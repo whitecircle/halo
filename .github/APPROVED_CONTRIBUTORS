@@ -1,0 +1,10 @@
+# The live contributor allowlist is NOT on this branch — it lives on the `allowlist` branch:
+#
+#   https://github.com/whitecircle/halo/blob/allowlist/.github/APPROVED_CONTRIBUTORS
+#
+# It sits there, outside main's ruleset, so the approval workflows can maintain it with the
+# workflow token: GitHub refuses the Actions app as a ruleset bypass actor by design, and this
+# split keeps main's reviewed-PR rule exception-free. A maintainer approves a contributor by
+# commenting `/approve @their-handle` on an accepted issue (.github/workflows/approve-contributor.yml);
+# merged-PR authors are appended automatically (approve-merged-contributor.yml); pr-gate.yml reads
+# the list from that branch via the API.
