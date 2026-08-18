@@ -1,0 +1,61 @@
+# Bradley-Terry reward model — Qwen3.5-9B on Skywork-Reward-Preference-80K-v0.2.
+# Launch: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/preference/rewards.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.5-9B
+attn_implementation: sdpa   # reward batches are right-padded, and FA2 unpads them into the M-RoPE
+                            #   varlen path that crashes this family (FA2 is only safe with
+                            #   packing: true — see agent-docs/models/qwen3_5.md)
+
+# --- Dataset ---
+dataset: Skywork/Skywork-Reward-Preference-80K-v0.2
+test_size: 0.05
+
+# --- Training ---
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+num_train_epochs: 1
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 1.0e-05
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Length ---
+max_length: 4096
+
+# --- Output ---
+output_dir: checkpoints/rm-qwen3.5-9b-skywork-pref80k
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: true
+
+# --- PEFT (optional) ---
+use_peft: false
+lora_task_type: SEQ_CLS
+# lora_r: 64
+# lora_alpha: 128
+# lora_target_modules:
+# - q_proj
+# - k_proj
+# - v_proj
+# - o_proj
+# lora_modules_to_save:
+# - score

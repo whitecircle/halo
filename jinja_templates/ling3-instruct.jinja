@@ -1,0 +1,32 @@
+{# --- Single-turn instruct template for Ling-3.0 (thinking disabled) --- #}
+{#- Ling-3.0's hub template renders every assistant turn as `<role>ASSISTANT</role>\n<think></think>`
+    + content, and the enable_thinking=False generation prompt the same way; Ling-mini-2.0 carries
+    no such prefix — that family stays on ling-instruct.jinja. Deliberate delta vs the hub: the
+    single-turn guard. -#}
+{# --- Single-turn data validation --- #}
+{%- set user_count = messages | selectattr("role", "equalto", "user") | list | length -%}
+{%- set assistant_count = messages | selectattr("role", "equalto", "assistant") | list | length -%}
+{%- if user_count != 1 or assistant_count > 1 -%}
+  {{- raise_exception("This template only supports single-turn data (1 user message, 0-1 assistant messages). Found " + user_count|string + " user and " + assistant_count|string + " assistant messages.") -}}
+{%- endif -%}
+
+{# --- System header (always present, thinking disabled) --- #}
+{{- '<role>SYSTEM</role>' -}}
+{%- if messages[0].role == 'system' -%}
+  {{- messages[0].content + '\n' -}}
+{%- endif -%}
+{{- 'detailed thinking off<|role_end|>' -}}
+
+{# --- Main message rendering (user & assistant only) --- #}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{- '<role>HUMAN</role>' + message.content + '<|role_end|>' -}}
+  {%- elif message.role == "assistant" -%}
+    {{- '<role>ASSISTANT</role>\n<think></think>' + message.content + '<|role_end|>' -}}
+  {%- endif -%}
+{%- endfor -%}
+
+{# --- Optional generation prompt (matches assistant_message_template) --- #}
+{%- if add_generation_prompt -%}
+  {{- '<role>ASSISTANT</role>\n<think></think>' -}}
+{%- endif -%}

@@ -1,0 +1,23 @@
+{# --- Single-turn data validation --- #}
+{%- set user_count = messages | selectattr("role", "equalto", "user") | list | length -%}
+{%- set assistant_count = messages | selectattr("role", "equalto", "assistant") | list | length -%}
+{%- if user_count != 1 or assistant_count > 1 -%}
+  {{- raise_exception("This template only supports single-turn data (1 user message, 0-1 assistant messages). Found " + user_count|string + " user and " + assistant_count|string + " assistant messages.") -}}
+{%- endif -%}
+
+{# --- Main message rendering (user & assistant only, no system prompt) --- #}
+{#- Deliberate deltas vs the hub template: single-turn guard, system messages dropped, and no
+    <think> block on assistant turns (the hub's enable_thinking=False scaffold) — everything else
+    matches the hub render token-for-token, including the newline after every <|im_end|>. -#}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' -}}
+  {%- elif message.role == "assistant" -%}
+    {{- '<|im_start|>assistant\n' + message.content + '<|im_end|>\n' -}}
+  {%- endif -%}
+{%- endfor -%}
+
+{# --- Optional generation prompt kick-off (matches assistant_message_template) --- #}
+{%- if add_generation_prompt -%}
+  {{- '<|im_start|>assistant\n' -}}
+{%- endif -%}

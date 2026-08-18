@@ -1,0 +1,41 @@
+# SDPG self-distillation (text) — Gemma-4 26B-A4B (EP=8) on OpenR1-Math-220k. See agent-docs/training-methods/distillation/self-distillation.md.
+# Dataset: RAW SFT conversations + privileged answer/solution fields — do NOT pre-tokenize.
+# Launch: torchrun --nproc_per_node=8 scripts/training/distillation/self_distill.py <this config>
+
+model_name_or_path: google/gemma-4-26B-A4B-it
+attn_implementation: sdpa   # only viable backend (global_head_dim=512)
+# Gemma4 has no aux-loss term and no EP bias-update support — no active load-balancing path exists.
+moe_balancing: none
+dataset: open-r1/OpenR1-Math-220k:default
+conversation_field: messages
+test_size: 0.02
+
+# --- Parallelism ---
+expert_parallel_size: 8
+
+# --- Privileged context (teacher-only hint) ---
+sdpg_hint_template: "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
+
+# --- Self-distillation (OPD) loss ---
+sdpg_loss: reverse_kl
+sdpg_beta_warmup_steps: 50
+sdpg_beta_decay_steps: 100
+opd_exclude_eos: true                   # keeps SFT's hard P(EOS)->1 undiluted by the teacher
+
+# --- Optional reference-policy KL anchor (0 disables; no ref model loaded) ---
+reference_kl_coef: 0.0
+
+assistant_message_template: "<|turn>model\n"
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-5
+num_train_epochs: 1
+max_length: 16384   # OpenR1 R1-traces run long; the self-distill collator fails loud on over-length rows
+gradient_checkpointing: true
+
+# --- Tokens ---
+pad_token: <pad>
+
+output_dir: checkpoints/self-distill-gemma4-26b-a4b
+report_to: wandb

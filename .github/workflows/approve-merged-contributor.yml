@@ -1,0 +1,61 @@
+name: approve-merged-contributor
+
+# Once a PR is merged, its author is added to .github/APPROVED_CONTRIBUTORS so repeat contributors skip
+# the gate on their next PR.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  add:
+    if: ${{ github.event.pull_request.merged == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const user = context.payload.pull_request.user.login;
+            if (context.payload.pull_request.user.type === 'Bot' || user.endsWith('[bot]')) return;
+
+            // Commits to the `allowlist` branch — deliberately outside main's ruleset, since GitHub
+            // refuses the Actions app as a bypass actor by design (see approve-contributor.yml).
+            // Retry once on a sha race (e.g. a concurrent /approve); on real failure say so on the
+            // merged PR instead of erroring silently.
+            const path = '.github/APPROVED_CONTRIBUTORS';
+            const branch = 'allowlist';
+            let committed = false, lastErr;
+            for (let attempt = 0; attempt < 2 && !committed; attempt++) {
+              const { data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+              const current = Buffer.from(file.content, 'base64').toString('utf8');
+              const existing = current.split('\n').map(s => s.trim().toLowerCase()).filter(s => s && !s.startsWith('#'));
+              if (existing.includes(user.toLowerCase())) { core.info(`${user} already approved`); return; }
+
+              const updated = current.replace(/\n*$/, '') + `\n${user}\n`;
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path, branch,
+                  message: `chore: auto-approve @${user} (merged PR #${context.payload.pull_request.number})`,
+                  content: Buffer.from(updated).toString('base64'),
+                  sha: file.sha,
+                });
+                committed = true;
+              } catch (e) { lastErr = e; }
+            }
+            if (!committed) {
+              // Feedback only — a locked PR conversation must not mask the real failure below.
+              try {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: context.payload.pull_request.number,
+                  body: `⚠️ Couldn't auto-add @${user} to \`.github/APPROVED_CONTRIBUTORS\` on the \`allowlist\` branch (\`${lastErr.message}\`) — a maintainer needs to append them by hand; if the branch is missing, recreate it (agent-docs/infrastructure/ci.md, Contribution gate).`,
+                });
+              } catch (e) { core.warning(`could not comment on the PR: ${e.message}`); }
+              core.setFailed(`allowlist update failed: ${lastErr.message}`);
+              return;
+            }
+            core.info(`auto-approved ${user} after merge`);

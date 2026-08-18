@@ -1,0 +1,26 @@
+# Vendored third-party submodules referenced by the Blackwell/Hopper training images. Each keeps its
+# own upstream license; see the Acknowledgments section of README.md for attribution.
+#
+# DeepEP — gitlink af9a0403188392824fc3057452822235873e0612, the commit the Dockerfile checks out
+# and builds. A gitlink is traceability only while it matches what the image ships, so bump the two
+# together.
+#
+# flash-attention — the images do NOT build from this submodule; its gitlink pins nothing that runs.
+# The real sources are in the Dockerfile:
+#   Hopper     FA2 from tag v2.8.3.post1, FA3 from main commit c46b8144 (fresh clones; no FA
+#              release supports CUDA 13, so FA3 needs the main SHA while FA2 stays on the tag)
+#   Blackwell  FA2 inherited from BASE_IMAGE (nvcr.io/nvidia/pytorch:26.03-py3) with
+#              flash-attn-4[cu13]==4.0.0b16 added on top, so the base image tag IS the pin
+#
+# Upgrade trigger: bump a pin only alongside an image rebuild that revalidates DeepEP (EP) and
+# FlashAttention (FA2/FA3 on Hopper, FA4 on Blackwell) end-to-end.
+
+[submodule "DeepEP"]
+	path = vendors/DeepEP
+	url = https://github.com/deepseek-ai/DeepEP.git
+	branch = main
+
+[submodule "flash-attention"]
+	path = vendors/flash-attention
+	url = https://github.com/Dao-AILab/flash-attention.git
+	branch = main

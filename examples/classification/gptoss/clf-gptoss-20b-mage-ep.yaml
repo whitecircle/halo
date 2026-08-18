@@ -1,0 +1,60 @@
+# Sequence classification — GPT-OSS 20B (EP=8), 2-class AI-vs-human text detection on MAGE.
+# Launch: torchrun --nproc_per_node=8 scripts/training/classification.py <this config>
+
+# --- Model ---
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
+                                         #   true) sets self_attn.sinks = None and the save re-emits
+                                         #   dtype.min; live sinks are rejected under FA2
+# GptOssForSequenceClassification computes no router aux loss (only the CausalLM head does).
+moe_balancing: none
+
+# --- Dataset ---
+# MAGE has native `text` + int `label` columns (the pipeline reads the label column by the hardcoded name `label`).
+dataset: yaful/MAGE
+text_field: text
+test_size: 0.1   # the loader folds ALL provided splits together and re-splits by this ratio
+
+# --- Parallelism ---
+expert_parallel_size: 8
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 1
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+optim: adamw_torch_fused
+learning_rate: 2.0e-05
+weight_decay: 0.05
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 32
+seed: 42
+
+# --- Sequence Length ---
+max_length: 2048
+
+# --- Output ---
+output_dir: checkpoints/clf-gptoss-20b-mage-ep
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: true
+
+# --- PEFT (optional) ---
+use_peft: false
+lora_task_type: SEQ_CLS

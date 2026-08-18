@@ -1,0 +1,65 @@
+# Gemma-4 26B-A4B — text-only EP=8 SFT example on UltraChat 200K. See agent-docs/models/gemma4.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: google/gemma-4-26B-A4B-it
+# Gemma4 has no aux-loss term and no EP bias-update support — no active load-balancing path exists.
+moe_balancing: none
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8
+# fp32_router omitted: Gemma-4's router is a sibling module OUTSIDE the EP wrapper (FSDP-managed),
+# so the knob has no fp32 route to take — setting it only logs a per-layer no-op warning.
+fp32_experts: true
+# fp32_non_ep_params omitted: refused at load under EP — Gemma-4's norms re-emit activations at
+# weight dtype, so the upcast would feed fp32 tokens into DeepEP's 2-byte transport.
+fp32_output_conversion: false
+
+# --- Attention & kernels ---
+attn_implementation: sdpa             # only viable backend (global_head_dim=512; mem-efficient SDPA auto-forced)
+packing: true
+max_length: 32768
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/gemma-4-26b-a4b-ultrachat-ep
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# chat_template deliberately unset — the tokenizer's bundled template is used.
+assistant_message_template: "<|turn>model\n"
+pad_token: <pad>

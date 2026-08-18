@@ -1,0 +1,79 @@
+# GPT-OSS 20B — node-local EP=8 on AWS (2 x 8 H100 / p5, EFA). Experts stay on NVLink per node;
+# EFA carries only the cross-node data-parallel gradient sync (no cross-node all-to-all, so no GIN/gdrdrv).
+# Launch: sky launch -c oss-20b launcher-configs/skypilot/aws/gpt-oss-20b/nodelocal-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
+
+name: oss-20b-nodelocal-ep-aws
+
+resources:
+  cloud: aws
+  region: us-east-1
+  accelerators: H100:8           # p5.48xlarge; 20B fits node-local
+  # image_id: docker:public.ecr.aws/whitecircle/halo:hopper   # H100 = Hopper; the prebuilt image is required
+  memory: 256+
+  disk_size: 1500
+  disk_tier: best
+  network_tier: best             # provisions EFA for the cross-node DP grad sync
+
+num_nodes: 2
+
+# The training-container flags every other surface passes (Makefile, dev container): host IPC for
+# CUDA IPC, unlimited memlock for NCCL/RDMA pinned buffers, a large stack, and a big /dev/shm.
+config:
+  docker:
+    run_options: ["--ipc=host", "--ulimit", "memlock=-1", "--ulimit", "stack=67108864", "--shm-size=128g"]
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
+
+envs:
+  CONFIG_PATH: examples/sft/gptoss/gptoss-20b-multinode-ep.yaml
+  MODEL: unsloth/gpt-oss-20b-BF16      # override to train from a local mirror or a previous run's output_dir
+  EXPERT_PARALLEL_SIZE: "8"
+  EXPERT_PARALLEL_SCOPE: "node"
+  HF_HOME: /data/hf_cache
+  # Toolkit scratch (S3 dataset cache, profiler traces) beside the HF cache; the default
+  # ~/.cache/halo would fill each node's root disk instead.
+  HALO_DATA_ROOT: /data/halo_scratch
+  OUTPUT_DIR: /data/checkpoints/oss-20b
+  DIST_SHARED_FILESYSTEM: "1"
+  WANDB_PROJECT: halo-20b-nodelocal-aws
+  # EFA tuning. NCCL_NET_PLUGIN is set explicitly rather than left to the NGC base's shinit_v2:
+  # that only fires if the run shell sources /etc/shinit_v2, and without it NCCL loads the HPC-X IB
+  # plugin on an EFA host — here the cross-node DP grad sync then falls back off EFA. Node-local EP
+  # needs no proxy GIN / gdrdrv.
+  NCCL_NET_PLUGIN: ofi
+  NCCL_PROTO: simple
+  FI_PROVIDER: efa
+  FI_EFA_USE_DEVICE_RDMA: "1"
+
+file_mounts:
+  /workspace: {source: ., mode: COPY}
+  /data: {source: s3://<your-bucket>/halo, mode: MOUNT}
+
+setup: |
+  set -e
+  cd /workspace
+  python -c "import flash_attn, deep_ep" 2>/dev/null || {
+    echo "ERROR: flash_attn / deep_ep missing — set resources.image_id: docker:public.ecr.aws/whitecircle/halo:hopper" >&2
+    echo "(see agent-docs/infrastructure/skypilot.md); from-source build on a bare node is unsupported." >&2
+    exit 1; }
+  fi_info -p efa >/dev/null 2>&1 && fi_info -p efa 2>/dev/null | head -10 \
+    || echo "WARNING: no EFA provider (cross-node DP grad sync needs EFA)" >&2
+  nvidia-smi --query-gpu=name,memory.total --format=csv
+  if [ -n "$HF_TOKEN" ]; then hf auth login --token "$HF_TOKEN" || true; fi
+  if [ -n "$WANDB_API_KEY" ]; then wandb login "$WANDB_API_KEY" || true; fi
+
+run: |
+  set -e
+  cd /workspace
+  NUM_GPUS=$(nvidia-smi -L | wc -l)
+  MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+  echo "Node $SKYPILOT_NODE_RANK/$SKYPILOT_NUM_NODES · $NUM_GPUS GPUs · EP=$EXPERT_PARALLEL_SIZE ($EXPERT_PARALLEL_SCOPE) · master=$MASTER_ADDR"
+  torchrun \
+    --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK --nproc_per_node=$NUM_GPUS \
+    --master_addr=$MASTER_ADDR --master_port=29500 \
+    scripts/training/sft.py $CONFIG_PATH \
+    --model_name_or_path=$MODEL \
+    --expert_parallel_size=$EXPERT_PARALLEL_SIZE --ep_scope=$EXPERT_PARALLEL_SCOPE --output_dir=$OUTPUT_DIR \
+    --project_name=$WANDB_PROJECT

@@ -1,0 +1,164 @@
+# Docker Compose for training + vLLM 0.26.0 inference server.
+# Two containers on one host: the trainer (halo) drives a vLLM server (its own
+# torch/transformers stack — see Dockerfile.vllm) over HTTP for rollouts and NCCL for weight sync.
+#
+# vLLM native weight transfer: the trainer forms the NCCL group once via
+# /init_weight_transfer_engine, then drives each sync as
+#   /pause -> /start_weight_update -> /update_weights -> /finish_weight_update -> /resume
+#
+# Prerequisites:
+#   1. Build the vLLM server image, or pull the prebuilt one and retag it — this service names the
+#      image `vllm-server:0.26.0`, and compose builds from Dockerfile.vllm when that tag is absent:
+#      docker build -f Dockerfile.vllm -t vllm-server:0.26.0 .
+#      docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0   # anonymous, no AWS account
+#      docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
+#
+#   2. Build the training image for your hardware, or pull the prebuilt one (no credentials needed):
+#      make build-blackwell            # B200/B300  -> halo:blackwell (the compose default)
+#      make build-hopper               # H100/H200  -> halo:hopper, then set TRAIN_IMAGE=halo:hopper
+#      docker pull public.ecr.aws/whitecircle/halo:blackwell   # anonymous, no AWS account
+#
+# Usage:
+#   docker compose -f docker-compose.vllm.yml up vllm-server
+#   docker compose -f docker-compose.vllm.yml up
+#
+#   # Override model or GPU assignment. The defaults put the server on GPU 7 and the trainer on
+#   # 0-6, matching the Makefile's TRAINER_CUDA_DEVICES — the two must never overlap, since weight
+#   # sync is an NCCL broadcast and a rank cannot broadcast to itself.
+#   VLLM_MODEL=Qwen/Qwen3-32B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
+#     TRAINER_CUDA_DEVICES=0,1,2,3,4,5 \
+#     docker compose -f docker-compose.vllm.yml up
+#
+# NCCL weight sync requires:
+#   - network_mode host on both containers: the weight-transfer NCCL group rendezvous uses an
+#     ephemeral TCP port the trainer advertises (loopback master by default) — behind a bridge
+#     network the vLLM side can never join it (only :8000 would be published) and group formation
+#     times out with "1/2 clients joined"
+#   - ipc=host on both containers (shared memory for CUDA IPC)
+#   - All GPUs visible in both containers (NCCL P2P)
+#   - CUDA_VISIBLE_DEVICES controls which GPU each process actually uses
+
+services:
+  vllm-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+      args:
+        VLLM_VERSION: "0.26.0"
+    image: vllm-server:0.26.0
+    ipc: host
+    network_mode: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=${VLLM_CUDA_DEVICES:-7}
+      - VLLM_SERVER_DEV_MODE=1
+      # Unset by default. A run sending thinking budgets must set VLLM_USE_V2_MODEL_RUNNER=0 —
+      # Model Runner V2 answers thinking_token_budget with 400 on every rollout. 0 or 1 ONLY:
+      # vLLM parses it with int(), so "false"/"" (an empty value in the repo-root .env counts)
+      # kill the server at startup with a bare ValueError.
+      - VLLM_USE_V2_MODEL_RUNNER
+      - NCCL_DEBUG=WARN
+      # The training image bakes IB defaults. On a host with no InfiniBand the weight-transfer
+      # group's first collective wedges on the uninitialized OFI/Gin NET path instead of falling
+      # back, spinning to the formation deadline. Override on an IB/EFA host.
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      - NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-NVL}
+      - HF_TOKEN=${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # vllm serve args (ENTRYPOINT is `vllm serve`, set in Dockerfile.vllm). Three flags below are
+    # load-bearing and silent when wrong: --moe-backend triton (the auto Blackwell backends repack
+    # expert weights, so a synced checkpoint-layout write corrupts the experts),
+    # --return-tokens-as-token-ids (train_on_sampled_tokens recovers sampled ids from the logprobs;
+    # without it the run trains on a re-tokenized re-render), and a --tool-call-parser matching the
+    # family. VLLM_CHAT_TEMPLATE must name the SAME .jinja the trainer's `chat_template:` uses and
+    # be visible inside THIS container; unset means both ends use the checkpoint's own template.
+    # Per-family parser values, thinking-budget setup, and the rest:
+    # agent-docs/infrastructure/rollout-servers.md.
+    command: >
+      ${VLLM_MODEL:-Qwen/Qwen3-0.6B}
+      --port ${VLLM_PORT:-8000}
+      --tensor-parallel-size ${VLLM_TP:-1}
+      --gpu-memory-utilization ${VLLM_GPU_MEM:-0.85}
+      --dtype auto
+      --weight-transfer-config '{"backend": "nccl"}'
+      --moe-backend ${VLLM_MOE_BACKEND:-triton}
+      ${VLLM_ATTENTION_BACKEND:+--attention-backend ${VLLM_ATTENTION_BACKEND}}
+      --return-tokens-as-token-ids
+      --enable-auto-tool-choice
+      ${VLLM_TOOL_PARSER_PLUGIN:+--tool-parser-plugin ${VLLM_TOOL_PARSER_PLUGIN}}
+      --tool-call-parser ${VLLM_TOOL_PARSER:-hermes}
+      ${VLLM_CHAT_TEMPLATE:+--chat-template ${VLLM_CHAT_TEMPLATE}}
+      ${VLLM_REASONING_PARSER_PLUGIN:+--reasoning-parser-plugin ${VLLM_REASONING_PARSER_PLUGIN}}
+      ${VLLM_REASONING_PARSER:+--reasoning-parser ${VLLM_REASONING_PARSER}}
+    healthcheck:
+      # python3, not python: the vllm-openai base image ships no bare `python` (exit 127 marks the
+      # service permanently unhealthy and wedges the training service's service_healthy gate).
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${VLLM_PORT:-8000}/health')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
+    restart: unless-stopped
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  training:
+    # Blackwell by default, matching the repo default (Makefile IMAGE); set TRAIN_IMAGE for Hopper.
+    image: ${TRAIN_IMAGE:-halo:blackwell}
+    ipc: host
+    network_mode: host
+    # The RL environments' external backends (OPENROUTER/OPENAI/TAVILY/... keys) and AWS_DEFAULT_REGION
+    # live in the repo-root .env, which compose otherwise reads for ${VAR} interpolation only.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - CUDA_VISIBLE_DEVICES=${TRAINER_CUDA_DEVICES:-0,1,2,3,4,5,6}
+      # Consumed only by the GPU test harness (tests/gpu/trainers/grpo); production trainers take
+      # the server URL from the YAML config (rollout_server_url / rollout_server_configs).
+      # host networking (required for the NCCL rendezvous, see header) has no service DNS.
+      - VLLM_SERVER_URL=http://localhost:${VLLM_PORT:-8000}
+      - NCCL_DEBUG=WARN
+      # No-InfiniBand recipe, the trainer half of the server's IB/NVL pair above. NCCL_NET is
+      # process-global, so a multi-node IB/EFA run must override it (it would force every trainer
+      # collective onto TCP and break DeepEP).
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      - NCCL_NET=${NCCL_NET:-Socket}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Off the container root FS, onto the mounted HF cache: without HF_HOME the Triton and FA4
+      # CuTe JIT caches anchor on /tmp and recompile every run (~10s/kernel).
+      - HF_HOME=/root/.cache/huggingface
+      - HF_DATASETS_CACHE=/root/.cache/huggingface/datasets
+      # Toolkit scratch on the same volume the Makefile targets use (HALO_SCRATCH), so the S3 dataset
+      # cache and profiler traces are shared with `make test-gpu-*` instead of re-downloaded.
+      - HALO_DATA_ROOT=${HALO_SCRATCH:-/mnt}
+      - TMPDIR=${HALO_SCRATCH:-/mnt}/tmp
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      vllm-server:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      # Same path inside and out, so HALO_DATA_ROOT above resolves either side of the boundary.
+      - ${HALO_SCRATCH:-/mnt}:${HALO_SCRATCH:-/mnt}
+      # AWS credentials for the optional S3 dataset sources — bring your own (mounted read-write
+      # like the Makefile's DOCKER_RUN so token refreshes can persist).
+      - ~/.aws:/root/.aws
+    working_dir: /workspace
+    command: >
+      bash -c "echo 'vLLM server ready at http://localhost:${VLLM_PORT:-8000}' && bash"
+    stdin_open: true
+    tty: true

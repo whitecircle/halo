@@ -1,0 +1,62 @@
+# Qwen3.5-9B (natively multimodal) — document-VQA SFT on Docmatix (rendered PDF pages + QA turns).
+# Small subset (~0.64 GB, 1,900 docs) — doubles as the quick VLM-path validation run; swap the
+# dataset for `HuggingFaceM4/Docmatix:images` (1.27M docs) for a real training run.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.5-9B
+attn_implementation: sdpa             # FA2 crashes the Qwen3.5 M-RoPE varlen path
+
+# --- Dataset (Docmatix schema: images (1-4 pages) + {user, assistant} QA turns) ---
+dataset:
+- HuggingFaceM4/Docmatix:zero-shot-exp
+conversation_field: texts
+images_field: images
+test_size: 0.05
+
+# --- Sequence budget ---
+# The VLM collator fails loud on over-length rows (image tokens cannot be truncated); multi-page
+# rows carry up to 4 page renders of vision tokens.
+max_length: 28672  # zero-shot-exp holds 4-page rows up to ~21k vision tokens; the collator fails loud on over-length
+
+# --- Training ---
+train_on_completions_only: true
+assistant_message_template: "<|im_start|>assistant\n"
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 1.0e-05
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Output ---
+output_dir: checkpoints/qwen3.5-9b-vl-docvqa
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 100
+save_total_limit: 2
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: false
+
+# --- Tokens ---
+pad_token: <|endoftext|>
+eos_token: <|im_end|>
+
+# --- PEFT ---
+use_peft: false

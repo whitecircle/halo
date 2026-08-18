@@ -1,0 +1,86 @@
+# SGLang inference server — plain serving, and the RL rollout/weight-sync pairing for env-GRPO.
+#
+# Default image is the NCCL-aligned `sglang-server` build (Dockerfile.sglang). Upstream
+# `lmsysorg/sglang` serves fine on its own, but its NCCL trails the training image's uv.lock pin, so
+# the weight-sync group cannot form against it — set SGLANG_IMAGE back to upstream only for
+# serving-only use (evals, batch generation, a chat endpoint).
+#
+# Usage:
+#   make build-sglang     # or pull the prebuilt image and point SGLANG_IMAGE at it (anonymous):
+#                         #   docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
+#                         #   SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17
+#   SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up
+#   SGLANG_MODEL=/mnt/models/my-ckpt SGLANG_MODEL_DIR=/mnt/models \
+#     SGLANG_TP=2 SGLANG_CUDA_DEVICES=6,7 docker compose -f docker-compose.sglang.yml up
+#
+# The trainer MUST use different GPUs than SGLANG_CUDA_DEVICES — NCCL cannot broadcast to itself.
+# The default is GPU 7, leaving 0-6 for the trainer (the Makefile's TRAINER_CUDA_DEVICES).
+#
+# network_mode host: the server binds SGLANG_PORT directly and the weight-sync rendezvous port is
+# never published, so clients and the trainer reach it at localhost — same as docker-compose.vllm.yml.
+#
+# Teardown: compose interpolates this file for every command, so `down` needs the required variable
+# too — `SGLANG_MODEL=x docker compose -f docker-compose.sglang.yml down` (any value satisfies it).
+
+services:
+  sglang-server:
+    image: ${SGLANG_IMAGE:-sglang-server:0.5.17}
+    ipc: host
+    network_mode: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=${SGLANG_CUDA_DEVICES:-7}
+      - HF_HOME=${HF_HOME:-/root/.cache/huggingface}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Weight sync runs over a NCCL group shared with the trainer in ANOTHER container. NCCL sees
+      # both ranks as same-node and would take the direct CUDA-IPC P2P path, whose shareable-buffer
+      # import fails across the container boundary — `ncclP2pImportShareableBuffer ... invalid
+      # argument`, surfacing as a failed weight update that leaves the engine partially written.
+      # Force the socket transport on BOTH ends; the trainer sets the same five (Makefile
+      # test-gpu-sglang). Weight sync is a per-step burst, not the hot path, so the cost is minor.
+      - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+      - NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE:-1}
+      - NCCL_NET=${NCCL_NET:-Socket}
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      # The images bundle the aws-ofi plugin, which NCCL still selects over the socket transport and
+      # then wedges group formation on a host with no OFI fabric ("NET/OFI gin: OFI NET plugin has
+      # not been initialized"), spinning until the formation deadline instead of falling back.
+      - NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-none}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      # The HF cache is mounted at the SAME path inside the container, so HF_HOME resolves whether
+      # it points at ~/.cache/huggingface or a large scratch volume.
+      - ${HF_HOME:-~/.cache/huggingface}:${HF_HOME:-/root/.cache/huggingface}
+      # Only needed when SGLANG_MODEL is a local path rather than a hub id; must contain it.
+      - ${SGLANG_MODEL_DIR:-/mnt/models}:${SGLANG_MODEL_DIR:-/mnt/models}:ro
+    # Two flags below are load-bearing and silent when wrong: --tool-call-parser (without a match
+    # the engine leaves tool calls as plain text, every episode scores 0 and GRPO trains on a flat
+    # zero gradient; `auto` reads it off the chat template, which is what keeps the whole roster
+    # correct) and --moe-runner-backend triton (the auto-selected fused runners bypass the R3
+    # capture hook, and flashinfer_trtllm repacks expert weights past what the sync can update).
+    # A chat template, if set, must be the SAME .jinja the trainer's `chat_template:` points at.
+    # See agent-docs/infrastructure/rollout-servers.md.
+    command: >
+      python3 -m sglang.launch_server
+      --model-path ${SGLANG_MODEL:?set SGLANG_MODEL to a hub id or a local checkpoint dir}
+      --host 0.0.0.0
+      --port ${SGLANG_PORT:-30000}
+      --tp-size ${SGLANG_TP:-1}
+      --mem-fraction-static ${SGLANG_GPU_MEM:-0.85}
+      --tool-call-parser ${SGLANG_TOOL_PARSER:-auto}
+      --moe-runner-backend ${SGLANG_MOE_RUNNER_BACKEND:-triton}
+      ${SGLANG_ENABLE_R3:+--enable-return-routed-experts}
+      ${SGLANG_REASONING_PARSER:+--reasoning-parser ${SGLANG_REASONING_PARSER}}
+      ${SGLANG_CHAT_TEMPLATE:+--chat-template ${SGLANG_CHAT_TEMPLATE}}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${SGLANG_PORT:-30000}/health')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 180s
+    restart: unless-stopped

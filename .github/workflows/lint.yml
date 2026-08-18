@@ -1,0 +1,48 @@
+name: lint
+
+# Hosted, pure-Python gates that run on every PR/push — the host has no GPU stack, so these
+# are the only checks that run outside the Docker image. ruff (lint + format-check) is pinned.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  # Superseding runs cancel PR runs only: on main, github.ref is the same for every push, and a
+  # merge burst would leave the earlier commits with no status at all.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    # Blocking gate = format-check + the FULL pyproject select set. PLC0415 (no inline imports) is
+    # a house rule, so a warn-only lint job would let it regress silently.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Pinned ruff via pip — ruff is a standalone binary, no project install needed
+      # (host has no torch). Matches docs.yml's setup-python pattern.
+      - run: pip install ruff==0.9.10
+      - name: ruff format --check
+        run: ruff format --check .
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+  actionlint:
+    # Lints the workflow files themselves — unknown runner labels, invalid action
+    # inputs, shell-script bugs. Catches the class of bug that silently breaks CI.
+    # Custom self-hosted labels are declared in .github/actionlint.yaml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: actionlint
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color

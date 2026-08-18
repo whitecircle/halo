@@ -1,0 +1,84 @@
+# Online GRPO (RLVR) — Qwen3.6-35B-A3B on DAPO-Math-17k, rule-based accuracy reward, EP=2 (train GPUs 1,2 + vLLM GPU 0).
+# See agent-docs/training-methods/grpo/online-grpo.md.
+# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.6-35B-A3B
+attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+model_init_kwargs:
+  output_router_logits: true
+  router_aux_loss_coef: 0.001
+moe_balancing: none  # aux_loss is a warn-and-no-op under GRPO trainers; router logits kept for MoE metrics
+
+# --- Parallelism (EP=2: one dispatch group on the 2 train GPUs, DP=2) ---
+expert_parallel_size: 2
+
+# --- Dataset ---
+# The DAPO paper's RL corpus repackaged for TRL: plain question in `prompt`, final integer answer in `solution`.
+dataset: open-r1/DAPO-Math-17k-Processed:en
+test_size: 0.01
+answer_field: solution
+system_prompt: "Solve the problem step by step and put your final numeric answer in \\boxed{}."
+
+# --- Reward Functions ---
+use_accuracy_reward: true
+
+# --- GRPO Hyperparameters ---
+beta: 0.0
+num_iterations: 1
+epsilon: 0.15
+scale_rewards: true
+num_generations: 8
+temperature: 1.0
+loss_type: grpo
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 8   # global eval batch must divide by num_generations at any world size
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+optim: adamw_torch_fused
+learning_rate: 1.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Lengths ---
+max_prompt_length: 1024
+max_completion_length: 4096
+
+# --- vLLM Generation ---
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 0.0.0.0   # the address the TRAINER DIALS (not a bind address) — TRL's own default,
+                            # which Linux connects to loopback, so on a single host it is the same
+                            # endpoint the 127.0.0.1 smoke siblings name. A server on another host
+                            # needs its real address here, or vllm_server_base_url instead.
+vllm_server_port: 8000
+
+# --- Output ---
+output_dir: checkpoints/online-grpo-qwen3.6-35b-a3b-dapo-math
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+log_completions: true
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+
+# --- PEFT (optional) ---
+use_peft: false

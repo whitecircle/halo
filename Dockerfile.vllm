@@ -1,0 +1,211 @@
+# vLLM 0.26.0 (CUDA 13 build) inference server with native weight transfer
+#
+# What this image adds over upstream vllm/vllm-openai:
+#   - NCCL weight transfer (packed broadcast, ~1GB buffers) driven through the phased protocol
+#     /pause -> /start_weight_update -> /update_weights -> /finish_weight_update -> /resume, which
+#     the trainer's VLLMWeightSyncClient requires.
+#   - MoE routing capture for R3 routing replay: serve with `--enable-return-routed-experts` for
+#     base64-npy `routed_experts` [tokens, layers, topk] per completion choice. Needs
+#     `--moe-backend triton` — FlashInfer's monolithic MoE kernels bypass the capturer and return
+#     all-zero expert ids (vLLM #44116), and repack expert weights past what the sync can update.
+#   - The gpt-oss harmony-disable patches and the tool/reasoning parser plugins (applied below).
+#   - nvidia-nccl-cu13 at uv.lock's exact pin. The weight-transfer communicator pairs this image's
+#     pynccl with the trainer's NCCL; a version skew fails ncclCommInitRank outright or hangs for
+#     30 minutes, so both ends install the same wheel off the same lock and assert what resolves.
+#
+# Build:
+#   docker build -f Dockerfile.vllm -t vllm-server:0.26.0 .
+# or pull the prebuilt image (anonymous, no AWS account):
+#   docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
+#
+# Run (--gpus all is required: NCCL P2P needs every GPU visible):
+#   docker run --gpus all --network=host --ipc=host \
+#     vllm-server:0.26.0 Qwen/Qwen3-0.6B --port 8000
+#
+# Serving flags, the per-family `--tool-call-parser` table, and which families the weight sync
+# admits: agent-docs/infrastructure/rollout-servers.md.
+
+ARG VLLM_VERSION=0.26.0
+FROM vllm/vllm-openai:v${VLLM_VERSION}
+
+# Pre-FROM ARGs are out of scope inside the stage — declare here so the LABELs see them.
+ARG VERSION=1.0.0
+ARG BUILD_DATE
+
+LABEL maintainer="White Circle <hello@whitecircle.ai>"
+LABEL org.opencontainers.image.title="Halo vLLM Server"
+LABEL org.opencontainers.image.description="vLLM 0.26.0 (cu13) with NCCL weight transfer + routed-experts capture + tool calling"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.vendor="White Circle"
+LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# The Halo-authored patches/plugins under /opt ship under the Halo License.
+COPY LICENSE APACHE-2.0.txt /opt/halo-license/
+
+# Apply GPT-OSS patches (target vLLM internals, applied to upstream layout)
+COPY docker/vllm/patches/patch_vllm_disable_gptoss.sh /tmp/patch_vllm_disable_gptoss.sh
+RUN chmod +x /tmp/patch_vllm_disable_gptoss.sh \
+    && VLLM_PATH=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
+    && /tmp/patch_vllm_disable_gptoss.sh "$VLLM_PATH" \
+    && rm /tmp/patch_vllm_disable_gptoss.sh
+
+# GPT-OSS native tool-calling parser. With harmony disabled (above), gpt-oss emits
+# its tool calls as plain text (`to=functions.<name> json{...}`), which the stock
+# `openai` (needs harmony token IDs) and `seed_oss` (`<seed:tool_call>`) parsers
+# cannot read. This text parser handles that format. Serve gpt-oss with:
+#   --tool-parser-plugin /opt/gpt_oss_text_tool_parser.py --tool-call-parser gpt_oss_text
+COPY docker/vllm/plugins/gpt_oss_text_tool_parser.py /opt/gpt_oss_text_tool_parser.py
+
+# GPT-OSS reasoning-parser plugin: enables vLLM `thinking_token_budget` (cap chain-of-thought,
+# then force the final answer) for harmony-DISABLED gpt-oss. The stock `openai_gptoss` reasoning
+# parser is harmony-only (and unregistered by the disable patch); this plugin re-registers it with
+# a token-id reasoning-end (works with harmony off) + a plain-text extract. Serve with:
+#   --reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss
+COPY docker/vllm/plugins/gpt_oss_reasoning_parser.py /opt/gpt_oss_reasoning_parser.py
+
+# Match the training image's NCCL EXACTLY — vLLM's torch and pynccl both dynamically link this
+# wheel's libnccl.so.2, and a version skew hangs the weight-sync ncclCommInitRank to the 30-minute
+# timeout with no error. A floor pin drifts the moment PyPI moves; uv.lock is the single source of
+# truth, read by the shared docker/nccl_pin.py rather than hand-pinning a second copy.
+# `--verify` checks the wheel metadata AND the libnccl.so.2 a process resolves once torch has
+# preloaded; the lock and the helper stay in /tmp so the final verification block below can re-run
+# it after every remaining pip step.
+COPY uv.lock docker/nccl_pin.py /tmp/
+RUN NCCL_V=$(python3 /tmp/nccl_pin.py /tmp/uv.lock) \
+    && pip install --no-cache-dir "nvidia-nccl-cu13==${NCCL_V}" --no-deps \
+    && python3 /tmp/nccl_pin.py /tmp/uv.lock --verify
+
+# Pin pynccl to the wheel just installed: without this, dlopen('libnccl.so.2') can resolve the
+# base image's older SYSTEM copy (it also ships one) and the sync group pairs skewed runtimes
+# anyway. torch's own groups keep torch's linked NCCL; only the weight-transfer path reads this.
+ENV VLLM_NCCL_SO_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2
+# The ENV pin is a literal path; fail the build if the image's site-packages ever moves off it.
+RUN test -f "$VLLM_NCCL_SO_PATH"
+
+# transformers 5.14 line, deliberately one line below the training image's 5.16 — Gemma 4 pins it:
+# vLLM's Gemma 4 code reads the 5.14 flat config schema, so a 5.16 install here makes the family
+# unservable. Full mechanism + the export-side flat-form contract the parity gate below asserts:
+# agent-docs/infrastructure/rollout-servers.md (Config-schema parity). Step-3.7 is outside the pin (read
+# only through its release's auto_map modules); Zaya/Inkling native types stay parseable.
+# Engine line: 0.26.0 is the last vLLM on torch 2.11 (the training image's torch and NCCL
+# generation); 0.27+ moves to torch 2.13, whose NCCL no longer matches uv.lock's pin the
+# weight-transfer group requires on both sides.
+RUN pip install --no-cache-dir "transformers>=5.14.1,<5.15.0"
+
+# Pickle compatibility shim: trainer pickles ncclUniqueId from
+# src.distributed.nccl._nccl_wrapper — vLLM must unpickle as its own type.
+RUN mkdir -p /opt/nccl_compat/src/distributed/nccl \
+    && touch /opt/nccl_compat/src/__init__.py \
+    && touch /opt/nccl_compat/src/distributed/__init__.py \
+    && touch /opt/nccl_compat/src/distributed/nccl/__init__.py \
+    && echo 'from vllm.distributed.device_communicators.pynccl_wrapper import *' \
+       > /opt/nccl_compat/src/distributed/nccl/_nccl_wrapper.py
+# GPT-OSS weight-reload patch: vLLM's layerwise reload puts each layer's tensors on the meta device
+# and wraps their weight_loaders, but `GptOssModel._load_weights_other` writes FusedMoE experts and
+# OAIAttention sinks with a direct `param.copy_()`. The copy hits a meta tensor, `load_numel` stays 0,
+# and `finalize_layerwise_reload` re-registers the SAVED tensors — so every /update_weights silently
+# reverts the experts while returning 200 OK. `sitecustomize` applies the fix in the API server and in
+# every engine-core worker, alongside the weight-transfer re-init patch beside it (which destroys the
+# NCCL communicator the engine would otherwise leak on every trainer connection). Their directory goes
+# FIRST on PYTHONPATH so `sitecustomize` is importable; `/opt/nccl_compat` keeps the ncclUniqueId
+# unpickle shim above.
+COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
+     docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
+     docker/vllm/patches/sitecustomize.py /opt/vllm_patches/
+# No `:${PYTHONPATH:-}` tail: the base image leaves it unset, so the tail renders a trailing colon —
+# an empty sys.path entry, i.e. the server's CWD, which any stray module there could import-shadow.
+ENV PYTHONPATH="/opt/vllm_patches:/opt/nccl_compat"
+
+# Re-verify NCCL alignment with the training image after every pip step above, through the same
+# helper the training image runs — one check, one source of truth, no second floor to drift.
+RUN python3 -c "import vllm; print(f'vLLM: {vllm.__version__}')" \
+    && python3 -c "from packaging.version import Version; import transformers; v=transformers.__version__; assert Version('5.14.1') <= Version(v) < Version('5.15'), f'transformers {v} is off the pinned 5.14 line — the config-schema parity install did not take'; print(f'Transformers: {v}')" \
+    && python3 /tmp/nccl_pin.py /tmp/uv.lock --verify \
+    && rm /tmp/uv.lock /tmp/nccl_pin.py \
+    && python3 -c "from src.distributed.nccl._nccl_wrapper import ncclUniqueId; from vllm.distributed.device_communicators.pynccl_wrapper import ncclUniqueId as v; assert ncclUniqueId is v; print('ncclUniqueId pickle compat: OK')"
+
+# Config-schema parity: one config.json per served family — the toolkit's own export, written by the
+# training image's transformers through every export rewrite, plus the remote-code config module the
+# export ships where the family is parsed through auto_map (Step-3.7, Bailing/Ling). Each must
+# parse with THIS transformers, survive the global attention reads vLLM's loaders make, and name a
+# registered architecture; and each rewrite's unrewritten form must still be refused (the folded 5.16
+# Gemma 4 config, the native-schema Step-3.7 export), which is what keeps the rewrites load-bearing.
+# The roster is derived from the EP registry — every family the weight sync admits owes a fixture.
+# Fixtures are generated in the training image (docker/vllm/parity/generate.py).
+COPY docker/vllm/parity /tmp/parity
+RUN python3 /tmp/parity/check.py /tmp/parity && rm -rf /tmp/parity
+
+# The reload patch must actually take effect: importing the layerwise module fires the sitecustomize
+# meta-path hook, which must leave both loader entry points replaced. A silent no-op here would mean
+# every weight sync reverts the experts again.
+RUN python3 -c "\
+import vllm_layerwise_reload_patch as p; \
+from vllm.model_executor.model_loader.reload import layerwise; \
+assert p._APPLIED, 'sitecustomize hook did not fire on layerwise import'; \
+assert layerwise.restore_layer_on_meta.__module__ == p.__name__, 'restore_layer_on_meta not patched'; \
+assert layerwise.initialize_online_processing.__module__ == p.__name__, 'initialize_online_processing not patched'; \
+print(f'layerwise reload patch: OK (skips {sorted(p.SKIP_LAYER_NAMES)})')"
+
+# The patch's class list must cover the classes that actually own the direct-copy weights in THIS
+# vLLM version, and vLLM moves them: on 0.26.0 the expert params live in the pluggable RoutedExperts
+# layer, which is NOT a FusedMoE subclass, so a name-only list drifts out of coverage silently and
+# every weight sync reverts the served experts while returning 200 OK. Resolve the real classes and
+# check MRO coverage — a rename/refactor upstream fails the build, not the run.
+RUN python3 -c "\
+import vllm_layerwise_reload_patch as p; \
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts; \
+from vllm.model_executor.models.gpt_oss import OAIAttention; \
+from vllm.model_executor.models.gemma4 import Gemma4Router; \
+covered = lambda cls: any(c.__name__ in p.SKIP_LAYER_NAMES for c in cls.__mro__); \
+assert covered(RoutedExperts), 'expert-weight owner RoutedExperts not covered by SKIP_LAYER_NAMES'; \
+assert covered(OAIAttention), 'sinks owner OAIAttention not covered by SKIP_LAYER_NAMES'; \
+assert covered(Gemma4Router), 'Gemma4Router (scale param + root_size buffer) not covered by SKIP_LAYER_NAMES'; \
+print('layerwise skip-list coverage: OK (RoutedExperts + OAIAttention + Gemma4Router)')"
+
+# The re-init patch must take too: importing the engine module fires the same hook, which must leave
+# both communicator-lifecycle entry points replaced. Unpatched, each trainer that connects strands a
+# live NCCL communicator on every engine-core worker until ncclCommInitRank fails outright, and only
+# recreating the server recovers it.
+RUN python3 -c "\
+import vllm_weight_transfer_reinit_patch as p; \
+from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine as E; \
+assert p._APPLIED, 'sitecustomize hook did not fire on nccl_engine import'; \
+assert getattr(E.init_transfer_engine, p.PATCH_MARKER, False), 'init_transfer_engine not patched'; \
+assert getattr(E.shutdown, p.PATCH_MARKER, False), 'shutdown not patched'; \
+print('weight-transfer re-init patch: OK (communicator destroyed on re-init and on shutdown)')"
+
+# The gpt-oss parser plugins are reachable only through a running server, so no test suite covers
+# them (they import vLLM, which the training image does not have). Exercise them here: registration,
+# the reasoning split on both the normal and the budget-forced marker, the streaming overrides, and
+# the required/named opt-out.
+COPY docker/vllm/plugins/verify_gptoss_plugins.py /tmp/verify_gptoss_plugins.py
+RUN python3 /tmp/verify_gptoss_plugins.py /opt && rm /tmp/verify_gptoss_plugins.py
+
+# The engine args this deployment depends on must exist in this vLLM version: the NCCL
+# weight-transfer engine, the routed-experts capture (R3 routing replay), and the MoE-backend
+# selector that steers capture off FlashInfer. A rename upstream fails the build, not the run.
+# (Introspected via dataclass fields — `vllm serve --help` needs a GPU to infer the platform,
+# and docker build has none.)
+RUN python3 -c "\
+import dataclasses; \
+from vllm.engine.arg_utils import EngineArgs; \
+names = {f.name for f in dataclasses.fields(EngineArgs)}; \
+missing = {'weight_transfer_config', 'enable_return_routed_experts'} - names; \
+assert not missing, f'EngineArgs lost: {missing}'; \
+from vllm.config.kernel import KernelConfig; \
+knames = {f.name for f in dataclasses.fields(KernelConfig)}; \
+assert 'moe_backend' in knames, 'KernelConfig.moe_backend gone'; \
+print('serve flags: OK')"
+
+# Dev mode exposes the /pause -> /resume phased endpoints VLLMWeightSyncClient drives during sync.
+ENV VLLM_SERVER_DEV_MODE=1
+
+ENTRYPOINT ["vllm", "serve"]
+# Exec form CMD — default args when no command override is provided.
+# docker-compose overrides CMD with model + args; standalone docker run
+# users pass --tool-call-parser explicitly to override the default (hermes).
+# --moe-backend triton is mandatory with weight transfer: the layerwise-reload patch skips RoutedExperts,
+# so a synced write must match the runtime layout — AUTO picks FLASHINFER on Blackwell and corrupts it.
+CMD ["--weight-transfer-config", "{\"backend\": \"nccl\"}", "--moe-backend", "triton", "--enable-auto-tool-choice", "--tool-call-parser", "hermes"]

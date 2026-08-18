@@ -1,0 +1,69 @@
+name: branch-cleanup
+
+# Deletes remote branches whose tip commit is older than 90 days and that have no open PR.
+# The default branch, the `allowlist` branch (the contribution gate reads
+# .github/APPROVED_CONTRIBUTORS from it — see pr-gate.yml), and release-* are never touched.
+# A deleted branch is not lost work: the tip commit stays fetchable by SHA (the run logs every
+# SHA it deletes), and `workflow_dispatch` offers a dry-run to preview the kill list first.
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'   # weekly, Monday 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only list the branches that would be deleted
+        type: boolean
+        default: true
+
+permissions:
+  contents: write        # delete refs
+  pull-requests: read    # skip branches that back an open PR
+
+concurrency:
+  group: branch-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const AGE_DAYS = 90;
+            const cutoff = Date.now() - AGE_DAYS * 24 * 3600 * 1000;
+            const dryRun = context.eventName === 'workflow_dispatch'
+              ? String(context.payload.inputs.dry_run) !== 'false'
+              : false;
+            const { owner, repo } = context.repo;
+
+            const defaultBranch = (await github.rest.repos.get({ owner, repo })).data.default_branch;
+            const branches = await github.paginate(github.rest.repos.listBranches, { owner, repo, per_page: 100 });
+            const openPrs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+            const prHeads = new Set(openPrs.map(pr => pr.head.ref));
+
+            // NOTE: br.protected is NOT a useful guard here — a repo-wide ruleset (e.g. Signed
+            // Commits with a ~ALL ref include) marks every branch protected. A branch a ruleset
+            // actually shields from deletion just fails the deleteRef call and is logged below.
+            let deleted = 0, kept = 0, failed = 0;
+            for (const br of branches) {
+              if (br.name === defaultBranch || br.name === 'allowlist' || br.name === 'gh-pages' || br.name.startsWith('release-')) { kept++; continue; }
+              if (prHeads.has(br.name)) { kept++; continue; }
+              const commit = await github.rest.repos.getCommit({ owner, repo, ref: br.commit.sha });
+              const date = new Date(commit.data.commit.committer.date).getTime();
+              if (date >= cutoff) { kept++; continue; }
+              const stamp = commit.data.commit.committer.date.slice(0, 10);
+              core.info(`${dryRun ? '[dry-run] would delete' : 'deleting'} ${br.name} (tip ${br.commit.sha.slice(0, 12)}, ${stamp})`);
+              if (!dryRun) {
+                try {
+                  await github.rest.git.deleteRef({ owner, repo, ref: `heads/${br.name}` });
+                } catch (e) {
+                  core.warning(`could not delete ${br.name}: ${e.message}`);
+                  failed++;
+                  continue;
+                }
+              }
+              deleted++;
+            }
+            core.notice(`${dryRun ? 'Dry-run: ' : ''}${deleted} branch(es) ${dryRun ? 'would be ' : ''}deleted, ${kept} kept${failed ? `, ${failed} failed` : ''} (cutoff ${AGE_DAYS}d).`);

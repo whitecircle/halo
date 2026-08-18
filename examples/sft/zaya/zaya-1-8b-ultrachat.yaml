@@ -1,0 +1,65 @@
+# ZAYA1-8B — SFT on UltraChat 200K (full fine-tune, standard DDP/FSDP). Starter config.
+# Zaya parallelism/architecture constraints: see agent-docs/models/zaya.md.
+# Launch: python scripts/training/sft.py <this config>
+#   or: accelerate launch --config_file launcher-configs/accelerate/multigpu_dp_config.yaml scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: Zyphra/ZAYA1-8B
+model_init_kwargs:
+  output_router_logits: false           # no aux loss in the family — balancing rides the native expert bias
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+dataset_num_proc: 16
+train_on_last_assistant_only: true
+
+# --- Attention & kernels ---
+attn_implementation: flash_attention_2
+packing: true
+padding_free: false
+max_length: 4096
+
+# --- Training schedule ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+num_train_epochs: 1.0
+# Refused in every mode: the toolkit clears ZayaPreTrainedModel.supports_gradient_checkpointing at
+# load, since recompute through CCA's nn.Conv1d pair faults in cuDNN on the CUDA 13.2 image.
+gradient_checkpointing: false
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 2
+save_only_model: true
+output_dir: checkpoints/zaya-1-8b-ultrachat
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+generate_eval_examples: false
+seed: 42
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# force_chat_template omitted deliberately — the tokenizer's bundled <think> template is used as-is.
+assistant_message_template: "<|im_start|>assistant\n<think>\n"
+pad_token: <pad>
+eos_token: <|im_end|>

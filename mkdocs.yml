@@ -1,0 +1,218 @@
+site_name: Halo
+site_description: 'Halo — install, configure, and run the Halo LLM training toolkit: pre-training and 12 post-training methods with EP/CP/TP/ETP parallelism for MoE and dense models.'
+site_author: White Circle
+copyright: 'Copyright &copy; 2026 <a href="https://whitecircle.com">White Circle</a> — Apache-2.0 · hello@whitecircle.ai · Generated with the <a href="https://claude.com/claude-code">Claude Code</a> <code>docs</code> skill'
+repo_url: https://github.com/whitecircle/halo
+repo_name: whitecircle/halo
+edit_uri: edit/main/agent-docs/
+docs_dir: agent-docs
+
+# Auto-link inline-code repo paths (`src/...`, `scripts/...`, configs) to GitHub source.
+hooks:
+  - mkdocs_hooks/github_links.py
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: custom
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: white
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.path
+    - navigation.top
+    - navigation.expand
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+plugins:
+  - search
+  - tags
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+
+extra:
+  version: "1.0.0"
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+extra_css:
+  - stylesheets/extra.css
+
+validation:
+  links:
+    anchors: warn
+    unrecognized_links: warn
+
+# Navigation is organized by topic so each section's nav matches its index page. Files keep
+# their on-disk directory (data/, optimization/, reference/, …), so relative links stay valid.
+nav:
+  - Get Started:
+    - index.md
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+    - Configuration Guide: getting-started/configuration.md
+    - Choosing a Training Method: getting-started/choosing-a-method.md
+  - Training Methods:
+    - training-methods/index.md
+    - Training Callbacks: training-methods/callbacks.md
+    - Supervised Learning:
+      - SFT: training-methods/sft.md
+      - Pre-training (from scratch): training-methods/pretraining.md
+    - Preference Optimization:
+      - training-methods/preference/index.md
+      - SMPO: training-methods/preference/smpo.md
+      - DPO: training-methods/preference/dpo.md
+      - KTO: training-methods/preference/kto.md
+      - Reward Modeling: training-methods/preference/reward-modeling.md
+    - Distillation:
+      - training-methods/distillation/index.md
+      - Teacher Distillation: training-methods/distillation/teacher-distillation.md
+      - Self-Distillation: training-methods/distillation/self-distillation.md
+      - Online SDPG: training-methods/distillation/online-sdpg.md
+    - Ordinary GRPO:
+      - training-methods/grpo/index.md
+      - Offline GRPO: training-methods/grpo/offline-grpo.md
+      - Online GRPO (RLVR): training-methods/grpo/online-grpo.md
+      - GRPO Comparison: training-methods/grpo/grpo-comparison.md
+    - Environmental GRPO:
+      - Overview: training-methods/grpo/environmental-grpo.md
+      - Environments:
+        - training-methods/grpo/environments/index.md
+        - ReAct: training-methods/grpo/environments/react.md
+        - Native Tool-Use: training-methods/grpo/environments/native-tool-use.md
+        - SWE Environment: training-methods/grpo/environments/swe-environment.md
+        - Code Contests: training-methods/grpo/environments/code-contests.md
+        - MCP: training-methods/grpo/environments/mcp.md
+        - Benchmarks: training-methods/grpo/environments/benchmarks.md
+        - Custom Environments: training-methods/grpo/environments/custom-environments.md
+      - Code Execution Sandboxes: training-methods/grpo/environments/sandbox.md
+    - Classification & Embeddings:
+      - Classification: training-methods/classification.md
+      - Embedding: training-methods/embedding.md
+  - Parallelism:
+    - parallelism/index.md
+    - Data Parallelism (FSDP): parallelism/data-parallelism.md
+    - Expert Parallelism (EP): parallelism/expert-parallelism.md
+    - Expert Tensor Parallelism: parallelism/expert-tensor-parallelism.md
+    - Tensor Parallelism (TP): parallelism/tensor-parallelism.md
+    - Context Parallelism (CP): parallelism/context-parallelism.md
+    - Pipeline Parallelism (PP): parallelism/pipeline-parallelism.md
+    - Multi-Node Training: parallelism/multi-node.md
+    - Multi-Node Launch Recipes: parallelism/launch-recipes.md
+    - Large-Scale Scenarios: parallelism/large-scale-scenarios.md
+    - Distributed Data Loading: parallelism/data-loading.md
+  - Data:
+    - data/index.md
+    - Dataset Formats: data/dataset-formats.md
+    - Collators: data/collators.md
+    - SFT Dataset Pre-Processing: data/dataset-preparation.md
+    - Filesystem Handling: data/filesystem-handling.md
+    - S3 Utilities: data/s3-utilities.md
+  - Optimization & Benchmarks:
+    - optimization/index.md
+    - PEFT (LoRA): optimization/peft.md
+    - BF16 Optimizer: optimization/bf16-optimizer.md
+    - Padding-Free Collator: optimization/padding-free-collator.md
+    - Flash Attention & Backends: optimization/flash-attention.md
+    - Grouped GEMM: optimization/grouped-gemm.md
+    - Mixed-Precision Training (FP8/FP4): optimization/low-precision-moe-kernels.md
+    - Liger Kernels: optimization/liger-kernels.md
+    - torch.compile: optimization/torch-compile.md
+    - Muon Optimizer: optimization/muon-optimizer.md
+    - FlashAdamW: optimization/flash-adamw.md
+    - Throughput Benchmarks: optimization/throughput-benchmarks.md
+    - Halo vs stock TRL: optimization/halo-vs-stock-trl.md
+  - Infrastructure:
+    - infrastructure/index.md
+    - Docker: infrastructure/docker.md
+    - Continuous Integration: infrastructure/ci.md
+    - AWS Authentication: infrastructure/aws-auth.md
+    - DeepEP Installation: infrastructure/deepep.md
+    - RunPod Multi-Node: infrastructure/runpod.md
+    - SkyPilot Deployment: infrastructure/skypilot.md
+    - Nomad Deployment: infrastructure/nomad.md
+    - Rollout Servers: infrastructure/rollout-servers.md
+    - Ray Cluster: infrastructure/ray.md
+  - Models:
+    - models/index.md
+    - Qwen3: models/qwen3.md
+    - Qwen3.5 / Qwen3.6 MoE: models/qwen3_5.md
+    - GPT-OSS: models/gpt-oss.md
+    - GLM-4 MoE Lite: models/glm4.md
+    - Laguna: models/laguna.md
+    - Inkling: models/inkling.md
+    - Gemma 4 MoE: models/gemma4.md
+    - Bailing MoE / Ling: models/bailing.md
+    - LFM-2 MoE: models/lfm2.md
+    - Mistral4 MoE: models/mistral4.md
+    - DeepSeek-V4: models/deepseek-v4.md
+    - Zaya: models/zaya.md
+    - Cohere2 MoE: models/cohere2-moe.md
+    - GLM-5 Next: models/glm5-next.md
+    - Step-3.7 Flash: models/step3p7.md
+    - Adding a New Model: models/adding-a-model.md
+  - Reference:
+    - reference/index.md
+    - Why This Framework: reference/why-this-framework.md
+    - GPU Training Theory: reference/gpu-training-theory.md
+    - Architecture: reference/architecture.md
+    - Trainer Architecture: reference/trainer-architecture.md
+    - Capabilities & Limitations at Scale: reference/scale-and-limitations.md
+    - Configuration Reference: reference/configuration-reference.md
+    - Scripts Reference: reference/scripts-reference.md
+    - Checkpoints & Resume: reference/checkpoints.md
+    - Model Merging: reference/model-merging.md
+    - Troubleshooting: reference/troubleshooting.md
+    - Debugging & Profiling: reference/debugging.md
+    - Glossary: reference/glossary.md
+  - Development:
+    - contributing/index.md
+    - Development Environment: contributing/development-environment.md

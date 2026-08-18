@@ -1,0 +1,218 @@
+[project]
+name = "halo"
+version = "1.0.0"
+description = "Halo — an LLM alignment and training toolkit extending HuggingFace (TRL, Accelerate, Transformers) with advanced parallelism and modern alignment methods."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Sergei Bratchikov", email = "sergey@whitecircle.ai" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "accelerate>=1.11.0,<1.12.0",
+    "backoff>=2.2.1,<3.0.0",
+    "bitsandbytes>=0.49.2,<0.50.0",  # 0.49.2 ships libbitsandbytes_cuda130.so; 0.46.x errors under cu13
+    "boto3>=1.35.0,<2.0.0",
+    "causal-conv1d>=1.6.0,<2.0.0",
+    "clearml>=2.0.2,<3.0.0",
+    "click>=8.1.0,<9.0.0",  # typer's CLI engine; src/cli.py raises click.UsageError directly
+    "datasets>=4.8.5,<5.0.0",
+    "ddgs>=9.10.0,<10.0.0",
+    "faiss-cpu>=1.10.0,<2.0.0",
+    "flash-linear-attention>=0.4.1,<0.5.0",  # DeltaNet kernels for Qwen3.5 hybrid attention
+    "gradio>=5.26.0,<6.0.0",
+    "gram-newton-schulz",
+    "huggingface-hub>=1.0.0,<2.0.0",
+    "kernels>=0.10.4,<0.11.0",
+    "liger-kernel>=0.8.0,<0.9.0",
+    "loguru>=0.7.2,<0.8.0",
+    "matplotlib>=3.10.5,<4.0.0",
+    "mcp>=1.22.0,<2.0.0",
+    "msgspec>=0.19.0,<0.20.0",
+    "openai>=1.44.1,<2.0.0",
+    "pandas>=2.2.1,<3.0.0",
+    "peft>=0.18.1,<0.19.0",
+    "pydantic>=2.6.4,<3.0.0",
+    "ray[default]>=2.52.0,<2.53.0",
+    "ruamel-yaml>=0.19.1,<0.20.0",
+    "s3fs>=2024.6.0",
+    "sentence-transformers>=5.2.2,<6.0.0",
+    "tabulate>=0.9.0,<0.10.0",
+    "tokenizers>=0.23.1,<0.24.0",
+    "torch>=2.11.0,<2.12.0",
+    "torchvision>=0.26.0,<0.27.0",  # transformers fast image processors (VLM training); the Dockerfile drops the NGC copy and reinstalls the locked one
+    "transformers>=5.16.1,<5.17.0",
+    "trl>=1.6.0,<1.7.0",
+    "typer>=0.25.1,<0.26.0",
+    "wandb>=0.25.0,<0.26.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/whitecircle/halo"
+Repository = "https://github.com/whitecircle/halo"
+Issues = "https://github.com/whitecircle/halo/issues"
+
+[project.scripts]
+halo = "src.cli:main"
+
+# vllm/sglang run in separate Docker containers (they carry their own torch/transformers stacks).
+# See: Dockerfile.vllm, docker-compose.vllm.yml
+# flash-attn is installed separately with --no-build-isolation (see Dockerfile).
+# nvidia-cutlass-dsl 4.5.2 + quack-kernels 0.5.0 (Blackwell block-scaled MoE grouped-GEMM and
+#   Muon Newton-Schulz kernels) are pinned by a Dockerfile pip-install over the lock's 4.4.2/0.4.1
+#   (gram-newton-schulz's hard pin). Not declared here because the resolver can't co-resolve the
+#   git-dep pin; the kernels degrade gracefully when absent.
+
+[project.optional-dependencies]
+flash-optimizers = [
+    "flashoptim>=0.1.3,<0.2.0",
+]
+gigatoken = [
+    "gigatoken>=0.9.0,<0.10.0",  # Rust bulk tokenizer backend for dataset preprocessing (pre-1.0 API)
+]
+
+# --- Dev tooling groups (PEP 735). Installed in-image so the image is the test/docs runtime;
+# `ty` is intentionally absent — type-checking is pyright (basic), run via Pylance / a Node install
+# (see [tool.pyright]), not a pip tool. ---
+[dependency-groups]
+dev = [
+    { include-group = "lint" },
+    { include-group = "test" },
+    { include-group = "docs" },
+    { include-group = "profiling" },
+]
+lint = [
+    "ruff>=0.9.9,<0.10.0",
+]
+# anyio and pillow are declared, not left transitive: anyio's pytest11 plugin is what applies
+# ``pytest.mark.anyio`` (without it the async environment tests silently collect zero items),
+# and tests/common/datasets.py builds VLM fixtures with PIL. Both arrive today only via httpx/openai
+# and transformers, so a dependency bump that drops either edge would quietly shrink the suite.
+test = [
+    "pytest>=9.0.1,<10.0.0",
+    "anyio>=4.13,<5.0",
+    "pillow>=11.3,<12.0",
+]
+docs = [
+    "mkdocs-material>=9.6.0,<10.0.0",
+]
+# Trace analysis + CPU flame graphs (scripts/profiling/, src/diagnostics/debugging.py).
+# TraceLens is git-only — the PyPI name `tracelens` is an unrelated project; openpyxl backs its
+# .xlsx reports; py-spy backs the stack dumps / CPU flame graphs.
+profiling = [
+    "tracelens",
+    "openpyxl>=3.1,<4.0",
+    "py-spy>=0.4.0,<0.5.0",
+]
+
+[tool.uv]
+required-version = ">=0.10.5"
+default-groups = ["dev"]
+# DeepEP V2 (EPv2, NCCL Gin backend) is built from source against NCCL >= 2.30.4 (see
+# Dockerfile). torch 2.11+cu130's wheel metadata hard-pins nvidia-nccl-cu13==2.28.9, so we
+# OVERRIDE it — torch dynamically links libnccl.so.2 (ABI-stable across 2.x).
+# EXACT pin, not a floor: all four build sites (both training images, Dockerfile.vllm,
+# Dockerfile.sglang) install this one wheel, and under a floor whichever image is rebuilt last
+# resolves whatever PyPI has moved to — the RL weight-sync ncclCommInitRank then fails on the skew.
+# It must also stay at or above the DeepEP V2 floor (docker/nccl_pin.py MINIMUM) that deep_ep._C is
+# compiled against. Bumping it means a `uv lock` AND a rebuild of all four images, not a lock edit.
+override-dependencies = ["nvidia-nccl-cu13==2.31.2"]
+
+[tool.uv.sources]
+gram-newton-schulz = { git = "https://github.com/Dao-AILab/gram-newton-schulz.git" }
+tracelens = { git = "https://github.com/AMD-AGI/TraceLens.git", tag = "v0.4.0" }
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+# Matches the direct upstreams (TRL + Transformers). The code is already ~p95=87 cols,
+# so the format-only diff is small. Vendored / third-party trees are excluded.
+target-version = "py312"
+line-length = 119
+# docker/vllm/parity/fixtures carries hub remote-code modules verbatim.
+extend-exclude = ["vendors", "docker/vllm/parity/fixtures"]
+
+[tool.ruff.lint]
+# E,F,W,I = pycodestyle/pyflakes/isort; UP = pyupgrade; B = bugbear; C4 = comprehensions;
+# SIM = simplify; T20 = no stray print() in src/; PLC0415 = no inline imports.
+# The whole set is a blocking CI gate (.github/workflows/lint.yml) — `ruff check .` must stay clean.
+# PLC0415 is a preview rule: `preview` + `explicit-preview-rules` arm it WITHOUT pulling in every
+# other preview rule (without them it is selected but silently does nothing).
+preview = true
+explicit-preview-rules = true
+select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM", "T20", "PLC0415"]
+ignore = [
+    "E501",   # line length is enforced by the formatter, not the linter
+    "UP038",  # isinstance(x, A | B) is slower than the tuple form at runtime (rule deprecated upstream)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: module-level setup imports (E402), asserts (S101), inline imports + prints are fine.
+# E741 (`l`/`I`/`O` names — `for l in losses` is idiomatic here), B007 (unused loop var) and
+# B023 (loop var captured in a closure — the closures are consumed within the same iteration in
+# these test helpers) and SIM117 (nested `with patch(...)` is the idiomatic mock-stack form) are
+# accepted in tests rather than churned across the suite.
+"tests/**" = ["E402", "PLC0415", "T20", "E741", "B007", "B023", "SIM117"]
+# Scripts are CLIs — prints are the interface.
+"scripts/**" = ["T20"]
+# Docs diagram generators: `from _theory_style import *` shares one matplotlib theme, and the
+# matplotlib `use()`-before-`pyplot` idiom puts an import after a call.
+"scripts/diagrams/*" = ["F403", "F405", "E402"]
+# Build-time check script: printing each result is its interface, and it imports vLLM (present only
+# in the server image) after setting sys.path, so the imports cannot be module-top.
+"docker/vllm/plugins/verify_gptoss_plugins.py" = ["T20", "E402"]
+# Build-time config-parity gate + its fixture generator: printed results are the interface.
+"docker/vllm/parity/*.py" = ["T20"]
+# Build-time pin resolver: the printed version IS its interface (a Dockerfile reads it off stdout).
+"docker/nccl_pin.py" = ["T20"]
+# Gradio's documented progress idiom is `def fn(..., progress=gr.Progress())` — the call in the
+# default is how Gradio injects the tracker, so B008 (call in arg default) does not apply here.
+# Package re-export shims: re-exported names (F401) and `import *` aggregation (F403/F405).
+
+[tool.ruff.lint.isort]
+# Pin import grouping (I001) so it is deterministic regardless of stray directories at the repo root:
+# a gitignored `wandb/` run dir and the tracked `launcher-configs/accelerate/` config dir would otherwise make ruff
+# infer those third-party packages as first-party locally but not in CI.
+known-first-party = ["src", "tests"]
+known-third-party = ["wandb", "accelerate"]
+
+[tool.pyright]
+# ruff's complement: type-aware checks (call args, None access, attribute typos, bad returns).
+# Single source of truth shared with Pylance (.vscode/settings.json). BASIC mode + non-blocking to
+# start (53k LOC of dynamic torch/DTensor code); tighten over time like the ruff lint-clean milestone.
+# Full checks need the deps installed, so run pyright IN the image (the host has no torch); a bare-host
+# run only checks our-code-to-our-code with third-party imports relaxed.
+typeCheckingMode = "basic"
+pythonVersion = "3.12"
+exclude = ["vendors", "**/__pycache__", ".venv", "site"]
+reportMissingTypeStubs = false      # third-party libs without py.typed shouldn't spam diagnostics
+reportMissingModuleSource = false   # host runs may not have the torch env installed
+
+[tool.pytest.ini_options]
+# CPU tests run inside the image (they import torch); GPU tests are torchrun scripts
+# launched as subprocesses by tests/gpu/conftest.py from tests/gpu/manifest.py — pytest
+# never imports them. Markers are registered in tests/conftest.py (from manifest.ALL_MARKERS)
+# so --strict-markers stays a single source of truth.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--strict-markers -ra"
+norecursedirs = ["*.egg", ".*", "build", "dist", "vendors"]
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

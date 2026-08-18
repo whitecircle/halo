@@ -1,0 +1,63 @@
+# Qwen3.5-9B (natively multimodal) — OCR SFT: page render → markdown transcription, olmOCR-mix book pages.
+# VLM path auto-detected by sft.py; packing/padding-free do not apply to images.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.5-9B
+attn_implementation: sdpa             # FA2 crashes the Qwen3.5 M-RoPE varlen path
+
+# --- Dataset (FineVision re-render of olmOCR-mix: images + {user, assistant} turns) ---
+# images_field injects the page render into the first user turn; the paired `texts` shape is
+# normalized to role/content messages by the VLM pipeline. 15,194 book pages, ~6.6 GB.
+dataset:
+- HuggingFaceM4/FineVision:olmOCR-mix-0225-books
+conversation_field: texts
+images_field: images
+test_size: 0.01
+
+# --- Sequence budget ---
+# The VLM collator fails loud on over-length rows (image tokens cannot be truncated) — keep this
+# above vision tokens + the longest markdown transcript, or pre-filter long rows offline.
+max_length: 16384
+
+# --- Training ---
+train_on_completions_only: true
+assistant_message_template: "<|im_start|>assistant\n"
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 1.0e-05
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Output ---
+output_dir: checkpoints/qwen3.5-9b-vl-ocr-olmocr
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 250
+save_total_limit: 2
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: false
+
+# --- Tokens ---
+pad_token: <|endoftext|>
+eos_token: <|im_end|>
+
+# --- PEFT ---
+use_peft: false

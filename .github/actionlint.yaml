@@ -1,0 +1,5 @@
+# actionlint config. Declares the self-hosted runner label used by cpu-tests.yml and gpu-tests.yml
+# so actionlint does not flag it as unknown (it cannot see the runner registered on the GPU box).
+self-hosted-runner:
+  labels:
+    - halo

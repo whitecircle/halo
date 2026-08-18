@@ -1,0 +1,51 @@
+name: cpu-tests
+
+# CPU test tier. Unlike lint/docs (pure-Python, hosted), the CPU tests import torch, so they
+# must run INSIDE the prebuilt image — which the host has no Python for. They need no GPU, so
+# the job runs the image without `--gpus` (zero contention with training on the same host), on a
+# SELF-HOSTED runner where `halo:blackwell` is already built. `make test-cpu` uses the creds-free
+# DOCKER_RUN_CPU (no `.env`/`~/.aws` mount), so it is safe to run contributor code here.
+#
+# DISABLED FOR NOW: only `workflow_dispatch` is active. Enable the `push`/`pull_request` triggers
+# below once the `[self-hosted, halo]` runner is registered — see agent-docs/infrastructure/ci.md.
+# PREREQUISITE for the pull_request trigger: this tier has no label gate, so fork-PR code reaches
+# the box on open. Set Settings → Actions → General to require run approval for ALL outside
+# collaborators FIRST — that approval is the maintainer opt-in for this tier.
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+
+concurrency:
+  group: cpu-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    # The label must match the registered self-hosted runner on the GPU box.
+    runs-on: [self-hosted, halo]
+    # Skip draft PRs (still runs on pushes to main and on ready PRs).
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify the runtime image is present
+        run: |
+          docker image inspect "${IMAGE:-halo:blackwell}" >/dev/null 2>&1 \
+            || { echo "::error::${IMAGE:-halo:blackwell} not found on this runner — build it with 'make build-blackwell'"; exit 1; }
+
+      - name: CPU tests (in image, no GPU)
+        run: make test-cpu PYTEST_ARGS="--junitxml=cpu-junit.xml -ra"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cpu-junit
+          path: cpu-junit.xml
+          if-no-files-found: warn

@@ -1,0 +1,125 @@
+# Environmental GRPO training template — see agent-docs/training-methods/grpo/environmental-grpo.md.
+# Launch: start a vLLM server on the GPUs the trainer does not take, then
+#   torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+#   (torchrun is the repo default and the only launcher for EP/CP/TP; accelerate launch
+#   --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml stays an option for plain data-parallel.)
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+attn_implementation: flash_attention_2
+
+# --- Environment (EnvironmentConfig fields) ---
+environment_type: react_math
+# Available: react_math, react_search, native_math, native_coding, native_combined,
+#            swe, codeforces, mcp, qa_search, code_contests, exam_qa
+success_reward: 1.0
+failure_reward: 0.0
+max_turns: 10
+# Env-specific kwargs (uncomment and nest as needed):
+# environment_kwargs:
+#   search_backend: duckduckgo   # For qa_search and open-book exam_qa (auto-detect when omitted)
+#   open_book: false             # For exam_qa (enable search tools)
+#   timeout_per_test: 5          # For code_contests / codeforces (seconds per test case)
+#   mcp_server: filesystem       # For mcp (MCP server name)
+#   include_python_tools: false  # For qa_search (add Python tools)
+
+# --- Ray Workers (AsyncTrainingConfig fields) ---
+num_rollout_workers: 16
+max_concurrent_rollouts: null  # default: num_workers * 4
+ray_address: null  # null = local, or "head-node:6379"
+
+# --- vLLM Server - Single Server (AsyncTrainingConfig fields) ---
+rollout_server_url: "http://localhost:8000"
+vllm_group_port: 51216  # NCCL group port for weight sync
+rollout_connection_timeout: 120.0
+sync_weights_every_n_steps: 1
+
+# --- vLLM Server - Multi-Server (uncomment to use) ---
+# rollout_server_configs:
+#   - url: "http://localhost:8000"
+#     group_port: 51216
+#   - url: "http://localhost:8001"
+#     group_port: 51217
+
+# --- Rollout Generation (AsyncTrainingConfig fields) ---
+rollout_temperature: 0.7
+rollout_top_p: 0.95
+rollout_max_tokens: 8192
+
+# --- Prefetch (AsyncTrainingConfig fields) ---
+enable_prefetch: false    # this config serves from ONE rollout_server_url, and that
+                          # engine stops serving during weight sync, so there is nothing to overlap
+                          # against — the trainer auto-disables prefetch and warns. Set it back to
+                          # true together with a rollout_server_configs list of 2+ servers.
+num_prefetch_batches: 1   # batches to prefetch ahead, once prefetch is on
+
+# --- Dataset (EnvironmentalGRPOScriptArguments fields) ---
+dataset:
+- path/to/dataset  # HuggingFace dataset or s3://bucket/path
+test_size: 0.05
+prompt_field: prompt
+answer_field: answer
+# context_fields: null   # extra dataset columns handed to the environment as context
+# No system_prompt on this surface: the rollout conversation opens with the ENVIRONMENT's own system
+# prompt. Environments that accept an override take it under environment_kwargs (e.g. qa_search).
+
+# --- Sequence Lengths ---
+max_prompt_length: null  # prompt filter (drop over-long rows), not a truncation length; null = keep all
+
+# --- GRPO ---
+num_generations: 4
+beta: 0.01
+num_iterations: 1
+epsilon: 0.2
+scale_rewards: batch     # global batch std — never the per-group std, whose near-zero divisor on a
+                        # uniformly-failed group inflates shaping noise into a full-scale advantage
+
+# --- Training ---
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 4   # global eval batch must divide by num_generations_eval at any world size
+gradient_accumulation_steps: 8
+num_train_epochs: 2.0
+learning_rate: 5.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 50
+
+# --- Optimization ---
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+
+# --- Output ---
+output_dir: checkpoints/environmental-grpo
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+log_completions: true        # per-sample console table
+save_completions: true       # trajectories → <output_dir>/completions/*.parquet
+num_completions_to_print: 3
+
+# --- Data Loading ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+seed: 42
+
+# --- PEFT (optional) ---
+use_peft: false
+# lora_r: 64
+# lora_alpha: 128
+# lora_dropout: 0.05
+# lora_target_modules:
+# - q_proj
+# - k_proj
+# - v_proj
+# - o_proj
+# lora_task_type: CAUSAL_LM

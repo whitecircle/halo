@@ -1,0 +1,70 @@
+# Online GRPO weight-transfer smoke — Qwen3-8B (dense FSDP DP=2) on GSM8K, 3 steps.
+# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3-8B
+attn_implementation: flash_attention_2   # explicit: this script already defaults padded workloads
+                                         #   to sdpa (an auto-detected FA4 runs right-padded batches
+                                         #   through its slow varlen path), and FA2 overrides that
+
+# --- Dataset ---
+dataset: openai/gsm8k:main@train   # @train, NOT the bare spec: with test_size set, a dataset that
+                                   # ships a 'test' split is CONCATENATED and re-split, pulling GSM8K's
+                                   # held-out benchmark rows into training
+test_size: 0.01                    # 1% holdout carved out of train only
+prompt_field: question
+system_prompt: "Solve the problem step by step and put your final numeric answer in \\boxed{}."
+
+# --- Reward Functions ---
+use_accuracy_reward: true
+
+# --- GRPO Hyperparameters ---
+beta: 0.0                  # no reference model
+num_iterations: 1
+epsilon: 0.2
+scale_rewards: true
+num_generations: 4
+temperature: 1.0
+loss_type: grpo
+
+# --- Training ---
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 4
+num_train_epochs: 1.0
+gradient_accumulation_steps: 1
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+max_steps: 3
+learning_rate: 1.0e-06
+lr_scheduler_type: constant
+warmup_steps: 0
+max_grad_norm: 1.0
+max_prompt_length: 256
+max_completion_length: 1024
+optim: adamw_torch_fused
+
+# --- vLLM Generation ---
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 127.0.0.1
+vllm_server_port: 8000
+
+# --- Output ---
+output_dir: checkpoints/online-grpo-qwen3-8b-smoke
+save_strategy: "no"
+eval_strategy: "no"
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: []
+log_completions: true
+num_completions_to_print: 2
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+use_peft: false
+seed: 42

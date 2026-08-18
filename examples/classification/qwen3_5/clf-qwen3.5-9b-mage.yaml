@@ -1,0 +1,58 @@
+# Sequence classification — Qwen3.5-9B, 2-class AI-vs-human text detection on MAGE.
+# Launch: python scripts/training/classification.py <this config>
+#   or: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/classification.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.5-9B
+attn_implementation: sdpa   # classification batches are right-padded, and FA2 unpads them into the
+                            #   M-RoPE varlen path that crashes this family (FA2 is only safe with
+                            #   packing: true — see agent-docs/models/qwen3_5.md)
+
+# --- Dataset ---
+# MAGE has native `text` + int `label` columns (the pipeline reads the label column by the hardcoded
+# name `label`, so a text/label dataset is required). Alternative: HuggingFaceFW/fineweb-edu-llama3-annotations
+# (6-class edu-quality) — but its label column is `score`, which the pipeline cannot remap, so not usable as-is.
+dataset: yaful/MAGE
+text_field: text  # raw text+label rows, not a prompt conversation
+test_size: 0.1   # the loader folds ALL provided splits together and re-splits by this ratio
+
+# --- Training ---
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 4
+num_train_epochs: 1
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 2.0e-05
+weight_decay: 0.05
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 32
+seed: 42
+
+# --- Sequence Length ---
+max_length: 2048
+
+# --- Output ---
+output_dir: checkpoints/clf-qwen3.5-9b-mage
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: true
+
+# --- PEFT (optional) ---
+use_peft: false
+lora_task_type: SEQ_CLS

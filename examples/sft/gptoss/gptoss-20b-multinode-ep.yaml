@@ -1,0 +1,86 @@
+# GPT-OSS 20B — multi-node EP SFT example (2 nodes x 8 GPUs). See agent-docs/parallelism/multi-node.md.
+# Launch on EACH node (MASTER_ADDR = node0 IP; set NCCL_SOCKET_IFNAME / DIST_NCCL_TIMEOUT_MINUTES /
+# DIST_SHARED_FILESYSTEM as needed; SLURM: exactly ONE srun task per node):
+#   torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
+#     --master_addr=$MASTER_ADDR --master_port=29500 scripts/training/sft.py <this config>
+
+# --- Model ---
+# Must be a BF16 (dequantized) gpt-oss checkpoint — EP cannot load the MXFP4-quantized openai/gpt-oss-20b.
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+model_init_kwargs:
+  output_router_logits: true          # enable MoE router auxiliary loss
+  router_aux_loss_coef: 0.001
+
+# --- Dataset ---
+# For large corpora, pre-shard (scripts/before_training/prepare_dataset.py); num_shards must be >= dp_size.
+# See agent-docs/data/dataset-preparation.md. The inline dataset below just makes the example runnable.
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+test_size: 0.01
+conversation_field: messages
+# Multiturn jinja ends EVERY assistant turn with <|return|> (a completion-span terminator) — the
+# bundled template ends non-final turns with <|end|>, which is not one, so completion masking would
+# silently leak user turns into the loss on multi-turn rows.
+chat_template: jinja_templates/gpt-oss-multiturn.jinja
+force_chat_template: true
+assistant_message_template: <|start|>assistant<|channel|>final<|message|>
+dataset_num_proc: 32
+
+# --- Parallelism — pick ONE layout ---
+# (A) Cross-node EP (this example): experts across all 16 GPUs, DP = world_size.
+# Cross-node dispatch rides the EFA proxy GIN, which is validated to 8192 tokens/rank per MoE
+# forward (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK) — hence per_device_train_batch_size: 1 below, since
+# packing fills every row: 1 x 8192 = the ceiling. Layout (B) keeps dispatch on NVLink and is not
+# bound by it. See agent-docs/infrastructure/deepep.md (Expert parallelism over AWS EFA).
+expert_parallel_size: 16
+ep_scope: global
+
+# (B) Node-local EP + DP across nodes (lower comms): uncomment instead of (A).
+# expert_parallel_size: 8
+# ep_scope: node
+
+# (C) EP + node-local TP: shard attention too.
+# expert_parallel_size: 16
+# tensor_parallel_size: 8        # TP must stay within one NVLink domain (<= 8 here)
+# ep_scope: global
+
+# (D) GB200/GB300 NVL72: single-domain pure EP must be one dispatch group (72) or ep2 —
+#     intermediate degrees are rejected — and 72 does not divide gpt-oss's 32 experts, so ep2 is
+#     this model's only pure-EP width there (shard further with expert_tensor_parallel_size);
+#     needs Fabric Manager + IMEX + NCCL >= 2.25.2.
+# expert_parallel_size: 2
+# ep_scope: node
+# nvlink_domain_size: 72         # or `export NVLINK_DOMAIN_SIZE=72`
+
+save_sharded_ep: false                # gather to an HF-standard checkpoint
+use_grouped_gemm: false               # gpt-oss: per-expert loop beats grouped GEMM at high EP
+max_concurrent_loading: 2             # ranks loading at once per node
+
+# --- Attention & kernels ---
+# attn_implementation deliberately unset — auto-selects FA4 on Blackwell, FA3/FA2 on Hopper
+packing: true
+max_length: 8192
+
+# --- Training schedule ---
+per_device_train_batch_size: 1     # layout (A) ceiling: pdbs x max_length <= 8192 tokens/rank
+gradient_accumulation_steps: 4
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+output_dir: checkpoints/oss-20b-multinode-ep
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+logging_steps: 5
+report_to: wandb

@@ -1,0 +1,69 @@
+# Qwen3.5 35B-A3B — EP=8 SFT example on UltraChat 200K. CP unsupported. See agent-docs/models/qwen3_5.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.5-35B-A3B
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 256 routed experts → 32/rank
+moe_balancing: bias_update_transient  # aux_loss RAISES here (Qwen3_5MoeForConditionalGeneration reads
+                                      # output_router_logits from kwargs, never from the config, so the
+                                      # flag records router logits while router_aux_loss_coef never
+                                      # reaches the loss) and the architecture has no exportable bias
+                                      # slot — exported checkpoints serve WITHOUT the trained bias
+                                      # (near-tie top-k flips vs training)
+save_sharded_ep: false
+fp32_router: true
+fp32_experts: true
+fp32_non_ep_params: true
+
+# --- Attention & kernels ---
+attn_implementation: flash_attention_2
+packing: true                         # fixed-length only — never padding_free (M-RoPE varlen crash)
+max_length: 33000
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/qwen3.5-35b-a3b-ultrachat-ep
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+assistant_message_template: "<|im_start|>assistant\n"
+pad_token: <|endoftext|>
+eos_token: <|im_end|>
+chat_template: jinja_templates/qwen3-multiturn.jinja  # ultrachat is multi-turn; the -instruct template rejects >1 user turn
+force_chat_template: true

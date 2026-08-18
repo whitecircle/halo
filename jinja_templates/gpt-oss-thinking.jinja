@@ -1,0 +1,37 @@
+{# --- Single-turn data validation --- #}
+{%- set user_count = messages | selectattr("role", "equalto", "user") | list | length -%}
+{%- set assistant_count = messages | selectattr("role", "equalto", "assistant") | list | length -%}
+{%- if user_count != 1 or assistant_count > 1 -%}
+  {{- raise_exception("This template only supports single-turn data (1 user message, 0-1 assistant messages). Found " + user_count|string + " user and " + assistant_count|string + " assistant messages.") -}}
+{%- endif -%}
+
+{# --- System message with reasoning level --- #}
+{%- if reasoning_effort is not defined -%}
+  {%- set reasoning_effort = "medium" -%}
+{%- endif -%}
+<|start|>system<|message|>Reasoning effort: {{ reasoning_effort }}<|end|>
+
+{# --- Main message rendering (user & assistant only) --- #}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+<|start|>user<|message|>{{ message.content }}<|end|>
+  {%- elif message.role == "assistant" -%}
+    {# Single-turn variant: always use <|return|> #}
+    {# Note: message.reasoning_content always empty, but leave this part for stability, since original model is reasoning-only #}
+    {%- set _reasoning = message.get("reasonong_content", message.get("reasoning_content")) -%}
+
+    {# If reasoning exists, output it to analysis channel. #}
+    {%- if _reasoning -%}
+<|start|>assistant<|channel|>analysis<|message|>{{ _reasoning }}<|end|>
+    {%- else -%}
+<|start|>assistant<|channel|>analysis<|message|><|end|>
+    {%- endif -%}
+
+    {{- "<|start|>assistant<|channel|>final<|message|>" + message.content + "<|return|>" }}
+  {%- endif -%}
+{%- endfor -%}
+
+{# --- Optional generation prompt kick-off --- #}
+{%- if add_generation_prompt -%}
+<|start|>assistant<|channel|>analysis<|message|>
+{%- endif -%}

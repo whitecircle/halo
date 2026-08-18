@@ -1,0 +1,52 @@
+# Optimization levers — reference
+
+Headline metric is **tokens/s/GPU** (real, non-padding tokens). MFU% and achieved-TFLOPS are opt-in
+diagnostics from `EfficiencyCallback`; MFU% is **not** comparable across GPUs (peak denominator differs —
+use tok/s/GPU or achieved TFLOPS for that). All effects below are measured on **B300 (Blackwell, SM100)**.
+**Measure every EP/MoE throughput number at batch ≥ 4** — batch 1 is comm-bound and run-to-run noisy.
+
+This page is the single home for this skill's figures. Every number names its source page, relative to
+`agent-docs/optimization/`. Read that page before quoting a number; when it and this table disagree, the doc
+wins.
+
+## Positive levers
+
+| Lever | When to use | Measured B300 effect (doc) | YAML flag / env var | Caveat |
+|---|---|---|---|---|
+| **Grouped GEMM** | Any MoE on SM90+ (auto) | **2.12×** e2e at b4 (3.43× at b1) (Qwen3-30B-A3B EP=2, s8192, GC on); isolated kernel ≈**11.93×** (grouped-gemm.md) | `use_grouped_gemm` (default `true`); at `ep_size=1` on a MoE model it still applies the EP wrappers (grouped-GEMM-only mode) | Measure at b≥4 (b1 comm-bound). Loop path can win at skinny per-expert M or `hidden==intermediate & %128≠0`; grouped and loop tie at ep8-b4. GptOss ETP falls back to loop. |
+| **Liger CE + RMSNorm/RoPE/SwiGLU** | All training (auto) | Dense **+37% tok/s, −14 GB** (Qwen3-8B s16k b1); MoE **+40%, −19 GB** (Qwen3-30B-A3B EP=2 b4) (liger-kernels.md) | `use_liger_kernel` (default `true`); `liger_kernel_config` per-kernel | SwiGLU/GeGLU auto-OFF where an EP wrapper replaces the only module the applier's GLU patch swaps (upstream-covered families); a toolkit spec naming the dense and shared-expert MLPs keeps it. CE and FLCE force-OFF under TP, CP and PP. |
+| **FusedLinearCrossEntropy (FLCE)** | Long-seq OOM at the loss | **−24.3 GB forward at 32k** (Qwen3-8B, 32.2 vs 56.5 GB; ~2.5 GB at 8k); MoE −24 GB beyond CE at near-CE throughput (liger-kernels.md) | `liger_kernel_config: {cross_entropy: false, fused_linear_cross_entropy: true}` | SFT-only; `logits=None` (no entropy logging); not CP-compatible; OK under EP MoE families + TP-off. |
+| **FA4 (Blackwell attention)** | Any Blackwell run (auto) | Dense **1.13× (s4k) → 1.85× (s16k) → 2.29× (s32k)** vs FA2 (Qwen3-4B b1); MoE **+13%** e2e (gpt-oss-20b ep8 s16k); isolated kernel 2.1–3.7× (flash-attention.md) | auto (`_detect_attention_impl`); override `attn_implementation` | Beta — validate accuracy-sensitive runs. Qwen3.5/3.6, Qwen3-Next and GLM-4 MoE Lite auto-fall-back to SDPA (FA4 backward NaN grads). Hopper keeps FA2+FA3. |
+| **Packing (variable-length data)** | avg seq << max_length | **9.2×** at ~75% padding waste (Qwen3-30B-A3B EP=2, b2, FA2) (padding-free-collator.md) | `packing: true` (mutually exclusive with `padding_free`); `packing_strategy: bfd` | No benefit when avg ≈ max_length (all collators tie ~1%). Rejected under CP — take the padded collator (`pad_to_multiple_of=cp_size`) there. |
+| **Padding-free collator** | Want to skip padding FLOPS but not cross-seq packing | **2.3×** real-throughput at ~75% waste, same shape as the packing row (padding-free-collator.md) | `padding_free: true` + a varlen attention impl (`flash_attention_2/3/4`) | NOT CP-compatible; smaller win than packing; a non-varlen impl (SDPA, eager, flex) is refused. SFT + SMPO only. |
+| **Gradient checkpointing OFF** | Batch/seq fits un-checkpointed | **1.29×** (gpt-oss-20b ep8 b4 s4096: 12,971 vs 10,051 tok/s/GPU); **+27–28%** across the ep8 b1 sequence sweep; ~2× memory (throughput-benchmarks.md) | `gradient_checkpointing: false` | Only when activations fit (ep8 b1 GC-off reaches s16k at 117 GB and OOMs at 32k). Keep ON for long seq / big batch / FSDP. |
+| **Push seq × batch** | EP throughput at low token counts | Batch is the dominant EP lever: **qwen3.5-35b ep2 b1→b4 = 2.1×** (5,964 → 12,584 tok/s/GPU, s4096; ep8 b1→b4 = 1.5×); read TFLOPS not MFU% (throughput-benchmarks.md) | raise `per_device_train_batch_size`, then `gradient_accumulation_steps`, then `max_length` | Bounded by memory; use GC / FLCE / EP degree to make room. |
+| **Min EP degree that fits** | Pure EP, choosing size | Fewer EP ranks = more local params + larger expert GEMMs; gpt-oss-20b ep1 dense FSDP tops the achieved-TFLOPS table (**3,152** TFLOPS / 24,456 tok/s/GPU at b4 s4096 GC-off, vs ep8 **389** / 10,041) (throughput-benchmarks.md) | `--expert_parallel_size`; use **ep2 or ep8** on 8 GPUs | **ep4 is rejected at config time** on 8 GPUs — multi-group >2-rank pure EP within one NVLink domain would deadlock the DeepEP combine (ep4 on 4 GPUs is fine). Finer expert sharding on 8 GPUs → **EP+ETP** (`ep4+etp2`), not EP+TP. Rule and mechanism: the `parallelism` skill (`matrix.md`, row *Multi-group >2-rank EP on one NVLink domain*). |
+| **AdamWBF16 + stochastic rounding** | Any bf16 training (auto) | **6 B/param** (vs 12 fp32 AdamW); step −17% vs `adamw_torch_fused`; loss gap to fp32 master ~8e-5 (~5× tighter than weight-only SR) (bf16-optimizer.md) | auto from `bf16: true` | Auto-enable skipped under accelerate-managed replicated DDP — a conservative default outside the validated FSDP/EP/TP/HSDP matrix, not a correctness limit (the SR seed is rank-identical, so replicated params round the same way); `bf16_optimizer: true` opts in. |
+| **fp32_grad_reduce** | Many-rank / multi-node | ~**2.2×** tighter grad-reduce at world=8 (0.37%→0.17% error); grows with scale (bf16-optimizer.md) | `fp32_grad_reduce: true` | Keeps 6 B/param storage; ~2× cost on the reduce-scatter/all-reduce only. Off by default; implied by `fp32_non_ep_params`. |
+| **fp32_non_ep_params** | Headroom + want exact dense updates | 12 B/param on dense params (e.g. large lm_head/embeds); experts stay bf16+SR — +1 GB on a 20B MoE, where experts dominate (bf16-optimizer.md) | `fp32_non_ep_params: true` | Doubles dense-param storage; implies `fp32_grad_reduce`. |
+| **FlashAdamW (quantized states)** | Optimizer-state OOM at scale | **~5 B/param** (~57% less than fp32 AdamW: 240 → ~100 GB of state at 20B params); **−8.6% peak memory** at a ~5 ms optimizer-step overhead; convergence matches AdamW (flash-adamw.md) | `optim: flash_adamw` (needs `pip install flashoptim` / `-E flash-optimizers`) | Saving scales with model size (tens of GB at 70B+). Refuses optimizer state for unevenly sharded FSDP2 DTensor params — resume warm-restarts the optimizer. |
+| **Muon** | Fewer steps to a target loss | Lower loss in the step budget (0.098–0.10 vs AdamW 0.13 at 40 steps); ~14× optimizer-step cost (102 vs 7.4 ms), +68% peak mem on a synthetic FFN (muon-optimizer.md) | `optim: muon` | Convergence lever, not per-step throughput (end-to-end slowdown far smaller — measure); needs the `quack-kernels`+`nvidia-cutlass-dsl` pair else slow torch fallback. 2D params only (1D→AdamW). |
+| **QLoRA** | Fit on small/consumer GPU | **~61% less memory** than full FT (25.3 vs 64.6 GB, r=64 all-linear); **~33% faster than bf16 LoRA** (15.8k vs 11.7k, bandwidth-bound) (peft.md) | `use_peft: true` + `load_in_4bit: true` (+ `bnb_4bit_quant_type`); with FLCE, Qwen3-8B r=32 all-linear at 32k needs 20.9 GB and fits a 24 GB GPU (peft.md) | Rejected under EP, TP, PP and the grouped-GEMM MoE loader (pure ETP included) — those loaders materialize plain de-quantized weights and lose `Params4bit`. `optim: adamw_8bit` is the separate 8-bit-optimizer-state lever for a **non**-quantized base, and it suppresses the AdamWBF16 auto-enable. |
+| **CDMC=1** | EP (baked in) | **+9.7% on ep8**, neutral dense/ep2 (throughput-benchmarks.md, deepep.md) | `CUDA_DEVICE_MAX_CONNECTIONS=1` (image ENV / Makefile `-e`) | Driver latches at the `deep_ep` import's `cuInit` — an in-script `os.environ` write is too late. Does NOT fix ep4 deadlock. |
+| **Atomic-free expert permute** | High-top_k MoE (auto) | **+18% (s4k) → +65% (s16k)** on qwen3.6-35b EP=8 (grouped-gemm.md) | auto, gated `top_k ≥ ep_size` | gpt-oss (low top-k) keeps cheaper `index_add_`; no change there. Win grows with seq. |
+
+## NEGATIVE RESULTS — do not chase
+
+At this repo's fine-grained MoE shapes (EP8, **256–512 tokens/expert**, expert width **N ≤ 4096**), the
+per-expert GEMM is **weight-bandwidth-bound at the bf16 roofline**. There is no compute headroom for a
+lower-precision matmul to take. **bf16 is the production default.**
+
+| Tempting lever | Why it does NOT help (measured reason) | Doc |
+|---|---|---|
+| **Low-precision fp8/fp4 *compute*** | No throughput win — proven 3 ways (roofline; Blackwell `tcgen05` has no bf16×fp4 MMA; measured DeepGEMM). Simulated fake-quant is **~8× a bf16 step** (mxfp8) / **17–19×** (fp4) — a convergence-validation oracle, not speed. The only real fp8/fp4 win is **inference memory** (`quantize_to_lowp.py`: fp8 = ½, fp4 = ¼ expert bytes). | low-precision-moe-kernels.md |
+| **Native DeepGEMM kernel** | **Net-slower than bf16 at every training shape** — 0.05–0.17× at production shapes; crosses 1.0 only at tok/e ≥ 16384 AND N ≥ 16384 (no run reaches it). Per-token activation-quant HBM pass never amortizes. Opt-in (`HALO_DEEPGEMM_NATIVE=1`), never auto-selected. | low-precision-moe-kernels.md |
+| **torch.compile on EP MoE as a *stacking* lever** | Reaches Liger's speedup (~+30%, −9 GB) but does **not** add on top of it: `liger_compile` **+31%** vs `liger_only` **+30%** (Qwen3-30B-A3B EP=2, s16384, b1 — all four cells within ~2%). DeepEP/FA4/reentrant-GC breaks fragment the graph, so compile and Liger fuse the same spans. Liger is the no-warmup default; use `torch_compile: true` only to cover a span Liger misses. | torch-compile.md |
+| **Lower-precision master weights (sub-bf16)** | **Dead** — parameters, checkpoints and optimizer state are never stored below bf16; only GEMM operands are cast. bf16 + SR-on-`exp_avg_sq` is the floor. | low-precision-moe-kernels.md, bf16-optimizer.md |
+| **FA2 on Blackwell** | The **slow outlier** — 7,484 vs FA4's 17,141 tok/s/GPU at s32768 (Qwen3-4B b1), and SDPA beats it too. Use FA4 (auto); SDPA is the dense fallback when FA4 is unavailable (rejected for GptOss live sinks). | flash-attention.md |
+
+### Notes on the "untapped" precision frontier
+The genuinely open low-precision lever is **memory, not matmul math**: quantized optimizer states (shipped
+as FlashAdamW above) and FP4 **activation-storage + EP-comm compression** (not shipped, no measurement in
+`agent-docs/optimization/`). Freed HBM converts to throughput indirectly — longer seq / less GC. Do not present
+the unshipped half as a ready lever, and do not attach a number to it.

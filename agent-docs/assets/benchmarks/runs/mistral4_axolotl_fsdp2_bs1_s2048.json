@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "framework": "Axolotl",
+  "model": "Mistral Small 4 119B-A6B",
+  "configuration": "FSDP2 BS1 S2048",
+  "hardware": {
+    "gpu": "NVIDIA B300 SXM6 AC",
+    "world_size": 4,
+    "python": "3.12.13",
+    "torch": "2.12.0+cu130"
+  },
+  "protocol": {
+    "warmup_steps": 5,
+    "measured_steps": 20,
+    "tokens_per_step": 8192
+  },
+  "cluster_tokens_per_second": 379.80116512001297,
+  "peak_memory_gib_per_gpu": 250.95115661621094,
+  "steps": [
+    {
+      "step": 6,
+      "duration_seconds": 23.55603771843016,
+      "cluster_tokens_per_second": 347.76646641173477,
+      "loss": 2.046875,
+      "grad_norm": 4.5,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 7,
+      "duration_seconds": 23.278255766257644,
+      "cluster_tokens_per_second": 351.9164013944073,
+      "loss": 2.03125,
+      "grad_norm": 3.953125,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 8,
+      "duration_seconds": 22.94119029212743,
+      "cluster_tokens_per_second": 357.08696435037166,
+      "loss": 2.02734375,
+      "grad_norm": 7.6875,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 9,
+      "duration_seconds": 22.778929467778653,
+      "cluster_tokens_per_second": 359.6305968455534,
+      "loss": 2.01171875,
+      "grad_norm": 4.5625,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 10,
+      "duration_seconds": 22.72015832690522,
+      "cluster_tokens_per_second": 360.56086767225696,
+      "loss": 1.99609375,
+      "grad_norm": 3.109375,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 11,
+      "duration_seconds": 22.488778459839523,
+      "cluster_tokens_per_second": 364.27056341140445,
+      "loss": 2.00390625,
+      "grad_norm": 3.90625,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 12,
+      "duration_seconds": 22.52163800597191,
+      "cluster_tokens_per_second": 363.73908495588927,
+      "loss": 2.005859375,
+      "grad_norm": 3.75,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 13,
+      "duration_seconds": 22.068432356696576,
+      "cluster_tokens_per_second": 371.2089679770195,
+      "loss": 1.99609375,
+      "grad_norm": 3.59375,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 14,
+      "duration_seconds": 21.977810294833034,
+      "cluster_tokens_per_second": 372.73959007308076,
+      "loss": 1.998046875,
+      "grad_norm": 3.71875,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 15,
+      "duration_seconds": 20.903281253762543,
+      "cluster_tokens_per_second": 391.9001950244275,
+      "loss": 2.001953125,
+      "grad_norm": 3.328125,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 16,
+      "duration_seconds": 20.804343602154404,
+      "cluster_tokens_per_second": 393.76392529643056,
+      "loss": 1.99609375,
+      "grad_norm": 3.140625,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 17,
+      "duration_seconds": 20.700424729846418,
+      "cluster_tokens_per_second": 395.7406723248803,
+      "loss": 2.0,
+      "grad_norm": 3.265625,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 18,
+      "duration_seconds": 20.680064840707928,
+      "cluster_tokens_per_second": 396.13028600734157,
+      "loss": 2.001953125,
+      "grad_norm": 3.859375,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 19,
+      "duration_seconds": 20.772208858281374,
+      "cluster_tokens_per_second": 394.3730806815015,
+      "loss": 1.99609375,
+      "grad_norm": 3.40625,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 20,
+      "duration_seconds": 20.566298705991358,
+      "cluster_tokens_per_second": 398.3215510534967,
+      "loss": 1.98828125,
+      "grad_norm": 3.234375,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 21,
+      "duration_seconds": 20.553564046043903,
+      "cluster_tokens_per_second": 398.56834472349215,
+      "loss": 1.990234375,
+      "grad_norm": 2.921875,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 22,
+      "duration_seconds": 20.550718280952424,
+      "cluster_tokens_per_second": 398.62353655992706,
+      "loss": 1.9921875,
+      "grad_norm": 2.8125,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 23,
+      "duration_seconds": 20.57090946799144,
+      "cluster_tokens_per_second": 398.2322712929558,
+      "loss": 1.99609375,
+      "grad_norm": 2.90625,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 24,
+      "duration_seconds": 20.61855523707345,
+      "cluster_tokens_per_second": 397.3120282099238,
+      "loss": 1.998046875,
+      "grad_norm": 3.015625,
+      "learning_rate": 2e-05
+    },
+    {
+      "step": 25,
+      "duration_seconds": 20.332016366068274,
+      "cluster_tokens_per_second": 402.91134201876196,
+      "loss": 1.9921875,
+      "grad_norm": 2.9375,
+      "learning_rate": 2e-05
+    }
+  ]
+}

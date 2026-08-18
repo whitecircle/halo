@@ -1,0 +1,66 @@
+# SFT — Qwen3-4B LoRA on UltraChat 200K (base frozen, adapters mergeable after training).
+# Launch: python scripts/training/sft.py <this config>
+#   or: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+attn_implementation: flash_attention_2
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+assistant_message_template: "<|im_start|>assistant\n"
+test_size: 0.01
+
+# --- LoRA ---
+use_peft: true
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target_modules:
+- q_proj
+- k_proj
+- v_proj
+- o_proj
+- gate_proj
+- up_proj
+- down_proj
+lora_task_type: CAUSAL_LM
+
+# --- Training ---
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 4
+num_train_epochs: 1.0
+gradient_accumulation_steps: 4
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 1.0e-04
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 32
+seed: 42
+
+# --- Sequence Length & Packing ---
+max_length: 4096
+packing: true
+
+# --- Output ---
+output_dir: checkpoints/sft-qwen3-4b-ultrachat-lora
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 4
+remove_unused_columns: true

@@ -1,0 +1,41 @@
+# Citation metadata — https://citation-file-format.github.io
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "Halo — LLM Alignment Toolkit"
+abstract: >-
+  An LLM alignment and training toolkit extending the HuggingFace stack (TRL,
+  Accelerate, Transformers) with advanced parallelism — Expert Parallelism,
+  Context Parallelism, Tensor Parallelism, Expert Tensor Parallelism — and
+  alignment methods including SMPO, Offline GRPO, and Environmental GRPO.
+type: software
+authors:
+  - name: "White Circle"
+    website: "https://whitecircle.com"
+  - family-names: "Bratchikov"
+    given-names: "Sergei"
+    email: "sergey@whitecircle.ai"
+    alias: "hivaze"
+  - family-names: "Smirnov"
+    given-names: "Oleg"
+    alias: "ossmirnov"
+  - family-names: "Korolev"
+    given-names: "Konstantin"
+    alias: "advpropsys"
+  - family-names: "Mekkouri"
+    given-names: "Mohamed"
+    alias: "MekkCyber"
+  - family-names: "Shilov"
+    given-names: "Denis"
+    alias: "mixeden"
+license: Apache-2.0
+version: 1.0.0
+date-released: "2026-08-20"
+repository-code: "https://github.com/whitecircle/halo"
+url: "https://github.com/whitecircle/halo"
+keywords:
+  - large-language-models
+  - alignment
+  - reinforcement-learning
+  - expert-parallelism
+  - mixture-of-experts
+  - distributed-training

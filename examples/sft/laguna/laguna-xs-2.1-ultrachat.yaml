@@ -1,0 +1,57 @@
+# Laguna XS 2.1 — single-GPU full SFT example on UltraChat 200K.
+# Launch: python scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: poolside/Laguna-XS-2.1
+model_revision: 205dc65dd4bda946c50da6b7522b215734fa107b
+trust_remote_code: true
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Attention & kernels ---
+attn_implementation: sdpa
+packing: true
+max_length: 2048
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+# Quantized optimizer states keep a full 33B fine-tune within one B300.
+optim: flash_adamw
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/laguna-xs-2.1-ultrachat
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+assistant_message_template: "<assistant>"
+pad_token: "〈|PAD|〉"
+eos_token: "〈|EOS|〉"

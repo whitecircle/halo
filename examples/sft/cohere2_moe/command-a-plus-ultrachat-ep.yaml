@@ -1,0 +1,76 @@
+# Command A+ (Cohere2 MoE) — EP=8 SFT on UltraChat 200K. See agent-docs/models/cohere2-moe.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+# VLM checkpoint (Cohere2Vision wrapper around the Cohere2MoeForCausalLM backbone); text-only SFT
+# runs through the processor pipeline, EP wraps the text backbone's MoE blocks. The revision pin is
+# the layout the memory numbers below were validated against.
+model_name_or_path: CohereLabs/command-a-plus-05-2026-bf16
+model_revision: 5fb6fde5fd12ff89356aae552e11883bc49f069b
+# The family has no aux-loss wiring and no exportable bias slot (auto resolves to none). The
+# transient side-buffer balances training but every exported checkpoint serves WITHOUT the bias —
+# near-tied top-k picks can flip between trainer and server. Deliberate opt-in; drop this line for
+# unbalanced-but-serve-exact training.
+moe_balancing: bias_update_transient
+router_balancing_rate: 1.0e-3
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+# Assistant turns open with <|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>. Without this the Llama-3
+# default marker is used, matches nothing, and every label is masked — loss is exactly 0.
+assistant_message_template: "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 128 routed experts → 16/rank
+save_sharded_ep: false                # consolidate expert shards into a single checkpoint
+fp32_router: true
+# Experts stay bf16 (AdamWBF16) — fp32 masters need 412 GB/rank of the 206B routed experts and OOM.
+fp32_experts: false
+
+# --- Attention & kernels ---
+attn_implementation: flash_attention_2   # pinned, not auto: Blackwell would take FA4. FA2 is the
+                                         #   backend the memory shape below was measured on; the
+                                         #   family has no forced fallback, so either label loads
+# Text-only SFT takes the text pipeline, where packing IS supported (isolation verified for the
+# family); off here to stay on the memory-validated shape below.
+packing: false
+# 4096 leaves no room for DeepEP's elastic buffer to grow: the symmetric heap allocation fails with
+# a CUDA OOM a few steps in, once a longer batch forces a resize. 1024 peaks at ~255 GiB of the
+# B300's ~268 GiB, which is the headroom this shape has.
+max_length: 1024
+
+# --- Training schedule ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/command-a-plus-ultrachat-ep
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false

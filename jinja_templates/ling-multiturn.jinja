@@ -1,0 +1,25 @@
+{#- --- Multi-turn chat template for Ling (no reasoning) --- -#}
+{#- Supports any number of user/assistant turns -#}
+
+{# --- System header (always present, thinking disabled) --- #}
+{{- '<role>SYSTEM</role>' -}}
+{%- if messages[0].role == 'system' -%}
+  {{- messages[0].content + '\n' -}}
+{%- endif -%}
+{{- 'detailed thinking off<|role_end|>' -}}
+
+{# --- Main message rendering --- #}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{- '<role>HUMAN</role>' + message.content + '<|role_end|>' -}}
+  {%- elif message.role == "system" and not loop.first -%}
+    {{- '<role>SYSTEM</role>' + message.content + '<|role_end|>' -}}
+  {%- elif message.role == "assistant" -%}
+    {{- '<role>ASSISTANT</role>' + message.content + '<|role_end|>' -}}
+  {%- endif -%}
+{%- endfor -%}
+
+{# --- Optional generation prompt --- #}
+{%- if add_generation_prompt -%}
+  {{- '<role>ASSISTANT</role>' -}}
+{%- endif -%}

@@ -1,0 +1,101 @@
+# Environmental GRPO — Qwen3.6-35B-A3B on WebInstruct-verified (exam QA), closed-book by default
+# (open_book enables search), EP=4.
+# Launch: start a vLLM server on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton
+#   (hermes does NOT parse Qwen3.5/3.6 XML tool calls — rollouts silently return no tool_calls).
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.6-35B-A3B
+attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+model_init_kwargs:
+  output_router_logits: true
+  router_aux_loss_coef: 0.001
+moe_balancing: none  # aux_loss is a warn-and-no-op under GRPO trainers; router logits kept for MoE metrics
+
+# --- Parallelism (EP=4: one dispatch group on the 4 train GPUs, DP=4) ---
+expert_parallel_size: 4
+
+# --- Environment ---
+environment_type: exam_qa
+max_turns: 5
+# environment_kwargs:
+#   open_book: true           # Enable search tools for open-book mode
+#   search_backend: duckduckgo
+
+# --- Ray Workers ---
+num_rollout_workers: 16
+
+# --- vLLM Server ---
+rollout_server_url: "http://localhost:8000"
+
+# --- Rollout Generation ---
+rollout_temperature: 0.7
+rollout_max_tokens: 8192
+
+# --- Prefetch ---
+enable_prefetch: false    # this config serves from ONE rollout_server_url, and that
+                          # engine stops serving during weight sync, so there is nothing to overlap
+                          # against — the trainer auto-disables prefetch and warns. Set it back to
+                          # true together with a rollout_server_configs list of 2+ servers.
+num_prefetch_batches: 1   # batches to prefetch ahead, once prefetch is on
+
+# --- Dataset ---
+# Exact-match grading is clean for Integer/Float/Multiple-Choice answer_type rows;
+# Expression-type answers under-credit — filter on answer_type offline if that matters.
+dataset:
+- TIGER-Lab/WebInstruct-verified
+test_size: 0.01
+prompt_field: question
+
+# --- Sequence Lengths ---
+max_prompt_length: null  # prompt filter (drop over-long rows), not a truncation length; null = keep all
+
+# --- GRPO ---
+num_generations: 4
+beta: 0.0  # KL-free. Non-zero beta under use_peft: false makes
+           # TRL instantiate a SECOND full 35B model as the reference (there is no adapter to
+           # disable instead), beside the EP-sharded policy this topology exists to fit
+num_iterations: 1
+epsilon: 0.2
+scale_rewards: batch     # global batch std — never the per-group std, whose near-zero divisor on a
+                        # uniformly-failed group inflates shaping noise into a full-scale advantage
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+learning_rate: 1.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+
+# --- Optimization ---
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+optim: adamw_torch_fused
+
+# --- Output ---
+output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-exam-qa-full-ep4
+save_strategy: steps
+save_steps: 100
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: none
+log_completions: true        # per-sample console table
+save_completions: true       # trajectories → <output_dir>/completions/*.parquet
+num_completions_to_print: 3
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+seed: 42
+
+# --- PEFT ---
+use_peft: false

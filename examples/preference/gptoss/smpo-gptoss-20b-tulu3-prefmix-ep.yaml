@@ -1,0 +1,67 @@
+# SMPO (reference-free preference optimization) — GPT-OSS 20B on the Tulu-3 preference mixture, EP=8.
+# See agent-docs/training-methods/preference/smpo.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/preference/smpo.py <this config>
+
+# --- Model ---
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
+                                         #   true) sets self_attn.sinks = None and the save re-emits
+                                         #   dtype.min; live sinks are rejected under FA2
+model_init_kwargs:
+  output_router_logits: true
+  router_aux_loss_coef: 0.001
+
+# --- Parallelism ---
+expert_parallel_size: 8
+
+# --- Dataset ---
+dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
+test_size: 0.005   # 273k rows — 0.005 keeps each eval pass near ~1.4k pair forwards
+
+# --- SMPO Hyperparameters ---
+beta: 1.0
+target_margin: 0.4
+initial_margin: 0.2
+chosen_sft_ratio: 0.75
+loss_type: smooth_lower_bound
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 2
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Lengths ---
+max_length: 4096
+max_prompt_length: 2048
+
+# --- Output ---
+output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+generate_eval_examples: true
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: true
+
+# --- PEFT (optional) ---
+use_peft: false

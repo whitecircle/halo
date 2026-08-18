@@ -1,0 +1,68 @@
+# GLM-4.7-Flash — EP=8 SFT example on UltraChat 200K. See agent-docs/models/glm4.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: zai-org/GLM-4.7-Flash
+# GLM-4 MoE Lite's aux-loss-free router makes output_router_logits inert — balance via bias_update.
+moe_balancing: bias_update
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 64 routed experts → 8/rank
+save_sharded_ep: false                # consolidate expert shards into a single checkpoint
+fp32_router: true
+fp32_experts: true
+fp32_non_ep_params: true              # fp32 attention/embeddings/lm_head
+
+# --- Attention & kernels ---
+attn_implementation: flash_attention_2
+packing: true
+max_length: 30720
+
+# --- Training ---
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/glm-4.7-flash-ultrachat-ep
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# Role token alone matches both thinking and non-thinking renders.
+assistant_message_template: "<|assistant|>"
+train_on_completions_only: true       # required under pad==eos (plain-LM path would mask the real EOS)
+pad_token: <|endoftext|>
+eos_token: <|endoftext|>
+# Multi-turn data needs glm-chat.jinja — glm-instruct.jinja raises on >1 assistant turn.
+chat_template: jinja_templates/glm-chat.jinja
+force_chat_template: true

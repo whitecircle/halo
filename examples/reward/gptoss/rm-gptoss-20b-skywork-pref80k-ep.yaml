@@ -1,0 +1,54 @@
+# Bradley-Terry reward model — GPT-OSS 20B on Skywork-Reward-Preference-80K-v0.2, EP=8 (scalar score head on the backbone).
+# Launch: torchrun --nproc_per_node=8 scripts/training/preference/rewards.py <this config>
+
+# --- Model ---
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
+                                         #   true) sets self_attn.sinks = None and the save re-emits
+                                         #   dtype.min; live sinks are rejected under FA2
+
+# --- Parallelism ---
+expert_parallel_size: 8
+
+# --- Dataset ---
+dataset: Skywork/Skywork-Reward-Preference-80K-v0.2
+test_size: 0.05
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 1
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+optim: adamw_torch_fused
+learning_rate: 1.0e-05
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Length ---
+max_length: 4096
+
+# --- Output ---
+output_dir: checkpoints/rm-gptoss-20b-skywork-pref80k-ep
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: true
+
+# --- PEFT ---
+use_peft: false

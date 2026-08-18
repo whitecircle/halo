@@ -1,0 +1,59 @@
+# KTO — Qwen3.5-9B on unpaired {prompt, completion, bool label} triples (not chosen/rejected pairs).
+# Launch: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/preference/kto.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.5-9B
+attn_implementation: sdpa
+
+# --- Dataset (unpaired: prompt / completion / label) ---
+# Any paired preference set also works — TRL's KTOTrainer auto-converts chosen/rejected pairs to unpaired True/False rows.
+dataset: trl-lib/kto-mix-14k
+test_size: 0.05
+
+# --- KTO Hyperparameters (trl KTOConfig) ---
+beta: 0.1
+desirable_weight: 1.0
+undesirable_weight: 1.0
+loss_type: kto
+
+# --- Training ---
+# batch > 1 is a KTO requirement, not a preference: the default `kto` loss builds each row's KL
+# completion by cycling its NEIGHBOURS in the batch, so at batch 1 the KL term collapses onto the
+# implied reward — TRL raises at construction. (Only the KL-free apo_zero_unpaired loss is exempt.)
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+num_train_epochs: 1
+gradient_accumulation_steps: 4   # batch 2 × accum 4 = 8 sequences/device/step
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 5.0e-07
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Lengths (KTOConfig uses max_length only) ---
+max_length: 4096
+
+# --- Output ---
+output_dir: checkpoints/kto-qwen3.5-9b-kto-mix-14k
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: false
+
+# --- PEFT (optional) ---
+use_peft: false

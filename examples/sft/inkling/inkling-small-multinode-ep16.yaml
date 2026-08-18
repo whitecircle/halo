@@ -1,0 +1,70 @@
+# Inkling-Small (276B total / 12B active) — cross-node EP SFT on 2×8 B300, EP=16 global
+# (532 GB of BF16 experts do not fit node-local EP=8 with full-FT optimizer states).
+# Requires transformers >= 5.14. Launch per node:
+#   torchrun --nnodes=2 --node-rank=<r> --nproc-per-node=8 \
+#     --master-addr=<addr> --master-port=29500 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: thinkingmachines/Inkling-Small
+# transformers defaults moe_intermediate_size=3072 and its compat shim only maps
+# dense_intermediate_size; the checkpoint stores the expert width as intermediate_size=2048.
+# Without this override every expert tensor is built 3072-wide and the load hard-fails.
+model_init_kwargs:
+  moe_intermediate_size: 2048
+# No Inkling flash-attention dispatch in transformers — pin sdpa so ranks cannot fall back unevenly.
+attn_implementation: sdpa
+# The causal-LM loss never reads router_logits — no aux-loss path; auto resolves here anyway.
+moe_balancing: bias_update
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+dataset_num_proc: 32
+# Model ships its own chat_template.jinja; assistant turns open with <|message_model|>.
+train_on_completions_only: true
+assistant_message_template: "<|message_model|>"
+# The tokenizer ships no pad_token; <|unused|> (id 199998) is a dedicated special token
+# that never appears in text — safer than aliasing EOS.
+pad_token: "<|unused|>"
+
+# --- Parallelism & MoE ---
+expert_parallel_size: 16              # 256 routed experts → 16/rank across both nodes
+ep_scope: global
+save_sharded_ep: false                # gather to an HF-standard checkpoint on save
+max_concurrent_loading: 4             # 532 GB checkpoint: 4 ranks at a time (~2.1 TB peak CPU RAM)
+
+# --- Kernels / attention ---
+# Packing is reachable — text rows on a multimodal checkpoint take the TEXT data path (is_vlm_run) —
+# and still off: full rows would attend 8192 tokens/rank/step where this topology budgets ~2.3k,
+# with peak memory already near 246 of the 288 GB card. Inkling's four depthwise convs per
+# layer cross packed documents regardless (the modeling never forwards seq_idx to them).
+# mbs × max_length must stay within the cross-node Gin dispatch cap of 8192 tokens/rank
+# (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK); 2 × 4096 sits exactly at it.
+packing: false
+max_length: 4096
+
+# --- Training schedule ---
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 1
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & eval ---
+output_dir: checkpoints/inkling-small-sft-ep16
+save_strategy: steps
+save_steps: 1000
+save_total_limit: 1
+save_only_model: true
+eval_strategy: steps
+eval_steps: 300
+logging_steps: 1
+report_to: none

@@ -1,0 +1,23 @@
+{# --- Single-turn data validation --- #}
+{%- set user_count = messages | selectattr("role", "equalto", "user") | list | length -%}
+{%- set assistant_count = messages | selectattr("role", "equalto", "assistant") | list | length -%}
+{%- if user_count != 1 or assistant_count > 1 -%}
+  {{- raise_exception("This template only supports single-turn data (1 user message, 0-1 assistant messages). Found " + user_count|string + " user and " + assistant_count|string + " assistant messages.") -}}
+{%- endif -%}
+
+{# --- Main message rendering (user & assistant only) --- #}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+<|start|>user<|message|>{{ message.content }}<|end|>
+  {%- elif message.role == "assistant" -%}
+    {# Single-turn variant: always use <|return|> #}
+    {# Note: message.reasoning_content always empty, but leave this part for stability, since original model is reasoning-only #}
+    {{- "<|start|>assistant<|channel|>analysis<|message|><|end|>" -}}
+    {{- "<|start|>assistant<|channel|>final<|message|>" + message.content + "<|return|>" }}
+  {%- endif -%}
+{%- endfor -%}
+
+{# --- Optional generation prompt kick-off --- #}
+{%- if add_generation_prompt -%}
+<|start|>assistant<|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>
+{%- endif -%}

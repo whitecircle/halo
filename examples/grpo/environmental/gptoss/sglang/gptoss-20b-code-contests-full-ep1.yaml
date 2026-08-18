@@ -1,0 +1,170 @@
+# Environmental GRPO — gpt-oss-20b full fine-tune on code_contests, SGLang backend, no EP, ZeRO-2, with
+# R3 routing replay. Server flags, the five NCCL socket vars and the fsdp_reshard_after_backward
+# rationale: sglang/gptoss-20b-code-contests-lora-ep1.yaml.
+# SGLang + expert distribution is rejected at construction (mutually exclusive NCCL transports) —
+# there is no sglang ep4 variant; use rollout_backend: vllm for EP runs.
+# rollout_max_thinking_tokens stays unset (vLLM-only; enforced by _validate_backend_capabilities).
+# Launch: 4 train GPUs + the 2 TP=2 servers on the other 4;
+#   CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+
+# --- Model ---
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+attn_implementation: flash_attention_4
+reset_sinks: false
+chat_template: jinja_templates/gpt-oss-harmony.jinja
+force_chat_template: true
+
+# --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-2) ---
+expert_parallel_size: 1
+fsdp_reshard_after_forward: false   # ZeRO-2 — required: ZeRO-3 is rejected with the reshard flag below
+fsdp_reshard_after_backward: false  # sglang's sync forces socket NCCL process-global; without this,
+                                    # FSDP2 re-all-gathers the full model EVERY grad-accum microstep
+                                    # over loopback TCP (~15s x 24 per step — the dominant step cost).
+                                    # Leaves one gather per optimizer step (the window's last backward
+                                    # still reshards), and costs one unsharded bf16 param copy per GPU
+                                    # (fine at 20B/275GB).
+
+# --- Full fine-tune (no PEFT) ---
+use_peft: false
+
+# --- Environment (identical ladder to the vLLM configs) ---
+environment_type: codeforces
+max_turns: 12               # high's worst case (3 subs + 6 scratchpad runs) plus room to recover
+                            # from a length-cutoff turn, which costs a turn instead of the episode
+environment_kwargs:
+  language: python
+  timeout_per_test: 5
+  stop_on_first_failure: false
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit — see the
+                             # vllm lora-ep1 config for the derivation
+  reasoning_effort: random
+  # One profile per effort level: CoT budget + interaction. Submissions scale with effort, one repair
+  # everywhere — a single submission strands near-misses; high funds the full verdict->fix loop.
+  # NO behavior bounties: a tested-submission bonus drowns in the group baseline or gets ritual-farmed,
+  # so the interaction ladder is the differentiator and the objective the only large channel.
+  # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + global answer headroom).
+  reasoning_effort_profiles:
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
+    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
+  # token_cost: reward units per 1k generated tokens (both channels), charged by the trainer.
+  # A PRICE, not a target: length floors/bands are farmable; a cost can only be avoided by
+  # economy, which is the desired cheap-tier behavior. High thinks free; the ladder prices compute.
+  submission_reward: 0.25
+  execution_progress_reward: 0.05
+  no_tool_use_penalty: 0.1
+  multi_turn_reward: 0.05
+  tool_success_reward: 0     # env default; any per-call pay is farmable by duplicate re-runs
+  turn_overflow_penalty: 0.1
+  tool_error_penalty: 0.05
+
+# --- Ray Workers ---
+num_rollout_workers: 32
+max_concurrent_rollouts: 32
+
+# --- Rollout servers (SGLang) ---
+rollout_backend: sglang
+rollout_server_configs:
+- url: "http://localhost:30000"
+  group_port: 51216
+- url: "http://localhost:30001"
+  group_port: 51217
+rollout_connection_timeout: 180.0
+request_timeout: 300.0
+episode_timeout: 2700         # whole-episode wall clock; launch with DIST_NCCL_TIMEOUT_MINUTES=60
+                              # (the 30-min default watchdog rejects this at training start)
+
+# --- Rollout Generation ---
+rollout_temperature: 1.1     # >1 flattens sampling for exploration pressure: guards the interaction strategy
+                            # against early sharpening (the IS geo-band/veto price the extra off-policyness)
+rollout_top_p: 0.95
+rollout_stop_tokens: ["<|call|>"]
+rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
+                                       # (the headroom must leave a finished thought room to emit its tool call)
+reasoning_compliance_weight: 0   # OFF: a reward floor on under-band CoT is exploitable — the policy grows CoT to the floor while
+                                 # the visible channel inflates; length control is engine-side (per-effort caps)
+
+# --- Prefetch ---
+enable_prefetch: true
+
+# --- Dataset ---
+# The two pools scripts/environments/preparation/prepare_code_dataset.py writes, listed side by
+# side — the loader concatenates them, so no merged pool has to exist. The held-out split is the
+# codeforces pool's own: deepcoder-taco ships train only (its source has no test split), so it
+# contributes training rows and nothing to the eval set. Placeholder paths: point them at the
+# --output_dir you wrote (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+dataset:
+- /mnt/s3_datasets/codeforces-verifiable-rl
+- /mnt/s3_datasets/deepcoder-taco-rl
+
+# --- Sequence Lengths ---
+max_prompt_length: null
+
+# --- GRPO objective: KL-free, bands as the trust region (identical to the vLLM configs) ---
+num_generations: 8
+use_chunked_grpo_logprobs: true
+loss_type: dapo
+advantage_mode: neg_mask_hard
+advantage_hard_group_threshold: 0.5
+beta: 0.0
+num_iterations: 1
+epsilon: 0.2
+epsilon_high: 0.28
+isr_geo_band_min: 0.98
+isr_geo_band_max: 1.02
+isr_veto_min: 1.0e-4
+isr_opsm_delta: 0.05
+skip_update_masked_frac: 0.4
+scale_rewards_std_floor: 0.2
+routing_replay: rollout     # R3 on SGLang: response-level sglext payload, raw-int32 wire format
+num_generations_eval: 1
+scale_rewards: batch
+drop_degenerate_groups: true
+top_entropy_quantile: 1.0
+mask_truncated_completions: false  # `truncated` covers ONLY the max_turns overflow (a length-cut TURN is
+                                   # priced and retried in-episode, and its fragment is skipped at tokenization),
+                                   # and a turn-budget burn is a real failure worth its negative advantage
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 24
+steps_per_generation: 24
+max_steps: 300              # the cosine horizon must match the run's USEFUL length, not the dataset's:
+                            # at a full-epoch (~1.2k-step) horizon the LR is still 97% of peak at step 150
+                            # — the whole run effectively trains at peak LR
+num_train_epochs: 1
+learning_rate: 2.0e-07      # full-FT LR; decays to ~0 over the 300-step horizon (LoRA sibling: 3e-6)
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 10
+
+# --- Optimization ---
+optim: adamw_torch_fused
+moe_balancing: none
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+fp32_grad_reduce: true
+
+# --- Output ---
+output_dir: checkpoints/env-grpo-oss-20b-code-contests-full-ep1-sglang
+save_strategy: steps
+save_steps: 50              # full checkpoints are ~42 GB — coarser cadence, tighter limit than LoRA
+save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size above
+
+# --- Eval ---
+eval_strategy: steps
+eval_steps: 50
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: ["wandb"]
+log_completions: false
+num_completions_to_print: 2
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+seed: 42

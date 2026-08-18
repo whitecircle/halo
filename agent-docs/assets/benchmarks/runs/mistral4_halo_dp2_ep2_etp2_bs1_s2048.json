@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "framework": "Halo",
+  "model": "Mistral Small 4 119B",
+  "configuration": "DP2 EP2 ETP2 BS1",
+  "protocol": {
+    "warmup_steps": 5,
+    "measured_steps": 20
+  },
+  "cluster_tokens_per_second": 7587.3,
+  "peak_memory_gib_per_gpu": 207.05,
+  "dataset_group": "halo_synthetic",
+  "steps": [
+    {
+      "step": 6,
+      "duration_seconds": 0.55,
+      "cluster_tokens_per_second": 7455.0,
+      "loss": 1.305,
+      "grad_norm": 87.13,
+      "learning_rate": 1.6e-05
+    },
+    {
+      "step": 7,
+      "duration_seconds": 0.52,
+      "cluster_tokens_per_second": 7922.0,
+      "loss": 1.08,
+      "grad_norm": 100.9,
+      "learning_rate": 1.52e-05
+    },
+    {
+      "step": 8,
+      "duration_seconds": 0.51,
+      "cluster_tokens_per_second": 7981.0,
+      "loss": 0.9942,
+      "grad_norm": 107.1,
+      "learning_rate": 1.44e-05
+    },
+    {
+      "step": 9,
+      "duration_seconds": 0.53,
+      "cluster_tokens_per_second": 7690.0,
+      "loss": 0.9095,
+      "grad_norm": 104.2,
+      "learning_rate": 1.36e-05
+    },
+    {
+      "step": 10,
+      "duration_seconds": 0.54,
+      "cluster_tokens_per_second": 7599.0,
+      "loss": 0.8259,
+      "grad_norm": 99.28,
+      "learning_rate": 1.28e-05
+    },
+    {
+      "step": 11,
+      "duration_seconds": 0.52,
+      "cluster_tokens_per_second": 7889.0,
+      "loss": 0.7411,
+      "grad_norm": 93.93,
+      "learning_rate": 1.2e-05
+    },
+    {
+      "step": 12,
+      "duration_seconds": 0.59,
+      "cluster_tokens_per_second": 6891.0,
+      "loss": 0.6527,
+      "grad_norm": 88.19,
+      "learning_rate": 1.12e-05
+    },
+    {
+      "step": 13,
+      "duration_seconds": 0.52,
+      "cluster_tokens_per_second": 7950.0,
+      "loss": 0.573,
+      "grad_norm": 82.26,
+      "learning_rate": 1.04e-05
+    },
+    {
+      "step": 14,
+      "duration_seconds": 0.52,
+      "cluster_tokens_per_second": 7829.0,
+      "loss": 0.5074,
+      "grad_norm": 76.26,
+      "learning_rate": 9.6e-06
+    },
+    {
+      "step": 15,
+      "duration_seconds": 0.55,
+      "cluster_tokens_per_second": 7451.0,
+      "loss": 0.6166,
+      "grad_norm": 231.3,
+      "learning_rate": 8.8e-06
+    },
+    {
+      "step": 16,
+      "duration_seconds": 0.82,
+      "cluster_tokens_per_second": 4996.0,
+      "loss": 0.408,
+      "grad_norm": 64.12,
+      "learning_rate": 8e-06
+    },
+    {
+      "step": 17,
+      "duration_seconds": 0.52,
+      "cluster_tokens_per_second": 7949.0,
+      "loss": 0.3731,
+      "grad_norm": 58.79,
+      "learning_rate": 7.2e-06
+    },
+    {
+      "step": 18,
+      "duration_seconds": 0.52,
+      "cluster_tokens_per_second": 7910.0,
+      "loss": 0.337,
+      "grad_norm": 53.83,
+      "learning_rate": 6.4e-06
+    },
+    {
+      "step": 19,
+      "duration_seconds": 0.51,
+      "cluster_tokens_per_second": 7983.0,
+      "loss": 0.3093,
+      "grad_norm": 49.25,
+      "learning_rate": 5.6e-06
+    },
+    {
+      "step": 20,
+      "duration_seconds": 0.51,
+      "cluster_tokens_per_second": 7954.0,
+      "loss": 0.2805,
+      "grad_norm": 45.17,
+      "learning_rate": 4.8e-06
+    },
+    {
+      "step": 21,
+      "duration_seconds": 0.52,
+      "cluster_tokens_per_second": 7938.0,
+      "loss": 0.2597,
+      "grad_norm": 41.84,
+      "learning_rate": 4e-06
+    },
+    {
+      "step": 22,
+      "duration_seconds": 0.51,
+      "cluster_tokens_per_second": 7960.0,
+      "loss": 0.2343,
+      "grad_norm": 38.12,
+      "learning_rate": 3.2e-06
+    },
+    {
+      "step": 23,
+      "duration_seconds": 0.51,
+      "cluster_tokens_per_second": 7989.0,
+      "loss": 0.2205,
+      "grad_norm": 36.03,
+      "learning_rate": 2.4e-06
+    },
+    {
+      "step": 24,
+      "duration_seconds": 0.51,
+      "cluster_tokens_per_second": 7959.0,
+      "loss": 0.2064,
+      "grad_norm": 33.95,
+      "learning_rate": 1.6e-06
+    },
+    {
+      "step": 25,
+      "duration_seconds": 0.51,
+      "cluster_tokens_per_second": 7988.0,
+      "loss": 0.199,
+      "grad_norm": 32.89,
+      "learning_rate": 8e-07
+    }
+  ]
+}

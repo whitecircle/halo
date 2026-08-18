@@ -1,0 +1,43 @@
+name: stale
+
+# Keeps the issue queue current: issues with no activity for 30 days are marked stale and closed 7 days
+# later. Anything labeled keep-open (or help wanted) is never touched. PRs are left alone — the pr-gate
+# already curates those; flip the days-before-pr-* values below to enable PR staling too.
+
+on:
+  schedule:
+    - cron: '30 1 * * *'   # daily, 01:30 UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: stale
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-stale: 30
+          days-before-close: 7
+          stale-issue-label: stale
+          exempt-issue-labels: keep-open,help wanted
+          exempt-all-assignees: true      # accepted work (an assignee) never goes stale
+          exempt-all-milestones: true     # planned work (a milestone) never goes stale
+          close-issue-reason: not_planned
+          stale-issue-message: >
+            No activity on this issue for 30 days, so it's now marked **stale** and will close in 7 days.
+            Comment to keep it open — a maintainer can add the **keep-open** label to exempt it permanently.
+          close-issue-message: >
+            Closing after no activity. Comment to reopen — happy to pick it back up if it's still relevant.
+          # PRs disabled (-1). To enable, set e.g. days-before-pr-stale: 45 / days-before-pr-close: 14
+          # and add `pull-requests: write` to permissions above.
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          exempt-pr-labels: keep-open
+          operations-per-run: 100
+          ascending: true
