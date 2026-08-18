@@ -1,0 +1,5 @@
+# The live contributor allowlist lives on the `allowlist` branch:
+#
+#   https://github.com/whitecircle/halo/blob/allowlist/.github/APPROVED_CONTRIBUTORS
+#
+# A maintainer approves a contributor by commenting `/approve @their-handle` on an accepted issue.
