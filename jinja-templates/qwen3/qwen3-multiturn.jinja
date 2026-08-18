@@ -1,0 +1,16 @@
+{#- --- Multi-turn chat template for Qwen3 (no system prompt, no tools) --- -#}
+{#- Supports any number of user/assistant turns -#}
+{#- Deliberate deltas vs the hub template: system messages are dropped, and assistant turns carry
+    no <think> block (the hub's enable_thinking=False scaffold) — everything else matches the hub
+    render token-for-token, including the newline after every <|im_end|>. -#}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' -}}
+  {%- elif message.role == "assistant" -%}
+    {{- '<|im_start|>assistant\n' + message.content + '<|im_end|>\n' -}}
+  {%- endif -%}
+{%- endfor -%}
+{#- --- Optional generation prompt kick-off (matches assistant_message_template) --- -#}
+{%- if add_generation_prompt -%}
+  {{- '<|im_start|>assistant\n' -}}
+{%- endif -%}

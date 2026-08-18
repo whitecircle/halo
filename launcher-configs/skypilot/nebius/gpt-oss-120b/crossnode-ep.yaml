@@ -1,0 +1,78 @@
+# GPT-OSS 120B — cross-node EP=16 on Nebius (2 x 8 H200, InfiniBand). Experts shard across all 16 GPUs.
+# Launch: sky launch -c oss-120b launcher-configs/skypilot/nebius/gpt-oss-120b/crossnode-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
+
+name: oss-120b-crossnode-ep-nebius
+
+resources:
+  cloud: nebius
+  region: eu-north1
+  accelerators: H200:8            # 141 GB HBM3e per GPU
+  memory: 512+
+  disk_size: 3000
+  disk_tier: best
+  network_tier: best             # Quantum-2 InfiniBand RDMA — required for cross-node EP
+  # image_id: docker:public.ecr.aws/whitecircle/halo:hopper   # H200 = Hopper; the prebuilt image is required
+
+num_nodes: 2
+
+# The training-container flags every other surface passes (Makefile, dev container): host IPC for
+# CUDA IPC, unlimited memlock for NCCL/RDMA pinned buffers, a large stack, and a big /dev/shm.
+config:
+  docker:
+    run_options: ["--ipc=host", "--ulimit", "memlock=-1", "--ulimit", "stack=67108864", "--shm-size=128g"]
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
+
+envs:
+  HALO_BUCKET: <your-bucket>     # sky launch --env HALO_BUCKET=... retargets the S3 mount
+  CONFIG_PATH: examples/sft/gptoss/gptoss-120b-multinode-ep.yaml
+  MODEL: unsloth/gpt-oss-120b-BF16      # override to train from a local mirror or a previous run's output_dir
+  EXPERT_PARALLEL_SIZE: "16"
+  EXPERT_PARALLEL_SCOPE: "global"
+  # Cross-node dispatch is capped at 8192 tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK) and is
+  # rejected at buffer sizing in the first MoE forward above it. The config already sits at that
+  # ceiling; pinned here so an overridden CONFIG_PATH cannot exceed it. See agent-docs/infrastructure/deepep.md.
+  MAX_LENGTH: "8192"
+  HF_HOME: /data/hf_cache
+  # Toolkit scratch (S3 dataset cache, profiler traces) beside the HF cache; the default
+  # ~/.cache/halo would fill each node's root disk instead.
+  HALO_DATA_ROOT: /data/halo_scratch
+  OUTPUT_DIR: /data/checkpoints/oss-120b
+  DIST_SHARED_FILESYSTEM: "1"    # /data is a shared S3 mount (below)
+  DIST_NCCL_TIMEOUT_MINUTES: "60"
+  WANDB_PROJECT: halo-120b-crossnode-nebius
+  # No NCCL env needed: the image bakes the IB defaults (NCCL_IB_HCA=mlx5, NCCL_NET_GDR_LEVEL=2,
+  # NCCL_P2P_LEVEL=NVL) and the NGC base leaves NCCL_NET_PLUGIN unset on IB → HPC-X (native GIN/IBGDA).
+
+file_mounts:
+  /workspace: {source: ., mode: COPY}
+  /data: {source: s3://${HALO_BUCKET}/halo, mode: MOUNT}   # shared across nodes; point at your bucket
+
+setup: |
+  set -e
+  cd /workspace
+  python -c "import flash_attn, deep_ep" 2>/dev/null || {
+    echo "ERROR: flash_attn / deep_ep missing — set resources.image_id: docker:public.ecr.aws/whitecircle/halo:hopper" >&2
+    echo "(see agent-docs/infrastructure/skypilot.md); from-source build on a bare node is unsupported." >&2
+    exit 1; }
+  command -v ibstat >/dev/null && ibstat | head -20 || echo "ibstat unavailable (NCCL will verify IB at init)"
+  nvidia-smi --query-gpu=name,memory.total --format=csv
+  if [ -n "$HF_TOKEN" ]; then hf auth login --token "$HF_TOKEN" || true; fi
+  if [ -n "$WANDB_API_KEY" ]; then wandb login "$WANDB_API_KEY" || true; fi
+
+run: |
+  set -e
+  cd /workspace
+  NUM_GPUS=$(nvidia-smi -L | wc -l)
+  MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+  echo "Node $SKYPILOT_NODE_RANK/$SKYPILOT_NUM_NODES · $NUM_GPUS GPUs · EP=$EXPERT_PARALLEL_SIZE ($EXPERT_PARALLEL_SCOPE) · master=$MASTER_ADDR"
+  torchrun \
+    --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK --nproc_per_node=$NUM_GPUS \
+    --master_addr=$MASTER_ADDR --master_port=29500 \
+    scripts/training/sft.py $CONFIG_PATH \
+    --model_name_or_path=$MODEL \
+    --expert_parallel_size=$EXPERT_PARALLEL_SIZE --ep_scope=$EXPERT_PARALLEL_SCOPE --max_length=$MAX_LENGTH \
+    --output_dir=$OUTPUT_DIR \
+    --project_name=$WANDB_PROJECT

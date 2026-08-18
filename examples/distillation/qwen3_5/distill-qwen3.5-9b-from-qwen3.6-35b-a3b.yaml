@@ -1,0 +1,52 @@
+# Off-policy teacher distillation — Qwen3.5-9B student from Qwen3.6-35B-A3B teacher on Tulu-3 SFT mixture.
+# KD requires teacher and student to share the tokenizer/vocab (same Qwen3.5/3.6 family here).
+# Launch: torchrun --nproc_per_node=8 scripts/training/distillation/teacher_distill.py <this config>
+
+model_name_or_path: Qwen/Qwen3.5-9B
+teacher_model: Qwen/Qwen3.6-35B-A3B
+distill_loss: kl_divergence
+distill_alpha: 0.5
+dataset: allenai/tulu-3-sft-mixture
+test_size: 0.02
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+num_train_epochs: 1.0
+learning_rate: 5.0e-05
+lr_scheduler_type: cosine
+warmup_steps: 10
+gradient_checkpointing: true
+max_length: 16384   # tulu-3 long tail; over-length conversations are dropped at prep, not truncated
+assistant_message_template: "<|im_start|>assistant\n"   # Qwen marker; train_on_completions_only masks the prompt on both the text and the VLM path
+seed: 42
+output_dir: checkpoints/distill-qwen3.5-9b-from-qwen3.6-35b-a3b
+save_strategy: steps
+save_steps: 100
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 5
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+run_name: distill-qwen3.5-9b-from-qwen3.6-35b-a3b
+use_peft: true
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules:
+- q_proj
+- v_proj
+- k_proj
+- o_proj
+- down_proj
+- up_proj
+- gate_proj
+- embed_tokens
+- lm_head
+# chat_template / pad_token / eos_token left unset: Qwen3.5's bundled tokenizer and template are used.
+optim: adamw_torch_fused   # adamw_8bit (bnb) over FSDP2 DTensor params is outside the validated matrix
+weight_decay: 0.01
+dataloader_num_workers: 2
+remove_unused_columns: false
+attn_implementation: sdpa

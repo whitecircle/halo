@@ -1,0 +1,57 @@
+# DPO — Qwen3.5-9B on the Tulu-3 preference mixture (reference model auto-loaded from model_name_or_path).
+# Launch: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/preference/dpo.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.5-9B
+attn_implementation: sdpa
+
+# --- Dataset ---
+dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
+test_size: 0.005   # 273k rows — 0.005 keeps each eval pass near ~1.4k pair forwards
+
+# --- DPO Hyperparameters ---
+beta: 0.1
+loss_type: sigmoid
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 2
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 5.0e-07
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Lengths ---
+# DPO has no training-side prompt cap: TRL truncates prompt + completion to max_length keep_start,
+# so an over-long prompt eats its own completion. generation_max_prompt_length bounds eval generation only.
+max_length: 4096
+generation_max_prompt_length: 2048
+
+# --- Output ---
+output_dir: checkpoints/dpo-qwen3.5-9b-tulu3-prefmix
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+generate_eval_examples: true
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: true
+
+# --- PEFT (optional) ---
+use_peft: false

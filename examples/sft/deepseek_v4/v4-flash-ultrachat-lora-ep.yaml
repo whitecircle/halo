@@ -1,0 +1,84 @@
+# DeepSeek-V4-Flash — EP=8 LoRA (attention PEFT + native grouped expert-LoRA) SFT on UltraChat 200K.
+# See agent-docs/models/deepseek-v4.md.
+#
+# Requires a BF16-converted checkpoint (the hub ships FP8 dense + FP4-packed experts):
+#   python scripts/before_training/convert_deepseek_v4_bf16.py \
+#       --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir /mnt/models/DeepSeek-V4-Flash-BF16
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: /mnt/models/DeepSeek-V4-Flash-BF16   # placeholder — your converted checkpoint
+# V4 is eager-only (head_dim=512 exceeds every FA kernel; sinks + compressor KV concat rule out
+# SDPA/flex) — the loader forces eager regardless, set explicitly for clarity.
+attn_implementation: eager
+# V4's aux-loss path is severed under EP (the wrapper re-derives routing) — auto resolves to the
+# DeepSeek-V3 bias update; stated explicitly.
+moe_balancing: bias_update
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism ---
+expert_parallel_size: 8               # 256 routed experts → 32/rank
+save_sharded_ep: false                # consolidate expert shards into a single checkpoint
+
+# --- LoRA (attention via PEFT; gate_up_proj/down_proj route to native grouped expert-LoRA) ---
+use_peft: true
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target_modules:
+- q_a_proj
+- q_b_proj
+- o_b_proj
+- gate_up_proj                        # routed experts (gate+up) — native EP grouped-LoRA
+- down_proj                           # routed experts (down) — native EP grouped-LoRA
+lora_task_type: CAUSAL_LM
+# Set merge_expert_lora_on_save: true for a fully-merged, servable HF checkpoint — it folds both halves
+# (expert deltas in the family gather, attention deltas via merge_adapter). Left off here, the run writes
+# a mixed adapter this toolkit resumes but no merge tool folds: merge_peft_adapters.py refuses it, because
+# a PEFT merge would drop every expert delta.
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+# padding_free / packing are rejected for V4 (eager attention has no varlen path) — padded batches.
+packing: false
+max_length: 8192
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 1.0e-04
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/dsv4-flash-ultrachat-lora-ep
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- Tokens & chat template ---
+# The hub checkpoint ships no chat template (DeepSeek uses an external encoder), so one is required.
+# deepseek-v4-chat.jinja uses the tokenizer's native <｜User｜>/<｜Assistant｜> special tokens.
+chat_template: jinja-templates/deepseek-v4/deepseek-v4-chat.jinja
+force_chat_template: true
+assistant_message_template: "<｜Assistant｜>"
+train_on_completions_only: true       # required under pad==eos (plain-LM path would mask the real EOS)

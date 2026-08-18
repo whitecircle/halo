@@ -1,0 +1,33 @@
+{
+  "key": "sft_ep_gpt-oss-20b_ep8_s4096",
+  "provenance": {
+    "model": "unsloth/gpt-oss-20b-BF16",
+    "seq_len": 4096,
+    "batch_size": 1,
+    "gradient_checkpointing": true,
+    "gpu": "8x B300",
+    "cuda_device_max_connections": 1,
+    "attn": "flash_attention_4",
+    "grouped_gemm": true,
+    "measured": "2026-06-25",
+    "image": "halo:blackwell",
+    "ep_size": 8
+  },
+  "metrics": {
+    "tokens_per_second": 8225.0,
+    "cluster_tokens_per_second": 65799.97,
+    "peak_allocated_gb": 25.34,
+    "training_peak_allocated_gb": 25.82,
+    "avg_step_time_seconds": 0.5,
+    "diagnostics": {
+      "gpu_model": "B300",
+      "precision": "bf16",
+      "mfu_percent": 7.11,
+      "smfu_percent": 3.98,
+      "achieved_tflops_dense": 234.59,
+      "achieved_tflops_active": 131.41,
+      "local_params_b": 4.187,
+      "sparsity_factor": 0.125
+    }
+  }
+}

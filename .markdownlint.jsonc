@@ -1,0 +1,14 @@
+// markdownlint config for the agent-docs/ and human-docs/ trees (MkDocs Material). Prose wraps as written, inline HTML
+// and repeated sibling section names are fine; the rules left on catch real hygiene issues —
+// trailing whitespace, stray blank lines, missing final newline, fence style, broken anchors.
+{
+  "default": true,
+  "MD013": false,                       // line length — prose lines wrap as written
+  "MD033": false,                       // inline HTML — used in a few pages
+  "MD024": { "siblings_only": true },   // repeated section names across the page are fine
+  "MD026": false,                       // trailing "?" in headings (e.g. "Fits 24 GB?")
+  "MD036": false,                       // bold lead-ins used as pseudo-headings
+  "MD041": false,                       // a page may open with an admonition, not a heading
+  "MD046": { "style": "fenced" },       // fenced code blocks
+  "MD007": { "indent": 4 }              // Material renders 4-space nested lists
+}

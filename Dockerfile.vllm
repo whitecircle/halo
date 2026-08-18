@@ -1,0 +1,140 @@
+# vLLM 0.26.0 (CUDA 13) server image with the Halo weight-sync patches and the NCCL version from
+# uv.lock, so both ends of the sync load the same runtime.
+#
+# Over upstream vllm/vllm-openai: the phased weight-sync protocol the trainer drives, routed-experts
+# capture for R3 replay (`--enable-return-routed-experts`, needs `--moe-backend triton`) and the
+# parser plugins.
+# Build: make build-vllm. Serving flags and supported families:
+# agent-docs/infrastructure/rollout-servers.md
+
+ARG VLLM_VERSION=0.26.0
+FROM vllm/vllm-openai:v${VLLM_VERSION}
+
+# Redeclare the pre-FROM arguments for use in the labels.
+ARG VERSION=1.0.0
+ARG BUILD_DATE
+
+LABEL maintainer="White Circle <hello@whitecircle.ai>"
+LABEL org.opencontainers.image.title="Halo vLLM Server"
+LABEL org.opencontainers.image.description="vLLM 0.26.0 (cu13) with NCCL weight transfer + routed-experts capture + tool calling"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.vendor="White Circle"
+LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# The Halo-authored patches/plugins under /opt ship under the Halo License.
+COPY LICENSE APACHE-2.0.txt /opt/halo-license/
+
+COPY docker/vllm/patches/patch_vllm_disable_gptoss.sh /tmp/patch_vllm_disable_gptoss.sh
+RUN chmod +x /tmp/patch_vllm_disable_gptoss.sh \
+    && VLLM_PATH=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
+    && /tmp/patch_vllm_disable_gptoss.sh "$VLLM_PATH" \
+    && rm /tmp/patch_vllm_disable_gptoss.sh
+
+COPY docker/vllm/plugins/gpt_oss_text_tool_parser.py /opt/gpt_oss_text_tool_parser.py
+
+COPY docker/vllm/plugins/gpt_oss_reasoning_parser.py /opt/gpt_oss_reasoning_parser.py
+
+# Use the NCCL version from uv.lock so the server matches the training image: a skew hangs the
+# weight-sync ncclCommInitRank with no error. `--verify` checks the wheel metadata and the
+# libnccl.so.2 a process actually resolves.
+COPY uv.lock docker/nccl_pin.py /tmp/
+RUN NCCL_V=$(python3 /tmp/nccl_pin.py /tmp/uv.lock) \
+    && pip install --no-cache-dir "nvidia-nccl-cu13==${NCCL_V}" --no-deps \
+    && python3 /tmp/nccl_pin.py /tmp/uv.lock --verify
+
+# Pin pynccl to that wheel: dlopen would otherwise resolve the base image's older system copy.
+ENV VLLM_NCCL_SO_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2
+RUN test -f "$VLLM_NCCL_SO_PATH"
+
+# transformers is held on the 5.14 line, one release below the training image: vLLM's Gemma 4 reads
+# that flat config schema.
+RUN pip install --no-cache-dir "transformers>=5.14.1,<5.15.0"
+
+# Pickle shim: the trainer sends ncclUniqueId as src.distributed.nccl._nccl_wrapper's type, which
+# vLLM must unpickle as its own.
+RUN mkdir -p /opt/nccl_compat/src/distributed/nccl \
+    && touch /opt/nccl_compat/src/__init__.py \
+    && touch /opt/nccl_compat/src/distributed/__init__.py \
+    && touch /opt/nccl_compat/src/distributed/nccl/__init__.py \
+    && echo 'from vllm.distributed.device_communicators.pynccl_wrapper import *' \
+       > /opt/nccl_compat/src/distributed/nccl/_nccl_wrapper.py
+# Both patches are required: vLLM's layerwise reload puts each layer's tensors on the meta device,
+# so layers that write weights with a direct `param.copy_()` revert on every /update_weights, and
+# the re-init patch destroys the NCCL communicator the engine would otherwise leak per trainer
+# connection. `sitecustomize` applies both in the API server and every engine-core worker.
+COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
+     docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
+     docker/vllm/patches/sitecustomize.py /opt/vllm_patches/
+# No `:${PYTHONPATH:-}` tail: it is unset in the base image, so the suffix would render an empty
+# sys.path entry (the server's CWD) that a stray module could import-shadow.
+ENV PYTHONPATH="/opt/vllm_patches:/opt/nccl_compat"
+
+RUN python3 -c "import vllm; print(f'vLLM: {vllm.__version__}')" \
+    && python3 -c "from packaging.version import Version; import transformers; v=transformers.__version__; assert Version('5.14.1') <= Version(v) < Version('5.15'), f'transformers {v} is off the pinned 5.14 line — the config-schema parity install did not take'; print(f'Transformers: {v}')" \
+    && python3 /tmp/nccl_pin.py /tmp/uv.lock --verify \
+    && rm /tmp/uv.lock /tmp/nccl_pin.py \
+    && python3 -c "from src.distributed.nccl._nccl_wrapper import ncclUniqueId; from vllm.distributed.device_communicators.pynccl_wrapper import ncclUniqueId as v; assert ncclUniqueId is v; print('ncclUniqueId pickle compat: OK')"
+
+# Verify configuration compatibility for each supported model family: every family the weight sync
+# admits owes a fixture. Fixtures: docker/vllm/parity/generate.py.
+COPY docker/vllm/parity /tmp/parity
+RUN python3 /tmp/parity/check.py /tmp/parity && rm -rf /tmp/parity
+
+RUN python3 -c "\
+import vllm_layerwise_reload_patch as p; \
+from vllm.model_executor.model_loader.reload import layerwise; \
+assert p._APPLIED, 'sitecustomize hook did not fire on layerwise import'; \
+assert layerwise.restore_layer_on_meta.__module__ == p.__name__, 'restore_layer_on_meta not patched'; \
+assert layerwise.initialize_online_processing.__module__ == p.__name__, 'initialize_online_processing not patched'; \
+print(f'layerwise reload patch: OK (skips {sorted(p.SKIP_LAYER_NAMES)})')"
+
+# Verify that the reload skip list covers each direct-copy layer, by MRO, in this vLLM version:
+# an upstream rename fails the build, not the run.
+RUN python3 -c "\
+import vllm_layerwise_reload_patch as p; \
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts; \
+from vllm.model_executor.models.gpt_oss import OAIAttention; \
+from vllm.model_executor.models.gemma4 import Gemma4Router; \
+covered = lambda cls: any(c.__name__ in p.SKIP_LAYER_NAMES for c in cls.__mro__); \
+assert covered(RoutedExperts), 'expert-weight owner RoutedExperts not covered by SKIP_LAYER_NAMES'; \
+assert covered(OAIAttention), 'sinks owner OAIAttention not covered by SKIP_LAYER_NAMES'; \
+assert covered(Gemma4Router), 'Gemma4Router (scale param + root_size buffer) not covered by SKIP_LAYER_NAMES'; \
+print('layerwise skip-list coverage: OK (RoutedExperts + OAIAttention + Gemma4Router)')"
+
+# Verify that reinitialization closes the previous NCCL communicator: unpatched, every trainer
+# connection strands a live one on each engine-core worker until ncclCommInitRank fails.
+RUN python3 -c "\
+import vllm_weight_transfer_reinit_patch as p; \
+from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine as E; \
+assert p._APPLIED, 'sitecustomize hook did not fire on nccl_engine import'; \
+assert getattr(E.init_transfer_engine, p.PATCH_MARKER, False), 'init_transfer_engine not patched'; \
+assert getattr(E.shutdown, p.PATCH_MARKER, False), 'shutdown not patched'; \
+print('weight-transfer re-init patch: OK (communicator destroyed on re-init and on shutdown)')"
+
+# Verify both parser plugins during the build: they import vLLM, so no test suite covers them.
+COPY docker/vllm/plugins/verify_gptoss_plugins.py /tmp/verify_gptoss_plugins.py
+RUN python3 /tmp/verify_gptoss_plugins.py /opt && rm /tmp/verify_gptoss_plugins.py
+
+# Verify the engine arguments this deployment requires; a rename fails the build, not the run.
+# (Dataclass fields, since `vllm serve --help` needs a GPU to infer the platform.)
+RUN python3 -c "\
+import dataclasses; \
+from vllm.engine.arg_utils import EngineArgs; \
+names = {f.name for f in dataclasses.fields(EngineArgs)}; \
+missing = {'weight_transfer_config', 'enable_return_routed_experts'} - names; \
+assert not missing, f'EngineArgs lost: {missing}'; \
+from vllm.config.kernel import KernelConfig; \
+knames = {f.name for f in dataclasses.fields(KernelConfig)}; \
+assert 'moe_backend' in knames, 'KernelConfig.moe_backend gone'; \
+print('serve flags: OK')"
+
+# Dev mode exposes the /pause -> /resume phased endpoints the weight-sync client drives. A
+# deployment must keep those endpoints off any untrusted network.
+ENV VLLM_SERVER_DEV_MODE=1
+
+ENTRYPOINT ["vllm", "serve"]
+# Default args; docker-compose overrides CMD with model + args. --moe-backend triton is required
+# with weight transfer: the auto-selected Blackwell backends repack the expert weights.
+CMD ["--weight-transfer-config", "{\"backend\": \"nccl\"}", "--moe-backend", "triton", "--enable-auto-tool-choice", "--tool-call-parser", "hermes"]

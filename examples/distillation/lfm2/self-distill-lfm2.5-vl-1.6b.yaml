@@ -1,0 +1,58 @@
+# LFM2.5-VL SDPG-style self-distillation for VLM SFT — see agent-docs/training-methods/distillation/self-distillation.md.
+# Dataset: raw VLM conversations carrying the privileged answer field.
+# Launch: torchrun --nproc_per_node=8 scripts/training/distillation/self_distill.py <this config>
+
+model_name_or_path: LiquidAI/LFM2.5-VL-1.6B
+attn_implementation: sdpa
+
+# --- Dataset (raw conversations + privileged fields) ---
+dataset: /path/to/vlm_self_distill_dataset
+test_size: 0.02
+
+# --- Privileged context (teacher-only hint) ---
+sdpg_hint_template: "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
+
+# --- SDPG OPD loss ---
+sdpg_loss: reverse_kl        # SDPG full-vocab reverse-KL D_KL(p || SG[q])
+sdpg_beta_warmup_steps: 50               # ramp beta 0 -> base
+sdpg_beta_decay_steps: 100               # decay beta -> 0 over the final steps
+opd_exclude_eos: true               # keeps SFT's hard P(EOS)->1 undiluted by the teacher
+
+# --- Reference-policy KL anchor (optional; alpha=0 disables, loads no ref model) ---
+reference_kl_coef: 0.0
+reference_kl_loss: unnormalized_kl
+
+# --- Confidence weighting (optional) ---
+# confidence_field: confidence
+# confidence_power: 4.0
+# confidence_weight_opd: true
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+learning_rate: 1.0e-05
+lr_scheduler_type: cosine
+warmup_steps: 20
+gradient_checkpointing: true
+max_length: 8192
+assistant_message_template: "<|im_start|>assistant\n"   # LFM2.5-VL template; unset would default to the llama3 header and mask every row
+seed: 42
+
+output_dir: checkpoints/lfm25vl-self-distill
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+run_name: lfm25vl-self-distill
+
+optim: adamw_torch_fused
+weight_decay: 0.01
+dataloader_num_workers: 2
+remove_unused_columns: false

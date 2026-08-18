@@ -1,0 +1,43 @@
+# SDPG self-distillation (text) — GPT-OSS 20B (EP=8) on OpenR1-Math-220k. See agent-docs/training-methods/distillation/self-distillation.md.
+# Dataset: raw SFT conversations plus privileged answer/solution fields; do not pre-tokenize.
+# Launch: torchrun --nproc_per_node=8 scripts/training/distillation/self_distill.py <this config>
+
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
+                                         #   true) sets self_attn.sinks = None and the save re-emits
+                                         #   dtype.min; live sinks are rejected under FA2
+model_init_kwargs:
+  output_router_logits: true
+  router_aux_loss_coef: 0.001
+dataset: open-r1/OpenR1-Math-220k:default
+conversation_field: messages
+test_size: 0.02
+
+# --- Parallelism ---
+expert_parallel_size: 8
+
+# --- Privileged context (teacher-only hint) ---
+sdpg_hint_template: "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
+
+# --- Self-distillation (OPD) loss ---
+sdpg_loss: reverse_kl
+sdpg_beta_warmup_steps: 50
+sdpg_beta_decay_steps: 100
+opd_exclude_eos: true                   # keeps SFT's hard P(EOS)->1 undiluted by the teacher
+
+# --- Optional reference-policy KL anchor (0 disables; no ref model loaded) ---
+reference_kl_coef: 0.0
+
+chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja   # upstream harmony template; plain turns render channel-less — the marker below must match that form
+force_chat_template: true
+assistant_message_template: <|start|>assistant<|message|>
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-5
+num_train_epochs: 1
+max_length: 16384   # OpenR1 R1-traces run long; the self-distill collator raises on over-length rows
+gradient_checkpointing: true
+
+output_dir: checkpoints/self-distill-gptoss-20b
+report_to: wandb

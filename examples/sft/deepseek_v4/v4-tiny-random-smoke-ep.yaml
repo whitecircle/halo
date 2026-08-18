@@ -1,0 +1,59 @@
+# DeepSeek-V4 tiny random-init smoke — pipeline check (EP=2, eager, hash + top-k layers) without
+# the 750 GB real checkpoint. Materialize the tiny checkpoint once (same recipe as the GPU tests):
+#
+#   python - <<'EOF'
+#   import torch
+#   from transformers import AutoModelForCausalLM, AutoTokenizer
+#   from transformers.models.deepseek_v4 import DeepseekV4Config
+#   from tests.common.models import TINY_DSV4_CONFIG
+#   tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+#   cfg = DeepseekV4Config(**{**TINY_DSV4_CONFIG, "vocab_size": len(tok), "attn_implementation": "eager"})
+#   torch.manual_seed(42)
+#   model = AutoModelForCausalLM.from_config(cfg).to(torch.bfloat16)
+#   gen = torch.Generator().manual_seed(42)
+#   for layer in model.model.layers:  # distinct experts per token id (DeepEP requires it)
+#       if layer.mlp.is_hash:
+#           t = layer.mlp.gate.tid2eid
+#           t.copy_(torch.rand(t.shape[0], cfg.n_routed_experts, generator=gen).argsort(-1)[:, : t.shape[1]])
+#   model.save_pretrained("/mnt/models/deepseek-v4-tiny"); tok.save_pretrained("/mnt/models/deepseek-v4-tiny")
+#   EOF
+#
+# Launch: torchrun --nproc_per_node=2 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: /mnt/models/deepseek-v4-tiny   # placeholder — the tiny checkpoint materialized above
+attn_implementation: eager
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+# The tiny checkpoint ships the Qwen3 tokenizer — without the matching marker the default (Llama-3
+# header) never matches and completion-only masking zeroes every label (loss 0).
+assistant_message_template: "<|im_start|>assistant\n"
+
+# --- Parallelism ---
+expert_parallel_size: 2
+
+# --- Training (few steps, padded batches — padding_free/packing are rejected for V4) ---
+max_steps: 10
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2
+gradient_checkpointing: false
+max_length: 512
+packing: false
+
+optim: adamw_torch_fused
+learning_rate: 1.0e-05
+lr_scheduler_type: constant
+warmup_steps: 1
+
+save_strategy: "no"
+eval_strategy: "no"
+output_dir: checkpoints/dsv4-tiny-smoke
+logging_steps: 1
+report_to: []
+remove_unused_columns: false
+dataloader_num_workers: 0
+use_peft: false

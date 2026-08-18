@@ -1,0 +1,60 @@
+# GPT-OSS 120B — multi-node EP SFT example (2 nodes x 8 GPUs). See agent-docs/parallelism/multi-node.md.
+# 120B does not fit node-local on H100/H200 — experts must shard across all 16 GPUs (cross-node EP=16).
+# Launch on each node (MASTER_ADDR = node0 IP):
+#   torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
+#     --master_addr=$MASTER_ADDR --master_port=29500 scripts/training/sft.py <this config>
+
+# --- Model ---
+# Must be a BF16 (dequantized) checkpoint — EP cannot load the MXFP4-quantized openai/gpt-oss-120b.
+model_name_or_path: unsloth/gpt-oss-120b-BF16
+model_init_kwargs:
+  output_router_logits: true          # enable MoE router auxiliary loss
+  router_aux_loss_coef: 0.001
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+test_size: 0.01
+conversation_field: messages
+chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
+force_chat_template: true
+assistant_message_template: <|start|>assistant<|message|>
+dataset_num_proc: 32
+
+# --- Parallelism ---
+# Cross-node EP: 128 experts across all 16 GPUs (8/rank), DP = world_size.
+expert_parallel_size: 16
+ep_scope: global
+
+save_sharded_ep: false                # gather to an HF-standard checkpoint
+use_grouped_gemm: false               # gpt-oss: per-expert loop beats grouped GEMM at high EP
+max_concurrent_loading: 1             # 120B weights: load one rank at a time per node
+
+# --- Attention & kernels ---
+# attn_implementation left unset: auto-selects FA4 on Blackwell, FA3/FA2 on Hopper
+packing: true
+max_length: 8192
+
+# --- Training schedule ---
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+output_dir: checkpoints/oss-120b-multinode-ep
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+logging_steps: 5
+report_to: wandb

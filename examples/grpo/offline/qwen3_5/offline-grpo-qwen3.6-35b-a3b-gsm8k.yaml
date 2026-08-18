@@ -1,0 +1,75 @@
+# Offline GRPO — Qwen3.6-35B-A3B on GSM8K (pre-computed completions + rewards), EP=8.
+# Dataset rows need prompt/completions/rewards — generate via
+# scripts/inference/reward_model/rm_rejection_sampling.py. See agent-docs/training-methods/grpo/offline-grpo.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/offline_grpo.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.6-35B-A3B
+attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+model_init_kwargs:
+  output_router_logits: true
+  router_aux_loss_coef: 0.001
+moe_balancing: none  # aux_loss is a warn-and-no-op under GRPO trainers; router logits kept for MoE metrics
+
+# --- Parallelism (EP=8: one dispatch group, DP=8) ---
+expert_parallel_size: 8
+fp32_router: true
+
+# --- Dataset ---
+# Wherever the rejection-sampling step above wrote its output — off the small root FS (/tmp),
+# which will not hold a generated GRPO dataset on a training host.
+dataset:
+- /mnt/datasets/gsm8k-qwen3.6-35b-a3b-offline-grpo
+test_size: 0.05
+
+# --- Offline GRPO Hyperparameters ---
+loss_type: bnpo                    # global token average
+advantage_method: quantile_norm    # rank-based → normal; handles discrete reward sets
+kl_beta: 0.0                       # no reference model
+initial_min_log_prob: -0.5         # schedules to -3.0
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+weight_decay: 0.01
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 10
+seed: 42
+
+# --- Sequence Lengths ---
+max_prompt_length: 512
+max_completion_length: 6144
+
+# --- Output ---
+output_dir: checkpoints/offline-grpo-qwen3.6-35b-a3b-gsm8k
+save_strategy: steps
+save_steps: 100
+eval_strategy: steps
+eval_steps: 50
+save_total_limit: 2
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Generation Callback ---
+generate_eval_examples: true
+num_eval_examples: 10
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: false
+dataloader_drop_last: true
+
+# --- PEFT (optional) ---
+use_peft: false

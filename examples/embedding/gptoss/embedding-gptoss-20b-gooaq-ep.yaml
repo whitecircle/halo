@@ -1,0 +1,46 @@
+# Embedding fine-tune — GPT-OSS 20B (EP=8) on GooAQ (MNRL). Demonstrates the EP path for embedding
+# training; a purpose-built dense embedder is the practical default. Columns (question, answer) map
+# positionally to anchor/positive in the ST collator.
+# Launch: torchrun --nproc_per_node=8 scripts/training/embedding.py <this config>
+
+# --- Model ---
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
+                                         #   true) sets self_attn.sinks = None and the save re-emits
+                                         #   dtype.min; live sinks are rejected under FA2
+
+# --- Parallelism ---
+expert_parallel_size: 8
+
+# --- Dataset ---
+dataset: sentence-transformers/gooaq:pair
+test_size: 0.01
+
+# --- Training ---
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+num_train_epochs: 1
+gradient_accumulation_steps: 1
+learning_rate: 2.0e-05
+lr_scheduler_type: cosine
+warmup_steps: 32
+weight_decay: 0.01
+seed: 42
+
+# --- Embedding-specific ---
+loss_type: mnrl
+pooling_mode: lasttoken
+max_length: 512
+batch_sampler: no_duplicates
+dataloader_drop_last: true
+
+# --- Output ---
+output_dir: checkpoints/embedding-gptoss-20b-gooaq-ep
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+report_to: wandb
+
+# --- Logging ---
+logging_steps: 50

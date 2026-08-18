@@ -1,0 +1,87 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python — patterns match against the whole path: a bare `__pycache__` only excludes the
+# top-level one, `**/` covers every nested bytecode dir.
+**/__pycache__
+__pycache__
+*.py[cod]
+**/*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+*.egg
+.eggs
+dist
+build
+*.manifest
+*.spec
+
+# Virtual environments
+.venv
+venv
+ENV
+env
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Testing
+.pytest_cache
+**/.pytest_cache
+.ruff_cache
+**/.ruff_cache
+.coverage
+htmlcov
+.tox
+.nox
+
+# Local development
+*.log
+*.tmp
+.env
+.env.*
+!.env.example
+
+
+# Large files (should be downloaded at runtime)
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.onnx
+
+# Caches
+.cache
+*.cache
+~/.cache
+
+# Data directories (mount at runtime)
+data/
+datasets/
+models/
+checkpoints/
+outputs/
+wandb/
+
+# Vendored submodules (the image clones and builds DeepEP itself)
+vendors/
+
+# Local caches / rendered docs / secrets — never build-context material
+.hfcache/
+site/
+keys/
+.claude/
+.agents/

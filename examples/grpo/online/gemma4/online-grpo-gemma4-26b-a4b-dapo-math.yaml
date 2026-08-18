@@ -1,0 +1,81 @@
+# Online GRPO (RLVR) — Gemma-4 26B-A4B on DAPO-Math-17k, rule-based accuracy reward, EP=2 (train GPUs 1,2 + vLLM GPU 0).
+# Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton.
+# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+
+# --- Model ---
+model_name_or_path: google/gemma-4-26B-A4B-it
+attn_implementation: sdpa  # only viable backend (global_head_dim=512; mem-efficient SDPA auto-forced)
+moe_balancing: none        # Gemma4 has no aux-loss wiring and no bias-update support
+
+# --- Parallelism (EP=2: one dispatch group on the 2 train GPUs, DP=2) ---
+expert_parallel_size: 2
+
+# --- Dataset ---
+# The DAPO paper's RL corpus repackaged for TRL: plain question in `prompt`, final integer answer in `solution`.
+dataset: open-r1/DAPO-Math-17k-Processed:en
+test_size: 0.01
+answer_field: solution
+system_prompt: "Solve the problem step by step and put your final numeric answer in \\boxed{}."
+
+# --- Reward Functions ---
+use_accuracy_reward: true
+
+# --- GRPO Hyperparameters ---
+beta: 0.0
+num_iterations: 1
+epsilon: 0.15
+scale_rewards: true
+num_generations: 8
+temperature: 1.0
+loss_type: grpo
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 8   # global eval batch must divide by num_generations at any world size
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+optim: adamw_torch_fused
+learning_rate: 1.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Lengths ---
+max_prompt_length: 1024
+max_completion_length: 4096
+
+# --- vLLM Generation ---
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 0.0.0.0   # the address the trainer dials (not a bind address); TRL's own default,
+                            # which Linux connects to loopback, so on a single host it is the same
+                            # endpoint the 127.0.0.1 smoke siblings name. A server on another host
+                            # needs its real address here, or vllm_server_base_url instead.
+vllm_server_port: 8000
+
+# --- Output ---
+output_dir: checkpoints/online-grpo-gemma4-26b-a4b-dapo-math
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+log_completions: true
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+
+# --- PEFT (optional) ---
+use_peft: false

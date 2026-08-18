@@ -1,0 +1,28 @@
+# Local pre-commit hooks. Optional but recommended — install with `pipx install pre-commit`
+# then `pre-commit install`. These mirror the hosted CI gates (.github/workflows/lint.yml),
+# so a clean commit locally is a green gate. The host has no torch, so only the pure-Python /
+# standalone-binary gates run here; CPU/GPU tests run inside the Docker image (see the Makefile).
+# Pins match CI: ruff 0.9.10 (lint.yml).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.10
+    hooks:
+      - id: ruff            # lint (autofix)
+        args: [--fix]
+      - id: ruff-format     # format
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout      # strip notebook outputs before they land in git
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+        exclude: '^(DeepEP/|.*\.ipynb)'
+      - id: trailing-whitespace
+        exclude: '^(DeepEP/|.*\.ipynb)'
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]

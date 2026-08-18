@@ -1,0 +1,87 @@
+name: approve-contributor
+
+# A maintainer commenting `/approve @username` on an issue adds that user to
+# .github/APPROVED_CONTRIBUTORS, so pr-gate lets their PR through. Write access is required to
+# approve.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write   # issue_comment fires on PR comments too; commenting there needs this
+
+jobs:
+  approve:
+    if: ${{ contains(github.event.comment.body, '/approve') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const commenter = context.payload.comment.user.login;
+
+            // only maintainers may approve
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: commenter });
+              if (!['admin', 'maintain', 'write'].includes(data.permission)) { core.info(`${commenter} lacks write access — ignore`); return; }
+            } catch (e) { core.info(`permission check failed: ${e.message}`); return; }
+
+            // The @ is required: without it `/approve looks good to me` would add "looks" to the
+            // allowlist. Anchored to line start so QUOTING the command doesn't approve anyone —
+            // pr-gate's comment contains the literal `/approve @author`, and a maintainer replying
+            // with that text quoted (`> ...`) must not trigger an approval.
+            const m = context.payload.comment.body.match(/^\/approve\s+@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)(?:\s|$)/m);
+            if (!m) { core.info('no username after /approve'); return; }
+            const user = m[1];
+            const issue_number = context.issue.number;
+
+            // The commit lands on the `allowlist` branch, deliberately outside main's ruleset:
+            // GitHub refuses the Actions app as a bypass actor by design, so keeping the list off
+            // main is what lets GITHUB_TOKEN maintain it — and main's reviewed-PR rule stays
+            // exception-free. API commits arrive GitHub-signed, satisfying the org signed-commit
+            // rule on every branch. Two failure modes are handled: a sha race with a concurrent
+            // approval (refetch and retry once), and a permission/missing-branch rejection — fail
+            // LOUD on the issue, because a silent workflow error looks like a successful approval.
+            // Commenting is feedback, not the approval itself — a locked issue must not turn a
+            // successful approval into a red run. Failures land in the log instead.
+            const say = async (body) => {
+              try { await github.rest.issues.createComment({ owner, repo, issue_number, body }); }
+              catch (e) { core.warning(`could not comment on the issue (${e.message}): ${body}`); }
+            };
+            const path = '.github/APPROVED_CONTRIBUTORS';
+            const branch = 'allowlist';
+            let committed = false, lastErr;
+            for (let attempt = 0; attempt < 2 && !committed; attempt++) {
+              const { data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+              const current = Buffer.from(file.content, 'base64').toString('utf8');
+              const existing = current.split('\n').map(s => s.trim().toLowerCase()).filter(s => s && !s.startsWith('#'));
+              if (existing.includes(user.toLowerCase())) {
+                await say(`@${user} is already approved. ✅`);
+                return;
+              }
+              const updated = current.replace(/\n*$/, '') + `\n${user}\n`;
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path, branch,
+                  message: `chore: approve @${user} as a contributor`,
+                  content: Buffer.from(updated).toString('base64'),
+                  sha: file.sha,
+                });
+                committed = true;
+              } catch (e) { lastErr = e; }
+            }
+            if (!committed) {
+              await say([
+                `⚠️ Couldn't update the allowlist automatically (\`${lastErr.message}\`).`,
+                `A maintainer needs to append \`${user}\` to \`.github/APPROVED_CONTRIBUTORS\` on the \`allowlist\` branch by hand —`,
+                `and if the branch itself is missing, recreate it (see agent-docs/infrastructure/ci.md, Contribution gate).`,
+              ].join(' '));
+              core.setFailed(`allowlist update failed: ${lastErr.message}`);
+              return;
+            }
+            await say(`@${user} is now approved to open a PR for this issue. 🎉 Welcome aboard!`);
+            core.info(`approved ${user}`);

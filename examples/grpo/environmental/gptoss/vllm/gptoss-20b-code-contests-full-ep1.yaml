@@ -1,0 +1,177 @@
+# Environmental GRPO — gpt-oss-20b full fine-tune on Codeforces, no EP, ZeRO-3, KL-free
+# (bands + IS masking as trust region) + routing_replay: rollout (R3, exact engine-token alignment).
+# R3 servers: vLLM 0.26.0 with --enable-return-routed-experts + --moe-backend triton (and
+#   VLLM_USE_V2_MODEL_RUNNER=0, since Model Runner V2 drops thinking_token_budget), image must
+#   carry the layerwise-reload patch (docker/vllm/patches/vllm_layerwise_reload_patch.py).
+#   Parsers (harmony is disabled on this path, so both are needed and neither is the vLLM default):
+#     --enable-auto-tool-choice --tool-parser-plugin /opt/gpt_oss_text_tool_parser.py
+#     --tool-call-parser gpt_oss_text: code_contests is a native-tool env; with no parser the server
+#     400s every rollout, and with a stock one (openai/seed_oss cannot read gpt-oss text calls) the call
+#     stays text and every episode scores 0.
+#     --reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss —
+#     without it the rollout_max_thinking_tokens budget below is refused with a 400.
+# Launch: 4 train GPUs + 2 vLLM servers TP=2 on the other 4;
+#   CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+
+# --- Model ---
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+# reset_sinks=false keeps pretrained sinks frozen to match vLLM; FA4 is the sink-carrying impl. See agent-docs/models/gpt-oss.md.
+attn_implementation: flash_attention_4
+reset_sinks: false
+chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
+force_chat_template: true
+# train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
+
+# --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-3) ---
+expert_parallel_size: 1            # pure DP; vLLM holds the other 4 GPUs
+fsdp_reshard_after_forward: true   # ZeRO-3: max activation headroom for long full-FT trajectories
+
+# --- Full fine-tune (no PEFT) ---
+use_peft: false
+
+# --- Environment ---
+environment_type: codeforces
+max_turns: 12               # high's worst case (3 subs + 6 scratchpad runs) plus room to recover
+                            # from a length-cutoff turn, which costs a turn instead of the episode
+environment_kwargs:
+  language: python
+  timeout_per_test: 5
+  stop_on_first_failure: false
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit — see the
+                             # -lora-ep1 sibling for the derivation. Budget stop scores the graded prefix.
+  reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
+  # max_output_size (grader stdout cap, not a generation budget) stays at the env default.
+  # One profile per effort level: CoT budget plus interaction limits. Submission and test-call
+  # allowances scale with effort. thinking_tokens is an engine cap that also bounds the turn total
+  # (thinking plus the global answer headroom).
+  reasoning_effort_profiles:
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
+    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
+  # token_cost: reward units per 1k generated tokens (both channels), charged by the trainer.
+  # A per-token cost rather than a length target: it is reduced only by generating less, whereas a
+  # length floor or band can be satisfied by padding. The high tier is not charged.
+  # Reward ladder: see code_contests.py _compute_reward.
+  submission_reward: 0.25    # bonus for reaching the graded channel
+  execution_progress_reward: 0.05
+  no_tool_use_penalty: 0.1   # ending with 0 tool calls
+  multi_turn_reward: 0.05    # binary, once per episode, gated on a real submission
+  tool_success_reward: 0     # env default; a per-call reward would be inflated by duplicate re-runs
+  turn_overflow_penalty: 0.1 # magnitude, >= 0; charged when the episode exhausts max_turns
+  tool_error_penalty: 0.05   # magnitude, >= 0; subtracted per call that fails to parse or execute
+
+# --- Ray Workers ---
+num_rollout_workers: 32
+max_concurrent_rollouts: 32
+
+# --- vLLM Servers ---
+rollout_server_configs:
+- url: "http://localhost:8000"
+  group_port: 51216
+- url: "http://localhost:8001"
+  group_port: 51217
+rollout_connection_timeout: 180.0
+request_timeout: 300.0        # per HTTP call
+episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
+
+# --- Rollout Generation ---
+rollout_temperature: 1.1     # >1 flattens sampling for exploration pressure: guards the interaction strategy
+                            # against early sharpening (the IS geo-band/veto bound the added off-policyness)
+rollout_top_p: 0.95
+rollout_stop_tokens: ["<|call|>"]      # end each turn at the harmony tool-call terminator
+rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
+                                       # (the headroom must leave a finished thought room to emit its tool call)
+rollout_max_thinking_tokens: 18000     # global CoT ceiling >= the profiles' high
+reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
+                                 # so length control is engine-side instead (per-effort caps)
+
+# --- Prefetch ---
+enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
+
+# --- Dataset ---
+# The held-out eval split ships in the dataset, so leave test_size unset.
+# The two pools scripts/environments/preparation/prepare_code_dataset.py writes, listed side by
+# side — the loader concatenates them, so no merged pool has to exist. The held-out split is the
+# codeforces pool's own: deepcoder-taco ships train only (its source has no test split), so it
+# contributes training rows and nothing to the eval set. Placeholder paths: point them at the
+# --output_dir you wrote (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+dataset:
+- /mnt/s3_datasets/codeforces-verifiable-rl
+- /mnt/s3_datasets/deepcoder-taco-rl
+
+# --- Sequence Lengths ---
+max_prompt_length: null
+
+# --- GRPO objective: KL-free, bands as the trust region ---
+num_generations: 8
+use_chunked_grpo_logprobs: true # required for gpt-oss (~201k vocab)
+loss_type: dapo
+advantage_mode: neg_mask_hard  # zero negative advantages in hard groups; the entropy brake at beta=0
+advantage_hard_group_threshold: 0.5      # hard = no member reached this reward/objective
+beta: 0.0                   # KL-free (also sidesteps TRL's implicit reference model, which is
+                            # rejected against live sinks under full FT with reset_sinks: false)
+num_iterations: 1
+epsilon: 0.2
+epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
+# --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
+# Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
+isr_geo_band_min: 0.98       # trajectory geometric-mean band; on sustained masking lower LR, never widen the band
+isr_geo_band_max: 1.02
+isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
+isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
+skip_update_masked_frac: 0.4  # zero the step's gradient when > this fraction of trajectories is masked
+scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
+routing_replay: rollout     # replay vLLM's per-token expert selection; server needs --enable-return-routed-experts
+num_generations_eval: 1
+scale_rewards: batch        # global batch std, not per-group (degenerate groups inflate the noise)
+drop_degenerate_groups: true  # all-alike groups would still inflate the DAPO normalizer
+top_entropy_quantile: 1.0   # train all tokens: tool-format tokens need direct reinforcement at beta=0
+mask_truncated_completions: false  # `truncated` covers only the max_turns overflow (a length-cut turn is
+                                   # charged and retried in-episode, and its fragment is skipped at
+                                   # tokenization), and exhausting the turn budget is a failure worth
+                                   # its negative advantage
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 24 # dp 4 x 24 = 96 episodes/step; per-rank value must divide by num_generations
+steps_per_generation: 24        # must equal gradient_accumulation_steps (pin explicitly)
+max_steps: 300              # the cosine horizon matches the run's useful length, not the dataset's: a
+                            # full-epoch horizon would decay so slowly that the whole run trains near
+                            # peak LR
+num_train_epochs: 1
+learning_rate: 2.0e-07      # full-FT LR; decays to ~0 over the 300-step horizon (LoRA sibling: 3e-6)
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 10
+
+# --- Optimization ---
+optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
+moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false      # no EP → non-reentrant GC
+fp32_grad_reduce: true
+
+# --- Output ---
+output_dir: checkpoints/env-grpo-oss-20b-code-contests-full-ep1
+save_strategy: steps
+save_steps: 50              # whole-model checkpoints (2 B/param bf16) — coarser cadence, tighter limit than LoRA
+save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size above
+
+# --- Eval (held-out test split, 200 problems, pass@1) ---
+eval_strategy: steps
+eval_steps: 50
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: ["wandb"]
+log_completions: false
+save_completions: true       # trajectories → <output_dir>/completions/*.parquet
+num_completions_to_print: 2
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+seed: 42

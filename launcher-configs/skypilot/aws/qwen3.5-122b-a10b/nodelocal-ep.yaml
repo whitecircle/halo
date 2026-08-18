@@ -1,0 +1,66 @@
+# Qwen3.5-122B-A10B — node-local EP=8 on a single Blackwell node (8 x B200, AWS p6). No cross-node fabric.
+# 122B fits one B200 node via EP=8 with gradient checkpointing (B300 is more comfortable).
+# Launch: sky launch -c qwen35-122b-nl launcher-configs/skypilot/aws/qwen3.5-122b-a10b/nodelocal-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
+
+name: qwen35-122b-nodelocal-ep-aws
+
+resources:
+  cloud: aws
+  region: us-east-1
+  accelerators: B200:8
+  memory: 512+
+  disk_size: 3000
+  disk_tier: best
+  # image_id: docker:public.ecr.aws/whitecircle/halo:blackwell   # B200 = Blackwell (SM100)
+
+num_nodes: 1
+
+# The training-container flags every other surface passes (Makefile, dev container): host IPC for
+# CUDA IPC, unlimited memlock for NCCL/RDMA pinned buffers, a large stack, and a big /dev/shm.
+config:
+  docker:
+    run_options: ["--ipc=host", "--ulimit", "memlock=-1", "--ulimit", "stack=67108864", "--shm-size=128g"]
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
+
+envs:
+  HALO_BUCKET: <your-bucket>     # sky launch --env HALO_BUCKET=... retargets the S3 mount
+  CONFIG_PATH: examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml
+  MODEL: Qwen/Qwen3.5-122B-A10B      # override to train from a local mirror or a previous run's output_dir
+  EXPERT_PARALLEL_SIZE: "8"
+  EXPERT_PARALLEL_SCOPE: "node"
+  HF_HOME: /data/hf_cache
+  # Toolkit scratch (S3 dataset cache, profiler traces) beside the HF cache; the default
+  # ~/.cache/halo would fill each node's root disk instead.
+  HALO_DATA_ROOT: /data/halo_scratch
+  OUTPUT_DIR: /data/checkpoints/qwen35-122b
+  WANDB_PROJECT: halo-qwen35-122b-nodelocal-aws
+  # Single node: intra-node NVLink only — no RDMA fabric env needed.
+
+file_mounts:
+  /workspace: {source: ., mode: COPY}
+  /data: {source: s3://${HALO_BUCKET}/halo, mode: MOUNT}
+
+setup: |
+  set -e
+  cd /workspace
+  python -c "import flash_attn, deep_ep" 2>/dev/null || {
+    echo "ERROR: flash_attn / deep_ep missing — set resources.image_id: docker:public.ecr.aws/whitecircle/halo:blackwell" >&2
+    echo "(see agent-docs/infrastructure/skypilot.md); from-source build on a bare node is unsupported." >&2
+    exit 1; }
+  nvidia-smi --query-gpu=name,memory.total --format=csv
+  if [ -n "$HF_TOKEN" ]; then hf auth login --token "$HF_TOKEN" || true; fi
+  if [ -n "$WANDB_API_KEY" ]; then wandb login "$WANDB_API_KEY" || true; fi
+
+run: |
+  set -e
+  cd /workspace
+  NUM_GPUS=$(nvidia-smi -L | wc -l)
+  echo "Single node · $NUM_GPUS B200 · EP=$EXPERT_PARALLEL_SIZE ($EXPERT_PARALLEL_SCOPE)"
+  torchrun --nnodes=1 --nproc_per_node=$NUM_GPUS --master_port=29500 \
+    scripts/training/sft.py $CONFIG_PATH \
+    --model_name_or_path=$MODEL \
+    --expert_parallel_size=$EXPERT_PARALLEL_SIZE --ep_scope=$EXPERT_PARALLEL_SCOPE --output_dir=$OUTPUT_DIR \
+    --project_name=$WANDB_PROJECT

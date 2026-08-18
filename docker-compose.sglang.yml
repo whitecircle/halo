@@ -1,0 +1,60 @@
+# SGLang inference server — plain serving, and the RL rollout/weight-sync pairing for env-GRPO.
+#
+# Default image is the NCCL-aligned build (Dockerfile.sglang); the weight-sync group cannot form
+# against upstream `lmsysorg/sglang`, so point SGLANG_IMAGE back at it only for serving-only use.
+# network_mode host: the rendezvous port is never published, so the trainer reaches it at localhost,
+# and it must use GPUs other than SGLANG_CUDA_DEVICES — NCCL cannot broadcast to itself.
+# Usage: SGLANG_MODEL=<hub id or path> docker compose -f docker-compose.sglang.yml up (`down` needs it too).
+
+services:
+  sglang-server:
+    image: ${SGLANG_IMAGE:-sglang-server:0.5.17}
+    ipc: host
+    network_mode: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=${SGLANG_CUDA_DEVICES:-7}
+      - HF_HOME=${HF_HOME:-/root/.cache/huggingface}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Weight sync shares an NCCL group with the trainer in another container, across which the
+      # CUDA-IPC path cannot import a shareable buffer — force sockets on both ends.
+      - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+      - NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE:-1}
+      - NCCL_NET=${NCCL_NET:-Socket}
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      # The bundled aws-ofi plugin outranks the socket transport and wedges group formation on a
+      # host with no OFI fabric.
+      - NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-none}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      # Mounted at the same path inside the container, so HF_HOME resolves either side.
+      - ${HF_HOME:-~/.cache/huggingface}:${HF_HOME:-/root/.cache/huggingface}
+      # Only needed when SGLANG_MODEL is a local path rather than a hub id; must contain it.
+      - ${SGLANG_MODEL_DIR:-/mnt/models}:${SGLANG_MODEL_DIR:-/mnt/models}:ro
+    # Two flags are required and silent when wrong: --tool-call-parser (tool-using environments need
+    # the calls parsed; `auto` reads the parser off the chat template) and --moe-runner-backend
+    # triton (the auto runners bypass R3 capture and repack expert weights).
+    command: >
+      python3 -m sglang.launch_server
+      --model-path ${SGLANG_MODEL:?set SGLANG_MODEL to a hub id or a local checkpoint dir}
+      --host 0.0.0.0
+      --port ${SGLANG_PORT:-30000}
+      --tp-size ${SGLANG_TP:-1}
+      --mem-fraction-static ${SGLANG_GPU_MEM:-0.85}
+      --tool-call-parser ${SGLANG_TOOL_PARSER:-auto}
+      --moe-runner-backend ${SGLANG_MOE_RUNNER_BACKEND:-triton}
+      ${SGLANG_ENABLE_R3:+--enable-return-routed-experts}
+      ${SGLANG_REASONING_PARSER:+--reasoning-parser ${SGLANG_REASONING_PARSER}}
+      ${SGLANG_CHAT_TEMPLATE:+--chat-template ${SGLANG_CHAT_TEMPLATE}}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${SGLANG_PORT:-30000}/health')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 180s
+    restart: unless-stopped

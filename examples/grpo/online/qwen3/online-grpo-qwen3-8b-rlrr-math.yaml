@@ -1,0 +1,88 @@
+# Online GRPO (RLVR) with RLRR relative-reward shaping — Qwen3-8B (dense FSDP DP=2) on DAPO-Math-17k.
+# RLRR replaces the group mean/std advantage with intra-group rankings, so an all-correct or
+# all-wrong group still carries signal — the case a binary accuracy reward hits constantly on math.
+# See agent-docs/training-methods/grpo/online-grpo.md.
+# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3-8B
+attn_implementation: flash_attention_2   # explicit: this script already defaults padded workloads
+                                         #   to sdpa (an auto-detected FA4 runs right-padded batches
+                                         #   through its slow varlen path), and FA2 overrides that
+
+# --- Dataset ---
+# The DAPO paper's RL corpus repackaged for TRL: plain question in `prompt`, final integer answer in `solution`.
+dataset: open-r1/DAPO-Math-17k-Processed:en
+test_size: 0.01
+answer_field: solution
+system_prompt: "Solve the problem step by step and put your final numeric answer in \\boxed{}."
+
+# --- Reward Functions ---
+use_accuracy_reward: true
+
+# --- GRPO Hyperparameters ---
+beta: 0.0
+num_iterations: 1
+epsilon: 0.2
+num_generations: 8
+temperature: 1.0
+loss_type: grpo
+
+# --- RLRR (arXiv:2601.23058) ---
+# The ranking advantages replace the group-normalized ones outright, so `scale_rewards` and the
+# AdvantageShaping knobs stay unset here — the trainer refuses RLRR together with `advantage_mode`
+# or `scale_rewards_std_floor`.
+use_rlrr: true
+rlrr_mode: hrr            # hybrid: bounded rank correction on top of the binary rule reward
+rlrr_tau: 0.1             # rank-correction magnitude; too high dilutes the accuracy reward
+rlrr_lambda: 2048.0       # length-bin width for the Eq. 6 tie-break, in tokens
+rlrr_correctness_clip: true
+rlrr_correctness_threshold: 0.5   # reward >= 0.5 counts as correct (accuracy_reward is 0/1)
+rlrr_xi_pos: 1.0e-03      # cap on an incorrect response's advantage (Eq. 5)
+rlrr_xi_neg: -1.0e-03     # floor on a correct response's advantage (Eq. 5)
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 8   # global eval batch must divide by num_generations at any world size
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 1.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Lengths ---
+max_prompt_length: 1024
+max_completion_length: 4096
+
+# --- vLLM Generation ---
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 127.0.0.1
+vllm_server_port: 8000
+
+# --- Output ---
+output_dir: checkpoints/online-grpo-qwen3-8b-rlrr-math
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+log_completions: true
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+use_peft: false

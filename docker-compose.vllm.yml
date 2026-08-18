@@ -1,0 +1,120 @@
+# Training + vLLM 0.26.0 rollout server: two containers on one host, HTTP for rollouts and a shared
+# NCCL group for weight sync.
+#
+# Prerequisites (compose builds `vllm-server:0.26.0` from Dockerfile.vllm when the tag is absent):
+#   make build-blackwell   # training image; for Hopper, make build-hopper + TRAIN_IMAGE=halo:hopper
+#   docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0   # prebuilt server, anonymous
+#
+# Usage: docker compose -f docker-compose.vllm.yml up [vllm-server]. Weight sync needs network_mode
+# + ipc host on both containers (the rendezvous port is ephemeral and never published) and all GPUs
+# visible; VLLM_CUDA_DEVICES and TRAINER_CUDA_DEVICES must not overlap.
+
+services:
+  vllm-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+      args:
+        VLLM_VERSION: "0.26.0"
+    image: vllm-server:0.26.0
+    ipc: host
+    network_mode: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=${VLLM_CUDA_DEVICES:-7}
+      - VLLM_SERVER_DEV_MODE=1
+      # Unset by default. Thinking budgets need VLLM_USE_V2_MODEL_RUNNER=0 (V2 answers them with
+      # 400). 0 or 1 only — vLLM parses it with int(), so an empty value kills the server at startup.
+      - VLLM_USE_V2_MODEL_RUNNER
+      - NCCL_DEBUG=WARN
+      # Disable InfiniBand when the host has none: the sync group wedges on the uninitialized OFI
+      # path instead of falling back. Override on an IB/EFA host.
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      - NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-NVL}
+      - HF_TOKEN=${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # vllm serve args (ENTRYPOINT is `vllm serve`). Required and silent when wrong: --moe-backend
+    # triton (the auto Blackwell backends repack expert weights), --return-tokens-as-token-ids
+    # (train_on_sampled_tokens needs the sampled ids), and a --tool-call-parser matching the family.
+    # See agent-docs/infrastructure/rollout-servers.md.
+    command: >
+      ${VLLM_MODEL:-Qwen/Qwen3-0.6B}
+      --port ${VLLM_PORT:-8000}
+      --tensor-parallel-size ${VLLM_TP:-1}
+      --gpu-memory-utilization ${VLLM_GPU_MEM:-0.85}
+      --dtype auto
+      --weight-transfer-config '{"backend": "nccl"}'
+      --moe-backend ${VLLM_MOE_BACKEND:-triton}
+      ${VLLM_ATTENTION_BACKEND:+--attention-backend ${VLLM_ATTENTION_BACKEND}}
+      --return-tokens-as-token-ids
+      --enable-auto-tool-choice
+      ${VLLM_TOOL_PARSER_PLUGIN:+--tool-parser-plugin ${VLLM_TOOL_PARSER_PLUGIN}}
+      --tool-call-parser ${VLLM_TOOL_PARSER:-hermes}
+      ${VLLM_CHAT_TEMPLATE:+--chat-template ${VLLM_CHAT_TEMPLATE}}
+      ${VLLM_REASONING_PARSER_PLUGIN:+--reasoning-parser-plugin ${VLLM_REASONING_PARSER_PLUGIN}}
+      ${VLLM_REASONING_PARSER:+--reasoning-parser ${VLLM_REASONING_PARSER}}
+    healthcheck:
+      # python3 because the base image does not provide a bare `python`.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${VLLM_PORT:-8000}/health')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
+    restart: unless-stopped
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  training:
+    image: ${TRAIN_IMAGE:-halo:blackwell}
+    ipc: host
+    network_mode: host
+    # The RL environments' external API keys live in the repo-root .env, which compose otherwise
+    # reads for ${VAR} interpolation only.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - CUDA_VISIBLE_DEVICES=${TRAINER_CUDA_DEVICES:-0,1,2,3,4,5,6}
+      # GPU test harness only; production trainers take the server URL from the YAML config.
+      - VLLM_SERVER_URL=http://localhost:${VLLM_PORT:-8000}
+      - NCCL_DEBUG=WARN
+      # Trainer half of the no-InfiniBand recipe. NCCL_NET is process-global, so a multi-node IB/EFA
+      # run must override it — it would force every trainer collective onto TCP and break DeepEP.
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      - NCCL_NET=${NCCL_NET:-Socket}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Keeps the Triton and FA4 JIT caches on the mounted volume instead of recompiling every run.
+      - HF_HOME=/root/.cache/huggingface
+      - HF_DATASETS_CACHE=/root/.cache/huggingface/datasets
+      # Toolkit scratch on the volume the Makefile targets use, so the S3 dataset cache and profiler
+      # traces are shared with `make test-gpu-*`.
+      - HALO_DATA_ROOT=${HALO_SCRATCH:-/mnt}
+      - TMPDIR=${HALO_SCRATCH:-/mnt}/tmp
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      vllm-server:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      # Same path inside and out, so HALO_DATA_ROOT resolves either side of the boundary.
+      - ${HALO_SCRATCH:-/mnt}:${HALO_SCRATCH:-/mnt}
+      # Optional S3 dataset sources — bring your own credentials (read-write so refreshes persist).
+      - ~/.aws:/root/.aws
+    working_dir: /workspace
+    command: >
+      bash -c "echo 'vLLM server ready at http://localhost:${VLLM_PORT:-8000}' && bash"
+    stdin_open: true
+    tty: true

@@ -1,0 +1,94 @@
+# SGLang server image with the NCCL version used by the Halo training image.
+#
+# Upstream `lmsysorg/sglang` serves fine on its own; this image exists only because Environmental
+# GRPO broadcasts weights into the live engine over a shared NCCL group, and both ends must load
+# the same NCCL runtime. Bumping the wheel to uv.lock's exact pin is the whole delta. transformers
+# stays at sglang's own exact pin (0.5.17 -> transformers==5.12.1); 0.5.17 is the last release on
+# torch 2.11, so it is the ceiling here.
+# Build: make build-sglang — prebuilt: public.ecr.aws/whitecircle/halo:sglang-0.5.17.
+
+ARG SGLANG_VERSION=0.5.17
+FROM lmsysorg/sglang:v${SGLANG_VERSION}
+
+# Redeclare the pre-FROM arguments for use in the labels.
+ARG VERSION=1.0.0
+ARG BUILD_DATE
+
+LABEL maintainer="White Circle <hello@whitecircle.ai>"
+LABEL org.opencontainers.image.title="Halo SGLang Server"
+LABEL org.opencontainers.image.description="SGLang 0.5.17 with NCCL matched to the Halo training image (RL weight sync over /update_weights_from_distributed)"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.vendor="White Circle"
+LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# The Halo-authored patches under /opt ship under the Halo License.
+COPY LICENSE APACHE-2.0.txt /opt/halo-license/
+
+# Use the NCCL version from uv.lock so the server matches the training image: a skew hangs the
+# weight-sync ncclCommInitRank with no error. `--no-deps` keeps pip off torch; `--verify` checks the
+# wheel and the libnccl.so.2 actually resolved, of which a wheel copy and a system copy both exist.
+COPY uv.lock docker/nccl_pin.py /tmp/
+RUN NCCL_V=$(python3 /tmp/nccl_pin.py /tmp/uv.lock) \
+    && pip install --no-cache-dir "nvidia-nccl-cu13==${NCCL_V}" --no-deps \
+    && python3 /tmp/nccl_pin.py /tmp/uv.lock --verify \
+    && rm /tmp/uv.lock /tmp/nccl_pin.py
+
+# Verify the weight-sync routes the client drives exist in this sglang version — upstream renames
+# control endpoints between releases, and a gap would surface mid-run as a 404. (Mounted
+# sub-routers carry no `.path`, hence the getattr.)
+RUN python3 -c "\
+from sglang.srt.entrypoints.http_server import app; \
+paths = {p for p in (getattr(r, 'path', None) for r in app.routes) if p}; \
+required = {'/init_weights_update_group', '/update_weights_from_distributed', '/server_info', \
+            '/pause_generation', '/continue_generation', '/flush_cache', '/health'}; \
+missing = required - paths; \
+assert not missing, f'sglang lost weight-sync routes: {sorted(missing)}'; \
+print(f'weight-sync routes: OK ({len(required)} present)')"
+
+# Verify the request fields used by SGLangWeightSyncClient: the names are the wire contract, and a
+# renamed field is dropped server-side. Read whichever representation the release uses.
+RUN python3 -c "\
+import dataclasses, msgspec; \
+from sglang.srt.managers.io_struct import InitWeightsUpdateGroupReqInput, UpdateWeightsFromDistributedReqInput; \
+names = lambda cls: {f.name for f in (dataclasses.fields(cls) if dataclasses.is_dataclass(cls) else msgspec.structs.fields(cls))}; \
+missing = {'master_address','master_port','rank_offset','world_size','group_name','backend'} - names(InitWeightsUpdateGroupReqInput); \
+assert not missing, f'InitWeightsUpdateGroupReqInput lost: {missing}'; \
+missing = {'names','dtypes','shapes','group_name','flush_cache','abort_all_requests'} - names(UpdateWeightsFromDistributedReqInput); \
+assert not missing, f'UpdateWeightsFromDistributedReqInput lost: {missing}'; \
+print('weight-sync request schemas: OK')"
+
+# The trainer vendors sglang's rendezvous convention (src/distributed/nccl/transport/torch_group.py):
+# a group_name-prefixed store joined via _new_process_group_helper, trainer at rank 0. A change
+# upstream would hang the group with no error, so assert it here, against whichever module this
+# release keeps the weight update in.
+RUN python3 -c "\
+import inspect; \
+from sglang.srt.utils.common import init_custom_process_group as f; \
+src = inspect.getsource(f); \
+assert 'PrefixStore(group_name, store)' in src, 'sglang no longer prefixes the store with group_name'; \
+assert '_new_process_group_helper' in src, 'sglang no longer builds the group via _new_process_group_helper'; \
+import importlib, importlib.util; \
+_wu = 'sglang.srt.model_executor.model_runner_components.weight_updater'; \
+owner = importlib.import_module(_wu).WeightUpdater if importlib.util.find_spec(_wu) else importlib.import_module('sglang.srt.model_executor.model_runner').ModelRunner; \
+upd = inspect.getsource(owner.update_weights_from_distributed); \
+assert 'src=0' in upd, 'sglang no longer broadcasts from rank 0'; \
+assert 'rank_offset + self.tp_rank' in inspect.getsource(owner.init_weights_update_group), \
+    'sglang changed the rank_offset convention'; \
+print('rendezvous + broadcast convention: OK (trainer is rank 0, store prefixed by group_name)')"
+
+# Verify fused-expert loader support for each allowed model family: only gpt_oss consumes the fused
+# expert pair the trainer streams, while qwen3_moe maps per-expert names and drops fused keys, which
+# is why the trainer refuses qwen3-moe + sglang. A flip either way fails the build, so the roster is
+# re-decided rather than drifting.
+RUN python3 -c "\
+import pathlib, sglang; \
+models = pathlib.Path(sglang.__file__).parent / 'srt' / 'models'; \
+gpt_oss = (models / 'gpt_oss.py').read_text(); \
+qwen3_moe = (models / 'qwen3_moe.py').read_text(); \
+assert 'make_expert_params_mapping_fused' in gpt_oss, \
+    'gpt_oss no longer loads fused experts — the one supported sglang sync family is broken'; \
+assert 'make_expert_params_mapping_fused' not in qwen3_moe, \
+    'qwen3_moe gained a fused loader — the toolkit refusal for qwen3-moe+sglang may be liftable (see EPQwen3MoELayer)'; \
+print('fused-expert loader roster: OK (gpt_oss only)')"

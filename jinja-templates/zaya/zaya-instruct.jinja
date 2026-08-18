@@ -1,0 +1,27 @@
+{#- --- Single-turn data validation --- -#}
+{%- set user_count = messages | selectattr("role", "equalto", "user") | list | length -%}
+{%- set assistant_count = messages | selectattr("role", "equalto", "assistant") | list | length -%}
+{%- if user_count != 1 or assistant_count > 1 -%}
+  {{- raise_exception("This template only supports single-turn data (1 user message, 0-1 assistant messages). Found " + user_count|string + " user and " + assistant_count|string + " assistant messages.") -}}
+{%- endif -%}
+{#- --- BOS prefix (matches native Zaya chat template) --- -#}
+{{- '<bos>' -}}
+{#- --- System block: the hub template emits it unconditionally, empty when no system message --- -#}
+{%- if messages[0].role == 'system' -%}
+  {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' -}}
+{%- else -%}
+  {{- '<|im_start|>system\n<|im_end|>\n' -}}
+{%- endif -%}
+{#- --- Main message rendering (user & assistant turns, thinking disabled) --- -#}
+{#- --- The closed <think>\n</think>\n\n block matches Zaya's native enable_thinking=false convention --- -#}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' -}}
+  {%- elif message.role == "assistant" -%}
+    {{- '<|im_start|>assistant\n<think>\n</think>\n\n' + message.content + '<|im_end|>\n' -}}
+  {%- endif -%}
+{%- endfor -%}
+{#- --- Optional generation prompt kick-off (matches assistant_message_template prefix) --- -#}
+{%- if add_generation_prompt -%}
+  {{- '<|im_start|>assistant\n<think>\n</think>\n\n' -}}
+{%- endif -%}

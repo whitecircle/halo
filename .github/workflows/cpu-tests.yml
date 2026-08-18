@@ -1,0 +1,49 @@
+name: cpu-tests
+
+# CPU test tier. The CPU tests import torch, so they run inside the prebuilt image, on a
+# self-hosted runner where `halo:blackwell` is already built. They need no GPU, so the job runs the
+# image without `--gpus`; `make test-cpu` uses the creds-free DOCKER_RUN_CPU (no `.env`/`~/.aws`
+# mount), so it is safe to run contributor code here.
+#
+# Only `workflow_dispatch` is active. The `push`/`pull_request` triggers below need the
+# `[self-hosted, halo]` runner registered — see agent-docs/infrastructure/ci.md. This tier has no
+# label gate, so before enabling `pull_request`, set Settings → Actions → General to require run
+# approval for all outside collaborators: that approval is the maintainer opt-in for this tier.
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+
+concurrency:
+  group: cpu-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    # The label must match the registered self-hosted runner on the GPU box.
+    runs-on: [self-hosted, halo]
+    # Skip draft PRs (still runs on pushes to main and on ready PRs).
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify the runtime image is present
+        run: |
+          docker image inspect "${IMAGE:-halo:blackwell}" >/dev/null 2>&1 \
+            || { echo "::error::${IMAGE:-halo:blackwell} not found on this runner — build it with 'make build-blackwell'"; exit 1; }
+
+      - name: CPU tests (in image, no GPU)
+        run: make test-cpu PYTEST_ARGS="--junitxml=cpu-junit.xml -ra"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cpu-junit
+          path: cpu-junit.xml
+          if-no-files-found: warn

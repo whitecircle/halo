@@ -1,0 +1,115 @@
+# GLM-5.3-Flash (glm5_next, 321B total / 18B active) — EP=8 LoRA (attention PEFT + native grouped
+# expert-LoRA) SFT on UltraChat 200K, single 8x Blackwell node. See agent-docs/models/glm5-next.md.
+#
+# Requires the BF16-converted checkpoint (the hub release is fp8 block-quantized):
+#   python scripts/before_training/convert_glm5_bf16.py \
+#       --model_id zai-org/GLM-5.3-Flash --output_dir /mnt/models/GLM-5.3-Flash-BF16
+#
+# Most of the model is routed expert weight, which ep8 shards over the node; ZeRO-2 keeps the
+# non-expert weights gathered. LoRA is what makes this fit on one node — the frozen base leaves
+# optimizer state adapter-only, where full fine-tuning at ep8 would also hold AdamWBF16 expert state
+# and expert grads per rank (use the 2-node full-FT config instead). Confirm free GPU memory with
+# nvidia-smi first.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model — the convert_glm5_bf16.py output, never the fp8 hub release ---
+model_name_or_path: /mnt/models/GLM-5.3-Flash-BF16   # placeholder — your converted checkpoint
+# Upstream declares no flash support (_supports_flash_attn = False); SDPA is the fast backend.
+# The KDA linear-attention layers run their own kernels regardless.
+attn_implementation: sdpa
+# Explicit: adopts the native fp32 gate.e_score_correction_bias buffer, whose sign-updates export
+# with every checkpoint. `auto` would resolve to aux_loss here (the forward honors output_router_logits).
+moe_balancing: bias_update
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 288 routed experts -> 36/rank; one dispatch group on 8 GPUs
+save_sharded_ep: false                # consolidate expert shards into a single checkpoint
+# Required, not a preference: the checkpoint keeps A_log / dt_bias / hc_* fp32 and FSDP2 asserts one
+# original dtype per shard group — upcasting the non-expert params to fp32 masters makes the wrap
+# legal. Under LoRA the attention adapters follow it; the expert adapters are EP-owned bf16.
+fp32_non_ep_params: true
+fp32_grad_reduce: true                # tighter gradient reduction; LoRA-cheap (adapter grads only)
+
+# --- LoRA — attention via PEFT; gate_up_proj/down_proj peel to native EP grouped expert-LoRA ---
+use_peft: true
+lora_r: 32
+lora_alpha: 64                        # scaling = alpha/r = 2
+lora_dropout: 0.05
+lora_task_type: CAUSAL_LM
+lora_target_modules:
+# KDA linear-attention layers (34/45): delta-rule projections and gates
+- q_proj
+- k_proj
+- v_proj
+- b_proj
+- f_a_proj
+- f_b_proj
+- g_a_proj
+- g_b_proj
+# DSA (MLA) layers (11/45): low-rank q/kv factor pairs; o_proj is the output projection on both kinds
+- q_a_proj
+- q_b_proj
+- kv_a_proj_with_mqa
+- kv_b_proj
+- o_proj
+# Routed experts (288 x 42 layers, fused storage): peeled by split_expert_lora_targets to grouped
+# adapters inside the EP layers. The 3 dense leading layers, the shared experts (inside the EP
+# wrapper — no LoRA route), the DSA indexer and the router gate stay frozen.
+- gate_up_proj
+- down_proj
+merge_expert_lora_on_save: true       # fold both halves into the base at every save -> servable HF
+                                      #   checkpoint; without it the mixed adapter resumes here but
+                                      #   merge_peft_adapters.py refuses it
+
+# --- Attention & sequence ---
+# Packing note: the KDA conv/scan crosses packed document boundaries on every backend (accepted
+# mixer class, as Zaya/Ling) — pack only where a little cross-document mixing is acceptable.
+packing: true
+max_length: 16384                     # starting point; raise after measuring free memory on the node
+
+# --- Training schedule ---
+per_device_train_batch_size: 1        # SDPA takes no cu_seqlens — batch>1 flattens into one wider row
+                                      #   and the 11 quadratic DSA layers pay for it; scale with GA
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 1.0e-04                # the generic LoRA SFT start (agent-docs/optimization/peft.md)
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/glm-5.3-flash-ultrachat-ep-lora
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- Tokens & chat template ---
+# GLM-5 ships GLM-4's role-token set (<|user|>/<|assistant|>, pad == eos
+# <|endoftext|>), so the GLM multi-turn template applies unchanged.
+assistant_message_template: "<|assistant|>"
+train_on_completions_only: true       # required under pad==eos (plain-LM path would mask the real EOS)
+pad_token: <|endoftext|>
+eos_token: <|endoftext|>
+chat_template: jinja-templates/glm/glm-chat.jinja
+force_chat_template: true

@@ -1,0 +1,94 @@
+# RLVR Online GRPO template — rule-based rewards (math accuracy, format), DistributedGRPOTrainer.
+# Dataset rows: {"prompt": ..., "answer": ...}. See agent-docs/training-methods/grpo/online-grpo.md.
+# Usage: start a vLLM server with --weight-transfer-config '{"backend": "nccl"}', then
+#   torchrun --nproc_per_node=4 scripts/training/online_grpo/rlvr.py <this config>
+#   (add --expert_parallel_size/--tensor_parallel_size here; accelerate launch --config_file
+#   launcher-configs/accelerate/fsdp2_gradop_config.yaml stays an option for plain data-parallel.)
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+attn_implementation: sdpa
+
+# --- Dataset ---
+dataset: trl-lib/DeepMath-103K
+test_size: 0.01
+prompt_field: prompt      # DeepMath ships chat-form prompts (role/content list) — consumed natively
+answer_field: solution    # DeepMath's ground-truth column is `solution` (there is no `answer` column)
+
+# --- Reward Functions ---
+use_accuracy_reward: true
+use_format_reward: false
+accuracy_reward_weight: 1.0
+format_reward_weight: 0.5
+# format_pattern: "<think>.*?</think>\\s*<answer>.*?</answer>"
+
+# --- GRPO Hyperparameters ---
+beta: 0.0
+num_iterations: 1
+epsilon: 0.15
+scale_rewards: true
+num_generations: 8
+temperature: 1.0
+loss_type: grpo
+
+# --- Training ---
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 8   # global eval batch must divide by num_generations at any world size
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 20
+seed: 42
+
+# --- Sequence Lengths ---
+max_prompt_length: 1024
+max_completion_length: 2048
+
+# --- vLLM Generation ---
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 0.0.0.0   # the address the trainer dials (not a bind address); TRL's own default,
+                            # which Linux connects to loopback, so on a single host it is the same
+                            # endpoint the 127.0.0.1 smoke siblings name. A server on another host
+                            # needs its real address here, or vllm_server_base_url instead.
+vllm_server_port: 8000
+
+# --- Output ---
+output_dir: checkpoints/rlvr-online-grpo
+save_strategy: steps
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 5
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+log_completions: true
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+
+# --- PEFT (optional) ---
+use_peft: false
+# lora_r: 64
+# lora_alpha: 128
+# lora_dropout: 0.05
+# lora_target_modules:
+# - q_proj
+# - k_proj
+# - v_proj
+# - o_proj
+# - gate_proj
+# - up_proj
+# - down_proj
+# lora_task_type: CAUSAL_LM

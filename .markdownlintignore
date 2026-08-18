@@ -1,0 +1,5 @@
+# Vendored / generated trees — not ours to lint.
+DeepEP/
+site/
+node_modules/
+.venv/

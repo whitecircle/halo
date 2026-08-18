@@ -1,0 +1,13 @@
+{#- --- Multi-turn chat template for Mistral4 (reasoning disabled) --- -#}
+{#- Supports any number of user/assistant turns -#}
+{#- --- BOS prefix + model settings (matches native Mistral4 chat template, no system prompt, reasoning disabled) --- -#}
+{{- '<s>[MODEL_SETTINGS]{"reasoning_effort": "none"}[/MODEL_SETTINGS]' -}}
+{#- --- Main message rendering (user & assistant only) --- -#}
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{- '[INST]' + message.content + '[/INST]' -}}
+  {%- elif message.role == "assistant" -%}
+    {{- message.content + '</s>' -}}
+  {%- endif -%}
+{%- endfor -%}
+{#- --- Optional generation prompt: assistant content starts directly after [/INST], no extra prefix --- -#}

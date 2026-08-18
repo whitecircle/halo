@@ -1,0 +1,59 @@
+name: gpu-tests
+
+# Core GPU test tier. Halo needs Blackwell (SM100) or Hopper (SM90) for FA3/FA4 + DeepEP, which no
+# GitHub-hosted runner provides, so this runs on a trusted self-hosted runner on the GPU box, where
+# `halo:blackwell` is already built.
+#
+# Only `workflow_dispatch` is active. The `pull_request` trigger below needs the
+# `[self-hosted, halo]` runner registered (see agent-docs/infrastructure/ci.md), and is label-gated
+# once enabled: a maintainer adds the `run-ci-gpu` label to a PR to run it, so contributor code
+# touches the GPU box only on an explicit maintainer opt-in. There is deliberately no `push`
+# trigger — it would fire the tier on every merge with no label gate.
+#
+# Security: this runs contributor code on the runner. It is deliberately creds-free
+# (`ENV_FILE= AWS_DIR=` drops the `.env` and `~/.aws` mounts); tests read the runner's HF model
+# cache (`HALO_SCRATCH`, default /mnt) instead. Keep the `pull_request` trigger (not
+# `pull_request_target`) so PR code never receives repo secrets. If a test needs a gated model,
+# inject `HF_TOKEN` from a repo secret at that step rather than mounting `.env`.
+
+on:
+  workflow_dispatch:
+  # pull_request:
+  #   types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: gpu-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-core:
+    # Label must match the self-hosted runner registered on the GPU box.
+    runs-on: [self-hosted, halo]
+    # Run on manual dispatch; on PRs only when non-draft AND labeled run-ci-gpu.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       contains(github.event.pull_request.labels.*.name, 'run-ci-gpu'))
+    # Ceiling for the whole tier; the launches it runs are listed in tests/gpu/manifest.py.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify the runtime image is present
+        run: |
+          docker image inspect "${IMAGE:-halo:blackwell}" >/dev/null 2>&1 \
+            || { echo "::error::${IMAGE:-halo:blackwell} not found on this runner — build it with 'make build-blackwell'"; exit 1; }
+
+      - name: Core GPU tests (in image, creds-free)
+        run: make test-gpu-core ENV_FILE= AWS_DIR= PYTEST_ARGS="--junitxml=gpu-junit.xml -ra"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: gpu-junit
+          path: gpu-junit.xml
+          if-no-files-found: warn

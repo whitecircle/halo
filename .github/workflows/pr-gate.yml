@@ -1,0 +1,79 @@
+name: pr-gate
+
+# Gates pull requests: anyone not on .github/APPROVED_CONTRIBUTORS (and without write access) gets a
+# comment and the PR is closed. Maintainers and bots are exempt. Uses pull_request_target so the
+# token can comment/close on fork PRs; the allowlist is read via the API from the `allowlist` branch,
+# never from PR code, and there is no checkout at all.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const author = pr.user.login;
+            const { owner, repo } = context.repo;
+
+            // 1. bots are exempt (dependabot, etc.)
+            if (pr.user.type === 'Bot' || author.endsWith('[bot]')) { core.info('bot author — skip'); return; }
+
+            // 2. maintainers (write/maintain/admin) are exempt
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: author });
+              if (['admin', 'maintain', 'write'].includes(data.permission)) { core.info(`write access (${data.permission}) — skip`); return; }
+            } catch (e) {
+              // Fail OPEN: maintainers need not be on the allowlist, so a transient 403/5xx here
+              // would auto-close their own PR. A missed gate is recoverable; that is not.
+              core.warning(`permission check failed, leaving the PR open: ${e.message}`);
+              return;
+            }
+
+            // 3. allowlisted contributors are exempt — read from the `allowlist` branch. A 404
+            // (branch or file missing) means a misconfigured gate: treat as an empty list and gate,
+            // loudly. Any other error is transient — fail OPEN like the permission check above,
+            // because auto-closing an approved contributor's PR on a 500 is the worse failure.
+            let approved = [];
+            try {
+              const { data: file } = await github.rest.repos.getContent({
+                owner, repo, path: '.github/APPROVED_CONTRIBUTORS', ref: 'allowlist',
+              });
+              approved = Buffer.from(file.content, 'base64').toString('utf8')
+                .split('\n').map(s => s.trim().toLowerCase()).filter(s => s && !s.startsWith('#'));
+            } catch (e) {
+              if (e.status === 404) {
+                core.warning('allowlist branch/file missing — gating as if the list were empty');
+              } else {
+                core.warning(`allowlist read failed, leaving the PR open: ${e.message}`);
+                return;
+              }
+            }
+            if (approved.includes(author.toLowerCase())) { core.info('approved contributor — skip'); return; }
+
+            // 4. not approved → comment + close
+            const branch = context.payload.repository.default_branch;
+            const body = [
+              `Thanks for the PR, @${author}! 🙏`,
+              ``,
+              `Halo gates contributions to keep review focused and AI-slop out — a PR needs an **accepted issue** and **maintainer approval** before it's opened. Your PR path isn't approved yet, so this is being closed automatically. It's routing, not rejection — we'd still like to see this land.`,
+              ``,
+              `To get there:`,
+              `1. Open an issue describing what you want to change and why — use the **Feature request / proposal** template (or **Bug report** for a fix).`,
+              `2. If it's accepted, a maintainer comments \`/approve @${author}\` on it — that adds you to \`.github/APPROVED_CONTRIBUTORS\`.`,
+              `3. Open your PR against that issue (or reopen this one).`,
+              ``,
+              `Details: [CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/${branch}/CONTRIBUTING.md). Thanks for understanding!`,
+            ].join('\n');
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' });
+            core.info(`gated PR #${pr.number} from ${author}`);

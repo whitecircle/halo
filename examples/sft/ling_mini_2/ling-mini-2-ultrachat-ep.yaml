@@ -1,0 +1,68 @@
+# Ling-mini-2.0 (Bailing MoE) — EP=8 SFT example on UltraChat 200K. See agent-docs/models/bailing.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: inclusionAI/Ling-mini-2.0
+trust_remote_code: true
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8
+moe_balancing: bias_update            # sign-updates land in the gate's native expert_bias (noaux_tc);
+                                      #   the gate trains — balancing replaces the old frozen-gate mitigation
+fp32_router: true
+fp32_experts: true
+fp32_non_ep_params: true
+
+# --- Attention & kernels ---
+attn_implementation: sdpa             # the remote code carries no transformers-v5 flash flag, so every
+                                      #   flash label is refused at build; the EP loader retries SDPA
+                                      #   anyway — this states what actually runs
+packing: true
+max_length: 24000
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 250
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/ling-mini-2-ultrachat-ep
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+assistant_message_template: <role>ASSISTANT</role>
+pad_token: <|endoftext|>
+eos_token: <|role_end|>
+# Multi-turn data needs ling-multiturn.jinja — ling-instruct.jinja raises on >1 assistant turn.
+chat_template: jinja-templates/ling/ling-multiturn.jinja
+force_chat_template: true

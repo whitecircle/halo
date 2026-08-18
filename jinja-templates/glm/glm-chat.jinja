@@ -1,0 +1,22 @@
+{# GLM multi-turn chat SFT template (non-thinking).
+
+   Renders the native GLM-4.7-Flash chat format (system/user/assistant with the non-thinking
+   `<|assistant|></think>` prefix). Intermediate assistant turns carry NO trailing `<|endoftext|>`,
+   exactly as native: a turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in
+   `config.eos_token_id`), and completion masking stops there. Only the final assistant turn gets an
+   explicit `<|endoftext|>` so it has an in-document turn terminator under packing (the next document /
+   padding lies outside its masked boundary). Pair with `assistant_message_template: "<|assistant|>"`.
+   For single-turn instruct data use glm-instruct.jinja. #}
+[gMASK]<sop>
+{%- for message in messages -%}
+  {%- if message.role == "system" -%}
+<|system|>{{ message.content }}
+  {%- elif message.role == "user" -%}
+<|user|>{{ message.content }}
+  {%- elif message.role == "assistant" -%}
+<|assistant|></think>{{ message.content }}{% if loop.last %}<|endoftext|>{% endif %}
+  {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+<|assistant|></think>
+{%- endif -%}

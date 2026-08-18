@@ -1,0 +1,57 @@
+{
+    // Dev container that runs the editor INSIDE the prebuilt GPU training image, so Pylance
+    // resolves the full env — including flash_attn / deep_ep, which a host interpreter lacks.
+    // Mirrors the `docker run` in CLAUDE.md. Blackwell (B200/B300) by default; for Hopper swap
+    // the image tag to halo:hopper. The tag is local: `make build-blackwell`, or pull the prebuilt
+    // image and retag it (docker tag public.ecr.aws/whitecircle/halo:blackwell halo:blackwell).
+    "name": "halo (blackwell)",
+    "image": "halo:blackwell",
+
+    // Repo is bind-mounted to /workspace to match the image's working dir and PYTHONPATH.
+    "workspaceFolder": "/workspace",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+    // GPU + IPC/ulimit/shm flags, py-spy's ptrace capability, and the repo-root .env (WANDB/HF/AWS
+    // keys — not auto-loaded). Create it first: `cp .env.example .env`, else Docker refuses to start.
+    // Scratch and AWS creds ride in as `-v` rather than "mounts" (`--mount`), which errors outright
+    // when the host path is absent.
+    "runArgs": [
+        "--gpus", "all",
+        "--ipc=host",
+        "--ulimit", "memlock=-1",
+        "--ulimit", "stack=67108864",
+        "--shm-size=128g",
+        "--cap-add=SYS_PTRACE",
+        "--env-file", "${localWorkspaceFolder}/.env",
+        "-v", "${localEnv:HALO_SCRATCH:/mnt}:/scratch",
+        "-v", "${localEnv:HOME}/.aws:/root/.aws"
+    ],
+
+    // Caches and toolkit scratch off the small in-container root FS. /scratch is whatever
+    // HALO_SCRATCH points at on the host (default /mnt) — verify it is a large device with
+    // `findmnt` / `df -h` first: a path named /mnt is not guaranteed to be one.
+    "containerEnv": {
+        "HF_HOME": "/scratch/hf",
+        "HF_DATASETS_CACHE": "/scratch/hf/datasets",
+        "TMPDIR": "/scratch/tmp",
+        "HALO_DATA_ROOT": "/scratch",
+        "PYTHONPATH": "/workspace"
+    },
+
+    "customizations": {
+        "vscode": {
+            // Deps install into the system interpreter (no venv inside the image).
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/bin/python"
+            },
+            "extensions": [
+                "charliermarsh.ruff",
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "ms-toolsai.jupyter",
+                "redhat.vscode-yaml"
+            ]
+        }
+    }
+}

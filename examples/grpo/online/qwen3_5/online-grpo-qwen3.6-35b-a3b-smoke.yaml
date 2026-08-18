@@ -1,0 +1,78 @@
+# Online GRPO smoke — Qwen3.6-35B-A3B on GSM8K, 3 steps, EP=2 (train GPUs 1,2 + vLLM GPU 0).
+# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.6-35B-A3B
+attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+model_init_kwargs:
+  output_router_logits: true
+  router_aux_loss_coef: 0.001
+moe_balancing: none  # aux_loss is a warn-and-no-op under GRPO trainers; router logits kept for MoE metrics
+
+# --- Parallelism (EP=2: one dispatch group on 2 GPUs, DP=2) ---
+expert_parallel_size: 2
+
+# --- Dataset ---
+dataset: openai/gsm8k:main@train   # @train rather than the bare spec: with test_size set, a dataset
+                                   # that ships a 'test' split is concatenated and re-split, pulling
+                                   # GSM8K's held-out benchmark rows into training
+test_size: 0.01                    # 1% holdout carved out of train only
+prompt_field: question
+
+# --- Reward Functions ---
+use_accuracy_reward: true
+
+# --- GRPO Hyperparameters ---
+beta: 0.0
+num_iterations: 1
+epsilon: 0.15
+scale_rewards: true
+num_generations: 4
+temperature: 1.0
+loss_type: grpo
+
+# --- MoE precision ---
+use_grouped_gemm: false
+fp32_router: true
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 4   # global eval batch must divide by num_generations at any world size
+num_train_epochs: 1.0
+gradient_accumulation_steps: 4
+gradient_checkpointing: true
+max_steps: 3
+learning_rate: 1.0e-06
+lr_scheduler_type: constant
+warmup_steps: 0
+max_grad_norm: 1.0
+max_prompt_length: 256
+max_completion_length: 256
+
+# --- vLLM Generation ---
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 0.0.0.0   # the address the trainer dials (not a bind address); TRL's own default,
+                            # which Linux connects to loopback, so on a single host it is the same
+                            # endpoint the 127.0.0.1 smoke siblings name. A server on another host
+                            # needs its real address here, or vllm_server_base_url instead.
+vllm_server_port: 8000
+
+# --- Output ---
+output_dir: checkpoints/online-grpo-qwen3.6-35b-a3b-smoke
+save_strategy: "no"
+eval_strategy: "no"
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: []
+log_completions: false
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+
+# --- PEFT ---
+use_peft: false
