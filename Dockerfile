@@ -22,7 +22,7 @@ FROM ${BASE_IMAGE}
 
 # Static identity labels only — the version/created labels live below, after the heavy layers,
 # so a release bump never invalidates the dep-compile cache.
-LABEL maintainer="White Circle <hello@whitecircle.ai>"
+LABEL maintainer="White Circle <hello@whitecircle.com>"
 LABEL org.opencontainers.image.title="Halo"
 LABEL org.opencontainers.image.description="Halo — HuggingFace-native LLM/VLM training and alignment toolkit (EP/CP/TP/ETP, MoE, FA4, DeepEP)"
 LABEL org.opencontainers.image.vendor="White Circle"

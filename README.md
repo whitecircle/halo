@@ -353,4 +353,4 @@ to third parties as a service: that's free up to US \$20M in such revenue over a
 above that requires a commercial agreement with White Circle. Models trained with Halo by anyone
 over \$20M in annual revenue must carry a "Trained with Halo" credit.
 
-Questions or commercial licensing: [hello@whitecircle.ai](mailto:hello@whitecircle.ai).
+Questions or commercial licensing: [hello@whitecircle.com](mailto:hello@whitecircle.com).

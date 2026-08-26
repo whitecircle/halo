@@ -1,7 +1,7 @@
 site_name: Halo
 site_description: 'Halo — install, configure, and run the Halo LLM training toolkit: pre-training and 12 post-training methods with EP/CP/TP/ETP parallelism for MoE and dense models.'
 site_author: White Circle
-copyright: 'Copyright &copy; 2026 <a href="https://whitecircle.com">White Circle</a> — <a href="https://github.com/whitecircle/halo/blob/main/LICENSE">Halo License</a> · hello@whitecircle.ai · Generated with the <a href="https://claude.com/claude-code">Claude Code</a> <code>docs</code> skill'
+copyright: 'Copyright &copy; 2026 <a href="https://whitecircle.com">White Circle</a> — <a href="https://github.com/whitecircle/halo/blob/main/LICENSE">Halo License</a> · hello@whitecircle.com · Generated with the <a href="https://claude.com/claude-code">Claude Code</a> <code>docs</code> skill'
 repo_url: https://github.com/whitecircle/halo
 repo_name: whitecircle/halo
 edit_uri: edit/main/agent-docs/
