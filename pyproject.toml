@@ -4,8 +4,8 @@ version = "1.0.0"
 description = "Halo is an open-source framework built by White Circle for training large language and multimodal models."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "LicenseRef-Halo"
+license-files = ["LICENSE", "APACHE-2.0.txt"]
 authors = [
     { name = "Sergei Bratchikov", email = "sergey@whitecircle.ai" },
 ]

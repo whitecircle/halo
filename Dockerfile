@@ -13,7 +13,7 @@ LABEL org.opencontainers.image.title="Halo"
 LABEL org.opencontainers.image.description="Halo is an open-source framework built by White Circle for training large language and multimodal models"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
@@ -338,7 +338,7 @@ COPY examples/ ./examples/
 COPY agent-docs/ ./agent-docs/
 COPY skills/ ./skills/
 RUN mkdir -p .claude .agents && ln -s ../skills .claude/skills && ln -s ../skills .agents/skills
-COPY README.md CLAUDE.md AGENTS.md ./
+COPY README.md CLAUDE.md AGENTS.md LICENSE APACHE-2.0.txt ./
 
 # Editable install, deliberately unmasked: a swallowed failure would ship an image with no `halo`
 # CLI and no installed `src` distribution.
