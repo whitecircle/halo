@@ -1,0 +1,18 @@
+# Approved contributors — one GitHub username per line (case-insensitive), # for comments.
+#
+# This file lives on the `allowlist` branch, outside main's ruleset, so the approval workflows can
+# maintain it with the workflow token (GitHub refuses the Actions app as a ruleset bypass actor by
+# design). PRs from anyone NOT on this list (and without write access) are auto-commented and closed
+# by .github/workflows/pr-gate.yml, which reads it from this branch via the API. A maintainer adds a
+# contributor by commenting
+#   /approve @their-handle
+# on an accepted issue (.github/workflows/approve-contributor.yml); anyone whose PR is merged is
+# appended automatically (.github/workflows/approve-merged-contributor.yml).
+#
+# Maintainers with write access do not need to be listed.
+hivaze
+advpropsys
+MekkCyber
+ossmirnov
+mixeden
+Igralino
