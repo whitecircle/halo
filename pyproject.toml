@@ -7,7 +7,7 @@ requires-python = ">=3.12,<3.13"
 license = "LicenseRef-Halo"
 license-files = ["LICENSE", "APACHE-2.0.txt"]
 authors = [
-    { name = "Sergei Bratchikov", email = "sergey@whitecircle.ai" },
+    { name = "Sergei Bratchikov", email = "sergey@whitecircle.com" },
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

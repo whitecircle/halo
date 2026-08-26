@@ -7,7 +7,7 @@ vulnerability.
 
 - Use GitHub's [private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
   ("Report a vulnerability" under the repository's **Security** tab), or
-- email **hello@whitecircle.ai**.
+- email **hello@whitecircle.com**.
 
 We aim to acknowledge a report within a few business days and will coordinate a fix and
 disclosure timeline with you.

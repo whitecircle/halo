@@ -8,7 +8,7 @@ FROM ${BASE_IMAGE}
 
 # Static identity labels. The release labels sit below the dependency layers to preserve the
 # dependency cache.
-LABEL maintainer="White Circle <hello@whitecircle.ai>"
+LABEL maintainer="White Circle <hello@whitecircle.com>"
 LABEL org.opencontainers.image.title="Halo"
 LABEL org.opencontainers.image.description="Halo is an open-source framework built by White Circle for training large language and multimodal models"
 LABEL org.opencontainers.image.vendor="White Circle"
