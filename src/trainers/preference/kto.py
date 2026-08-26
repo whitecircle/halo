@@ -1,10 +1,8 @@
 # Copyright 2024 White Circle
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Halo License (the "License"): the Apache License, Version 2.0
+# (a copy is provided in APACHE-2.0.txt), as modified by, and subject to, the
+# Supplemental Terms in the LICENSE file at the root of this repository.
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,

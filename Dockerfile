@@ -27,7 +27,7 @@ LABEL org.opencontainers.image.title="Halo"
 LABEL org.opencontainers.image.description="Halo — HuggingFace-native LLM/VLM training and alignment toolkit (EP/CP/TP/ETP, MoE, FA4, DeepEP)"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
 
 # Build-only knobs — ARG, not ENV: BuildKit exports them to every RUN in this stage, and nothing
 # at runtime reads them (a persisted DEBIAN_FRONTEND/PIP_* would only leak into training subprocesses).

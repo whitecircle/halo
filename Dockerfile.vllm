@@ -39,7 +39,7 @@ LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
 
 # The Halo-authored patches/plugins under /opt ship under the Halo License.
 COPY LICENSE APACHE-2.0.txt /opt/halo-license/

@@ -343,4 +343,14 @@ Halo is built and maintained by **[White Circle](https://whitecircle.com)**.
 
 ## License
 
-Apache License 2.0 — see [`LICENSE`](LICENSE). Copyright 2026 White Circle.
+Halo is released under the **Halo License** — the Apache License 2.0
+([`APACHE-2.0.txt`](APACHE-2.0.txt)) as modified by the Supplemental Terms in [`LICENSE`](LICENSE).
+Copyright © 2026 White Circle, PBC.
+
+In plain terms: free to use, modify, self-host, and to train your own models and ship them in your
+own products — at any scale. The one commercial condition is offering Halo's training functionality
+to third parties as a service: that's free up to US \$20M in such revenue over any 12 months, and
+above that requires a commercial agreement with White Circle. Models trained with Halo by anyone
+over \$20M in annual revenue must carry a "Trained with Halo" credit.
+
+Questions or commercial licensing: [hello@whitecircle.ai](mailto:hello@whitecircle.ai).

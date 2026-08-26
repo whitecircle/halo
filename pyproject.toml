@@ -4,8 +4,8 @@ version = "1.0.0"
 description = "Halo — an LLM alignment and training toolkit extending HuggingFace (TRL, Accelerate, Transformers) with advanced parallelism and modern alignment methods."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "LicenseRef-Halo"
+license-files = ["LICENSE", "APACHE-2.0.txt"]
 authors = [
     { name = "Sergei Bratchikov", email = "sergey@whitecircle.ai" },
 ]
