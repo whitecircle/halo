@@ -14,9 +14,6 @@
   <a href="agent-docs/optimization/throughput-benchmarks.md"><strong>Benchmarks</strong></a>
 </p>
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Halo%20License-1f6feb.svg" alt="License: Halo License"></a>
-</p>
 <br/>
 
 ## What is Halo
