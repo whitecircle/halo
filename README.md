@@ -83,7 +83,7 @@ make build-blackwell
 # H100/H200 — FA2 + FA3 + DeepEP
 make build-hopper
 ```
-No host Python environment is required. See [Docker](agent-docs/infrastructure/docker.md) for image details and build options.
+No host Python environment is required. See [Installation](human-docs/installation.md) for image details and build options.
 
 ### Launch a training run
 `halo launch` takes a training method and a YAML config:
@@ -160,8 +160,8 @@ We keep two versions of the docs, depending on whether or not you're AI:
 
 - **[`human-docs/`](human-docs/README.md)** — shorter, task-oriented guides for installing, configuring,
   and running Halo.
-- **[`agent-docs/`](agent-docs/README.md)** — the full technical reference about model integrations,
-  parallelism, optimization internals, infrastructure, and troubleshooting.
+- **[`agent-docs/`](agent-docs/README.md)** — the full technical reference, written for coding agents:
+  model integrations, parallelism, optimization internals, infrastructure, and troubleshooting.
 
 The full reference is also perfectly readable if you're human and want the details.
 
@@ -186,7 +186,7 @@ The full reference is also perfectly readable if you're human and want the detai
 **Go deeper in the reference (`agent-docs/`):**
 [Installation](agent-docs/getting-started/installation.md) ·
 [Models](agent-docs/models/README.md) · [Adding a Model](agent-docs/models/adding-a-model.md) ·
-[Parallelism (EP/CP/TP/ETP)](agent-docs/parallelism/expert-parallelism.md) ·
+[Parallelism (EP/CP/TP/ETP)](agent-docs/parallelism/README.md) ·
 [Multi-Node](agent-docs/parallelism/multi-node.md) ·
 [Pre-training](agent-docs/training-methods/pretraining.md) ·
 [Optimization & Benchmarks](agent-docs/optimization/throughput-benchmarks.md) ·
@@ -267,8 +267,8 @@ halo launch sft config.yaml -n 8 -- --expert_parallel_size=8
 ```
 
 Multi-node runs support shared (NFS/Lustre) and node-local filesystems.
-See [Supported Models](human-docs/supported-matrix.md) for the per-model support matrix and
-[Parallelism](agent-docs/parallelism/expert-parallelism.md) for implementation details.
+See [Parallelism](human-docs/parallelism.md) to pick a mode, [Supported Models](human-docs/supported-matrix.md)
+for the per-model matrix, and the [reference](agent-docs/parallelism/README.md) for implementation details.
 
 </br>
 
@@ -292,8 +292,8 @@ Enabled by default where supported:
 
 - **Data** — offline tokenization, packing, and sharding, plus native `s3://` dataset streaming.
 
-→ [Optimization docs](agent-docs/optimization/throughput-benchmarks.md) ·
-[GPU Training Theory](agent-docs/reference/gpu-training-theory.md)
+→ [Optimization docs](agent-docs/optimization/README.md) ·
+[GPU Training Theory](agent-docs/reference/gpu-training-theory.md) — the bottlenecks these levers attack
 
 </br>
 

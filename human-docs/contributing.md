@@ -37,7 +37,7 @@ used.
 1. Issue → approval → focused PR (keep diffs under ~2,000 lines).
 2. Build the image and run the gates: `make lint`, `make format`,
    `make test-cpu`, `make docs` — plus `make test-gpu-core` for GPU-affecting
-   changes. Lint/format run on the host; tests and the strict docs build run inside the image.
+   changes. Lint/format and the docs link check run on the host; tests run inside the image.
 3. Ship tests that **fail when the behavior breaks** — no smoke-only or
    `assert x is not None` tests. The anti-slop test guide is in
    [`agent-docs/contributing/`](../agent-docs/contributing/README.md) ↗.

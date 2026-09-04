@@ -31,7 +31,9 @@ jobs:
             const branch = 'allowlist';
             let committed = false, lastErr;
             for (let attempt = 0; attempt < 2 && !committed; attempt++) {
-              const { data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+              let file;
+              try { ({ data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch })); }
+              catch (e) { lastErr = e; break; }
               const current = Buffer.from(file.content, 'base64').toString('utf8');
               const existing = current.split('\n').map(s => s.trim().toLowerCase()).filter(s => s && !s.startsWith('#'));
               if (existing.includes(user.toLowerCase())) { core.info(`${user} already approved`); return; }

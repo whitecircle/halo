@@ -7,7 +7,7 @@ labels: question
 
 <!-- Questions are for usage or design help. Search existing issues and the docs first. Found a bug?
      Use Bug report. Proposing a change? Use Feature request / proposal. Idle issues are auto-closed
-     by the stale bot — comment to keep yours active, or reopen any time. -->
+     by the stale bot — comment to keep yours active; a maintainer can reopen a closed one. -->
 
 ## What are you trying to do?
 

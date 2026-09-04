@@ -6,9 +6,12 @@ name: gpu-tests
 #
 # Only `workflow_dispatch` is active. The `pull_request` trigger below needs the
 # `[self-hosted, halo]` runner registered (see agent-docs/infrastructure/ci.md), and is label-gated
-# once enabled: a maintainer adds the `run-ci-gpu` label to a PR to run it, so contributor code
-# touches the GPU box only on an explicit maintainer opt-in. There is deliberately no `push`
-# trigger — it would fire the tier on every merge with no label gate.
+# once enabled: a maintainer adds the `run-ci-gpu` label to a PR to run it. The label is a per-PR
+# opt-in, not the security boundary — a `pull_request` run executes the PR's own copy of this file
+# and the Makefile, and the label survives later pushes (`synchronize` re-runs each one) — so before
+# enabling, set Settings → Actions → General to require run approval for ALL outside collaborators
+# and re-review the diff before each approval. There is deliberately no `push` trigger — it would
+# fire the tier on every merge with no label gate.
 #
 # Security: this runs contributor code on the runner. It is deliberately creds-free
 # (`ENV_FILE= AWS_DIR=` drops the `.env` and `~/.aws` mounts); tests read the runner's HF model

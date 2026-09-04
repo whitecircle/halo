@@ -9,15 +9,16 @@ same targets. The Docker incantation lives once in the `Makefile`; `make help` l
   inside the prebuilt images, so anything that *runs* runs inside one. Tools are on `PATH` in the
   container (uv installs into the system interpreter — no venv, no Poetry): call `python`,
   `torchrun`, `pytest` directly.
-- **`make lint`, `make format`, and `make precommit` are the only host-runnable gates**
-  (`uvx ruff@$(RUFF_VERSION)`, `RUFF_VERSION ?= 0.9.10`, falling back to a `ruff` already on `PATH`).
-  Everything else — tests, `make docs` — runs inside the image.
+- **`make lint`, `make format`, `make precommit`, and `make docs` are the only host-runnable gates**
+  (ruff via `uvx ruff@$(RUFF_VERSION)`, `RUFF_VERSION ?= 0.9.10`, falling back to a `ruff` already on
+  `PATH`; the docs target is a pure link check). Everything else — tests, benchmarks — runs inside
+  the image.
 - **Credentials live in the repo-root `.env`.** `cp .env.example .env` and fill it in: the GPU
   `make` targets pass `--env-file .env` and fail outright without the file.
-- **Markdown lives in `agent-docs/` (the MkDocs-built reference), `human-docs/` (the concise human
-  guide, plain GitHub markdown) and `skills/` (the agent skills).** The root files
-  (`README`, `CONTRIBUTING`, `AGENTS.md`, `CLAUDE.md`, `.github/*`) are the documented exception;
-  scratch markdown goes to `/tmp`.
+- **Markdown lives in `agent-docs/` (the detailed reference), `human-docs/` (the concise human
+  guide) and `skills/` (the agent skills) — all plain GitHub markdown.** The root files
+  (`README`, `CONTRIBUTING`, `SECURITY`, `CODE_OF_CONDUCT`, `AGENTS.md`, `CLAUDE.md`, `.github/*`)
+  are the documented exception; scratch markdown goes to `/tmp`.
 - **Large outputs go to a verified large volume.** The root filesystem is small; the `make` targets
   put `HF_HOME` and `TMPDIR` under `HALO_SCRATCH` (default `/mnt`) — point it at a volume you have
   checked with `findmnt` / `df -h`.
@@ -305,11 +306,11 @@ Update the owning doc page in the same PR when you change `src/` (`skills/docs/d
 follow the anti-slop charter carried by the `/docs` skill: American English, active voice, short
 sentences, tables only for real matrices, no marketing register.
 
-Two `docs.yml` jobs block a merge, and `make docs` runs only the first: the relative-link check
-over `agent-docs/`, `human-docs/`, `skills/` and the root markdown, and a `diagrams` job that
-re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the committed PNGs
+`docs.yml` runs three jobs, and `make docs` runs only the first: the relative-link check over
+`agent-docs/`, `human-docs/`, `skills/` and the root markdown, which blocks a merge; a `diagrams` job
+that re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the committed PNGs
 under `agent-docs/assets/` — touch a generator and you owe `make diagrams` plus the regenerated figure in
-the same commit. `markdownlint` runs non-blocking.
+the same commit; and `markdownlint`. The last two are advisory.
 
 ## Proof of Value
 

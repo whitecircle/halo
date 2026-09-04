@@ -41,7 +41,12 @@ jobs:
             const defaultBranch = (await github.rest.repos.get({ owner, repo })).data.default_branch;
             const branches = await github.paginate(github.rest.repos.listBranches, { owner, repo, per_page: 100 });
             const openPrs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
-            const prHeads = new Set(openPrs.map(pr => pr.head.ref));
+            // A branch an open PR targets is as live as one it comes from: deleting the base
+            // force-closes the PR. A fork's head ref names a branch in the fork, not here.
+            const prRefs = new Set(openPrs.flatMap(pr => [
+              pr.base.ref,
+              ...(pr.head.repo?.full_name === `${owner}/${repo}` ? [pr.head.ref] : []),
+            ]));
 
             // NOTE: br.protected is NOT a useful guard here — a repo-wide ruleset (e.g. Signed
             // Commits with a ~ALL ref include) marks every branch protected. A branch a ruleset
@@ -49,7 +54,7 @@ jobs:
             let deleted = 0, kept = 0, failed = 0;
             for (const br of branches) {
               if (br.name === defaultBranch || br.name === 'allowlist' || br.name === 'gh-pages' || br.name.startsWith('release-')) { kept++; continue; }
-              if (prHeads.has(br.name)) { kept++; continue; }
+              if (prRefs.has(br.name)) { kept++; continue; }
               const commit = await github.rest.repos.getCommit({ owner, repo, ref: br.commit.sha });
               const date = new Date(commit.data.commit.committer.date).getTime();
               if (date >= cutoff) { kept++; continue; }
