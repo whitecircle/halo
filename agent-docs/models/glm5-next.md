@@ -49,7 +49,7 @@ The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's ex
 
 ## Attention
 
-Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice.
+Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice; they reach `fla` through the hub-kernel funnel the toolkit repairs ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
 
 ## Limitations
 
