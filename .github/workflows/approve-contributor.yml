@@ -30,14 +30,28 @@ jobs:
               if (!['admin', 'maintain', 'write'].includes(data.permission)) { core.info(`${commenter} lacks write access — ignore`); return; }
             } catch (e) { core.info(`permission check failed: ${e.message}`); return; }
 
-            // The @ is required: without it `/approve looks good to me` would add "looks" to the
-            // allowlist. Anchored to line start so QUOTING the command doesn't approve anyone —
-            // pr-gate's comment contains the literal `/approve @author`, and a maintainer replying
-            // with that text quoted (`> ...`) must not trigger an approval.
-            const m = context.payload.comment.body.match(/^\/approve\s+@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)(?:\s|$)/m);
-            if (!m) { core.info('no username after /approve'); return; }
-            const user = m[1];
+            // Commenting is feedback, not the approval itself — a locked issue must not turn a
+            // successful approval into a red run. Failures land in the log instead.
             const issue_number = context.issue.number;
+            const say = async (body) => {
+              try { await github.rest.issues.createComment({ owner, repo, issue_number, body }); }
+              catch (e) { core.warning(`could not comment on the issue (${e.message}): ${body}`); }
+            };
+
+            // Fenced code is stripped first, so a pasted log excerpt or a "don't run this yet"
+            // example never approves anyone. The @ is required: without it `/approve looks good to
+            // me` would add "looks" to the allowlist. Anchored to line start so QUOTING the command
+            // doesn't approve anyone — pr-gate's comment contains the literal `/approve @author`,
+            // and a maintainer replying with that text quoted (`> ...`) must not trigger an approval.
+            const body = context.payload.comment.body.replace(/(```|~~~)[\s\S]*?\1/g, '');
+            const m = body.match(/^\/approve\s+@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)(?:\s|$)/m);
+            if (!m) {
+              // A line-start `/approve` with a malformed handle is a maintainer who believes they
+              // approved someone; say so, or the contributor's next PR silently hits the gate.
+              if (/^\/approve\b/m.test(body)) await say('No user was approved: write the command as `/approve @their-github-handle` on its own line.');
+              return;
+            }
+            const user = m[1];
 
             // The commit lands on the `allowlist` branch, deliberately outside main's ruleset:
             // GitHub refuses the Actions app as a bypass actor by design, so keeping the list off
@@ -46,17 +60,13 @@ jobs:
             // rule on every branch. Two failure modes are handled: a sha race with a concurrent
             // approval (refetch and retry once), and a permission/missing-branch rejection — fail
             // LOUD on the issue, because a silent workflow error looks like a successful approval.
-            // Commenting is feedback, not the approval itself — a locked issue must not turn a
-            // successful approval into a red run. Failures land in the log instead.
-            const say = async (body) => {
-              try { await github.rest.issues.createComment({ owner, repo, issue_number, body }); }
-              catch (e) { core.warning(`could not comment on the issue (${e.message}): ${body}`); }
-            };
             const path = '.github/APPROVED_CONTRIBUTORS';
             const branch = 'allowlist';
             let committed = false, lastErr;
             for (let attempt = 0; attempt < 2 && !committed; attempt++) {
-              const { data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+              let file;
+              try { ({ data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch })); }
+              catch (e) { lastErr = e; break; }
               const current = Buffer.from(file.content, 'base64').toString('utf8');
               const existing = current.split('\n').map(s => s.trim().toLowerCase()).filter(s => s && !s.startsWith('#'));
               if (existing.includes(user.toLowerCase())) {

@@ -33,7 +33,7 @@ jobs:
             No activity on this issue for 30 days, so it's now marked **stale** and will close in 7 days.
             Comment to keep it open — a maintainer can add the **keep-open** label to exempt it permanently.
           close-issue-message: >
-            Closing after no activity. Comment to reopen — happy to pick it back up if it's still relevant.
+            Closing after no activity. Comment if it's still relevant and a maintainer will reopen it.
           days-before-pr-stale: -1
           days-before-pr-close: -1
           exempt-pr-labels: keep-open

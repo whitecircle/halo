@@ -35,7 +35,7 @@ Guidance for Claude Code and other AI agents working in this repository. These r
 
 ### Docs & markdown
 - **Docs first.** Check `agent-docs/` (the detailed AI reference) before searching the code; only read `src/` directly if the docs don't answer it. `human-docs/` is the concise human guide.
-- **Markdown only in `agent-docs/`** (detailed reference), **`human-docs/`** (human guide) **and `skills/`** (agent skills; `.claude/skills` and `.agents/skills` are symlinks to it for Claude Code and Codex discovery). Root GitHub-convention files (`README.md`, `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`, `.github/**`) are the exception. Never create `.md` elsewhere; scratch/design notes go to `/tmp`, not the repo.
+- **Markdown only in `agent-docs/`** (detailed reference), **`human-docs/`** (human guide) **and `skills/`** (agent skills; `.claude/skills` and `.agents/skills` are symlinks to it for Claude Code and Codex discovery). Root GitHub-convention files (`README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `AGENTS.md`, `CLAUDE.md`, `.github/**`) are the exception. Never create `.md` elsewhere; scratch/design notes go to `/tmp`, not the repo.
 - **Keep docs current.** A significant `src/` change updates its owning doc page (ownership map: `skills/docs/docs-ownership.md`). Docs follow the lean **present-state** style charter (`skills/docs/style.md`, via the `docs` skill): load-bearing facts only, no changelog/story-telling, cite sparingly. All doc trees are plain GitHub-rendered markdown (no build); run `./scripts/docs/check_links.sh` (or `make docs`) after edits to keep relative links valid.
 
 ### Process

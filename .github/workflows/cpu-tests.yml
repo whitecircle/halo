@@ -8,7 +8,9 @@ name: cpu-tests
 # Only `workflow_dispatch` is active. The `push`/`pull_request` triggers below need the
 # `[self-hosted, halo]` runner registered — see agent-docs/infrastructure/ci.md. This tier has no
 # label gate, so before enabling `pull_request`, set Settings → Actions → General to require run
-# approval for all outside collaborators: that approval is the maintainer opt-in for this tier.
+# approval for all outside collaborators: that approval is the maintainer opt-in for this tier, and
+# it covers the PR's own edits to this file and the Makefile — a `pull_request` run executes the
+# PR's copies.
 on:
   workflow_dispatch:
   # push:

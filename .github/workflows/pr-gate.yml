@@ -74,6 +74,9 @@ jobs:
               ``,
               `Details: [CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/${branch}/CONTRIBUTING.md). Thanks for understanding!`,
             ].join('\n');
-            await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            // The close is the enforcement and the comment the courtesy: the comment must not be
+            // able to leave the PR open by failing first.
             await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' });
+            try { await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body }); }
+            catch (e) { core.warning(`closed PR #${pr.number} but could not comment: ${e.message}`); }
             core.info(`gated PR #${pr.number} from ${author}`);
