@@ -14,6 +14,7 @@ import pytest
 import torch
 from transformers.integrations import hub_kernels
 
+from src.models.patches import kernel_dispatch
 from src.models.patches.kernel_dispatch import ensure_device_aware_kernel_dispatch
 from tests.common.utils import REPO_ROOT
 
@@ -74,6 +75,59 @@ def test_cpu_delta_rule_restarts_recurrent_state_per_document():
     assert out[0, :, 0].tolist() == [1.0, 2.0, 3.0, 1.0, 2.0, 3.0], "state leaked across the boundary"
     leaked, _ = probe(v, v, v, g=v, beta=v)
     assert leaked[0, :, 0].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+
+def _closure_functions(fn, depth=0, seen=None):
+    seen = seen if seen is not None else set()
+    if id(fn) in seen or depth > 6 or not callable(fn):
+        return
+    seen.add(id(fn))
+    yield fn
+    for cell in getattr(fn, "__closure__", None) or []:
+        value = getattr(cell, "cell_contents", None)
+        if callable(value):
+            yield from _closure_functions(value, depth + 1, seen)
+
+
+def test_cuda_capture_resolves_a_submodule_only_package_kernel():
+    """``fla`` exports nothing at root, so upstream's getattr walk finds no kernel on a bare package
+    import and silently captures the torch body — every CUDA forward then runs the naive scan at
+    ~10x the step time. The shim pre-imports the mapped chain; the decoration must capture fla's
+    real kernel."""
+    pytest.importorskip("fla")
+    ensure_device_aware_kernel_dispatch()
+
+    @hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
+    def probe(query, key, value, **kwargs):
+        return value, None
+
+    captured = {
+        f"{fn.__module__}.{fn.__qualname__}"
+        for fn in _closure_functions(probe)
+        if getattr(fn, "__module__", "").startswith("fla.")
+    }
+    assert any("chunk_gated_delta_rule" in name for name in captured), (
+        f"decoration captured no fla kernel (closure held {captured or 'only torch functions'}) — "
+        "CUDA forwards would silently run the torch fallback"
+    )
+
+
+def test_torch_capture_with_the_package_installed_warns(caplog, monkeypatch):
+    """A capture that lands on torch while the package is importable is a silent 10x — it must warn."""
+    pytest.importorskip("fla")
+    ensure_device_aware_kernel_dispatch()
+    monkeypatch.setitem(hub_kernels._KERNELS_INTERNAL_PATH_MAPPINGS, "chunk_gated_delta_rule", "ops.no_such_submodule")
+    monkeypatch.setattr(kernel_dispatch, "_WARNED_TORCH_CAPTURES", set())
+
+    with caplog.at_level("WARNING"):
+
+        @hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
+        def probe(query, key, value, **kwargs):
+            return value, None
+
+    assert any("captured the torch fallback" in r.message for r in caplog.records), (
+        "no warning for a torch capture with the package installed — the fallback is silent again"
+    )
 
 
 def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
