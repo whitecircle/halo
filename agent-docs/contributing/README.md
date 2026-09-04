@@ -306,11 +306,11 @@ Update the owning doc page in the same PR when you change `src/` (`skills/docs/d
 follow the anti-slop charter carried by the `/docs` skill: American English, active voice, short
 sentences, tables only for real matrices, no marketing register.
 
-Two `docs.yml` jobs block a merge, and `make docs` runs only the first: the relative-link check
-over `agent-docs/`, `human-docs/`, `skills/` and the root markdown, and a `diagrams` job that
-re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the committed PNGs
+`docs.yml` runs three jobs, and `make docs` runs only the first: the relative-link check over
+`agent-docs/`, `human-docs/`, `skills/` and the root markdown, which blocks a merge; a `diagrams` job
+that re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the committed PNGs
 under `agent-docs/assets/` — touch a generator and you owe `make diagrams` plus the regenerated figure in
-the same commit. `markdownlint` runs non-blocking.
+the same commit; and `markdownlint`. The last two are advisory.
 
 ## Proof of Value
 

@@ -44,8 +44,8 @@ Once your PR path is approved, the normal bar applies (full detail in
 [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md)):
 
 - **Everything runs in the Docker image.** The host has no usable Python; use the `make` targets
-  (`make build-blackwell`, `make install`, `make test-cpu`); only `make lint` / `make format` (`uvx ruff`)
-  and `make docs` (a pure link check) run on the host.
+  (`make build-blackwell`, `make install`, `make test-cpu`); only `make lint` / `make format` /
+  `make precommit` (`uvx ruff`) and `make docs` (a pure link check) run on the host.
 - **Pass the gates.** `make lint`, `make format`, `make test-cpu` (and `make test-gpu-core` for
   GPU-affecting changes), `make docs`.
 - **Tests ship with behavior — and must not be slop.** A test must *fail when the behavior breaks*; no

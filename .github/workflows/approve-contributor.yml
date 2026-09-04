@@ -38,12 +38,13 @@ jobs:
               catch (e) { core.warning(`could not comment on the issue (${e.message}): ${body}`); }
             };
 
-            // Fenced code is stripped first, so a pasted log excerpt or a "don't run this yet"
-            // example never approves anyone. The @ is required: without it `/approve looks good to
-            // me` would add "looks" to the allowlist. Anchored to line start so QUOTING the command
-            // doesn't approve anyone — pr-gate's comment contains the literal `/approve @author`,
-            // and a maintainer replying with that text quoted (`> ...`) must not trigger an approval.
-            const body = context.payload.comment.body.replace(/(```|~~~)[\s\S]*?\1/g, '');
+            // Fenced code is stripped first (an unclosed fence runs to the end), so a pasted log
+            // excerpt or a "don't run this yet" example never approves anyone. The @ is required:
+            // without it `/approve looks good to me` would add "looks" to the allowlist. Anchored to
+            // line start so QUOTING the command doesn't approve anyone — pr-gate's comment contains
+            // the literal `/approve @author`, and a maintainer replying with that text quoted
+            // (`> ...`) must not trigger an approval.
+            const body = context.payload.comment.body.replace(/(```|~~~)[\s\S]*?(?:\1|$)/g, '');
             const m = body.match(/^\/approve\s+@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)(?:\s|$)/m);
             if (!m) {
               // A line-start `/approve` with a malformed handle is a maintainer who believes they
