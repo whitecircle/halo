@@ -29,6 +29,7 @@ from tqdm import tqdm
 from scripts.inference._common import reject_empty_results, run_async_cli
 from scripts.inference.reward_model._common import (
     OverlongConversationError,
+    TruncatedGenerationError,
     boot_scoring_run,
     build_generation_parser,
     build_output_path,
@@ -102,6 +103,11 @@ async def generate_and_evaluate(
         except OverlongConversationError as e:
             stats["overlong"] += 1
             print(f"Over --rm_max_seq_len for {row.get(args.id_field, '?')}: row dropped ({e})")
+        except TruncatedGenerationError as e:
+            # The first turn of a follow-up row was cut, so the scored turn would have conditioned on
+            # a fragment: a truncation like the final-turn cut above, not a generation failure.
+            stats["truncated"] += 1
+            print(f"Truncated at --max_gen_tokens for {row.get(args.id_field, '?')}: {e}")
         except ValueError:
             # The single-output shape guard (score_conversations) is a deterministic
             # misconfiguration, so re-raise and let the run abort rather than scoring nothing.

@@ -581,6 +581,18 @@ def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():
     AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_thinking_tokens=4095)  # no raise
 
 
+def test_async_config_rejects_a_negative_thinking_budget():
+    """A negative budget is below every turn cap, so the headroom check alone would pass it through to
+    the engine as a nonsense ``thinking_token_budget``; ``null`` is the spelling for unbounded reasoning."""
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be >= 0"):
+        AsyncTrainingConfig(rollout_max_thinking_tokens=-1)
+    cfg = AsyncTrainingConfig()
+    cfg.rollout_max_thinking_tokens = -1
+    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be >= 0"):
+        cfg.__post_override__({"rollout_max_thinking_tokens"})
+
+
 def test_async_config_range_guards_survive_a_cli_override():
     """``__post_init__`` never re-runs under ``--key=value``; the guards live in ``_validate_ranges``
     so the override path re-runs them whole."""
