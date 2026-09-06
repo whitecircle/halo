@@ -52,13 +52,14 @@ def build_lce_forward(logit_scale_attr: str | None = None, router_aux_loss_in_he
         # here would report that a family whose own head has no such parameter honors the flag, moving
         # GLM-4.7-Flash off `bias_update` onto an `aux_loss` its config carries no coefficient for,
         # leaving it with no router balancing.
-        output_router_logits = kwargs.pop("output_router_logits", None)
+        explicit_router_logits = kwargs.pop("output_router_logits", None)
 
         # Checked before the backbone runs: a loss-only eval forced onto the fused path with nothing
         # to score is a caller error, and detecting it afterwards wastes the forward.
         if skip_logits and labels is None and shift_labels is None:
             raise ValueError("skip_logits is True, but labels and shift_labels are None")
 
+        output_router_logits = explicit_router_logits
         if output_router_logits is None:
             output_router_logits = get_config_field(self.config, "output_router_logits", False)
         if output_router_logits and router_aux_loss_in_head:
@@ -69,7 +70,11 @@ def build_lce_forward(logit_scale_attr: str | None = None, router_aux_loss_in_he
                 f"that term to the objective. Use moe_balancing: bias_update (or none), or set "
                 f"fused_linear_cross_entropy: false in liger_kernel_config."
             )
-        if output_router_logits:
+        # The backbone resolves an omitted flag from the config, so an explicit value — a caller's
+        # False over a config True included — is forwarded as the family's own head forwards it.
+        if explicit_router_logits is not None:
+            kwargs["output_router_logits"] = explicit_router_logits
+        elif output_router_logits:
             kwargs["output_router_logits"] = True
 
         outputs = self.model(

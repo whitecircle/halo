@@ -570,6 +570,14 @@ def test_the_fused_head_forwards_the_router_flag_where_the_head_adds_no_aux_loss
         "laguna",
     }
 
+    # A caller's explicit False over a config True is the family head's own behaviour: no refusal,
+    # and the backbone — which would otherwise resolve the omitted flag from the config — gets it.
+    head.config.output_router_logits = True
+    build_lce_forward(None, router_aux_loss_in_head=True)(
+        head, input_ids=torch.zeros(1, 2, dtype=torch.long), output_router_logits=False
+    )
+    assert calls[-1].get("output_router_logits") is False, "the explicit False never reached the backbone"
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

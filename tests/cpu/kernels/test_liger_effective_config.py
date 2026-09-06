@@ -21,6 +21,7 @@ from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 
+import src.distributed.expert_parallel.layers.roster  # noqa: F401 — the EP predicates read a filled registry
 from src.kernels.liger import orchestrator
 from src.kernels.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
