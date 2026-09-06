@@ -398,7 +398,8 @@ other containers NCCL otherwise enumerates them too, and a veth carries no host-
 first collective after the sync hangs) or disappears when its container exits (`Call to bind failed:
 No such device` on the server, `400` on the update). Setting the flags only on the server is not
 enough — the group still forms (a TCP rendezvous) and the first broadcast hangs, because the trainer
-still reaches for CUDA-IPC.
+still reaches for CUDA-IPC. Both compose files pass `NCCL_SOCKET_IFNAME=^docker,veth` by default
+(the vLLM file to its training service too); override it to pin one NIC on a multi-homed host.
 
 The cost is process-global: a multi-rank trainer
 loses NVLink between its own ranks for the whole job (the reason for

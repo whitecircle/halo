@@ -24,6 +24,8 @@ services:
       # The bundled aws-ofi plugin outranks the socket transport and wedges group formation on a
       # host with no OFI fabric.
       - NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-none}
+      # Keep the socket transport off Docker's bridge and per-container veth pairs.
+      - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}
     deploy:
       resources:
         reservations:
