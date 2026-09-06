@@ -11,6 +11,8 @@ from pydantic import BaseModel
 # The OpenAI-wire finish_reason for a generation cut off at its token cap. Both the length-cutoff
 # recovery and the truncated-turn flag compare against this constant.
 FINISH_REASON_LENGTH = "length"
+# vLLM's finish reason for a generation the engine aborted (a pause in abort mode, an engine restart).
+FINISH_REASON_ABORT = "abort"
 
 
 class OpenAIResponse(BaseModel):

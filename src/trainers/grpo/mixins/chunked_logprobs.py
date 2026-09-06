@@ -1,23 +1,18 @@
 """Chunked per-token log-probs for GRPO, without materializing the full ``[B, T, vocab]`` logits.
 
 TRL computes log-probs from full logits, which is the binding memory peak for large-vocab models.
-This computes the same log-probs from the backbone's ``last_hidden_state`` via a vocab-chunked matmul
-and online softmax (Liger's ``_ChunkedSelectiveLogProbFunction``) with a recompute backward, bounding
-peak memory by chunk size. TRL's ``_compute_loss`` runs unchanged on the resulting ``(B, T)``
-log-probs. Works under FSDP2 (``lm_head`` gathered differentiably with ``full_tensor``), ep1/EP
-(``lm_head`` dense), and TP (a replicated head; a gathered-output TP plan takes the full-logits path
-with the head's output cloned — ``_writable_logits``).
+This computes the same log-probs from the backbone's ``last_hidden_state`` via a dual-chunked
+(sequence × vocab) matmul and online softmax with a recompute backward, bounding peak memory by the
+tile size. TRL's ``_compute_loss`` runs unchanged on the resulting ``(B, T)`` log-probs. Works under
+FSDP2 (``lm_head`` gathered differentiably with ``full_tensor``), ep1/EP (``lm_head`` dense), and TP
+(a replicated head; a gathered-output TP plan takes the full-logits path with the head's output
+cloned — ``_writable_logits``).
 """
 
 import inspect
 from contextlib import contextmanager
 
 import torch
-from liger_kernel.chunked_loss.fused_linear_ppo import (
-    _SELECTIVE_LOGPROB_SEQ_CHUNK_SIZE,
-    _ChunkedSelectiveLogProbFunction,
-    _selective_logprob_backward,
-)
 from trl import GRPOTrainer
 from trl.extras.profiling import profiling_decorator
 from trl.models.utils import _ForwardRedirection
@@ -28,12 +23,15 @@ from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.models.loading.config_levels import text_config
 from src.models.modality import config_declares_multimodality
 
-# Vocab tile for the chunked matmul / online softmax, independent of full vocab size.
-_VOCAB_CHUNK = 4096
+# Tiles of the chunked matmul / online softmax. The working set is a few [seq, vocab] fp32 tiles
+# (4096 × 16384 × 4 B = 256 MiB each); the loop runs (T / seq) × (V / vocab) iterations, so tiles
+# sized well below this leave the sweep launch-bound on large-vocabulary models.
+_SEQ_CHUNK = 4096
+_VOCAB_CHUNK = 16384
 
 
 def dense_row_spans(attention_mask: torch.Tensor) -> list[tuple[int, int]]:
-    """Real-token span ``[lo, hi)`` per row of a padded batch, as forwarded by the FA4 dense path.
+    """Real-token span ``[lo, hi)`` per row of a padded batch, as forwarded by the dense per-row path.
 
     Used by both ``_dense_last_hidden_state`` and routing-replay capture/arm trimming: the trimmed
     widths decide how many routing tokens each per-row forward produces and consumes, so both sides
@@ -51,7 +49,7 @@ def dense_row_spans(attention_mask: torch.Tensor) -> list[tuple[int, int]]:
             # A hole in the mask shifts every logprob after it (the dense path tail-aligns).
             raise ValueError(
                 f"dense_row_spans: row {i} has a non-contiguous attention mask "
-                f"({len(real)} real tokens across span [{lo}, {hi})); the FA4 per-row dense "
+                f"({len(real)} real tokens across span [{lo}, {hi})); the per-row dense "
                 f"logprob path requires one contiguous real-token span per row."
             )
         if hi - lo < 2:
@@ -70,6 +68,24 @@ def uses_fa4(model) -> bool:
     return impl == "flash_attention_4"
 
 
+def rows_forward_densely(model, batch_size: int) -> bool:
+    """Whether the chunked forward trims each row to its real span, one backbone call per row.
+
+    Mandatory under FA4 (exact RoPE positions and rank-uniform collective counts — see
+    ``_dense_last_hidden_state``). Taken on every attention path when rows are forwarded singly anyway
+    (``batch_size == 1``): a padded row otherwise costs its rank's widest prompt+completion in every
+    layer — quadratic in the full-attention layers — and the head sweep runs over the padded
+    completion width, while the trimmed row also takes SDPA's mask-free causal kernel.
+    """
+    return uses_fa4(model) or batch_size == 1
+
+
+def _pad_completion_window(values: torch.Tensor, logits_to_keep: int) -> torch.Tensor:
+    """Right-pad a ``(1, n)`` per-token tensor to the ``(1, logits_to_keep)`` completion window with
+    zeros: the padded positions are masked downstream and must only stay finite."""
+    return torch.nn.functional.pad(values, (0, logits_to_keep - values.size(1)))
+
+
 def chunked_selective_log_softmax(
     hidden: torch.Tensor,
     weight: torch.Tensor,
@@ -84,7 +100,7 @@ def chunked_selective_log_softmax(
     division.
     """
     b, t, h = hidden.shape
-    logps = _ChunkedSelectiveLogProbFunction.apply(
+    logps, _entropy = _ChunkedSelectiveLogProbEntropyFunction.apply(
         hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, _VOCAB_CHUNK
     )
     return logps.reshape(b, t)
@@ -99,7 +115,7 @@ def _selective_logprob_entropy_forward(
     temperature: float,
     vocab_chunk_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Liger's ``_selective_logprob_forward`` extended with an entropy accumulator in the same sweep.
+    """Dual-chunked (sequence × vocab) selective log-softmax with an entropy accumulator in the same sweep.
 
     The entropy needs only ``u = Σ exp(z−m)·z`` on top of the online-softmax accumulators the logprob
     pass already tracks, so fusing them avoids a second full-vocab matmul per gradient microbatch.
@@ -109,7 +125,7 @@ def _selective_logprob_entropy_forward(
     n_rows, _ = hidden.shape
     vocab_size, _ = weight.shape
     inv_t = 1.0 / temperature
-    seq_chunk_size = _SELECTIVE_LOGPROB_SEQ_CHUNK_SIZE
+    seq_chunk_size = _SEQ_CHUNK
 
     logprobs = torch.empty((n_rows,), device=device, dtype=torch.float32)
     log_z = torch.empty((n_rows,), device=device, dtype=torch.float32)
@@ -156,6 +172,53 @@ def _selective_logprob_entropy_forward(
     return logprobs, log_z, entropy
 
 
+def _selective_logprob_backward(hidden, weight, targets, bias, log_z, grad_logprobs, temperature, vocab_chunk_size):
+    """Dual-chunked backward: each logits tile is recomputed from the saved ``log_z`` instead of a
+    stored ``[T, V]`` plane. Both gradients accumulate in fp32; the row activations are upcast once per
+    sequence tile rather than once per vocab tile."""
+    inv_t = 1.0 / temperature
+    n_rows, _ = hidden.shape
+    vocab_size = weight.shape[0]
+    has_bias = bias is not None
+
+    grad_hidden = torch.zeros(hidden.shape, device=hidden.device, dtype=torch.float32)
+    grad_weight = torch.zeros(weight.shape, device=weight.device, dtype=torch.float32)
+    grad_bias = torch.zeros((vocab_size,), device=weight.device, dtype=torch.float32) if has_bias else None
+    grad_logprobs = grad_logprobs.to(torch.float32)
+
+    for seq_start in range(0, n_rows, _SEQ_CHUNK):
+        seq_end = min(seq_start + _SEQ_CHUNK, n_rows)
+        hidden_chunk = hidden[seq_start:seq_end]
+        hidden_chunk_f32 = hidden_chunk.float()
+        targets_chunk = targets[seq_start:seq_end]
+        grad_chunk = grad_logprobs[seq_start:seq_end]
+        logz_chunk = log_z[seq_start:seq_end]
+        row_idx = torch.arange(seq_end - seq_start, device=hidden.device)
+
+        for vocab_start in range(0, vocab_size, vocab_chunk_size):
+            vocab_end = min(vocab_start + vocab_chunk_size, vocab_size)
+            weight_chunk = weight[vocab_start:vocab_end]
+            logits_chunk = (hidden_chunk @ weight_chunk.to(hidden.dtype).t()).float()
+            if has_bias:
+                logits_chunk.add_(bias[vocab_start:vocab_end].to(torch.float32))
+            logits_chunk.mul_(inv_t)
+
+            probs = torch.exp(logits_chunk - logz_chunk.unsqueeze(-1))
+            grad_logits = (-grad_chunk).unsqueeze(-1) * probs
+
+            in_chunk = (targets_chunk >= vocab_start) & (targets_chunk < vocab_end)
+            local_idx = torch.clamp(targets_chunk - vocab_start, 0, vocab_end - vocab_start - 1)
+            grad_logits[row_idx, local_idx] += grad_chunk * in_chunk
+            grad_logits.mul_(inv_t)
+
+            grad_hidden[seq_start:seq_end].add_(grad_logits @ weight_chunk.float())
+            grad_weight[vocab_start:vocab_end].add_(grad_logits.t() @ hidden_chunk_f32)
+            if has_bias:
+                grad_bias[vocab_start:vocab_end].add_(grad_logits.sum(dim=0))
+
+    return grad_hidden, grad_weight, grad_bias
+
+
 def _tp_gathered_output_head(model) -> torch.nn.Module | None:
     """The output embedding when a TP plan shards it, else ``None``.
 
@@ -172,11 +235,11 @@ def _tp_gathered_output_head(model) -> torch.nn.Module | None:
 
 
 class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
-    """Selective logprob and entropy in one vocab sweep; backward is Liger's recompute backward.
+    """Selective logprob and entropy in one vocab sweep; backward is the dual-chunked recompute above.
 
     The entropy output is a detached diagnostic (``mark_non_differentiable``); only the logprobs
-    carry gradient, through the same saved tensors and backward as Liger's
-    ``_ChunkedSelectiveLogProbFunction``.
+    carry gradient. The plain (entropy-free) entry shares this Function, so both paths run one
+    backward.
     """
 
     @staticmethod
@@ -299,26 +362,34 @@ class ChunkedLogprobsCore:
         self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
         weight = materialize_dtensor(lm_head.weight)
         bias = materialize_dtensor(getattr(lm_head, "bias", None))
-        dense = uses_fa4(unwrapped_model)
+        dense = rows_forward_densely(unwrapped_model, batch_size)
+
+        def sweep(hidden, completion_ids):
+            if compute_entropy:
+                return chunked_selective_log_softmax_with_entropy(
+                    hidden, weight, completion_ids, bias, self.temperature
+                )
+            return chunked_selective_log_softmax(hidden, weight, completion_ids, bias, self.temperature), None
 
         all_logps, all_entropies = [], []
         for start in range(0, input_ids.size(0), batch_size):
             ids = input_ids[start : start + batch_size]
             mask = attention_mask[start : start + batch_size]
-            hidden = (
-                self._dense_last_hidden_state(unwrapped_model, ids, mask, logits_to_keep)
-                if dense
-                else self._backbone_hidden_state(unwrapped_model, ids, mask, logits_to_keep)
-            )  # (b, ltk, H)
             completion_ids = ids[:, -logits_to_keep:]
-            if compute_entropy:
-                logps, entropies = chunked_selective_log_softmax_with_entropy(
-                    hidden, weight, completion_ids, bias, self.temperature
-                )
+            if not dense:
+                hidden = self._backbone_hidden_state(unwrapped_model, ids, mask, logits_to_keep)  # (b, ltk, H)
+                logps, entropies = sweep(hidden, completion_ids)
+                all_logps.append(logps)
                 all_entropies.append(entropies)
-            else:
-                logps = chunked_selective_log_softmax(hidden, weight, completion_ids, bias, self.temperature)
-            all_logps.append(logps)
+                continue
+            # Dense rows: the sweep covers each row's real completion tokens only (the window's zero
+            # tail is masked downstream), so the head pays the row's length, not the padded width.
+            hidden, n_comps = self._dense_last_hidden_state(unwrapped_model, ids, mask, logits_to_keep)
+            for row, n_comp in enumerate(n_comps):
+                width = max(n_comp, 1)
+                logps, entropies = sweep(hidden[row : row + 1, :width], completion_ids[row : row + 1, :width])
+                all_logps.append(_pad_completion_window(logps, logits_to_keep))
+                all_entropies.append(_pad_completion_window(entropies, logits_to_keep) if compute_entropy else None)
 
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
@@ -336,13 +407,15 @@ class ChunkedLogprobsCore:
         return self._get_last_hidden_state(unwrapped_model, input_ids, attention_mask, logits_to_keep)
 
     def _dense_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Per-row, unpadded (dense) backbone forward -> completion hidden ``(rows, logits_to_keep, H)``.
+        """Per-row, unpadded (dense) backbone forward -> completion hidden ``(rows, logits_to_keep, H)``
+        plus each row's real completion-token count.
 
         Forwarding each row trimmed to its real span with ``attention_mask=None`` keeps FA4 on its
         dense kernel and restores RoPE positions ``[0, len)``; the result is bit-identical. One
         forward per row keeps the FSDP/EP collective count in step. The detour is motivated by those
         position and collective invariants, not by compile cost: FA4's varlen kernel JIT-compiles
-        once per head-config and is then length-agnostic.
+        once per head-config and is then length-agnostic. Rows forwarded singly on the other
+        attention paths take it for the cost alone: see ``rows_forward_densely``.
         """
         spans = dense_row_spans(attention_mask)
         # Every row's completion count in one D2H: read inside the loop this is another sync per row.
@@ -360,7 +433,7 @@ class ChunkedLogprobsCore:
             out = hidden.new_zeros(1, logits_to_keep, hidden.size(-1))
             out[:, :n_keep] = hidden[:, -n_keep:]
             outputs.append(out)
-        return torch.cat(outputs, dim=0)
+        return torch.cat(outputs, dim=0), [int(n) for n in n_comps]
 
 
 class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):

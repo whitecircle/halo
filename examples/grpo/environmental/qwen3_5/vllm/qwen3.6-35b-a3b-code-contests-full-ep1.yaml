@@ -5,19 +5,22 @@
 #   this config sends with a 400 on every rollout).
 #   (hermes does not parse Qwen3.5/3.6 XML tool calls, so rollouts return no tool_calls).
 # vLLM only: rollout_backend sglang is rejected for this family (no fused expert gather).
-# Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
-#   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+# Launch: start 2 vLLM servers, TP=1 each, on GPUs 6 and 7 with --weight-transfer-config '{"backend":"nccl"}', then
+#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
+#   Six trainer ranks, not four: one ~100k-token trajectory peaks near 200 GB of activations on its
+#   rank (batch 1, per-layer GC), and at DP=4 the ~70 GB of ZeRO-3 param/grad/optimizer shards leave
+#   no margin beside it on a 288 GB GPU; DP=6 shards them to ~47 GB.
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
-model_init_kwargs:
-  output_router_logits: true
-  router_aux_loss_coef: 0.001
+# No output_router_logits: the aux loss is inert under the policy-gradient objective (the trainer warns),
+# and transformers still runs the load-balancing loss whenever the flag is on — its one-hot expansion is
+# layers x tokens x top_k x experts int64, tens of GB on a 100k-token trajectory (moe_balancing: none below).
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
 
-# --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-3) ---
-expert_parallel_size: 1            # pure DP; vLLM holds the other 4 GPUs
+# --- Parallelism (6 train GPUs: pure data-parallel, DP=6, ZeRO-3) ---
+expert_parallel_size: 1            # pure DP; vLLM holds the other 2 GPUs
 fsdp_reshard_after_forward: true   # ZeRO-3: max activation headroom for long full-FT trajectories
 
 # --- Full fine-tune (no PEFT) ---
@@ -65,7 +68,11 @@ rollout_server_configs:
 - url: "http://localhost:8001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 300.0        # per HTTP call
+request_timeout: 1200.0       # per HTTP call; this family decodes at ~25-50 tok/s per sequence on the
+                              # triton-MoE path (TP=1, ~40 concurrent), so a high-effort turn can need
+                              # most of this budget
+max_retries: 1                # a timeout re-runs the whole episode; 2 attempts x 1200 s stays under the
+                              # 80%-of-watchdog retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 
 # --- Rollout Generation ---
@@ -125,8 +132,8 @@ mask_truncated_completions: false  # `truncated` covers only the max_turns overf
 # --- Training ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 4
-gradient_accumulation_steps: 24 # dp 4 x 24 = 96 episodes/step; per-rank value must divide by num_generations
-steps_per_generation: 24        # must equal gradient_accumulation_steps (pin explicitly)
+gradient_accumulation_steps: 16 # dp 6 x 16 = 96 episodes/step; per-rank value must divide by num_generations
+steps_per_generation: 16        # must equal gradient_accumulation_steps (pin explicitly)
 max_steps: 300              # the cosine horizon matches the run's useful length, not the dataset's: a
                             # full-epoch horizon would decay so slowly that the whole run trains near
                             # peak LR
@@ -141,7 +148,7 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: false      # no EP → non-reentrant GC
+  use_reentrant: false      # overridden to True at runtime: the ep1 grouped-GEMM expert layer counts as EP (the trainer warns)
 fp32_grad_reduce: true
 
 # --- Output ---

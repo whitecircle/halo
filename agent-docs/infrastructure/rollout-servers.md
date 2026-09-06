@@ -72,10 +72,13 @@ bound on the *trainer* host
 **The quiesce spans the streaming, not just the final broadcast.** The update opens with the first
 full chunk — ~1 GB into the gather — and closes when the last one lands, so a server stops serving
 for as long as the gather runs: minutes at 397B, and for every server at once outside the
-[rolling path](../training-methods/grpo/environmental-grpo.md#single-server-vs-multi-server). vLLM
-queues requests behind its pause; SGLang's is `/pause_generation {"mode": "abort"}` (its post-update
-cache flush asserts an idle scheduler), so in-flight generations — prefetched rollouts included —
-are dropped across that window.
+[rolling path](../training-methods/grpo/environmental-grpo.md#single-server-vs-multi-server). The
+client pauses vLLM with `/pause?mode=keep`: in-flight generations — the prefetched rollout round —
+freeze and resume under the new weights on `/resume`, the one-step staleness the sampling-logprob IS
+ratio corrects. vLLM's own default is `abort`, which hands every in-flight request back as a fragment
+with an ordinary stop reason; once the training pass is shorter than a rollout round that is most
+long turns, every step. SGLang's is `/pause_generation {"mode": "abort"}` (its post-update cache
+flush asserts an idle scheduler), so there in-flight generations are dropped across that window.
 
 **An interrupted mid-stream sync leaves that server unusable.** The engine then holds neither the
 old policy nor the new one, and vLLM's layerwise reload materializes a layer whose tensors straddled

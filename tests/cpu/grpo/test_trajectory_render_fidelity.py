@@ -134,6 +134,7 @@ def _stub(tok):
         model=types.SimpleNamespace(config=types.SimpleNamespace(max_position_embeddings=131072)),
     )
     stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
+    stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
     stub._render_messages_to_ids = types.MethodType(Trainer._render_messages_to_ids, stub)
     stub._context_limit = types.MethodType(Trainer._context_limit, stub)
     stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
@@ -169,9 +170,29 @@ def _renders(stub, messages):
 
 
 def _row(stub, messages):
+    _result, row = _row_with_result(stub, messages)
+    return row
+
+
+def _row_with_result(stub, messages):
     result = RolloutResult(prompt="task", trajectory=_trajectory(messages))
     prompt_ids, completion_ids, loss_mask = stub._tokenize_trajectory(result)
-    return prompt_ids.tolist(), completion_ids.tolist(), loss_mask.tolist()
+    return result, (prompt_ids.tolist(), completion_ids.tolist(), loss_mask.tolist())
+
+
+def _assert_dropped_not_guessed(stub, result, row, caplog, *needles):
+    """The contract for a trajectory the template cannot decompose: no guessed render is trained (one
+    fully masked row), the episode is invalidated so it leaves the group baseline, the cause is logged
+    with its name — and nothing is recorded as the batch error that fails every rank."""
+    _prompt, completion, mask = row
+    assert stub._batch_build_error is None, "a data-local template failure must not fail the run"
+    assert result.trajectory.episode_invalid
+    assert sum(mask) == 0, "an unlocatable trajectory must not contribute gradient"
+    assert len(completion) == 1
+    dropped = [r.message for r in caplog.records if "Dropping an episode" in r.message]
+    assert dropped, "the drop was not logged"
+    for needle in needles:
+        assert needle in dropped[-1], f"{needle!r} missing from: {dropped[-1]}"
 
 
 def _trajectory(messages):
@@ -467,9 +488,9 @@ def test_sampled_token_path_falls_back_to_the_identical_render_row():
     assert prompt + completion == full
 
 
-def test_unlocatable_turn_span_is_reported_not_guessed():
-    """A render that cannot be decomposed surfaces a named error (which
-    ``_raise_batch_error_uniformly`` re-raises on every rank) and yields a fully masked row."""
+def test_unlocatable_turn_span_is_reported_not_guessed(caplog):
+    """A render that cannot be decomposed drops THAT episode (named in the warning) with a fully masked
+    row; it is not guessed from prefix renders and does not fail the run."""
     stub, messages, _ = _case("Qwen/Qwen3-0.6B", "tool")
     real_render = stub._render_messages_to_ids
 
@@ -479,15 +500,13 @@ def test_unlocatable_turn_span_is_reported_not_guessed():
         return ids if len(msgs) == len(messages) and not add_generation_prompt else [0, *ids]
 
     stub._render_messages_to_ids = _unanchorable
-    _, completion, mask = _row(stub, messages)
+    with caplog.at_level("WARNING"):
+        result, row = _row_with_result(stub, messages)
 
-    assert stub._batch_build_error is not None
-    assert "Qwen/Qwen3-0.6B" in stub._batch_build_error
-    assert sum(mask) == 0, "an unlocatable trajectory must not contribute gradient"
-    assert len(completion) == 1
+    _assert_dropped_not_guessed(stub, result, row, caplog, "Qwen/Qwen3-0.6B")
 
 
-def test_consecutive_assistant_turns_are_reported_not_guessed():
+def test_consecutive_assistant_turns_are_reported_not_guessed(caplog):
     """Two assistant messages in a row leave the second turn's context unanchorable on a template that
     rewrites an assistant-final prefix. The boundary between the generation prompt and the policy's own
     tokens is then unknowable — a header's token length is not turn-invariant, since BPE merges its
@@ -503,27 +522,26 @@ def test_consecutive_assistant_turns_are_reported_not_guessed():
         Message.assistant("Second REPLYBBB.", thinking="THINKBBB"),
     ]
 
-    _, completion, mask = _row(stub, messages)
+    with caplog.at_level("WARNING"):
+        result, row = _row_with_result(stub, messages)
 
-    assert stub._batch_build_error is not None, "an unknowable turn boundary must be reported"
-    assert "unknowable" in stub._batch_build_error
-    assert sum(mask) == 0 and len(completion) == 1
+    _assert_dropped_not_guessed(stub, result, row, caplog, "unknowable")
 
 
-def test_template_render_failure_is_reported_not_raised():
-    """A template that rejects the trajectory itself is recorded, not raised: a raw exception on one
-    rank alone leaves its peers in the batch collectives until the NCCL watchdog fires."""
+def test_template_render_failure_is_reported_not_raised(caplog):
+    """A template that rejects the trajectory itself drops the episode, never raises: a raw exception
+    on one rank alone leaves its peers in the batch collectives until the NCCL watchdog fires, and a
+    batch error recorded for one malformed trajectory takes every rank down mid-run."""
     stub, messages, _ = _case("Qwen/Qwen3-0.6B", "chat")
 
     def _explode(*_args, **_kwargs):
         raise TypeError("Can only get item pairs from a mapping")
 
     stub._render_messages_to_ids = _explode
-    _, completion, mask = _row(stub, messages)
+    with caplog.at_level("WARNING"):
+        result, row = _row_with_result(stub, messages)
 
-    assert stub._batch_build_error is not None
-    assert "cannot render this trajectory" in stub._batch_build_error
-    assert sum(mask) == 0 and len(completion) == 1
+    _assert_dropped_not_guessed(stub, result, row, caplog, "cannot render this trajectory")
 
 
 if __name__ == "__main__":

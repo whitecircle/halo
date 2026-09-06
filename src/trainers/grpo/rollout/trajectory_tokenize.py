@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 import torch
 
-from src.environments.base import Trajectory
+from src.environments.base import EPISODE_INVALID_KEY, Trajectory
 from src.environments.episode import RolloutResult
 from src.environments.registry import create_environment
 from src.models.loading.tokenizer_setup import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
@@ -116,6 +116,19 @@ class TrajectoryTokenizeMixin:
             torch.tensor([0], dtype=torch.long),
         )
 
+    def _invalidate_untrainable_episode(self, result: RolloutResult, reason: str) -> None:
+        """Drop one episode whose trajectory the chat template cannot re-render, instead of failing the run.
+
+        The failure is data-local — an engine turn that came back without ids plus a message the
+        template rejects (a malformed tool-call payload) — so it is treated like an env-invalid
+        episode: its rows stay fully masked and ``rollout_valid_mask`` drops it from the group
+        baseline. A systematic cause (every turn without ids) still surfaces through the all-invalid
+        step halt.
+        """
+        logger.warning("Dropping an episode the chat template cannot re-render for training: %s", reason)
+        if result.trajectory is not None:
+            result.trajectory.info[EPISODE_INVALID_KEY] = True
+
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Tokenize a multi-turn trajectory into prompt, completion, and completion-mask tensors.
 
@@ -151,15 +164,16 @@ class TrajectoryTokenizeMixin:
         try:
             spans = locate_assistant_spans(_render, messages, first_assistant_idx)
         except TemplateSpanError as e:
-            # Recorded rather than raised: a per-rank raise would break the batch collectives' order.
-            if self._batch_build_error is None:
-                self._batch_build_error = (
-                    f"Cannot locate the trained turn spans of {self._tokenizer.name_or_path} inside its own "
-                    f"chat-template render ({e}). Training on independently rendered per-turn prefixes would "
-                    f"splice in tokens the serving template never emits (a mid-episode stop token, dropped "
-                    f"context). Serve with --return-tokens-as-token-ids and set train_on_sampled_tokens: true "
-                    f"to train the engine's sampled ids directly."
-                )
+            # Never raised per rank (a raise ahead of the batch collectives would break their order),
+            # and not fatal either: independently rendered per-turn prefixes would splice in tokens the
+            # serving template never emits, so the episode is dropped rather than trained on a guessed
+            # render.
+            self._invalidate_untrainable_episode(
+                result,
+                f"cannot locate the trained turn spans of {self._tokenizer.name_or_path} inside its own "
+                f"chat-template render ({e}); serve with --return-tokens-as-token-ids and "
+                f"train_on_sampled_tokens: true to train the engine's sampled ids directly",
+            )
             return self._masked_trajectory_tensors()
 
         prompt_token_ids = spans.full_ids[: spans.prompt_len]
@@ -252,20 +266,18 @@ class TrajectoryTokenizeMixin:
             if m.prompt_token_ids:
                 prompt_ids = list(m.prompt_token_ids)
             else:
-                # Recorded rather than raised, like every other render site: a template that rejects
-                # this prefix (a turn ending on a `tool` message) fails on one rank only, and the
-                # raise must stay rank-uniform.
+                # A template that rejects this prefix (a turn ending on a `tool` message) fails on
+                # one rank only, so it must never raise per rank; the episode is dropped instead.
                 try:
                     prompt_ids = self._render_messages_to_ids(
                         messages[:idx], True, template_kwargs, include_thinking=False
                     )
-                except Exception as e:  # any template failure must stay rank-uniform
-                    if self._batch_build_error is None:
-                        self._batch_build_error = (
-                            f"Per-turn re-render of the prompt prefix failed ({type(e).__name__}: {e}). The "
-                            f"engine returned no prompt_token_ids for this turn, so the chat template had to "
-                            f"rebuild it — and it rejects this message prefix."
-                        )
+                except Exception as e:  # never a per-rank raise; the episode is dropped, the run goes on
+                    self._invalidate_untrainable_episode(
+                        result,
+                        f"per-turn re-render of the prompt prefix failed ({type(e).__name__}: {e}); the engine "
+                        f"returned no prompt_token_ids for this turn and the template rejects this prefix",
+                    )
                     continue
             comp = list(m.token_ids)
             if len(prompt_ids) + len(comp) > context_limit and self._batch_build_error is None:

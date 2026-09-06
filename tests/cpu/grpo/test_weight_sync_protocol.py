@@ -71,6 +71,7 @@ class FakeVLLMServer:
         self.max_model_len: int | None = None
         self.requests: list[str] = []
         self.bodies: dict[str, dict] = {}
+        self.queries: dict[str, str] = {}
         self.status: dict[str, int] = {}
         self.refuse: set[str] = set()
         self._lock = threading.Lock()
@@ -112,9 +113,10 @@ class FakeVLLMServer:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length)
-                path = self.path.split("?")[0]
+                path, _, query = self.path.partition("?")
                 with server._lock:
                     server.requests.append(f"POST {path}")
+                    server.queries[path] = query
                     if raw:
                         server.bodies[path] = json.loads(raw)
                     if path in server.refuse:
@@ -226,6 +228,18 @@ def _run_bounded(fn) -> list:
     thread.start()
     thread.join(timeout=JOIN_TIMEOUT_S)
     return outcome
+
+
+def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
+    """vLLM's ``/pause`` defaults to ``mode=abort``, which kills every in-flight generation — the
+    prefetched rollout round — and hands each back as a fragment with an ordinary stop reason. The
+    client must ask for ``keep``, so those requests freeze and resume under the new weights."""
+    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+
+    client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+
+    assert server.count("POST /pause") == 1
+    assert "mode=keep" in server.queries["/pause"], f"pause query was {server.queries['/pause']!r}"
 
 
 def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):

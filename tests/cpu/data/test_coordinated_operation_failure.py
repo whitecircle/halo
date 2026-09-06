@@ -178,24 +178,42 @@ def test_writer_map_may_outlive_the_process_group_timeout(tmp_path):
         assert result == "PASS", f"rank {rank}: {result}"
 
 
-def test_run_training_prints_the_traceback_before_its_blocking_teardown(capfd, monkeypatch):
-    """``destroy_process_group`` is a collective and blocks whenever the peers are not also tearing
-    down; Python prints an uncaught exception only after the ``finally`` returns. The traceback must
-    therefore ALREADY be out when teardown starts, which is what the stderr snapshot taken from
-    inside the teardown proves — assert it afterwards and a hanging teardown still passes."""
-    at_teardown: list[str] = []
-    monkeypatch.setattr(environment, "destroy_all_dispatchers", lambda: at_teardown.append(capfd.readouterr().err))
+def _record_teardown(monkeypatch) -> list[str]:
+    torn_down: list[str] = []
+    monkeypatch.setattr(environment, "destroy_all_dispatchers", lambda: torn_down.append("dispatchers"))
+    monkeypatch.setattr(environment.dist, "is_available", lambda: True)
+    monkeypatch.setattr(environment.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(environment.dist, "destroy_process_group", lambda: torn_down.append("process_group"))
+    return torn_down
+
+
+def test_run_training_skips_the_collective_teardown_when_main_raises(monkeypatch):
+    """Both teardown halves are collectives (``destroy_all_dispatchers`` opens with a barrier and
+    ``destroy_process_group`` is one). A rank failing mid-step has peers still inside the step's own
+    collective, so entering teardown parks the failed rank in the NCCL watchdog instead of exiting
+    and letting torchrun reap the peers. The exception must propagate with NO teardown call."""
+    torn_down = _record_teardown(monkeypatch)
 
     @environment.run_training
     def main():
         raise ValueError("the real cause")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="the real cause"):
         main()
 
-    assert at_teardown, "teardown never ran"
-    assert "the real cause" in at_teardown[0], "the traceback was not on stderr before the teardown"
-    assert "ValueError" in at_teardown[0]
+    assert torn_down == [], f"teardown collectives ran on the failure path: {torn_down}"
+
+
+def test_run_training_tears_down_dispatchers_before_the_process_group_on_success(monkeypatch):
+    """Gin frees a DeepEP buffer through the group communicator, so the order is load-bearing."""
+    torn_down = _record_teardown(monkeypatch)
+
+    @environment.run_training
+    def main():
+        return "done"
+
+    assert main() == "done"
+    assert torn_down == ["dispatchers", "process_group"]
 
 
 if __name__ == "__main__":

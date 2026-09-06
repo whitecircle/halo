@@ -12,14 +12,17 @@ import sys
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
 from src.distributed.runtime import materialize_dtensor
+from src.trainers.grpo.mixins import chunked_logprobs
 from src.trainers.grpo.mixins.chunked_logprobs import (
     _VOCAB_CHUNK,
     ChunkedGRPOLogprobsMixin,
     chunked_selective_log_softmax,
     chunked_selective_log_softmax_with_entropy,
+    rows_forward_densely,
 )
 
 # Vocab spans multiple chunk tiles so the online-softmax accumulation across chunks is exercised.
@@ -144,8 +147,9 @@ def test_dense_empty_row_stays_connected_to_graph():
     harness = _DenseHarness(hidden_size=8)
     input_ids, attention_mask, ltk = _dense_batch()
 
-    out = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
+    out, n_comps = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
     assert out.shape == (2, ltk, 8)
+    assert n_comps == [2, 0]
 
     harness.param.grad = None
     out[1].sum().backward()  # the dummy row alone must still reach the param
@@ -159,13 +163,102 @@ def test_dense_real_row_values_unchanged_by_fix():
     # Keeping the empty row connected must not perturb a real row's values.
     harness = _DenseHarness(hidden_size=8)
     input_ids, attention_mask, ltk = _dense_batch()
-    out = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
+    out, _n_comps = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
 
     expected_real = harness.param.detach() + 1.0
     torch.testing.assert_close(out[0, 0], expected_real)
     torch.testing.assert_close(out[0, 1], expected_real)
     # Row 1 connects position 0 only; its value is irrelevant (masked downstream), position 1 stays zero.
     assert torch.count_nonzero(out[1, 1]) == 0
+
+
+class _EmbeddingBackboneHarness(ChunkedGRPOLogprobsMixin):
+    """Backbone = a position-free embedding lookup (drop the final position, keep the last
+    ``logits_to_keep``), so a row trimmed to its real span and its padded twin must agree exactly on
+    every real completion position; the head is a plain Linear. Records each backbone call's input
+    shape and whether it ran mask-free."""
+
+    temperature = 1.0
+
+    def __init__(self, attn_impl: str, vocab: int = 40, hidden: int = 8):
+        torch.manual_seed(0)
+        self.embed = torch.nn.Embedding(vocab, hidden)
+        self.model = torch.nn.Module()
+        self.model.lm_head = torch.nn.Linear(hidden, vocab, bias=False)
+        self.model.config = PretrainedConfig()
+        self.model.config._attn_implementation = attn_impl
+        self.model.get_output_embeddings = lambda: self.model.lm_head
+        self.forward_calls: list[tuple[tuple[int, ...], bool]] = []
+
+    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
+        self.forward_calls.append((tuple(input_ids.shape), attention_mask is None))
+        full = self.embed(input_ids)[:, :-1, :]
+        return full[:, -logits_to_keep:, :]
+
+
+def _ragged_batch():
+    # row 0: prompt 3 + completion 4, no padding; row 1: left-pad 1 + prompt 2 + completion 2 + right-pad 2.
+    input_ids = torch.tensor([[11, 12, 13, 21, 22, 23, 24], [0, 14, 15, 25, 26, 0, 0]])
+    attention_mask = torch.tensor([[1, 1, 1, 1, 1, 1, 1], [0, 1, 1, 1, 1, 0, 0]])
+    completion_mask = torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0]], dtype=torch.bool)
+    return input_ids, attention_mask, completion_mask, 4
+
+
+def test_rows_forward_densely_on_every_attention_path_at_batch_size_one():
+    sdpa = _EmbeddingBackboneHarness("sdpa").model
+    fa4 = _EmbeddingBackboneHarness("flash_attention_4").model
+    assert rows_forward_densely(sdpa, 1) and not rows_forward_densely(sdpa, 2)
+    assert rows_forward_densely(fa4, 1) and rows_forward_densely(fa4, 4)
+
+
+def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
+    # At batch size 1 the SDPA path forwards each row trimmed (mask-free) and sweeps only its real
+    # completion tokens; the padded path is the reference on every real position, pads stay zero.
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
+    padded = _EmbeddingBackboneHarness("sdpa")
+    logps_pad, ent_pad = padded._chunked_logps_impl(padded.model, input_ids, attention_mask, ltk, 2, True)
+    assert padded.forward_calls == [((2, 7), False)]
+
+    dense = _EmbeddingBackboneHarness("sdpa")
+    logps_dense, ent_dense = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 1, True)
+    assert dense.forward_calls == [((1, 7), True), ((1, 4), True)]
+
+    torch.testing.assert_close(logps_dense[completion_mask], logps_pad[completion_mask])
+    torch.testing.assert_close(ent_dense[completion_mask], ent_pad[completion_mask])
+    assert torch.count_nonzero(logps_dense[~completion_mask]) == 0
+    assert torch.count_nonzero(ent_dense[~completion_mask]) == 0
+    assert torch.isfinite(logps_dense).all()
+
+    logps_dense.sum().backward()
+    assert dense.model.lm_head.weight.grad is not None and dense.embed.weight.grad is not None
+
+
+def test_sweep_matches_full_path_across_sequence_and_vocab_tiles(monkeypatch):
+    # Both loops must cross tile boundaries: sequence tiles carry independent online-softmax
+    # accumulators, vocab tiles rescale them.
+    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
+    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    vocab, temperature = 23, 0.8
+    torch.manual_seed(2)
+    hidden = torch.randn(B, T, HIDDEN, requires_grad=True)
+    weight = torch.randn(vocab, HIDDEN, requires_grad=True)
+    bias = torch.randn(vocab)
+    ids = torch.randint(0, vocab, (B, T))
+
+    h_ref = hidden.detach().clone().requires_grad_(True)
+    w_ref = weight.detach().clone().requires_grad_(True)
+    ref_logits = _ref_logits(h_ref, w_ref, bias, temperature)
+    ref_logps = selective_log_softmax(ref_logits, ids)
+    ref_entropy = entropy_from_logits(ref_logits)
+    ref_logps.sum().backward()
+
+    logps, entropy = chunked_selective_log_softmax_with_entropy(hidden, weight, ids, bias, temperature)
+    logps.sum().backward()
+
+    torch.testing.assert_close(logps, ref_logps, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(hidden.grad, h_ref.grad, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(weight.grad, w_ref.grad, atol=1e-4, rtol=1e-4)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 
 # Reasoning-effort levels for the chat template ("Reasoning: <level>"). "random" resolves per episode.
 VALID_REASONING_EFFORTS = ("low", "medium", "high")
@@ -334,7 +334,8 @@ class BaseEnvironment(ABC):
                 routing_mask=ctx.get("routing_mask"),
                 routing_prompt_tokens=ctx.get("routing_prompt_tokens"),
                 prompt_token_ids=ctx.get("prompt_token_ids"),
-                truncated=ctx.get("finish_reason") == FINISH_REASON_LENGTH,
+                # An engine abort is a cut turn too: the fragment must never train as a natural stop.
+                truncated=ctx.get("finish_reason") in (FINISH_REASON_LENGTH, FINISH_REASON_ABORT),
             )
         )
 

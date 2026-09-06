@@ -26,7 +26,7 @@ from src.environments.base import (
 )
 from src.environments.episode import RolloutResult, reasoning_calibration_penalty
 from src.models.structure import resolve_tokenizer
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, uses_fa4
+from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, rows_forward_densely
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.mixins.generation_buffer import GRPOGenerationBufferMixin
@@ -373,9 +373,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         if mode == "none":
             return None
         injector = build_routing_replay_injector(self.model)  # raises on no-EP / unsupported families
-        # The FA4 dense path trims each row to its real span, and capture/arm must tile the same layout.
-        self._replay_row_spans = (
-            uses_fa4(self.accelerator.unwrap_model(self.model)) and self._use_chunked_grpo_logprobs
+        # The dense per-row path trims each row to its real span, and capture/arm must tile the same layout.
+        self._replay_row_spans = self._use_chunked_grpo_logprobs and rows_forward_densely(
+            self.accelerator.unwrap_model(self.model), self.args.per_device_train_batch_size
         )
         if mode == "rollout":
             # Experimental: validate the engine's capture coverage on the serving shape before a run.
@@ -409,10 +409,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         )
 
     def _replay_spans_for(self, inputs: dict) -> list[tuple[int, int]] | None:
-        """Row spans for routing-replay capture/arm when the FA4 dense path trims per-row forwards.
+        """Row spans for routing-replay capture/arm when the dense per-row path trims the forwards
+        (FA4, or any attention path at ``per_device_train_batch_size`` 1).
 
-        ``None`` on the full-width paths (FA2/SDPA/eager or chunked logprobs off), where the mask
-        tiles ``rows × seq`` directly. Derived from the same padded masks the logprob forwards see.
+        ``None`` on the padded-batch paths (batched rows without FA4, or chunked logprobs off), where
+        the mask tiles ``rows × seq`` directly. Derived from the same padded masks the logprob forwards see.
         """
         if not self._replay_row_spans:
             return None
