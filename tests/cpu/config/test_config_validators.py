@@ -237,6 +237,27 @@ def test_distill_out_of_range_raises(kwargs, match):
         DistillationConfig(**_CPU_OK, **kwargs)
 
 
+def test_distill_alpha_must_be_one_without_the_clm_term():
+    """``use_clm_loss=False`` drops the term carrying the ``(1 - alpha)`` share, so any other alpha
+    would scale the sole remaining loss — a silent gradient rescale the trainer never renormalizes."""
+    with pytest.raises(ValueError, match="use_clm_loss=False needs distill_alpha=1.0"):
+        DistillationConfig(**_CPU_OK, use_clm_loss=False, distill_alpha=0.5)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"use_clm_loss": False, "distill_alpha": 1.0},
+        {"use_clm_loss": True, "distill_alpha": 0.5},
+    ],
+)
+def test_distill_alpha_and_clm_term_valid_neighbors(kwargs):
+    """The two combinations that do weight the loss as written must still build."""
+    cfg = DistillationConfig(**_CPU_OK, **kwargs)
+    assert cfg.use_clm_loss is kwargs["use_clm_loss"]
+    assert cfg.distill_alpha == kwargs["distill_alpha"]
+
+
 def test_distill_teacher_model_still_required_on_the_script_args():
     """The knobs moved to the training config; the teacher the SCRIPT loads did not."""
     with pytest.raises(ValueError, match="teacher_model"):

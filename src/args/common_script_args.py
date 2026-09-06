@@ -38,7 +38,12 @@ class CommonScriptArguments(RangeValidatedConfig):
     )
     test_size: float | None = field(
         default=None,
-        metadata={"help": "Test set split proportion (like 0.05). If dataset already contain test split leave empty"},
+        metadata={
+            "help": "Test split proportion (like 0.05). Leave empty to keep the dataset's own split: "
+            "set on a dataset that already carries a test split, the two splits are concatenated and "
+            "re-split at this proportion. Ignored (warned) on a sharded or pre-processed dataset, "
+            "whose split was fixed at preparation time."
+        },
     )
     project_name: str = field(
         default=_DEFAULT_PROJECT,
@@ -101,7 +106,10 @@ class CommonScriptArguments(RangeValidatedConfig):
         metadata={
             "help": "Enable MoEMetricsCallback (per-expert load distribution, dead-expert fraction, "
             "first/last layer skew). Auto-no-op for non-MoE models. Needs output_router_logits, which "
-            "it enables only under moe_balancing=aux_loss; otherwise it reports only if already on."
+            "it enables only under moe_balancing=aux_loss; otherwise it reports only if already on. "
+            "Not wired at all under a bias_update balancing mode (RouterBiasBalancingCallback carries "
+            "the load metrics there) nor under pipeline parallelism, whose stage forwards return bare "
+            "tensors without router_logits — moe_balancing=bias_update is the route to load metrics under PP."
         },
     )
     num_full_model_params: float | None = field(

@@ -41,7 +41,7 @@ SDPG fields live on the RLVR script args (`src/args/rlvr_online_grpo_args.py`) a
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `use_sdpg` | `False` | Swap in `DistributedSDPGTrainer` (GRPO + privileged-teacher OPD) |
-| `sdpg_hint_template` | reveals the gold answer | Hint appended to the prompt for the teacher forward (`{answer}` placeholder) |
+| `sdpg_hint_template` | `PRIVILEGED_HINT_TEMPLATE` — `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Hint appended to the prompt for the teacher forward (`{answer}` placeholder) |
 | `sdpg_loss` | `"reverse_kl"` | OPD loss: `reverse_kl` (SDPG), `forward_kl`, or `unnormalized_kl` |
 | `sdpg_temperature` | `1.0` | OPD softmax temperature |
 | `sdpg_beta_base` | `1.0` | Base OPD coefficient |

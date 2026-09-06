@@ -32,7 +32,7 @@ from src.args.mixins import SDPGArguments
 from src.args.self_distill_args import SelfDistillationArguments
 from src.data.collators.self_distill import SelfDistillTextCollator, audit_self_distill_row
 from src.data.collators.vlm import SelfDistillVLMDataCollator
-from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
+from src.data.pipeline.processing import coordinated_map, require_render_column, resolve_map_num_proc
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.data.vlm import is_vlm_run
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
@@ -62,6 +62,18 @@ from src.training.script_runner import (
 )
 
 logger = get_logger(__name__, log_level="INFO")
+
+
+def _require_privileged_answer_column(ds, args) -> None:
+    """Raise when the hint's answer column is absent while the OPD term carries weight.
+
+    The collators read it with ``.get``, so a missing column renders the hint with an EMPTY answer
+    and the OPD term distils toward a teacher told the answer is nothing. The on-policy arm
+    (:class:`DistributedSDPGTrainer`) gates the same way; this is the offline half of it.
+    """
+    if args.sdpg_beta_base == 0.0 or not args.sdpg_answer_field:
+        return
+    require_render_column(ds, str(args.dataset), "sdpg_answer_field", args.sdpg_answer_field)
 
 
 def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_config, num_proc):
@@ -182,6 +194,15 @@ def main():
     # the default-comparing form, since its own default (50) is truthy.
     reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
 
+    # Both only feed the reference term, which is not built at all below this coefficient.
+    if args.reference_kl_coef <= 0:
+        reject_non_default_args(
+            "Self-distillation with the reference anchor off (reference_kl_coef <= 0)",
+            args,
+            "reference_model_name_or_path",
+            "reference_kl_loss",
+        )
+
     # Reject inherited options the SelfDistill collators do not implement; ignoring them would train
     # something other than the config states.
     if args.train_on_last_assistant_only:
@@ -238,6 +259,7 @@ def main():
     log_model_info(model, tokenizer)
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=args.conversation_field)
+    _require_privileged_answer_column(ds, args)
     # The data path follows the run, not the checkpoint class: a natively-multimodal student
     # distilled on text-only rows is a text run (see is_vlm_run).
     reject_images_under_text_only_model(args, ds, text_only_model=distributed_args.text_only_model)

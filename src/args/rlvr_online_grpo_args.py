@@ -90,7 +90,7 @@ class RLVROnlineGRPOScriptArguments(
     )
     rlrr_correctness_threshold: float = field(
         default=0.5,
-        metadata={"help": "Reward >= threshold counts as correct when explicit labels are absent"},
+        metadata={"help": "Reward >= threshold counts as correct — the only correctness signal"},
     )
     rlrr_xi_pos: float = field(
         default=1e-3, metadata={"help": "Advantage cap ξ⁺ for incorrect responses (Eq. 5 clip)"}

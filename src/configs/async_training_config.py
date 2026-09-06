@@ -72,8 +72,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         metadata={
             "help": "Per-rank asyncio-semaphore cap on rollouts in flight — the real generation-throughput "
             "throttle. Server-pool load = this × data_parallel_size ÷ num_servers. Size it to the per-rank "
-            "rollout demand of one generation cycle (per_device_train_batch_size × gradient_accumulation_steps) "
-            "with ~2× headroom for prefetch; raising it past the actual rollout count does nothing. "
+            "rollout demand of one generation cycle (per_device_train_batch_size × steps_per_generation, "
+            "which itself defaults to gradient_accumulation_steps) with ~2× headroom for prefetch; raising "
+            "it past the actual rollout count does nothing. "
             "Default: 4 × this rank's share of the rollout workers (num_rollout_workers ÷ world_size on a shared Ray "
             "cluster, all of them locally), clamped to ≥ that share."
         },
@@ -87,9 +88,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "help": "Inference engine serving rollouts and receiving weight updates. Both support "
             "generation, NCCL weight sync, `train_on_sampled_tokens` and `routing_replay: rollout`. "
             "'sglang' does not support `rollout_max_thinking_tokens` (the trainer wires neither of "
-            "SGLang's budget mechanisms; harmony models have none server-side), needs "
+            "SGLang's budget mechanisms; harmony models have none server-side), wants "
             "fsdp_reshard_after_backward=False (its sync forces socket NCCL process-global, making "
-            "FSDP2's per-microstep reshard the dominant step cost otherwise), and must be served "
+            "FSDP2's per-microstep reshard the dominant step cost otherwise — a throughput lever "
+            "nothing enforces), and must be served "
             "from the NCCL-aligned Dockerfile.sglang image — the stock upstream image ships a "
             "different NCCL than the trainer and cannot form the weight-sync group."
         },
@@ -118,7 +120,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
 
     sync_weights_every_n_steps: int = field(
         default=1,
-        metadata={"help": "Sync weights to vLLM server(s) every N training steps. Must be >= 1 (1 = every step)."},
+        metadata={
+            "help": "Sync weights to the rollout server(s) every N training steps. Must be >= 1 (1 = every step)."
+        },
     )
 
     rollout_temperature: float = field(
@@ -158,9 +162,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "Model-agnostic and fully faithful — it eliminates every re-tokenization mismatch (tool-call "
             "rendering, argument whitespace, reasoning re-render). Each assistant turn is its own training "
             "row (prompt = the history the server built for that turn, completion = that turn's sampled "
-            "ids), sharing the trajectory's advantage. Requires the vLLM server to run with "
-            "`--return-tokens-as-token-ids`; falls back to re-tokenization for any turn whose ids were not "
-            "captured. Default on."
+            "ids), sharing the trajectory's advantage. On vLLM the server must run with "
+            "`--return-tokens-as-token-ids` (docker-compose.vllm.yml passes it); SGLang captures per "
+            "request and needs no flag. All-or-nothing per trajectory: one uncaptured turn falls that "
+            "whole trajectory back to a single re-tokenized row. Default on."
         },
     )
 
@@ -257,8 +262,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         default_factory=list,
         metadata={
             "help": "Special-token strings that end a turn's generation, resolved to ids via the tokenizer "
-            "and sent as vLLM `stop_token_ids`. Set to the model's tool-call terminator so a turn stops "
-            "when the model emits its call and the environment runs it — without this a model whose "
+            "and sent as the engine's `stop_token_ids`. Set to the model's tool-call terminator so a turn "
+            "stops when the model emits its call and the environment runs it — without this a model whose "
             "terminator is not an eos (e.g. gpt-oss `<|call|>` under harmony-disabled serving) keeps "
             "generating, hallucinating the tool result and playing out the whole episode in one turn "
             "(huge, off-policy-noisy completions). Empty (default) = only the model's eos stops a turn."
@@ -278,7 +283,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     )
 
     enable_prefetch: bool = field(
-        default=True, metadata={"help": "Enable prefetching to overlap rollout collection with training."}
+        default=True,
+        metadata={
+            "help": "Enable prefetching to overlap rollout collection with training. Multi-server "
+            "only: with one rollout server it auto-disables, since that engine stops serving during "
+            "weight sync and there is nothing to overlap against."
+        },
     )
 
     num_prefetch_batches: int = field(
@@ -286,20 +296,21 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         metadata={
             "help": "Bound on the prefetch result queue. The pipeline is one round deep by construction "
             "(each round submits one batch and pops one), so values above 1 only add headroom — they do "
-            "not prefetch further ahead."
+            "not prefetch further ahead. Inert while prefetch is auto-disabled (single rollout server)."
         },
     )
 
     model_name: str | None = field(
         default=None,
         metadata={
-            "help": "Model name sent in vLLM /v1/chat/completions requests. "
-            "Optional — the server answers with its loaded model when omitted."
+            "help": "Model name sent in the rollout server's /v1/chat/completions requests. "
+            "Unset is filled with model_name_or_path at script start, so a request always names one."
         },
     )
 
     request_timeout: float = field(
-        default=DEFAULT_REQUEST_TIMEOUT_SECONDS, metadata={"help": "HTTP timeout per vLLM request in seconds."}
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        metadata={"help": "HTTP timeout per rollout-server request in seconds."},
     )
 
     episode_timeout: float = field(
@@ -320,7 +331,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     max_retries: int = field(
         default=DEFAULT_MAX_RETRIES,
         metadata={
-            "help": "Retries after a failed vLLM request (total attempts = max_retries + 1). "
+            "help": "Retries after a failed rollout-server request (total attempts = max_retries + 1). "
             "0 = one attempt, no retry."
         },
     )

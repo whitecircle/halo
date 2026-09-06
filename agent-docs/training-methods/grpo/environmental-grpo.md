@@ -373,7 +373,7 @@ Eval rolls out the eval set (metrics prefixed `eval_`). The eval group size is `
 
 **`GENERATION is wedged (no response … to a 1-token probe)`** at startup — the weight-sync client's fail-fast probe (`probe_generation`): the server answers `/health` but its scheduler is stuck because a previous trainer died mid-run while attached to the weight-transfer engine. **Restart the vLLM container** — the probe trades an opaque ~30-min NCCL-watchdog timeout for an immediate failure. After any hard trainer crash, restart vLLM before relaunching.
 
-**`Prefetch auto-disabled: single rollout server mode detected.`** — expected; use multiple servers for prefetch.
+**`Prefetch auto-disabled: 1 rollout server configured.`** — expected; use multiple servers for prefetch.
 
 **vLLM request timeouts / `asyncio.TimeoutError`** — actors retry with backoff (`request_timeout` 120 s, `max_retries` 3, `retry_base_wait` 1 s; 4xx terminal except 408/429). Check vLLM health; multi-server keeps servers live during sync. `episode_timeout` (default `1200` s) bounds the whole episode and must stay under the NCCL collective watchdog (`DIST_NCCL_TIMEOUT_MINUTES × 60`, default `1800`): a larger value raises at training start and ≥80% of it warns. The default sits at two thirds of the watchdog, leaving ~10 min of margin — raise `DIST_NCCL_TIMEOUT_MINUTES` before raising it. The retry budget (`(max_retries + 1) × request_timeout` plus backoff) is only **warned** about at the same 80% mark, never refused: past it a stuck rollout keeps retrying until the watchdog fires and hangs the per-step barrier instead of giving up.
 

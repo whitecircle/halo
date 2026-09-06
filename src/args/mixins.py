@@ -91,9 +91,11 @@ class PromptDatasetArguments:
         metadata={
             "help": "Prompt budget in tokens, applied as a dataset FILTER: rows whose rendered prompt "
             "exceeds it are dropped, never truncated (a truncated prompt loses the question the "
-            "verifier grades against). None (default) = no filtering. When BOTH this and the "
-            "generation budget are set, their sum also becomes the tokenizer's model_max_length for "
-            "the run; leaving either unset leaves the tokenizer's own value alone."
+            "verifier grades against). None (default) = no filtering. On the online (RLVR) arm, when "
+            "BOTH this and the generation budget are set their sum also becomes the tokenizer's "
+            "model_max_length for the run, and leaving either unset leaves the tokenizer's own value "
+            "alone; environmental GRPO pins the model's context window instead, the limit its rollout "
+            "server enforces."
         },
     )
     prompt_field: str = field(
@@ -156,7 +158,8 @@ class RLRRConfig:
     correctness_clip: bool = True
     """Apply correctness-aware advantage clipping (Eq. 5); disable for pure PRR."""
     correctness_threshold: float = 0.5
-    """Without explicit labels, a response is correct iff raw reward ``>= correctness_threshold``."""
+    """A response is correct iff raw reward ``>= correctness_threshold`` — the only correctness
+    signal; no caller supplies explicit labels."""
 
     def __post_init__(self) -> None:
         if self.mode not in get_args(RLRRMode):
@@ -187,7 +190,7 @@ class AdvantageShapingArguments(RangeValidatedConfig):
             "entropy-safest constant baseline per regime. 'asymmetric' = mean baseline, then scale "
             "positive/negative advantages by advantage_pos_scale/advantage_neg_scale (continuous "
             "failure-cone attenuation). 'neg_mask_hard' = zero negative advantages only in groups "
-            "where no member's objective reward reached advantage_hard_group_threshold. Targets entropy "
+            "where no member's gate reward reached advantage_hard_group_threshold. Targets entropy "
             "explosion in failure-dominated batches — the substitute that lets a strong KL anchor "
             "be retired."
         },
@@ -211,8 +214,10 @@ class AdvantageShapingArguments(RangeValidatedConfig):
         default=0.5,
         metadata={
             "help": "advantage_mode='neg_mask_hard': a group is HARD (negatives zeroed) when no "
-            "member's objective reward component reaches this value. Set it to the objective value "
-            "that counts as a solve for your reward scale."
+            "member's gate reward reaches this value. The gate reward is the objective reward "
+            "component on the environmental arm and the TOTAL weighted reward on the online (RLVR) "
+            "arm, which has no objective decomposition (a multi-reward run warns). Set it to the "
+            "value that counts as a solve on that scale."
         },
     )
     scale_rewards_std_floor: float = field(
