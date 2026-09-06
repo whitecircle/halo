@@ -21,6 +21,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
+from src.kernels.liger.lce_forward import build_lce_forward
 from src.models.moe_balancing import _WARNED_UNSERVABLE_AUTO, resolve_balancing_mode
 
 _RESOLVER_LOGGER = "src.models.moe_balancing"
@@ -81,6 +82,39 @@ def test_auto_says_why_it_gave_up_on_balancing(caplog):
     message = caplog.text
     assert "output_router_logits" in message, f"the reason must name the missing forward parameter: {message}"
     assert "UNBALANCED" in message, f"the consequence must be stated: {message}"
+
+
+def test_the_fused_loss_remedy_is_named_only_when_a_liger_head_replaced_the_forward(caplog):
+    """A Liger fused loss installs a forward without the parameter over a head that may declare it;
+    turning it off restores the family's head. On a forward that never declared the flag the remedy
+    would be false advice, so it must not be offered — and the probe must look through a PEFT
+    wrapper, whose own forward is never Liger's, at the base model that carries the patched head."""
+    with caplog.at_level(logging.WARNING, logger=_RESOLVER_LOGGER):
+        _resolve(_NoRouterLogitFlag())
+    assert "fused_linear_cross_entropy: false" not in caplog.text, (
+        "advised turning off a fused loss that is not installed"
+    )
+
+    class _LigerHeaded(_NoRouterLogitFlag):
+        forward = build_lce_forward()
+
+    class _PeftLike(nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
+            self.config = base.config
+
+        def get_base_model(self):
+            return self.base
+
+        def forward(self, *args, **kwargs):
+            return self.base(*args, **kwargs)
+
+    for model in (_LigerHeaded(), _PeftLike(_LigerHeaded())):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=_RESOLVER_LOGGER):
+            assert _resolve(model) == "none"
+        assert "fused_linear_cross_entropy: false" in caplog.text, f"{type(model).__name__}: the remedy is missing"
 
 
 def test_auto_still_picks_aux_loss_where_the_forward_honours_the_flag():

@@ -556,18 +556,26 @@ def honors_output_router_logits_config(model) -> bool:
     ``kwargs`` only, and the flag then pays a ``[tokens, num_experts]`` plane per MoE layer while the
     aux loss never reaches the loss, so the balancing has no effect.
     """
-    # A PEFT wrapper forwards **kwargs into the base model and shares its config, so probing the
-    # wrapper's own signature would report False for a base that does honour the flag.
-    base = getattr(model, "get_base_model", None)
-    if callable(base):
-        model = base()
-    forward = getattr(type(model), "forward", None)
+    forward = getattr(type(_unwrap_peft(model)), "forward", None)
     if forward is None:
         return False
     try:
         return "output_router_logits" in inspect.signature(forward).parameters
     except (TypeError, ValueError):  # C-implemented or otherwise un-introspectable forward
         return False
+
+
+def _unwrap_peft(model):
+    """The base model under a PEFT wrapper, which forwards **kwargs into it and shares its config;
+    probing the wrapper's own forward would describe the wrapper, not the head that runs."""
+    base = getattr(model, "get_base_model", None)
+    return base() if callable(base) else model
+
+
+def _liger_fused_head_installed(model) -> bool:
+    """Whether a Liger fused-loss forward replaced the family's head, on the class or the instance."""
+    forward = getattr(_unwrap_peft(model), "forward", None)
+    return "liger" in (getattr(forward, "__module__", None) or "")
 
 
 def resolve_balancing_mode(requested: str, model, is_moe: bool) -> BalancingMode:
@@ -616,10 +624,9 @@ def resolve_balancing_mode(requested: str, model, is_moe: bool) -> BalancingMode
         return "aux_loss"
     # A Liger fused loss installs a forward without the parameter over a head that may have declared
     # it; only then is turning the fused loss off a remedy.
-    fused_head = "liger" in (getattr(getattr(type(model), "forward", None), "__module__", None) or "")
     remedy = (
         "set fused_linear_cross_entropy: false in liger_kernel_config to keep the family's own head, or "
-        if fused_head
+        if _liger_fused_head_installed(model)
         else ""
     )
     warn_once(
