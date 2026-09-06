@@ -48,10 +48,10 @@ def build_lce_forward(logit_scale_attr: str | None = None, router_aux_loss_in_he
         shift_labels = kwargs.pop("shift_labels", None)
         # Taken from kwargs rather than declared as a parameter. `honors_output_router_logits_config`
         # decides whether a family's aux loss can reach the objective by looking for this parameter on
-        # `type(model).forward`, and Liger patches that forward before balancing resolves. Declaring it
-        # here would report that a family whose own head has no such parameter honors the flag, moving
-        # GLM-4.7-Flash off `bias_update` onto an `aux_loss` its config carries no coefficient for,
-        # leaving it with no router balancing.
+        # the forward the model runs, and Liger installs this one before balancing resolves. Declaring
+        # it here would report that a family whose own head has no such parameter honors the flag,
+        # moving GLM-4.7-Flash off `bias_update` onto an `aux_loss` its config carries no coefficient
+        # for, leaving it with no router balancing.
         explicit_router_logits = kwargs.pop("output_router_logits", None)
 
         # Checked before the backbone runs: a loss-only eval forced onto the fused path with nothing

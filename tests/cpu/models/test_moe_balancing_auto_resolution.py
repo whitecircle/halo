@@ -15,6 +15,7 @@ cannot honour it, and it must fail loudly at config time rather than train unbal
 """
 
 import logging
+from types import MethodType
 
 import pytest
 import torch.nn as nn
@@ -115,6 +116,22 @@ def test_the_fused_loss_remedy_is_named_only_when_a_liger_head_replaced_the_forw
         with caplog.at_level(logging.WARNING, logger=_RESOLVER_LOGGER):
             assert _resolve(model) == "none"
         assert "fused_linear_cross_entropy: false" in caplog.text, f"{type(model).__name__}: the remedy is missing"
+
+
+def test_a_fused_loss_bound_on_the_instance_alone_is_seen():
+    """Liger binds the fused loss on the class at load, but on the INSTANCE alone when re-applied to
+    a built model (TRL's re-application). The class then still declares the flag while the forward
+    that runs does not: a verdict read off the class picks ``aux_loss``, the strategy enables
+    ``output_router_logits``, and a head that assembles its aux loss after the projection the fused
+    loss replaces raises on the first step. The resolver must read the forward that runs."""
+    model = _HonorsRouterLogitFlag()
+    model.forward = MethodType(build_lce_forward(router_aux_loss_in_head=True), model)
+    mode = _resolve(model)
+    assert mode == "none", f"auto resolved to {mode!r} off the class while the instance runs a fused loss"
+    apply_balancing_strategy(model, mode, is_moe=True)
+    assert not getattr(model.config, "output_router_logits", False), (
+        "the strategy enabled a flag the fused forward refuses"
+    )
 
 
 def test_auto_still_picks_aux_loss_where_the_forward_honours_the_flag():

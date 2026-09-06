@@ -555,8 +555,13 @@ def honors_output_router_logits_config(model) -> bool:
     declare it never consults the config: ``Qwen3_5MoeForConditionalGeneration`` reads it from
     ``kwargs`` only, and the flag then pays a ``[tokens, num_experts]`` plane per MoE layer while the
     aux loss never reaches the loss, so the balancing has no effect.
+
+    Probed on the forward the instance runs, not the class's: a Liger fused loss replaces the head
+    with a forward that takes no such parameter, bound on the class at load or on the instance
+    alone when re-applied to a built model, and a verdict read off the class would then enable a
+    flag the running forward refuses.
     """
-    forward = getattr(type(_unwrap_peft(model)), "forward", None)
+    forward = getattr(_unwrap_peft(model), "forward", None)
     if forward is None:
         return False
     try:
