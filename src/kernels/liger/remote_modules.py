@@ -54,13 +54,17 @@ def _fire(module: ModuleType) -> None:
 def patch_remote_modules(class_names: tuple[str, ...], patch: Callable[[ModuleType], object]) -> None:
     """Apply ``patch`` to the remote modeling module defining ``class_names``, now or when it loads.
 
-    Idempotent per ``class_names``: re-applying Liger (model load, then TRL's re-application) must
-    not arm the same patch twice. Already-loaded modules are patched immediately — a second run in
-    the same process finds the module in ``sys.modules``.
+    One entry per ``class_names``: re-applying Liger (model load, then TRL's re-application) replaces
+    the armed patch rather than arming a second one, so the flags of the latest application are the
+    ones that fire. Already-loaded modules are patched immediately — a second run in the same process
+    finds the module in ``sys.modules``.
     """
-    armed_names = {names for names, _ in _ARMED}
-    if class_names not in armed_names:
-        _ARMED.append((class_names, patch))
+    entry = (class_names, patch)
+    index = next((i for i, (names, _) in enumerate(_ARMED) if names == class_names), None)
+    if index is None:
+        _ARMED.append(entry)
+    else:
+        _ARMED[index] = entry
     register_remote_class_hook(_fire)
     for module in list(sys.modules.values()):
         if (

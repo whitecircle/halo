@@ -13,6 +13,7 @@
 - **Router is a sibling**, not a child — `Gemma4TextRouter` lives in `Gemma4TextDecoderLayer` next to the experts. The wrapper only replaces the experts; the router stays FSDP-managed.
 - Routing input: pre-normalized weights from the sibling router (per-expert-scaled, not raw logits).
 - Activation: tanh-GeGLU (fused gate_up), run through the fused Triton kernel (`src/kernels/fused_glu.py`) when the activation is the genuine `gelu_pytorch_tanh`; logged as `glu_combine=fused_gelu_tanh_mul`.
+- Liger: every decoder layer keeps a dense `Gemma4TextMLP` beside its experts, which the wrapper never touches; the toolkit's delegating spec fuses it (`geglu`, probing the activation the same way) so it stays fused under EP, while upstream's `gemma4_text` applier serves the norms. The fused loss is forced off for `Gemma4ForConditionalGeneration` checkpoints, whose own head runs ([Liger Kernels](../optimization/liger-kernels.md#fused-loss-under-a-multimodal-wrapper)).
 - Storage: `gate_up_proj [E, H, 2M]`, `down_proj [E, M, H]` (matmul convention; the HF checkpoint is `[E, 2M, H]` / `[E, H, M]`, transposed on load). Compute via Grouped GEMM.
 
 ### Precision flags

@@ -619,11 +619,12 @@ def resolve_balancing_mode(requested: str, model, is_moe: bool) -> BalancingMode
         _WARNED_UNSERVABLE_AUTO,
         type(model).__name__,
         f"moe_balancing=auto resolves to none on {type(model).__name__}: its forward does not take "
-        f"output_router_logits, so the aux-loss term never reaches the loss, and nothing on this "
-        f"tree carries a routing bias (no EP MoE wrapper, no native balancing_biases router) — THIS "
-        f"RUN TRAINS UNBALANCED, a real cost at this expert count. Launch under torchrun with "
-        f"use_grouped_gemm: true or expert parallelism, where auto resolves to the bias update for "
-        f"families whose bias exports, or load the text-only sibling class whose forward honours the "
-        f"flag.",
+        f"output_router_logits (a Liger fused loss installs a head without that parameter — set "
+        f"fused_linear_cross_entropy: false in liger_kernel_config to keep the family's own), so the "
+        f"aux-loss term never reaches the loss, and nothing on this tree carries a routing bias (no EP "
+        f"MoE wrapper, no native balancing_biases router) — THIS RUN TRAINS UNBALANCED, a real cost at "
+        f"this expert count. Launch under torchrun with use_grouped_gemm: true or expert parallelism, "
+        f"where auto resolves to the bias update for families whose bias exports, or load the "
+        f"text-only sibling class whose forward honours the flag.",
     )
     return "none"

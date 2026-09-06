@@ -16,10 +16,13 @@ import types
 from pathlib import Path
 
 import pytest
+import torch.nn.functional as F
 from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
+from transformers.loss import loss_utils
 
 from src.kernels.liger import orchestrator
+from src.kernels.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
 from src.models.loading.model_preparation import finalize_liger_after_direct_load
 from src.models.moe_balancing import has_ep_wrapper_class
@@ -57,8 +60,83 @@ class _FlceOnlyRecordingApplier:
         self.calls.append({"fused_linear_cross_entropy": fused_linear_cross_entropy})
 
 
+class _SwigluOffApplier(_RecordingApplier):
+    """An applier whose own ``swiglu`` default is False — GptOss's and Qwen3-VL's shape upstream."""
+
+    def __call__(self, rope=True, cross_entropy=True, fused_linear_cross_entropy=False, rms_norm=True, swiglu=False):
+        super().__call__(rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu)
+
+
 def _zaya_like_config():
     return types.SimpleNamespace(model_type="zaya", text_config=None)
+
+
+def _wrapper_config(wrapper: str, text: str):
+    return types.SimpleNamespace(model_type=wrapper, text_config=types.SimpleNamespace(model_type=text))
+
+
+def test_an_appliers_own_swiglu_default_off_is_honored(monkeypatch):
+    """The shared default-on must not override an applier that declares the kernel cannot serve it.
+
+    ``rope`` has always been read off the signature; ``swiglu``/``geglu`` are the same shape — upstream
+    defaults GptOss's and Qwen3-VL's to False — and the recorded effective config must say what ran.
+    """
+    applier = _SwigluOffApplier()
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "family_with_swiglu_off", applier)
+    config = types.SimpleNamespace(model_type="family_with_swiglu_off", text_config=None)
+    applied = orchestrator.apply_liger_kernel(config, None)
+    assert applied["swiglu"] is False
+    assert applier.calls[0]["swiglu"] is False
+    # An explicit request still reaches the applier, as it does for rope.
+    config = types.SimpleNamespace(model_type="family_with_swiglu_off", text_config=None)
+    assert orchestrator.apply_liger_kernel(config, {"swiglu": True})["swiglu"] is True
+
+
+def test_flce_is_never_applied_through_a_multimodal_wrappers_text_tower(monkeypatch, caplog):
+    """Resolved through ``text_config``, the checkpoint loads as the wrapper, whose own head runs.
+
+    The fused loss patches the text tower's causal-LM class, which that model never instantiates:
+    it would report as applied, materialize the logits plane anyway, and — since FLCE and CE are
+    exclusive — trade away the CE kernel that does reach the decoder. LFM-2 VL, Cohere2-Vision and
+    every Mistral-3 checkpoint are this shape.
+    """
+    applier = _RecordingApplier()
+    monkeypatch.setitem(orchestrator._TOOLKIT_LIGER_APPLIERS, "lfm2", applier)
+    with caplog.at_level(logging.WARNING, logger="src.kernels.liger.orchestrator"):
+        applied = orchestrator.apply_liger_kernel(
+            _wrapper_config("lfm2_vl", "lfm2"), {"fused_linear_cross_entropy": True}
+        )
+    assert applied["fused_linear_cross_entropy"] is False
+    assert applied["cross_entropy"] is True, "the working CE kernel must not be traded for a dead FLCE"
+    assert applier.calls == [applied]
+    assert any("multimodal wrapper" in record.getMessage() for record in caplog.records)
+
+    # Anti-vacuity: the same applier resolved directly, on a text-only checkpoint, still fuses the head.
+    applied = orchestrator.apply_liger_kernel(
+        types.SimpleNamespace(model_type="lfm2", text_config=None), {"fused_linear_cross_entropy": True}
+    )
+    assert applied["fused_linear_cross_entropy"] is True and applied["cross_entropy"] is False
+
+
+def test_an_upstream_applier_gets_cross_entropy_off_and_the_scoped_patch(monkeypatch):
+    """Upstream's CE branch rebinds ``torch.nn.functional.cross_entropy`` process-wide.
+
+    The orchestrator therefore calls every upstream applier with ``cross_entropy=False`` and installs
+    the toolkit's scoped patch itself, while the effective config still records CE as applied.
+    """
+    applier = _RecordingApplier()
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "family_upstream_covers", applier)
+    original = loss_utils.nn
+    try:
+        applied = orchestrator.apply_liger_kernel(
+            types.SimpleNamespace(model_type="family_upstream_covers", text_config=None), None
+        )
+        assert loss_utils.nn.functional.cross_entropy is liger_cross_entropy
+    finally:
+        loss_utils.nn = original
+    assert applied["cross_entropy"] is True
+    assert applier.calls[0]["cross_entropy"] is False
+    assert F.cross_entropy is _TORCH_CROSS_ENTROPY
 
 
 def test_per_model_defaults_recorded_as_effective(monkeypatch):
@@ -442,6 +520,38 @@ def test_finalize_keeps_flag_for_effective_flce():
     finalize_liger_after_direct_load(training_config, True, _model_with_applied(applied))
     assert training_config.use_liger_kernel is True
     assert training_config.liger_kernel_config == applied  # pinned to what was actually applied
+
+
+def test_finalize_turns_the_withheld_roles_off_for_trls_reapplication():
+    """TRL re-applies through liger-kernel's own registry: upstream's applier alone, on the built model.
+
+    A role the toolkit took over must not be re-run by upstream there — its instance patch would bind
+    the llama-cast norm over GptOss's Gemma-cast one. The pinned dict therefore turns the withheld flag
+    off while the effective record keeps it on, since the toolkit did apply that role.
+    """
+    applied = {
+        "rope": True,
+        "cross_entropy": False,
+        "fused_linear_cross_entropy": True,
+        "rms_norm": True,
+        "swiglu": False,
+    }
+    model = types.SimpleNamespace(
+        config=types.SimpleNamespace(model_type="gpt_oss", text_config=None, _halo_liger_applied_config=applied)
+    )
+    training_config = _training_config(None)
+    finalize_liger_after_direct_load(training_config, True, model)
+    assert training_config.use_liger_kernel is True
+    assert training_config.liger_kernel_config == {**applied, "rms_norm": False}
+    assert model.config._halo_liger_applied_config == applied, "the effective record must not change"
+
+    # Through a wrapper's text config too: Gemma 4's dense GeGLU is the toolkit's.
+    text = types.SimpleNamespace(model_type="gemma4_text")
+    wrapper = types.SimpleNamespace(model_type="gemma4", text_config=text)
+    geglu_applied = {"rope": False, "cross_entropy": False, "fused_linear_cross_entropy": True, "geglu": True}
+    assert orchestrator.trl_reapplication_config(wrapper, geglu_applied) == {**geglu_applied, "geglu": False}
+    # A family that withholds nothing re-applies exactly what was applied.
+    assert orchestrator.trl_reapplication_config(_zaya_like_config(), applied) == applied
 
 
 def test_finalize_disables_flag_when_flce_forced_off():

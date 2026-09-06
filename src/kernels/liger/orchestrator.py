@@ -5,6 +5,10 @@ Resolution order: toolkit applier (built from :mod:`~src.kernels.liger.families`
 branch, so every rule here applies to it. Parallelism safety filters
 (:func:`liger_parallelism_overrides`) then force kernels off; a family no applier covers warns, and an
 explicit per-kernel request for it raises.
+
+Cross-entropy is the toolkit's scoped patch for every family, upstream-resolved ones included: an
+upstream applier's own CE branch rebinds ``torch.nn.functional.cross_entropy`` process-wide, under every
+caller that is not the model's loss, so it is never asked for.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers import AutoConfig
 
 from src.kernels.liger.builder import build_liger_appliers
+from src.kernels.liger.cross_entropy import patch_loss_utils_cross_entropy
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
 from src.models.loading.config_levels import set_config_field_run_scoped
 from src.models.moe_balancing import ep_wraps_experts
@@ -28,16 +33,13 @@ logger = get_logger(__name__)
 LIGER_APPLIED_CONFIG_ATTR = "_halo_liger_applied_config"
 
 
-# liger-kernel 0.8.0's Qwen3.5 applier imports ``liger_cross_entropy`` from a module where the symbol
-# does not live, so its CE branch raises ImportError. Keyed by qualified name to cover every alias.
-_LIGER_CROSS_ENTROPY_BROKEN_APPLIERS = frozenset(
-    {"liger_kernel.transformers.monkey_patch.apply_liger_kernel_to_qwen3_5"}
-)
-
-
 # Kernels a parallelism override makes inert rather than incorrect, so an explicit request is honored.
 # A kernel that would compute the wrong loss (CE/FLCE under TP/CP/PP) is forced off even when requested.
 _YIELDS_TO_EXPLICIT_REQUEST = ("swiglu", "geglu")
+
+# Flags whose applier-declared ``False`` default states that Liger's kernel cannot serve the family
+# (a partial, mrope or YARN rotary; GptOss's clamped experts) — honored over the shared default-on.
+_APPLIER_DEFAULT_OFF_FLAGS = ("rope", "swiglu", "geglu")
 
 
 # Every family the toolkit patches, built from its declarative spec (:mod:`src.kernels.liger.families`)
@@ -47,13 +49,10 @@ _YIELDS_TO_EXPLICIT_REQUEST = ("swiglu", "geglu")
 _TOOLKIT_LIGER_APPLIERS = build_liger_appliers(LIGER_FAMILY_SPECS)
 
 # Model types whose fused GLU survives an EP wrapper: a toolkit spec names the dense and shared-expert
-# MLPs, which every wrapper adopts unchanged. A delegating spec that names none has only upstream's
-# routed-expert swap, which the wrapper replaces, so it is forced off as for any upstream family.
+# MLPs, which every wrapper adopts unchanged. A spec naming none either has no fused GLU at all or, when
+# delegating, only upstream's routed-expert swap, which the wrapper replaces — forced off either way.
 _TOOLKIT_GLU_SURVIVES_EP = frozenset(
-    model_type
-    for spec in LIGER_FAMILY_SPECS
-    if spec.glu_mlp or not spec.delegates_to_upstream
-    for model_type in spec.model_types
+    model_type for spec in LIGER_FAMILY_SPECS if spec.glu_mlp for model_type in spec.model_types
 )
 
 
@@ -86,17 +85,6 @@ _LIGER_DEFAULTS = {
 def resolve_liger_applier(model_type: str):
     """The Liger applier claiming ``model_type``, toolkit first, or ``None``."""
     return next((registry[model_type] for registry in _APPLIER_REGISTRIES if model_type in registry), None)
-
-
-def _applier_identities(apply_fn) -> set[str]:
-    """Qualified names of every applier the call will run; a toolkit delegate also runs upstream's.
-
-    A defect belongs to the function that actually runs, so a spec delegating to it inherits both the
-    defect and the default that works around it.
-    """
-    chain = (apply_fn, getattr(apply_fn, "upstream", None))
-    # A callable object has no __qualname__ of its own; fall back to its class's.
-    return {f"{fn.__module__}.{getattr(fn, '__qualname__', type(fn).__qualname__)}" for fn in chain if fn is not None}
 
 
 def _liger_model_types(model_config) -> tuple[str | None, str | None]:
@@ -170,6 +158,23 @@ def apply_liger_parallelism_overrides(user_config: dict, forced_off: dict[str, s
             logger.warning(f"Liger {key} was explicitly enabled but {reason}; forcing it off.")
         result[key] = False
     return result
+
+
+def trl_reapplication_config(model_config, applied: dict) -> dict:
+    """The config HF Trainer re-applies Liger with, derived from the effective one.
+
+    TRL's re-application resolves on liger-kernel's own registry and runs upstream's applier alone,
+    so a flag a delegating spec withheld from upstream (``upstream_off``) must go off there: upstream's
+    instance patch would otherwise bind its variant over the toolkit's — the llama-cast norm over
+    GptOss's Gemma-cast one. The effective record on ``model.config`` keeps the flag on, since the
+    toolkit did apply that role.
+    """
+    model_type, fallback_type = _liger_model_types(model_config)
+    applier = resolve_liger_applier(model_type)
+    if applier is None and fallback_type:
+        applier = resolve_liger_applier(fallback_type)
+    withheld = getattr(getattr(applier, "spec", None), "upstream_off", ())
+    return {**applied, **dict.fromkeys(withheld, False)}
 
 
 def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> None:
@@ -248,6 +253,10 @@ def _apply_liger_for_standard_models(
     without notice, and raises when the config asked for a specific kernel nothing can deliver.
     """
     apply_fn = resolve_liger_applier(model_type)
+    # Resolved through the text tower of a multimodal wrapper: the checkpoint loads as the wrapper
+    # class, whose own head runs. The applier's fused loss patches the tower's `*ForCausalLM`, which
+    # that model never instantiates, so it would report as applied while the logits plane materializes.
+    wrapper_head = False
     if apply_fn is None and fallback_model_type:
         apply_fn = resolve_liger_applier(fallback_model_type)
         if apply_fn is not None:
@@ -257,6 +266,7 @@ def _apply_liger_for_standard_models(
                 f"falling back to text sub-config model_type={fallback_model_type}{suffix}"
             )
             model_type = fallback_model_type
+            wrapper_head = True
     if apply_fn is None:
         if requested_kernels:
             raise ValueError(
@@ -288,12 +298,20 @@ def _apply_liger_for_standard_models(
         **user_overrides,
     }
 
+    flce_requested = bool(user_overrides.get("fused_linear_cross_entropy"))
+    if wrapper_head and "fused_linear_cross_entropy" in valid_params:
+        if flce_requested:
+            logger.warning(
+                f"Liger fused_linear_cross_entropy requested for model_type={model_type}, but the "
+                f"checkpoint loads as its multimodal wrapper, whose own head runs: the fused loss patches "
+                f"the text tower's causal-LM class and would never engage. Keeping cross_entropy instead."
+            )
+        config["fused_linear_cross_entropy"] = False
+        flce_requested = False
+
     # CE and FLCE are mutually exclusive (FLCE fuses the lm_head projection into the loss) and every
     # applier asserts on the pair. Only CE is a toolkit default, so the default yields to explicit FLCE.
-    if (
-        user_overrides.get("fused_linear_cross_entropy")
-        and {"cross_entropy", "fused_linear_cross_entropy"} <= valid_params
-    ):
+    if flce_requested and {"cross_entropy", "fused_linear_cross_entropy"} <= valid_params:
         if user_overrides.get("cross_entropy"):
             raise ValueError(
                 f"liger_kernel_config for {model_type} sets both cross_entropy: true and "
@@ -308,15 +326,12 @@ def _apply_liger_for_standard_models(
             )
             config["cross_entropy"] = False
 
-    # An applier declaring ``rope=False`` states Liger's generic rotary cannot serve this family
-    # (mrope, partial rotary, YARN); read it off the applier so a family added upstream is covered.
-    rope_param = signature_params.get("rope")
-    if rope_param is not None and rope_param.default is False and "rope" not in user_overrides:
-        config["rope"] = False
-    broken_ce = _LIGER_CROSS_ENTROPY_BROKEN_APPLIERS & _applier_identities(apply_fn)
-    if broken_ce and "cross_entropy" not in user_overrides:
-        logger.info(f"Liger cross_entropy disabled for {model_type}: {sorted(broken_ce)[0]} cannot apply it.")
-        config["cross_entropy"] = False
+    # An applier declaring one of these ``False`` states Liger's kernel cannot serve the family; read
+    # off the applier so a family added upstream is covered.
+    for name in _APPLIER_DEFAULT_OFF_FLAGS:
+        parameter = signature_params.get(name)
+        if parameter is not None and parameter.default is False and name not in user_overrides:
+            config[name] = False
 
     # A key this applier does not accept is dropped by the filter below. Dropping a requested kernel
     # without notice is the same failure the no-applier branch raises over: a config requesting
@@ -332,8 +347,16 @@ def _apply_liger_for_standard_models(
 
     filtered_config = {k: v for k, v in config.items() if k in valid_params}
 
+    # An upstream applier's CE branch rebinds `torch.nn.functional.cross_entropy` process-wide; the
+    # toolkit's scoped patch reaches the model's loss alone, so it serves CE for every family. A
+    # toolkit applier (delegating ones included) already withholds the flag from upstream itself.
+    call_config = dict(filtered_config)
+    if model_type not in _TOOLKIT_LIGER_APPLIERS and call_config.get("cross_entropy"):
+        call_config["cross_entropy"] = False
+        patch_loss_utils_cross_entropy()
+
     logger.info(f"Applying Liger Kernel for {model_type}: {filtered_config}")
-    apply_fn(**filtered_config)
+    apply_fn(**call_config)
     logger.info(f"✓ Liger Kernel applied for {model_type}")
     return filtered_config
 

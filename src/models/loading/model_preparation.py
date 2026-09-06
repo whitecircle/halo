@@ -20,7 +20,7 @@ from transformers.models.auto.modeling_auto import (
 )
 
 import src.models.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
-from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR
+from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR, trl_reapplication_config
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.patches.attention import (
     model_is_gemma4,
@@ -193,7 +193,7 @@ def finalize_liger_after_direct_load(training_config, original_use_liger: bool, 
     Reads the effective config the orchestrator applied (per-model defaults and EP/TP force-offs
     included), not the user's raw ``liger_kernel_config``. Under ``fused_linear_cross_entropy`` the
     model returns no logits, so the flag must stay on or TRL slices ``None`` in its metric path
-    (FLCE-only families: DeepSeek-V4, GLM-4 MoE Lite, Zaya); pinning the applied config makes TRL's
+    (the FLCE-default families: DeepSeek-V4, GLM-4 MoE Lite, Zaya); pinning the applied config makes TRL's
     re-application an identical re-patch. Otherwise the flag is cleared, so TRL does not re-apply
     Liger with its own defaults over the patched modules.
     """
@@ -202,7 +202,8 @@ def finalize_liger_after_direct_load(training_config, original_use_liger: bool, 
     applied = getattr(model.config, LIGER_APPLIED_CONFIG_ATTR, None)
     if applied and applied.get("fused_linear_cross_entropy", False):
         training_config.use_liger_kernel = True
-        training_config.liger_kernel_config = dict(applied)
+        # Minus the flags a delegating spec withheld from upstream: TRL runs upstream's applier alone.
+        training_config.liger_kernel_config = trl_reapplication_config(model.config, applied)
     else:
         training_config.use_liger_kernel = False
 
