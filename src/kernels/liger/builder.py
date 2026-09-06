@@ -36,10 +36,15 @@ _PATCHED_MARKER = "_halo_liger_patched_role"
 # The resolved fused activation-and-multiply, latched per module at construction.
 _GLU_MUL_ATTR = "_halo_glu_mul"
 
-# The flag gating the gated MLP of every toolkit-patched family. Liger spells the switch twice
-# (`swiglu`/`geglu`) and the orchestrator defaults and overrides both together; which kernel a module
-# gets is resolved from its own activation by `resolve_fused_glu_mul`, not from the spelling.
-_GLU_FLAG = "swiglu"
+# The flags gating the gated MLP of every toolkit-patched family. Liger spells the switch twice
+# (`swiglu`/`geglu`) and the orchestrator defaults and overrides both together; a non-delegating spec
+# offers the first, a delegating one whichever upstream declares. Which kernel a module gets is
+# resolved from its own activation by `resolve_fused_glu_mul`, not from the spelling.
+_GLU_FLAGS = ("swiglu", "geglu")
+
+# The upstream flags a delegating spec may withhold because it fills that role itself, each mapped to
+# the spec field that must then be non-empty.
+_WITHHOLDABLE_UPSTREAM_ROLES = {"rms_norm": "rms_norm", "swiglu": "glu_mlp", "geglu": "glu_mlp"}
 
 # The gates `fla`'s fused gated norm implements. Its kernel dispatches on the string with no else
 # branch, so a value it does not know applies no gate at all.
@@ -55,7 +60,10 @@ class LigerFamilySpec:
     :mod:`~src.kernels.liger.remote_modules`.
 
     A family upstream Liger already covers sets ``delegates_to_upstream``: its applier keeps every
-    role it declares, and the spec names only the roles the toolkit adds on top.
+    role it declares, and the spec names only the roles the toolkit adds on top — or takes over, by
+    listing the upstream flag in ``upstream_off``. Cross-entropy is never upstream's: every applier's
+    CE branch rebinds ``torch.nn.functional.cross_entropy`` process-wide, so the toolkit's scoped patch
+    serves that role for every family.
     """
 
     model_types: tuple[str, ...]
@@ -80,6 +88,10 @@ class LigerFamilySpec:
     causal_lm: tuple[str, ...] = ()
     # Attribute on the causal-LM module holding a scalar applied to the logits before the loss.
     logit_scale_attr: str | None = None
+    # Whether the family's head adds the router aux loss after the projection the fused loss
+    # replaces. The fused forward then refuses `output_router_logits`, since nothing would add that
+    # term to the objective; a head that only forwards the flag passes it through instead.
+    router_aux_loss_in_head: bool = False
     # Whether Liger's generic rotary computes this family's `apply_rotary_pos_emb`. False for every
     # partial, interleaved, mrope, YARN or per-layer-type rotary.
     rope: bool = False
@@ -92,6 +104,10 @@ class LigerFamilySpec:
     # Upstream Liger covers these model types: its applier runs first with every flag, and the roles
     # above are added on top. Which roles it serves is read off Liger's registry, not restated here.
     delegates_to_upstream: bool = False
+    # Upstream flags a delegating spec passes as False because it fills that role itself — where
+    # upstream's variant is not the family's function (GptOss's norm is Gemma-cast; upstream applies
+    # the llama cast) or where upstream's swap does not survive the EP wrapper the toolkit's does.
+    upstream_off: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if bool(self.modeling_module) == bool(self.remote_classes):
@@ -99,8 +115,20 @@ class LigerFamilySpec:
                 f"LigerFamilySpec for {self.model_types} must set exactly one of modeling_module "
                 f"(native) or remote_classes (trust_remote_code)."
             )
-        if self.logit_scale_attr and not self.causal_lm:
-            raise ValueError(f"LigerFamilySpec for {self.model_types} declares a logit scale but no causal_lm")
+        if (self.logit_scale_attr or self.router_aux_loss_in_head) and not self.causal_lm:
+            raise ValueError(
+                f"LigerFamilySpec for {self.model_types} declares a logit scale or an in-head aux loss "
+                f"but no causal_lm"
+            )
+        if self.upstream_off and not self.delegates_to_upstream:
+            raise ValueError(f"LigerFamilySpec for {self.model_types} withholds upstream flags but does not delegate")
+        for flag in self.upstream_off:
+            role = _WITHHOLDABLE_UPSTREAM_ROLES.get(flag)
+            if role is None or not getattr(self, role):
+                raise ValueError(
+                    f"LigerFamilySpec for {self.model_types} withholds {flag!r} from upstream without "
+                    f"filling that role itself; only {sorted(_WITHHOLDABLE_UPSTREAM_ROLES)} can be taken over."
+                )
         # A delegating spec needs a module to patch and something to add; a role upstream also claims
         # is caught by :func:`_named_class`, on the class it replaced.
         if self.delegates_to_upstream and not (
@@ -255,6 +283,11 @@ def _fused_gated_rms_norm_class(original: type) -> type:
     return _rebrand(_FusedGatedRMSNorm, original, "gated_rms_norm")
 
 
+def _glu_flag_on(flags: dict) -> bool:
+    """Whether the gated-MLP role is enabled under either of Liger's two spellings of its flag."""
+    return any(flags.get(name) for name in _GLU_FLAGS)
+
+
 def _fused_glu_forward(self, x: torch.Tensor) -> torch.Tensor:
     """`down(act(gate(x)) * up(x))` with the activation and multiply in one kernel."""
     return self.down_proj(getattr(self, _GLU_MUL_ATTR)(self.gate_proj(x), self.up_proj(x)))
@@ -307,19 +340,20 @@ def _patch_module(module: ModuleType, spec: LigerFamilySpec, flags: dict) -> lis
                 setattr(module, name, _fused_gated_rms_norm_class(original))
         patched.append(f"RMSNorm({', '.join(spec.rms_norm + spec.gated_rms_norm)})")
 
-    if flags.get(_GLU_FLAG) and spec.glu_mlp:
+    if _glu_flag_on(flags) and spec.glu_mlp:
         for name in spec.glu_mlp:
             original = _named_class(module, name, spec)
             if getattr(original, _PATCHED_MARKER, None) != "glu_mlp":
                 setattr(module, name, _fused_glu_mlp_class(original))
-        patched.append(f"{_GLU_FLAG}({', '.join(spec.glu_mlp)})")
+        patched.append(f"GLU({', '.join(spec.glu_mlp)})")
 
-    if flags.get("rope"):
+    # Only where the spec declares the rotary is Liger's; under delegation the role is upstream's.
+    if flags.get("rope") and spec.rope:
         module.apply_rotary_pos_emb = liger_rotary_pos_emb
         patched.append("RoPE")
 
     if flags.get("fused_linear_cross_entropy") and spec.causal_lm:
-        lce_forward = build_lce_forward(spec.logit_scale_attr)
+        lce_forward = build_lce_forward(spec.logit_scale_attr, spec.router_aux_loss_in_head)
         for name in spec.causal_lm:
             _named_class(module, name, spec).forward = lce_forward
         patched.append(f"FusedLinearCrossEntropy({', '.join(spec.causal_lm)})")
@@ -352,13 +386,14 @@ def _patch_instance(model, spec: LigerFamilySpec, flags: dict) -> None:
                 # fused when the class swap ran at load.
                 gated_forward = gated_forward or _fused_gated_rms_norm_class(type(module)).forward
                 module.forward = MethodType(gated_forward, module)
-    if flags.get(_GLU_FLAG):
+    if _glu_flag_on(flags):
         for module in model.modules():
             if type(module).__name__ not in spec.glu_mlp:
                 continue
             # The class swap already fuses this module unless something bound a forward over it,
-            # which upstream's instance patch does on the MLPs a delegating spec names, in the call
-            # this one follows. Re-binding puts the toolkit's patch last.
+            # which upstream's instance patch does on the MLPs a delegating spec names when HF
+            # Trainer re-applies Liger through Liger's own registry (a kernel-equivalent forward).
+            # Re-binding puts the toolkit's patch last.
             if getattr(type(module), _PATCHED_MARKER, None) == "glu_mlp" and "forward" not in module.__dict__:
                 continue
             fused_mul = getattr(module, _GLU_MUL_ATTR, None) or resolve_fused_glu_mul(getattr(module, "act_fn", None))
@@ -366,7 +401,7 @@ def _patch_instance(model, spec: LigerFamilySpec, flags: dict) -> None:
                 setattr(module, _GLU_MUL_ATTR, fused_mul)
                 module.forward = MethodType(_fused_glu_forward, module)
     if flags.get("fused_linear_cross_entropy") and type(model).__name__ in spec.causal_lm:
-        model.forward = MethodType(build_lce_forward(spec.logit_scale_attr), model)
+        model.forward = MethodType(build_lce_forward(spec.logit_scale_attr, spec.router_aux_loss_in_head), model)
 
 
 class LigerApplier:
@@ -395,9 +430,9 @@ class LigerApplier:
     def _declared_parameters(self):
         """One parameter per role that will run; a role nothing fills is not offered.
 
-        Under delegation the names and defaults are upstream's; the toolkit applies only its own loss
-        convention (CE on, FLCE off, the reverse of Liger's, because CE keeps the logits metrics
-        readable).
+        Under delegation the names and defaults are upstream's — a withheld flag included, since the
+        toolkit serves that role under the same name; the toolkit applies only its own loss convention
+        (CE on, FLCE off, the reverse of Liger's, because CE keeps the logits metrics readable).
         """
         spec = self.spec
         loss_defaults = {"cross_entropy": not spec.flce_default, "fused_linear_cross_entropy": spec.flce_default}
@@ -413,7 +448,7 @@ class LigerApplier:
             if spec.rms_norm or spec.gated_rms_norm:
                 yield "rms_norm", True
             if spec.glu_mlp:
-                yield _GLU_FLAG, True
+                yield _GLU_FLAGS[0], True
         yield "model", None
 
     def __call__(self, **kwargs) -> list[str]:
@@ -422,7 +457,10 @@ class LigerApplier:
         flags.update(kwargs)
         model = flags.pop("model", None)
 
-        if flags.get("rope") and not spec.rope:
+        # Under delegation the rotary is upstream's role where its own default says it serves the
+        # family; where it does not, refuse here — an upstream applier may only warn and patch nothing.
+        upstream_serves_rope = self.upstream is not None and self.defaults.get("rope") is True
+        if flags.get("rope") and not spec.rope and not upstream_serves_rope:
             raise NotImplementedError(
                 f"rope is not implemented for {spec.model_types[0]}: its rotary (partial, "
                 f"interleaved, mrope, YARN or per-layer-type) is not what Liger's kernel computes. "
@@ -433,10 +471,14 @@ class LigerApplier:
 
         patched: list[str] = []
         if self.upstream is not None:
-            # Upstream handles every role it declares, the loss included, hence the skip below. What
-            # follows adds only the classes the spec names, which `_named_class` checks are unclaimed.
-            self.upstream(model=model, **flags)
-            patched.append(f"{self.upstream.__name__}({', '.join(sorted(name for name, on in flags.items() if on))})")
+            # Upstream keeps every role it declares except the ones this spec takes over and the
+            # loss, whose upstream branch rebinds `torch.nn.functional.cross_entropy` for the whole
+            # process; the scoped patch below serves it instead. What follows adds only the classes
+            # the spec names, which `_named_class` checks are unclaimed.
+            upstream_flags = {**flags, "cross_entropy": False, **dict.fromkeys(spec.upstream_off, False)}
+            self.upstream(model=model, **upstream_flags)
+            on = sorted(name for name, enabled in upstream_flags.items() if enabled)
+            patched.append(f"{self.upstream.__name__}({', '.join(on)})")
 
         if spec.remote_classes:
             # The modeling module does not exist until transformers loads the remote file; arm the
@@ -446,7 +488,7 @@ class LigerApplier:
         else:
             patched += _patch_module(importlib.import_module(spec.modeling_module), spec, flags)
 
-        if flags.get("cross_entropy") and self.upstream is None:
+        if flags.get("cross_entropy"):
             patch_loss_utils_cross_entropy()
             patched.append("CrossEntropy")
 

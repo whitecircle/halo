@@ -293,7 +293,8 @@ def _check_glu_mlps(spec, originals, device) -> None:
         hidden_size=HIDDEN, intermediate_size=INTERMEDIATE, num_hidden_layers=2, vocab_size=128
     ).get_text_config()
     applier = resolve_liger_applier(spec.model_types[0])
-    applier(**_flags(applier, swiglu=True))
+    # Both spellings: a delegating spec offers whichever flag upstream declares for the role.
+    applier(**_flags(applier, swiglu=True, geglu=True))
 
     for name in spec.glu_mlp:
         original, patched = originals[name], getattr(module, name)
@@ -343,7 +344,7 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     patch_moe_model_for_ep(reference, ep_config)
     reference_loss, reference_grads = _loss_and_grads(reference, input_ids)
 
-    applier(**_flags(applier, swiglu=True))
+    applier(**_flags(applier, swiglu=True, geglu=True))
     modeling = importlib.import_module(spec.modeling_module)
     for name in spec.glu_mlp:
         assert getattr(modeling, name) is not originals[name], f"{name} was not swapped"

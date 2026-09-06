@@ -2,9 +2,9 @@
 
 Reproduces the standard ``*ForCausalLM.forward`` body (backbone → ``logits_to_keep`` slice → ``lm_head``
 → loss) with Liger's fused head+CE on the training path, and raises on the two shapes it cannot
-reproduce (a router aux loss, an ``lm_head`` bias). Anything else a family applies between head and loss
-must be declared on its :class:`~src.kernels.liger.builder.LigerFamilySpec`, or the family must not
-declare ``causal_lm``.
+reproduce (a router aux loss assembled in the head, an ``lm_head`` bias). Anything else a family applies
+between head and loss must be declared on its :class:`~src.kernels.liger.builder.LigerFamilySpec`, or
+the family must not declare ``causal_lm``.
 """
 
 from __future__ import annotations
@@ -18,12 +18,18 @@ from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutpu
 from src.models.loading.config_levels import get_config_field
 
 
-def build_lce_forward(logit_scale_attr: str | None = None) -> Callable:
+def build_lce_forward(logit_scale_attr: str | None = None, router_aux_loss_in_head: bool = False) -> Callable:
     """A fused-loss ``forward`` for one family.
 
     ``logit_scale_attr`` names a scalar the family multiplies the logits by before the loss (Cohere's
     ``logit_scale``). The fused path applies it to the hidden states instead, which is the same
-    product — ``(s·h) @ Wᵀ == s·(h @ Wᵀ)`` — reassociated so the scale survives the fusion.
+    product — ``(s·h) @ Wᵀ == s·(h @ Wᵀ)`` — reassociated so the scale survives the fusion; in bf16 it
+    is bit-exact for the power-of-two scales the shipped checkpoints use.
+
+    ``router_aux_loss_in_head`` states that the family's own head adds the router aux loss after the
+    projection the fused loss replaces, so ``output_router_logits`` is refused: nothing would add that
+    term to the objective. A head that only forwards the flag (Zaya, Mistral4) passes it through to
+    the backbone, whose router logits then reach the output as they do unfused.
     """
 
     def lce_forward(
@@ -42,20 +48,21 @@ def build_lce_forward(logit_scale_attr: str | None = None) -> Callable:
         shift_labels = kwargs.pop("shift_labels", None)
         # Taken from kwargs rather than declared as a parameter. `honors_output_router_logits_config`
         # decides whether a family's aux loss can reach the objective by looking for this parameter on
-        # `type(model).forward`, and Liger patches that forward before balancing resolves. Declaring it
-        # here would report that a family whose own head has no such parameter honors the flag, moving
-        # GLM-4.7-Flash off `bias_update` onto an `aux_loss` its config carries no coefficient for,
-        # leaving it with no router balancing.
-        output_router_logits = kwargs.pop("output_router_logits", None)
+        # the forward the model runs, and Liger installs this one before balancing resolves. Declaring
+        # it here would report that a family whose own head has no such parameter honors the flag,
+        # moving GLM-4.7-Flash off `bias_update` onto an `aux_loss` its config carries no coefficient
+        # for, leaving it with no router balancing.
+        explicit_router_logits = kwargs.pop("output_router_logits", None)
 
         # Checked before the backbone runs: a loss-only eval forced onto the fused path with nothing
         # to score is a caller error, and detecting it afterwards wastes the forward.
         if skip_logits and labels is None and shift_labels is None:
             raise ValueError("skip_logits is True, but labels and shift_labels are None")
 
+        output_router_logits = explicit_router_logits
         if output_router_logits is None:
             output_router_logits = get_config_field(self.config, "output_router_logits", False)
-        if output_router_logits:
+        if output_router_logits and router_aux_loss_in_head:
             raise ValueError(
                 f"Liger fused_linear_cross_entropy on {type(self).__name__} requires "
                 f"output_router_logits=False: the fused loss replaces the lm_head projection the "
@@ -63,6 +70,12 @@ def build_lce_forward(logit_scale_attr: str | None = None) -> Callable:
                 f"that term to the objective. Use moe_balancing: bias_update (or none), or set "
                 f"fused_linear_cross_entropy: false in liger_kernel_config."
             )
+        # The backbone resolves an omitted flag from the config, so an explicit value — a caller's
+        # False over a config True included — is forwarded as the family's own head forwards it.
+        if explicit_router_logits is not None:
+            kwargs["output_router_logits"] = explicit_router_logits
+        elif output_router_logits:
+            kwargs["output_router_logits"] = True
 
         outputs = self.model(
             input_ids=input_ids,

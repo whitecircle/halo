@@ -24,6 +24,7 @@ import ast
 import importlib
 import inspect
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ import torch
 from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.utils import HF_MODULES_CACHE
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
@@ -61,11 +63,21 @@ _LLAMA_RMS_NORM_BODY = (
 
 # Multimodal wrappers carry no decoder classes of their own; the orchestrator resolves them through
 # `text_config.model_type`, and the wrapper's text tower may be either sibling (LFM-2 VL and
-# Cohere2-Vision both default to the DENSE one), so pinning the wrapper to a spec would be wrong.
+# Cohere2-Vision both default to the DENSE one, `mistral3` wraps `mistral` or `mistral4`), so pinning
+# the wrapper to a spec would be wrong.
 RESOLVED_THROUGH_TEXT_CONFIG = {
     "gemma4": "gemma4_text",
     "lfm2_vl": "lfm2",
     "cohere2_vision": "cohere2",
+    "mistral3": "mistral4",
+}
+
+# Norm classes that compute Liger's function on CPU yet must stay undeclared, with the reason: the
+# sweep below would otherwise report each as a coverage gap.
+UNDECLARABLE_NORMS = {
+    # `_keep_in_fp32_modules_strict` pins the weight to fp32, so the eager norm returns fp32 from a
+    # bf16 activation where Liger's kernel stores in the input dtype.
+    "deepseek_v4": {"DeepseekV4RMSNorm"},
 }
 
 # The canonical GLU body a `glu_mlp` entry promises: `down_proj(act_fn(gate_proj(x)) * up_proj(x))`.
@@ -106,6 +118,67 @@ def test_every_roster_family_resolves_an_applier(model_type):
         return
     assert resolve_liger_applier(model_type) is not None, (
         f"no Liger applier covers {model_type}; add a LigerFamilySpec in src/kernels/liger/families.py"
+    )
+
+
+@pytest.mark.parametrize("spec", LIGER_FAMILY_SPECS, ids=lambda s: s.model_types[0])
+def test_a_listed_wrapper_can_only_wrap_the_family_it_is_listed_under(spec):
+    """A composite wrapper's text tower must be the spec's own family, or the spec must not list it.
+
+    The orchestrator resolves a listed model type directly and never consults its text config, so a
+    wrapper pinned to the wrong sibling patches classes the loaded model never instantiates and
+    reports every kernel as applied: ``mistral3`` wraps ``mistral`` (Mistral Small 3.x) as readily as
+    ``mistral4``, which is why it must resolve through the text config instead.
+    """
+    for model_type in spec.model_types:
+        config_cls = CONFIG_MAPPING.get(model_type)
+        if config_cls is None or "text_config" not in (getattr(config_cls, "sub_configs", None) or {}):
+            continue
+        tower = config_cls().text_config.model_type
+        assert tower in spec.model_types, (
+            f"{model_type} is a composite wrapper whose default text tower is {tower!r}, outside this "
+            f"spec's {spec.model_types}; drop it and let the orchestrator resolve it through text_config"
+        )
+
+
+@pytest.mark.parametrize(
+    "spec", [s for s in NATIVE_SPECS if not s.delegates_to_upstream], ids=lambda s: s.model_types[0]
+)
+def test_no_liger_expressible_norm_is_left_undeclared(spec):
+    """Every weighted norm in the family's module that computes Liger's function must be declared.
+
+    The declared-norm check above proves a listed norm is right; this is the converse — a class that
+    IS the llama- or Gemma-style body but is missing from the spec trains unfused with no warning
+    (``Cohere2MoeRMSNorm``, live whenever ``rms_norm_eps`` is set, is the shape). Weightless, gated
+    and grouped norms are skipped by construction: they cannot take the probe's ``(dim, eps)`` shape or
+    carry no ``weight``. A norm that matches yet must stay off the list is named in
+    ``UNDECLARABLE_NORMS`` with its reason.
+    """
+    module = importlib.import_module(spec.modeling_module)
+    torch.manual_seed(0)
+    x = torch.randn(3, 5, 16, dtype=torch.bfloat16)
+    expressible = set()
+    for name, cls in vars(module).items():
+        if not (isinstance(cls, type) and cls.__module__ == module.__name__ and name.endswith("RMSNorm")):
+            continue
+        try:
+            norm = cls(16, 1e-5).to(torch.bfloat16)
+        except TypeError:
+            continue
+        weight = getattr(norm, "weight", None)
+        if weight is None or "gate" in inspect.signature(norm.forward).parameters:
+            continue
+        weight.data.normal_()
+        for offset in (0.0, 1.0):
+            for casting_mode in ("llama", "gemma"):
+                if torch.allclose(
+                    norm(x), _liger_rms_norm_reference(x, weight, 1e-5, offset, casting_mode), atol=1e-2
+                ):
+                    expressible.add(name)
+    undeclared = expressible - set(spec.rms_norm) - UNDECLARABLE_NORMS.get(spec.model_types[0], set())
+    assert not undeclared, (
+        f"{spec.model_types[0]}: {sorted(undeclared)} compute a norm LigerRMSNorm expresses but are not "
+        f"declared — they train unfused. Declare them, or record why not in UNDECLARABLE_NORMS."
     )
 
 
@@ -458,6 +531,52 @@ def test_the_applier_offers_only_the_roles_the_spec_fills(spec):
     assert ("rms_norm" in parameters) == bool(spec.rms_norm or spec.gated_rms_norm)
     assert ("swiglu" in parameters) == bool(spec.glu_mlp)
     assert ("fused_linear_cross_entropy" in parameters) == bool(spec.causal_lm)
+
+
+def test_the_fused_head_forwards_the_router_flag_where_the_head_adds_no_aux_loss():
+    """A family whose head only forwards ``output_router_logits`` must pass it through, not refuse it.
+
+    The refusal exists for heads that add the router aux loss after the projection the fused loss
+    replaces (DeepSeek-V4, Laguna). Zaya's head forwards the flag and adds nothing, so refusing it
+    would fail the run the moment router-load metrics ask for the logits.
+    """
+    calls = []
+
+    class _Backbone:
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(
+                last_hidden_state=torch.zeros(1, 2, 4), past_key_values=None, hidden_states=None, attentions=None
+            )
+
+    head = types.SimpleNamespace(
+        config=types.SimpleNamespace(output_router_logits=False),
+        model=_Backbone(),
+        lm_head=torch.nn.Linear(4, 3, bias=False),
+        training=False,
+        loss_function=lambda **kwargs: None,
+    )
+    build_lce_forward(None, router_aux_loss_in_head=False)(
+        head, input_ids=torch.zeros(1, 2, dtype=torch.long), output_router_logits=True
+    )
+    assert calls and calls[-1].get("output_router_logits") is True, "the flag never reached the backbone"
+
+    with pytest.raises(ValueError, match="output_router_logits=False"):
+        build_lce_forward(None, router_aux_loss_in_head=True)(
+            head, input_ids=torch.zeros(1, 2, dtype=torch.long), output_router_logits=True
+        )
+    assert {spec.model_types[0] for spec in LIGER_FAMILY_SPECS if spec.router_aux_loss_in_head} == {
+        "deepseek_v4",
+        "laguna",
+    }
+
+    # A caller's explicit False over a config True is the family head's own behaviour: no refusal,
+    # and the backbone — which would otherwise resolve the omitted flag from the config — gets it.
+    head.config.output_router_logits = True
+    build_lce_forward(None, router_aux_loss_in_head=True)(
+        head, input_ids=torch.zeros(1, 2, dtype=torch.long), output_router_logits=False
+    )
+    assert calls[-1].get("output_router_logits") is False, "the explicit False never reached the backbone"
 
 
 if __name__ == "__main__":

@@ -21,25 +21,25 @@ function **exactly**. The builder patches a role by subclassing the family's own
 constructor signature and class name.
 
 Upstream Liger 0.8 covers Llama, Qwen2/3, Qwen3 MoE, Qwen3.5/3.6, Mistral, Mixtral, Gemma 2/3/4, GLM-4
-(incl. 4V MoE), OLMo 2/3, GptOss, Qwen3-Next and VLM wrappers; `qwen3_5*` and `qwen3_next` are extended by a
-[delegating spec](#upstream-covered-families-the-toolkit-extends).
+(incl. 4V MoE), OLMo 2/3, GptOss, Qwen3-Next and VLM wrappers; `qwen3_5*`, `qwen3_next`, `gpt_oss` and
+`gemma4_text` are extended or corrected by a [delegating spec](#upstream-covered-families-the-toolkit-extends).
 
 Toolkit-covered families (upstream has none). ✅ = patched, — = left unfused, with the reason:
 
 | Model | model_type | RMSNorm | GLU MLP | RoPE | CE | FLCE |
 |---|---|:--:|:--:|:--:|:--:|:--:|
-| Mistral 3 / 4 | `mistral3`, `mistral4` | ✅ | ✅ | — interleaved YARN + llama-4 log scale | ✅ | ✅ |
+| Mistral 4 | `mistral4` (a `mistral3` wrapper resolves through its text tower: `mistral4` here, `mistral` upstream) | ✅ | ✅ | — interleaved YARN; the llama-4 log scale follows it | ✅ | ✅ text-only checkpoints; [forced off under the wrapper](#fused-loss-under-a-multimodal-wrapper) |
 | Zaya | `zaya` | ✅ | — EP wrapper owns the experts | — partial rotary | ✅ | ✅ **default** |
-| DeepSeek-V4 | `deepseek_v4` | — mixes weighted and weightless norms, some fp32-pinned | — clamped SwiGLU | — interleaved partial | ✅ | ✅ **default** |
+| DeepSeek-V4 | `deepseek_v4` | — `_keep_in_fp32_modules_strict` pins the weights to fp32, so the eager norm returns fp32 from bf16 where the kernel stores in the input dtype | — clamped SwiGLU | — interleaved partial | ✅ | ✅ **default** |
 | GLM-4.7-Flash | `glm4_moe_lite` | ✅ | ✅ | — dual interleave/plain MLA | ✅ | ✅ **default** |
 | Laguna | `laguna` | ✅ | ✅ | — half-width on full-attention layers, full on sliding | ✅ | ✅ |
-| GLM-5.3-Flash | `glm5_next`, `glm5_next_text` | ✅ the two plain norms **+ the GDN gated norm** (fla) | — clamped at `swiglu_limit` | — NoPE text tower | ✅ | — VLM head reads `text_config.vocab_size` |
+| GLM-5.3-Flash | `glm5_next`, `glm5_next_text` | ✅ the two plain norms **+ the GDN gated norm** (fla) | — clamped at `swiglu_limit` | — NoPE text tower | ✅ | — no `*ForCausalLM`; the `*ForConditionalGeneration` head adds the router aux loss after the projection |
 | Inkling | `inkling_text`, `inkling_mm_model` | ✅ | — trained `global_scale` on the MLP output | — no rotary (learned relative bias) | ✅ | — head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` |
-| LFM-2 / LFM-2 MoE | `lfm2`, `lfm2_moe` | ✅ | — `w1`/`w3`/`w2`, no `act_fn` | ✅ **the only family whose rotary is Liger's** | ✅ | ✅ |
-| Cohere 2 / Cohere 2 MoE | `cohere2`, `cohere2_moe` | — live norm is a mean-subtracting `LayerNorm` with no bias parameter | ✅ | — GPT-J interleaved, sliding layers only | ✅ | ✅ (`logit_scale` folded onto the hidden states) |
-| Step-3.7 Flash | `step3p7`, `step3p5` | ✅ Gemma-style (`offset=1.0`, fp32 weight) | — clamps the activated gate | — partial rotary + llama3 scaling | ✅ | — VLM head reads `text_config.vocab_size` |
-| Ling / Ring 2.0 | `bailing_moe`, `bailing_moe_linear` | ✅ | ✅ (dense + shared expert) | — partial rotary | ✅ | — the head adds an MTP loss term |
-| Ling 3.0 | `bailing_hybrid` | ✅ | ✅ (dense + shared expert) | — interleaved MLA + YARN | ✅ | — the head adds an MTP loss term |
+| LFM-2 / LFM-2 MoE | `lfm2`, `lfm2_moe` | ✅ | — `w1`/`w3`/`w2`, no `act_fn` | ✅ **the only family whose rotary is Liger's** | ✅ | ✅ text-only; [forced off under `lfm2_vl`](#fused-loss-under-a-multimodal-wrapper) |
+| Cohere 2 / Cohere 2 MoE | `cohere2`, `cohere2_moe` | — dense: a mean-subtracting `LayerNorm` with no bias parameter; ✅ MoE `Cohere2MoeRMSNorm`, the live class when `rms_norm_eps` is set (`null` builds the LayerNorm) | ✅ | — GPT-J interleaved, on the sliding and `force_rope` layers | ✅ | ✅ text-only (`logit_scale` folded onto the hidden states); [forced off under `cohere2_vision`](#fused-loss-under-a-multimodal-wrapper) |
+| Step-3.7 Flash | `step3p7`, `step3p5` | ✅ Gemma-style (`offset=1.0`, fp32 weight) | — clamps the activated gate | — partial rotary + llama3 scaling | ✅ | — no `*ForCausalLM`; the `*ForConditionalGeneration` head is the only one |
+| Ling / Ring 2.0 | `bailing_moe`, `bailing_moe_linear` | ✅ | ✅ (dense + shared expert) | — partial rotary | ✅ | — the head adds an MTP term whenever `num_nextn_predict_layers > 0`, which a spec cannot gate on |
+| Ling 3.0 | `bailing_hybrid` | ✅ | ✅ (dense + shared expert) | — interleaved MLA + YARN | ✅ | — same MTP term |
 
 The Bailing families are `trust_remote_code`, so their modeling module does not exist when Liger is applied.
 Their patch is registered on the shared hook over `transformers.dynamic_module_utils.get_class_in_module` (`src/models/patches/remote_code_hooks.py`, wrapped once for every registrant) — the funnel every remote
@@ -66,42 +66,58 @@ else branch, so an unknown gate would apply none at all. A **grouped** gated nor
 is deliberately uncovered: Bailing's `*GroupRMSNorm` reduces over `hidden_size // group_norm_size`, where a
 last-dim kernel would normalize the wrong axis and still return the right shape.
 
-**Cross-entropy is scoped, not process-wide.** The toolkit's CE patch overrides
+**Cross-entropy is scoped, not process-wide — for every family.** The toolkit's CE patch overrides
 `transformers.loss.loss_utils`' view of `nn`, its single CE call site, leaving `F.cross_entropy` and every
-3-D or soft-target caller untouched. Upstream Liger's own appliers rebind `F.cross_entropy` globally — as
-does a [delegating spec](#upstream-covered-families-the-toolkit-extends), whose CE is upstream's.
+3-D or soft-target caller untouched (the classification trainer's focal loss calls it twice on one logits
+tensor, which Liger's in-place kernel would corrupt). Upstream Liger's own appliers install CE by rebinding
+`F.cross_entropy` globally, so the orchestrator never asks them for it: an upstream-resolved family is
+applied with `cross_entropy=False` and gets the scoped patch instead, and a delegating spec withholds the
+flag from upstream the same way. The effective config still records `cross_entropy: true` — it is the
+same fused kernel at the same call site.
 
 **One fused head for the roster.** Every family declaring a fused loss installs the same forward
-(`src/kernels/liger/lce_forward.py`). It refuses the two shapes it cannot reproduce: `output_router_logits`
-(the family's head adds the router aux loss *after* the projection the fused loss replaces, so the term
-would silently leave the objective — use `moe_balancing: bias_update`) and an `lm_head` bias.
+(`src/kernels/liger/lce_forward.py`). It refuses the two shapes it cannot reproduce: an `lm_head` bias, and
+`output_router_logits` on a family whose head adds the router aux loss *after* the projection the fused loss
+replaces (DeepSeek-V4, Laguna — declared `router_aux_loss_in_head`; the term would silently leave the
+objective, so use `moe_balancing: bias_update`). A head that only forwards the flag (Zaya, Mistral 4, LFM-2,
+Cohere 2) passes it through to the backbone, whose router logits reach the output as they do unfused.
 
-**Gemma 4 FLCE caveat:** Liger patches `Gemma4ForCausalLM.forward`, but checkpoints saved as
-`Gemma4ForConditionalGeneration` compute `logits = self.lm_head(...)` before calling `loss_function`,
-bypassing FLCE. Default Liger CE works; for batch>1 at long seq, use a text-only checkpoint.
+### Fused loss under a multimodal wrapper
+
+A checkpoint whose `model_type` is a multimodal wrapper — `gemma4`, `lfm2_vl`, `cohere2_vision`, `mistral3`
+(every Mistral Small 3.x / 4 checkpoint) — loads as its `*ForConditionalGeneration` class, whose own forward
+runs `lm_head` and the loss. The applier resolved through `text_config.model_type` patches the text tower's
+`*ForCausalLM`, which that model never instantiates, so a fused loss there would report as applied while the
+logits plane materializes anyway — and trade away the CE kernel that does reach the decoder. The orchestrator
+therefore forces `fused_linear_cross_entropy` off whenever it resolved through the text config, warning if
+the config requested it, and keeps `cross_entropy` on. RMSNorm, the fused GLU, RoPE and CE all reach the
+decoder as usual. For the fused head, train a text-only checkpoint (`model_type` = the text tower's).
 
 **Not covered:** `glm4_moe` (full GLM-4.5/4.7) has no EP wrapper, doc page or example in this toolkit, so it
 has no spec either.
 
 ### Upstream-covered families the toolkit extends
 
-Qwen3.5 / 3.6 and Qwen3-Next resolve to a toolkit applier that **delegates**: upstream Liger's applier runs
-first with every flag it declares, and the spec adds the roles it leaves eager — the gated-delta-net blocks'
-gated norm (three layers in every four) and, on the MoE siblings, the shared-expert MLP.
+Qwen3.5 / 3.6, Qwen3-Next, GptOss and Gemma 4 resolve to a toolkit applier that **delegates**: upstream
+Liger's applier runs first with every flag it declares, and the spec adds the roles it leaves eager, or takes
+over (`upstream_off`) a role upstream gets wrong for the family.
 
-| Model | model_type | Upstream applier patches | Toolkit spec adds |
+| Model | model_type | Upstream applier patches | Toolkit spec adds or takes over |
 |---|---|---|---|
-| Qwen3.5 / 3.6 dense | `qwen3_5`, `qwen3_5_text` | RMSNorm, `Qwen3_5MLP`, FLCE (its CE branch is broken, [below](#configuration)) | GDN gated norm → `fla` |
-| Qwen3.5 / 3.6 MoE | `qwen3_5_moe`, `qwen3_5_moe_text` | RMSNorm, `LigerExperts`, FLCE, CE | GDN gated norm → `fla`, shared-expert `Qwen3_5MoeMLP` |
-| Qwen3-Next | `qwen3_next` | RMSNorm, `LigerExperts`, FLCE, CE | GDN gated norm → `fla`, dense + shared-expert `Qwen3NextMLP` |
+| Qwen3.5 / 3.6 dense | `qwen3_5`, `qwen3_5_text` | RMSNorm, `Qwen3_5MLP`, FLCE | GDN gated norm → `fla` |
+| Qwen3.5 / 3.6 MoE | `qwen3_5_moe`, `qwen3_5_moe_text` | RMSNorm, `LigerExperts`, FLCE | GDN gated norm → `fla`, shared-expert `Qwen3_5MoeMLP` |
+| Qwen3-Next | `qwen3_next` | RMSNorm, `LigerExperts`, FLCE | GDN gated norm → `fla`, dense + shared-expert `Qwen3NextMLP` |
+| GptOss | `gpt_oss` | RoPE, FLCE | **takes over RMSNorm**: `GptOssRMSNorm` multiplies its weight in fp32 before the cast back (Gemma's casting mode); upstream applies the llama-cast `LigerRMSNorm`, a bf16-ULP deviation on every norm |
+| Gemma 4 | `gemma4_text` (the `gemma4` wrapper resolves here) | RMSNorm, FLCE | **takes over GeGLU**: `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its experts, so the EP wrapper never replaces it; the toolkit's fused GLU probes its activation and survives EP, where upstream's swap was force-off |
 
 `delegates_to_upstream` makes that a build-time contract: the upstream applier is looked up in liger-kernel's
 own registry (a family it stops covering fails at import), the delegating applier re-exports upstream's exact
-knob surface, and a role naming a class upstream has already replaced raises at patch time rather than
-stacking two swaps. Everything the orchestrator derives then follows the applier that actually **runs** — the
-`cross_entropy` default-off for liger-kernel 0.8.0's broken Qwen3.5 branch, and the EP fused-GLU decision
-below. Its CE is upstream's too (the process-wide `F.cross_entropy` rebind), which is inert where it would
-matter, since CE is force-disabled under CP/TP/PP.
+knob surface, a withheld flag must name a role the spec fills, and a role naming a class upstream has already
+replaced raises at patch time rather than stacking two swaps. Everything the orchestrator derives then
+follows the applier that actually **runs** — the `rope`/`swiglu` defaults read off its signature, and the EP
+fused-GLU decision below. CE is the toolkit's scoped patch here as everywhere; upstream's branch (broken
+outright in liger-kernel 0.8.0's Qwen3.5 applier, which imports `liger_cross_entropy` from the wrong module)
+is never called.
 
 **The shared expert is the toolkit's, the routed experts are upstream's.** Upstream's `swiglu` sets only the
 routed-experts class (`Qwen3_5MoeExperts` / `Qwen3NextExperts`), which the EP wrapper replaces wholesale; the
@@ -134,26 +150,19 @@ resolved applier's signature does not accept is dropped, with a warning naming i
 
 | Kernel | Default | Notes |
 |---|---|---|
-| `rope` | On | Fused rotary embedding. Auto-off whenever the resolved applier's own `rope` parameter defaults to `False` — the family's rotary (partial, mrope, YARN) has no Liger kernel, and several such appliers raise `NotImplementedError` if asked. Read off the signature, not a model_type list, so a family added upstream later is covered. An explicit `rope: true` bypasses the auto-off and reaches the applier, which refuses it with `NotImplementedError` rather than patching nothing |
+| `rope` | On | Fused rotary embedding. Auto-off whenever the resolved applier's own `rope` parameter defaults to `False` — the family's rotary (partial, mrope, YARN) has no Liger kernel. Read off the signature, not a model_type list, so a family added upstream later is covered. An explicit `rope: true` bypasses the auto-off and is refused with `NotImplementedError` rather than patching nothing (upstream's own appliers may only warn; the toolkit refuses on their behalf) |
 | `rms_norm` | On | Fused RMS normalization. Also covers a family's gated (GDN) norm where its spec declares one — one knob, both norm kernels |
-| `swiglu` | On | Auto-off where an **upstream** applier's expert-FFN swap is replaced by an EP wrapper, which runs Halo's own fused GLU combine instead. A toolkit spec patches the dense and shared-expert MLPs, which survive EP — see below |
-| `geglu` | On | Gemma4. Same auto-off, same replacement |
-| `cross_entropy` | On | Keeps logits for metrics. Force-off under TP, CP and PP, defaulted off for appliers whose CE branch cannot run (below), and defaulted off when the config explicitly requests `fused_linear_cross_entropy` (the two are mutually exclusive; setting both explicitly raises) |
-| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP, CP and PP |
+| `swiglu` | On | Auto-off where the applier's own default is `False` (GptOss, whose upstream applier has no SwiGLU patch block; Qwen3-VL), and where an **upstream** applier's expert-FFN swap is replaced by an EP wrapper, which runs Halo's own fused GLU combine instead. A toolkit spec patches the dense and shared-expert MLPs, which survive EP — see below |
+| `geglu` | On | Gemma 4. Served by the toolkit's spec on the always-on dense `Gemma4TextMLP`, which survives the EP wrapper, so it is **not** forced off under EP |
+| `cross_entropy` | On | Keeps logits for metrics. Always the toolkit's scoped patch. Force-off under TP, CP and PP, and defaulted off when the config explicitly requests `fused_linear_cross_entropy` (the two are mutually exclusive; setting both explicitly raises) |
+| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP, CP and PP, and [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper) |
 
 Precedence is generic defaults < per-model defaults < user keys, and user keys win **except** the TP/CP/PP
-force-offs ([below](#ep-cp-tp-behavior)), which overwrite an explicit `true`. Per-model defaults are read off
-each applier's own signature (`_PER_MODEL_DEFAULTS`), derived from the spec's `flce_default` — set by the
-three large-vocab families above and nothing else. An applier accepting `fused_linear_cross_entropy` but not
-`cross_entropy` also defaults FLCE on, since the generic FLCE-off default would reduce it to a no-op.
-
-**One applier has an unusable CE branch:** liger-kernel 0.8.0's `apply_liger_kernel_to_qwen3_5` (reached by
-`qwen3_5` and `qwen3_5_text`) imports `liger_cross_entropy` from `liger_kernel.transformers.cross_entropy`,
-where the symbol does not live, so the branch raises `ImportError`. The orchestrator defaults `cross_entropy`
-off for it; an explicit `cross_entropy: true` still hits the failure. The check matches every applier a call
-runs — the resolved one and, under
-[delegation](#upstream-covered-families-the-toolkit-extends), the upstream one it wraps. The Qwen3.5 MoE
-applier is a different function and is unaffected.
+force-offs ([below](#ep-cp-tp-behavior)) and the wrapper force-off, which overwrite an explicit `true`.
+Per-model defaults are read off each applier's own signature (`_PER_MODEL_DEFAULTS`), derived from the spec's
+`flce_default` — set by the three large-vocab families above and nothing else. An applier accepting
+`fused_linear_cross_entropy` but not `cross_entropy` also defaults FLCE on, since the generic FLCE-off default
+would reduce it to a no-op.
 
 Two library defaults are overridden: TRL's `use_liger_kernel=False` (toolkit → `True`, via
 `_TOOLKIT_DEFAULTS` in `src/training/parser.py`), and Liger's `fused_linear_cross_entropy=True,
@@ -223,7 +232,10 @@ orchestrator records the **effective** applied config on `model.config`, and
 `finalize_liger_after_direct_load` (`src/models/loading/model_preparation.py`) reads it after a
 `load_distributed_model` load: with FLCE applied it keeps `use_liger_kernel` on and pins
 `liger_kernel_config` to the applied dict, so TRL's re-application is an identical re-patch and its entropy
-guard knows logits are `None`; otherwise it turns the flag off. Code loading via
+guard knows logits are `None`; otherwise it turns the flag off. TRL re-applies through liger-kernel's own
+registry — upstream's applier alone — so the pinned dict has the flags a delegating spec withheld from
+upstream turned off (`trl_reapplication_config`): upstream's instance patch would otherwise bind its
+llama-cast norm over GptOss's Gemma-cast one, or its GeGLU over Gemma 4's toolkit-fused dense MLP. Code loading via
 `AutoModelForCausalLM.from_pretrained()` instead — the GPU benchmarks — patches through
 `apply_liger_kernel_for_direct_loading()`, which applies the toolkit defaults then sets
 `use_liger_kernel = False`.
@@ -235,9 +247,12 @@ sharded DTensor. Model-level kernels stay active.
 ## GptOss
 
 Upstream Liger's `gpt_oss` applier accepts a `swiglu` flag but has no patch block for it — GptOss's custom
-clamped/interleaved expert FFN has no standard-SwiGLU equivalent, so `swiglu` is a no-op at any value. FLCE
-is supported, marginally slower than CE. Effective options: `rope`, `cross_entropy`,
-`fused_linear_cross_entropy`, `rms_norm`.
+clamped/interleaved expert FFN has no standard-SwiGLU equivalent, so `swiglu` is a no-op at any value and
+defaults off. FLCE is supported, marginally slower than CE. Effective options: `rope`, `cross_entropy`,
+`fused_linear_cross_entropy`, `rms_norm` — the last served by the toolkit's spec with Gemma's casting mode
+(`GptOssRMSNorm` multiplies its weight in fp32 before the cast back), since upstream's llama-cast swap
+rounds before the multiply and moves every norm by a bf16 ULP — on the family the on-policy RL trainers
+score against a vLLM copy running the eager norm.
 
 The EP MoE layer's own clamped-SwiGLU is independent of Liger: every path — per-expert loop,
 [grouped GEMM](grouped-gemm.md) (default on SM90+) and ETP — runs the same fused Triton kernel

@@ -555,19 +555,32 @@ def honors_output_router_logits_config(model) -> bool:
     declare it never consults the config: ``Qwen3_5MoeForConditionalGeneration`` reads it from
     ``kwargs`` only, and the flag then pays a ``[tokens, num_experts]`` plane per MoE layer while the
     aux loss never reaches the loss, so the balancing has no effect.
+
+    Probed on the forward the instance runs, not the class's: a Liger fused loss replaces the head
+    with a forward that takes no such parameter, bound on the class at load or on the instance
+    alone when re-applied to a built model, and a verdict read off the class would then enable a
+    flag the running forward refuses.
     """
-    # A PEFT wrapper forwards **kwargs into the base model and shares its config, so probing the
-    # wrapper's own signature would report False for a base that does honour the flag.
-    base = getattr(model, "get_base_model", None)
-    if callable(base):
-        model = base()
-    forward = getattr(type(model), "forward", None)
+    forward = getattr(_unwrap_peft(model), "forward", None)
     if forward is None:
         return False
     try:
         return "output_router_logits" in inspect.signature(forward).parameters
     except (TypeError, ValueError):  # C-implemented or otherwise un-introspectable forward
         return False
+
+
+def _unwrap_peft(model):
+    """The base model under a PEFT wrapper, which forwards **kwargs into it and shares its config;
+    probing the wrapper's own forward would describe the wrapper, not the head that runs."""
+    base = getattr(model, "get_base_model", None)
+    return base() if callable(base) else model
+
+
+def _liger_fused_head_installed(model) -> bool:
+    """Whether a Liger fused-loss forward replaced the family's head, on the class or the instance."""
+    forward = getattr(_unwrap_peft(model), "forward", None)
+    return "liger" in (getattr(forward, "__module__", None) or "")
 
 
 def resolve_balancing_mode(requested: str, model, is_moe: bool) -> BalancingMode:
@@ -614,14 +627,21 @@ def resolve_balancing_mode(requested: str, model, is_moe: bool) -> BalancingMode
         return "none"
     if honors_aux_loss:
         return "aux_loss"
+    # A Liger fused loss installs a forward without the parameter over a head that may have declared
+    # it; only then is turning the fused loss off a remedy.
+    remedy = (
+        "set fused_linear_cross_entropy: false in liger_kernel_config to keep the family's own head, or "
+        if _liger_fused_head_installed(model)
+        else ""
+    )
     warn_once(
         logger,
         _WARNED_UNSERVABLE_AUTO,
         type(model).__name__,
         f"moe_balancing=auto resolves to none on {type(model).__name__}: its forward does not take "
-        f"output_router_logits, so the aux-loss term never reaches the loss, and nothing on this "
-        f"tree carries a routing bias (no EP MoE wrapper, no native balancing_biases router) — THIS "
-        f"RUN TRAINS UNBALANCED, a real cost at this expert count. Launch under torchrun with "
+        f"output_router_logits, so the aux-loss term never reaches the loss, and nothing on this tree "
+        f"carries a routing bias (no EP MoE wrapper, no native balancing_biases router) — THIS RUN "
+        f"TRAINS UNBALANCED, a real cost at this expert count. {remedy}Launch under torchrun with "
         f"use_grouped_gemm: true or expert parallelism, where auto resolves to the bias update for "
         f"families whose bias exports, or load the text-only sibling class whose forward honours the "
         f"flag.",

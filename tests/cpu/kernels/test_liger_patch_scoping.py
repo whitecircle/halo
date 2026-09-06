@@ -123,6 +123,43 @@ def test_every_nn_attribute_loss_utils_uses_still_resolves(patched, attribute):
         assert resolved is expected, f"loss_utils.nn.{attribute} no longer delegates to torch.nn"
 
 
+def test_an_upstream_family_leaves_the_process_wide_function_alone():
+    """The scope must hold for a family UPSTREAM Liger covers, not only for the toolkit's own specs.
+
+    Upstream's appliers install CE by rebinding ``torch.nn.functional.cross_entropy``; the orchestrator
+    withholds that flag and applies the scoped patch instead. A reward head calling ``F.cross_entropy``
+    twice on one logits tensor (the classification trainer's focal loss) would otherwise read
+    gradients Liger wrote into the tensor in place.
+
+    Subprocess: applying a real upstream applier rebinds the family's classes for the process.
+    """
+    from tests.common.utils import probe_findings
+
+    script = """
+import torch.nn.functional as F
+from accelerate import PartialState
+
+PartialState()
+from transformers.loss import loss_utils
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+from src.kernels.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
+from src.kernels.liger.orchestrator import apply_liger_kernel
+
+applied = apply_liger_kernel(CONFIG_MAPPING["llama"]())
+failures = []
+if not applied or applied.get("cross_entropy") is not True:
+    failures.append(f"CE not applied for llama: {applied}")
+if F.cross_entropy is not _TORCH_CROSS_ENTROPY:
+    failures.append("torch.nn.functional.cross_entropy was rebound process-wide")
+if loss_utils.nn.functional.cross_entropy is not liger_cross_entropy:
+    failures.append("transformers' loss path is not routed through the scoped patch")
+print("FAILURES:" + "|".join(failures))
+"""
+    failures = probe_findings(script, "FAILURES:")
+    assert not failures, "\n".join(failures)
+
+
 def test_hf_loss_path_numerics_unchanged_on_cpu(patched):
     """Liger is Triton/CUDA-only; on CPU the replacement must fall back to torch, bit for bit."""
     torch.manual_seed(0)

@@ -99,9 +99,12 @@ memory-validated shape.
   SGLang is refused independently (the family declares no fused gather;
   [Rollout Servers](../infrastructure/rollout-servers.md)).
 - Liger covers the fused SwiGLU (`Cohere2MoeMLP`, i.e. the dense and shared-expert path), cross-entropy,
-  and the fused loss, which folds `config.logit_scale` onto the hidden states so the scaled softmax
-  survives the fusion. The norm is left eager: the live class is `Cohere2MoeLayerNorm`, a
-  mean-subtracting LayerNorm with no bias parameter. RoPE too — GPT-J interleaved, sliding layers only
+  the norm when the checkpoint sets `rms_norm_eps` (a llama-style `Cohere2MoeRMSNorm`; the `null` default
+  builds `Cohere2MoeLayerNorm`, a mean-subtracting LayerNorm with no bias parameter, which stays eager),
+  and — on a text-only `cohere2_moe` checkpoint — the fused loss, which folds `config.logit_scale` onto the
+  hidden states so the scaled softmax survives the fusion. Command A+ is a `cohere2_vision` wrapper whose
+  own head runs, so the fused loss is forced off there and CE serves instead. RoPE stays eager — GPT-J
+  interleaved, on the sliding and `force_rope` layers
   ([Liger Kernels](../optimization/liger-kernels.md#supported-models)).
 
 ## Configs
