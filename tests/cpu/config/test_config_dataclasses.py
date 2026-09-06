@@ -581,15 +581,17 @@ def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():
     AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_thinking_tokens=4095)  # no raise
 
 
-def test_async_config_rejects_a_negative_thinking_budget():
-    """A negative budget is below every turn cap, so the headroom check alone would pass it through to
-    the engine as a nonsense ``thinking_token_budget``; ``null`` is the spelling for unbounded reasoning."""
+@pytest.mark.parametrize("bad", [-1, float("nan")])
+def test_async_config_rejects_a_negative_or_non_finite_thinking_budget(bad):
+    """A negative budget is below every turn cap and NaN passes every ordered comparison, so the
+    headroom check alone would pass either through to the engine as a nonsense ``thinking_token_budget``;
+    ``null`` is the spelling for unbounded reasoning."""
     AsyncTrainingConfig = _import_async_training_config()
-    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be >= 0"):
-        AsyncTrainingConfig(rollout_max_thinking_tokens=-1)
+    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be a finite number >= 0"):
+        AsyncTrainingConfig(rollout_max_thinking_tokens=bad)
     cfg = AsyncTrainingConfig()
-    cfg.rollout_max_thinking_tokens = -1
-    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be >= 0"):
+    cfg.rollout_max_thinking_tokens = bad
+    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be a finite number >= 0"):
         cfg.__post_override__({"rollout_max_thinking_tokens"})
 
 

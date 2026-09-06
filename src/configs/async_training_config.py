@@ -391,10 +391,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         # The per-turn answer headroom is `rollout_max_tokens - rollout_max_thinking_tokens`, floored
         # at 0 where the budgets meet: the turn would then spend its whole cap on reasoning and stop
         # before the answer or tool call it exists to produce.
-        if self.rollout_max_thinking_tokens is not None and self.rollout_max_thinking_tokens < 0:
+        if self.rollout_max_thinking_tokens is not None and (
+            not isfinite(self.rollout_max_thinking_tokens) or self.rollout_max_thinking_tokens < 0
+        ):
             raise ValueError(
-                f"rollout_max_thinking_tokens must be >= 0 when set (null = unbounded reasoning), got "
-                f"{self.rollout_max_thinking_tokens}"
+                f"rollout_max_thinking_tokens must be a finite number >= 0 when set (null = unbounded "
+                f"reasoning), got {self.rollout_max_thinking_tokens}"
             )
         if (
             self.rollout_max_thinking_tokens is not None
