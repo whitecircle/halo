@@ -24,7 +24,7 @@ from src.checkpoint.tool_io import reject_sharded_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
 from src.inference.openai_client import create_openai_client
-from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason
+from src.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.loading.dtype import DTYPE_BY_NAME
 from src.models.patches.buffer_fixes import finalize_loaded_model
@@ -228,9 +228,9 @@ async def prepare_generation_prompt(client, row: pd.Series, args) -> tuple[list[
     follow_up = row.get(args.follow_up_prompt_field)
     if isinstance(follow_up, list) and len(follow_up) > 0:
         answer, finish_reason = await generate_chat_message(client, base_prompt, args, response_format)
-        if finish_reason == FINISH_REASON_LENGTH:
-            # The follow-up turn conditions on this answer, so a fragment here corrupts every
-            # hypothesis the row goes on to produce.
+        if finish_reason in ENGINE_CUT_FINISH_REASONS:
+            # The follow-up turn conditions on this answer, so a fragment (token cap or engine abort)
+            # here corrupts every hypothesis the row goes on to produce.
             raise TruncatedGenerationError(
                 f"the first turn hit --max_gen_tokens ({args.max_gen_tokens}) and the follow-up turn "
                 f"would condition on a fragment"

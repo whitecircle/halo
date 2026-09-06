@@ -18,6 +18,10 @@ from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
+# Token ids of the synthetic prefix-monotone template the whole-trajectory tests render with.
+_ROLE_TOKENS = {"system": 100, "user": 101, "assistant": 102, "tool": 103}
+_END_TOKEN = 199
+
 
 def _echo_registry():
     registry = NativeToolRegistry()
@@ -242,6 +246,90 @@ def test_trainer_skips_the_cut_off_turn_row():
     rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
     assert len(rows) == 1  # both the fragment and the rejected-call turn are skipped
     assert rows[0].completion_ids.tolist() == [4, 5]
+
+
+def _flat_render(msgs, add_generation_prompt, _include_thinking):
+    """A minimal prefix-monotone chat template: ``<role> <content chars> <end>`` per message.
+
+    Stands in for a real tokenizer so the span locator anchors every boundary by construction and the
+    assertions below are about the loss mask alone.
+    """
+    ids = []
+    for m in msgs:
+        ids.append(_ROLE_TOKENS[m.role])
+        ids.extend(ord(c) for c in (m.content or ""))
+        ids.append(_END_TOKEN)
+    if add_generation_prompt:
+        ids.append(_ROLE_TOKENS["assistant"])
+    return ids
+
+
+def _render_trainer():
+    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+
+    trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    trainer._batch_build_error = None
+    trainer._context_limit = lambda: 100_000
+    trainer._tokenizer = type("T", (), {"name_or_path": "fake"})()
+    trainer.eos_token_id = 2
+    trainer.pad_token_id = 0
+    trainer._render_messages_to_ids = lambda msgs, agp, _kwargs, include_thinking=True: _flat_render(
+        msgs, agp, include_thinking
+    )
+    return trainer
+
+
+def _trained_tokens(trainer, traj):
+    _prompt, completion_ids, mask = trainer._tokenize_trajectory(type("R", (), {"trajectory": traj})())
+    return [tid for tid, keep in zip(completion_ids.tolist(), mask.tolist(), strict=True) if keep]
+
+
+def _two_turn_trajectory(first_truncated: bool):
+    return Trajectory(
+        messages=[
+            Message.user("task"),
+            Message.assistant("aaaa", truncated=first_truncated),
+            Message.user("obs"),
+            Message.assistant("bb"),
+        ]
+    )
+
+
+def test_whole_trajectory_render_does_not_weight_a_cut_turn():
+    """The re-tokenized path must exclude the same turns the per-turn path does.
+
+    It is the fallback whenever the engine returned no sampled ids, and it is the only path at
+    ``train_on_sampled_tokens: false`` — weighting the fragment there reinforces exactly the runaway
+    the exclusion exists to suppress, at whatever advantage the recovered episode earns.
+    """
+    trained = _trained_tokens(_render_trainer(), _two_turn_trajectory(first_truncated=True))
+
+    assert ord("a") not in trained  # the cut turn's own tokens carry no loss
+    assert trained.count(ord("b")) == 2  # the turn that finished still trains
+
+
+def test_whole_trajectory_render_weights_every_finished_turn():
+    trained = _trained_tokens(_render_trainer(), _two_turn_trajectory(first_truncated=False))
+
+    assert trained.count(ord("a")) == 4
+    assert trained.count(ord("b")) == 2
+
+
+def test_whole_trajectory_render_of_an_all_cut_episode_is_one_masked_row():
+    """Nothing survives, so the row must not carry the trajectory's width into the padded batch."""
+    traj = Trajectory(
+        messages=[
+            Message.user("task"),
+            Message.assistant("aaaa", truncated=True),
+            Message.user("obs"),
+            Message.assistant("bb", calls_rejected=True),
+        ]
+    )
+    trainer = _render_trainer()
+    _prompt, completion_ids, mask = trainer._tokenize_trajectory(type("R", (), {"trajectory": traj})())
+
+    assert mask.tolist() == [0]
+    assert completion_ids.numel() == 1
 
 
 def test_all_turns_excluded_trains_a_zero_weight_row():

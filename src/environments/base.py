@@ -98,6 +98,14 @@ class Message:
             d.update(dict.fromkeys(REASONING_KEYS, self.thinking))
         return d
 
+    @property
+    def untrainable(self) -> bool:
+        """An assistant turn no tokenization path may weight: an engine-cut fragment (``truncated``)
+        or a turn whose every tool call named a nonexistent tool (``calls_rejected``). It stays in
+        the render later turns condition on, but reinforcing it would reward the runaway or the
+        invented call whenever the episode recovers."""
+        return self.truncated or self.calls_rejected
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Message":
         return cls(

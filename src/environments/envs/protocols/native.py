@@ -15,6 +15,7 @@ from src.environments.base import (
 )
 from src.environments.rewards import compute_answer_reward
 from src.environments.tools.definitions import (
+    MissingToolArguments,
     NativeToolCall,
     NativeToolRegistry,
     NativeToolResult,
@@ -198,6 +199,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
                         result = self._result_from_call(tc, tool.execute(**tc.arguments))
                     except ToolBudgetExhausted as e:
                         result = self._budget_exhausted_result(tc, e)
+                    except MissingToolArguments as e:  # the model's mistake, observed without a traceback
+                        logger.warning(
+                            "Tool %r called without required argument(s): %s", tc.name, ", ".join(e.missing)
+                        )
+                        result = self._result_from_call(tc, e)
                     except Exception as e:  # a tool fault becomes an observation, not an episode failure
                         # Graded tools run here too: a submit handler that dies on a malformed payload
                         # becomes an ordinary tool error, and the trajectory would then record only
@@ -359,6 +365,9 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
                 return self._result_from_call(tc, await tool.execute_async(**tc.arguments))
             except ToolBudgetExhausted as e:
                 return self._budget_exhausted_result(tc, e)
+            except MissingToolArguments as e:
+                logger.warning("Tool %r called without required argument(s): %s", tc.name, ", ".join(e.missing))
+                return self._result_from_call(tc, e)
             except Exception as e:  # same contract as the sync path above
                 logger.warning("Tool %r raised during async execution", tc.name, exc_info=True)
                 return self._result_from_call(tc, e)

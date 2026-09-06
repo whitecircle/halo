@@ -39,7 +39,7 @@ from scripts.inference.reward_model._common import (
     resolve_correct_answer,
     score_conversations_offloaded,
 )
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 
 def parse_args():
@@ -68,8 +68,8 @@ async def generate_and_evaluate(
             base_prompt, response_format = await prepare_generation_prompt(client, row, args)
 
             response, finish_reason = await generate_chat_message(client, base_prompt, args, response_format)
-            if finish_reason == FINISH_REASON_LENGTH:
-                # Scoring a fragment as a finished answer would write a reward for text the policy
+            if finish_reason in ENGINE_CUT_FINISH_REASONS:
+                # Scoring a fragment (token cap or engine abort) as a finished answer would write a reward for text the policy
                 # never finished, so the row is dropped, counted and reported.
                 stats["truncated"] += 1
                 print(f"Truncated at --max_gen_tokens for {row.get(args.id_field, '?')}: dropped")

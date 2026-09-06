@@ -136,13 +136,12 @@ class TrajectoryTokenizeMixin:
         Prompt plus completion is one render of the whole trajectory, so the trained sequence is what
         the serving template emits; per-turn spans are located inside it
         (:func:`locate_assistant_spans`) rather than accumulated from independently rendered prefixes,
-        which no non-monotone template reproduces. The returned mask is the loss mask (1 on assistant
-        spans, 0 on env-injected tokens), consumed as TRL's ``tool_mask``; ``_build_training_tensors``
-        derives the attention-valid ``completion_mask`` (all real tokens) from it, so tool outputs stay
-        visible to attention while contributing no loss.
+        which no non-monotone template reproduces. The returned mask is the loss mask (1 on the
+        trainable assistant spans, 0 on env-injected tokens and on the turns the per-turn path also
+        excludes), consumed as TRL's ``tool_mask``; ``_build_training_tensors`` derives the
+        attention-valid ``completion_mask`` (all real tokens) from it, so tool outputs stay visible to
+        attention while contributing no loss.
         """
-        fallback_completion_token = self.eos_token_id if self.eos_token_id is not None else self.pad_token_id
-
         if not result.trajectory or not result.trajectory.messages:
             return self._masked_trajectory_tensors()
 
@@ -164,7 +163,9 @@ class TrajectoryTokenizeMixin:
 
         try:
             spans = locate_assistant_spans(_render, messages, first_assistant_idx)
-        except TemplateSpanError as e:
+            # One span per assistant message, in message order (:meth:`_SpanLocator.resolve`).
+            turn_spans = list(zip((m for m in messages if m.role == "assistant"), spans.turn_spans, strict=True))
+        except (TemplateSpanError, ValueError) as e:
             # Never raised per rank (a raise ahead of the batch collectives would break their order),
             # and not fatal either: independently rendered per-turn prefixes would splice in tokens the
             # serving template never emits, so the episode is dropped rather than trained on a guessed
@@ -180,7 +181,9 @@ class TrajectoryTokenizeMixin:
         prompt_token_ids = spans.full_ids[: spans.prompt_len]
         completion_ids = spans.full_ids[spans.prompt_len :]
         completion_mask = [0] * len(completion_ids)
-        for start, end in spans.turn_spans:
+        for turn, (start, end) in turn_spans:
+            if turn.untrainable:
+                continue
             completion_mask[start - spans.prompt_len : end - spans.prompt_len] = [1] * (end - start)
 
         # No truncation (reward would decouple from trained tokens); recorded rather than raised.
@@ -194,11 +197,11 @@ class TrajectoryTokenizeMixin:
                 f"the trainer context, or the prompt length — trajectories are trained in full, never truncated."
             )
 
-        if len(completion_ids) == 0:
-            # Masked for the same reason _masked_trajectory_tensors() masks: a trainable row here
-            # would reinforce P(EOS|prompt) at this advantage on a completion the policy never emitted.
-            completion_ids = [fallback_completion_token]
-            completion_mask = [0]
+        if not any(completion_mask):
+            # Nothing trainable survives (an empty completion, or every assistant turn excluded). The
+            # one-token masked row keeps the rank-uniform row count without padding the round's batch
+            # to this trajectory's width, and it cannot reinforce P(EOS|prompt) at this advantage.
+            return self._masked_trajectory_tensors()
 
         return (
             torch.tensor(prompt_token_ids, dtype=torch.long),
@@ -255,11 +258,7 @@ class TrajectoryTokenizeMixin:
         for idx, m in enumerate(messages):
             if m.role != "assistant":
                 continue
-            if m.truncated or m.calls_rejected:
-                # A turn that produced nothing usable: an engine-cut fragment, or one whose every tool
-                # call named a nonexistent tool. It stays in the next turn's prompt (the model must
-                # condition on what it emitted), but training on it would reinforce the runaway or the
-                # invented call whenever the episode recovers and earns a positive advantage.
+            if m.untrainable:
                 excluded_unusable = True
                 continue
             # Engine prompt ids take priority: a client re-render drifts on effort steering, tool
@@ -318,8 +317,9 @@ class TrajectoryTokenizeMixin:
 
         if not rows:
             if excluded_unusable:
-                # Re-tokenizing would weight every assistant span, truncated ones included, inverting
-                # the exclusion above into full-weight training on what it suppresses.
+                # Every assistant turn was excluded, so the whole-trajectory render below could only
+                # mask out the same turns and return this row anyway — at the cost of re-rendering a
+                # trajectory that carries no trainable token.
                 return single_trajectory_row(self._masked_trajectory_tensors())
             return single_trajectory_row(self._tokenize_trajectory(result))
         return rows

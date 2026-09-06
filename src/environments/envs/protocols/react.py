@@ -13,7 +13,7 @@ from typing import Any
 
 from src.environments.base import BaseEnvironment, Message, Trajectory, require_magnitudes
 from src.environments.rewards import compute_answer_reward
-from src.environments.tools.definitions import NativeToolRegistry
+from src.environments.tools.definitions import MissingToolArguments, NativeToolRegistry
 from src.environments.tools.factories import (
     create_native_math_tools,
     create_native_python_tools,
@@ -298,6 +298,13 @@ Always think before acting, and provide a Final Answer when you're done."""
                     reward += self.tool_success_reward
                     trajectory.info["successful_tool_calls"] += 1
                     info["tool_success"] = True
+                except MissingToolArguments as e:  # the model's mistake, observed without a traceback
+                    logger.warning(
+                        "Tool %r called without required argument(s): %s", step.action, ", ".join(e.missing)
+                    )
+                    observation = f"Error: {str(e)}"
+                    reward -= self.tool_error_penalty
+                    info["tool_error"] = str(e)
                 except Exception as e:
                     # The observation carries the message, but a broken tool is diagnosed from the
                     # logs, not the trajectory, which only records failure_reward.

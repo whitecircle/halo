@@ -10,6 +10,15 @@ from typing import Any
 from src.environments.base import Message
 
 
+class MissingToolArguments(ValueError):
+    """A model-authored call omitted arguments the tool's schema declares as required."""
+
+    def __init__(self, tool: str, missing: list[str]):
+        self.tool = tool
+        self.missing = missing
+        super().__init__(f"tool '{tool}' call is missing required argument(s): {', '.join(missing)}")
+
+
 class ToolBudgetExhausted(Exception):
     """Raised when an episode has spent its per-episode call budget for a tool.
 
@@ -97,7 +106,15 @@ class NativeTool:
         if not self.parameters:
             return arguments
         declared = {parameter.name for parameter in self.parameters}
-        return {name: value for name, value in arguments.items() if name in declared}
+        bound = {name: value for name, value in arguments.items() if name in declared}
+        # The schema advertises these as required, so a call without them is the model's error to
+        # observe, not a TypeError inside the handler.
+        missing = [
+            parameter.name for parameter in self.parameters if parameter.required and parameter.name not in bound
+        ]
+        if missing:
+            raise MissingToolArguments(self.name, missing)
+        return bound
 
     @staticmethod
     def _as_text(result: Any) -> str:
