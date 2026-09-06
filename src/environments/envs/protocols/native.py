@@ -20,7 +20,7 @@ from src.environments.tools.definitions import (
     NativeToolResult,
     ToolBudgetExhausted,
 )
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +34,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
     # States the fact and asks for the tool call, not for shorter reasoning: this text is trained on
     # wherever a recovery succeeds, so any instruction here generalizes beyond the cutoff case.
     LENGTH_CUTOFF_NUDGE = (
-        "Your previous turn was cut off at its length limit before you made a tool call, so nothing "
-        "was recorded. Make your tool call now with the best solution you have."
+        "Your previous turn was cut off before you made a tool call, so nothing was recorded. Make "
+        "your tool call now with the best solution you have."
     )
 
     # Per-tool-call shaping used when the config sets neither knob. Class attributes, like
@@ -264,7 +264,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Handle a turn that called no tool, shared by the sync and async steps: an engine-cut turn
         recovers, anything else is the model's final text answer."""
-        if ctx.get("finish_reason") == FINISH_REASON_LENGTH:
+        if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             return self._handle_length_cutoff(trajectory)
         return self._finalize_text_response(trajectory, action)
 

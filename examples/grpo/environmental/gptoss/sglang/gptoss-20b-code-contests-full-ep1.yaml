@@ -1,6 +1,10 @@
 # Environmental GRPO — gpt-oss-20b full fine-tune on code_contests, SGLang backend, no EP, ZeRO-2, with
-# R3 routing replay. Server flags, the five NCCL socket vars and the fsdp_reshard_after_backward
-# rationale: sglang/gptoss-20b-code-contests-lora-ep1.yaml.
+# R3 routing replay. Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2× TP=2, with
+#   --enable-return-routed-experts --moe-runner-backend triton (the auto-picked triton_kernel runner
+#   bypasses the R3 capture hook, and a repacking runner corrupts every weight update)
+#   --tool-call-parser auto --reasoning-parser gpt-oss, and --chat-template on the same file this
+#   config forces below. Keep --enable-torch-compile off under R3 capture. The five NCCL socket vars
+#   and the fsdp_reshard_after_backward rationale: sglang/gptoss-20b-code-contests-lora-ep1.yaml.
 # SGLang + expert distribution is rejected at construction (mutually exclusive NCCL transports) —
 # there is no sglang ep4 variant; use rollout_backend: vllm for EP runs.
 # rollout_max_thinking_tokens stays unset (vLLM-only; enforced by _validate_backend_capabilities).

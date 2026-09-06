@@ -3,7 +3,8 @@
 # reset deletes that Parameter, so the server would serve pretrained sinks against a sink-free trainer
 # — refused at construction by validate_weight_sync_support. Live sinks need a sink-carrying kernel:
 # FA4 on Blackwell, eager/flex_attention on Hopper.
-# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
+# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' --moe-backend triton (GPU 0;
+#   the auto-picked Blackwell MoE backends repack the expert weights this sync writes), then
 #   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
 
 # --- Model ---

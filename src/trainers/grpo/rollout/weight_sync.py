@@ -88,10 +88,9 @@ def validate_weight_sync_support(model: torch.nn.Module) -> None:
     - **GptOss with trainable sinks** (``train_sinks``): an SFT-only policy. The frozen live sinks of
       ``reset_sinks: false`` are on-policy by construction; a sink that moves every step has no
       validated end-to-end sync into either rollout engine.
-    - **Families whose layer class declares ``_supports_weight_sync = False``** (DeepSeek-V4,
-      Inkling, Zaya, Cohere2 MoE, GLM-5 Next): the names this sync forwards go straight into vLLM's
-      ``model.load_weights`` and cannot land; each class's ``_WEIGHT_SYNC_REFUSAL_REASON`` states the
-      family's gap. Enforced through live EP instances when present, else through the registry off
+    - **Families whose layer class declares ``_supports_weight_sync = False``**: the names this sync
+      forwards go straight into vLLM's ``model.load_weights`` and cannot land; each class's
+      ``_WEIGHT_SYNC_REFUSAL_REASON`` states the family's gap. Enforced through live EP instances when present, else through the registry off
       ``config.model_type``, since a wrapper-less run carries the same contract.
     - **Model types no pinned engine can serve** (``_WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES``): these
       spellings have no model class in the pinned engines, so the server cannot load the base model.

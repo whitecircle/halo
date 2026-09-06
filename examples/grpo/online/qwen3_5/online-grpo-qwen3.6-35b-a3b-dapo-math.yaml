@@ -1,6 +1,7 @@
 # Online GRPO (RLVR) — Qwen3.6-35B-A3B on DAPO-Math-17k, rule-based accuracy reward, EP=2 (train GPUs 1,2 + vLLM GPU 0).
 # See agent-docs/training-methods/grpo/online-grpo.md.
-# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
+# Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' --moe-backend triton (GPU 0;
+#   the auto-picked Blackwell MoE backends repack the expert weights this sync writes), then
 #   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
 
 # --- Model ---

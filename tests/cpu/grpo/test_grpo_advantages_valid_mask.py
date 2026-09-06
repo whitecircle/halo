@@ -13,6 +13,7 @@ group falls back to the plain mean without crashing.
 import pytest
 import torch
 
+from src.args.mixins import AdvantageShaping
 from src.trainers.grpo.objective.advantages import group_relative_advantages
 
 
@@ -64,6 +65,25 @@ def test_group_std_excludes_invalid_members():
     all_valid = group_relative_advantages(rewards, 4, "group", valid_mask=torch.ones(4, dtype=torch.bool))
     plain = group_relative_advantages(rewards, 4, "group")
     assert torch.allclose(all_valid, plain)
+
+
+def test_neg_mask_hard_gate_excludes_invalid_members():
+    """The hard-group gate takes its maximum over valid members, like the baseline and the std.
+
+    ``neg_mask_hard`` zeroes negatives in groups whose best objective reward stayed below the
+    threshold. An infra-failed row's forced 0.0 is not a score, and on any reward scale that puts
+    real rewards below zero it is the group maximum — the gate then never fires and the run silently
+    stops masking negatives in exactly the groups it was configured for.
+    """
+    shaping = AdvantageShaping(mode="neg_mask_hard", hard_group_threshold=-0.5)
+    rewards = torch.tensor([-2.0, -1.0, -3.0, 0.0])  # three real failures + one errored placeholder
+    valid = torch.tensor([True, True, True, False])
+
+    adv = group_relative_advantages(rewards, 4, "none", valid_mask=valid, shaping=shaping, gate_rewards=rewards)
+    alone = group_relative_advantages(rewards[:3], 3, "none", shaping=shaping, gate_rewards=rewards[:3])
+
+    assert (adv[:3] >= 0).all(), f"a hard group's negatives survived the placeholder: {adv.tolist()}"
+    assert torch.allclose(adv[:3], alone), f"{adv[:3].tolist()} vs the same group alone {alone.tolist()}"
 
 
 def test_batch_std_excludes_invalid_members():

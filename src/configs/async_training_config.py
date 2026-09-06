@@ -19,6 +19,15 @@ from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
 
 logger = logging.getLogger(__name__)
 
+# Rollout knobs whose consumer has no meaning for a non-positive value (see _validate_ranges).
+POSITIVE_ROLLOUT_FIELDS = (
+    "rollout_temperature",
+    "rollout_max_tokens",
+    "request_timeout",
+    "episode_timeout",
+    "rollout_connection_timeout",
+)
+
 
 def rollout_field_sources(config_cls) -> dict[str, str]:
     """Map each ``RolloutConfig`` field to the ``config_cls`` field
@@ -273,7 +282,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
 
     num_prefetch_batches: int = field(
         default=1,
-        metadata={"help": "Number of batches to prefetch ahead. 1 provides good overlap without excessive memory."},
+        metadata={
+            "help": "Bound on the prefetch result queue. The pipeline is one round deep by construction "
+            "(each round submits one batch and pops one), so values above 1 only add headroom — they do "
+            "not prefetch further ahead."
+        },
     )
 
     model_name: str | None = field(
@@ -344,6 +357,33 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             raise ValueError(
                 f"max_concurrent_rollouts must be >= 1 when set (null = derive from "
                 f"num_rollout_workers), got {self.max_concurrent_rollouts}"
+            )
+        # None of these consumers can express a non-positive value, and each swallows one far from
+        # the knob: rollout_temperature divides the log-prob sweep (the trainer scores at the
+        # sampling temperature, so a 0 is a ZeroDivisionError mid-step), rollout_max_tokens doubles
+        # as the dr_grpo loss normalizer, and the deadlines are compared against wall-clock, where a
+        # non-positive one cancels every episode on entry and halts the run as an empty batch.
+        for name in POSITIVE_ROLLOUT_FIELDS:
+            value = getattr(self, name)
+            if value <= 0:
+                raise ValueError(f"{name} must be > 0, got {value}")
+        # Sent verbatim on the wire; outside (0, 1] the server rejects every rollout request.
+        if not 0 < self.rollout_top_p <= 1:
+            raise ValueError(f"rollout_top_p must be in (0, 1], got {self.rollout_top_p}")
+        # A negative base shrinks the retry backoff instead of growing it.
+        if self.retry_base_wait < 0:
+            raise ValueError(f"retry_base_wait must be >= 0 (0 = retry immediately), got {self.retry_base_wait}")
+        # The per-turn answer headroom is `rollout_max_tokens - rollout_max_thinking_tokens`, floored
+        # at 0 where the budgets meet: the turn would then spend its whole cap on reasoning and stop
+        # before the answer or tool call it exists to produce.
+        if (
+            self.rollout_max_thinking_tokens is not None
+            and self.rollout_max_thinking_tokens >= self.rollout_max_tokens
+        ):
+            raise ValueError(
+                f"rollout_max_thinking_tokens ({self.rollout_max_thinking_tokens}) must be below "
+                f"rollout_max_tokens ({self.rollout_max_tokens}), which bounds the WHOLE turn: at or "
+                f"above it the turn has no answer headroom left and is cut mid-reasoning every time."
             )
         self._validate_backend_capabilities()
 

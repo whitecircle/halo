@@ -85,6 +85,7 @@ def relative_advantages(
     config: RLRRConfig,
     *,
     lengths: ArrayLike | None = None,
+    valid: BoolArrayLike | None = None,
 ) -> np.ndarray:
     """Compute RLRR advantages for a single group of responses.
 
@@ -95,6 +96,10 @@ def relative_advantages(
         rewards: Raw scalar reward / RM score per response (group size ``G``).
         config: :class:`RLRRConfig` hyperparameters.
         lengths: Optional response token lengths for length re-ranking (Eq. 6).
+        valid: Optional per-response mask (True = a real response). A placeholder row carries a
+            sentinel, not a score, so ranking it as a group member would move ``r_max`` and the
+            group mean and thereby every sibling's advantage; ranking and centring run over the
+            real responses alone and the placeholders return 0.
 
     Returns:
         ``np.ndarray`` of shape ``(G,)`` with the per-response advantage.
@@ -103,6 +108,14 @@ def relative_advantages(
     n = len(rewards_arr)
     if n == 0:
         return np.zeros(0, dtype=np.float64)
+    if valid is not None:
+        keep = np.asarray(valid, dtype=bool)
+        out = np.zeros(n, dtype=np.float64)
+        if keep.any():
+            out[keep] = relative_advantages(
+                rewards_arr[keep], config, lengths=None if lengths is None else np.asarray(lengths)[keep]
+            )
+        return out
 
     correct_arr = rewards_arr >= config.correctness_threshold
     rule_scores_arr = correct_arr.astype(np.float64)
@@ -130,12 +143,13 @@ def relative_advantages_grouped(
     config: RLRRConfig,
     *,
     lengths: ArrayLike | None = None,
+    valid: BoolArrayLike | None = None,
 ) -> np.ndarray:
     """Apply :func:`relative_advantages` to a flat batch of contiguous groups.
 
     ``rewards`` is laid out as ``num_prompts`` consecutive blocks of
     ``group_size`` responses (the standard GRPO rollout layout). Returns a flat
-    advantage array of the same length.
+    advantage array of the same length. ``valid`` is per response, sliced per group.
     """
     rewards_arr = np.asarray(rewards, dtype=np.float64)
     total = len(rewards_arr)
@@ -149,5 +163,6 @@ def relative_advantages_grouped(
             rewards_arr[start:end],
             config,
             lengths=None if lengths is None else lengths[start:end],
+            valid=None if valid is None else valid[start:end],
         )
     return out

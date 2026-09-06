@@ -18,6 +18,9 @@ model_name_or_path: unsloth/gpt-oss-20b-BF16
 # reset_sinks=false keeps pretrained sinks frozen to match vLLM; FA4 is the sink-carrying impl. See agent-docs/models/gpt-oss.md.
 attn_implementation: flash_attention_4
 reset_sinks: false
+# Serve with --chat-template on this same file (VLLM_CHAT_TEMPLATE in the compose file): forced on the
+# trainer alone it leaves the engine on the checkpoint's built-in, which double-encodes tool-call
+# arguments the harmony parser cannot then read.
 chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
 force_chat_template: true
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.

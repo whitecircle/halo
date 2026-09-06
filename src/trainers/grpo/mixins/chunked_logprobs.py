@@ -411,11 +411,12 @@ class ChunkedLogprobsCore:
         plus each row's real completion-token count.
 
         Forwarding each row trimmed to its real span with ``attention_mask=None`` keeps FA4 on its
-        dense kernel and restores RoPE positions ``[0, len)``; the result is bit-identical. One
-        forward per row keeps the FSDP/EP collective count in step. The detour is motivated by those
-        position and collective invariants, not by compile cost: FA4's varlen kernel JIT-compiles
-        once per head-config and is then length-agnostic. Rows forwarded singly on the other
-        attention paths take it for the cost alone: see ``rows_forward_densely``.
+        dense kernel and restores RoPE positions ``[0, len)``. Every supported family's attention is
+        relative, so the shift moves no score and the log-probs match the padded forward to
+        floating-point noise. One forward per row keeps the FSDP/EP collective count in step. The
+        detour is motivated by those position and collective invariants, not by compile cost: FA4's
+        varlen kernel JIT-compiles once per head-config and is then length-agnostic. Rows forwarded
+        singly on the other attention paths take it for the cost alone: see ``rows_forward_densely``.
         """
         spans = dense_row_spans(attention_mask)
         # Every row's completion count in one D2H: read inside the loop this is another sync per row.
@@ -463,11 +464,13 @@ class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):
         # TRL's loss forward passes batch_size=None (OOMs on env-GRPO); rows are independent, so
         # bounding is exact. Per mode, like TRL's default: eval runs at the eval batch size, so
         # lowering that for memory reaches the chunked path too instead of keeping the train bound.
+        # The mode is the trainer's, not the passed model's flag: a frozen reference model is in eval
+        # for the whole run, so reading its flag would compute the KL's reference log-probs at the
+        # eval batch size — and, wherever that crosses ``rows_forward_densely``, by the padded batched
+        # path while the policy runs trimmed dense rows, measuring the KL between two computations.
         if batch_size is None:
             batch_size = (
-                self.args.per_device_train_batch_size
-                if getattr(model, "training", True)
-                else self.args.per_device_eval_batch_size
+                self.args.per_device_train_batch_size if self.model.training else self.args.per_device_eval_batch_size
             )
         chunked = getattr(self, "_use_chunked_grpo_logprobs", False)
         is_multimodal = any(kwargs.get(k) is not None for k in self._multimodal_keys())

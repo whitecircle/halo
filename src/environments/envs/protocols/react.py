@@ -19,7 +19,7 @@ from src.environments.tools.factories import (
     create_native_python_tools,
     create_native_search_tools,
 )
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +151,9 @@ class ReActEnvironment(BaseEnvironment):
     # Asks only for the next Action or Final Answer, not for shorter reasoning: this text is trained
     # on wherever a recovery succeeds, so any instruction here generalizes beyond the cutoff case.
     LENGTH_CUTOFF_NUDGE = (
-        "Your previous turn was cut off at its length limit before you produced an Action or a Final "
-        "Answer, so nothing was recorded. Give your next Action now, or your Final Answer if you "
-        "already have the solution."
+        "Your previous turn was cut off before you produced an Action or a Final Answer, so nothing "
+        "was recorded. Give your next Action now, or your Final Answer if you already have the "
+        "solution."
     )
 
     DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant that solves problems step by step.
@@ -257,12 +257,12 @@ Always think before acting, and provide a Final Answer when you're done."""
 
         step = parse_react_output(action)
 
-        # A turn the engine cut off before either terminator is a failed turn, not a formatting
+        # A turn the engine cut short before either terminator is a failed turn, not a formatting
         # failure. Checked after the parse, so a turn that emitted its Action or Final Answer before
-        # the cap takes the normal path; an unfinished turn is neither rewarded nor penalized.
+        # the cut takes the normal path; an unfinished turn is neither rewarded nor penalized.
         if (
             not (step.has_action or step.has_final_answer)
-            and (context or {}).get("finish_reason") == FINISH_REASON_LENGTH
+            and (context or {}).get("finish_reason") in ENGINE_CUT_FINISH_REASONS
         ):
             return self._handle_length_cutoff(trajectory)
 

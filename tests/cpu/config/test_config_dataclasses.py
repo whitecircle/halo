@@ -21,6 +21,16 @@ OUTPUT_DIR = "/tmp/test_output"
 # bf16 at its default and never reach the GPU check.
 _CPU_OK = {"output_dir": OUTPUT_DIR, "bf16": False}
 
+# The rollout knobs AsyncTrainingConfig refuses at or below 0, spelled out so the sweep is static at
+# collection; test_positive_rollout_knob_sweep_covers_the_production_tuple holds it to the source.
+_POSITIVE_ROLLOUT_KNOBS = (
+    "rollout_temperature",
+    "rollout_max_tokens",
+    "request_timeout",
+    "episode_timeout",
+    "rollout_connection_timeout",
+)
+
 
 # SmoothMarginPOConfig tests
 
@@ -504,6 +514,69 @@ def test_async_config_episode_timeout_equal_watchdog_does_not_raise():
         cfg = AsyncTrainingConfig(episode_timeout=1800.0)  # == default 1800s watchdog
         rc = cfg.get_rollout_config()  # no raise
         assert rc.episode_timeout == 1800.0
+
+
+def test_positive_rollout_knob_sweep_covers_the_production_tuple():
+    """The sweep below spells its fields out; this fails if the guarded tuple grows or shrinks."""
+    from src.configs.async_training_config import POSITIVE_ROLLOUT_FIELDS
+
+    assert set(POSITIVE_ROLLOUT_FIELDS) == set(_POSITIVE_ROLLOUT_KNOBS)
+
+
+@pytest.mark.parametrize("field", _POSITIVE_ROLLOUT_KNOBS)
+@pytest.mark.parametrize("bad", [0, -1])
+def test_async_config_rejects_non_positive_rollout_knobs(field, bad):
+    """Each of these reaches a consumer with no reading for 0 or a negative, far from the knob.
+
+    ``rollout_temperature`` overwrites the trainer's own and then divides the chunked log-prob sweep
+    (0 → ZeroDivisionError inside the first optimizer step); ``rollout_max_tokens`` becomes TRL's
+    ``max_completion_length``, the dr_grpo loss normalizer; the three deadlines are compared against
+    wall-clock, so a non-positive one cancels every episode on entry and the run halts two steps
+    later reporting an empty batch instead of a bad config.
+    """
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match=field):
+        AsyncTrainingConfig(**{field: bad})
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_async_config_rejects_a_vanishing_concurrency_cap(bad):
+    """``max_concurrent_rollouts`` is read as ``value or default``, so a 0 reads as "unset" and the
+    per-rank semaphore cap disappears — every rollout of the round hits the servers at once."""
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="max_concurrent_rollouts"):
+        AsyncTrainingConfig(max_concurrent_rollouts=bad)
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, 1.5])
+def test_async_config_rejects_out_of_range_top_p(bad):
+    """``rollout_top_p`` is forwarded verbatim, so an out-of-range value is a per-request server
+    rejection — every episode errors and the step reads as a dead environment."""
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="rollout_top_p"):
+        AsyncTrainingConfig(rollout_top_p=bad)
+
+
+def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():
+    """The answer headroom is ``rollout_max_tokens - rollout_max_thinking_tokens``, floored at 0.
+
+    At or above the turn cap the floor hides the mistake: every turn spends its whole budget on
+    reasoning and is cut before the answer or tool call, which trains as a length-cut turn forever.
+    """
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="rollout_max_thinking_tokens"):
+        AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_thinking_tokens=4096)
+    AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_thinking_tokens=4095)  # no raise
+
+
+def test_async_config_range_guards_survive_a_cli_override():
+    """``__post_init__`` never re-runs under ``--key=value``; the guards live in ``_validate_ranges``
+    so the override path re-runs them whole."""
+    AsyncTrainingConfig = _import_async_training_config()
+    cfg = AsyncTrainingConfig()
+    cfg.rollout_temperature = 0.0
+    with pytest.raises(ValueError, match="rollout_temperature"):
+        cfg.__post_override__({"rollout_temperature"})
 
 
 if __name__ == "__main__":

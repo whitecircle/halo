@@ -20,6 +20,7 @@ from trl.trainer.utils import pad
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
+    EPISODE_INVALID_REASON_KEY,
     OBJECTIVE_REWARD_KEY,
     BaseEnvironment,
     resolve_reasoning_effort,
@@ -364,8 +365,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         """Validate and build the routing-replay injector (``None`` when off).
 
         Fails fast on every unsupported shape: unknown mode, a model without EP MoE wrappers, a family
-        that cannot re-derive gate weights, the FA4 per-row dense logprob path, ``recompute`` in a
-        config whose recompute pass never runs, and ``rollout`` without train-on-sampled-tokens.
+        that cannot re-derive gate weights, ``recompute`` in a config whose recompute pass never runs,
+        and ``rollout`` without train-on-sampled-tokens.
         """
         if mode not in ROUTING_REPLAY_MODES:
             raise ValueError(f"routing_replay must be one of {list(ROUTING_REPLAY_MODES)}, got {mode!r}")
@@ -1143,11 +1144,19 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             return
         self._empty_rollout_steps += 1
         errors = sorted({r.error for r in rollout_results if r.error})
-        detail = (
-            f" Rollout error: {errors[0]}"
-            if errors
-            else " No rollout carried an error: the environment marked every episode invalid."
+        untrainable = sorted(
+            {
+                r.trajectory.info[EPISODE_INVALID_REASON_KEY]
+                for r in rollout_results
+                if r.trajectory is not None and EPISODE_INVALID_REASON_KEY in r.trajectory.info
+            }
         )
+        if errors:
+            detail = f" Rollout error: {errors[0]}"
+        elif untrainable:
+            detail = f" Episodes were dropped as untrainable: {untrainable[0]}"
+        else:
+            detail = " No rollout carried an error: the environment marked every episode invalid."
         if self._empty_rollout_steps < EMPTY_ROLLOUT_STEP_LIMIT:
             logger.warning(
                 f"Every rollout in this step failed or was marked invalid — the step contributes no "

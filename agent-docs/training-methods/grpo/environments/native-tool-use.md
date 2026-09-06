@@ -27,7 +27,7 @@ All five are **magnitudes** (≥ 0); the minus is applied at the use site and a 
 
 `turn_overflow_penalty` is charged on any **truncated** episode, not only one that burned `max_turns` — `finalize_truncated` marks an episode killed mid-flight (a generation failure, an external abort) the same way, so it pays too.
 
-**A turn cut off at its token cap** (`finish_reason == "length"`) **with no tool call is a failed turn, not an answer.** The episode appends a nudge naming what happened and retries on its remaining `max_turns` budget; the count surfaces as `episode/length_cutoff_turns`. A turn that emitted its tool call before the cap takes the normal tool path.
+**A turn the engine cut short** (`finish_reason` `length` — its token cap — or `abort`) **with no tool call is a failed turn, not an answer.** The episode appends a nudge naming what happened and retries on its remaining `max_turns` budget; the count surfaces as `episode/length_cutoff_turns`. A turn that emitted its tool call before the cut takes the normal tool path.
 
 The cutoff is **unpriced** — a penalty would be avoidable only by reasoning well short of the budget. Bound the frequency structurally instead, through the per-effort caps and the answer headroom (`rollout_max_tokens - rollout_max_thinking_tokens`).
 

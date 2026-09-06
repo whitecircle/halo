@@ -89,7 +89,7 @@ repair it.
 
 The first sync takes minutes (one-time NCCL group formation per server) and the server stops
 answering `/health` mid-update — an update in progress, not a hang. Every sync pauses the engine
-and resumes it after: `/pause` … `/resume` on vLLM, with the broadcast itself bracketed by
+and resumes it after: `/pause?mode=keep` … `/resume` on vLLM, with the broadcast itself bracketed by
 `/start_weight_update` … `/finish_weight_update` (the layerwise reload phase, closed on every path);
 `/pause_generation` … `/continue_generation` on SGLang. The broadcast is packed (~1 GB buffers,
 double-buffered) on vLLM and typed 1 GB chunks on SGLang.

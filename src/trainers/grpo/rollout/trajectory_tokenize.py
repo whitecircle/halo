@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 import torch
 
-from src.environments.base import EPISODE_INVALID_KEY, Trajectory
+from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, Trajectory
 from src.environments.episode import RolloutResult
 from src.environments.registry import create_environment
 from src.models.loading.tokenizer_setup import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
@@ -128,6 +128,7 @@ class TrajectoryTokenizeMixin:
         logger.warning("Dropping an episode the chat template cannot re-render for training: %s", reason)
         if result.trajectory is not None:
             result.trajectory.info[EPISODE_INVALID_KEY] = True
+            result.trajectory.info[EPISODE_INVALID_REASON_KEY] = reason
 
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Tokenize a multi-turn trajectory into prompt, completion, and completion-mask tensors.

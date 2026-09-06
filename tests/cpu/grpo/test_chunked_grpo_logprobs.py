@@ -9,10 +9,11 @@ tolerance and FAIL if the chunked math drifts from the reference.
 """
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import LlamaConfig, LlamaForCausalLM, PretrainedConfig
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
 from src.distributed.runtime import materialize_dtensor
@@ -231,6 +232,131 @@ def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
 
     logps_dense.sum().backward()
     assert dense.model.lm_head.weight.grad is not None and dense.embed.weight.grad is not None
+
+
+class _ModeResolutionHarness(ChunkedGRPOLogprobsMixin):
+    """Records the sub-batch size ``_get_per_token_logps_and_entropies`` resolves for each callee."""
+
+    def __init__(self):
+        self.model = torch.nn.Module()
+        self.model.config = PretrainedConfig()
+        self.model.train()
+        self.args = SimpleNamespace(per_device_train_batch_size=1, per_device_eval_batch_size=4)
+        self._use_chunked_grpo_logprobs = True
+        # is_main_process: TRL's @profiling_decorator on the overridden method reads it.
+        self.accelerator = SimpleNamespace(unwrap_model=lambda module: module, is_main_process=False)
+        self.resolved: list[int] = []
+
+    def _chunked_logps(self, model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy):
+        self.resolved.append(batch_size)
+        return torch.zeros(input_ids.size(0), logits_to_keep), None
+
+
+def test_reference_logps_use_the_trainer_mode_not_the_frozen_model_flag():
+    """A frozen reference model sits in eval for the whole run (``frozen_models.py`` eval()s it, TRL
+    prepares it with evaluation_mode=True), so reading ITS training flag resolves the KL's reference
+    forward to the eval batch size while the policy uses the train one. At the shipped env-GRPO shape
+    (train 1, eval 4) that also lands the two on opposite sides of ``rows_forward_densely``: the policy
+    on trimmed dense rows, the reference on the padded batch — a KL between two computations.
+    """
+    harness = _ModeResolutionHarness()
+    reference = torch.nn.Module()
+    reference.eval()
+    ids, mask = torch.zeros(2, 6, dtype=torch.long), torch.ones(2, 6, dtype=torch.long)
+
+    harness._get_per_token_logps_and_entropies(harness.model, ids, mask, 3)
+    harness._get_per_token_logps_and_entropies(reference, ids, mask, 3)
+
+    assert harness.resolved == [1, 1], (
+        f"policy and reference resolved different sub-batch sizes {harness.resolved}; at train=1/eval=4 "
+        "that puts them on opposite sides of the dense/padded split"
+    )
+
+    harness.model.eval()  # the trainer's own eval pass moves both
+    harness._get_per_token_logps_and_entropies(reference, ids, mask, 3)
+    assert harness.resolved[-1] == 4
+
+
+class _RealBackboneHarness(ChunkedGRPOLogprobsMixin):
+    """A real causal LM behind ``_get_last_hidden_state``, reproducing TRL's own slicing.
+
+    The embedding harness above is position-free, so it cannot see what the dense path does to
+    attention and RoPE: the trimmed row is forwarded mask-free at positions ``[0, len)`` while the
+    padded row runs at positions offset by its left padding.
+    """
+
+    temperature = 1.0
+
+    def __init__(self, attn_implementation: str):
+        config = LlamaConfig(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+        )
+        torch.manual_seed(0)
+        self.model = LlamaForCausalLM(config).eval()
+        self.model.config._attn_implementation = attn_implementation
+        self.model.model.config._attn_implementation = attn_implementation
+
+    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
+        hidden = model.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
+        return hidden[:, :-1, :][:, -logits_to_keep:, :]
+
+
+@pytest.mark.parametrize("attn_implementation", ["sdpa", "eager"])
+def test_dense_rows_match_the_padded_batch_on_a_real_attention_stack(attn_implementation):
+    # The dense arm trims each row and drops its mask, so the row's causal mask and RoPE positions
+    # both change. Only a real attention + RoPE stack can show that the log-probs are unaffected;
+    # an off-by-one span, a mask-free row that still carries padding, or a mis-tiled head sweep
+    # would all move them.
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
+    harness = _RealBackboneHarness(attn_implementation)
+
+    with torch.no_grad():
+        padded, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+        dense, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 1, False)
+
+    torch.testing.assert_close(dense[completion_mask], padded[completion_mask], atol=1e-5, rtol=1e-5)
+    assert torch.count_nonzero(dense[~completion_mask]) == 0
+
+
+def test_backward_matches_autograd_for_every_input_across_tiles(monkeypatch):
+    # The recompute backward reconstructs each logits tile from the saved log_z, so every input's
+    # gradient — the head bias included, whose only chain to the loss is through this Function — has
+    # to carry the 1/temperature factor and land in the right vocab tile. An upstream gradient that
+    # varies per token catches a per-row scale that .sum() would hide.
+    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
+    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    vocab, b, t, hidden_size = 23, 3, 11, 6
+    torch.manual_seed(5)
+    hidden0 = torch.randn(b, t, hidden_size)
+    weight0 = torch.randn(vocab, hidden_size) * 0.3
+    bias0 = torch.randn(vocab) * 0.2
+    ids = torch.randint(0, vocab, (b, t))  # targets land in every vocab tile
+    upstream = torch.randn(b, t)
+
+    def leaves(with_bias):
+        h = hidden0.clone().requires_grad_(True)
+        w = weight0.clone().requires_grad_(True)
+        return h, w, bias0.clone().requires_grad_(True) if with_bias else None
+
+    for temperature in (1.0, 0.7):
+        for with_bias in (False, True):
+            ref_h, ref_w, ref_b = leaves(with_bias)
+            (selective_log_softmax(_ref_logits(ref_h, ref_w, ref_b, temperature), ids) * upstream).sum().backward()
+
+            got_h, got_w, got_b = leaves(with_bias)
+            (chunked_selective_log_softmax(got_h, got_w, ids, got_b, temperature) * upstream).sum().backward()
+
+            for got, ref in ((got_h, ref_h), (got_w, ref_w), (got_b, ref_b)):
+                if ref is None:
+                    continue
+                assert got.grad is not None
+                torch.testing.assert_close(got.grad, ref.grad, atol=1e-4, rtol=1e-4)
 
 
 def test_sweep_matches_full_path_across_sequence_and_vocab_tiles(monkeypatch):

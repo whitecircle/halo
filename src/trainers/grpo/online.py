@@ -393,14 +393,17 @@ class DistributedGRPOTrainer(
         local_lengths = result["completion_mask"].sum(dim=1).to(rewards.device)
         full_lengths = self.accelerator.gather(local_lengths)
 
+        # ``valid`` both keeps the unscorable placeholders out of their group's ranking and returns
+        # their own advantage as 0, which is TRL's unscorable handling.
         advantages_full = torch.from_numpy(
             relative_advantages_grouped(
                 rewards.float().cpu().numpy(),
                 group_size=self.num_generations,
                 config=self._rlrr_config,
                 lengths=full_lengths.float().cpu().numpy(),
+                valid=(~unscorable).cpu().numpy(),
             )
-        ).masked_fill(unscorable.cpu(), 0.0)
+        )
 
         self._install_advantages(result, advantages_full, "RLRR")
 

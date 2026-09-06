@@ -8,11 +8,14 @@ from typing import Any
 from openai.types.chat import ChatCompletionMessageToolCall
 from pydantic import BaseModel
 
-# The OpenAI-wire finish_reason for a generation cut off at its token cap. Both the length-cutoff
-# recovery and the truncated-turn flag compare against this constant.
+# The OpenAI-wire finish_reason for a generation cut off at its token cap.
 FINISH_REASON_LENGTH = "length"
 # vLLM's finish reason for a generation the engine aborted (a pause in abort mode, an engine restart).
 FINISH_REASON_ABORT = "abort"
+# Finish reasons that ended a turn without the model choosing to stop. The fragment is never a
+# natural termination, so it is neither trained as one (the truncated-turn flag) nor graded as the
+# model's answer (the cut-turn recovery each protocol routes to).
+ENGINE_CUT_FINISH_REASONS = (FINISH_REASON_LENGTH, FINISH_REASON_ABORT)
 
 
 class OpenAIResponse(BaseModel):

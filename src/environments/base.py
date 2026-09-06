@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 # Reasoning-effort levels for the chat template ("Reasoning: <level>"). "random" resolves per episode.
 VALID_REASONING_EFFORTS = ("low", "medium", "high")
@@ -17,6 +17,9 @@ VALID_REASONING_EFFORTS = ("low", "medium", "high")
 # Set in ``info`` when an episode completed but its reward carries no learning signal (a failed grading
 # backend forced the failure reward); the trainer excludes it from the GRPO group baseline.
 EPISODE_INVALID_KEY = "episode_invalid"
+# Why the trainer dropped an episode as untrainable (a chat-template re-render failure); read by the
+# all-invalid step halt so its message names the cause.
+EPISODE_INVALID_REASON_KEY = "episode_invalid_reason"
 
 # The task-outcome component of an env's ``reward_components``, the term advantage shaping gates on.
 # Shaping falls back to the total reward when the component is absent, so a misspelled key shapes on
@@ -202,9 +205,9 @@ class BaseEnvironment(ABC):
     # it in the trajectory meta. ``None`` = no system turn.
     system_prompt: str | None = None
 
-    # What :meth:`_handle_length_cutoff` feeds back after the engine cuts a turn off at its token cap.
-    # Per protocol, since the text must ask for that protocol's next move; ``None`` means the protocol
-    # has no recovery path and does not route cut-off turns there.
+    # What :meth:`_handle_length_cutoff` feeds back after the engine cuts a turn short. Per protocol,
+    # since the text must ask for that protocol's next move; ``None`` means the protocol has no
+    # recovery path and does not route cut-off turns there.
     LENGTH_CUTOFF_NUDGE: str | None = None
 
     def __init__(self, max_turns: int | None = None, max_observation_chars: int = 16384, **kwargs):
@@ -335,12 +338,13 @@ class BaseEnvironment(ABC):
                 routing_prompt_tokens=ctx.get("routing_prompt_tokens"),
                 prompt_token_ids=ctx.get("prompt_token_ids"),
                 # An engine abort is a cut turn too: the fragment must never train as a natural stop.
-                truncated=ctx.get("finish_reason") in (FINISH_REASON_LENGTH, FINISH_REASON_ABORT),
+                truncated=ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS,
             )
         )
 
     def _handle_length_cutoff(self, trajectory: Trajectory) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
-        """Handle a turn the engine cut off at its token cap before it produced anything.
+        """Handle a turn the engine cut short before it produced anything — at its token cap, or by
+        aborting it (:data:`~src.inference.response.ENGINE_CUT_FINISH_REASONS`).
 
         The turn is nudged and retried within ``max_turns`` rather than graded: the fragment would end
         the episode on a mid-sentence string that reads as a natural termination. It carries no reward
