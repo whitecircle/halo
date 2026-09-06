@@ -242,7 +242,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 |---|---|---|
 | `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint |
 | `VLLM_PORT` | `8000` | Bound on the host (`network_mode: host`). One knob for the whole stack: it drives the serve command, the healthcheck, the container's `VLLM_SERVER_URL` and the readiness banner, and the Makefile derives its own `VLLM_SERVER_URL` from it (`SGLANG_PORT` is the SGLang equivalent) |
-| `VLLM_CUDA_DEVICES` | `7` | Server GPUs — must exclude the trainer's (a rank cannot broadcast to itself) |
+| `VLLM_CUDA_DEVICES` | `7` | Server GPUs — must exclude the trainer's (a rank cannot broadcast to itself). Selects via `CUDA_VISIBLE_DEVICES` inside a container that sees every GPU: hiding devices from the container instead (`--gpus device=N`) breaks the cross-container NCCL P2P import of the trainer's buffers (`Cuda failure 101 'invalid device ordinal'`, `500` on `/init_weight_transfer_engine`) |
 | `VLLM_TP` | `1` | `--tensor-parallel-size` |
 | `VLLM_GPU_MEM` | `0.85` | `--gpu-memory-utilization` |
 | `VLLM_MOE_BACKEND` | `triton` | Keep `triton` for MoE RL ([Weight sync](#weight-sync)) |
@@ -521,6 +521,7 @@ covered.
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → the engine strands a communicator per trainer connection until the GPU runs out; rebuild `vllm-server` and recreate the server container |
 | `ncclBuildRings: ring 0 does not contain rank 1` (vLLM) | Trainer launched with SGLang's socket vars — the sync transports are mutually exclusive |
 | Broadcast hangs at the first sync (SGLang) | The NCCL socket vars missing on one end — both processes need the same set |
+| `/init_weight_transfer_engine` answers 500 with `ncclP2pImportShareableBuffer ... Cuda failure 101 'invalid device ordinal'` in the server log | The server container does not see the trainer's GPU — expose all GPUs to it and select with `CUDA_VISIBLE_DEVICES` (`VLLM_CUDA_DEVICES`), as the compose file does |
 | `Call to bind failed: No such device` in the server log (`400` on `/update_weights_from_distributed`), or a trainer collective hanging right after the first sync | NCCL's socket transport picked a Docker `veth` — set `NCCL_SOCKET_IFNAME=^docker,veth` on both ends |
 | `Errno 98` binding the group port at trainer start | Previous run's port in TIME_WAIT → wait for `ss -tln` to clear, or change `group_port` |
 | `/health` answers but generation is wedged after a killed trainer | Scheduler left attached to the dead transfer group → restart the server container |
