@@ -388,12 +388,17 @@ need the socket transport, process-global:
 
 ```text
 NCCL_P2P_DISABLE=1  NCCL_SHM_DISABLE=1  NCCL_NET=Socket  NCCL_IB_DISABLE=1  NCCL_NET_PLUGIN=none
+NCCL_SOCKET_IFNAME=^docker,veth
 ```
 
 `NCCL_NET_PLUGIN=none` is separate and load-bearing: the images bundle the aws-ofi plugin, which
-NCCL prefers and then wedges group formation on a host with no OFI fabric. Setting the flags only on
-the server is not enough — the group still forms (a TCP rendezvous) and the first broadcast hangs,
-because the trainer still reaches for CUDA-IPC.
+NCCL prefers and then wedges group formation on a host with no OFI fabric. `NCCL_SOCKET_IFNAME`
+keeps the socket transport off Docker's bridge and the per-container `veth` pairs: on a host running
+other containers NCCL otherwise enumerates them too, and a veth carries no host-to-host traffic (the
+first collective after the sync hangs) or disappears when its container exits (`Call to bind failed:
+No such device` on the server, `400` on the update). Setting the flags only on the server is not
+enough — the group still forms (a TCP rendezvous) and the first broadcast hangs, because the trainer
+still reaches for CUDA-IPC.
 
 The cost is process-global: a multi-rank trainer
 loses NVLink between its own ranks for the whole job (the reason for
@@ -514,8 +519,9 @@ covered.
 | Log-ratio drifts on SGLang while the server log stays clean | No server-side signal exists: the MoE loaders skip unmapped expert names before their `not found in params_dict` warning → do not read a clean log as proof of a landed sync; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild `vllm-server` |
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → the engine strands a communicator per trainer connection until the GPU runs out; rebuild `vllm-server` and recreate the server container |
-| `ncclBuildRings: ring 0 does not contain rank 1` (vLLM) | Trainer launched with SGLang's five socket vars — the sync transports are mutually exclusive |
-| Broadcast hangs at the first sync (SGLang) | The five NCCL vars missing on one end — both processes need all five |
+| `ncclBuildRings: ring 0 does not contain rank 1` (vLLM) | Trainer launched with SGLang's socket vars — the sync transports are mutually exclusive |
+| Broadcast hangs at the first sync (SGLang) | The NCCL socket vars missing on one end — both processes need the same set |
+| `Call to bind failed: No such device` in the server log (`400` on `/update_weights_from_distributed`), or a trainer collective hanging right after the first sync | NCCL's socket transport picked a Docker `veth` — set `NCCL_SOCKET_IFNAME=^docker,veth` on both ends |
 | `Errno 98` binding the group port at trainer start | Previous run's port in TIME_WAIT → wait for `ss -tln` to clear, or change `group_port` |
 | `/health` answers but generation is wedged after a killed trainer | Scheduler left attached to the dead transfer group → restart the server container |
 | `RESTART the … server` in the trainer log; that server stays paused and refuses the next sync | A sync was interrupted after part of the model went out → the engine holds a half-written model on purpose ([Weight sync](#weight-sync)); restart it, do not `/resume` it |
