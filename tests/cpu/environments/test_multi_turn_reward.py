@@ -163,6 +163,7 @@ def test_rollout_metrics_decomposition_sums_to_reward():
         "reward/submission",
         "reward/execution",
         "reward/tested_submission",
+        "reward/resubmission",
         "reward/tool_shaping",
         "reward/turn_shaping",
     }

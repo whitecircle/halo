@@ -22,6 +22,8 @@ from src.environments.base import (
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
+    VERDICT_DETAIL_FULL,
+    VERDICT_DETAILS,
     GradeResult,
     GradingSpec,
     grade_solution,
@@ -100,6 +102,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         sandbox_url: str | None = None,
         language: str = "python",
         output_comparison: str = "exact",
+        verdict_detail: str = VERDICT_DETAIL_FULL,
         stop_on_first_failure: bool = False,
         max_time_limit: float = SANDBOX_DEFAULT_TIMEOUT,
         max_grading_seconds: float | None = None,
@@ -107,6 +110,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_test_calls: int = 5,
         submission_reward: float = 0.0,
         execution_progress_reward: float = 0.0,
+        resubmission_penalty: float = 0.0,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         **kwargs,
@@ -114,18 +118,27 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         spec = require_language(language)
         if output_comparison not in ("exact", "tokens"):
             raise ValueError(f"output_comparison must be 'exact' or 'tokens', got {output_comparison!r}")
+        if verdict_detail not in VERDICT_DETAILS:
+            raise ValueError(f"verdict_detail must be one of {VERDICT_DETAILS}, got {verdict_detail!r}")
         if max_submissions < 1:
             raise ValueError(f"max_submissions must be >= 1, got {max_submissions}")
         if max_test_calls < 0:
             raise ValueError(f"max_test_calls must be >= 0, got {max_test_calls}")
         if max_grading_seconds is not None and max_grading_seconds <= 0:
             raise ValueError(f"max_grading_seconds must be > 0 or None, got {max_grading_seconds}")
-        require_magnitudes(submission_reward=submission_reward, execution_progress_reward=execution_progress_reward)
+        require_magnitudes(
+            submission_reward=submission_reward,
+            execution_progress_reward=execution_progress_reward,
+            resubmission_penalty=resubmission_penalty,
+        )
         self.language = spec.name
         # Bootstraps a base model that never submits; the term cancels within a GRPO group once all do.
         self.submission_reward = submission_reward
         # Fraction of graded tests that ran: the only within-group signal when every completion fails.
         self.execution_progress_reward = execution_progress_reward
+        # Each graded submission after the first is a probe of the judge. Free, and with only the last
+        # one counting, probing out-earns testing in the scratchpad within a GRPO group at every effort.
+        self.resubmission_penalty = resubmission_penalty
         # Reaching the cap ends the episode; further calls are rejected as tool errors.
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
@@ -144,6 +157,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         self.grading_spec = GradingSpec(
             sandbox=self.sandbox,
             comparison=output_comparison,
+            verdict_detail=verdict_detail,
             language=self.language,
             max_output_size=max_output_size,
             stop_on_first_failure=stop_on_first_failure,
@@ -468,6 +482,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             if graded_content and info.get("tested_before_submission")
             else 0.0
         )
+        resubmission = -self.resubmission_penalty * max(0, info.get("submission_count", 0) - 1)
         tool_shaping = self._tool_use_shaping(trajectory)
 
         # Components must sum exactly to the returned scalar; the trainer checks the composition residue.
@@ -476,10 +491,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             "reward/submission": submission,
             "reward/execution": execution,
             "reward/tested_submission": tested,
+            "reward/resubmission": resubmission,
             "reward/tool_shaping": tool_shaping,
             "reward/turn_shaping": trajectory.total_reward,
         }
-        return self._shaped_base_reward(trajectory) + objective + submission + execution + tested
+        return self._shaped_base_reward(trajectory) + objective + submission + execution + tested + resubmission
 
     def rollout_metrics(self, trajectory: Trajectory) -> dict[str, float]:
         """CodeContests diagnostics: task outcome, submission behavior, and the reward decomposition."""

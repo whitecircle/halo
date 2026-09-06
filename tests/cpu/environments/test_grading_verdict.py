@@ -314,6 +314,42 @@ def test_grade_solution_gives_checker_infra_timeout_not_solution_limit():
     assert checker_call["timeout"] == pytest.approx(SANDBOX_DEFAULT_TIMEOUT)
 
 
+def test_outcome_verdict_hides_expected_and_produced_output():
+    """``verdict_detail="outcome"`` is the Codeforces contract: a wrong answer is a verdict, not a diff.
+    With the expected output shown, the graded channel doubled as a free test oracle and submit-first
+    out-earned test-first within a GRPO group."""
+    sandbox = _StubSandbox(SandboxResult(stdout="X\n", returncode=0))
+    tests = [{"input": "1", "output": "Y"}, {"input": "2", "output": "X"}]
+    full = run_solution_against_tests("code", tests, sandbox=sandbox)
+    outcome = run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="outcome")
+    assert "Expected: Y" in full.details and "Got:      X" in full.details
+    assert "Test 1: FAIL" in outcome.details
+    assert "Expected" not in outcome.details and "Got:" not in outcome.details
+    assert "Y" not in outcome.details, outcome.details
+    assert (outcome.passed, outcome.total) == (full.passed, full.total) == (1, 2)
+    crash = run_solution_against_tests(
+        "code",
+        tests[:1],
+        sandbox=_StubSandbox(SandboxResult(stdout="", stderr="boom", returncode=1)),
+        verdict_detail="outcome",
+    )
+    assert "RUNTIME ERROR (exit 1)" in crash.details and "boom" in crash.details
+    with pytest.raises(ValueError, match="verdict_detail"):
+        run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="diff")
+
+
+def test_verdict_detail_travels_with_the_grading_contract():
+    """The env builds the spec once and the offline re-grader takes it back through ``to_meta``."""
+    sandbox = _StubSandbox(SandboxResult(stdout="X\n", returncode=0))
+    spec = GradingSpec(sandbox=sandbox, verdict_detail="outcome")
+    assert spec.to_meta()["verdict_detail"] == "outcome"
+    assert spec.with_meta({"verdict_detail": "full"}).verdict_detail == "full"
+    env = CodeContestsEnvironment(language="python", sandbox=sandbox, verdict_detail="outcome")
+    assert env.grading_spec.verdict_detail == "outcome"
+    with pytest.raises(ValueError, match="verdict_detail"):
+        CodeContestsEnvironment(language="python", sandbox=sandbox, verdict_detail="diff")
+
+
 def test_select_verdict_prefers_checker():
     """A non-empty checker always wins over the comparison mode."""
     v = select_verdict("# checker", "tokens", _StubSandbox(SandboxResult(stdout="1", returncode=0)))

@@ -107,6 +107,38 @@ def test_scratchpad_cap_reads_episode_budget():
         _ACTIVE_TRAJECTORY.reset(token)
 
 
+def test_resubmission_penalty_prices_each_graded_submission_after_the_first():
+    """Three graded submissions of which only the last counts make the judge a free test oracle: the
+    penalty prices every probe after the first, a single submission pays nothing, and the component
+    stays inside the decomposition the trainer's residue check sums."""
+    profiles = {"high": {"max_submissions": 3, "max_test_calls": 6}}
+    env = _make_env(reasoning_effort_profiles=profiles, resubmission_penalty=0.1)
+    traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    token = _ACTIVE_TRAJECTORY.set(traj)
+    try:
+        for _ in range(3):
+            env._submit("print('X')")
+    finally:
+        _ACTIVE_TRAJECTORY.reset(token)
+    reward = env._compute_reward(traj)
+    components = traj.info["reward_components"]
+    assert components["reward/resubmission"] == pytest.approx(-0.2)
+    assert reward == pytest.approx(sum(components.values()))
+
+    once = _make_env(reasoning_effort_profiles=profiles, resubmission_penalty=0.1)
+    traj_once = _reset(once, {"reasoning_effort": "high", **_TESTS})
+    token = _ACTIVE_TRAJECTORY.set(traj_once)
+    try:
+        once._submit("print('X')")
+    finally:
+        _ACTIVE_TRAJECTORY.reset(token)
+    once._compute_reward(traj_once)
+    assert traj_once.info["reward_components"]["reward/resubmission"] == 0.0
+
+    with pytest.raises(ValueError, match="resubmission_penalty"):
+        _make_env(resubmission_penalty=-0.1)
+
+
 def test_over_cap_call_classifies_as_tool_error_not_paid_success():
     # A refused call must charge tool_error_penalty, never pay the model for an exhausted budget.
     env = _make_env(tool_success_reward=0.02, tool_error_penalty=0.05)

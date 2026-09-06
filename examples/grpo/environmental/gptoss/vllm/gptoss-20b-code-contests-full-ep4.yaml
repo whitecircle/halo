@@ -63,6 +63,8 @@ environment_kwargs:
   # Reward ladder: see code_contests.py _compute_reward.
   submission_reward: 0.25    # bonus for reaching the graded channel
   execution_progress_reward: 0.05
+  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
+  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first; prices probing the judge
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
   multi_turn_reward: 0.05    # binary, once per episode, gated on a real submission
   tool_success_reward: 0     # env default; a per-call reward would be inflated by duplicate re-runs
