@@ -28,7 +28,7 @@ from transformers.integrations import hub_kernels
 
 from src.log import warn_once
 
-_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 _PATCHED_FLAG = "_halo_device_aware_kernel_dispatch"
 _WARNED_TORCH_CAPTURES: set[tuple[str, str]] = set()
@@ -132,7 +132,7 @@ def _warn_if_torch_captured(dispatched, torch_function, func_name: str, package:
         installed = False
     if installed and _capture_fell_back(dispatched, torch_function):
         warn_once(
-            _logger,
+            logger,
             _WARNED_TORCH_CAPTURES,
             (func_name, package),
             f"kernel dispatch for '{func_name}' captured the torch fallback although '{package}' is "
