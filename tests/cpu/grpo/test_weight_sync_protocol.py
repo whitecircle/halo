@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,7 +47,11 @@ from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES, DEFAULT_PACKED_NUM_BUFFERS
 from src.distributed.nccl.transport.pynccl import PyNcclCommunicator
 from src.distributed.nccl.transport.stateless_group import StatelessProcessGroup
-from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager, verify_context_window
+from src.trainers.grpo.rollout.weight_sync_clients import (
+    InferenceClientManager,
+    verify_context_window,
+    verify_sampler_logprob_reference,
+)
 from tests.common.ports import free_port
 
 # Well above the client deadlines each test monkeypatches down, so a block is observed, not waited out.
@@ -69,8 +74,12 @@ class FakeVLLMServer:
         self.world_size = 1
         # Declared on the model card only when set, as a server without one reports no context window.
         self.max_model_len: int | None = None
+        # What /v1/completions logprobs account for: vLLM's raw default, its processed mode
+        # (temperature + nucleus renormalization), or SGLang's default (temperature only).
+        self.logprobs_mode = "raw_logprobs"
         self.requests: list[str] = []
         self.bodies: dict[str, dict] = {}
+        self.queries: dict[str, str] = {}
         self.status: dict[str, int] = {}
         self.refuse: set[str] = set()
         self._lock = threading.Lock()
@@ -109,16 +118,44 @@ class FakeVLLMServer:
                 else:
                     self._reply(404)
 
+            def _completion_logprobs(self, body: dict) -> list[float]:
+                """Top logprobs of a fixed 3-token prefill under the server's logprobs mode."""
+                logits = torch.tensor([2.0, 0.0, -1.0])
+                if server.logprobs_mode == "raw_logprobs":
+                    return torch.log_softmax(logits, dim=0).tolist()
+                logprobs = torch.log_softmax(logits / float(body.get("temperature", 1.0)), dim=0)
+                if server.logprobs_mode == "processed_logprobs" and float(body.get("top_p", 1.0)) < 1.0:
+                    probs = logprobs.exp()
+                    keep = probs.cumsum(0) - probs < float(body["top_p"])
+                    logprobs = torch.where(keep, torch.log(probs / probs[keep].sum()), torch.full_like(probs, -1e9))
+                return logprobs.tolist()
+
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length)
-                path = self.path.split("?")[0]
+                path, _, query = self.path.partition("?")
                 with server._lock:
                     server.requests.append(f"POST {path}")
+                    server.queries[path] = query
                     if raw:
                         server.bodies[path] = json.loads(raw)
                     if path in server.refuse:
                         self._reply(503)
+                        return
+                    if path == "/v1/completions":
+                        values = self._completion_logprobs(server.bodies[path])
+                        top = {f"tok{i}": v for i, v in enumerate(values)}
+                        self._reply(
+                            200,
+                            {
+                                "choices": [
+                                    {
+                                        "text": "tok0",
+                                        "logprobs": {"token_logprobs": [values[0]], "top_logprobs": [top]},
+                                    }
+                                ]
+                            },
+                        )
                         return
                     # The engine acts first; only the reply may fail.
                     if path == "/pause":
@@ -226,6 +263,18 @@ def _run_bounded(fn) -> list:
     thread.start()
     thread.join(timeout=JOIN_TIMEOUT_S)
     return outcome
+
+
+def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
+    """vLLM's ``/pause`` defaults to ``mode=abort``, which kills every in-flight generation — the
+    prefetched rollout round — and hands each back as a fragment with an ordinary stop reason. The
+    client must ask for ``keep``, so those requests freeze and resume under the new weights."""
+    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+
+    client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+
+    assert server.count("POST /pause") == 1
+    assert "mode=keep" in server.queries["/pause"], f"pause query was {server.queries['/pause']!r}"
 
 
 def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):
@@ -539,6 +588,51 @@ def test_context_window_preflight_raises_on_a_server_that_cannot_hold_one_turn(s
         verify_context_window(VLLMWeightSyncClient, [server.url], 4096, None)
 
     verify_context_window(VLLMWeightSyncClient, [server.url], 512, None)
+
+
+def test_sampler_logprob_probe_reads_each_engine_default(server, client):
+    """vLLM's raw default carries neither temperature nor nucleus; its processed mode carries both;
+    SGLang's default carries the temperature only."""
+    assert client.probe_sampler_logprob_semantics() == (False, False)
+    server.logprobs_mode = "processed_logprobs"
+    assert client.probe_sampler_logprob_semantics() == (True, True)
+    server.logprobs_mode = "sglang_default"
+    assert client.probe_sampler_logprob_semantics() == (True, False)
+
+
+def test_sampler_logprob_preflight_refuses_a_raw_reference_at_any_temperature_but_one(server):
+    """Raw (pre-temperature) logprobs make every IS weight π^T/π^1: refused whenever the trainer scores
+    at a temperature other than 1, and the refusal names the server flag that fixes it."""
+    with pytest.raises(ValueError, match="processed_logprobs"):
+        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 1.0, True)
+    with pytest.raises(ValueError, match="RAW"):
+        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 0.7, 1.0, False)
+    # At temperature 1 with no band a raw reference is the sampling distribution's: nothing to probe.
+    probes_before = server.count("POST /v1/completions")
+    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.0, 0.95, False)
+    assert server.count("POST /v1/completions") == probes_before, "temperature 1 without a band must not spend a probe"
+
+    server.logprobs_mode = "processed_logprobs"
+    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 1.0, True)
+
+
+def test_sampler_logprob_preflight_refuses_a_nucleus_reference_under_the_geometric_band(server):
+    """A nucleus-renormalized reference with top-p < 1 shifts every uncertain position by its nucleus
+    mass, which the geometric band reads as drift; pre-nucleus references (SGLang, raw at T=1) pass."""
+    server.logprobs_mode = "processed_logprobs"
+    with pytest.raises(ValueError, match="rollout_top_p: 1.0"):
+        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.0, 0.95, True)
+    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.0, 0.95, False)
+    server.logprobs_mode = "sglang_default"
+    verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 0.95, True)
+
+
+def test_sampler_logprob_preflight_warns_on_an_unreachable_server(server, caplog):
+    """An unreadable probe must never be what fails the run — it warns and moves on."""
+    server.close()
+    with caplog.at_level(logging.WARNING):
+        verify_sampler_logprob_reference(VLLMWeightSyncClient, [server.url], 1.1, 1.0, True)
+    assert any("could not verify" in r.getMessage() for r in caplog.records)
 
 
 def test_context_window_preflight_skips_an_unreachable_server(server):

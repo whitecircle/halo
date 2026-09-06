@@ -32,6 +32,7 @@ staleness, sync cadence, trajectory-length knobs — stay on the
 |---|---|---|
 | Trainers | online, env-GRPO | env-GRPO |
 | Sampled-token ids | `--return-tokens-as-token-ids` (server flag) | per-request `return_meta_info` |
+| IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/grpo/environmental-grpo.md#off-policy-mismatch-and-stability-knobs) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
 | Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side with a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`; harmony-disabled gpt-oss arms it off the toolkit plugin's marker ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) | rejected at config time |
 | Expert layout on sync | whatever the family's own `gather_expert_state_dict` emits — per-expert (Qwen3 MoE, GLM-4/Laguna, Bailing, LFM-2) or fused where that is the family's base gather (Qwen3.5/3.6, Gemma 4); 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | fused only (GptOss) |
@@ -72,10 +73,13 @@ bound on the *trainer* host
 **The quiesce spans the streaming, not just the final broadcast.** The update opens with the first
 full chunk — ~1 GB into the gather — and closes when the last one lands, so a server stops serving
 for as long as the gather runs: minutes at 397B, and for every server at once outside the
-[rolling path](../training-methods/grpo/environmental-grpo.md#single-server-vs-multi-server). vLLM
-queues requests behind its pause; SGLang's is `/pause_generation {"mode": "abort"}` (its post-update
-cache flush asserts an idle scheduler), so in-flight generations — prefetched rollouts included —
-are dropped across that window.
+[rolling path](../training-methods/grpo/environmental-grpo.md#single-server-vs-multi-server). The
+client pauses vLLM with `/pause?mode=keep`: in-flight generations — the prefetched rollout round —
+freeze and resume under the new weights on `/resume`, the one-step staleness the sampling-logprob IS
+ratio corrects. vLLM's own default is `abort`, which hands every in-flight request back as a fragment
+with an ordinary stop reason; once the training pass is shorter than a rollout round that is most
+long turns, every step. SGLang's is `/pause_generation {"mode": "abort"}` (its post-update cache
+flush asserts an idle scheduler), so there in-flight generations are dropped across that window.
 
 **An interrupted mid-stream sync leaves that server unusable.** The engine then holds neither the
 old policy nor the new one, and vLLM's layerwise reload materializes a layer whose tensors straddled
@@ -86,7 +90,7 @@ repair it.
 
 The first sync takes minutes (one-time NCCL group formation per server) and the server stops
 answering `/health` mid-update — an update in progress, not a hang. Every sync pauses the engine
-and resumes it after: `/pause` … `/resume` on vLLM, with the broadcast itself bracketed by
+and resumes it after: `/pause?mode=keep` … `/resume` on vLLM, with the broadcast itself bracketed by
 `/start_weight_update` … `/finish_weight_update` (the layerwise reload phase, closed on every path);
 `/pause_generation` … `/continue_generation` on SGLang. The broadcast is packed (~1 GB buffers,
 double-buffered) on vLLM and typed 1 GB chunks on SGLang.
@@ -239,7 +243,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 |---|---|---|
 | `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint |
 | `VLLM_PORT` | `8000` | Bound on the host (`network_mode: host`). One knob for the whole stack: it drives the serve command, the healthcheck, the container's `VLLM_SERVER_URL` and the readiness banner, and the Makefile derives its own `VLLM_SERVER_URL` from it (`SGLANG_PORT` is the SGLang equivalent) |
-| `VLLM_CUDA_DEVICES` | `7` | Server GPUs — must exclude the trainer's (a rank cannot broadcast to itself) |
+| `VLLM_CUDA_DEVICES` | `7` | Server GPUs — must exclude the trainer's (a rank cannot broadcast to itself). Selects via `CUDA_VISIBLE_DEVICES` inside a container that sees every GPU: hiding devices from the container instead (`--gpus device=N`) breaks the cross-container NCCL P2P import of the trainer's buffers (`Cuda failure 101 'invalid device ordinal'`, `500` on `/init_weight_transfer_engine`) |
 | `VLLM_TP` | `1` | `--tensor-parallel-size` |
 | `VLLM_GPU_MEM` | `0.85` | `--gpu-memory-utilization` |
 | `VLLM_MOE_BACKEND` | `triton` | Keep `triton` for MoE RL ([Weight sync](#weight-sync)) |
@@ -258,6 +262,15 @@ Flags the compose file already sets that are load-bearing for RL:
   from the logprobs, which vLLM only spells out under this flag. Without it every turn falls back to
   re-tokenizing a chat-template re-render: one warning, then a whole run training on tokens the
   engine never sampled.
+- `--logprobs-mode processed_logprobs` — the reported logprobs are the sampling distribution's
+  (temperature and top-p applied). The default `raw_logprobs` are pre-temperature: the trainer scores
+  its log-probs at `rollout_temperature` and divides by these, so at any temperature ≠ 1 every IS
+  weight is π^T / π^1 — tilted toward improbable tokens above 1 (entropy climbs step over step) and
+  toward confident ones below (entropy collapses) — while `sampling/is_ratio_mean` still reads ≈ 1.
+  The trainer probes each server at startup (temperature 2 must halve the top-1/top-2 gap) and
+  refuses a raw server whenever `rollout_temperature` ≠ 1. Under this mode a top-p < 1 also
+  renormalizes every uncertain position over its nucleus, which the trajectory geometric band reads
+  as drift: `rollout_top_p: 1.0` whenever `isr_geo_band_min/max` is set (also probed and refused).
 
 `--max-model-len` is left unset — the server serves the model's native context window. The trainer's
 startup probe reads it off `/v1/models` and **raises** when `max_prompt_length` plus one turn's
@@ -348,6 +361,11 @@ Engine behavior under RL:
 - **Sampled ids** arrive per request: SGLang's OpenAI `logprobs` reports tokens as text, so the
   trainer sets `return_meta_info` + `return_prompt_token_ids` and reads
   `choice.meta_info.output_token_logprobs[i][1]`. No server flag.
+- **Logprobs are post-temperature, pre-nucleus** by default (`sampler.py` divides the logits by the
+  temperature before the log-softmax the reported values come from; top-p renormalizes only the
+  sampling probabilities), so they are the IS reference the trainer expects at any
+  `rollout_temperature`, and a top-p < 1 leaves the geometric band untouched. Do not set
+  `SGLANG_RETURN_ORIGINAL_LOGPROB`: it switches to raw values, and the startup probe refuses them.
 - **A length cut-off is a `stop_reason`**, not a `finish_reason`. `get_finish_reason`
   (`src/inference/response.py`) reads `finish_reason or stop_reason`, so the rollout path grades an
   engine-truncated completion as truncated rather than as an answer.
@@ -385,12 +403,18 @@ need the socket transport, process-global:
 
 ```text
 NCCL_P2P_DISABLE=1  NCCL_SHM_DISABLE=1  NCCL_NET=Socket  NCCL_IB_DISABLE=1  NCCL_NET_PLUGIN=none
+NCCL_SOCKET_IFNAME=^docker,veth
 ```
 
 `NCCL_NET_PLUGIN=none` is separate and load-bearing: the images bundle the aws-ofi plugin, which
-NCCL prefers and then wedges group formation on a host with no OFI fabric. Setting the flags only on
-the server is not enough — the group still forms (a TCP rendezvous) and the first broadcast hangs,
-because the trainer still reaches for CUDA-IPC.
+NCCL prefers and then wedges group formation on a host with no OFI fabric. `NCCL_SOCKET_IFNAME`
+keeps the socket transport off Docker's bridge and the per-container `veth` pairs: on a host running
+other containers NCCL otherwise enumerates them too, and a veth carries no host-to-host traffic (the
+first collective after the sync hangs) or disappears when its container exits (`Call to bind failed:
+No such device` on the server, `400` on the update). Setting the flags only on the server is not
+enough — the group still forms (a TCP rendezvous) and the first broadcast hangs, because the trainer
+still reaches for CUDA-IPC. Both compose files pass `NCCL_SOCKET_IFNAME=^docker,veth` by default
+(the vLLM file to its training service too); override it to pin one NIC on a multi-homed host.
 
 The cost is process-global: a multi-rank trainer
 loses NVLink between its own ranks for the whole job (the reason for
@@ -511,8 +535,10 @@ covered.
 | Log-ratio drifts on SGLang while the server log stays clean | No server-side signal exists: the MoE loaders skip unmapped expert names before their `not found in params_dict` warning → do not read a clean log as proof of a landed sync; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild `vllm-server` |
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → the engine strands a communicator per trainer connection until the GPU runs out; rebuild `vllm-server` and recreate the server container |
-| `ncclBuildRings: ring 0 does not contain rank 1` (vLLM) | Trainer launched with SGLang's five socket vars — the sync transports are mutually exclusive |
-| Broadcast hangs at the first sync (SGLang) | The five NCCL vars missing on one end — both processes need all five |
+| `ncclBuildRings: ring 0 does not contain rank 1` (vLLM) | Trainer launched with SGLang's socket vars — the sync transports are mutually exclusive |
+| Broadcast hangs at the first sync (SGLang) | The NCCL socket vars missing on one end — both processes need the same set |
+| `/init_weight_transfer_engine` answers 500 with `ncclP2pImportShareableBuffer ... Cuda failure 101 'invalid device ordinal'` in the server log | The server container does not see the trainer's GPU — expose all GPUs to it and select with `CUDA_VISIBLE_DEVICES` (`VLLM_CUDA_DEVICES`), as the compose file does |
+| `Call to bind failed: No such device` in the server log (`400` on `/update_weights_from_distributed`), or a trainer collective hanging right after the first sync | NCCL's socket transport picked a Docker `veth` — set `NCCL_SOCKET_IFNAME=^docker,veth` on both ends |
 | `Errno 98` binding the group port at trainer start | Previous run's port in TIME_WAIT → wait for `ss -tln` to clear, or change `group_port` |
 | `/health` answers but generation is wedged after a killed trainer | Scheduler left attached to the dead transfer group → restart the server container |
 | `RESTART the … server` in the trainer log; that server stays paused and refuses the next sync | A sync was interrupted after part of the model went out → the engine holds a half-written model on purpose ([Weight sync](#weight-sync)); restart it, do not `/resume` it |

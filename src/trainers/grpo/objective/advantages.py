@@ -102,7 +102,7 @@ def group_relative_advantages(
         # num_generations == 1: singleton groups have advantage 0; leave unscaled rather than /NaN.
 
     if shaping is not None and shaping.mode in ("asymmetric", "neg_mask_hard"):
-        advantages = _negative_side_surgery(advantages, num_generations, shaping, gate_rewards, rewards)
+        advantages = _negative_side_surgery(advantages, num_generations, shaping, gate_rewards, rewards, valid_mask)
     # A NaN advantage would propagate into the optimizer.
     return torch.nan_to_num(advantages, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -113,16 +113,22 @@ def _negative_side_surgery(
     shaping: AdvantageShaping,
     gate_rewards: torch.Tensor | None,
     rewards: torch.Tensor,
+    valid_mask: torch.Tensor | None,
 ) -> torch.Tensor:
     """Post-baseline negative-advantage treatment (see :class:`AdvantageShaping`).
 
     ``asymmetric`` scales each sign unconditionally; ``neg_mask_hard`` zeroes negatives only in groups
-    whose best ``gate_rewards`` member stayed below ``hard_group_threshold``.
+    whose best ``gate_rewards`` member stayed below ``hard_group_threshold``. ``valid_mask`` takes that
+    maximum over real completions like the baseline above: a placeholder's forced reward is not a score,
+    and one sitting at or above the threshold lifts a hard group out of the gate. A group with no valid
+    member gates as hard, its rows being masked out of the loss anyway.
     """
     if shaping.mode == "asymmetric":
         return torch.where(advantages >= 0, advantages * shaping.pos_scale, advantages * shaping.neg_scale)
     gate = gate_rewards if gate_rewards is not None else rewards
     grouped_gate = _grouped(gate, num_generations)
+    if valid_mask is not None:
+        grouped_gate = grouped_gate.masked_fill(~_grouped(valid_mask, num_generations).bool(), float("-inf"))
     hard = (grouped_gate.max(dim=1, keepdim=True).values < shaping.hard_group_threshold).expand_as(grouped_gate)
     return torch.where(hard.flatten() & (advantages < 0), torch.zeros_like(advantages), advantages)
 

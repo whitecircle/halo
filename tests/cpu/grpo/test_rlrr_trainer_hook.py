@@ -11,10 +11,12 @@ Run: python tests/cpu/grpo/test_rlrr_trainer_hook.py
 import types
 from collections import deque
 
+import numpy as np
 import pytest
 import torch
 
 from src.args.mixins import RLRRConfig
+from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.online import DistributedGRPOTrainer
 
 
@@ -81,6 +83,29 @@ def test_hook_all_correct_group_keeps_signal_via_length():
     adv = result["advantages"]
     assert adv.std() > 0, f"all-correct group should retain signal, got {adv}"
     assert adv[0] > adv[-1], adv  # shortest correct ranked best
+
+
+def test_unscorable_member_does_not_shift_its_siblings():
+    """An unscorable completion (every reward fn returned None) must stay out of the group's ranking.
+
+    ``_gathered_rewards`` reconstructs its reward as ``nansum`` = exactly 0.0, which RLRR would rank as
+    a genuine failing response: it moves ``r_max`` and the group mean, so every VALID sibling trains on
+    a shifted advantage. Zeroing only the placeholder's own row afterwards does not undo that.
+    """
+    rewards_per_func = torch.tensor([[1.0], [1.0], [0.0], [float("nan")]])
+    config = RLRRConfig(mode="hrr")
+    me = _fake_self(config, rewards_per_func, 4)
+    result = _result([0.0] * 4, completion_lengths=[5, 5, 5, 5])
+
+    DistributedGRPOTrainer._apply_rlrr_advantages(me, result)
+    adv = result["advantages"]
+
+    # The three real completions must get exactly what a group of three alone gets.
+    expected = relative_advantages_grouped(np.array([1.0, 1.0, 0.0]), group_size=3, config=config)
+    assert adv[:3].tolist() == pytest.approx(expected.tolist(), rel=1e-6), (
+        f"the unscorable placeholder shifted its siblings: {adv[:3].tolist()} vs {expected.tolist()}"
+    )
+    assert adv[3].item() == 0.0, "the unscorable row must carry no advantage of its own"
 
 
 def test_build_rlrr_config_from_args():

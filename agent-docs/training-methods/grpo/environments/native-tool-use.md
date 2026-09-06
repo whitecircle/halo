@@ -27,13 +27,13 @@ All five are **magnitudes** (≥ 0); the minus is applied at the use site and a 
 
 `turn_overflow_penalty` is charged on any **truncated** episode, not only one that burned `max_turns` — `finalize_truncated` marks an episode killed mid-flight (a generation failure, an external abort) the same way, so it pays too.
 
-**A turn cut off at its token cap** (`finish_reason == "length"`) **with no tool call is a failed turn, not an answer.** The episode appends a nudge naming what happened and retries on its remaining `max_turns` budget; the count surfaces as `episode/length_cutoff_turns`. A turn that emitted its tool call before the cap takes the normal tool path.
+**A turn the engine cut short** (`finish_reason` `length` — its token cap — or `abort`) **with no tool call is a failed turn, not an answer.** The episode appends a nudge naming what happened and retries on its remaining `max_turns` budget; the count surfaces as `episode/length_cutoff_turns`. A turn that emitted its tool call before the cut takes the normal tool path.
 
 The cutoff is **unpriced** — a penalty would be avoidable only by reasoning well short of the budget. Bound the frequency structurally instead, through the per-effort caps and the answer headroom (`rollout_max_tokens - rollout_max_thinking_tokens`).
 
-The cut-off turn is flagged on its `Message` (`truncated`) and the trainer skips it when building per-turn training rows: the model still conditions on the fragment in the next turn's prompt, but an unfinished turn is never reinforced by an episode that goes on to succeed.
+The cut-off turn is flagged on its `Message` (`truncated`) and the trainer gives it zero loss weight on both tokenization paths — skipped when building per-turn training rows, masked out of its span in the whole-trajectory render: the model still conditions on the fragment in the next turn's prompt, but an unfinished turn is never reinforced by an episode that goes on to succeed. Turns whose every tool call named a nonexistent tool (`calls_rejected`) are excluded the same way.
 
-**A turn whose every tool call named a tool that does not exist** is flagged the same way (`Message.calls_rejected`) and likewise skipped at tokenization. The rejection travels on the tool result's structured `unknown_tool` field, never on error-text matching: a real tool whose backend answers with its own "Tool not found …" message is a tool failure, not a model-invented call, and keeps its turn in training.
+**A turn whose every tool call named a tool that does not exist** is flagged the same way (`Message.calls_rejected`) and excluded on both tokenization paths (`Message.untrainable`). The rejection travels on the tool result's structured `unknown_tool` field, never on error-text matching: a real tool whose backend answers with its own "Tool not found …" message is a tool failure, not a model-invented call, and keeps its turn in training.
 
 The unknown-tool observation names the real tools (`Error: Unknown tool 'X'. Available tools: ...`) — a policy that drifts off the tool syntax late in training invents plausible names and then burns turns probing for a listing that no tool provides.
 

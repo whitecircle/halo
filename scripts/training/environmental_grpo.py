@@ -51,7 +51,10 @@ from src.environments.registry import create_environment, get_registered_environ
 from src.models.loading.model_preparation import log_model_info
 from src.models.loading.tokenizer_setup import get_model_context_window, setup_model_and_tokenizer
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.weight_sync_clients import verify_context_window_synced
+from src.trainers.grpo.rollout.weight_sync_clients import (
+    verify_context_window_synced,
+    verify_sampler_logprob_reference_synced,
+)
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser
 from src.training.script_runner import (
@@ -267,6 +270,14 @@ def main():
         async_config.get_server_urls(),
         single_turn_tokens=prompt_budget + async_config.rollout_max_tokens,
         full_trajectory_tokens=prompt_budget + max_turns * async_config.rollout_max_tokens,
+        backend=async_config.rollout_backend,
+    )
+    # The IS ratio divides by the engine's logprobs: they must be the sampling distribution's.
+    verify_sampler_logprob_reference_synced(
+        async_config.get_server_urls(),
+        temperature=async_config.rollout_temperature,
+        top_p=async_config.rollout_top_p,
+        geo_band_active=async_config.isr_geo_band_min is not None,
         backend=async_config.rollout_backend,
     )
 

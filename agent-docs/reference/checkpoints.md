@@ -63,8 +63,10 @@ safetensors *file* header is the container format, not this marker.
 | **EP per-rank sharded** | `model-00000-of-000NN.safetensors` (`.shard_{rank}` keys) + index | `save_sharded_ep: true` | `format: "ep_sharded"` | No — `merge_ep_shards.py` first |
 
 Shard size defaults to 5 GB (`save_max_shard_size` overrides it). It bounds the **gathered** writers
-(EP/TP/FSDP2/CP/PP) and the merge tools' output; a per-rank EP shard is one file per rank by design,
-so the cap does not apply there — the save logs that rather than appearing to honor it. A directory of
+(EP/TP/FSDP2/CP/PP); a per-rank EP shard is one file per rank by design, so the cap does not apply
+there — the save logs that rather than appearing to honor it. It does not reach the merge either:
+the after-training tools size their own output from their `--max_shard_size` flag, so pass it there
+to match a run's setting. A directory of
 per-rank shards whose index never landed (a run killed between the shard writes and the index write)
 is refused by every after-training tool: the shards carry `.shard_N` keys, which a header-only peek
 detects without an index.

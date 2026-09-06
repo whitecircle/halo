@@ -1,7 +1,9 @@
-# ZAYA1-8B — SFT on UltraChat 200K (full fine-tune, standard DDP/FSDP). Starter config.
+# ZAYA1-8B — SFT on UltraChat 200K (full fine-tune, plain FSDP2 data-parallel). Starter config.
 # Zaya parallelism/architecture constraints: see agent-docs/models/zaya.md.
 # Launch: python scripts/training/sft.py <this config>
-#   or: accelerate launch --config_file launcher-configs/accelerate/multigpu_dp_config.yaml scripts/training/sft.py <this config>
+#   or: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+# (MoE experts run grouped GEMM by default, which requires torchrun — `accelerate launch` is refused
+#  at load unless `use_grouped_gemm: false`.)
 
 # --- Model ---
 model_name_or_path: Zyphra/ZAYA1-8B

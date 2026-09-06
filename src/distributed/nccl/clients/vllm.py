@@ -275,7 +275,10 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
         # so a lost reply leaves it paused unless the flag already covers the in-flight request.
         self._paused = True
         try:
-            self._post("/pause")
+            # mode=keep freezes in-flight generations and resumes them under the new weights (the
+            # one-step staleness the sampling-logprob IS ratio corrects). vLLM's default is abort,
+            # which returns every in-flight request as a fragment with an ordinary stop reason.
+            self._post("/pause", params={"mode": "keep"})
             # Set before the POST for the same reason as the pause flag: a lost reply still leaves the
             # layerwise reload open server-side, and only the close can end it.
             self._phase_started = True

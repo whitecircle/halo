@@ -147,8 +147,9 @@ class TurnGeneration:
     reasoning: str
     tokens: int
     finish_reason: str | None = None
-    """Why generation stopped. ``"length"`` means the engine cut the turn off at its token cap, so
-    the text is a fragment rather than a completed answer."""
+    """Why generation stopped. ``"length"`` (token cap) and ``"abort"`` (the engine dropped the
+    request, e.g. a pause in abort mode) both mean the text is a fragment rather than a completed
+    answer."""
     token_ids: list[int] | None = None
     token_logprobs: list[float] | None = None
     routing_mask: str | None = None

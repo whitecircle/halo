@@ -109,13 +109,41 @@ def test_neg_mask_hard_gate_uses_objective_not_shaped_total():
 
 
 def _ratio_setup(logdiffs: torch.Tensor, clip_max: float = 3.0):
-    """Build (ratio, logps_diff, corrected_mask) from a [rows, T] log-diff tensor, all tokens corrected."""
+    """Build (ratio, logps_diff, corrected_mask) from a [rows, T] log-diff tensor, all tokens corrected.
+
+    The sampling logprobs sit at -1 rather than 0: a sampling logprob of exactly 0 is the engine's
+    "emitted with probability 1" marker, which ``compute_is_ratio`` leaves uncorrected.
+    """
     rows, t = logdiffs.shape
     completion_mask = torch.ones(rows, t, dtype=torch.long)
+    sampling = torch.full_like(logdiffs, -1.0)
     ratio, diff, corrected = compute_is_ratio(
-        logdiffs, torch.zeros_like(logdiffs), completion_mask, torch.ones(rows, dtype=torch.bool), clip_max
+        logdiffs + sampling, sampling, completion_mask, torch.ones(rows, dtype=torch.bool), clip_max
     )
     return ratio, diff, corrected
+
+
+def test_forced_token_does_not_trip_the_veto():
+    """A budget-forced ``</think>`` (sampling logprob 0, trainer logprob −12) must not veto the trajectory:
+    the engine made no sampling choice there, so it is not evidence of a broken sync."""
+    recompute = torch.tensor([[-0.5, -12.0, -0.7]])
+    sampling = torch.tensor([[-0.5, 0.0, -0.7]])
+    ratio, diff, corrected = compute_is_ratio(
+        recompute, sampling, torch.ones(1, 3, dtype=torch.long), torch.ones(1, dtype=torch.bool), 3.0
+    )
+    out, stats = apply_is_masks(ratio, diff, corrected, torch.arange(1), ISMaskConfig(veto_min=1e-4))
+    assert stats["sampling/is_veto_masked_frac"] == 0.0
+    assert torch.equal(out, torch.ones(1, 3))
+    # The same disagreement on a token the engine actually sampled is exactly what the veto is for.
+    ratio, diff, corrected = compute_is_ratio(
+        recompute,
+        torch.tensor([[-0.5, -1e-3, -0.7]]),
+        torch.ones(1, 3, dtype=torch.long),
+        torch.ones(1, dtype=torch.bool),
+        3.0,
+    )
+    out, stats = apply_is_masks(ratio, diff, corrected, torch.arange(1), ISMaskConfig(veto_min=1e-4))
+    assert stats["sampling/is_veto_masked_frac"] == 1.0
 
 
 def test_ismask_defaults_are_inert():

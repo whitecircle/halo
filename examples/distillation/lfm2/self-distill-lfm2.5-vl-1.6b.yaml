@@ -20,7 +20,6 @@ opd_exclude_eos: true               # keeps SFT's hard P(EOS)->1 undiluted by th
 
 # --- Reference-policy KL anchor (optional; alpha=0 disables, loads no ref model) ---
 reference_kl_coef: 0.0
-reference_kl_loss: unnormalized_kl
 
 # --- Confidence weighting (optional) ---
 # confidence_field: confidence

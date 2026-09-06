@@ -48,7 +48,11 @@ class DistillationConfig(RangeValidatedConfig, TrainingArguments):
     )
     use_clm_loss: bool = field(
         default=True,
-        metadata={"help": "Add the auxiliary CLM (SFT) loss alongside distillation. False = distillation only"},
+        metadata={
+            "help": "Add the auxiliary CLM (SFT) loss alongside distillation. False = distillation "
+            "only, which requires distill_alpha=1.0: the loss is not renormalized, so a smaller alpha "
+            "would scale the sole remaining term rather than split the two."
+        },
     )
     max_length: int | None = field(
         default=2048,
@@ -72,3 +76,12 @@ class DistillationConfig(RangeValidatedConfig, TrainingArguments):
             raise ValueError(f"distill_temperature must be > 0, got {self.distill_temperature}")
         if not 0.0 <= self.distill_alpha <= 1.0:
             raise ValueError(f"distill_alpha must be in [0, 1], got {self.distill_alpha}")
+        # The CLM term carries the (1 - alpha) share, so dropping it leaves alpha scaling the
+        # distillation term alone — a silent gradient rescale rather than the requested split.
+        if not self.use_clm_loss and self.distill_alpha != 1.0:
+            raise ValueError(
+                f"use_clm_loss=False needs distill_alpha=1.0, got {self.distill_alpha}: with the CLM "
+                f"term off, alpha multiplies the only remaining loss instead of weighting it against "
+                f"one, so the run would train at {self.distill_alpha}x the intended gradient scale. "
+                f"Set distill_alpha=1.0, or keep use_clm_loss on to weight the two terms."
+            )

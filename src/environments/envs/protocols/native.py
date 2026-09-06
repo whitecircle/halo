@@ -15,12 +15,13 @@ from src.environments.base import (
 )
 from src.environments.rewards import compute_answer_reward
 from src.environments.tools.definitions import (
+    MissingToolArguments,
     NativeToolCall,
     NativeToolRegistry,
     NativeToolResult,
     ToolBudgetExhausted,
 )
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
     # States the fact and asks for the tool call, not for shorter reasoning: this text is trained on
     # wherever a recovery succeeds, so any instruction here generalizes beyond the cutoff case.
     LENGTH_CUTOFF_NUDGE = (
-        "Your previous turn was cut off at its length limit before you made a tool call, so nothing "
-        "was recorded. Make your tool call now with the best solution you have."
+        "Your previous turn was cut off before you made a tool call, so nothing was recorded. Make "
+        "your tool call now with the best solution you have."
     )
 
     # Per-tool-call shaping used when the config sets neither knob. Class attributes, like
@@ -198,6 +199,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
                         result = self._result_from_call(tc, tool.execute(**tc.arguments))
                     except ToolBudgetExhausted as e:
                         result = self._budget_exhausted_result(tc, e)
+                    except MissingToolArguments as e:  # the model's mistake, observed without a traceback
+                        logger.warning(
+                            "Tool %r called without required argument(s): %s", tc.name, ", ".join(e.missing)
+                        )
+                        result = self._result_from_call(tc, e)
                     except Exception as e:  # a tool fault becomes an observation, not an episode failure
                         # Graded tools run here too: a submit handler that dies on a malformed payload
                         # becomes an ordinary tool error, and the trajectory would then record only
@@ -264,7 +270,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Handle a turn that called no tool, shared by the sync and async steps: an engine-cut turn
         recovers, anything else is the model's final text answer."""
-        if ctx.get("finish_reason") == FINISH_REASON_LENGTH:
+        if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             return self._handle_length_cutoff(trajectory)
         return self._finalize_text_response(trajectory, action)
 
@@ -359,6 +365,9 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
                 return self._result_from_call(tc, await tool.execute_async(**tc.arguments))
             except ToolBudgetExhausted as e:
                 return self._budget_exhausted_result(tc, e)
+            except MissingToolArguments as e:
+                logger.warning("Tool %r called without required argument(s): %s", tc.name, ", ".join(e.missing))
+                return self._result_from_call(tc, e)
             except Exception as e:  # same contract as the sync path above
                 logger.warning("Tool %r raised during async execution", tc.name, exc_info=True)
                 return self._result_from_call(tc, e)

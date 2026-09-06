@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 import torch
 
-from src.environments.base import Trajectory
+from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, Trajectory
 from src.environments.episode import RolloutResult
 from src.environments.registry import create_environment
 from src.models.loading.tokenizer_setup import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
@@ -116,19 +116,32 @@ class TrajectoryTokenizeMixin:
             torch.tensor([0], dtype=torch.long),
         )
 
+    def _invalidate_untrainable_episode(self, result: RolloutResult, reason: str) -> None:
+        """Drop one episode whose trajectory the chat template cannot re-render, instead of failing the run.
+
+        The failure is data-local — an engine turn that came back without ids plus a message the
+        template rejects (a malformed tool-call payload) — so it is treated like an env-invalid
+        episode: its rows stay fully masked and ``rollout_valid_mask`` drops it from the group
+        baseline. A systematic cause (every turn without ids) still surfaces through the all-invalid
+        step halt.
+        """
+        logger.warning("Dropping an episode the chat template cannot re-render for training: %s", reason)
+        if result.trajectory is not None:
+            result.trajectory.info[EPISODE_INVALID_KEY] = True
+            result.trajectory.info[EPISODE_INVALID_REASON_KEY] = reason
+
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Tokenize a multi-turn trajectory into prompt, completion, and completion-mask tensors.
 
         Prompt plus completion is one render of the whole trajectory, so the trained sequence is what
         the serving template emits; per-turn spans are located inside it
         (:func:`locate_assistant_spans`) rather than accumulated from independently rendered prefixes,
-        which no non-monotone template reproduces. The returned mask is the loss mask (1 on assistant
-        spans, 0 on env-injected tokens), consumed as TRL's ``tool_mask``; ``_build_training_tensors``
-        derives the attention-valid ``completion_mask`` (all real tokens) from it, so tool outputs stay
-        visible to attention while contributing no loss.
+        which no non-monotone template reproduces. The returned mask is the loss mask (1 on the
+        trainable assistant spans, 0 on env-injected tokens and on the turns the per-turn path also
+        excludes), consumed as TRL's ``tool_mask``; ``_build_training_tensors`` derives the
+        attention-valid ``completion_mask`` (all real tokens) from it, so tool outputs stay visible to
+        attention while contributing no loss.
         """
-        fallback_completion_token = self.eos_token_id if self.eos_token_id is not None else self.pad_token_id
-
         if not result.trajectory or not result.trajectory.messages:
             return self._masked_trajectory_tensors()
 
@@ -150,22 +163,27 @@ class TrajectoryTokenizeMixin:
 
         try:
             spans = locate_assistant_spans(_render, messages, first_assistant_idx)
-        except TemplateSpanError as e:
-            # Recorded rather than raised: a per-rank raise would break the batch collectives' order.
-            if self._batch_build_error is None:
-                self._batch_build_error = (
-                    f"Cannot locate the trained turn spans of {self._tokenizer.name_or_path} inside its own "
-                    f"chat-template render ({e}). Training on independently rendered per-turn prefixes would "
-                    f"splice in tokens the serving template never emits (a mid-episode stop token, dropped "
-                    f"context). Serve with --return-tokens-as-token-ids and set train_on_sampled_tokens: true "
-                    f"to train the engine's sampled ids directly."
-                )
+            # One span per assistant message, in message order (:meth:`_SpanLocator.resolve`).
+            turn_spans = list(zip((m for m in messages if m.role == "assistant"), spans.turn_spans, strict=True))
+        except (TemplateSpanError, ValueError) as e:
+            # Never raised per rank (a raise ahead of the batch collectives would break their order),
+            # and not fatal either: independently rendered per-turn prefixes would splice in tokens the
+            # serving template never emits, so the episode is dropped rather than trained on a guessed
+            # render.
+            self._invalidate_untrainable_episode(
+                result,
+                f"cannot locate the trained turn spans of {self._tokenizer.name_or_path} inside its own "
+                f"chat-template render ({e}); serve with --return-tokens-as-token-ids and "
+                f"train_on_sampled_tokens: true to train the engine's sampled ids directly",
+            )
             return self._masked_trajectory_tensors()
 
         prompt_token_ids = spans.full_ids[: spans.prompt_len]
         completion_ids = spans.full_ids[spans.prompt_len :]
         completion_mask = [0] * len(completion_ids)
-        for start, end in spans.turn_spans:
+        for turn, (start, end) in turn_spans:
+            if turn.untrainable:
+                continue
             completion_mask[start - spans.prompt_len : end - spans.prompt_len] = [1] * (end - start)
 
         # No truncation (reward would decouple from trained tokens); recorded rather than raised.
@@ -179,11 +197,11 @@ class TrajectoryTokenizeMixin:
                 f"the trainer context, or the prompt length — trajectories are trained in full, never truncated."
             )
 
-        if len(completion_ids) == 0:
-            # Masked for the same reason _masked_trajectory_tensors() masks: a trainable row here
-            # would reinforce P(EOS|prompt) at this advantage on a completion the policy never emitted.
-            completion_ids = [fallback_completion_token]
-            completion_mask = [0]
+        if not any(completion_mask):
+            # Nothing trainable survives (an empty completion, or every assistant turn excluded). The
+            # one-token masked row keeps the rank-uniform row count without padding the round's batch
+            # to this trajectory's width, and it cannot reinforce P(EOS|prompt) at this advantage.
+            return self._masked_trajectory_tensors()
 
         return (
             torch.tensor(prompt_token_ids, dtype=torch.long),
@@ -240,11 +258,7 @@ class TrajectoryTokenizeMixin:
         for idx, m in enumerate(messages):
             if m.role != "assistant":
                 continue
-            if m.truncated or m.calls_rejected:
-                # A turn that produced nothing usable: an engine-cut fragment, or one whose every tool
-                # call named a nonexistent tool. It stays in the next turn's prompt (the model must
-                # condition on what it emitted), but training on it would reinforce the runaway or the
-                # invented call whenever the episode recovers and earns a positive advantage.
+            if m.untrainable:
                 excluded_unusable = True
                 continue
             # Engine prompt ids take priority: a client re-render drifts on effort steering, tool
@@ -252,21 +266,21 @@ class TrajectoryTokenizeMixin:
             if m.prompt_token_ids:
                 prompt_ids = list(m.prompt_token_ids)
             else:
-                # Recorded rather than raised, like every other render site: a template that rejects
-                # this prefix (a turn ending on a `tool` message) fails on one rank only, and the
-                # raise must stay rank-uniform.
+                # A template that rejects this prefix (a turn ending on a `tool` message) fails on
+                # one rank only, so it must never raise per rank; the episode is dropped instead, as
+                # one masked row — no earlier turn of it trains, and the whole-trajectory fallback
+                # below cannot hand the invalidated episode a weighted row.
                 try:
                     prompt_ids = self._render_messages_to_ids(
                         messages[:idx], True, template_kwargs, include_thinking=False
                     )
-                except Exception as e:  # any template failure must stay rank-uniform
-                    if self._batch_build_error is None:
-                        self._batch_build_error = (
-                            f"Per-turn re-render of the prompt prefix failed ({type(e).__name__}: {e}). The "
-                            f"engine returned no prompt_token_ids for this turn, so the chat template had to "
-                            f"rebuild it — and it rejects this message prefix."
-                        )
-                    continue
+                except Exception as e:  # never a per-rank raise; the episode is dropped, the run goes on
+                    self._invalidate_untrainable_episode(
+                        result,
+                        f"per-turn re-render of the prompt prefix failed ({type(e).__name__}: {e}); the engine "
+                        f"returned no prompt_token_ids for this turn and the template rejects this prefix",
+                    )
+                    return single_trajectory_row(self._masked_trajectory_tensors())
             comp = list(m.token_ids)
             if len(prompt_ids) + len(comp) > context_limit and self._batch_build_error is None:
                 # First error wins, like every sibling write: a later overflow would otherwise
@@ -305,8 +319,9 @@ class TrajectoryTokenizeMixin:
 
         if not rows:
             if excluded_unusable:
-                # Re-tokenizing would weight every assistant span, truncated ones included, inverting
-                # the exclusion above into full-weight training on what it suppresses.
+                # Every assistant turn was excluded, so the whole-trajectory render below could only
+                # mask out the same turns and return this row anyway — at the cost of re-rendering a
+                # trajectory that carries no trainable token.
                 return single_trajectory_row(self._masked_trajectory_tensors())
             return single_trajectory_row(self._tokenize_trajectory(result))
         return rows

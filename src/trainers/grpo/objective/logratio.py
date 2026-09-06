@@ -35,6 +35,11 @@ def clamp_ref_logps(ref_logps: torch.Tensor, policy_logps: torch.Tensor) -> tupl
     return torch.minimum(ref_logps, ceiling), (ref_logps > ceiling).float().mean()
 
 
+# A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits
+# processor forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it.
+SAMPLER_CERTAIN_LOGPROB = 0.0
+
+
 def compute_is_ratio(
     recompute_logps: torch.Tensor,
     sampling_logps: torch.Tensor,
@@ -45,10 +50,14 @@ def compute_is_ratio(
     """Truncated per-token vLLM→trainer importance ratio ``clamp(exp(logπ_recompute − logπ_sampling), clip_max)``.
 
     Rows flagged ``False`` in ``row_has_sampling`` (rollout error dropped their vLLM logprobs) and
-    non-policy tokens get ratio exactly 1, so one bad row cannot perturb the others.
+    non-policy tokens get ratio exactly 1, so one bad row cannot perturb the others. So does a token
+    the sampler reports as certain (:data:`SAMPLER_CERTAIN_LOGPROB`): no sampling choice was made
+    there, so it carries no importance weight and cannot trip a band or the veto.
     Returns ``(ratio, logps_diff, corrected_mask)``, all shaped like ``completion_mask``.
     """
-    corrected_mask = completion_mask.bool() & row_has_sampling.unsqueeze(1)
+    corrected_mask = (
+        completion_mask.bool() & row_has_sampling.unsqueeze(1) & (sampling_logps < SAMPLER_CERTAIN_LOGPROB)
+    )
     logps_diff = (recompute_logps - sampling_logps) * corrected_mask
     return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff, corrected_mask
 

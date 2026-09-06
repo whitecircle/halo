@@ -72,8 +72,20 @@ def raw_config(config: Path) -> dict:
     return yaml.safe_load(config.read_text(encoding="utf-8")) or {}
 
 
+def comment_block(config: Path) -> str:
+    """The example's comment lines — where its launch line and its serving contract live."""
+    return "\n".join(line for line in config.read_text(encoding="utf-8").splitlines() if line.lstrip().startswith("#"))
+
+
 # Only the rollout methods carry an episode budget to check against the watchdog.
 _ROLLOUT_EXAMPLES = [config for config in _EXAMPLES if "episode_timeout" in raw_config(config)]
+
+# The two methods that push trained weights into a live rollout engine. Their launch comments are the
+# only place the server-side half of the contract is written down, so it is checked as part of the file.
+_WEIGHT_SYNC_EXAMPLES = [
+    config for config in _EXAMPLES if script_for(config) in ("online_grpo/rlvr.py", "environmental_grpo.py")
+]
+_ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == "environmental_grpo.py"]
 
 
 def launch_topology(config: Path) -> tuple[int, int]:
@@ -83,9 +95,7 @@ def launch_topology(config: Path) -> tuple[int, int]:
     ``--nproc_per_node=4`` and two racy ones on a full node, so the launch width is what decides
     whether the shape below is accepted. Falls back to a single standard node.
     """
-    comments = "\n".join(
-        line for line in config.read_text(encoding="utf-8").splitlines() if line.lstrip().startswith("#")
-    )
+    comments = comment_block(config)
     gpus_per_node = int(match.group(1)) if (match := _NPROC.search(comments)) else DEFAULT_GPUS_PER_NODE
     nodes = int(match.group(1)) if (match := _NNODES.search(comments)) else 1
     return gpus_per_node * nodes, gpus_per_node
@@ -235,12 +245,71 @@ def test_example_thinking_budget_has_a_server_side_parser(config):
     """
     if raw_config(config).get("rollout_max_thinking_tokens") is None:
         return
-    comments = "\n".join(
-        line for line in config.read_text(encoding="utf-8").splitlines() if line.lstrip().startswith("#")
-    )
-    assert "--reasoning-parser" in comments, (
+    assert "--reasoning-parser" in comment_block(config), (
         "this config sends a thinking budget but its launch instructions name no --reasoning-parser; "
         "vLLM refuses thinking_token_budget with a 400 on every rollout without one"
+    )
+
+
+def test_a_weight_sync_example_exists():
+    """The three server-contract checks below are parametrized over this list."""
+    assert _WEIGHT_SYNC_EXAMPLES and _ENV_GRPO_EXAMPLES, "no shipped example drives a rollout engine"
+
+
+@pytest.mark.parametrize("config", _ENV_GRPO_EXAMPLES, **_ID)
+def test_sampled_token_example_names_the_server_flag(config):
+    """Sampled-token training without ``--return-tokens-as-token-ids`` trains on ids nobody sampled.
+
+    The knob defaults ON, and a server that returns no ids is not an error: every turn falls back to
+    re-tokenizing a chat-template re-render — one warning, then the whole run — and the vLLM
+    importance-sampling correction, which needs the sampling log-probs that ride along with the ids,
+    goes silently with it. Read through the parser, since the file usually leaves the knob at its
+    default. Only vLLM takes a flag; SGLang returns the ids per request.
+    """
+    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+    if not parsed_field(parsed, "train_on_sampled_tokens") or parsed_field(parsed, "rollout_backend") == "sglang":
+        return
+    assert "--return-tokens-as-token-ids" in comment_block(config), (
+        "this config trains on the engine's sampled tokens but its launch instructions name no "
+        "--return-tokens-as-token-ids; without it every turn silently falls back to a re-tokenized "
+        "re-render and the IS correction is disabled"
+    )
+
+
+@pytest.mark.parametrize("config", _WEIGHT_SYNC_EXAMPLES, **_ID)
+def test_custom_chat_template_example_hands_it_to_the_server(config):
+    """A template forced on the trainer alone leaves the ENGINE on the checkpoint's own.
+
+    The rollout prompt is rendered server-side, so the divergence lands in the context the policy is
+    sampled under, not merely in the trainer's fallback render: the shipped harmony template guards
+    ``tool_call.arguments`` against double-encoding, and the gpt-oss checkpoint's built-in does not,
+    so every tool-carrying turn is served quoted-and-escaped. Nothing raises on either side.
+    """
+    if not raw_config(config).get("chat_template"):
+        return
+    comments = comment_block(config)
+    assert "--chat-template" in comments or "CHAT_TEMPLATE" in comments, (
+        "this config forces its own chat template on the trainer but its launch instructions never "
+        "pass the same file to the server, which then serves the checkpoint's built-in template"
+    )
+
+
+@pytest.mark.parametrize("config", _WEIGHT_SYNC_EXAMPLES, **_ID)
+def test_moe_weight_sync_example_names_the_triton_moe_backend(config):
+    """An auto-selected MoE backend repacks the expert weights the sync writes.
+
+    vLLM's Blackwell defaults (FLASHINFER_TRTLLM / CUTLASS) and SGLang's flashinfer runner hold the
+    experts in a repacked layout, while the push writes the bf16 unpacked one. The engine accepts
+    the update either way — nothing raises; the served policy just stops being the trained one.
+    """
+    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+    if not ep_layer_classes_for_config(model_config_for(config, parsed)):
+        return  # dense: no expert weights to repack
+    comments = comment_block(config)
+    assert "--moe-backend triton" in comments or "--moe-runner-backend triton" in comments, (
+        "this config syncs weights into an engine serving a MoE model but its launch instructions "
+        "name no triton MoE backend; the auto-selected ones repack the expert weights and every "
+        "update after the first lands corrupted"
     )
 
 

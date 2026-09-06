@@ -21,7 +21,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.environments.base import EPISODE_INVALID_KEY, Trajectory
+from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, Trajectory
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import (
@@ -195,6 +195,23 @@ def test_env_marked_invalid_episodes_halt_too_and_say_so():
     for _ in range(EMPTY_ROLLOUT_STEP_LIMIT - 1):
         _check(stub, results)
     with pytest.raises(RuntimeError, match="environment marked every episode invalid"):
+        _check(stub, results)
+
+
+def test_untrainable_episodes_halt_names_the_render_failure():
+    """An episode the chat template could not re-render carries no ``RolloutResult.error`` either; the
+    halt must name that cause instead of blaming the environment."""
+    stub = _guard_stub()
+    reason = "cannot locate the trained turn spans of tok inside its own chat-template render"
+    results = [
+        RolloutResult(
+            prompt="p", trajectory=Trajectory(info={EPISODE_INVALID_KEY: True, EPISODE_INVALID_REASON_KEY: reason})
+        )
+        for _ in range(4)
+    ]
+    for _ in range(EMPTY_ROLLOUT_STEP_LIMIT - 1):
+        _check(stub, results)
+    with pytest.raises(RuntimeError, match="dropped as untrainable: cannot locate the trained turn spans"):
         _check(stub, results)
 
 

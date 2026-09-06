@@ -105,8 +105,9 @@ TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 SERVER_TIER ?= not moe
 # NCCL_IB_DISABLE/NCCL_NET: the trainer↔server weight-transfer group is NCCL over the host network.
 # On a host without InfiniBand the image's OFI/Gin defaults hang on the first collective rather than
-# falling back, so force sockets.
-test-gpu-vllm: EXTRA_DOCKER_ENV = -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket \
+# falling back, so force sockets. NCCL_SOCKET_IFNAME keeps that transport off Docker's bridge and the
+# per-container veth pairs, which NCCL otherwise enumerates and cannot carry host-to-host traffic on.
+test-gpu-vllm: EXTRA_DOCKER_ENV = -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_SOCKET_IFNAME=^docker,veth \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e VLLM_SERVER_URL=$(VLLM_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=vllm
 test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half)
@@ -120,9 +121,10 @@ test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAIN
 # NCCL_P2P_DISABLE/NCCL_SHM_DISABLE: the trainer and SGLang run in separate containers, across which
 # NCCL's same-node CUDA-IPC path cannot import a shareable buffer. NCCL_NET_PLUGIN=none: the bundled
 # aws-ofi plugin outranks the socket transport and wedges group formation on a host with no OFI
-# fabric. The server sets the same five (docker-compose.sglang.yml).
+# fabric. The server sets the same set (docker-compose.sglang.yml).
 test-gpu-sglang: EXTRA_DOCKER_ENV = -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_NET_PLUGIN=none \
-  -e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
+  -e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_SOCKET_IFNAME=^docker,veth \
+  -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e SGLANG_SERVER_URL=$(SGLANG_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=sglang
 test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half)
 	@curl -sf $(SGLANG_SERVER_URL)/health >/dev/null || { echo "No SGLang server at $(SGLANG_SERVER_URL). Start it on a \

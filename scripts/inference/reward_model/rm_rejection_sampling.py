@@ -56,7 +56,7 @@ from scripts.inference.reward_model._common import (
     resolve_correct_answer,
     score_conversations_offloaded,
 )
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 
 def parse_args():
@@ -89,10 +89,10 @@ async def generate_hypotheses(
             truncated = 0
             for _ in range(args.n_hypos):
                 answer, finish_reason = await generate_chat_message(client, base_prompt, args, response_format)
-                if finish_reason == FINISH_REASON_LENGTH:
-                    # A fragment cut at --max_gen_tokens is not a hypothesis: the reward model would
-                    # score it as a finished answer and it would land in the preference file on that
-                    # number.
+                if finish_reason in ENGINE_CUT_FINISH_REASONS:
+                    # A fragment (cut at --max_gen_tokens or aborted by the engine) is not a hypothesis:
+                    # the reward model would score it as a finished answer and it would land in the
+                    # preference file on that number.
                     truncated += 1
                     continue
                 conversations.append(base_prompt + [answer])

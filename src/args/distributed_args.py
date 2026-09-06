@@ -56,8 +56,8 @@ class DistributedArguments:
         metadata={
             "help": "Max size of one safetensors shard the distributed save paths write (e.g. '5GB'). "
             "The gathered EP/TP/FSDP2 writers read it; HF's own save_pretrained uses its own default. "
-            "A sharded EP save writes one file per rank by design, so it applies to the merged "
-            "artifact merge_ep_shards.py produces, not to the shards themselves."
+            "A sharded EP save writes one file per rank by design, so it bounds neither those shards "
+            "nor the merge: merge_ep_shards.py sizes its output from its own --max_shard_size flag."
         },
     )
 
@@ -273,7 +273,8 @@ class DistributedArguments:
     pipeline_parallel_size: int = field(
         default=1,
         metadata={
-            "help": "Pipeline parallel size — splits the model's decoder layers into contiguous stages. "
+            "help": "NOT YET AVAILABLE in this release: any value > 1 is rejected at config time. "
+            "Pipeline parallel size — splits the model's decoder layers into contiguous stages. "
             "PP is the OUTERMOST parallelism dimension and the only one designed to cross NVLink "
             "domains: stage boundaries must fall on NVLink-domain boundaries (world_size / "
             "pipeline_parallel_size must be a multiple of nvlink_domain_size), so only point-to-point "
@@ -288,7 +289,9 @@ class DistributedArguments:
     pipeline_microbatches: int = field(
         default=0,
         metadata={
-            "help": "Microbatches per optimizer step under pipeline parallelism (the pipeline's own "
+            "help": "PP-only, and PP is not yet available in this release: at pipeline_parallel_size=1 "
+            "any non-default value is rejected at config time. Microbatches per optimizer step under "
+            "pipeline parallelism (the pipeline's own "
             "gradient accumulation). 0 (default) = auto: gradient_accumulation_steps, raised to "
             "pipeline_parallel_size when the 1f1b schedule requires it. per_device_train_batch_size "
             "must be divisible by this."
@@ -298,7 +301,9 @@ class DistributedArguments:
     pipeline_schedule: Literal["1f1b", "gpipe"] = field(
         default="1f1b",
         metadata={
-            "help": "Pipeline schedule: '1f1b' (default, one-forward-one-backward — lowest activation "
+            "help": "PP-only, and PP is not yet available in this release: at pipeline_parallel_size=1 "
+            "any non-default value is rejected at config time. Pipeline schedule: '1f1b' (default, "
+            "one-forward-one-backward — lowest activation "
             "memory, requires pipeline_microbatches >= pipeline_parallel_size) or 'gpipe' (all forwards "
             "then all backwards — higher activation memory, no microbatch-count constraint)."
         },
@@ -307,7 +312,9 @@ class DistributedArguments:
     pipeline_split: list[int] | None = field(
         default=None,
         metadata={
-            "help": "Manual per-stage decoder-layer counts under pipeline parallelism, e.g. [19, 17] "
+            "help": "PP-only, and PP is not yet available in this release: at pipeline_parallel_size=1 "
+            "any non-default value is rejected at config time. Manual per-stage decoder-layer counts "
+            "under pipeline parallelism, e.g. [19, 17] "
             "for a 36-layer model at pipeline_parallel_size=2. Must sum to the model's layer count, "
             "with stage boundaries on the model's layer_types period. Default (null) is the "
             "head-weighted split: the last stage's layer budget shrinks by the lm_head's "

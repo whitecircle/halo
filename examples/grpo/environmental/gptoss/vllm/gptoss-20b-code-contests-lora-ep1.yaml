@@ -18,6 +18,9 @@ model_name_or_path: unsloth/gpt-oss-20b-BF16
 # reset_sinks=false keeps pretrained sinks frozen to match vLLM; FA4 is the sink-carrying impl. See agent-docs/models/gpt-oss.md.
 attn_implementation: flash_attention_4
 reset_sinks: false
+# Serve with --chat-template on this same file (VLLM_CHAT_TEMPLATE in the compose file): forced on the
+# trainer alone it leaves the engine on the checkpoint's built-in, which double-encodes tool-call
+# arguments the harmony parser cannot then read.
 chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
 force_chat_template: true
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
@@ -91,9 +94,8 @@ request_timeout: 300.0        # per HTTP call
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 
 # --- Rollout Generation ---
-rollout_temperature: 1.1     # >1 flattens sampling for exploration pressure: guards the interaction strategy
-                            # against early sharpening (the IS geo-band/veto bound the added off-policyness)
-rollout_top_p: 0.95
+rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
+rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]      # end each turn at the harmony tool-call terminator
 rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
                                        # (the headroom must leave a finished thought room to emit its tool call)

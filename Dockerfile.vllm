@@ -130,6 +130,18 @@ knames = {f.name for f in dataclasses.fields(KernelConfig)}; \
 assert 'moe_backend' in knames, 'KernelConfig.moe_backend gone'; \
 print('serve flags: OK')"
 
+# The weight-sync client pauses with `mode=keep` (in-flight requests survive the sync); a renamed
+# or narrowed parameter fails the build, not the run.
+RUN python3 -c "\
+import inspect, typing; \
+from vllm.entrypoints.serve.dev.rlhf.api_router import pause_generation; \
+p = inspect.signature(pause_generation).parameters; \
+assert 'mode' in p, '/pause lost its mode query parameter'; \
+ann = p['mode'].annotation; \
+inner = typing.get_args(ann)[0] if typing.get_origin(ann) is typing.Annotated else ann; \
+assert 'keep' in typing.get_args(inner), f'/pause mode no longer accepts keep: {inner}'; \
+print('/pause mode=keep: OK')"
+
 # Dev mode exposes the /pause -> /resume phased endpoints the weight-sync client drives. A
 # deployment must keep those endpoints off any untrusted network.
 ENV VLLM_SERVER_DEV_MODE=1

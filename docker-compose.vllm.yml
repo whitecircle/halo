@@ -30,6 +30,8 @@ services:
       # path instead of falling back. Override on an IB/EFA host.
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
       - NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-NVL}
+      # Keep the socket transport off Docker's bridge and per-container veth pairs.
+      - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}
       - HF_TOKEN=${HF_TOKEN:-}
     deploy:
       resources:
@@ -40,8 +42,10 @@ services:
               capabilities: [gpu]
     # vllm serve args (ENTRYPOINT is `vllm serve`). Required and silent when wrong: --moe-backend
     # triton (the auto Blackwell backends repack expert weights), --return-tokens-as-token-ids
-    # (train_on_sampled_tokens needs the sampled ids), and a --tool-call-parser matching the family.
-    # See agent-docs/infrastructure/rollout-servers.md.
+    # (train_on_sampled_tokens needs the sampled ids), --logprobs-mode processed_logprobs (the IS
+    # ratio divides by these logprobs, so they must be the sampling distribution's; the default
+    # raw_logprobs are pre-temperature and the trainer refuses them at any rollout_temperature != 1),
+    # and a --tool-call-parser matching the family. See agent-docs/infrastructure/rollout-servers.md.
     command: >
       ${VLLM_MODEL:-Qwen/Qwen3-0.6B}
       --port ${VLLM_PORT:-8000}
@@ -52,6 +56,7 @@ services:
       --moe-backend ${VLLM_MOE_BACKEND:-triton}
       ${VLLM_ATTENTION_BACKEND:+--attention-backend ${VLLM_ATTENTION_BACKEND}}
       --return-tokens-as-token-ids
+      --logprobs-mode processed_logprobs
       --enable-auto-tool-choice
       ${VLLM_TOOL_PARSER_PLUGIN:+--tool-parser-plugin ${VLLM_TOOL_PARSER_PLUGIN}}
       --tool-call-parser ${VLLM_TOOL_PARSER:-hermes}
@@ -87,6 +92,7 @@ services:
       # run must override it — it would force every trainer collective onto TCP and break DeepEP.
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
       - NCCL_NET=${NCCL_NET:-Socket}
+      - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - HF_TOKEN=${HF_TOKEN:-}
       # Keeps the Triton and FA4 JIT caches on the mounted volume instead of recompiling every run.

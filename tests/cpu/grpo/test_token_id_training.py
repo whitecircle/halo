@@ -283,5 +283,129 @@ def test_turns_path_records_context_overflow():
     assert "context window" in stub._batch_build_error
 
 
+def _render_stub(render):
+    """A stub with the REAL whole-trajectory tokenizer and per-turn splitter wired over ``render``."""
+    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+
+    stub = types.SimpleNamespace(
+        _warned_capture_missing=False,
+        _rollout_routing_replay=False,
+        _rollout_backend="vllm",
+        _batch_build_error=None,
+        eos_token_id=2,
+        pad_token_id=0,
+        _tokenizer=types.SimpleNamespace(name_or_path="stub-model"),
+    )
+    stub._render_messages_to_ids = render
+    stub._context_limit = lambda: 10**9
+    stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
+    stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
+    stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
+    stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
+    return stub
+
+
+def test_unrenderable_trajectory_invalidates_the_episode_instead_of_the_run():
+    """A turn without engine ids sends the trajectory through the whole-render fallback; when the chat
+    template rejects it (a malformed tool-call payload), the episode must be dropped as invalid — fully
+    masked row, no group-baseline weight — and NOT recorded as the fatal batch error that takes every
+    rank down mid-run."""
+    from src.environments.base import Message, Trajectory
+    from src.environments.episode import RolloutResult
+
+    def render(*_a, **_k):
+        raise TypeError("Can only get item pairs from a mapping.")
+
+    stub = _render_stub(render)
+    traj = Trajectory()
+    traj.add_message(Message.user("q"))
+    traj.add_message(Message.assistant("a1", token_ids=None))  # engine returned no ids for this turn
+    result = RolloutResult(prompt="q", trajectory=traj)
+
+    rows = stub._tokenize_trajectory_turns(result)
+
+    assert stub._batch_build_error is None, "a data-local template failure must not fail the run"
+    assert traj.episode_invalid
+    assert len(rows) == 1 and int(rows[0][2].sum()) == 0, "the fallback row must carry zero loss weight"
+
+
+def test_per_turn_prefix_render_failure_drops_the_episode_not_the_run():
+    from src.environments.base import Message, Trajectory
+    from src.environments.episode import RolloutResult
+
+    calls = []
+
+    def render(msgs, *_a, **_k):
+        calls.append(len(msgs))
+        raise ValueError("template rejects this prefix")
+
+    stub = _render_stub(render)
+    traj = Trajectory()
+    traj.add_message(Message.user("q"))
+    # Sampled ids present, engine prompt ids absent -> the per-turn path must re-render the prefix.
+    traj.add_message(Message.assistant("a1", token_ids=[10, 11], token_logprobs=[-0.1, -0.2]))
+    assert not traj.messages[-1].prompt_token_ids
+    result = RolloutResult(prompt="q", trajectory=traj)
+
+    rows = stub._tokenize_trajectory_turns(result)
+
+    assert calls, "the prefix re-render must have been attempted"
+    assert stub._batch_build_error is None
+    assert traj.episode_invalid
+    assert len(rows) == 1 and int(rows[0][2].sum()) == 0
+
+
+def test_prefix_render_failure_masks_the_episode_even_when_the_whole_render_would_succeed():
+    """The invalidated episode must not reach the whole-trajectory fallback: that render can succeed
+    where the per-turn prefix render failed and would hand an episode already excluded from the group
+    baseline a weighted row (and, under rollout routing replay, a row with no captured routing)."""
+    import torch
+
+    from src.environments.base import Message, Trajectory
+    from src.environments.episode import RolloutResult
+
+    def render(*_a, **_k):
+        raise ValueError("template rejects this prefix")
+
+    stub = _render_stub(render)
+    stub._tokenize_trajectory = lambda _result: (
+        torch.tensor([1, 2]),
+        torch.tensor([10, 11]),
+        torch.tensor([1, 1]),  # a whole-trajectory render that would train the turn
+    )
+    traj = Trajectory()
+    traj.add_message(Message.user("q"))
+    traj.add_message(Message.assistant("a1", token_ids=[10, 11], token_logprobs=[-0.1, -0.2]))
+    result = RolloutResult(prompt="q", trajectory=traj)
+
+    rows = stub._tokenize_trajectory_turns(result)
+
+    assert traj.episode_invalid
+    assert len(rows) == 1 and int(rows[0][2].sum()) == 0
+
+
+def test_prefix_render_failure_on_a_later_turn_masks_the_earlier_rows_too():
+    """An episode is invalid as a whole: a first turn whose engine prompt ids made it a trainable row
+    must not survive a later turn's failed prefix render at the episode's (now excluded) advantage."""
+    from src.environments.base import Message, Trajectory
+    from src.environments.episode import RolloutResult
+
+    def render(*_a, **_k):
+        raise ValueError("template rejects this prefix")
+
+    stub = _render_stub(render)
+    traj = Trajectory()
+    traj.add_message(Message.user("q"))
+    traj.add_message(Message.assistant("a1", token_ids=[10, 11], prompt_token_ids=[1, 2, 3]))
+    traj.add_message(Message.user("more"))
+    traj.add_message(Message.assistant("a2", token_ids=[12, 13]))  # engine prompt ids absent
+    result = RolloutResult(prompt="q", trajectory=traj)
+
+    rows = stub._tokenize_trajectory_turns(result)
+
+    assert traj.episode_invalid
+    assert len(rows) == 1 and int(rows[0][2].sum()) == 0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

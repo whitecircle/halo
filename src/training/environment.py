@@ -12,7 +12,6 @@ import functools
 import hashlib
 import os
 import time
-import traceback
 from pathlib import Path
 
 import datasets
@@ -96,27 +95,27 @@ def _validate_output_dir_across_ranks(output_dir: str) -> None:
 
 
 def run_training(main_fn):
-    """Wrap a training entry point so distributed teardown runs on every exit path.
+    """Wrap a training entry point so distributed teardown runs on the success path only.
 
     Usage: ``run_training(main)()`` under ``if __name__ == "__main__":``. Dispatchers are destroyed
-    before the process group: a DeepEP Gin buffer outliving the group communicator faults with a
-    sticky ``cudaErrorIllegalAddress`` that hides the original traceback. The traceback is printed
-    before that teardown because ``destroy_process_group`` is itself a collective — a failing rank
-    blocks there while its peers are still inside it, and an uncaught exception prints only once the
-    ``finally`` returns, so the error would surface as a hang.
+    before the process group — a DeepEP Gin buffer outliving the group communicator faults with a
+    sticky ``cudaErrorIllegalAddress`` that hides the original traceback.
+
+    An exception propagates with no teardown at all. Both teardown halves are collectives
+    (``destroy_all_dispatchers`` opens with a barrier, ``destroy_process_group`` is one), and a rank
+    failing mid-step — an OOM in backward, say — has peers still inside the step's own collective,
+    so entering another parks the failed rank in the NCCL watchdog for the full timeout while
+    torchrun sees no exit to act on. Exiting non-zero instead lets the launcher reap the peers;
+    the process exit frees the communicators.
     """
 
     @functools.wraps(main_fn)
     def wrapper(*args, **kwargs):
-        try:
-            return main_fn(*args, **kwargs)
-        except Exception:
-            traceback.print_exc()
-            raise
-        finally:
-            destroy_all_dispatchers()
-            if dist.is_available() and dist.is_initialized():
-                dist.destroy_process_group()
+        result = main_fn(*args, **kwargs)
+        destroy_all_dispatchers()
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
+        return result
 
     return wrapper
 

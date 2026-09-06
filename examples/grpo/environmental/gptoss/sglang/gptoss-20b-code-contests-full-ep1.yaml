@@ -1,6 +1,10 @@
 # Environmental GRPO — gpt-oss-20b full fine-tune on code_contests, SGLang backend, no EP, ZeRO-2, with
-# R3 routing replay. Server flags, the five NCCL socket vars and the fsdp_reshard_after_backward
-# rationale: sglang/gptoss-20b-code-contests-lora-ep1.yaml.
+# R3 routing replay. Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2× TP=2, with
+#   --enable-return-routed-experts --moe-runner-backend triton (the auto-picked triton_kernel runner
+#   bypasses the R3 capture hook, and a repacking runner corrupts every weight update)
+#   --tool-call-parser auto --reasoning-parser gpt-oss, and --chat-template on the same file this
+#   config forces below. Keep --enable-torch-compile off under R3 capture. The five NCCL socket vars
+#   and the fsdp_reshard_after_backward rationale: sglang/gptoss-20b-code-contests-lora-ep1.yaml.
 # SGLang + expert distribution is rejected at construction (mutually exclusive NCCL transports) —
 # there is no sglang ep4 variant; use rollout_backend: vllm for EP runs.
 # rollout_max_thinking_tokens stays unset (vLLM-only; enforced by _validate_backend_capabilities).
@@ -72,9 +76,8 @@ episode_timeout: 2700         # whole-episode wall clock; launch with DIST_NCCL_
                               # (the 30-min default watchdog rejects this at training start)
 
 # --- Rollout Generation ---
-rollout_temperature: 1.1     # >1 flattens sampling for exploration pressure: guards the interaction strategy
-                            # against early sharpening (the IS geo-band/veto bound the added off-policyness)
-rollout_top_p: 0.95
+rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
+rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]
 rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
                                        # (the headroom must leave a finished thought room to emit its tool call)

@@ -12,6 +12,7 @@ model_init_kwargs:
   output_router_logits: true
   router_aux_loss_coef: 0.001
 moe_balancing: none  # aux_loss is a warn-and-no-op under GRPO trainers; router logits kept for MoE metrics
+# train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
 
 # --- Parallelism (EP=4: one dispatch group on the 4 train GPUs, DP=4) ---
 expert_parallel_size: 4

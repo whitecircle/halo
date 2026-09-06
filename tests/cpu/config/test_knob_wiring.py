@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from datasets import Dataset, DatasetDict
 
 from src.args.distributed_args import DistributedArguments
 from src.args.mixins import RLRRConfig, SDPGArguments
@@ -377,6 +378,17 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
         # TRL's own dataset prep and default collator — the only consumers — are both replaced.
         ("sft.py", "assistant_only_loss: true\n", "assistant_only_loss"),
         ("distillation/self_distill.py", "completion_only_loss: false\n", "completion_only_loss"),
+        # Both only feed the reference term, and no reference model is loaded at this coefficient.
+        (
+            "distillation/self_distill.py",
+            "reference_kl_coef: 0.0\nreference_model_name_or_path: stub/reference\n",
+            "reference_model_name_or_path",
+        ),
+        (
+            "distillation/self_distill.py",
+            "reference_kl_coef: 0.0\nreference_kl_loss: reverse_kl\n",
+            "reference_kl_loss",
+        ),
     ],
 )
 def test_script_main_refuses_the_knob_before_any_load(script, config_body, knob, tmp_path):
@@ -683,6 +695,36 @@ def test_self_distill_trainer_adopts_every_forwarded_sdpg_field():
 
     _, leaked = _construct_self_distill_shell(sdpg_hint_template="the answer is {answer}")
     assert leaked == {"sdpg_hint_template": "the answer is {answer}"}
+
+
+def _answer_column_args(**overrides):
+    defaults = {"sdpg_beta_base": 1.0, "sdpg_answer_field": "answer", "dataset": "dummy/dataset"}
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+def _dataset_with(columns: dict[str, list]) -> DatasetDict:
+    return DatasetDict({"train": Dataset.from_dict(columns), "test": Dataset.from_dict(columns)})
+
+
+def test_self_distill_requires_the_answer_column_while_the_opd_term_carries_weight():
+    """The collators read the answer with ``.get``, so a missing column hints an EMPTY answer as fact
+    and the OPD term distils toward a misled teacher — the offline half of the on-policy arm's gate."""
+    module = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_answer")
+    without = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]]})
+    with pytest.raises(ValueError, match="sdpg_answer_field='answer' names a column"):
+        module._require_privileged_answer_column(without, _answer_column_args())
+
+    carried = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "answer": ["42"]})
+    module._require_privileged_answer_column(carried, _answer_column_args())
+
+
+@pytest.mark.parametrize("overrides", [{"sdpg_beta_base": 0.0}, {"sdpg_answer_field": None}])
+def test_self_distill_answer_column_gate_stands_down_where_no_hint_is_asserted(overrides):
+    """beta 0 drops the OPD term and a null field opts out of the hint's answer slot; neither renders
+    an answer, so neither may demand the column."""
+    module = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_answer_off")
+    without = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]]})
+    module._require_privileged_answer_column(without, _answer_column_args(**overrides))
 
 
 def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():

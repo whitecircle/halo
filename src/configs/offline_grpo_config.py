@@ -32,7 +32,8 @@ class OfflineGRPOConfig(ChunkedLogprobsArguments, RangeValidatedConfig, Training
     max_length: int | None = field(
         default=None,
         metadata={
-            "help": "Fixed total (prompt + completion) sequence length under pipeline parallelism; every "
+            "help": "PP-only, and PP is not yet available in this release, so every value is rejected "
+            "today. Fixed total (prompt + completion) sequence length under pipeline parallelism; every "
             "batch is padded to it because the pipeline's P2P buffer shapes freeze on the first step. "
             "None defaults to max_prompt_length + max_completion_length. PP-ONLY: nothing reads it "
             "off PP (the budget there is max_prompt_length + max_completion_length), so setting it "
@@ -92,7 +93,8 @@ class OfflineGRPOConfig(ChunkedLogprobsArguments, RangeValidatedConfig, Training
         default=None,
         metadata={
             "help": "When set, linearly schedules min_log_prob from this start value to its final value "
-            "over training (None = constant). Recommend ~the mean CE loss on the SFT data."
+            "over training (None = constant). Requires min_log_prob — without a final value to "
+            "schedule toward no scheduler is added (warned). Recommend ~the mean CE loss on the SFT data."
         },
     )
     dataset_num_proc: int | None = field(

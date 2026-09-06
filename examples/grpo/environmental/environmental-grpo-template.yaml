@@ -7,6 +7,8 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
 attn_implementation: flash_attention_2
+# train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids; a native-tool
+# environment_type below also needs a matching --tool-call-parser, or the server 400s every rollout.
 
 # --- Environment (EnvironmentConfig fields) ---
 environment_type: react_math

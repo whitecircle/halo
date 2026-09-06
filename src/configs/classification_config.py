@@ -55,7 +55,9 @@ class ClassificationConfig(RangeValidatedConfig, TrainingArguments):
         default=None,
         metadata={
             "help": "Alpha (balancing factor) for focal loss. None means no alpha weighting. "
-            "Ignored unless loss_type='focal'."
+            "Ignored unless loss_type='focal'. Multi-label (sigmoid) heads only — on a "
+            "single-label softmax head a scalar alpha is a uniform loss rescale rather than "
+            "balancing, and a non-None value is rejected there."
         },
     )
     label_smoothing: float = field(
@@ -69,7 +71,8 @@ class ClassificationConfig(RangeValidatedConfig, TrainingArguments):
         default=None,
         metadata={
             "help": "Manual class weights as a list of floats (one per class, ordered by label ID). "
-            "Applied to cross_entropy and focal losses. None means equal weights."
+            "Applied to every loss_type (cross_entropy, focal, label_smoothing_ce) and as pos_weight "
+            "on the multi-label BCE. None means equal weights."
         },
     )
     derive_class_weights: bool = field(
@@ -90,8 +93,8 @@ class ClassificationConfig(RangeValidatedConfig, TrainingArguments):
     compute_per_class_metrics: bool = field(
         default=False,
         metadata={
-            "help": "Log per-class precision, recall, and F1 during evaluation. "
-            "Can produce many metrics with many classes."
+            "help": "Log per-class precision, recall, and F1 during evaluation. Single-label "
+            "only — ignored on a multi-label dataset. Can produce many metrics with many classes."
         },
     )
     compute_auc_roc: bool = field(
@@ -101,8 +104,9 @@ class ClassificationConfig(RangeValidatedConfig, TrainingArguments):
     compute_mcc: bool = field(
         default=True,
         metadata={
-            "help": "Compute Matthews Correlation Coefficient during evaluation. "
-            "MCC is a balanced metric useful even with imbalanced classes."
+            "help": "Compute Matthews Correlation Coefficient during evaluation. Single-label "
+            "only — ignored on a multi-label dataset. MCC is a balanced metric useful even "
+            "with imbalanced classes."
         },
     )
 

@@ -29,6 +29,7 @@ from tqdm import tqdm
 from scripts.inference._common import reject_empty_results, run_async_cli
 from scripts.inference.reward_model._common import (
     OverlongConversationError,
+    TruncatedGenerationError,
     boot_scoring_run,
     build_generation_parser,
     build_output_path,
@@ -39,7 +40,7 @@ from scripts.inference.reward_model._common import (
     resolve_correct_answer,
     score_conversations_offloaded,
 )
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 
 def parse_args():
@@ -68,8 +69,8 @@ async def generate_and_evaluate(
             base_prompt, response_format = await prepare_generation_prompt(client, row, args)
 
             response, finish_reason = await generate_chat_message(client, base_prompt, args, response_format)
-            if finish_reason == FINISH_REASON_LENGTH:
-                # Scoring a fragment as a finished answer would write a reward for text the policy
+            if finish_reason in ENGINE_CUT_FINISH_REASONS:
+                # Scoring a fragment (token cap or engine abort) as a finished answer would write a reward for text the policy
                 # never finished, so the row is dropped, counted and reported.
                 stats["truncated"] += 1
                 print(f"Truncated at --max_gen_tokens for {row.get(args.id_field, '?')}: dropped")
@@ -102,6 +103,11 @@ async def generate_and_evaluate(
         except OverlongConversationError as e:
             stats["overlong"] += 1
             print(f"Over --rm_max_seq_len for {row.get(args.id_field, '?')}: row dropped ({e})")
+        except TruncatedGenerationError as e:
+            # The first turn of a follow-up row was cut, so the scored turn would have conditioned on
+            # a fragment: a truncation like the final-turn cut above, not a generation failure.
+            stats["truncated"] += 1
+            print(f"Truncated at --max_gen_tokens for {row.get(args.id_field, '?')}: {e}")
         except ValueError:
             # The single-output shape guard (score_conversations) is a deterministic
             # misconfiguration, so re-raise and let the run abort rather than scoring nothing.

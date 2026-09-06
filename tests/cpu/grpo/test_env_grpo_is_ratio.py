@@ -63,6 +63,17 @@ def test_non_policy_tokens_are_neutral():
     assert corrected[0, 0] and not corrected[0, 1]
 
 
+def test_sampler_certain_token_is_uncorrected():
+    """A token the engine emitted at probability 1 (sampling logprob exactly 0 — a budget-forced
+    ``</think>``, a collapsed nucleus) was no sampling choice: ratio exactly 1, outside the corrected
+    set, while its neighbours stay corrected."""
+    ratio, diff, corrected = _run([[-1.0, -9.0, -2.0]], [[-1.5, 0.0, -2.25]], [[1, 1, 1]], [True])
+    assert ratio[0, 1].item() == 1.0 and diff[0, 1].item() == 0.0
+    assert not corrected[0, 1]
+    assert corrected[0, 0] and corrected[0, 2]
+    torch.testing.assert_close(ratio[0, [0, 2]], torch.exp(torch.tensor([0.5, 0.25])))
+
+
 def test_ratio_is_truncated_at_clip_max():
     """A huge positive log-ratio is clamped so a negative-advantage term can't blow up."""
     ratio, _, _ = _run([[0.0]], [[-20.0]], [[1]], [True])

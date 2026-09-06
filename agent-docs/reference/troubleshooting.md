@@ -117,7 +117,10 @@ DeepEP is required for EP — there is no NCCL fallback. Two failure modes domin
   down the peers die on launch failures inside whatever kernel is on-stream. The OOMing rank's
   traceback is the primary failure and is easily buried under the collateral; the trainer logs a
   `RANK n: ... THIS RANK IS THE PRIMARY FAILURE` banner for it, and warns after the first optimizer
-  step when a rank's peak sits above ~92% of its device. On MoE the usual cause is routing skew — a
+  step when a rank's peak sits above ~92% of its device. The failing rank exits without entering
+  distributed teardown (both halves are themselves collectives, and its peers are still inside the
+  step's own), so torchrun reaps the job in seconds rather than at the NCCL watchdog.
+  On MoE the usual cause is routing skew — a
   cold (unbalanced) router concentrates dispatch buffers and expert activations on hot ranks, and
   under gradient checkpointing every MoE layer's saved dispatch/combine results scale with it; under
   `bias_update` the skew (watch `moe/load_max`) falls over the first few hundred steps, so a batch
