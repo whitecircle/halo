@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field, fields
+from math import isfinite
 from typing import Any, Literal
 
 from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments
@@ -362,17 +363,20 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         # the knob: rollout_temperature divides the log-prob sweep (the trainer scores at the
         # sampling temperature, so a 0 is a ZeroDivisionError mid-step), rollout_max_tokens doubles
         # as the dr_grpo loss normalizer, and the deadlines are compared against wall-clock, where a
-        # non-positive one cancels every episode on entry and halts the run as an empty batch.
+        # non-positive one cancels every episode on entry and halts the run as an empty batch. A NaN
+        # passes every ordered comparison, so finiteness is checked first.
         for name in POSITIVE_ROLLOUT_FIELDS:
             value = getattr(self, name)
-            if value <= 0:
-                raise ValueError(f"{name} must be > 0, got {value}")
+            if not isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a finite number > 0, got {value}")
         # Sent verbatim on the wire; outside (0, 1] the server rejects every rollout request.
         if not 0 < self.rollout_top_p <= 1:
             raise ValueError(f"rollout_top_p must be in (0, 1], got {self.rollout_top_p}")
         # A negative base shrinks the retry backoff instead of growing it.
-        if self.retry_base_wait < 0:
-            raise ValueError(f"retry_base_wait must be >= 0 (0 = retry immediately), got {self.retry_base_wait}")
+        if not isfinite(self.retry_base_wait) or self.retry_base_wait < 0:
+            raise ValueError(
+                f"retry_base_wait must be a finite number >= 0 (0 = retry immediately), got {self.retry_base_wait}"
+            )
         # The per-turn answer headroom is `rollout_max_tokens - rollout_max_thinking_tokens`, floored
         # at 0 where the budgets meet: the turn would then spend its whole cap on reasoning and stop
         # before the answer or tool call it exists to produce.

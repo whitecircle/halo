@@ -524,9 +524,11 @@ def test_positive_rollout_knob_sweep_covers_the_production_tuple():
 
 
 @pytest.mark.parametrize("field", _POSITIVE_ROLLOUT_KNOBS)
-@pytest.mark.parametrize("bad", [0, -1])
-def test_async_config_rejects_non_positive_rollout_knobs(field, bad):
-    """Each of these reaches a consumer with no reading for 0 or a negative, far from the knob.
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+def test_async_config_rejects_non_positive_or_non_finite_rollout_knobs(field, bad):
+    """Each of these reaches a consumer with no reading for 0, a negative, NaN or infinity, far from
+    the knob. NaN passes every ordered comparison and infinity passes ``> 0``, so both must be refused
+    up front rather than by the sign check alone.
 
     ``rollout_temperature`` overwrites the trainer's own and then divides the chunked log-prob sweep
     (0 → ZeroDivisionError inside the first optimizer step); ``rollout_max_tokens`` becomes TRL's
@@ -548,13 +550,23 @@ def test_async_config_rejects_a_vanishing_concurrency_cap(bad):
         AsyncTrainingConfig(max_concurrent_rollouts=bad)
 
 
-@pytest.mark.parametrize("bad", [0.0, -0.1, 1.5])
+@pytest.mark.parametrize("bad", [0.0, -0.1, 1.5, float("nan"), float("inf")])
 def test_async_config_rejects_out_of_range_top_p(bad):
     """``rollout_top_p`` is forwarded verbatim, so an out-of-range value is a per-request server
     rejection — every episode errors and the step reads as a dead environment."""
     AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="rollout_top_p"):
         AsyncTrainingConfig(rollout_top_p=bad)
+
+
+@pytest.mark.parametrize("bad", [-0.5, float("nan"), float("inf")])
+def test_async_config_rejects_a_non_finite_or_negative_retry_base_wait(bad):
+    """The retry backoff grows from ``retry_base_wait``: a negative base shrinks it, NaN slips past
+    the sign check, and an infinite base parks the first retry forever."""
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="retry_base_wait"):
+        AsyncTrainingConfig(retry_base_wait=bad)
+    AsyncTrainingConfig(retry_base_wait=0.0)  # no raise: retry immediately
 
 
 def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():

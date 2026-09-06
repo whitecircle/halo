@@ -101,7 +101,7 @@ def chunked_selective_log_softmax(
     """
     b, t, h = hidden.shape
     logps, _entropy = _ChunkedSelectiveLogProbEntropyFunction.apply(
-        hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, _VOCAB_CHUNK
+        hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, _VOCAB_CHUNK, False
     )
     return logps.reshape(b, t)
 
@@ -114,12 +114,15 @@ def _selective_logprob_entropy_forward(
     bias: torch.Tensor | None,
     temperature: float,
     vocab_chunk_size: int,
+    compute_entropy: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Dual-chunked (sequence × vocab) selective log-softmax with an entropy accumulator in the same sweep.
 
     The entropy needs only ``u = Σ exp(z−m)·z`` on top of the online-softmax accumulators the logprob
     pass already tracks, so fusing them avoids a second full-vocab matmul per gradient microbatch.
-    Returns ``(logprobs, log_z, entropy)``, each ``(n_rows,)`` fp32; ``entropy = log_z − u/s``.
+    Returns ``(logprobs, log_z, entropy)``, each ``(n_rows,)`` fp32; ``entropy = log_z − u/s``. With
+    ``compute_entropy=False`` the ``u`` accumulator (one extra ``[seq, vocab]`` product and reduction
+    per tile) is skipped and the entropy comes back as zeros.
     """
     device = hidden.device
     n_rows, _ = hidden.shape
@@ -129,7 +132,7 @@ def _selective_logprob_entropy_forward(
 
     logprobs = torch.empty((n_rows,), device=device, dtype=torch.float32)
     log_z = torch.empty((n_rows,), device=device, dtype=torch.float32)
-    entropy = torch.empty((n_rows,), device=device, dtype=torch.float32)
+    entropy = torch.zeros((n_rows,), device=device, dtype=torch.float32)
 
     for seq_start in range(0, n_rows, seq_chunk_size):
         seq_end = min(seq_start + seq_chunk_size, n_rows)
@@ -139,7 +142,7 @@ def _selective_logprob_entropy_forward(
 
         max_old = torch.full((n_chunk,), float("-inf"), device=device, dtype=torch.float32)
         sum_exp = torch.zeros((n_chunk,), device=device, dtype=torch.float32)
-        sum_exp_z = torch.zeros((n_chunk,), device=device, dtype=torch.float32)
+        sum_exp_z = torch.zeros((n_chunk,), device=device, dtype=torch.float32) if compute_entropy else None
         target_logit = torch.zeros((n_chunk,), device=device, dtype=torch.float32)
         row_idx = torch.arange(n_chunk, device=device)
 
@@ -157,7 +160,8 @@ def _selective_logprob_entropy_forward(
             chunk_exp = torch.exp(logits_chunk - max_new.unsqueeze(-1))
 
             sum_exp = sum_exp * rescale + chunk_exp.sum(dim=-1)
-            sum_exp_z = sum_exp_z * rescale + (chunk_exp * logits_chunk).sum(dim=-1)
+            if compute_entropy:
+                sum_exp_z = sum_exp_z * rescale + (chunk_exp * logits_chunk).sum(dim=-1)
             max_old = max_new
 
             in_chunk = (targets_chunk >= vocab_start) & (targets_chunk < vocab_end)
@@ -167,7 +171,8 @@ def _selective_logprob_entropy_forward(
         log_z_chunk = max_old + torch.log(sum_exp)
         log_z[seq_start:seq_end] = log_z_chunk
         logprobs[seq_start:seq_end] = target_logit - log_z_chunk
-        entropy[seq_start:seq_end] = log_z_chunk - sum_exp_z / sum_exp
+        if compute_entropy:
+            entropy[seq_start:seq_end] = log_z_chunk - sum_exp_z / sum_exp
 
     return logprobs, log_z, entropy
 
@@ -238,14 +243,14 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
     """Selective logprob and entropy in one vocab sweep; backward is the dual-chunked recompute above.
 
     The entropy output is a detached diagnostic (``mark_non_differentiable``); only the logprobs
-    carry gradient. The plain (entropy-free) entry shares this Function, so both paths run one
-    backward.
+    carry gradient. The plain (entropy-free) entry shares this Function with the entropy accumulator
+    off, so both paths run one backward.
     """
 
     @staticmethod
-    def forward(ctx, hidden, weight, targets, bias, temperature, vocab_chunk_size):
+    def forward(ctx, hidden, weight, targets, bias, temperature, vocab_chunk_size, compute_entropy):
         logprobs, log_z, entropy = _selective_logprob_entropy_forward(
-            hidden, weight, targets, bias, temperature, vocab_chunk_size
+            hidden, weight, targets, bias, temperature, vocab_chunk_size, compute_entropy
         )
         if bias is None:
             bias = hidden.new_empty((0,))
@@ -276,6 +281,7 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
             grad_bias.to(bias.dtype) if ctx.has_bias else None,
             None,
             None,
+            None,
         )
 
 
@@ -294,7 +300,7 @@ def chunked_selective_log_softmax_with_entropy(
     """
     b, t, h = hidden.shape
     logps, entropy = _ChunkedSelectiveLogProbEntropyFunction.apply(
-        hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, _VOCAB_CHUNK
+        hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, _VOCAB_CHUNK, True
     )
     return logps.reshape(b, t), entropy.reshape(b, t)
 

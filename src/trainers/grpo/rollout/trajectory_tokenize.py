@@ -267,7 +267,9 @@ class TrajectoryTokenizeMixin:
                 prompt_ids = list(m.prompt_token_ids)
             else:
                 # A template that rejects this prefix (a turn ending on a `tool` message) fails on
-                # one rank only, so it must never raise per rank; the episode is dropped instead.
+                # one rank only, so it must never raise per rank; the episode is dropped instead, as
+                # one masked row — no earlier turn of it trains, and the whole-trajectory fallback
+                # below cannot hand the invalidated episode a weighted row.
                 try:
                     prompt_ids = self._render_messages_to_ids(
                         messages[:idx], True, template_kwargs, include_thinking=False
@@ -278,7 +280,7 @@ class TrajectoryTokenizeMixin:
                         f"per-turn re-render of the prompt prefix failed ({type(e).__name__}: {e}); the engine "
                         f"returned no prompt_token_ids for this turn and the template rejects this prefix",
                     )
-                    continue
+                    return single_trajectory_row(self._masked_trajectory_tensors())
             comp = list(m.token_ids)
             if len(prompt_ids) + len(comp) > context_limit and self._batch_build_error is None:
                 # First error wins, like every sibling write: a later overflow would otherwise

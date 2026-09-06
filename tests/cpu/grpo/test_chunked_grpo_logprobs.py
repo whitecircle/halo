@@ -95,18 +95,21 @@ def test_fused_entropy_matches_full_path():
 
 
 def test_fused_backward_matches_plain_chunked():
-    # Both delegate backward to Liger's recompute path over the same saved tensors, so atol/rtol are 0.
+    # Both run the same dual-chunked recompute backward over the same saved tensors, so atol/rtol are
+    # 0; the plain entry only leaves the entropy accumulator out of the forward sweep.
     torch.manual_seed(4)
     weight = torch.randn(VOCAB, HIDDEN, dtype=torch.float32) * 0.05
     ids = torch.randint(0, VOCAB, (B, T))
 
     h_plain = torch.randn(B, T, HIDDEN, dtype=torch.float32, requires_grad=True)
-    chunked_selective_log_softmax(h_plain, weight, ids, None, 1.0).sum().backward()
+    logps_plain = chunked_selective_log_softmax(h_plain, weight, ids, None, 1.0)
+    logps_plain.sum().backward()
 
     h_fused = h_plain.detach().clone().requires_grad_(True)
     logps, _entropy = chunked_selective_log_softmax_with_entropy(h_fused, weight, ids, None, 1.0)
     logps.sum().backward()
 
+    torch.testing.assert_close(logps, logps_plain, atol=0.0, rtol=0.0)
     torch.testing.assert_close(h_fused.grad, h_plain.grad, atol=0.0, rtol=0.0)
 
 
