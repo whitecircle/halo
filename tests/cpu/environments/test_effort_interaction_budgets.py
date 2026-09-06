@@ -135,8 +135,10 @@ def test_resubmission_penalty_prices_each_graded_submission_after_the_first():
     once._compute_reward(traj_once)
     assert traj_once.info["reward_components"]["reward/resubmission"] == 0.0
 
-    with pytest.raises(ValueError, match="resubmission_penalty"):
-        _make_env(resubmission_penalty=-0.1)
+    # A sign check alone lets NaN and infinity through, and either poisons the whole reward.
+    for bad in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="resubmission_penalty"):
+            _make_env(resubmission_penalty=bad)
 
 
 def test_over_cap_call_classifies_as_tool_error_not_paid_success():
