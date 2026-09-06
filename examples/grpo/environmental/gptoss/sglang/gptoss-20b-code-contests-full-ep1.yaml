@@ -76,9 +76,8 @@ episode_timeout: 2700         # whole-episode wall clock; launch with DIST_NCCL_
                               # (the 30-min default watchdog rejects this at training start)
 
 # --- Rollout Generation ---
-rollout_temperature: 1.1     # >1 flattens sampling for exploration pressure: guards the interaction strategy
-                            # against early sharpening (the IS geo-band/veto bound the added off-policyness)
-rollout_top_p: 0.95
+rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
+rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]
 rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
                                        # (the headroom must leave a finished thought room to emit its tool call)

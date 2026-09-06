@@ -19,6 +19,7 @@ from src.distributed.nccl.clients.base import (
     WEIGHT_SYNC_CHUNK_BYTES,
     BaseWeightSyncClient,
     PinnedHostBufferPool,
+    SamplerLogprobSemantics,
     payload_bytes,
     starts_new_chunk,
     validate_syncable_param,
@@ -80,26 +81,104 @@ def verify_context_window(
             )
 
 
-def verify_context_window_synced(
-    urls: list[str], single_turn_tokens: int, full_trajectory_tokens: int | None = None, *, backend: str
-) -> None:
-    """Collective-safe :func:`verify_context_window`; call on every rank.
+def _probe_sampler_logprob_semantics(client_cls: type[BaseWeightSyncClient], url: str) -> SamplerLogprobSemantics:
+    """One server's :meth:`BaseWeightSyncClient.probe_sampler_logprob_semantics`; unknown when unreadable."""
+    client = None
+    try:
+        client = client_cls(base_url=url)
+        return client.probe_sampler_logprob_semantics()
+    except Exception as e:
+        logger.warning(f"Could not probe the sampler-logprob semantics of {url}: {e}")
+        return SamplerLogprobSemantics(None, None)
+    finally:
+        if client is not None:
+            client.session.close()
 
-    The HTTP probe runs on rank 0 only (one probe, no log spam); the hard-requirement verdict is
-    broadcast so all ranks raise together instead of hanging on the next barrier. The backend lookup
-    runs on every rank: it reads no server, and a rank-0-only raise there would leave the peers
-    blocked in the broadcast below.
+
+def verify_sampler_logprob_reference(
+    client_cls: type[BaseWeightSyncClient],
+    urls: list[str],
+    temperature: float,
+    top_p: float,
+    geo_band_active: bool,
+) -> None:
+    """Refuse a rollout server whose per-token logprobs are not the reference the IS ratio divides by.
+
+    The trainer scores its log-probs at ``rollout_temperature`` and divides by the engine's reported
+    sampling log-probs, so those must already carry the temperature: against vLLM's default raw
+    (pre-temperature) values every weight becomes π^T / π^1, tilted toward improbable tokens on every
+    step — entropy inflates at T > 1, collapses at T < 1 — while the ratio still reads ≈ 1. A nucleus-
+    renormalized reference (vLLM ``processed_logprobs`` with top-p < 1) lifts every uncertain position
+    by the nucleus mass, which the trajectory geometric band reads as drift, so that pairing is refused
+    with the band on. An unverifiable server warns: a preflight probe never fails the run by itself.
     """
-    client_cls = resolve_weight_sync_client(backend)
+    if temperature == 1.0 and not (top_p < 1.0 and geo_band_active):
+        return
+    for url in urls:
+        semantics = _probe_sampler_logprob_semantics(client_cls, url)
+        if temperature != 1.0:
+            if semantics.temperature_applied is None:
+                logger.warning(
+                    f"Rollout server {url}: could not verify that its logprobs carry the sampling temperature "
+                    f"({temperature}); the IS ratio is biased if they are vLLM's default raw values."
+                )
+            elif not semantics.temperature_applied:
+                raise ValueError(
+                    f"Rollout server {url} reports RAW (pre-temperature) logprobs while rollout_temperature="
+                    f"{temperature}: the IS ratio would divide the trainer's temperature-{temperature} log-probs "
+                    f"by temperature-1 ones, biasing every token weight. Serve vLLM with "
+                    f"`--logprobs-mode processed_logprobs` (the compose recipe sets it), or leave "
+                    f"SGLANG_RETURN_ORIGINAL_LOGPROB unset on SGLang, or sample at rollout_temperature: 1.0."
+                )
+        if top_p < 1.0 and geo_band_active:
+            if semantics.nucleus_renormalized is None:
+                logger.warning(
+                    f"Rollout server {url}: could not verify whether its logprobs are renormalized over the "
+                    f"top-p nucleus; with rollout_top_p={top_p} a renormalized reference shifts the geometric band."
+                )
+            elif semantics.nucleus_renormalized:
+                raise ValueError(
+                    f"Rollout server {url} reports logprobs renormalized over the top-p nucleus while "
+                    f"rollout_top_p={top_p} and the trajectory geometric band is on: every uncertain position "
+                    f"reads as drift by its nucleus mass. Set rollout_top_p: 1.0 or drop isr_geo_band_min/max."
+                )
+
+
+def _rank0_preflight(check: Callable[[], None]) -> None:
+    """Run ``check`` on rank 0 and re-raise its ``ValueError`` on every rank.
+
+    One HTTP probe, no log spam; the verdict is broadcast so all ranks raise together instead of
+    hanging on the next barrier.
+    """
     error: str | None = None
     if is_global_main_process():
         try:
-            verify_context_window(client_cls, urls, single_turn_tokens, full_trajectory_tokens)
+            check()
         except ValueError as e:
             error = str(e)
     error = broadcast_from_rank0(error)
     if error is not None:
         raise ValueError(error)
+
+
+def verify_context_window_synced(
+    urls: list[str], single_turn_tokens: int, full_trajectory_tokens: int | None = None, *, backend: str
+) -> None:
+    """Collective-safe :func:`verify_context_window`; call on every rank.
+
+    The backend lookup runs on every rank: it reads no server, and a rank-0-only raise there would
+    leave the peers blocked in the verdict broadcast.
+    """
+    client_cls = resolve_weight_sync_client(backend)
+    _rank0_preflight(partial(verify_context_window, client_cls, urls, single_turn_tokens, full_trajectory_tokens))
+
+
+def verify_sampler_logprob_reference_synced(
+    urls: list[str], *, temperature: float, top_p: float, geo_band_active: bool, backend: str
+) -> None:
+    """Collective-safe :func:`verify_sampler_logprob_reference`; call on every rank."""
+    client_cls = resolve_weight_sync_client(backend)
+    _rank0_preflight(partial(verify_sampler_logprob_reference, client_cls, urls, temperature, top_p, geo_band_active))
 
 
 class InferenceClientManager:

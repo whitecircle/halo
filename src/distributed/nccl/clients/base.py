@@ -15,6 +15,7 @@ import logging
 import socket
 import threading
 import time
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 import requests
@@ -55,6 +56,15 @@ _ASYNC_POLL_INTERVAL_S = 0.1
 _SERVER_ERROR_GRACE_S = 5.0
 # Cadence of the startup /health poll, which runs against a server that may still be loading weights.
 _HEALTH_RETRY_INTERVAL_S = 2.0
+# Sampler-logprob semantics probe: 1-token completions of one prompt under three sampler settings.
+_LOGPROB_PROBE_PROMPT = "The capital of France is"
+_LOGPROB_PROBE_TIMEOUT_S = 60.0
+_LOGPROB_PROBE_TEMPERATURE = 2.0
+_LOGPROB_PROBE_TOP_P = 0.5
+# Temperature-processed logprobs halve the top-1/top-2 gap at temperature 2; raw ones leave it whole.
+_TEMPERATURE_APPLIED_GAP_RATIO_MAX = 0.75
+# A nucleus renormalization lifts the top token's logprob by -log(nucleus mass) at top-p 0.5.
+_NUCLEUS_RENORM_MIN_SHIFT_NATS = 1e-3
 
 
 def payload_bytes(tensor: torch.Tensor) -> int:
@@ -269,6 +279,13 @@ class PinnedHostBufferPool:
         return self._free_bytes
 
 
+class SamplerLogprobSemantics(NamedTuple):
+    """What the engine's reported per-token logprobs already account for; ``None`` = the probe could not tell."""
+
+    temperature_applied: bool | None
+    nucleus_renormalized: bool | None
+
+
 class BaseWeightSyncClient:
     """HTTP session, group addressing and host-side parameter buffering shared by every engine.
 
@@ -419,6 +436,57 @@ class BaseWeightSyncClient:
             if card.get("max_model_len"):
                 return int(card["max_model_len"])
         return None
+
+    def _probe_top_logprobs(self, model_id: str, temperature: float, top_p: float) -> list[float] | None:
+        """The top logprob values (descending) of one 1-token completion, or ``None`` when unreadable."""
+        body = {
+            "model": model_id,
+            "prompt": _LOGPROB_PROBE_PROMPT,
+            "max_tokens": 1,
+            "temperature": temperature,
+            "top_p": top_p,
+            "logprobs": 2,
+            "seed": 0,
+        }
+        try:
+            resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=_LOGPROB_PROBE_TIMEOUT_S)
+            resp.raise_for_status()
+            top = resp.json()["choices"][0]["logprobs"]["top_logprobs"][0]
+            values = sorted((float(v) for v in top.values() if v is not None), reverse=True)
+        except (requests.exceptions.RequestException, KeyError, IndexError, TypeError, ValueError) as e:
+            logger.warning(
+                f"Sampler-logprob probe against {self.base_url} failed (T={temperature}, top_p={top_p}): {e}"
+            )
+            return None
+        return values
+
+    def probe_sampler_logprob_semantics(self) -> SamplerLogprobSemantics:
+        """Whether the engine's per-token logprobs are the SAMPLING distribution's — after temperature,
+        and after a top-p renormalization — or the raw pre-processor values.
+
+        The prefill logits of one prompt are the same under every sampler setting, so the reported
+        values alone tell: temperature 2 halves the top-1/top-2 gap only when it is applied before the
+        logprobs are taken, and top-p 0.5 lifts the top token's logprob only when the nucleus is
+        renormalized into them. vLLM reports raw values unless served with ``--logprobs-mode
+        processed_logprobs`` (temperature and nucleus both applied); SGLang reports post-temperature,
+        pre-nucleus values unless ``SGLANG_RETURN_ORIGINAL_LOGPROB`` is set.
+        """
+        try:
+            model_id = self.served_model_cards()[0]["id"]
+        except Exception as e:
+            logger.warning(f"Sampler-logprob probe: could not resolve the model served at {self.base_url}: {e}")
+            return SamplerLogprobSemantics(None, None)
+        base = self._probe_top_logprobs(model_id, 1.0, 1.0)
+        hot = self._probe_top_logprobs(model_id, _LOGPROB_PROBE_TEMPERATURE, 1.0)
+        nucleus = self._probe_top_logprobs(model_id, 1.0, _LOGPROB_PROBE_TOP_P)
+        if base is None or len(base) < 2:
+            return SamplerLogprobSemantics(None, None)
+        temperature_applied = None
+        base_gap = base[0] - base[1]
+        if hot is not None and len(hot) >= 2 and base_gap > 0:
+            temperature_applied = (hot[0] - hot[1]) / base_gap < _TEMPERATURE_APPLIED_GAP_RATIO_MAX
+        nucleus_renormalized = None if nucleus is None else nucleus[0] - base[0] > _NUCLEUS_RENORM_MIN_SHIFT_NATS
+        return SamplerLogprobSemantics(temperature_applied, nucleus_renormalized)
 
     def _resolve_group_address(self) -> tuple[str, int]:
         """The address the engine's workers dial back to for the weight-transfer group.

@@ -952,6 +952,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._metrics[mode]["sampling/logratio_mean"].append(
                 (logps_diff.sum() / corrected_mask.sum().clamp(min=1)).item()
             )
+            # Policy tokens the sampler emitted with probability 1 (budget-forced closes): uncorrected.
+            with_sampling = completion_mask.bool() & torch.tensor(row_has_sampling, device=device).unsqueeze(1)
+            self._metrics[mode]["sampling/sampler_certain_frac"].append(
+                ((with_sampling & ~corrected_mask).sum() / with_sampling.sum().clamp(min=1)).item()
+            )
             traj_row_ids = rows.to_rows(torch.arange(len(rows.rollout_results), device=device), dummy_fill=-1)
             if self._is_mask_config.any_mask_active:
                 importance_sampling_ratio, mask_stats = apply_is_masks(

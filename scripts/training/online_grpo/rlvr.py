@@ -30,7 +30,10 @@ from src.environments.rewards import extract_last_boxed
 from src.models.loading.model_preparation import log_model_info
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.weight_sync_clients import verify_context_window_synced
+from src.trainers.grpo.rollout.weight_sync_clients import (
+    verify_context_window_synced,
+    verify_sampler_logprob_reference_synced,
+)
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser
 from src.training.script_runner import (
@@ -270,6 +273,14 @@ def main():
     verify_context_window_synced(
         [vllm_base_url],
         single_turn_tokens=(args.max_prompt_length or 0) + grpo_config.max_completion_length,
+        backend=VLLMWeightSyncClient.BACKEND_KEY,
+    )
+    # TRL's IS correction divides by the engine's logprobs too: they must carry the sampling temperature.
+    verify_sampler_logprob_reference_synced(
+        [vllm_base_url],
+        temperature=grpo_config.temperature,
+        top_p=grpo_config.top_p,
+        geo_band_active=False,
         backend=VLLMWeightSyncClient.BACKEND_KEY,
     )
 

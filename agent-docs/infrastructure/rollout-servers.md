@@ -32,6 +32,7 @@ staleness, sync cadence, trajectory-length knobs — stay on the
 |---|---|---|
 | Trainers | online, env-GRPO | env-GRPO |
 | Sampled-token ids | `--return-tokens-as-token-ids` (server flag) | per-request `return_meta_info` |
+| IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/grpo/environmental-grpo.md#off-policy-mismatch-and-stability-knobs) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
 | Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side with a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`; harmony-disabled gpt-oss arms it off the toolkit plugin's marker ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) | rejected at config time |
 | Expert layout on sync | whatever the family's own `gather_expert_state_dict` emits — per-expert (Qwen3 MoE, GLM-4/Laguna, Bailing, LFM-2) or fused where that is the family's base gather (Qwen3.5/3.6, Gemma 4); 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | fused only (GptOss) |
@@ -261,6 +262,15 @@ Flags the compose file already sets that are load-bearing for RL:
   from the logprobs, which vLLM only spells out under this flag. Without it every turn falls back to
   re-tokenizing a chat-template re-render: one warning, then a whole run training on tokens the
   engine never sampled.
+- `--logprobs-mode processed_logprobs` — the reported logprobs are the sampling distribution's
+  (temperature and top-p applied). The default `raw_logprobs` are pre-temperature: the trainer scores
+  its log-probs at `rollout_temperature` and divides by these, so at any temperature ≠ 1 every IS
+  weight is π^T / π^1 — tilted toward improbable tokens above 1 (entropy climbs step over step) and
+  toward confident ones below (entropy collapses) — while `sampling/is_ratio_mean` still reads ≈ 1.
+  The trainer probes each server at startup (temperature 2 must halve the top-1/top-2 gap) and
+  refuses a raw server whenever `rollout_temperature` ≠ 1. Under this mode a top-p < 1 also
+  renormalizes every uncertain position over its nucleus, which the trajectory geometric band reads
+  as drift: `rollout_top_p: 1.0` whenever `isr_geo_band_min/max` is set (also probed and refused).
 
 `--max-model-len` is left unset — the server serves the model's native context window. The trainer's
 startup probe reads it off `/v1/models` and **raises** when `max_prompt_length` plus one turn's
@@ -351,6 +361,11 @@ Engine behavior under RL:
 - **Sampled ids** arrive per request: SGLang's OpenAI `logprobs` reports tokens as text, so the
   trainer sets `return_meta_info` + `return_prompt_token_ids` and reads
   `choice.meta_info.output_token_logprobs[i][1]`. No server flag.
+- **Logprobs are post-temperature, pre-nucleus** by default (`sampler.py` divides the logits by the
+  temperature before the log-softmax the reported values come from; top-p renormalizes only the
+  sampling probabilities), so they are the IS reference the trainer expects at any
+  `rollout_temperature`, and a top-p < 1 leaves the geometric band untouched. Do not set
+  `SGLANG_RETURN_ORIGINAL_LOGPROB`: it switches to raw values, and the startup probe refuses them.
 - **A length cut-off is a `stop_reason`**, not a `finish_reason`. `get_finish_reason`
   (`src/inference/response.py`) reads `finish_reason or stop_reason`, so the rollout path grades an
   engine-truncated completion as truncated rather than as an answer.
