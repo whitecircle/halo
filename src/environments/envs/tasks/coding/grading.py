@@ -31,6 +31,11 @@ _OUTPUT_EXCERPT_CHARS = 100
 # Verdict detail lists failures only and is capped: per-test PASS lines add nothing to the summary's
 # pass count, and an uncapped failure list would run to hundreds of entries.
 _MAX_FAILURE_DETAILS = 5
+# What a non-passing test's detail line shows the policy. ``full`` adds the expected and produced
+# output to a wrong answer; ``outcome`` states the verdict alone, the Codeforces contract.
+VERDICT_DETAIL_FULL = "full"
+VERDICT_DETAIL_OUTCOME = "outcome"
+VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
 
 # run() cannot pass argv, so a runpy shim supplies the Codeforces checker argv contract.
 _CHECKER_DRIVER = (
@@ -186,12 +191,14 @@ def run_solution_against_tests(
     verdict_fn: VerdictFn | None = None,
     stop_on_first_failure: bool = False,
     max_grading_seconds: float | None = None,
+    verdict_detail: str = VERDICT_DETAIL_FULL,
 ) -> GradeResult:
     """Run a solution against test cases through a :class:`SandboxExecutor` -> :class:`GradeResult`.
 
     Each test feeds ``input`` to stdin and compares stdout to expected ``output`` via ``verdict_fn``
     (default: trimmed exact match) in an independent sandbox run. Details list only non-passing tests,
-    capped at ``_MAX_FAILURE_DETAILS``.
+    capped at ``_MAX_FAILURE_DETAILS``; ``verdict_detail`` decides whether a wrong answer shows the
+    expected and produced output (``full``) or the verdict alone (``outcome``).
 
     ``max_grading_seconds`` bounds one grade's total wall clock, since tests run sequentially and a
     several-hundred-test problem would otherwise stall the whole rollout round. It is checked between
@@ -199,6 +206,8 @@ def run_solution_against_tests(
     budget stop keeps the full pool as the denominator, so a solution too slow to reach its remaining
     tests cannot outscore one that ran them all; size the budget to the pool.
     """
+    if verdict_detail not in VERDICT_DETAILS:
+        raise ValueError(f"verdict_detail must be one of {VERDICT_DETAILS}, got {verdict_detail!r}")
     if not test_cases:
         return GradeResult(0, 0, "No test cases provided.", 0, graded=0)
 
@@ -268,10 +277,12 @@ def run_solution_against_tests(
                 if test_passed:
                     passed += 1
                 else:
-                    line = (
-                        f"Test {i}: FAIL\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
-                        f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
-                    )
+                    line = f"Test {i}: FAIL"
+                    if verdict_detail == VERDICT_DETAIL_FULL:
+                        line += (
+                            f"\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
+                            f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
+                        )
                     if result.stderr:
                         line += f"\n  Stderr: {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
                     add_detail(line)
@@ -328,6 +339,7 @@ class GradingSpec:
     default_timeout: float = SANDBOX_DEFAULT_TIMEOUT
     max_time_limit: float = SANDBOX_DEFAULT_TIMEOUT
     max_grading_seconds: float | None = None
+    verdict_detail: str = VERDICT_DETAIL_FULL
 
     # The live executor: rebuilt from the run's env kwargs offline, not carried through a JSON dump.
     _META_EXCLUDED = frozenset({"sandbox"})
@@ -381,4 +393,5 @@ def grade_solution(
         verdict_fn=select_verdict(checker, spec.comparison, spec.sandbox),
         stop_on_first_failure=spec.stop_on_first_failure,
         max_grading_seconds=spec.max_grading_seconds,
+        verdict_detail=spec.verdict_detail,
     )

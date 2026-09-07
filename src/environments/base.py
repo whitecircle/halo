@@ -4,6 +4,7 @@ base classes an environment subclasses. ``AsyncBaseEnvironment`` runs its turn b
 
 import asyncio
 import itertools
+import math
 import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -49,14 +50,15 @@ def resolve_reasoning_effort(effort: str | None) -> str | None:
 
 
 def require_magnitudes(**knobs: float) -> None:
-    """Reject a negative value for any reward/penalty magnitude knob.
+    """Reject a negative or non-finite value for any reward/penalty magnitude knob.
 
     The minus sign is applied at the use site, so a negative config value would turn a penalty into a
-    bonus.
+    bonus; NaN or infinity would pass a sign check and poison every reward the knob enters, even at a
+    zero multiplier.
     """
     for name, value in knobs.items():
-        if value < 0:
-            raise ValueError(f"{name} must be >= 0 (a magnitude), got {value}")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a finite value >= 0 (a magnitude), got {value}")
 
 
 @dataclass(slots=True)
