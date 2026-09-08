@@ -44,7 +44,7 @@ envs:
   # plugin on an EFA host — here the cross-node DP grad sync then falls back off EFA. Node-local EP
   # needs no proxy GIN / gdrdrv.
   NCCL_NET_PLUGIN: ofi
-  NCCL_PROTO: simple
+  NCCL_PROTO: simple        # one protocol table on every rank; a rollout server joining from these ranks needs the same
   FI_PROVIDER: efa
   FI_EFA_USE_DEVICE_RDMA: "1"
 

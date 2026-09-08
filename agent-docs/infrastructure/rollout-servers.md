@@ -38,8 +38,8 @@ staleness, sync cadence, trajectory-length knobs — stay on the
 | Expert layout on sync | whatever the family's own `gather_expert_state_dict` emits — per-expert (Qwen3 MoE, GLM-4/Laguna, Bailing, LFM-2) or fused where that is the family's base gather (Qwen3.5/3.6, Gemma 4); 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | fused only (GptOss) |
 | Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
 
-Use vLLM unless you need SGLang specifically — vLLM serves every family and is the only backend
-for Online GRPO.
+Use vLLM unless you need SGLang specifically: it is the only backend for Online GRPO, and the
+family gates below apply to both.
 
 ## Weight sync
 
@@ -305,8 +305,8 @@ the trainer sends `tools` for any env with a tool registry:
 | GLM-4 | `glm45` / `glm47` |
 | most others | `hermes` (`<tool_call>` XML) |
 
-`docker-compose.vllm.yml` defaults **both** containers to the no-fabric recipe — `NCCL_IB_DISABLE=1`
-+ `NCCL_NET=Socket` on the trainer, `NCCL_IB_DISABLE=1` + `NCCL_P2P_LEVEL=NVL` on the server — so on
+`docker-compose.vllm.yml` defaults **both** containers to the no-fabric recipe (`NCCL_IB_DISABLE=1`
+and `NCCL_NET=Socket` on the trainer, `NCCL_IB_DISABLE=1` and `NCCL_P2P_LEVEL=NVL` on the server), so on
 a host without a fabric the cross-container group takes NVLink + sockets instead of the
 uninitialized OFI NET path, on which the first collective wedges (both GPUs spin at 100% and the
 trainer raises after 120 s: `NCCL weight-sync warm-up all-reduce did not complete`). On an EFA host

@@ -84,7 +84,7 @@ sync falls off EFA.
 envs:                       # AWS EFA
   FI_PROVIDER: efa
   FI_EFA_USE_DEVICE_RDMA: "1"
-  NCCL_PROTO: simple        # EFA is unreliable with NCCL's LL/LL128 protocols
+  NCCL_PROTO: simple        # one protocol table on every rank; optional (the plugin probes per endpoint)
   NCCL_NET_PLUGIN: ofi      # every multi-node AWS task (the OFI plugin, not HPC-X)
   NCCL_GIN_TYPE: "2"        # cross-node EP only (proxy GIN)
 ```

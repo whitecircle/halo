@@ -254,16 +254,15 @@ image also bakes `NCCL_IB_HCA=mlx5`.
 | Fabric | Verify (on the host) | Launch env (beyond image defaults) |
 |--------|--------|------------------------------------|
 | InfiniBand / RoCE (Mellanox) | `ibstat` → `State: Active` | none; set `NCCL_IB_HCA` only for a non-default HCA |
-| AWS EFA | `fi_info -p efa` | `NCCL_NET_PLUGIN=ofi`, `FI_PROVIDER=efa`, `FI_EFA_USE_DEVICE_RDMA=1`, `NCCL_PROTO=simple` |
+| AWS EFA | `fi_info -p efa` | `NCCL_NET_PLUGIN=ofi`, `NCCL_NET=Libfabric` |
 
 - **InfiniBand and RoCE** share the NCCL IB path and run on the baked defaults.
 - **AWS EFA is libfabric, not Mellanox.** The base bundles `aws-ofi-nccl` 1.17.3, which exports no
   `ncclGin`; every Halo image builds a GIN-capable plugin from one pinned commit
   (`docker/efa/install_efa_userspace.sh`) and exposes it as `libnccl-gin.so` — the vLLM and SGLang
   server images carry the same build, since a weight-sync group between two different plugin builds
-  hangs at its first collective. EFA is unreliable with NCCL's LL/LL128 protocols, hence
-  `NCCL_PROTO=simple`. The **host** supplies the EFA kernel driver and `/dev/infiniband`; pass them
-  into the container (`--device`, not a bind mount).
+  hangs at its first collective. `NCCL_PROTO=simple` is optional with the images' EFA userspace: the plugin probes each endpoint for in-order RDMA writes and forces the simple protocol itself where the fabric lacks them. Set it on every rank of a communicator or on none — a rollout server joining a weight-sync group included — since ranks on different protocol tables hang at their first collective. The **host** supplies the EFA kernel driver and
+  `/dev/infiniband`; pass them into the container (`--device`, not a bind mount).
 - **Rollout server on another node** — the server container takes the same fabric env through its
   compose EFA overlay (`docker-compose.vllm.efa.yml` / `docker-compose.sglang.efa.yml`), the trainer
   through `make ... EFA=1`; recipe, preflight and measured rates:

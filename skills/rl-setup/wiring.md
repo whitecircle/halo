@@ -156,7 +156,7 @@ merged into the base and forwarded under base-model names. Multi-homed clusters:
 pin the control-plane NIC via `VLLM_GROUP_HOST` (distinct from
 `NCCL_SOCKET_IFNAME`). A server on another EFA node: compose EFA overlay on the
 server, `make ... EFA=1` on the trainer, `scripts/profiling/weight_sync_transport.py
---expect efa` as the preflight (`agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa`).
+--server-url http://<server>:8000 --expect efa` as the preflight (`agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa`).
 
 ## 4. Environment registry (`src/environments/registry.py`)
 

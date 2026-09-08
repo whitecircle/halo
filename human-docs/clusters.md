@@ -53,9 +53,10 @@ whole-corpus pack outlasts that while the other ranks wait.
 InfiniBand works out of the box; the sensible NCCL settings are baked into the
 image. Two situations need extra environment:
 
-- **AWS EFA**: add `NCCL_NET_PLUGIN=ofi FI_PROVIDER=efa FI_EFA_USE_DEVICE_RDMA=1
-  NCCL_PROTO=simple`, and for cross-node expert parallelism also
-  `NCCL_GIN_TYPE=2` plus `--device /dev/gdrdrv` on the container. Don't set
+- **AWS EFA**: add `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric`, pass `--device
+  /dev/infiniband`, and for cross-node expert parallelism also `NCCL_GIN_TYPE=2`
+  plus `--device /dev/gdrdrv`. `NCCL_PROTO=simple` is optional; if you set it,
+  set it on every rank, a rollout server on another node included. Don't set
   these on an InfiniBand cluster — they make it slower.
 - **Multiple NICs**: point `NCCL_SOCKET_IFNAME` at the fast interface so NCCL's
   bootstrap doesn't wander onto the management network.

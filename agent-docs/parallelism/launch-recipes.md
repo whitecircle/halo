@@ -74,11 +74,13 @@ export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the 
 # driver latches it at cuInit, so a launch outside the image must export it before the process starts).
 # On IB, NCCL_NET_PLUGIN stays unset → HPC-X. Set NCCL_IB_HCA only for a non-default HCA.
 # AWS EFA: set the plugin explicitly — the base's shinit_v2 sets it only for a shell that sources
-# /etc/shinit_v2 — plus the reliability tuning (would degrade an IB cluster, so it is not baked):
+# /etc/shinit_v2 — and name its net so a missing plugin fails instead of falling back to sockets:
 # export NCCL_NET_PLUGIN=ofi
-# export FI_PROVIDER=efa
-# export FI_EFA_USE_DEVICE_RDMA=1
-# export NCCL_PROTO=simple
+# export NCCL_NET=Libfabric
+# NCCL_PROTO=simple is optional (the plugin probes each endpoint for in-order RDMA writes and forces
+# it where the fabric lacks them); if set, set it on every rank of a communicator, a rollout server
+# joining a weight-sync group included — ranks on different protocol tables hang at their first
+# collective. FI_PROVIDER=efa and FI_EFA_USE_DEVICE_RDMA=1 are the plugin's and libfabric's defaults.
 # Cross-node EP (ep_scope=global) over EFA additionally needs proxy GIN + GDRCopy:
 # export NCCL_GIN_TYPE=2             # proxy GIN (EFA has no IBGDA)
 # and run the container with `--device /dev/gdrdrv` (host loads the gdrdrv module).

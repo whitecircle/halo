@@ -5,7 +5,8 @@ A trainer and a rollout server that disagree on the NCCL net, on the aws-ofi-ncc
 cuMem form their weight-sync group and then hang at the first collective. This runs the toolkit's
 own client against the server, pushes one real parameter of the served checkpoint (unchanged, so
 the served model is unchanged), and reports what NCCL chose — ``efa`` (``NET/Libfabric`` with
-GPUDirect), ``socket`` (TCP over the host network), ``p2p`` (same-host CUDA IPC) — with the plugin
+GPUDirect), ``ib`` (NCCL's own InfiniBand transport), ``socket`` (TCP over the host network),
+``p2p`` (same-host CUDA IPC) — with the plugin
 build string, the libfabric provider and the push rate. With ``--expect`` it is a gate.
 
     # trainer node, server on another node over EFA
@@ -26,6 +27,7 @@ import sys
 from src.diagnostics.weight_sync_transport import (
     DEFAULT_PARAM,
     VERDICT_EFA,
+    VERDICT_IB,
     VERDICT_P2P,
     VERDICT_SOCKET,
     format_report,
@@ -52,7 +54,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--expect",
-        choices=(VERDICT_EFA, VERDICT_SOCKET, VERDICT_P2P),
+        choices=(VERDICT_EFA, VERDICT_IB, VERDICT_SOCKET, VERDICT_P2P),
         default=None,
         help="exit 1 unless the group formed on this transport",
     )
