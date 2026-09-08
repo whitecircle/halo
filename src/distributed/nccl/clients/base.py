@@ -36,8 +36,8 @@ def resolve_weight_sync_chunk_bytes() -> int:
 
     The buffer drains into the engine as soon as it is reached, so the forwarding rank's host
     footprint is this plus the largest single tensor (one above the budget becomes its own chunk,
-    since both wire protocols describe whole tensors), and the SGLang client holds a chunk's uploads
-    on the sync GPU until its broadcasts drain. Each chunk costs one engine round trip, and the
+    since both wire protocols describe whole tensors), and the SGLang client keeps two device arenas
+    of this size for its uploads. Each chunk costs one engine round trip, and the
     packed transport re-packs it into its own fixed-size staging buffers; measured over EFA against
     vLLM, 2048 MB pushed a 16 GB model 15% faster than the default and 4096 MB slower than it.
     """

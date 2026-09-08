@@ -416,9 +416,13 @@ The trainer's default process group cannot contain the engine's ranks (new group
 parent can only subset it), so `create_weight_update_group` forms the trainer↔engine group through
 a fresh TCP-store handshake both sides can reach. Teardown asks the engine to drop its half of the
 group concurrently with the local destroy — under cuMem transports each side's finalize waits for
-the other. Each chunk's broadcasts are drained under the same 600 s deadline as the vLLM path
-(`HALO_NCCL_SYNC_TIMEOUT_SECONDS` overrides it), and the group is aborted on expiry instead of
-parking the trainer.
+the other. A chunk's uploads go through one of two alternating device arenas on the sync GPU (each
+the chunk budget, `HALO_WEIGHT_SYNC_CHUNK_MB`), and an arena's sends are settled before it is
+reused two chunks later, under the same 600 s deadline as the vLLM path
+(`HALO_NCCL_SYNC_TIMEOUT_SECONDS` overrides it); a failed chunk is settled under a 30 s deadline.
+On expiry the group is aborted instead of parking the trainer. The settle is deferred rather than
+per chunk because a host-side drain after every chunk cost a fifth of the push rate: the engine
+acknowledges a chunk as soon as its data arrived, and the sender's kernels retire a little later.
 
 ### The fused expert layout is declared per family
 
@@ -512,7 +516,7 @@ Measured on 4× p6-b300, trainer node → server node, one worker, full model pe
 | Transport | Rate | Qwen3-8B (16.4 GB, measured) | gpt-oss-20b (42 GB) | Qwen3-30B-A3B (61 GB) | gpt-oss-120b (234 GB) |
 |---|---|---|---|---|---|
 | EFA, vLLM client | 54 GB/s | 0.30 s | 0.8 s | 1.1 s | 4.3 s |
-| EFA, SGLang client | 73 GB/s | 0.22 s | 0.6 s | 0.8 s | 3.2 s |
+| EFA, SGLang client | 91 GB/s | 0.18 s | 0.5 s | 0.7 s | 2.6 s |
 | Sockets over the ENA | 9.7 GB/s | 1.7 s | 4.3 s | 6.3 s | 24 s |
 
 ## Checking a server

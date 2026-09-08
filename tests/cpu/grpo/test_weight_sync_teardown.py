@@ -118,58 +118,72 @@ def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
     assert ("remote", None) in calls
 
 
-def test_a_drain_deadline_aborts_the_group_and_retires_the_client(monkeypatch):
-    """A peer that never joins parks the broadcast; the drain's deadline must abort the group (or every
-    later device sync hangs behind the spinning kernel) and every later update must be refused."""
+def test_a_settle_deadline_aborts_the_group_and_retires_the_client(monkeypatch):
+    """A peer that never joins parks the broadcast; the settle's deadline must abort the group (or
+    every later device sync hangs behind the spinning kernel) and every later update must be refused.
+    A slot with nothing in flight settles without touching the event machinery."""
     client = _offline_client()
     group = object()
     client._group = group
-    client._sync_device = torch.device("cpu")
     aborted: list[object] = []
     monkeypatch.setattr(sglang_module.c10d, "_abort_process_group", aborted.append)
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: object())
 
-    def expired(stream, timeout_s, what):
+    def expired(event, timeout_s, what):
         raise RuntimeError(f"{what} did not complete")
 
-    monkeypatch.setattr(sglang_module, "bounded_stream_sync", expired)
+    monkeypatch.setattr(sglang_module, "bounded_event_sync", expired)
 
+    client._settle(0, timeout_s=1.0)  # nothing recorded for the slot: no wait, no abort
+    assert aborted == []
+
+    client._inflight[0] = object()
     with pytest.raises(RuntimeError, match="did not complete"):
-        client._drain_broadcasts()
+        client._settle(0, timeout_s=1.0)
 
     assert aborted == [group], "the deadline did not abort the weight-update group"
     assert client._aborted is True
+    assert client._inflight[0] is None, "a settled slot must not be waited on twice"
     with pytest.raises(RuntimeError, match="aborted"):
         client.begin_weight_update()
 
 
-def test_chunks_are_staged_in_one_reused_arena_that_grows_only_for_an_oversized_tensor():
+def test_chunks_are_staged_in_reused_arenas_settled_before_reuse(monkeypatch):
     """Per-tensor device allocations churn the allocator on the critical path and, once freed with a
-    pending NCCL event, block the next upload inside the allocator; the arena sidesteps both. The
-    views must reproduce every tensor's values, dtype and shape, and the arena must be reused."""
+    pending NCCL event, block the next upload inside the allocator; the arenas sidestep both. The
+    views must reproduce every tensor's values, dtype and shape; an arena must be reused for a chunk
+    that fits and grown for one that does not; and the sends it last carried must be settled before
+    it is overwritten."""
     client = _offline_client()
     client._sync_device = torch.device("cpu")
+    settled: list[object] = []
+    monkeypatch.setattr(sglang_module, "bounded_event_sync", lambda event, timeout_s, what: settled.append(event))
     first = [torch.arange(6, dtype=torch.bfloat16).reshape(2, 3), torch.full((5,), 2.5, dtype=torch.float32)]
 
-    staged = list(client._stage_on_device(first))
-    arena = client._device_arena
+    staged = list(client._stage_on_device(first, 0))
+    arena = client._device_arenas[0]
     assert arena is not None and arena.dtype == torch.uint8
     for view, tensor in zip(staged, first, strict=True):
         assert view.dtype == tensor.dtype and view.shape == tensor.shape
         assert torch.equal(view, tensor)
         assert view.untyped_storage().data_ptr() == arena.untyped_storage().data_ptr(), "a view outside the arena"
+    assert settled == [], "nothing was in flight, so nothing was waited on"
 
-    second = [torch.ones(3, dtype=torch.bfloat16)]
-    list(client._stage_on_device(second))
-    assert client._device_arena is arena, "a chunk that fits must reuse the arena"
+    pending = object()
+    client._inflight[0] = pending
+    list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)], 0))
+    assert settled == [pending], "the arena's previous sends were not settled before its reuse"
+    assert client._device_arenas[0] is arena, "a chunk that fits must reuse the arena"
 
     oversized = [torch.zeros(arena.numel() + 1, dtype=torch.uint8)]
-    staged = list(client._stage_on_device(oversized))
-    assert client._device_arena is not arena and client._device_arena.numel() >= oversized[0].numel()
+    staged = list(client._stage_on_device(oversized, 0))
+    assert client._device_arenas[0] is not arena and client._device_arenas[0].numel() >= oversized[0].numel()
     assert torch.equal(staged[0], oversized[0])
+    assert client._device_arenas[1] is None, "the other slot is untouched"
 
     client.close_communicator(_local_destroy=False)
-    assert client._device_arena is None, "a closed client must not pin device memory"
+    assert client._device_arenas == [None, None] and client._inflight == [None, None], (
+        "a closed client must not pin device memory"
+    )
 
 
 def test_the_atexit_invocation_skips_the_local_nccl_destroy(monkeypatch):

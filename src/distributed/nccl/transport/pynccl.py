@@ -41,12 +41,10 @@ def vllm_pynccl_disabled() -> bool:
     return env_str("VLLM_DISABLE_PYNCCL", "").strip().lower() in _VLLM_TRUE_VALUES
 
 
-def bounded_stream_sync(stream: torch.cuda.Stream, timeout_s: float, what: str) -> None:
-    """Drain ``stream`` with a deadline: a collective whose peer never arrives spins forever, and these comms have no torch watchdog."""
+def bounded_event_sync(event: torch.cuda.Event, timeout_s: float, what: str) -> None:
+    """Wait for a recorded ``event`` with a deadline: a collective whose peer never arrives spins forever, and these comms have no torch watchdog."""
     if _SYNC_TIMEOUT_OVERRIDE is not None:
         timeout_s = _SYNC_TIMEOUT_OVERRIDE
-    event = torch.cuda.Event()
-    event.record(stream)
     deadline = time.monotonic() + timeout_s
     while not event.query():
         if time.monotonic() > deadline:
@@ -61,6 +59,13 @@ def bounded_stream_sync(stream: torch.cuda.Stream, timeout_s: float, what: str) 
                 f"transport the group actually formed on."
             )
         time.sleep(_SYNC_POLL_INTERVAL_S)
+
+
+def bounded_stream_sync(stream: torch.cuda.Stream, timeout_s: float, what: str) -> None:
+    """Drain everything queued on ``stream`` so far, under :func:`bounded_event_sync`'s deadline."""
+    event = torch.cuda.Event()
+    event.record(stream)
+    bounded_event_sync(event, timeout_s, what)
 
 
 class PyNcclCommunicator:
