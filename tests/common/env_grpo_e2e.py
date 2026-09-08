@@ -272,9 +272,19 @@ def run_env_grpo_e2e(
 
     # One finalizer over a mutable slot rather than a bound method per phase: a registered
     # ``trainer.cleanup_ep`` pins its trainer (and its model's GPU memory) for the whole run, which a
-    # resume row cannot afford, since it builds a second one.
+    # resume row cannot afford, since it builds a second one. The engine client goes first: the
+    # forced pushes below re-form the weight-sync group outside ``train()``, and a group still
+    # registered when the harness destroys every process group is finalized against an engine that
+    # never enters destroy — under NCCL's cuMem transports that finalize waits forever.
     live: dict[str, object] = {"trainer": None}
-    ctx.on_teardown(lambda: live["trainer"].cleanup_ep() if live["trainer"] is not None else None)
+
+    def _release() -> None:
+        trainer = live["trainer"]
+        if trainer is not None:
+            trainer._cleanup_async_components()
+            trainer.cleanup_ep()
+
+    ctx.on_teardown(_release)
 
     trainer = _make_trainer(**trainer_kwargs)
     live["trainer"] = trainer

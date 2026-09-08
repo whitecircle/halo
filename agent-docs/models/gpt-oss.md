@@ -87,7 +87,7 @@ With harmony disabled, five settings are load-bearing.
 
 Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer matches by freezing the same sinks, so recompute equals vLLM to ~0 nats (`is_ratio ~1`).
 
-GPT-OSS also serves from **SGLang** for env-GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.17); thinking budgets are rejected at config time for this backend, and the trainer needs `fsdp_reshard_after_backward: false` or the forced-socket NCCL makes FSDP2's per-microstep reshard the dominant step cost. Flags, constraints, and the measured step-cost ratio: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
+GPT-OSS also serves from **SGLang** for env-GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.17); thinking budgets are rejected at config time for this backend, and the server container needs `NCCL_CUMEM_ENABLE=1` (the compose default). Flags and constraints: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
 
 ## Router balancing
 

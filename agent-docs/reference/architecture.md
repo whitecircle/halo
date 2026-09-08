@@ -168,7 +168,7 @@ Online and Environmental GRPO generate completions with vLLM (0.26.0). vLLM pins
 torch/transformers stack, so it is never imported into the training environment — it runs as its
 own container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). Environmental GRPO can target SGLang
 instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`), under
-narrower model and expert-distribution limits — see
+narrower model limits (every MoE family but GptOss is refused) — see
 [Rollout Servers](../infrastructure/rollout-servers.md).
 
 The training process talks to it over two channels: HTTP for generation, and a vendored NCCL client

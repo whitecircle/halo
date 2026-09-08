@@ -3,10 +3,10 @@
 #   --enable-return-routed-experts --moe-runner-backend triton (the auto-picked triton_kernel runner
 #   bypasses the R3 capture hook, and a repacking runner corrupts every weight update)
 #   --tool-call-parser auto --reasoning-parser gpt-oss, and --chat-template on the same file this
-#   config forces below. Keep --enable-torch-compile off under R3 capture. The five NCCL socket vars
-#   and the fsdp_reshard_after_backward rationale: sglang/gptoss-20b-code-contests-lora-ep1.yaml.
-# SGLang + expert distribution is rejected at construction (mutually exclusive NCCL transports) —
-# there is no sglang ep4 variant; use rollout_backend: vllm for EP runs.
+#   config forces below. Keep --enable-torch-compile off under R3 capture. The server's
+#   NCCL_CUMEM_ENABLE=1 requirement and the fsdp_reshard_after_backward note:
+#   sglang/gptoss-20b-code-contests-lora-ep1.yaml.
+# No sglang ep4 variant ships; the expert-distributed ep4 configs are the ones under ../vllm/.
 # rollout_max_thinking_tokens stays unset (vLLM-only; enforced by _validate_backend_capabilities).
 # Launch: 4 train GPUs + the 2 TP=2 servers on the other 4;
 #   CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
@@ -21,11 +21,9 @@ force_chat_template: true
 # --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-2) ---
 expert_parallel_size: 1
 fsdp_reshard_after_forward: false   # ZeRO-2; ZeRO-3 is rejected together with the reshard flag below
-fsdp_reshard_after_backward: false  # sglang's sync forces socket NCCL process-global; without this,
-                                    # FSDP2 re-all-gathers the full model on every grad-accum microstep
-                                    # over loopback TCP, which dominates step time. Leaves one gather
-                                    # per optimizer step (the window's last backward still reshards),
-                                    # and costs one unsharded bf16 param copy per GPU (fine at 20B).
+fsdp_reshard_after_backward: false  # optional: one FSDP2 re-gather per optimizer step instead of one
+                                    # per grad-accum microstep (the window's last backward still
+                                    # reshards), for one unsharded bf16 param copy per GPU (fine at 20B).
 
 # --- Full fine-tune (no PEFT) ---
 use_peft: false

@@ -111,7 +111,7 @@ enable_prefetch: true   # auto-disabled for single server
 
 ## Rollout backend
 
-`rollout_backend` selects the engine: `vllm` (default) or `sglang`. Both serve rollouts over `/v1/chat/completions`, receive weights over an NCCL group the trainer joins as rank 0, and support `train_on_sampled_tokens` through shared gather/merge/gate code — but the expert layout that code emits belongs to the receiving engine: the family's own gather for vLLM, the fused `experts.{gate_up,down}_proj` pair for SGLang. Engine capabilities, required serving flags, the SGLang-only constraints (expert distribution and non-fused families refused at construction; `rollout_max_thinking_tokens` rejected; the five socket NCCL vars; `fsdp_reshard_after_backward: false` on the trainer), and the ~1.4× measured step-cost ratio are on [Rollout Servers](../../infrastructure/rollout-servers.md).
+`rollout_backend` selects the engine: `vllm` (default) or `sglang`. Both serve rollouts over `/v1/chat/completions`, receive weights over an NCCL group the trainer joins as rank 0, and support `train_on_sampled_tokens` through shared gather/merge/gate code — but the expert layout that code emits belongs to the receiving engine: the family's own gather for vLLM, the fused `experts.{gate_up,down}_proj` pair for SGLang. Engine capabilities, required serving flags, and the SGLang-only constraints (every MoE family but GptOss refused at construction — the fused expert layout; `rollout_max_thinking_tokens` rejected; `NCCL_CUMEM_ENABLE=1` in the server container) are on [Rollout Servers](../../infrastructure/rollout-servers.md).
 
 TRL's own sampling knobs are inert here. `top_p`, `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` set on `GRPOConfig` reach no sampler — rollouts sample from the `rollout_*` fields — and the trainer warns for each one set. `temperature` is reconciled the other way: it is force-set to `rollout_temperature`, so the trainer scores log-probs at the sampling temperature.
 
@@ -321,7 +321,7 @@ Profile one step with `nvidia-smi dmon` or `EfficiencyCallback`: trainer GPUs id
 
 ## Multi-node deployment
 
-Training, vLLM and rollout workers can run on separate nodes: episode results return through Ray (set `ray_address` — [Ray Cluster](../../infrastructure/ray.md)), generation goes to vLLM over HTTP (one `rollout_server_configs` entry per inference node, each with its own `group_port`), NCCL weight sync over TCP/RDMA to the `group_port`. Rolling sync and prefetch work cross-node.
+Training, vLLM and rollout workers can run on separate nodes: episode results return through Ray (set `ray_address` — [Ray Cluster](../../infrastructure/ray.md)), generation goes to vLLM over HTTP (one `rollout_server_configs` entry per inference node, each with its own `group_port`), NCCL weight sync to the `group_port` — over EFA when the server runs under its compose EFA overlay and the trainer under `make ... EFA=1`, over sockets otherwise ([Servers on other nodes](../../infrastructure/rollout-servers.md#servers-on-other-nodes-efa), with the measured rates). Rolling sync and prefetch work cross-node.
 
 ![Scenario 1 — separate inference node: training and Ray actors share one node while vLLM runs on another; a single NCCL group syncs weights and actors reach vLLM over HTTP](../../assets/diagrams/multi_node_separate_inference.png)
 
@@ -331,7 +331,7 @@ Training, vLLM and rollout workers can run on separate nodes: episode results re
 
 Ports: vLLM HTTP `8000`, NCCL `group_port` `51216+` (TCP); Ray's own ports are upstream defaults ([Ray Cluster](../../infrastructure/ray.md#multi-node)). vLLM URLs must resolve from **all** Ray actor nodes, not just the trainer; conversely the trainer's NCCL address must be routable from the rollout nodes — set `VLLM_GROUP_HOST` (or `SGLANG_GROUP_HOST`) if the default-route NIC is wrong ([Multi-homed nodes](online-grpo.md#multi-homed-nodes-vllm_group_host)). Use `--gpus all` (not `--gpus '"device=N"'`) on vLLM containers so NCCL can negotiate P2P. Start vLLM and verify `/health` before launching the trainer, or `init_communicator()` hangs up to `rollout_connection_timeout`.
 
-**Single-node co-located (trainer + vLLM on one host).** Run the vLLM containers with `--network=host` and launch the **trainer container with `--network=host` too** — otherwise `localhost:8000` inside the trainer's bridge namespace points at itself and the Ray actors cannot reach the servers. On a host without InfiniBand, both containers also need the no-IB NCCL overrides — the full two-container recipe and its EP/multi-node caveats are on [Rollout Servers](../../infrastructure/rollout-servers.md#vllm).
+**Single-node co-located (trainer + vLLM on one host).** Run the vLLM containers with `--network=host` and launch the **trainer container with `--network=host` too** — otherwise `localhost:8000` inside the trainer's bridge namespace points at itself and the Ray actors cannot reach the servers. On a host without a fabric both containers need the no-fabric NCCL defaults the compose files set; on an EFA host, the overlays — the two-container recipe is on [Rollout Servers](../../infrastructure/rollout-servers.md#vllm).
 
 ## Saving trajectories (`save_completions`, default on)
 

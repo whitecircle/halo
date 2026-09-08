@@ -57,6 +57,7 @@ changes.
 | `src/distributed/runtime.py` (rank/world state, barriers, cross-rank consensus, group timeouts), `src/distributed/filesystem.py` (c10d-store phases, main-first ordering, output-FS probe, load throttle) | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/nvlink.py` (fabric probes behind `nvlink_domain_size`) | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/deepep.md` |
 | `src/diagnostics/profiling.py` (torch-profiler traces, CUDA memory snapshots), `src/diagnostics/debugging.py` (opt-in consistency checks, py-spy capture) | `agent-docs/reference/debugging.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `src/diagnostics/weight_sync_transport.py` + `scripts/profiling/weight_sync_transport.py` (weight-sync transport preflight) | `agent-docs/infrastructure/rollout-servers.md` (Servers on other nodes), `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/debugging.md` |
 | `src/diagnostics/performance_monitor.py` | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/reference/debugging.md` |
 
 ## Models
@@ -156,7 +157,8 @@ changes.
 | `scripts/after_training/merge_ep_shards.py` | `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/{quantize_to_lowp,convert_to_bf16}.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `scripts/after_training/merge_models.py` | `agent-docs/reference/scripts-reference.md` |
-| `Dockerfile*`, `docker-compose*` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files also `agent-docs/infrastructure/rollout-servers.md` |
+| `Dockerfile*`, `docker-compose*` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files (EFA overlays included) also `agent-docs/infrastructure/rollout-servers.md` |
+| `docker/efa/install_efa_userspace.sh` (the EFA userspace every image shares) | `agent-docs/infrastructure/docker.md` (RDMA networking), `agent-docs/infrastructure/rollout-servers.md` (Servers on other nodes), `agent-docs/parallelism/multi-node.md` (RDMA fabrics) |
 | AWS / S3 auth, `src/data/sources/s3_client.py` paths | `agent-docs/infrastructure/aws-auth.md`, `agent-docs/data/s3-utilities.md` |
 | DeepEP install / NVSHMEM / CDMC notes | `agent-docs/infrastructure/deepep.md` |
 | multi-node / SkyPilot / RunPod / Nomad launch | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |

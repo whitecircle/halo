@@ -322,11 +322,9 @@ def validate_backend_parallelism(backend: str, parallelism_config, model: torch.
             f"rollout_backend={backend!r} cannot be combined with expert distribution "
             f"(expert_parallel_size={parallelism_config.ep_size}, "
             f"expert_tensor_parallel_size={parallelism_config.expert_tp_size} — the sync is blocked by "
-            f"their product, {parallelism_config.ep_group_size}, exceeding 1). The cross-container "
-            f"weight-sync communicator needs NCCL's CUDA-IPC transports disabled, DeepEP needs them "
-            f"enabled for symmetric memory, and both are process-global — NCCL caches them on first "
-            f"read, so they cannot be scoped to one communicator. Use rollout_backend='vllm' for "
-            f"expert-distributed runs (validated), or set both sizes to 1. "
+            f"their product, {parallelism_config.ep_group_size}, exceeding 1): "
+            f"{client_cls.__name__} declares its weight sync cannot share a process with DeepEP. "
+            f"Use a backend that supports it, or set both sizes to 1. "
             f"See agent-docs/infrastructure/rollout-servers.md."
         )
     # An engine that takes the per-expert layout has no fused contract to check.

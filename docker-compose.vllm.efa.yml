@@ -1,0 +1,30 @@
+# EFA overlay for docker-compose.vllm.yml: the weight-sync group between the trainer and the vLLM
+# server, and every other NCCL collective in the trainer, ride the fabric. Layer it after the base:
+#   docker compose -f docker-compose.vllm.yml -f docker-compose.vllm.efa.yml up -d vllm-server
+# Both images carry the same libfabric + aws-ofi-nccl build (docker/efa/install_efa_userspace.sh);
+# the host supplies the EFA driver and /dev/infiniband. A trainer on another node needs the server's
+# rollout_server_configs entry to name it, and VLLM_GROUP_HOST when the default-route NIC is not
+# the one the server can reach. See agent-docs/infrastructure/rollout-servers.md.
+
+x-efa: &efa
+  devices:
+    - /dev/infiniband:/dev/infiniband
+  ulimits:
+    memlock: -1
+  environment:
+    # Naming the plugin's net makes a missing or broken plugin fail group formation instead of
+    # silently falling back to sockets.
+    - NCCL_NET=${NCCL_NET:-Libfabric}
+    - NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-ofi}
+    - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
+    # The bootstrap and rendezvous ride the ENA interface. NCCL's exclusion list must name lo: an
+    # excluded-only list still ranks loopback first, and a server that advertises 127.0.0.1 to a
+    # trainer on another node fails formation with "remote process exited". Name the interface
+    # outright on a host with more interfaces (a VPN, bridges) than the exclusion covers.
+    - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^lo,docker,veth,tailscale}
+
+services:
+  vllm-server:
+    <<: *efa
+  training:
+    <<: *efa

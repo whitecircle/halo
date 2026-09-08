@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-"""Environmental GRPO end-to-end against a live SGLang server, under plain FSDP2 (ep1 only —
-any expert distribution is refused for the SGLang backend at construction).
+"""Environmental GRPO end-to-end against a live SGLang server, under plain FSDP2 and under EP.
 
 The SGLang counterpart of ``test_env_grpo_vllm_e2e.py``, and the only coverage of MoE expert weights
 going through SGLang's own ``load_weights``. vLLM needs a server-side patch for its expert sync to
@@ -23,11 +22,11 @@ Prerequisites (``make test-gpu-sglang`` sets these up):
     # the NCCL-aligned sglang-server image — upstream's NCCL is two minors behind the training image
     # and the weight-sync group will not form against it
 
-Usage (trainer on GPUs the server does NOT own — a rank cannot NCCL broadcast to itself):
-    CUDA_VISIBLE_DEVICES=0,1 NCCL_IB_DISABLE=1 NCCL_NET=Socket NCCL_NET_PLUGIN=none \
-        NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 \
+Usage (trainer on GPUs the server does NOT own — a rank cannot NCCL broadcast to itself; the
+server side needs cuMem parity, which docker-compose.sglang.yml sets):
+    CUDA_VISIBLE_DEVICES=0,1 NCCL_IB_DISABLE=1 NCCL_NET=Socket \
         torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/grpo/test_env_grpo_sglang_e2e.py
+        tests/gpu/trainers/grpo/test_env_grpo_sglang_e2e.py --ep-size 2
 """
 
 import argparse
@@ -46,14 +45,7 @@ GROUP_PORT = env_int("HALO_TEST_SGLANG_GROUP_PORT", 51216)
 @gpu_test_main(exact_world_size=2, prefix="env_grpo_sglang_e2e")
 def run(ctx):
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        # ep1 only: any expert distribution is refused for this backend at trainer
-        # construction, so 2 could only ever produce a ValueError.
-        "--ep-size",
-        type=int,
-        choices=(1,),
-        default=1,
-    )
+    parser.add_argument("--ep-size", type=int, choices=(1, 2), default=1)
     parser.add_argument("--tp-size", type=int, choices=(1, 2), default=1)
     parser.add_argument("--peft", choices=("lora",), default=None)
     parser.add_argument("--resume", action="store_true")

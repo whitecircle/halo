@@ -13,12 +13,12 @@ Covers the two halves of the SGLang backend that only a running engine can prove
 
 Prerequisites (``make test-gpu-sglang`` sets both up):
     SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d
-    # the trainer must own a GPU the server does not, and both need the socket NCCL transport
+    # the trainer must own a GPU the server does not; the compose file gives the server the cuMem
+    # parity the cross-container group needs (NCCL_CUMEM_ENABLE=1)
 
-Usage (the trainer must set the SAME five NCCL settings the compose server does — a trainer on P2P/SHM
-against a socket-only server blocks both ranks in the first broadcast):
-    CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_NET=Socket NCCL_IB_DISABLE=1 \
-        NCCL_NET_PLUGIN=none torchrun --nproc_per_node=1 \
+Usage (the trainer and the server must agree on the NCCL net — the socket recipe below, or EFA on
+both ends; a mismatch blocks both ranks in the first broadcast):
+    CUDA_VISIBLE_DEVICES=0 NCCL_NET=Socket NCCL_IB_DISABLE=1 torchrun --nproc_per_node=1 \
         tests/gpu/trainers/grpo/test_sglang_weight_sync_e2e.py
 """
 

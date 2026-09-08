@@ -34,7 +34,11 @@ import weakref
 import pytest
 import torch
 
-from src.distributed.nccl.clients.base import WEIGHT_SYNC_CHUNK_BYTES, PinnedHostBufferPool
+from src.distributed.nccl.clients.base import (
+    WEIGHT_SYNC_CHUNK_BYTES,
+    PinnedHostBufferPool,
+    resolve_weight_sync_chunk_bytes,
+)
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
@@ -487,6 +491,17 @@ def test_the_chunk_budget_is_one_packed_buffer():
     from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
 
     assert WEIGHT_SYNC_CHUNK_BYTES == DEFAULT_PACKED_BUFFER_SIZE_BYTES
+
+
+def test_the_chunk_budget_is_read_from_the_env_in_megabytes(monkeypatch):
+    """``HALO_WEIGHT_SYNC_CHUNK_MB`` sizes the pinned host chunk (and the SGLang client's on-device
+    hold); an ignored or misparsed value silently leaves the default in place."""
+    monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", "2048")
+    assert resolve_weight_sync_chunk_bytes() == 2 * 2**30
+    monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", "0")
+    assert resolve_weight_sync_chunk_bytes() == 2**30, "a non-positive value must fall back to the default"
+    monkeypatch.delenv("HALO_WEIGHT_SYNC_CHUNK_MB")
+    assert resolve_weight_sync_chunk_bytes() == WEIGHT_SYNC_CHUNK_BYTES
 
 
 if __name__ == "__main__":

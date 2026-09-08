@@ -73,17 +73,19 @@ carries: [Docker → Image matrix](../infrastructure/docker.md#image-matrix).
 `make test-gpu-vllm` is the `vllm_server` slice of the full tier and needs the `docker-compose.vllm.yml`
 server already serving on a GPU outside `TRAINER_CUDA_DEVICES` (default `0,1,2,3,4,5,6`, which the target
 pins as the trainer's `CUDA_VISIBLE_DEVICES`) — weight sync is an NCCL broadcast, and a rank cannot
-broadcast to itself. It forces `NCCL_IB_DISABLE=1 NCCL_NET=Socket` (why:
-[Rollout Servers → vLLM](../infrastructure/rollout-servers.md#vllm)).
+broadcast to itself. Without `EFA=1` it forces the no-fabric recipe both compose bases default to
+(`NCCL_IB_DISABLE=1 NCCL_NET=Socket`; why: [Rollout Servers → vLLM](../infrastructure/rollout-servers.md#vllm));
+`EFA=1` passes `/dev/infiniband` and the fabric variables instead, matching a server started with
+its compose EFA overlay ([Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
 
 Each server slice takes **two passes**, because the tests broadcast the trainer's own weights into the
 served model and assert the served policy moved — server and trainer must hold the same checkpoint, and
 no one server covers both halves. `SERVER_TIER` defaults to `not moe` (serve a dense model); restart the
 server on a MoE checkpoint and rerun with `SERVER_TIER=moe`.
 
-`make test-gpu-sglang` is the `sglang_server` slice and has the same server requirement, but forces
-three more variables — `NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_NET_PLUGIN=none` (why:
-[Rollout Servers → NCCL transport](../infrastructure/rollout-servers.md#nccl-transport-sglang-only)).
+`make test-gpu-sglang` is the `sglang_server` slice with the same server requirement and the same
+`EFA=1` switch; the server needs only cuMem parity on top — `NCCL_CUMEM_ENABLE=1`, the compose default
+(why: [Rollout Servers → NCCL transport](../infrastructure/rollout-servers.md#nccl-transport-sglang)).
 
 ```bash
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8

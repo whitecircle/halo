@@ -8,6 +8,9 @@
 # Usage: docker compose -f docker-compose.vllm.yml up [vllm-server]. Weight sync needs network_mode
 # + ipc host on both containers (the rendezvous port is ephemeral and never published) and all GPUs
 # visible; VLLM_CUDA_DEVICES and TRAINER_CUDA_DEVICES must not overlap.
+# The NCCL defaults below are the no-fabric recipe (sockets, InfiniBand off). On an EFA host layer
+# docker-compose.vllm.efa.yml after this file: it passes the fabric devices to both services and
+# names the aws-ofi-nccl net, so a trainer on another node syncs over EFA.
 
 services:
   vllm-server:
@@ -27,7 +30,7 @@ services:
       - VLLM_USE_V2_MODEL_RUNNER
       - NCCL_DEBUG=WARN
       # Disable InfiniBand when the host has none: the sync group wedges on the uninitialized OFI
-      # path instead of falling back. Override on an IB/EFA host.
+      # path instead of falling back. The EFA overlay overrides it.
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
       - NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-NVL}
       # Keep the socket transport off Docker's bridge and per-container veth pairs.
@@ -88,8 +91,9 @@ services:
       # GPU test harness only; production trainers take the server URL from the YAML config.
       - VLLM_SERVER_URL=http://localhost:${VLLM_PORT:-8000}
       - NCCL_DEBUG=WARN
-      # Trainer half of the no-InfiniBand recipe. NCCL_NET is process-global, so a multi-node IB/EFA
-      # run must override it — it would force every trainer collective onto TCP and break DeepEP.
+      # Trainer half of the no-fabric recipe. NCCL_NET is process-global: left at Socket on an EFA
+      # host it forces every trainer collective onto TCP and breaks DeepEP, so the EFA overlay
+      # overrides both.
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
       - NCCL_NET=${NCCL_NET:-Socket}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}

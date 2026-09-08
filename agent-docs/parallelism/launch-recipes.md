@@ -82,6 +82,10 @@ export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the 
 # Cross-node EP (ep_scope=global) over EFA additionally needs proxy GIN + GDRCopy:
 # export NCCL_GIN_TYPE=2             # proxy GIN (EFA has no IBGDA)
 # and run the container with `--device /dev/gdrdrv` (host loads the gdrdrv module).
+# A rollout server on another node (online / env-GRPO) shares this env: `make ... EFA=1` passes
+# --device=/dev/infiniband NCCL_NET=Libfabric NCCL_NET_PLUGIN=ofi NCCL_IB_DISABLE=0 to the trainer
+# container, and the server takes the same through its compose EFA overlay
+# (docker-compose.vllm.efa.yml / docker-compose.sglang.efa.yml) — agent-docs/infrastructure/rollout-servers.md.
 # export NVLINK_DOMAIN_SIZE=72        # GB200/GB300 NVL72 only; leave unset on ≤8-GPU nodes
 # export NCCL_DEBUG=INFO              # optional; overrides the image's WARN
 ```

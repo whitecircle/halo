@@ -26,15 +26,25 @@ from torch.distributed.tensor import DTensor
 from urllib3.util.retry import Retry
 
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
-from src.env import env_str
+from src.env import env_positive_int, env_str
 
 logger = logging.getLogger(__name__)
 
-# Host-side budget for one streamed chunk. The buffer drains into the engine as soon as it is
-# reached, so the forwarding rank's host footprint is this plus the largest single tensor (one above
-# the budget becomes its own chunk, since both wire protocols describe whole tensors). Matched to the
-# packed transport's staging buffer, which a chunk is re-packed into.
-WEIGHT_SYNC_CHUNK_BYTES = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+
+def resolve_weight_sync_chunk_bytes() -> int:
+    """Host-side budget for one streamed chunk: ``HALO_WEIGHT_SYNC_CHUNK_MB``, default 1024.
+
+    The buffer drains into the engine as soon as it is reached, so the forwarding rank's host
+    footprint is this plus the largest single tensor (one above the budget becomes its own chunk,
+    since both wire protocols describe whole tensors), and the SGLang client holds a chunk's uploads
+    on the sync GPU until its broadcasts drain. Each chunk costs one engine round trip, and the
+    packed transport re-packs it into its own fixed-size staging buffers; measured over EFA against
+    vLLM, 2048 MB pushed a 16 GB model 15% faster than the default and 4096 MB slower than it.
+    """
+    return env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", DEFAULT_PACKED_BUFFER_SIZE_BYTES >> 20) << 20
+
+
+WEIGHT_SYNC_CHUNK_BYTES = resolve_weight_sync_chunk_bytes()
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "0.0.0.0", "::1", "localhost"}
 # UDP "connect" target used only to make the kernel pick this host's outbound interface, whose local

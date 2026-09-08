@@ -1,7 +1,6 @@
 # Environmental GRPO — gpt-oss-20b LoRA on code_contests, SGLang backend, no EP, ZeRO-2, with R3
 # rollout routing replay. SGLang serving contract: agent-docs/infrastructure/rollout-servers.md.
-# SGLang + expert distribution is rejected at construction (mutually exclusive NCCL transports):
-# there is no sglang ep4 variant — use rollout_backend: vllm for EP runs.
+# No sglang ep4 variant ships; the expert-distributed ep4 configs are the ones under ../vllm/.
 # rollout_max_thinking_tokens stays unset (refused by _validate_backend_capabilities): SGLang caps no
 # gpt-oss/harmony CoT, so rollout_max_tokens is the per-turn bound and reasoning-compliance shapes it.
 # Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2× TP=2, ports 30000/30001, with
@@ -10,9 +9,9 @@
 #   the harmony parser; a server started with NO parser leaves calls as text → flat zero
 #   gradient) --reasoning-parser gpt-oss. --enable-torch-compile
 #   is unsafe under R3 capture (isolated extreme log-ratio rows from capture x compile numerics).
-#   Both containers need the five NCCL socket vars (P2P/SHM/IB disabled, NET=Socket, PLUGIN=none) —
-#   the weight-sync c10d group crosses the container boundary and NCCL state is process-global.
-# fsdp_reshard_after_backward: false below is required for performance (see its inline note).
+#   The server container needs NCCL_CUMEM_ENABLE=1 (the compose default): SGLang otherwise turns cuMem
+#   off process-wide and the trainer's first cross-container import fails.
+# fsdp_reshard_after_backward: false below is optional (see its inline note).
 # Launch: 4 train GPUs + the 2 TP=2 servers on the other 4;
 #   CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 
@@ -29,11 +28,9 @@ force_chat_template: true
 # --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-2) ---
 expert_parallel_size: 1
 fsdp_reshard_after_forward: false
-fsdp_reshard_after_backward: false  # sglang's sync forces socket NCCL process-global; without this,
-                                    # FSDP2 re-all-gathers the full model on every grad-accum microstep
-                                    # over loopback TCP, which dominates step time. Leaves one gather
-                                    # per optimizer step (the window's last backward still reshards),
-                                    # and costs one unsharded bf16 param copy per GPU (fine at 20B).
+fsdp_reshard_after_backward: false  # optional: one FSDP2 re-gather per optimizer step instead of one
+                                    # per grad-accum microstep (the window's last backward still
+                                    # reshards), for one unsharded bf16 param copy per GPU (fine at 20B).
 
 # --- LoRA (r=64, all linear layers: attention + MoE experts) ---
 use_peft: true

@@ -1,0 +1,25 @@
+# EFA overlay for docker-compose.sglang.yml: the weight-sync group between the trainer and the
+# SGLang server rides the fabric. Layer it after the base:
+#   SGLANG_MODEL=... docker compose -f docker-compose.sglang.yml -f docker-compose.sglang.efa.yml up -d
+# Both images carry the same libfabric + aws-ofi-nccl build (docker/efa/install_efa_userspace.sh);
+# the host supplies the EFA driver and /dev/infiniband. The trainer container needs the same
+# devices and NCCL_NET / NCCL_NET_PLUGIN (`make ... EFA=1`), and SGLANG_GROUP_HOST when the
+# default-route NIC is not the one the server can reach. See agent-docs/infrastructure/rollout-servers.md.
+
+services:
+  sglang-server:
+    devices:
+      - /dev/infiniband:/dev/infiniband
+    ulimits:
+      memlock: -1
+    environment:
+      # Naming the plugin's net makes a missing or broken plugin fail group formation instead of
+      # silently falling back to sockets.
+      - NCCL_NET=${NCCL_NET:-Libfabric}
+      - NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-ofi}
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
+      # The bootstrap and rendezvous ride the ENA interface. NCCL's exclusion list must name lo: an
+      # excluded-only list still ranks loopback first, and a server that advertises 127.0.0.1 to a
+      # trainer on another node fails formation with "remote process exited". Name the interface
+      # outright on a host with more interfaces (a VPN, bridges) than the exclusion covers.
+      - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^lo,docker,veth,tailscale}

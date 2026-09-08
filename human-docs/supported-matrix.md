@@ -89,10 +89,9 @@ log-probability sums, full-sequence pooling, and dual-model / rollout setups.
 ### Rollout engines
 
 Environmental GRPO serves rollouts from vLLM by default; `rollout_backend:
-sglang` switches engines. SGLang is the narrower path and refuses three shapes
+sglang` switches engines. SGLang is the narrower path and refuses two shapes
 at startup rather than mid-run:
 
-- any distributed experts (`expert_parallel_size × expert_tensor_parallel_size > 1`);
 - `rollout_max_thinking_tokens`, a vLLM-only request field — steer reasoning
   with the environment's `reasoning_effort` and price it with
   `reasoning_compliance_weight` instead;
@@ -103,9 +102,9 @@ at startup rather than mid-run:
 `routing_replay: rollout` works on either engine; SGLang captures it when the
 server runs `--enable-return-routed-experts --moe-runner-backend triton`.
 SGLang must be served from this repo's `Dockerfile.sglang` image — the upstream
-one ships a different NCCL and cannot form the weight-sync group — and its
-weight sync costs the trainer NVLink between its own ranks, so its step runs
-slower than vLLM's ([Troubleshooting](troubleshooting.md)). Engine-by-engine
+one ships a different NCCL and cannot form the weight-sync group — with
+`NCCL_CUMEM_ENABLE=1` in its container (the compose default; a mismatch fails
+the first sync, [Troubleshooting](troubleshooting.md)). Engine-by-engine
 detail: [Rollout Servers](../agent-docs/infrastructure/rollout-servers.md) ↗.
 
 ## Parallelism modes

@@ -260,8 +260,8 @@ class ParallelismConfig:
     # False keeps params unsharded across a grad-accum window's microsteps (set_reshard_after_backward,
     # toggled back on for its last backward so the optimizer still reads sharded params carrying grads).
     # FSDP2 otherwise reshards after each microstep's backward and re-all-gathers the full model on the
-    # next — once per gradient_accumulation_step, and costly when NCCL is forced onto sockets
-    # (rollout_backend=sglang). Costs one unsharded param copy per GPU; plain-DP torchrun path only.
+    # next — once per gradient_accumulation_step, and the dominant step cost whenever those collectives
+    # run over sockets. Costs one unsharded param copy per GPU; plain-DP torchrun path only.
     fsdp_reshard_after_backward: bool = True
 
     # ep_size==1 only: True shards the replicated experts via FSDP reduce-scatter (grad-equivalent,

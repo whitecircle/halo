@@ -88,10 +88,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "help": "Inference engine serving rollouts and receiving weight updates. Both support "
             "generation, NCCL weight sync, `train_on_sampled_tokens` and `routing_replay: rollout`. "
             "'sglang' does not support `rollout_max_thinking_tokens` (the trainer wires neither of "
-            "SGLang's budget mechanisms; harmony models have none server-side), wants "
-            "fsdp_reshard_after_backward=False (its sync forces socket NCCL process-global, making "
-            "FSDP2's per-microstep reshard the dominant step cost otherwise — a throughput lever "
-            "nothing enforces), and must be served "
+            "SGLang's budget mechanisms; harmony models have none server-side), needs cuMem parity on "
+            "the server (NCCL_CUMEM_ENABLE=1, which docker-compose.sglang.yml sets), and must be served "
             "from the NCCL-aligned Dockerfile.sglang image — the stock upstream image ships a "
             "different NCCL than the trainer and cannot form the weight-sync group."
         },

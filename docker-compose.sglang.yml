@@ -5,6 +5,8 @@
 # network_mode host: the rendezvous port is never published, so the trainer reaches it at localhost,
 # and it must use GPUs other than SGLANG_CUDA_DEVICES — NCCL cannot broadcast to itself.
 # Usage: SGLANG_MODEL=<hub id or path> docker compose -f docker-compose.sglang.yml up (`down` needs it too).
+# On an EFA host layer docker-compose.sglang.efa.yml after this file: it passes the fabric devices
+# and names the aws-ofi-nccl net, so a trainer on another node syncs over EFA.
 
 services:
   sglang-server:
@@ -15,15 +17,15 @@ services:
       - CUDA_VISIBLE_DEVICES=${SGLANG_CUDA_DEVICES:-7}
       - HF_HOME=${HF_HOME:-/root/.cache/huggingface}
       - HF_TOKEN=${HF_TOKEN:-}
-      # Weight sync shares an NCCL group with the trainer in another container, across which the
-      # CUDA-IPC path cannot import a shareable buffer — force sockets on both ends.
-      - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
-      - NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE:-1}
+      # Weight sync shares an NCCL group with the trainer in another container. cuMem must match on
+      # both ends: SGLang sets NCCL_CUMEM_ENABLE=0 process-wide unless it is already set, the
+      # trainer's NCCL has it on, and the mismatch fails the first cross-container buffer import
+      # (`ncclP2pImportShareableBuffer ... invalid argument`). With parity the same-host group takes
+      # CUDA IPC over NVLink.
+      - NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-1}
+      # No-fabric defaults (InfiniBand off, socket net); the EFA overlay overrides both.
       - NCCL_NET=${NCCL_NET:-Socket}
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
-      # The bundled aws-ofi plugin outranks the socket transport and wedges group formation on a
-      # host with no OFI fabric.
-      - NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-none}
       # Keep the socket transport off Docker's bridge and per-container veth pairs.
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}
     deploy:

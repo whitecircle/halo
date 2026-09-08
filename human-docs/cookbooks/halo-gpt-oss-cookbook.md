@@ -285,31 +285,27 @@ fsdp_reshard_after_backward: false
 
 `rollout_stop_tokens` matters because `<|call|>` is not an eos here: without it the
 model generates past its tool call and hallucinates the result for most of the turn.
-`fsdp_reshard_after_backward: false` is required for performance on this engine. Its sync
-forces process-global socket NCCL, and without the flag FSDP2 re-gathers the whole model
-over loopback TCP once per grad-accum microstep.
+`fsdp_reshard_after_backward: false` is optional: it leaves one FSDP2 re-gather per
+optimizer step instead of one per grad-accumulation microstep, for one unsharded bf16
+parameter copy per GPU (fine at 20B).
 `reset_sinks: false` keeps the pretrained sinks live and frozen so the trainer's log
 probabilities match the served policy. Live sinks restrict the attention backend to a
 sink-carrying implementation: FA4 on Blackwell, or `flex_attention`, `eager`, or an FA3
 build exposing `s_aux` on Hopper (the shipped Hopper FA3 does not).
 FA2 and SDPA are rejected, and CP is unavailable in this mode.
 
-Launch the trainer on the remaining GPUs with the same five NCCL socket variables the
-server's compose file sets, because the weight-sync group crosses the container boundary
-and NCCL transport state is process-global. Expect a slower step than on vLLM for the same
-reason: socket NCCL also costs the trainer NVLink between its own ranks.
+Launch the trainer on the remaining GPUs. The weight-sync group is ordinary NCCL between
+the two containers — CUDA IPC over NVLink on one host — and its one server-side
+requirement, `NCCL_CUMEM_ENABLE=1`, is the compose file's default.
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_IB_DISABLE=1 NCCL_NET=Socket NCCL_NET_PLUGIN=none \
-  halo launch environmental-grpo gpt-oss-grpo.yaml -n 4
+CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gpt-oss-grpo.yaml -n 4
 ```
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
-The trainer keeps `expert_parallel_size: 1` on this engine, whatever its GPU count.
 
-vLLM (`rollout_backend: vllm`, the config default) is the other engine, and it is required
-for the expert-distributed ep4 configs and for `rollout_max_thinking_tokens`. Pull the
+vLLM (`rollout_backend: vllm`, the config default) is the other engine, the one the shipped
+expert-distributed ep4 configs target, and the only one for `rollout_max_thinking_tokens`. Pull the
 prebuilt server image and retag it to the name the compose file expects:
 
 ```bash

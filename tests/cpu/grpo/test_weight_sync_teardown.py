@@ -1,14 +1,18 @@
 """CPU tests for the SGLang weight-sync client's teardown contract.
 
-Two facts are load-bearing and invisible in a passing run:
+Four facts are load-bearing and invisible in a passing run:
 
+  * the engine-side release of the group name runs WHILE the local ``dist.destroy_process_group``
+    runs, not after it returns: under NCCL's cuMem transports each side's finalize waits for the
+    other, so a local-first order parks the local destroy forever;
   * the atexit invocation must NOT enter ``dist.destroy_process_group``: the group's peers are
     engine processes that never enter destroy, so with an interrupted sync in flight the destroy
     BLOCKS rather than raises — wedging interpreter exit. The engine-side name release and the
     rendezvous-store drop still run, or the server refuses every future join under the name;
   * the explicit ``close_communicator()`` (the reconnect path) must keep the full local destroy,
     or the c10d group name and rendezvous port leak and the next client to the same server cannot
-    form its group;
+    form its group — unless a drain deadline aborted the group, after which torch has dropped its
+    bookkeeping and a destroy raises;
   * the quiesce this teardown has to lift is lifted on SGLang's OWN route, with the body its
     handler requires — the class attributes that carry both are read once, on a failing path, where
     a wrong value is a warning line and an engine left paused.
@@ -18,9 +22,11 @@ Two facts are load-bearing and invisible in a passing run:
 
 import inspect
 import sys
+import threading
 from unittest.mock import patch
 
 import pytest
+import torch
 
 import src.distributed.nccl.clients.sglang as sglang_module
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
@@ -71,6 +77,99 @@ def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):
     assert all(kind != "drop" for kind, _ in calls)
     assert ("remote", None) in calls
     assert client._group is None and client._store is None
+
+
+def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch):
+    """The local destroy blocks until the engine drops its half, so the engine must already have been
+    asked by then. The fake destroy waits for the engine-side release to start; a client that only
+    releases the engine after the destroy returned never satisfies it."""
+    client = _offline_client()
+    client._group = object()
+    remote_started = threading.Event()
+    monkeypatch.setattr(client, "_destroy_remote_group", remote_started.set)
+    seen_during_destroy: list[bool] = []
+    monkeypatch.setattr(
+        sglang_module,
+        "destroy_weight_update_group",
+        lambda group: seen_during_destroy.append(remote_started.wait(timeout=2.0)),
+    )
+
+    client.close_communicator()
+
+    assert seen_during_destroy == [True], (
+        "the engine-side /destroy_weights_update_group did not start while the local destroy ran — "
+        "under cuMem transports that order parks destroy_process_group forever"
+    )
+
+
+def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
+    """After a drain deadline aborted the group torch has already removed its bookkeeping; a destroy
+    raises "Invalid process group", and the engine-side release must still run."""
+    client = _offline_client()
+    group = object()
+    client._group = group
+    client._aborted = True
+    calls = _teardown_probe(client, monkeypatch)
+
+    client.close_communicator()
+
+    assert all(kind != "destroy" for kind, _ in calls), "close entered dist.destroy_process_group on an aborted group"
+    assert ("drop", group) in calls
+    assert ("remote", None) in calls
+
+
+def test_a_drain_deadline_aborts_the_group_and_retires_the_client(monkeypatch):
+    """A peer that never joins parks the broadcast; the drain's deadline must abort the group (or every
+    later device sync hangs behind the spinning kernel) and every later update must be refused."""
+    client = _offline_client()
+    group = object()
+    client._group = group
+    client._sync_device = torch.device("cpu")
+    aborted: list[object] = []
+    monkeypatch.setattr(sglang_module.c10d, "_abort_process_group", aborted.append)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: object())
+
+    def expired(stream, timeout_s, what):
+        raise RuntimeError(f"{what} did not complete")
+
+    monkeypatch.setattr(sglang_module, "bounded_stream_sync", expired)
+
+    with pytest.raises(RuntimeError, match="did not complete"):
+        client._drain_broadcasts()
+
+    assert aborted == [group], "the deadline did not abort the weight-update group"
+    assert client._aborted is True
+    with pytest.raises(RuntimeError, match="aborted"):
+        client.begin_weight_update()
+
+
+def test_chunks_are_staged_in_one_reused_arena_that_grows_only_for_an_oversized_tensor():
+    """Per-tensor device allocations churn the allocator on the critical path and, once freed with a
+    pending NCCL event, block the next upload inside the allocator; the arena sidesteps both. The
+    views must reproduce every tensor's values, dtype and shape, and the arena must be reused."""
+    client = _offline_client()
+    client._sync_device = torch.device("cpu")
+    first = [torch.arange(6, dtype=torch.bfloat16).reshape(2, 3), torch.full((5,), 2.5, dtype=torch.float32)]
+
+    staged = list(client._stage_on_device(first))
+    arena = client._device_arena
+    assert arena is not None and arena.dtype == torch.uint8
+    for view, tensor in zip(staged, first, strict=True):
+        assert view.dtype == tensor.dtype and view.shape == tensor.shape
+        assert torch.equal(view, tensor)
+        assert view.untyped_storage().data_ptr() == arena.untyped_storage().data_ptr(), "a view outside the arena"
+
+    second = [torch.ones(3, dtype=torch.bfloat16)]
+    list(client._stage_on_device(second))
+    assert client._device_arena is arena, "a chunk that fits must reuse the arena"
+
+    oversized = [torch.zeros(arena.numel() + 1, dtype=torch.uint8)]
+    staged = list(client._stage_on_device(oversized))
+    assert client._device_arena is not arena and client._device_arena.numel() >= oversized[0].numel()
+    assert torch.equal(staged[0], oversized[0])
+
+    client.close_communicator(_local_destroy=False)
+    assert client._device_arena is None, "a closed client must not pin device memory"
 
 
 def test_the_atexit_invocation_skips_the_local_nccl_destroy(monkeypatch):

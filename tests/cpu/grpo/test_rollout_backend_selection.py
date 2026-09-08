@@ -92,34 +92,51 @@ def test_sglang_clients_default_to_distinct_group_names_per_server():
     assert named.group_name == "custom"
 
 
-def test_expert_parallelism_is_refused_for_an_engine_that_cannot_sync_under_it():
-    """SGLang + expert distribution must fail at construction, not ten minutes into the run.
+class _NoExpertParallelClient(SGLangWeightSyncClient):
+    """A client that declares its sync cannot share a process with DeepEP. Neither shipped engine
+    declares it any more, so the gate is exercised through a stand-in resolved by name."""
 
-    The two requirements are irreconcilable in one process: the cross-container sync communicator
-    needs NCCL's CUDA-IPC transports off, DeepEP needs them on for symmetric memory, and NCCL caches
-    both flags process-wide on first read. Without this gate the run loads the model, collects
-    rollouts, pauses the engine and only then dies mid-broadcast with the served weights half
-    overwritten.
-    """
+    SUPPORTS_EXPERT_PARALLEL = False
+
+
+def test_both_shipped_engines_sync_under_expert_distribution():
+    """The SGLang sync is ordinary NCCL like vLLM's once the server matches the trainer's cuMem
+    setting (docker-compose.sglang.yml), so neither engine is refused under EP or ETP."""
     from src.trainers.grpo.rollout.weight_sync import validate_backend_parallelism
 
+    for backend in rollout_backends():
+        validate_backend_parallelism(backend, _ep_config(ep_size=2), torch.nn.Linear(1, 1))
+        validate_backend_parallelism(backend, _ep_config(ep_size=1, expert_tp_size=2), torch.nn.Linear(1, 1))
+
+
+def test_expert_parallelism_is_refused_for_an_engine_that_declares_it_cannot_sync_under_it(monkeypatch):
+    """An engine that cannot share a process with DeepEP must fail at construction, not ten minutes
+    into the run: without this gate the run loads the model, collects rollouts, pauses the engine and
+    only then dies mid-broadcast with the served weights half overwritten."""
+    import src.trainers.grpo.rollout.weight_sync as weight_sync
+
+    monkeypatch.setattr(weight_sync, "resolve_weight_sync_client", lambda backend: _NoExpertParallelClient)
+
     with pytest.raises(ValueError, match="cannot be combined with expert distribution"):
-        validate_backend_parallelism("sglang", _ep_config(ep_size=2), torch.nn.Linear(1, 1))
+        weight_sync.validate_backend_parallelism("stub", _ep_config(ep_size=2), torch.nn.Linear(1, 1))
 
-    # vLLM is validated under EP, and an undistributed config is fine on either engine.
-    validate_backend_parallelism("vllm", _ep_config(ep_size=2), torch.nn.Linear(1, 1))
-    validate_backend_parallelism("sglang", _ep_config(), torch.nn.Linear(1, 1))
+    # An undistributed config is fine on the same engine.
+    weight_sync.validate_backend_parallelism("stub", _ep_config(), torch.nn.Linear(1, 1))
 
 
-def test_pure_etp_is_refused_and_the_message_names_the_knob_that_would_fix_it():
+def test_pure_etp_is_refused_and_the_message_names_the_knob_that_would_fix_it(monkeypatch):
     """``is_ep_mode`` is ``ep_group_size > 1`` = ``ep_size * expert_tp_size``, so pure ETP
     (``ep_size=1``) trips the same gate. Telling that config to "drop to ep_size=1" names a state it
     is already in — the message has to name expert_tensor_parallel_size or it sends the user in a
     circle."""
-    from src.trainers.grpo.rollout.weight_sync import validate_backend_parallelism
+    import src.trainers.grpo.rollout.weight_sync as weight_sync
+
+    monkeypatch.setattr(weight_sync, "resolve_weight_sync_client", lambda backend: _NoExpertParallelClient)
 
     with pytest.raises(ValueError) as excinfo:
-        validate_backend_parallelism("sglang", _ep_config(ep_size=1, expert_tp_size=4), torch.nn.Linear(1, 1))
+        weight_sync.validate_backend_parallelism(
+            "stub", _ep_config(ep_size=1, expert_tp_size=4), torch.nn.Linear(1, 1)
+        )
 
     message = str(excinfo.value)
     assert "expert_tensor_parallel_size=4" in message

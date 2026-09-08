@@ -33,10 +33,12 @@ Markers (selection):
                                    * the server must own a GPU the trainer does not use, since weight
                                      sync is an NCCL broadcast and a rank cannot broadcast to itself
                                      (drive the trainer with ``CUDA_VISIBLE_DEVICES`` excluding it);
-                                   * on a host without InfiniBand, launch with ``NCCL_IB_DISABLE=1
-                                     NCCL_NET=Socket``. The image's OFI/Gin defaults hang the
-                                     cross-container group instead of failing: both GPUs spin until
-                                     the 120 s formation deadline, per test.
+                                   * the trainer and the server must agree on the NCCL transport:
+                                     the socket recipe both compose bases default to (``make``
+                                     passes it), or EFA on both ends (``EFA=1`` plus the compose
+                                     overlay). A mismatch hangs the cross-container group instead of
+                                     failing: both GPUs spin until the 120 s formation deadline, per
+                                     test.
                                  A trainer killed while attached to the weight-transfer engine leaves
                                  the server's scheduler stuck while ``/health`` still answers 200;
                                  restart the container before re-running.
@@ -462,13 +464,14 @@ MANIFEST: dict[str, TestSpec] = {
         # FA4-JIT and checkpoint-download cold paths on top of it.
         timeout=1800,
     ),
-    # No --ep-size 2 row: SGLang weight sync and DeepEP need opposite process-global NCCL transport
-    # settings, so the trainer refuses that pairing at construction (validate_backend_parallelism).
+    # --ep-size 2 gathers FSDP-ignored plain experts through DeepEP with the SGLang group in the same
+    # process; the server's cuMem parity (docker-compose.sglang.yml) is what lets the two coexist.
     "trainers/grpo/test_env_grpo_sglang_e2e.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "tp", "lora", "moe", "gptoss", "sglang_server"),
+        markers=("gpu", "full", "2gpu", "ep", "tp", "lora", "moe", "gptoss", "sglang_server"),
         args_matrix=(
             "--ep-size 1",
+            "--ep-size 2",
             "--tp-size 2",
             "--ep-size 1 --peft lora",
             "--ep-size 1 --resume",

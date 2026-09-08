@@ -339,7 +339,7 @@ host-driven **proxy Gin** (`NCCL_GIN_TYPE=2`), copying completions to GPU memory
 
 | Need | Provided by | Detail |
 |------|-------------|--------|
-| GIN plugin | **image** | The Dockerfile builds a GIN-capable `aws-ofi-nccl` (exports `ncclGinPlugin_v13`) over the NGC-bundled 1.17.3 (which exports no `ncclGin`) and exposes it as `libnccl-gin.so`. NCCL ≥ 2.30.4 is the GIN-API floor. |
+| GIN plugin | **image** | `docker/efa/install_efa_userspace.sh` builds a GIN-capable `aws-ofi-nccl` (exports `ncclGinPlugin_v13`) at one pinned commit into every Halo image — the NGC-bundled 1.17.3 exports no `ncclGin` — and exposes it as `libnccl-gin.so`. NCCL ≥ 2.30.4 is the GIN-API floor. |
 | GDRCopy ≥ 2.5 | **image + host** | `libgdrapi` is built into the image; the `gdrdrv` kernel module + `/dev/gdrdrv` come from the host. Pass `--device /dev/gdrdrv`. |
 | Launch env | **per job** | `NCCL_NET_PLUGIN=ofi`, `FI_PROVIDER=efa`, `FI_EFA_USE_DEVICE_RDMA=1`, `NCCL_PROTO=simple`, `NCCL_GIN_TYPE=2` — the same block as [Launch Recipes](../parallelism/launch-recipes.md#environment-variables) plus the proxy-GIN type. |
 
