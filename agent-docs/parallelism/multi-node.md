@@ -244,12 +244,13 @@ unless you need maximum expert distribution — cross-node EP buys per-GPU memor
 
 Cross-node EP and inter-node FSDP gradient sync ride the node's RDMA NIC. The toolkit sets **no**
 fabric env vars in code — NCCL (and libfabric, on EFA) read them from the process environment, so
-they belong in the launcher. The NGC base ships the NCCL transport plugins for both AWS EFA
-(libfabric + `aws-ofi-nccl`) and IB (HPC-X) in the `ldconfig` cache, and auto-selects: its
-`/etc/shinit_v2` sets `NCCL_NET_PLUGIN=ofi` when it detects EFA hardware, else leaves it unset so
-NCCL loads the HPC-X IB plugin. It fires only for a shell that sources it, so an EFA job sets the
-variable itself rather than relying on it — that is what every `launcher-configs/skypilot/aws/**` task does. The
-image also bakes `NCCL_IB_HCA=mlx5`.
+they belong in the launcher. Every Halo image carries the `aws-ofi-nccl` plugin under NCCL's default
+plugin name, so it is tried on every host and yields to NCCL's built-in transports (IB, sockets)
+where libfabric finds no provider. The NGC base's `/etc/shinit_v2` sets `NCCL_NET_PLUGIN=ofi` when it
+detects EFA hardware, but only for a shell that sources it, so an EFA job sets the variable itself,
+and `NCCL_NET=Libfabric` with it so a missing plugin fails instead of falling back — that is what
+every multi-node `launcher-configs/skypilot/aws/**` task does. The image also bakes
+`NCCL_IB_HCA=mlx5`.
 
 | Fabric | Verify (on the host) | Launch env (beyond image defaults) |
 |--------|--------|------------------------------------|
@@ -260,9 +261,11 @@ image also bakes `NCCL_IB_HCA=mlx5`.
 - **AWS EFA is libfabric, not Mellanox.** The base bundles `aws-ofi-nccl` 1.17.3, which exports no
   `ncclGin`; every Halo image builds a GIN-capable plugin from one pinned commit
   (`docker/efa/install_efa_userspace.sh`) and exposes it as `libnccl-gin.so` — the vLLM and SGLang
-  server images carry the same build, since a weight-sync group between two different plugin builds
-  hangs at its first collective. `NCCL_PROTO=simple` is optional with the images' EFA userspace: the plugin probes each endpoint for in-order RDMA writes and forces the simple protocol itself where the fabric lacks them. Set it on every rank of a communicator or on none — a rollout server joining a weight-sync group included — since ranks on different protocol tables hang at their first collective. The **host** supplies the EFA kernel driver and
-  `/dev/infiniband`; pass them into the container (`--device`, not a bind mount).
+  server images carry the same build. `NCCL_PROTO=simple` is optional; if set, set it on every rank
+  of a communicator, a rollout server joining a weight-sync group included
+  ([why](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)). The **host** supplies
+  the EFA kernel driver and `/dev/infiniband`; pass them into the container (`--device`, not a bind
+  mount).
 - **Rollout server on another node** — the server container takes the same fabric env through its
   compose EFA overlay (`docker-compose.vllm.efa.yml` / `docker-compose.sglang.efa.yml`), the trainer
   through `make ... EFA=1`; recipe, preflight and measured rates:
@@ -289,7 +292,7 @@ over NVLink) — which proves the rank math and the gradient algebra, not the fa
 | **Wider layouts** (4-node, 8-node, the 512-GPU layouts in [Large-Scale Scenarios](large-scale-scenarios.md)) | ❌ | rank math only — `ParallelismConfig` is exercised at world 8/16/32, no recorded run |
 | **NVL72 / MNNVL rack-wide domains** | ❌ | simulated domain sizes only; see the warning below and [Scale & Limits](../reference/scale-and-limitations.md) |
 | **InfiniBand/RoCE as a multi-node fabric** | ❌ | the recorded multi-node runs used EFA; the IB path is config guidance, not a measurement |
-| Multi-node weight sync for online / environmental GRPO — trainer node → rollout-server node over EFA, vLLM (EP=2, TP=2, EP=1 + LoRA) and SGLang (EP=2) end-to-end rows, plus a two-node trainer (EP=1) syncing to a server on a third node (4× p6-b300) | ✅ | [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
+| Multi-node weight sync for online / environmental GRPO — trainer node → rollout-server node over EFA, both engines, plus a two-node trainer syncing to a server on a third node | ✅ | [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
 | **Cross-node gathered EP save** on a shared filesystem | ❌ | hand-run recipe in `tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py`; not exercised multi-node |
 
 ## GB200/GB300 NVL72 (multi-node NVLink)

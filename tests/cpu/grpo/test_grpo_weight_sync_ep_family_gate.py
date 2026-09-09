@@ -82,7 +82,7 @@ def test_unsupported_family_roster_is_pinned():
 def test_gate_rejects_unsupported_ep_family():
     model = nn.Module()
     model.mlp = _UnsupportedEPModuleStub()
-    with pytest.raises(ValueError, match="does not support vLLM weight sync"):
+    with pytest.raises(ValueError, match="does not support weight sync"):
         validate_weight_sync_support(model)
 
 
@@ -121,7 +121,7 @@ def test_gate_still_rejects_an_unsupported_family_behind_a_peft_wrapper():
     """Skipping the wrapper must not lose the rejection — the wrapped layer is its own child module."""
     model = nn.Module()
     model.mlp = _PeftStyleWrapper(_UnsupportedEPModuleStub())
-    with pytest.raises(ValueError, match="does not support vLLM weight sync"):
+    with pytest.raises(ValueError, match="does not support weight sync"):
         validate_weight_sync_support(model)
 
 

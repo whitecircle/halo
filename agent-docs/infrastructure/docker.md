@@ -176,20 +176,22 @@ base image's own older system copy would otherwise reach the weight-sync communi
 
 Both training images are EFA-ready as built, and so are the vLLM and SGLang server images:
 `docker/efa/install_efa_userspace.sh` installs the EFA installer 1.46.0's rdma-core (60) and AWS
-libfabric 2.3.1amzn4.0 — replacing the NGC base's MOFED rdma-core in the training images — and builds
-`aws-ofi-nccl` at one pinned commit against the `uv.lock` NCCL, in all three. One build everywhere is
-the point, rdma-core included: the plugin forces `NCCL_PROTO=simple` when libfabric's in-order-write
-probe fails, that probe answers through rdma-core's EFA provider (the MOFED `libefa` 59.1 fails it,
-the installer's 60 passes), and a weight-sync group between two containers that answer differently
-hangs at its first collective. The upstream server bases ship no EFA userspace at all. IB works on the baked
-defaults; **EFA is a per-job opt-in** (its env vars degrade IB clusters, so they are not baked). The
-image matrix keys on GPU arch only — no separate `-efa` tag.
+libfabric 2.3.1amzn4.0 — replacing the NGC base's MOFED rdma-core in the training images and the
+distro rdma-core of the server bases — and builds `aws-ofi-nccl` at one pinned commit against the
+`uv.lock` NCCL, in all three. One build everywhere is the point, rdma-core included; why both ends of
+a weight-sync group must match down to it:
+[Rollout Servers → Servers on other nodes](rollout-servers.md#servers-on-other-nodes-efa). IB works
+on the baked defaults; **EFA is a per-job opt-in** (its env vars degrade IB clusters, so they are not
+baked). The image matrix keys on GPU arch only — no separate `-efa` tag.
 
-- **InfiniBand / RoCE** (no extra env) — HPC-X `libnccl-net.so` (`/opt/hpcx`), loaded by NCCL by default.
+- **InfiniBand / RoCE** (no extra env) — NCCL's built-in IB transport. The OFI plugin also sits under
+  NCCL's default plugin name, so it is tried on every host and yields to the built-in transports
+  where libfabric finds no provider.
 - **AWS EFA** (opt-in) — libfabric (`/opt/amazon/efa`) + a GIN-capable `aws-ofi-nccl` built at the pinned
   commit (exporting `ncclGinPlugin_v13`; the NGC-bundled 1.17.3 exports no `ncclGin`) exposed as
-  `libnccl-gin.so`, plus GDRCopy `libgdrapi`. Select it per job with the libfabric env block on the
-  page linked below, and for DeepEP cross-node EP add `NCCL_GIN_TYPE=2` (proxy GIN; EFA has no IBGDA)
+  `libnccl-gin.so`, plus GDRCopy `libgdrapi`. Select it per job with `NCCL_NET_PLUGIN=ofi
+  NCCL_NET=Libfabric` ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)), and
+  for DeepEP cross-node EP add `NCCL_GIN_TYPE=2` (proxy GIN; EFA has no IBGDA)
   and `--device /dev/gdrdrv` (host `gdrdrv` module).
 
 Prerequisites and measured EFA ceilings: [DeepEP → EFA](deepep.md#expert-parallelism-over-aws-efa);

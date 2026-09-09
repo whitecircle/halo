@@ -14,7 +14,6 @@ turn a drifted pin into a failed build.
 """
 
 import re
-import sys
 
 import pytest
 
@@ -51,23 +50,42 @@ def test_every_dockerfile_installs_the_whole_shared_efa_userspace():
         assert "AWS_OFI_NCCL_COMMIT" not in text, f"{name} carries its own plugin commit — a second, drifting pin"
 
 
+def _live_line(script: str, text: str) -> bool:
+    """Whether ``text`` appears on a line that is not commented out."""
+    return re.search(r"^\s*(?!#)[^#\n]*" + re.escape(text), script, re.M) is not None
+
+
 def test_the_script_installs_rdma_core_alongside_libfabric():
     script = _script()
-    for package in ("libibverbs1", "ibverbs-providers", "librdmacm1", "libfabric1-aws"):
-        assert package in script, f"the script no longer installs {package}"
+    for deb in (
+        '"$debs"/rdma-core/libibverbs1_*.deb',
+        '"$debs"/rdma-core/ibverbs-providers_*.deb',
+        '"$debs"/rdma-core/librdmacm1_*.deb',
+        '"$debs"/libfabric1-aws_${LIBFABRIC_VERSION}_amd64.deb',
+    ):
+        assert _live_line(script, deb), f"the script no longer installs {deb}"
 
 
 def test_the_script_verifies_what_it_installed():
     """A pin bump that produces the wrong artifact must fail the build, not the first sync."""
     script = _script()
-    assert 'grep -F "git-${short}"' in script, "the plugin build is not checked against the pinned commit"
-    assert 'grep -F "libfabric: ${LIBFABRIC_VERSION}"' in script, "the installed libfabric version is not checked"
-    assert "ncclGinPlugin_v13" in script, "the GIN entry point DeepEP V2 needs is not checked"
-    assert "libfabric.so.1 => $EFA_PREFIX/lib/" in script, "the plugin's libfabric resolution is not checked"
-    assert "libefa" in script, "the installed rdma-core EFA provider is not checked"
+    assert _live_line(script, 'grep -F "git-${short}"'), "the plugin build is not checked against the pinned commit"
+    assert re.search(
+        r'^\s*\|\| \{ echo "plugin does not identify as git-\$\{short\}" >&2; exit 1; \}', script, re.M
+    ), "a plugin that does not identify as the pinned commit must fail the build"
+    assert _live_line(script, 'grep -F "libfabric: ${LIBFABRIC_VERSION}"'), (
+        "the installed libfabric version is not checked"
+    )
+    assert _live_line(script, "for sym in ncclNetPlugin_v12 ncclGinPlugin_v13"), (
+        "the GIN entry point DeepEP V2 needs is not checked"
+    )
+    assert _live_line(script, "libfabric.so.1 => $EFA_PREFIX/lib/"), "the plugin's libfabric resolution is not checked"
+    assert _live_line(script, "libefa=$(ldconfig -p | awk '/libefa\\.so\\.1 /"), (
+        "the installed rdma-core EFA provider is not looked up in the loader cache"
+    )
     # `grep -q` exits early and the producer takes a SIGPIPE, which `pipefail` reports as a failure.
     assert "grep -q" not in script, "a `grep -q` under pipefail fails a passing check"
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

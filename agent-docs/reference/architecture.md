@@ -172,13 +172,13 @@ narrower model limits (every MoE family but GptOss is refused) — see
 [Rollout Servers](../infrastructure/rollout-servers.md).
 
 The training process talks to it over two channels: HTTP for generation, and a vendored NCCL client
-(`src/distributed/nccl/`, `VLLMWeightSyncClient`) for weight sync, replacing TRL's `VLLMClient`
-which would pull in the vLLM package.
+(`src/distributed/nccl/`, one client per engine: `VLLMWeightSyncClient` / `SGLangWeightSyncClient`)
+for weight sync, replacing TRL's `VLLMClient` which would pull in the vLLM package.
 
 Before each generation round that follows a weight update (environmental GRPO: every
 `sync_weights_every_n_steps`), the trainer gathers EP expert shards, unfolds FSDP2 DTensors via
-`full_tensor()`, gathers TP shards, pushes the weights to vLLM over NCCL, and resets the prefix
-cache. See [Online GRPO](../training-methods/grpo/online-grpo.md) and
+`full_tensor()`, gathers TP shards, pushes the weights to the rollout server over NCCL, and resets
+the prefix cache. See [Online GRPO](../training-methods/grpo/online-grpo.md) and
 [Environmental GRPO](../training-methods/grpo/environmental-grpo.md).
 
 ## Related pages

@@ -9,7 +9,6 @@ rejections and the payload gating that stand in the way.
 
 import logging
 import sys
-import types
 from unittest.mock import patch
 
 import pytest
@@ -24,15 +23,7 @@ from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.environments.ray_actors import RolloutConfig
-
-
-def _ep_config(ep_size: int = 1, expert_tp_size: int = 1) -> types.SimpleNamespace:
-    """The four fields the gate reads. Stubbed rather than a real ParallelismConfig: constructing one
-    with ep_size=2 needs an NVLink domain this CPU tier does not have."""
-    group = ep_size * expert_tp_size
-    return types.SimpleNamespace(
-        is_ep_mode=group > 1, ep_size=ep_size, expert_tp_size=expert_tp_size, ep_group_size=group
-    )
+from src.trainers.grpo.rollout.weight_sync import validate_backend_expert_layout
 
 
 def _model_holding(layer_cls: type) -> torch.nn.Module:
@@ -92,58 +83,6 @@ def test_sglang_clients_default_to_distinct_group_names_per_server():
     assert named.group_name == "custom"
 
 
-class _NoExpertParallelClient(SGLangWeightSyncClient):
-    """A client that declares its sync cannot share a process with DeepEP. Neither shipped engine
-    declares it any more, so the gate is exercised through a stand-in resolved by name."""
-
-    SUPPORTS_EXPERT_PARALLEL = False
-
-
-def test_both_shipped_engines_sync_under_expert_distribution():
-    """The SGLang sync is ordinary NCCL like vLLM's once the server matches the trainer's cuMem
-    setting (docker-compose.sglang.yml), so neither engine is refused under EP or ETP."""
-    from src.trainers.grpo.rollout.weight_sync import validate_backend_parallelism
-
-    for backend in rollout_backends():
-        validate_backend_parallelism(backend, _ep_config(ep_size=2), torch.nn.Linear(1, 1))
-        validate_backend_parallelism(backend, _ep_config(ep_size=1, expert_tp_size=2), torch.nn.Linear(1, 1))
-
-
-def test_expert_parallelism_is_refused_for_an_engine_that_declares_it_cannot_sync_under_it(monkeypatch):
-    """An engine that cannot share a process with DeepEP must fail at construction, not ten minutes
-    into the run: without this gate the run loads the model, collects rollouts, pauses the engine and
-    only then dies mid-broadcast with the served weights half overwritten."""
-    import src.trainers.grpo.rollout.weight_sync as weight_sync
-
-    monkeypatch.setattr(weight_sync, "resolve_weight_sync_client", lambda backend: _NoExpertParallelClient)
-
-    with pytest.raises(ValueError, match="cannot be combined with expert distribution"):
-        weight_sync.validate_backend_parallelism("stub", _ep_config(ep_size=2), torch.nn.Linear(1, 1))
-
-    # An undistributed config is fine on the same engine.
-    weight_sync.validate_backend_parallelism("stub", _ep_config(), torch.nn.Linear(1, 1))
-
-
-def test_pure_etp_is_refused_and_the_message_names_the_knob_that_would_fix_it(monkeypatch):
-    """``is_ep_mode`` is ``ep_group_size > 1`` = ``ep_size * expert_tp_size``, so pure ETP
-    (``ep_size=1``) trips the same gate. Telling that config to "drop to ep_size=1" names a state it
-    is already in — the message has to name expert_tensor_parallel_size or it sends the user in a
-    circle."""
-    import src.trainers.grpo.rollout.weight_sync as weight_sync
-
-    monkeypatch.setattr(weight_sync, "resolve_weight_sync_client", lambda backend: _NoExpertParallelClient)
-
-    with pytest.raises(ValueError) as excinfo:
-        weight_sync.validate_backend_parallelism(
-            "stub", _ep_config(ep_size=1, expert_tp_size=4), torch.nn.Linear(1, 1)
-        )
-
-    message = str(excinfo.value)
-    assert "expert_tensor_parallel_size=4" in message
-    # The knob that is ALREADY 1 must not be presented as the remedy on its own.
-    assert "drop to ep_size=1" not in message
-
-
 def test_a_family_without_a_fused_gather_is_refused_before_the_engine_is_touched():
     """SGLang loads experts fused, and ``gather_fused_expert_state_dict`` is a per-family hook whose
     base default raises. Reaching the first sync before discovering that leaves the engine paused and
@@ -155,19 +94,17 @@ def test_a_family_without_a_fused_gather_is_refused_before_the_engine_is_touched
     build cached cross-family unions — and it would stop tracking the roster, so a family that gained
     or lost the override would not move this test.
     """
-    from src.trainers.grpo.rollout.weight_sync import validate_backend_parallelism
-
     implementing = [c for c in ep_layer_classes() if c.implements_fused_expert_layout()]
     missing = [c for c in ep_layer_classes() if not c.implements_fused_expert_layout()]
     assert implementing, "no EP family implements the fused gather — the anti-vacuity side is vacuous"
     assert missing, "every EP family now implements the fused gather; this gate is dead code — delete it"
 
     with pytest.raises(ValueError, match="does not implement"):
-        validate_backend_parallelism("sglang", _ep_config(), _model_holding(missing[0]))
+        validate_backend_expert_layout("sglang", _model_holding(missing[0]))
 
     # Anti-vacuity: neither the missing override nor the engine alone can be what fires the raise.
-    validate_backend_parallelism("sglang", _ep_config(), _model_holding(implementing[0]))
-    validate_backend_parallelism("vllm", _ep_config(), _model_holding(missing[0]))
+    validate_backend_expert_layout("sglang", _model_holding(implementing[0]))
+    validate_backend_expert_layout("vllm", _model_holding(missing[0]))
 
 
 def test_an_unrecognized_expert_layout_is_refused_rather_than_guessed():

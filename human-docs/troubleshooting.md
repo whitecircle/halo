@@ -41,7 +41,7 @@ reference.
 | "Checkpoint not found" on resume, or duplicate per-node saves | The filesystem flag doesn't match reality: `DIST_SHARED_FILESYSTEM` is `1` for a shared FS, `0` for per-node disks. |
 | `OSError: Stale file handle` while loading a model or dataset cache | A cross-node read-after-write on NFS/EFS. Set `DIST_INPUT_SHARED_FILESYSTEM=0` and leave the output side shared — see [Clusters](clusters.md). |
 | A rank waits hours then aborts during a download or corpus pack | The rank going first outlasted `DIST_STORE_TIMEOUT_HOURS` (default 4). Raise it. |
-| Slow cross-node traffic on AWS | EFA needs opt-in env (`FI_PROVIDER=efa`, …) — see [Clusters](clusters.md). Those same vars degrade an InfiniBand cluster if left set. |
+| Slow cross-node traffic on AWS | EFA needs opt-in env (`NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric`, `--device /dev/infiniband`) — see [Clusters](clusters.md). Those same vars degrade an InfiniBand cluster if left set. |
 | `Xid 145` NVLink messages flooding dmesg | Usually benign FEC churn. `halo run nvlink-health` exits non-zero only on real faults — trust it, not dmesg volume. |
 
 ## RL runs (vLLM / SGLang)

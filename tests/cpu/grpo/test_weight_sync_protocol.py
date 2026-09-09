@@ -501,6 +501,7 @@ def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(clien
     staged (before ``init_communicator``, or an empty tail)."""
     synchronized: list = []
     monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: synchronized.append(device))
+    client._sync_device = torch.device("cuda", 3)  # a guarded whole-device sync would fire on it
 
     class _Event:
         def __init__(self):

@@ -5,13 +5,10 @@ from typing import Any
 
 import torch
 
-from src.distributed.nccl.transport.pynccl import bounded_stream_sync
+from src.distributed.nccl.transport.pynccl import bounded_stream_sync, resolve_drain_timeout_s
 
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
-# Deadline for draining one buffer's in-flight broadcast, sized for a full ~1GB buffer over a slow
-# link.
-_BROADCAST_SYNC_TIMEOUT_S = 600.0
 
 
 def packed_broadcast_producer(
@@ -57,7 +54,7 @@ def packed_broadcast_producer(
         # Bounded sync: a server death mid-sync raises here instead of hanging the broadcast.
         try:
             bounded_stream_sync(
-                streams[buffer_idx], timeout_s=_BROADCAST_SYNC_TIMEOUT_S, what="packed weight broadcast"
+                streams[buffer_idx], timeout_s=resolve_drain_timeout_s(), what="packed weight broadcast"
             )
         except RuntimeError:
             group.abort()

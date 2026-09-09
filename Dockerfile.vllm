@@ -49,10 +49,10 @@ RUN NCCL_V=$(python3 /tmp/nccl_pin.py /tmp/uv.lock) \
 ENV VLLM_NCCL_SO_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2
 RUN test -f "$VLLM_NCCL_SO_PATH"
 
-# EFA userspace (the rdma-core, AWS libfabric and aws-ofi-nccl build the training image runs), so
-# the weight-sync group can ride EFA between this container and a trainer on another node. The
-# upstream base ships none of it, and NCCL then silently falls back to sockets. Pinned once, in the
-# script.
+# The EFA userspace every Halo image shares (docker/efa/install_efa_userspace.sh owns the pins and
+# the reason the builds must match), so the weight-sync group can ride EFA between this container
+# and a trainer on another node. The upstream base ships rdma-core but no libfabric or plugin, and
+# NCCL then falls back to sockets with no message.
 COPY docker/efa/install_efa_userspace.sh /tmp/install_efa_userspace.sh
 RUN /tmp/install_efa_userspace.sh && rm /tmp/install_efa_userspace.sh
 

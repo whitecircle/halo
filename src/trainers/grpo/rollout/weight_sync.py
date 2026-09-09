@@ -4,8 +4,8 @@ Both push the trained policy to the rollout server over the vendored NCCL client
 first, then the FSDP2-DP / TP shards of every dense param. The gathers must run on **every** rank
 (``full_tensor()`` and ``gather_expert_state_dict`` are collectives that hang if a rank skips them),
 while only the forwarding rank (global-main, TP-rank 0 under TP) sends. PEFT/LoRA is folded into the
-base and forwarded under base-model param names. The engine is a parameter: the expert layout and the
-parallelism gate are read off the resolved client class (vLLM or SGLang).
+base and forwarded under base-model param names. The engine is a parameter: the expert layout is read
+off the resolved client class (vLLM or SGLang).
 
 Those sends sit between the gathers, so each runs under a :class:`DeferredRankFailure` and the verdict
 is taken at a rank-uniform ``reject``; a forwarding rank raising mid-loop would otherwise leave every
@@ -74,7 +74,7 @@ _HELD_CONVERTER_BUDGET_BYTES = WEIGHT_SYNC_CHUNK_BYTES
 
 
 def validate_weight_sync_support(model: torch.nn.Module) -> None:
-    """Construction gate for the trainers that push weights to vLLM.
+    """Construction gate for the trainers that push weights to a rollout engine.
 
     Six failure classes are rejected here rather than at the first sync:
 
@@ -101,7 +101,7 @@ def validate_weight_sync_support(model: torch.nn.Module) -> None:
     """
     if model_has_quantized_params(model):
         raise ValueError(
-            "QLoRA (quantized base weights) is not supported with vLLM weight sync: the sync forwards "
+            "QLoRA (quantized base weights) is not supported with rollout-engine weight sync: the sync forwards "
             "raw parameter storage under base-weight names, and bnb-packed non-floating-point tensors "
             "corrupt the served policy. Use plain LoRA (use_peft without load_in_4bit/load_in_8bit) "
             "or full fine-tuning."
@@ -128,9 +128,9 @@ def validate_weight_sync_support(model: torch.nn.Module) -> None:
     for where, cls in _sync_contract_classes(model):
         if not cls._supports_weight_sync:
             raise ValueError(
-                f"{cls.__name__} (at {where!r}) does not support vLLM weight sync: the sync forwards "
-                f"trainer parameter names straight into vLLM's model.load_weights, but "
-                f"{cls._WEIGHT_SYNC_REFUSAL_REASON}. Online/environmental GRPO with vLLM weight sync "
+                f"{cls.__name__} (at {where!r}) does not support weight sync: the sync forwards "
+                f"trainer parameter names straight into the engine's model.load_weights, but "
+                f"{cls._WEIGHT_SYNC_REFUSAL_REASON}. Online/environmental GRPO with weight sync "
                 f"is unsupported for this model — see {cls.__name__}._supports_weight_sync."
             )
         unservable = model_types & set(cls._WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES)
@@ -216,7 +216,7 @@ class _HubForwarder:
     its sources together while the engine loads one tensor at a time.
 
     Every forward runs under the caller's ``guard``: this object is the only part of the sync that can
-    fail on one rank alone (a host OOM pinning the snapshot, an HTTP/NCCL error from the client, a
+    fail on one rank alone (a device OOM staging the snapshot, an HTTP/NCCL error from the client, a
     tensor the engine's key space rejects), and it does so between two group-wide gathers.
     """
 
@@ -308,25 +308,14 @@ def wants_fused_experts(expert_layout: str) -> bool:
     )
 
 
-def validate_backend_parallelism(backend: str, parallelism_config, model: torch.nn.Module) -> None:
-    """Reject an engine/parallelism/model triple whose weight sync cannot work, at construction.
+def validate_backend_expert_layout(backend: str, model: torch.nn.Module) -> None:
+    """Reject an engine/model pair whose expert layout the weight sync cannot ship, at construction.
 
     Caught here rather than at the first sync: by then the run has loaded the model, collected a
     round of rollouts and paused the engine, and the failure lands mid-broadcast with the served
     weights already partly overwritten.
     """
     client_cls = resolve_weight_sync_client(backend)
-    if parallelism_config.is_ep_mode and not client_cls.SUPPORTS_EXPERT_PARALLEL:
-        # is_ep_mode is ep_size * expert_tp_size > 1, so pure ETP trips this too; name both sizes.
-        raise ValueError(
-            f"rollout_backend={backend!r} cannot be combined with expert distribution "
-            f"(expert_parallel_size={parallelism_config.ep_size}, "
-            f"expert_tensor_parallel_size={parallelism_config.expert_tp_size} — the sync is blocked by "
-            f"their product, {parallelism_config.ep_group_size}, exceeding 1): "
-            f"{client_cls.__name__} declares its weight sync cannot share a process with DeepEP. "
-            f"Use a backend that supports it, or set both sizes to 1. "
-            f"See agent-docs/infrastructure/rollout-servers.md."
-        )
     # An engine that takes the per-expert layout has no fused contract to check.
     if not wants_fused_experts(client_cls.EXPERT_LAYOUT):
         return
@@ -389,19 +378,28 @@ def _send_ep_expert_weights(
         # Guarded only where it retains: a non-retaining rank runs the same collectives and keeps
         # nothing, so a raise there is a group-wide failure rather than this rank's own.
         gathered = guard.run(gather) if retain else gather()
-        if forwarder is None or not gathered:
-            continue
-        for param_name, param_data in gathered.items():
-            forwarder.send(f"{layer_name}.{param_name}", param_data)
-        # Per layer, so a hub split of this layer's experts never outlives the next layer's gather.
-        forwarder.flush()
+        if forwarder is not None and gathered:
+            _forward_gathered_layer(forwarder, layer_name, gathered)
+        # Released before the next layer's gather: the assembly is the sync's largest rank-local
+        # allocation, and a binding kept across the loop would hold two of them.
+        del gathered
+
+
+def _forward_gathered_layer(forwarder: _HubForwarder, layer_name: str, gathered: dict[str, torch.Tensor]) -> None:
+    """Forward one assembled EP layer, then flush the hub converters it may have fed.
+
+    Per layer, so a hub split of this layer's experts never outlives the next layer's gather; a
+    function of its own so the last tensor's binding dies with the layer.
+    """
+    for param_name, param_data in gathered.items():
+        forwarder.send(f"{layer_name}.{param_name}", param_data)
+    forwarder.flush()
 
 
 def _send_dense_weights(
     model: torch.nn.Module,
     ep_layers: dict[str, EPMoELayerBase],
     forwarder: _HubForwarder | None,
-    peft: bool = False,
 ) -> None:
     """Gather non-expert (dense) params — one ``full_tensor()`` over FSDP2 DP and TP — and forward them.
 
@@ -419,12 +417,10 @@ def _send_dense_weights(
             continue
         if hand_sliced and name.endswith(hand_sliced):
             continue
-        raw = param.data
-        data = materialize_dtensor(raw)
-        # Sends buffer by reference and flush after PEFT unmerge, so a plain param must be cloned first.
-        if peft and data is raw:
-            data = data.clone()
+        data = materialize_dtensor(param.data)  # collective on every rank
         if forwarder is not None:
+            # A plain param aliases the live weight, which the PEFT unmerge rewrites before the tail
+            # flush; the client buffers a snapshot, so no clone is needed here.
             forwarder.send(name, data)
 
     # Every rank drains this (collective); only the forwarding rank sends.
@@ -439,7 +435,7 @@ def _flush_and_close(sender: Any) -> None:
     """Send the tail chunk and close the engine's update, aborting the update if that raises.
 
     ``reset_prefix_cache`` closes and resumes on its own success path, but a raise before the close
-    (the D2H completion of the tail's host snapshots, or a chunk the engine rejects on arrival) would
+    (the completion of the tail's staged copies, or a chunk the engine rejects on arrival) would
     leave the engine quiesced behind an open reload with nothing else on this path to end it.
     """
     try:
@@ -516,7 +512,7 @@ def gather_and_send_weights(
             else None
         )
         _send_ep_expert_weights(ep_layers, forwarder, guard, expert_layout)
-        _send_dense_weights(model, ep_layers, forwarder, peft)
+        _send_dense_weights(model, ep_layers, forwarder)
     # Collective on every rank. Raises on all of them with the forwarding rank's cause, after the
     # adapters are unmerged, so a failed sync leaves the trainer's own weights untouched.
     guard.reject()

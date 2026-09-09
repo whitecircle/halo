@@ -5,9 +5,8 @@ rank 0 and, while the engine is quiesced, streams the gathered parameters to it 
 chunks. Both wire protocols are chunk-oriented (one quiesce, N declared payloads), so the forwarding
 rank stages at most one chunk on its sync GPU instead of a full model. Staged on the device, not in
 pinned host memory: a chunk that transits the host is copied out and back over PCIe before it
-reaches the NIC, and those two copies, not the fabric, set the sync rate (measured 19-24 GB/s for a
-host-staged push against 53-80 GB/s device-staged over EFA). Only the HTTP verbs and the broadcast
-transport differ; those are in ``VLLMWeightSyncClient`` / ``SGLangWeightSyncClient``.
+reaches the NIC, and those two copies, not the fabric, would set the sync rate. Only the HTTP verbs
+and the broadcast transport differ; those are in ``VLLMWeightSyncClient`` / ``SGLangWeightSyncClient``.
 
 The gather layer (``src/trainers/grpo/rollout/weight_sync.py``) drives whichever client it is given
 through ``update_named_param`` + ``reset_prefix_cache``.
@@ -33,21 +32,6 @@ from src.env import env_positive_int, env_str
 
 logger = logging.getLogger(__name__)
 
-
-def resolve_weight_sync_chunk_bytes() -> int:
-    """Budget for one streamed chunk on the sync GPU: ``HALO_WEIGHT_SYNC_CHUNK_MB``, default 1024.
-
-    The staged chunk drains into the engine as soon as the budget is reached, so the forwarding
-    rank's footprint is this plus the largest single tensor (one above the budget becomes its own
-    chunk, since both wire protocols describe whole tensors), and the SGLang client keeps two device
-    arenas of this size for its broadcasts. Each chunk costs one engine round trip, which is what
-    bounds the vLLM path: measured over EFA, 1 / 2 / 4 / 8 GiB chunks pushed a 16 GB model at 54 /
-    63 / 70 / 73 GB/s; the SGLang path reaches the fabric's rate at the default.
-    """
-    return env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", DEFAULT_PACKED_BUFFER_SIZE_BYTES >> 20) << 20
-
-
-WEIGHT_SYNC_CHUNK_BYTES = resolve_weight_sync_chunk_bytes()
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "0.0.0.0", "::1", "localhost"}
 # UDP "connect" target used only to make the kernel pick this host's outbound interface, whose local
@@ -80,9 +64,34 @@ _TEMPERATURE_APPLIED_GAP_RATIO_MAX = 0.75
 _NUCLEUS_RENORM_MIN_SHIFT_NATS = 1e-3
 
 
+def resolve_weight_sync_chunk_bytes() -> int:
+    """Budget for one streamed chunk on the sync GPU: ``HALO_WEIGHT_SYNC_CHUNK_MB``, default 1024.
+
+    The staged chunk drains into the engine as soon as the budget is reached, so the forwarding
+    rank's staged footprint is this plus the largest single tensor (one above the budget becomes its
+    own chunk, since both wire protocols describe whole tensors); the SGLang client's staging arena
+    is at least this size, while the vLLM producer's packed buffers stay at their own size. Each
+    chunk costs one engine round trip, so a larger budget trades staged memory for fewer round trips
+    (the vLLM path's remaining per-chunk cost).
+    """
+    return env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", DEFAULT_PACKED_BUFFER_SIZE_BYTES >> 20) << 20
+
+
+WEIGHT_SYNC_CHUNK_BYTES = resolve_weight_sync_chunk_bytes()
+
+
 def payload_bytes(tensor: torch.Tensor) -> int:
     """Wire size of one tensor, the unit the chunk budgets below are counted in."""
     return tensor.numel() * tensor.element_size()
+
+
+def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], list[str], list[list[int]]]:
+    """``(names, dtype names, shapes)`` of one chunk in wire order: what both engines' update requests
+    declare ahead of the broadcasts, so the consumer allocates and unpacks against them."""
+    names = [name for name, _ in chunk]
+    dtypes = [str(param.dtype).split(".")[-1] for _, param in chunk]
+    shapes = [list(param.shape) for _, param in chunk]
+    return names, dtypes, shapes
 
 
 def starts_new_chunk(buffered_bytes: int, item_bytes: int, budget: int) -> bool:
@@ -148,16 +157,28 @@ def _is_local_address(host: str) -> bool:
         return False
 
 
+def resolve_sync_device(device: torch.device | str | int) -> torch.device:
+    """The explicit ``cuda:N`` form of ``device``.
+
+    An index (0 included) and a bare ``"cuda"`` must name the same GPU the transport is formed on
+    and the snapshots are staged on, and ``torch.device("cuda")`` compares unequal to ``cuda:0``.
+    """
+    resolved = device if isinstance(device, torch.device) else torch.device(device)
+    if resolved.type == "cuda" and resolved.index is None:
+        resolved = torch.device("cuda", torch.cuda.current_device())
+    return resolved
+
+
 def snapshot_param(weights: torch.Tensor, device: torch.device | None) -> torch.Tensor:
-    """A copy of ``weights`` on ``device`` (the source's own device when ``None``), never an alias.
+    """A contiguous copy of ``weights`` on ``device`` (the source's own when ``None``), never an alias.
 
     A snapshot: an in-place mutation of the source after buffering (a PEFT unmerge, the next
-    optimizer step) cannot revert a staged weight before it is sent. The copy is async on the
-    caller's stream; the flush completes it before a producer reads the tensor.
+    optimizer step) cannot revert a staged weight before it is sent. One copy even from a strided
+    source, since ``copy_`` reads any layout. It is async on the caller's stream; the flush
+    completes it before a producer reads the tensor.
     """
-    src = weights.detach().contiguous()
-    snapshot = torch.empty_like(src, device=src.device if device is None else device)
-    snapshot.copy_(src, non_blocking=True)
+    snapshot = torch.empty_like(weights, memory_format=torch.contiguous_format, device=device)
+    snapshot.copy_(weights.detach(), non_blocking=True)
     return snapshot
 
 
@@ -249,7 +270,7 @@ class SamplerLogprobSemantics(NamedTuple):
 
 
 class BaseWeightSyncClient:
-    """HTTP session, group addressing and host-side parameter buffering shared by every engine.
+    """HTTP session, group addressing and chunk staging shared by every engine.
 
     Subclasses implement the engine-specific half (``init_communicator``, ``begin_weight_update``,
     ``_broadcast_chunk``, ``end_weight_update``, ``close_communicator``) and declare:
@@ -262,8 +283,6 @@ class BaseWeightSyncClient:
     * ``RESUME_ENDPOINT`` / ``RESUME_PAYLOAD``: the route (and body, where the engine's handler takes
       a request object) that lifts the sync quiesce, used by :meth:`_lift_pause`.
     * ``EXPERT_LAYOUT`` (default ``"unfused"``): which expert layout this engine's loader accepts.
-    * ``SUPPORTS_EXPERT_PARALLEL`` (default ``True``): whether this engine's weight sync works
-      alongside DeepEP in one trainer process, read by the gather layer.
     """
 
     BACKEND_KEY = ""
@@ -282,9 +301,6 @@ class BaseWeightSyncClient:
     UNFUSED_EXPERT_LAYOUT = "unfused"
     FUSED_EXPERT_LAYOUT = "fused"
     EXPERT_LAYOUT = UNFUSED_EXPERT_LAYOUT
-    # Whether this engine's weight sync survives alongside DeepEP in one trainer process. Declared
-    # per client because the obstruction is the engine's transport, not anything about the model.
-    SUPPORTS_EXPERT_PARALLEL = True
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal that
     # follows one. Declared per client because it follows from the engine's own reload model.
     INTERRUPTED_UPDATE_STATE = "a model that is part old weights and part new"
@@ -545,16 +561,9 @@ class BaseWeightSyncClient:
         return self._sync_device
 
     def _resolve_sync_device(self, device: torch.device | str | int) -> torch.device:
-        """The explicit ``cuda:N`` form of ``device``, recorded as this client's :attr:`sync_device`.
-
-        The index is made explicit because ``torch.device("cuda")`` compares unequal to ``cuda:0`` and
-        carries no index for the D2H completion sync to name.
-        """
-        resolved = device if isinstance(device, torch.device) else torch.device(device)
-        if resolved.type == "cuda" and resolved.index is None:
-            resolved = torch.device("cuda", torch.cuda.current_device())
-        self._sync_device = resolved
-        return resolved
+        """Record :func:`resolve_sync_device` of ``device`` as this client's :attr:`sync_device`."""
+        self._sync_device = resolve_sync_device(device)
+        return self._sync_device
 
     def init_communicator(self, device: torch.device | str | int = 0):
         raise NotImplementedError
@@ -632,15 +641,6 @@ class BaseWeightSyncClient:
         """Sync every model param in one quiesced update."""
         self.sync_model_weights([(n, p.data) for n, p in model.named_parameters()])
 
-    def snapshot_param(self, weights: torch.Tensor) -> torch.Tensor:
-        """One snapshot of ``weights`` on this client's sync device (:func:`snapshot_param`).
-
-        Read-only after creation, so one can be shared across several clients' buffers (see
-        ``buffer_param``). Before ``init_communicator`` there is no sync device and the copy stays on
-        the source's device.
-        """
-        return snapshot_param(weights, self.sync_device)
-
     def buffer_param(self, name: str, snapshot: torch.Tensor):
         """Buffer a pre-made snapshot (from ``snapshot_param``) by reference, for the next chunk.
 
@@ -668,10 +668,11 @@ class BaseWeightSyncClient:
         # the update as soon as the first chunk fills, so a later rejection lands mid-stream and the
         # abort path handles the engine's state.
         validate_syncable_param(name, weights)
-        snapshot = self.snapshot_param(weights)
-        if starts_new_chunk(self._buffered_bytes, payload_bytes(snapshot), WEIGHT_SYNC_CHUNK_BYTES):
+        # Flushed before the snapshot, so the staged chunk never holds more than the budget plus this
+        # param. Before init_communicator there is no sync device and the copy stays on the source's.
+        if starts_new_chunk(self._buffered_bytes, payload_bytes(weights), WEIGHT_SYNC_CHUNK_BYTES):
             self.flush_chunk()
-        self.buffer_param(name, snapshot)
+        self.buffer_param(name, snapshot_param(weights, self.sync_device))
 
     def flush_chunk(self):
         """Send what is buffered as one chunk, leaving the update open for the chunks that follow."""

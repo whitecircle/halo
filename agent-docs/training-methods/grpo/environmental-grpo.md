@@ -65,7 +65,7 @@ Reference configs live under `examples/grpo/environmental/<family>/<backend>/`, 
 
 The `-full-` siblings turn PEFT off (full-FT LR, ZeRO-3 at ep1 for activation headroom); the `-ep4` siblings run one 4-rank DeepEP group with ZeRO-2 for the dense params — use them when expert weights or optimizer state are the memory pressure. The code-contests configs use [chunked log-probs](#chunked-log-probs) and the [tuned verifiable-reward objective](online-grpo.md#grpo-objective-for-verifiable-rewards); every per-family recipe runs `beta: 0` (only `environmental-grpo-template.yaml` carries `beta: 0.01`), which also sidesteps the implicit-reference rejection a full-finetune-under-EP shape would hit. The code-contests configs set `episode_timeout: 2700`, which needs `DIST_NCCL_TIMEOUT_MINUTES=60` on the trainer — an episode timeout above the NCCL watchdog is rejected before the first rollout ([Troubleshooting](#troubleshooting)).
 
-SGLang variants exist only for gpt-oss at ep1: the backend is rejected under any expert distribution, and gpt-oss is the only MoE family whose EP layer implements the fused expert gather SGLang's loaders consume — every other family, Qwen3 MoE included, is refused at construction ([Rollout Servers](../../infrastructure/rollout-servers.md#the-fused-expert-layout-is-declared-per-family)).
+SGLang variants exist only for gpt-oss: it is the only MoE family whose EP layer implements the fused expert gather SGLang's loaders consume — every other family, Qwen3 MoE included, is refused at construction ([Rollout Servers](../../infrastructure/rollout-servers.md#the-fused-expert-layout-is-declared-per-family)). Expert distribution is accepted on SGLang as on vLLM; the shipped SGLang configs are ep1 variants.
 
 ## NCCL weight synchronization
 

@@ -72,22 +72,20 @@ export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the 
 # NCCL_NET_GDR_LEVEL=2 (GPU Direct RDMA for inter-node EP), NCCL_P2P_LEVEL=NVL (NVLink intra-node P2P),
 # NCCL_DEBUG=WARN, and CUDA_DEVICE_MAX_CONNECTIONS=1 (DeepEP's free default, +9.7% on ep8; the
 # driver latches it at cuInit, so a launch outside the image must export it before the process starts).
-# On IB, NCCL_NET_PLUGIN stays unset → HPC-X. Set NCCL_IB_HCA only for a non-default HCA.
+# On IB, leave NCCL_NET_PLUGIN unset: the OFI plugin yields to NCCL's built-in IB transport. Set
+# NCCL_IB_HCA only for a non-default HCA.
 # AWS EFA: set the plugin explicitly — the base's shinit_v2 sets it only for a shell that sources
 # /etc/shinit_v2 — and name its net so a missing plugin fails instead of falling back to sockets:
 # export NCCL_NET_PLUGIN=ofi
 # export NCCL_NET=Libfabric
-# NCCL_PROTO=simple is optional (the plugin probes each endpoint for in-order RDMA writes and forces
-# it where the fabric lacks them); if set, set it on every rank of a communicator, a rollout server
-# joining a weight-sync group included — ranks on different protocol tables hang at their first
-# collective. FI_PROVIDER=efa and FI_EFA_USE_DEVICE_RDMA=1 are the plugin's and libfabric's defaults.
+# NCCL_PROTO=simple is optional; if set, set it on every rank of a communicator, a rollout server
+# joining a weight-sync group included (multi-node.md#rdma-fabrics). FI_PROVIDER=efa and
+# FI_EFA_USE_DEVICE_RDMA=1 are the plugin's and libfabric's defaults.
 # Cross-node EP (ep_scope=global) over EFA additionally needs proxy GIN + GDRCopy:
 # export NCCL_GIN_TYPE=2             # proxy GIN (EFA has no IBGDA)
 # and run the container with `--device /dev/gdrdrv` (host loads the gdrdrv module).
-# A rollout server on another node (online / env-GRPO) shares this env: `make ... EFA=1` passes
-# --device=/dev/infiniband NCCL_NET=Libfabric NCCL_NET_PLUGIN=ofi NCCL_IB_DISABLE=0 to the trainer
-# container, and the server takes the same through its compose EFA overlay
-# (docker-compose.vllm.efa.yml / docker-compose.sglang.efa.yml) — agent-docs/infrastructure/rollout-servers.md.
+# A rollout server on another node (online / env-GRPO): the server under its compose EFA overlay,
+# the trainer with `make ... EFA=1` — agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa.
 # export NVLINK_DOMAIN_SIZE=72        # GB200/GB300 NVL72 only; leave unset on ≤8-GPU nodes
 # export NCCL_DEBUG=INFO              # optional; overrides the image's WARN
 ```

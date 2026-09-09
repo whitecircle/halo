@@ -19,7 +19,11 @@ from src.env import env_positive_float, env_str
 logger = logging.getLogger(__name__)
 
 
-# Parsed once at import so a malformed value can't raise mid-RL-step.
+# Deadline for draining one chunk's broadcasts (a vLLM packed buffer, a SGLang chunk's sends), sized
+# for a full chunk over a slow link. The override replaces it alone: the warm-up and the failure-path
+# cleanup keep their own shorter deadlines. Parsed once at import so a malformed value can't raise
+# mid-RL-step.
+BROADCAST_DRAIN_TIMEOUT_S = 600.0
 _SYNC_TIMEOUT_OVERRIDE = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", None)
 
 # vLLM's own truthy spellings for VLLM_DISABLE_PYNCCL, and only those. It is the server's variable:
@@ -31,9 +35,15 @@ _VLLM_TRUE_VALUES = ("1", "true")
 # actually talk; generous because it also covers the peer's own NCCL init.
 _WARMUP_SYNC_TIMEOUT_S = 120.0
 # Poll cadence of the bounded sync loop. It sits on the critical path once per drained buffer or
-# chunk (a 1 GiB chunk crosses EFA in ~11 ms), so the granularity is a direct per-chunk tax: 50 ms
-# cost the SGLang client 4x its throughput. 1 ms still yields the GIL between polls.
+# chunk, a few milliseconds of transfer each, so the granularity is a direct per-chunk tax; 1 ms
+# still yields the GIL between polls.
 _SYNC_POLL_INTERVAL_S = 0.001
+
+
+def resolve_drain_timeout_s() -> float:
+    """The per-chunk broadcast drain deadline: ``HALO_NCCL_SYNC_TIMEOUT_SECONDS`` when set, else
+    :data:`BROADCAST_DRAIN_TIMEOUT_S`."""
+    return BROADCAST_DRAIN_TIMEOUT_S if _SYNC_TIMEOUT_OVERRIDE is None else _SYNC_TIMEOUT_OVERRIDE
 
 
 def vllm_pynccl_disabled() -> bool:
@@ -43,8 +53,6 @@ def vllm_pynccl_disabled() -> bool:
 
 def bounded_event_sync(event: torch.cuda.Event, timeout_s: float, what: str) -> None:
     """Wait for a recorded ``event`` with a deadline: a collective whose peer never arrives spins forever, and these comms have no torch watchdog."""
-    if _SYNC_TIMEOUT_OVERRIDE is not None:
-        timeout_s = _SYNC_TIMEOUT_OVERRIDE
     deadline = time.monotonic() + timeout_s
     while not event.query():
         if time.monotonic() > deadline:

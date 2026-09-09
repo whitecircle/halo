@@ -14,11 +14,11 @@ import time
 import weakref
 
 import ray
-import torch
 from accelerate.utils import is_peft_model
 from transformers import TrainerCallback
 from trl.extras.profiling import profiling_context
 
+from src.distributed.nccl.clients.base import resolve_sync_device
 from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import broadcast_from_rank0, get_num_nodes
 from src.environments.episode import RolloutResult
@@ -231,10 +231,7 @@ class AsyncRolloutMixin:
         if not self.accelerator.is_main_process:
             return
 
-        # PyNcclCommunicator requires an explicit cuda:N (torch.device("cuda") != cuda:0 in comparisons).
-        device = self.accelerator.device
-        if device.type == "cuda" and device.index is None:
-            device = torch.device("cuda", torch.cuda.current_device())
+        device = resolve_sync_device(self.accelerator.device)
 
         client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
 

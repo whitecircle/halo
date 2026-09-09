@@ -8,18 +8,18 @@ each of them fails *silently* at runtime: the run trains, logs a loss, and is qu
 without it every turn falls back to re-tokenizing a chat-template re-render behind a single warning.
 """
 
-import os
 import re
 import sys
 
 import pytest
 import yaml
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-VLLM_COMPOSE = os.path.join(PROJECT_ROOT, "docker-compose.vllm.yml")
-SGLANG_COMPOSE = os.path.join(PROJECT_ROOT, "docker-compose.sglang.yml")
-VLLM_EFA_OVERLAY = os.path.join(PROJECT_ROOT, "docker-compose.vllm.efa.yml")
-SGLANG_EFA_OVERLAY = os.path.join(PROJECT_ROOT, "docker-compose.sglang.efa.yml")
+from tests.common.utils import REPO_ROOT
+
+VLLM_COMPOSE = REPO_ROOT / "docker-compose.vllm.yml"
+SGLANG_COMPOSE = REPO_ROOT / "docker-compose.sglang.yml"
+VLLM_EFA_OVERLAY = REPO_ROOT / "docker-compose.vllm.efa.yml"
+SGLANG_EFA_OVERLAY = REPO_ROOT / "docker-compose.sglang.efa.yml"
 
 
 def _services(compose_path: str) -> dict:
@@ -79,16 +79,15 @@ def test_both_composes_configure_a_tool_call_parser():
     )
 
 
-def test_sglang_compose_matches_the_trainers_cumem_instead_of_forcing_sockets():
+def test_sglang_compose_matches_the_trainers_cumem_and_leaves_the_transports_to_nccl():
     """SGLang sets ``NCCL_CUMEM_ENABLE=0`` process-wide unless it is already set; the trainer's NCCL
     has cuMem on, and the mismatch fails the first cross-container buffer import. The compose file
-    pre-sets it, and no longer forces the socket-only recipe that stood in for that fix (which put
-    FSDP2's own collectives on loopback TCP)."""
+    pre-sets it; the CUDA-IPC and shared-memory transports and the plugin stay at NCCL's own
+    selection, since a same-host group runs over CUDA IPC and the EFA overlay names the plugin."""
     env = _environment(_services(SGLANG_COMPOSE)["sglang-server"])
     assert env.get("NCCL_CUMEM_ENABLE") == "${NCCL_CUMEM_ENABLE:-1}", env
-    for forced in ("NCCL_P2P_DISABLE", "NCCL_SHM_DISABLE"):
-        assert forced not in env, f"docker-compose.sglang.yml still forces {forced}"
-    assert env.get("NCCL_NET_PLUGIN") != "${NCCL_NET_PLUGIN:-none}", "the aws-ofi-nccl plugin is disabled by default"
+    for forced in ("NCCL_P2P_DISABLE", "NCCL_SHM_DISABLE", "NCCL_NET_PLUGIN"):
+        assert forced not in env, f"docker-compose.sglang.yml sets {forced}"
 
 
 def test_efa_overlays_put_every_service_of_their_base_on_the_fabric():
@@ -109,6 +108,15 @@ def test_efa_overlays_put_every_service_of_their_base_on_the_fabric():
             # An excluded-only interface list still ranks loopback first, and a server that
             # advertises 127.0.0.1 to a trainer on another node fails formation.
             assert env.get("NCCL_SOCKET_IFNAME", "").startswith("${NCCL_SOCKET_IFNAME:-^lo,"), (overlay, name, env)
+
+
+def test_every_server_and_trainer_service_passes_nccl_proto_through_bare():
+    """A protocol table set on the trainer alone hangs the first collective, on every recipe. The
+    entry must be bare: a ``${NCCL_PROTO:-}`` default would hand NCCL an explicit, empty protocol
+    list, and a defaulted value would pin the server where the trainer is not."""
+    for compose in (VLLM_COMPOSE, SGLANG_COMPOSE):
+        for name, service in _services(compose).items():
+            assert "NCCL_PROTO" in service.get("environment", []), (compose, name, "no bare NCCL_PROTO pass-through")
 
 
 def test_the_compose_command_carries_no_yaml_comment_lines():

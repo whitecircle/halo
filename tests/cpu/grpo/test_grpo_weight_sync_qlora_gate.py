@@ -46,7 +46,7 @@ class _FloatStub(nn.Module):
 
 
 def test_gate_rejects_quantized_model():
-    with pytest.raises(ValueError, match="QLoRA .* not supported with vLLM weight sync"):
+    with pytest.raises(ValueError, match="QLoRA .* not supported with rollout-engine weight sync"):
         validate_weight_sync_support(_QuantizedStub())
 
 
@@ -68,7 +68,7 @@ def test_online_setup_weight_sync_gates_quantized_model():
     """The online trainer's weight-sync install (called in ``__init__``) must run the gate BEFORE
     anything else, so a QLoRA model fails at construction rather than at the first sync."""
     me = _install_host(_QuantizedStub(), types.SimpleNamespace())
-    with pytest.raises(ValueError, match="QLoRA .* not supported with vLLM weight sync"):
+    with pytest.raises(ValueError, match="QLoRA .* not supported with rollout-engine weight sync"):
         DistributedGRPOTrainer._setup_weight_sync(me)
 
 
@@ -104,7 +104,7 @@ def _env_sync_host(model):
 def test_environmental_setup_weight_sync_gates_quantized_model():
     """The env trainer has no sync to install, so its gate IS the whole seam: it must reject a
     quantized model at construction rather than mid-broadcast at the first push."""
-    with pytest.raises(ValueError, match="QLoRA .* not supported with vLLM weight sync"):
+    with pytest.raises(ValueError, match="QLoRA .* not supported with rollout-engine weight sync"):
         DistributedAsyncEnvironmentalGRPOTrainer._setup_weight_sync(_env_sync_host(_QuantizedStub()))
 
 

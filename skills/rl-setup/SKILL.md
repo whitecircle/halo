@@ -3,8 +3,8 @@ name: rl-setup
 description: >-
   Wire up online GRPO (RLVR) or environmental (multi-turn tool-use) GRPO for
   Halo: bring up the separate rollout container — vLLM 0.26.0 (cu13), or
-  SGLang 0.5.17 for environmental GRPO (rollout_backend: sglang, gpt-oss + ep1
-  only) — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
+  SGLang 0.5.17 for environmental GRPO (rollout_backend: sglang, gpt-oss only)
+  — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
   NCCL weight sync through the vendored client in src/distributed/nccl/
   (parallelism-aware gather — EP/TP/ETP and multi-rank FSDP2 all participate),
   select the RL environment by registry name, and set the key GRPO

@@ -14,7 +14,7 @@ Every helper here is opt-in and costs nothing when disabled.
 | Hang stack dump (every rank on the node) | `scripts/profiling/py_spy_diag.py dump` | run standalone; needs `--cap-add=SYS_PTRACE` |
 | NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, while a failed `nvidia-smi` or an unrecognized counter layout raises |
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
-| Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, sockets, CUDA IPC), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
+| Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
 The consistency helpers live in `src/diagnostics/debugging.py`. They are **manual
 instrumentation** — the toolkit ships no call sites for them, so the env flag does nothing until you

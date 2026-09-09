@@ -28,6 +28,10 @@ services:
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
       # Keep the socket transport off Docker's bridge and per-container veth pairs.
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}
+      # Passed through bare from the shell or .env (unset stays unset): a protocol table set on the
+      # trainer alone hangs the first collective, so a trainer that pins NCCL_PROTO needs the server
+      # pinned the same way, on every recipe.
+      - NCCL_PROTO
     deploy:
       resources:
         reservations:

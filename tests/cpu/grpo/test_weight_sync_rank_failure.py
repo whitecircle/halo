@@ -182,7 +182,7 @@ def test_a_failing_flush_raises_on_every_rank(tmp_path):
 
     assert counters[1][1] == 0, "a non-forwarding rank flushed the engine — the rank gate is gone"
     # The flush closes the update only on the paths that REACH the close: a raise before it (the
-    # D2H completion of the tail's snapshots, a chunk the engine rejects) leaves the engine quiesced
+    # completion of the tail's staged copies, a chunk the engine rejects) leaves the engine quiesced
     # behind an open reload, and nothing else on this path ends it.
     assert counters[0][2] == 1, "the failing flush left the engine's update open — no abort followed it"
 

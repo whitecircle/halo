@@ -60,13 +60,17 @@ inside one quiesce (`/start_weight_update` … N × `/update_weights` … `/fini
 N × `/update_weights_from_distributed` between `/pause_generation` and `/continue_generation` on
 SGLang), so the forwarding rank sends each chunk as the gather fills it and stages one chunk on its
 sync GPU — not one model (~800 GB at 400B), and not in host memory: a chunk that transits pinned
-host memory is copied out and back over PCIe before the NIC sees it, which capped the push at
-19-24 GB/s against 53-80 GB/s staged on the device. The chunk is cut before the budget
-(`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB) is exceeded. In multi-server mode (`rollout_server_configs`)
+host memory is copied out and back over PCIe before the NIC sees it — 19-24 GB/s against 53-80 GB/s
+staged on the device. The chunk is cut before the budget
+(`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB) is exceeded; a tensor above it is a chunk of its own. The
+forwarding rank's peak during a sync is therefore the assembled EP layer being sent (the largest
+rank-local allocation, ~28 GB for one 397B layer), the staged chunk, the snapshot of the largest
+tensor, and the engine path's buffers (two vLLM packed buffers, one SGLang arena), each grown to
+the largest chunk seen. In multi-server mode (`rollout_server_configs`)
 one snapshot per parameter is shared across all servers and each chunk goes out to every server on
 concurrent threads, released once they all have it; the threads share the forwarding rank's GPU,
-NICs and process, and the fan-out measured as the sum rather than the max — two servers took 2×
-one server's push (27 GB/s each over EFA) — so the per-sync cost grows with the server count.
+NICs and process, and the fan-out costs the sum rather than the max — two servers each push at
+27 GB/s over EFA, half of one server's rate — so the per-sync cost grows with the server count.
 The trade is that a chunk cannot be replayed: a server that fails **after** its first chunk is
 reported rather than reconnected — the trainer does not hold what already landed. One that fails
 before any chunk went out (an engine restarted between syncs, the common case) is still recovered by
@@ -102,8 +106,9 @@ double-buffered) on vLLM and typed 1 GB chunks on SGLang.
 On vLLM, each client owns **one persistent CUDA stream pair** for the pack uploads, because PyTorch's
 caching allocator keeps freed blocks in per-stream pools: a fresh stream per sync would strand one
 payload of reserved memory every sync. The forwarding rank's steady state is therefore its training
-footprint plus about one sync of pack buffers. SGLang stages its chunks on the default stream and has
-no equivalent hazard.
+footprint plus about one sync of pack buffers. The SGLang client keeps one persistent send stream
+for the same reason and drops its arena at the end of every sync, so between syncs that memory is
+the allocator's rather than pinned at the largest chunk's size.
 
 Each rank logs a `[mem rankNN] weight-sync pre/post` line per collective sync to watch exactly
 this ([Debugging](../reference/debugging.md#3-gpu-memory-profiling)); `reserved` far above
@@ -310,11 +315,11 @@ the trainer sends `tools` for any env with a tool registry:
 | most others | `hermes` (`<tool_call>` XML) |
 
 `docker-compose.vllm.yml` defaults **both** containers to the no-fabric recipe (`NCCL_IB_DISABLE=1`
-and `NCCL_NET=Socket` on the trainer, `NCCL_IB_DISABLE=1` and `NCCL_P2P_LEVEL=NVL` on the server), so on
-a host without a fabric the cross-container group takes NVLink + sockets instead of the
-uninitialized OFI NET path, on which the first collective wedges (both GPUs spin at 100% and the
-trainer raises after 120 s: `NCCL weight-sync warm-up all-reduce did not complete`). On an EFA host
-layer `docker-compose.vllm.efa.yml` over it ([Servers on other nodes](#servers-on-other-nodes-efa)):
+and `NCCL_NET=Socket` on each, `NCCL_P2P_LEVEL=NVL` on the server), so on a host without a fabric
+the cross-container group takes NVLink + sockets on both ends by declaration rather than by each
+side's own fallback — two containers that land on different nets form the group and hang at the
+first collective ([Troubleshooting](#troubleshooting)). On an EFA host layer
+`docker-compose.vllm.efa.yml` over it ([Servers on other nodes](#servers-on-other-nodes-efa)):
 `NCCL_NET` is process-global, so a trainer left at `Socket` there sends every collective over TCP
 and breaks DeepEP.
 
@@ -420,13 +425,16 @@ The trainer's default process group cannot contain the engine's ranks (new group
 parent can only subset it), so `create_weight_update_group` forms the trainer↔engine group through
 a fresh TCP-store handshake both sides can reach. Teardown asks the engine to drop its half of the
 group concurrently with the local destroy — under cuMem transports each side's finalize waits for
-the other. A chunk's uploads go through one of two alternating device arenas on the sync GPU (each
-the chunk budget, `HALO_WEIGHT_SYNC_CHUNK_MB`), and an arena's sends are settled before it is
-reused two chunks later, under the same 600 s deadline as the vLLM path
-(`HALO_NCCL_SYNC_TIMEOUT_SECONDS` overrides it); a failed chunk is settled under a 30 s deadline.
-On expiry the group is aborted instead of parking the trainer. The settle is deferred rather than
-per chunk because a host-side drain after every chunk cost a fifth of the push rate: the engine
-acknowledges a chunk as soon as its data arrived, and the sender's kernels retire a little later.
+the other. A chunk's uploads go through one device arena on the sync GPU (the chunk budget,
+`HALO_WEIGHT_SYNC_CHUNK_MB`, grown for a tensor above it and released at the end of each sync),
+reused across chunks by stream order alone: uploads and broadcasts share one stream, so a chunk's
+copies queue behind the previous chunk's sends with no host wait. The host settles a chunk's sends
+two chunks later, under the same 600 s drain deadline as the vLLM path
+(`HALO_NCCL_SYNC_TIMEOUT_SECONDS` overrides it), and a failed chunk drains the whole stream under a
+30 s deadline; on expiry the group is aborted instead of parking the trainer. The settle is
+deferred rather than per chunk because the engine acknowledges a chunk as soon as its data arrived
+while the sender's kernels retire a little later, and a host-side drain after every chunk would
+serialize that tail with the next chunk's declaration, at a fifth of the push rate.
 
 ### The fused expert layout is declared per family
 
@@ -450,24 +458,22 @@ signal**: both MoE loaders `continue` on an unmatched `mlp.experts` name *before
 
 The trainer-side construction gates are the whole guard. They read the family's contract off a live EP
 wrapper, or — when a run has none (`use_grouped_gemm: false` at `ep_size: 1`) — off the `model_type`
-registry. The same gate honors a client's `SUPPORTS_EXPERT_PARALLEL` declaration
-(`validate_backend_parallelism`); no shipped client sets it `False`, so expert distribution is
-accepted on both engines.
+registry (`validate_backend_expert_layout`). Expert distribution (EP, ETP) is accepted on both
+engines: the sync group is ordinary NCCL beside DeepEP's.
 
 ## Servers on other nodes (EFA)
 
 The weight-sync group rides the node's fabric when both containers can drive it. All three images
-carry one EFA userspace, installed whole by `docker/efa/install_efa_userspace.sh`: the EFA installer
-1.46.0's rdma-core (60) and AWS libfabric 2.3.1amzn4.0 — the libfabric the training image's NGC base
-bundles, whose MOFED rdma-core the script replaces — and `aws-ofi-nccl` built at commit `1f0a976`
-against the NCCL wheel `uv.lock` pins. The stack is wire-sensitive down to rdma-core: at init the
+carry one EFA userspace, installed whole by `docker/efa/install_efa_userspace.sh` — rdma-core, AWS
+libfabric and one `aws-ofi-nccl` build; the pins live in the script, the inventory on
+[Docker](docker.md#rdma-networking-infiniband-and-efa). The stack is wire-sensitive down to rdma-core: at init the
 plugin probes libfabric for in-order RDMA writes and forces `NCCL_PROTO=simple` when the probe
 fails, and the answer comes from rdma-core's EFA provider (`libefa`). The NGC base's MOFED `libefa`
-59.1 fails it, the installer's 60 passes, and two containers whose answers differ form the group
+fails it, the installer's passes, and two containers whose answers differ form the group
 with different NCCL protocol tables and hang at the first collective — the same signature as a
 plugin-version mismatch. So both ends must run images built from the same script; a pair that
-cannot be rebuilt runs with `NCCL_PROTO=simple` on both ends instead (measured: either fix restores
-the full rate). The preflight below reports a side whose plugin forced the simple protocol. The
+cannot be rebuilt runs with `NCCL_PROTO=simple` on both ends instead — either restores the full
+rate. The preflight below reports a side whose plugin forced the simple protocol. The
 upstream vLLM and SGLang bases ship no EFA userspace, and NCCL then falls back to sockets with no
 message.
 
@@ -507,12 +513,14 @@ python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8
 
 Run it from the trainer container, launched as the trainer would be (same image, devices and NCCL
 env), on a GPU the server does not own. It forms the group against the live server (either
-backend), pushes one real parameter of the served checkpoint (`model.embed_tokens.weight` by
-default, value unchanged, so the served model is unchanged) and reports the transport NCCL formed
-on — `NET/Libfabric/…/GDRDMA` (EFA with GPUDirect), `NET/Socket`, or `P2P/CUMEM` (same-host CUDA
-IPC) — the `aws-ofi-nccl` build string, the libfabric provider, and GB/s. `--expect efa|socket|p2p`
-makes it a gate (exit 1 on a mismatch, on an altered served model, or when the group fails to
-form); flags on [Scripts](../reference/scripts-reference.md#profiling--benchmarks).
+backend), pushes one real parameter of the served checkpoint (the input embedding by default, value
+unchanged, so the served model is unchanged — the checkpoint read on the trainer side must be the
+one the server loaded, `--model-id` when the served id is a server-side path or an alias) and
+reports the transport NCCL formed on — `NET/Libfabric/…/GDRDMA` (EFA with GPUDirect), `NET/IB`,
+`NET/Socket`, `P2P/CUMEM` (same-host CUDA IPC) or `SHM` — the `aws-ofi-nccl` build string, the
+libfabric provider, and GB/s. `--expect efa|ib|socket|p2p|shm` makes it a gate (exit 1 on a
+mismatch, on an altered served model, or when the group fails to form); flags on
+[Scripts](../reference/scripts-reference.md#profiling--benchmarks).
 
 Measured on 4× p6-b300, trainer node → server node, one worker, the trainer's own streamed path
 (`update_named_param` per gathered tensor, `reset_prefix_cache`), full model per sync (NIC line

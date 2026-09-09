@@ -20,7 +20,7 @@ from transformers import CONFIG_MAPPING, PretrainedConfig
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.trainers.grpo.rollout.weight_sync import validate_backend_parallelism, validate_weight_sync_support
+from src.trainers.grpo.rollout.weight_sync import validate_backend_expert_layout, validate_weight_sync_support
 
 
 class _StockModel(nn.Module):
@@ -57,7 +57,7 @@ def _model_type_without_fused_gather() -> str:
 
 
 def test_flag_false_family_is_refused_without_wrappers():
-    with pytest.raises(ValueError, match="does not support vLLM weight sync"):
+    with pytest.raises(ValueError, match="does not support weight sync"):
         validate_weight_sync_support(_StockModel("deepseek_v4"))
 
 
@@ -78,7 +78,7 @@ def test_unservable_model_type_is_refused_with_a_live_wrapper():
 def test_fused_layout_engine_is_refused_without_wrappers():
     model_type = _model_type_without_fused_gather()
     with pytest.raises(ValueError, match="does not implement"):
-        validate_backend_parallelism("sglang", _NO_EP, _StockModel(model_type))
+        validate_backend_expert_layout("sglang", _StockModel(model_type))
 
 
 def test_servable_sibling_and_dense_models_pass():
@@ -86,7 +86,7 @@ def test_servable_sibling_and_dense_models_pass():
     validate_weight_sync_support(_StockModel("qwen3"))  # dense: no EP family resolves at all
     # Anti-vacuity for the rejection above: vLLM takes the per-expert layout the same family gathers,
     # so the engine's expert layout is what makes SGLang refuse it — not the model_type resolving.
-    validate_backend_parallelism("vllm", _NO_EP, _StockModel(_model_type_without_fused_gather()))
+    validate_backend_expert_layout("vllm", _StockModel(_model_type_without_fused_gather()))
 
 
 if __name__ == "__main__":

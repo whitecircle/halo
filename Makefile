@@ -48,7 +48,7 @@ DOCKER_RUN = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_
   $(if $(strip $(ENV_FILE)),--env-file $(ENV_FILE),) \
   -e HF_HOME=$(HALO_SCRATCH)/hf -e HF_DATASETS_CACHE=$(HALO_SCRATCH)/hf/datasets \
   -e TMPDIR=$(HALO_SCRATCH)/tmp -e HALO_DATA_ROOT=$(HALO_SCRATCH) \
-  -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(EXTRA_DOCKER_ENV) \
+  -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(NCCL_PROTO_ENV) $(EXTRA_DOCKER_ENV) \
   -v $(CURDIR):/workspace $(MNT_MOUNT) $(if $(strip $(AWS_DIR)),-v $(AWS_DIR):/root/.aws,) -w /workspace \
   $(IMAGE)
 # Per-target additions to the run above (see test-gpu-vllm).
@@ -57,14 +57,22 @@ EXTRA_DOCKER_ENV ?=
 # every other trainer collective. EFA=1 passes the EFA devices and names the aws-ofi-nccl net (a
 # missing plugin then fails loudly instead of falling back to sockets); the rollout server must run
 # under the matching compose overlay (docker-compose.*.efa.yml). Without it the two server test
-# tiers force the no-fabric socket recipe both compose bases default to.
-# NCCL_SOCKET_IFNAME on the fabric excludes lo: an excluded-only list still ranks loopback first,
-# and a bootstrap address of 127.0.0.1 never reaches a peer on another node.
+# tiers force the no-fabric socket recipe the compose files default to.
+# NCCL_SOCKET_IFNAME (from the shell or the make command line; make does not read .env) overrides
+# either recipe's interface selection. The fabric default excludes lo:
+# an excluded-only list still ranks loopback first, and a bootstrap address of 127.0.0.1 never
+# reaches a peer on another node; the no-fabric default keeps the same-host loopback path.
+# NCCL_PROTO, when set in the calling shell, reaches the container: a protocol table on the trainer
+# alone hangs the first collective, so the compose EFA overlays pass it to the server the same way.
 EFA ?=
-NCCL_SOCKET_IFNAME ?= ^lo,docker,veth,tailscale
+NCCL_SOCKET_IFNAME ?=
+EFA_SOCKET_IFNAME_DEFAULT = ^lo,docker,veth,tailscale
+NO_FABRIC_SOCKET_IFNAME_DEFAULT = ^docker,veth
 EFA_DOCKER_FLAGS = $(if $(filter 1,$(EFA)),--device=/dev/infiniband -e NCCL_NET=Libfabric -e NCCL_NET_PLUGIN=ofi \
-  -e NCCL_IB_DISABLE=0 -e NCCL_SOCKET_IFNAME=$(NCCL_SOCKET_IFNAME),)
-NO_FABRIC_ENV = $(if $(filter 1,$(EFA)),,-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_SOCKET_IFNAME=^docker,veth)
+  -e NCCL_IB_DISABLE=0 -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(EFA_SOCKET_IFNAME_DEFAULT)),)
+NO_FABRIC_ENV = $(if $(filter 1,$(EFA)),,-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket \
+  -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(NO_FABRIC_SOCKET_IFNAME_DEFAULT)))
+NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
 # CPU-only variant (no --gpus): CPU tests, lint, docs inside the image. The Hugging Face cache is
 # mounted read-write so the tests that load a real tokenizer work without the hub; set HF_CACHE= to
 # disable that mount.

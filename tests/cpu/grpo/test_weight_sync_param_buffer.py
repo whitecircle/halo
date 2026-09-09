@@ -34,11 +34,12 @@ import weakref
 import pytest
 import torch
 
-from src.distributed.nccl.clients.base import resolve_weight_sync_chunk_bytes, snapshot_param
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
+import src.distributed.nccl.clients.base as base_module
+from src.distributed.nccl.clients.base import resolve_sync_device, resolve_weight_sync_chunk_bytes, snapshot_param
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
+from tests.common.weight_sync import offline_sglang_client
 
 
 class _Wire:
@@ -138,6 +139,7 @@ def test_a_snapshot_is_contiguous_and_on_the_requested_device():
     strided = torch.arange(16, dtype=torch.float32).reshape(4, 4).t()
     snapshot = snapshot_param(strided, torch.device("cpu"))
     assert snapshot.is_contiguous() and snapshot.device.type == "cpu"
+    assert snapshot.dtype == strided.dtype, "the wire declares the source dtype, so the snapshot must keep it"
     assert torch.equal(snapshot, strided)
     assert snapshot_param(strided, None).device == strided.device, "no device pins the source's own"
 
@@ -227,9 +229,10 @@ def test_manager_stages_one_snapshot_per_param(monkeypatch):
 
 
 def test_manager_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
-    """``init_communicators(0)`` must stage on CUDA device 0: an int index is falsy, so a helper that
-    falls back on ``device or source`` silently stages on the source's device instead. The manager
-    stores a normalized ``torch.device`` and the helper tests for ``None`` explicitly."""
+    """``init_communicators(0)`` must stage on CUDA device 0: the manager stores the resolved
+    ``torch.device``, so an int index (0 included, which is falsy) or a bare ``"cuda"`` names the same
+    GPU the clients join on."""
+    assert resolve_sync_device(0) == torch.device("cuda", 0)
     joined: list = []
 
     class _StubClient:
@@ -366,7 +369,7 @@ def test_chunks_are_cut_before_the_budget_is_exceeded(monkeypatch):
     """The budget must bound what goes OUT, not what went out plus the tensor that crossed it.
 
     Cutting after it is reached puts the crossing tensor in the chunk on the wire: up to a second
-    budget of pinned host memory here, and the same overshoot in the receive buffers the engine
+    budget of staged device memory here, and the same overshoot in the receive buffers the engine
     allocates for every declared name before the first byte arrives.
     """
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
@@ -420,8 +423,7 @@ def test_sglang_declares_one_request_per_chunk(monkeypatch):
     fragment its own ``/update_weights_from_distributed`` declare, thread and round-trip.
     """
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
-    client._reset_buffer_state()
+    client = offline_sglang_client()
     declares: list[list[str]] = []
     client.begin_weight_update = lambda: None
     client._send_chunk = lambda chunk, flush_cache: declares.append([name for name, _ in chunk])
@@ -464,9 +466,15 @@ def test_the_default_chunk_budget_is_one_packed_buffer(monkeypatch):
     assert resolve_weight_sync_chunk_bytes() == DEFAULT_PACKED_BUFFER_SIZE_BYTES
 
 
+def test_the_module_constant_is_the_resolved_budget():
+    """The clients read the budget through the module constant; one that ignored the resolver would
+    leave the knob documented but inert."""
+    assert resolve_weight_sync_chunk_bytes() == base_module.WEIGHT_SYNC_CHUNK_BYTES
+
+
 def test_the_chunk_budget_is_read_from_the_env_in_megabytes(monkeypatch):
-    """``HALO_WEIGHT_SYNC_CHUNK_MB`` sizes the pinned host chunk (and the SGLang client's device
-    arenas); an ignored or misparsed value silently leaves the default in place."""
+    """``HALO_WEIGHT_SYNC_CHUNK_MB`` sizes the chunk staged on the sync GPU (and the SGLang client's
+    device arena); an ignored or misparsed value silently leaves the default in place."""
     monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", "2048")
     assert resolve_weight_sync_chunk_bytes() == 2 * 2**30
     monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", "0")

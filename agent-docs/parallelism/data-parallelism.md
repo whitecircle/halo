@@ -78,8 +78,8 @@ gradient-accumulation window's microsteps** (torch `set_reshard_after_backward`)
 SHARD_GRAD_OP, FSDP2 reshards each module after its backward and re-all-gathers it on the next
 microstep's forward — one full param re-gather per grad-accum microstep for weights that did not
 change in between. Over NVLink that traffic is negligible; with the trainer's NCCL on TCP sockets
-it measures ~15 s per re-gather at gpt-oss-20b scale — ~6 minutes of every optimizer step at
-`gradient_accumulation_steps: 24`.
+(the no-fabric compose recipe, `NCCL_NET=Socket`) it measures ~15 s per re-gather at gpt-oss-20b
+scale — ~6 minutes of every optimizer step at `gradient_accumulation_steps: 24`.
 
 The window's **last** backward still reshards: the trainer arms the flag per microstep from
 `accelerator.sync_gradients` in `src/trainers/mixins/base.py`. That leaves one re-gather per

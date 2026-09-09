@@ -24,7 +24,7 @@ IPC over NVLink) stays selectable for intranode EP via `ep_buffer_backend`.
   `num_nodes > 1` and `node_local=False`); intra-node runs the non-Gin path and needs no RDMA.
 - Python 3.12 (`requires-python = ">=3.12,<3.13"`); PyTorch 2.11+ (`pyproject.toml` pins `torch>=2.11.0,<2.12.0`); CUDA 12.3+ (image 13.2);
   ninja (nvcc device linking under `-rdc=true`).
-- **NCCL 2.30.4+** — the Gin backend's floor; `uv.lock` pins `2.31.2` and every image shares it. `torch 2.11+cu130` ships `nvidia-nccl-cu13==2.28.9`.
+- **NCCL 2.30.4+** — the Gin backend's floor; `uv.lock` pins the exact version every image shares. `torch 2.11+cu130` ships `nvidia-nccl-cu13==2.28.9`.
 
 ## Build from source
 
@@ -341,12 +341,12 @@ host-driven **proxy Gin** (`NCCL_GIN_TYPE=2`), copying completions to GPU memory
 |------|-------------|--------|
 | GIN plugin | **image** | `docker/efa/install_efa_userspace.sh` builds a GIN-capable `aws-ofi-nccl` (exports `ncclGinPlugin_v13`) at one pinned commit into every Halo image — the NGC-bundled 1.17.3 exports no `ncclGin` — and exposes it as `libnccl-gin.so`. NCCL ≥ 2.30.4 is the GIN-API floor. |
 | GDRCopy ≥ 2.5 | **image + host** | `libgdrapi` is built into the image; the `gdrdrv` kernel module + `/dev/gdrdrv` come from the host. Pass `--device /dev/gdrdrv`. |
-| Launch env | **per job** | `NCCL_NET_PLUGIN=ofi`, `FI_PROVIDER=efa`, `FI_EFA_USE_DEVICE_RDMA=1`, `NCCL_PROTO=simple`, `NCCL_GIN_TYPE=2` — the same block as [Launch Recipes](../parallelism/launch-recipes.md#environment-variables) plus the proxy-GIN type. |
+| Launch env | **per job** | `NCCL_NET_PLUGIN=ofi`, `NCCL_NET=Libfabric`, `NCCL_GIN_TYPE=2` — the [Launch Recipes](../parallelism/launch-recipes.md#environment-variables) EFA block plus the proxy-GIN type. |
 
 Without these, NCCL reports `globalGinSupport 0` / `GIN/Plugin: Failed to initialize any GIN plugin` and
 DeepEP aborts with `NCCL GIN is unavailable`; `Failed to initialize GDRCopy` means the host is missing
 `/dev/gdrdrv`. The node's Mellanox `mlx5` devices are not a cross-node NCCL path on p6 (NCCL falls back to
-TCP socket, ~18 GB/s) — EFA is the fabric.
+TCP sockets) — EFA is the fabric.
 
 Cross-node EP over EFA is bound by **proxy-Gin per-operation latency, not bandwidth**: the dispatch's
 layout-exchange round-trips through a CPU proxy, and the cost scales with the number of cross-node

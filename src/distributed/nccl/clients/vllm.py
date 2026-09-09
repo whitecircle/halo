@@ -20,6 +20,7 @@ from src.distributed.nccl.clients.base import (
     BaseWeightSyncClient,
     _AsyncCall,
     _wait_for_calls,
+    describe_chunk,
 )
 from src.distributed.nccl.transport.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -299,11 +300,7 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
         del final
         # The payload was validated where it entered the client (before any quiesce); here it is only
         # described, in the order the consumer will unpack it.
-        names, dtype_names, shapes = [], [], []
-        for name, param in named_params:
-            names.append(name)
-            dtype_names.append(str(param.dtype).split(".")[-1])
-            shapes.append(list(param.shape))
+        names, dtype_names, shapes = describe_chunk(named_params)
 
         server_call: _AsyncCall | None = None
         try:
@@ -330,9 +327,15 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
             # post_iter_func lands each tensor on the sync device; a no-op for the device-staged chunk.
             communicator = self._require_communicator()
             device = communicator.device
-            if self._packed_streams is None and torch.device(device).type == "cuda":
-                with torch.cuda.device(device):
-                    self._packed_streams = [torch.cuda.Stream() for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
+            if torch.device(device).type == "cuda":
+                if self._packed_streams is None:
+                    with torch.cuda.device(device):
+                        self._packed_streams = [torch.cuda.Stream() for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
+                # The whole-payload path packs live params, written by the caller's stream; the
+                # streamed path's snapshots are complete by now, so it costs that path nothing.
+                current = torch.cuda.current_stream(device)
+                for stream in self._packed_streams:
+                    stream.wait_stream(current)
             packed_broadcast_producer(
                 iterator=iter(named_params),
                 group=communicator,

@@ -29,10 +29,15 @@ services:
       # 400). 0 or 1 only — vLLM parses it with int(), so an empty value kills the server at startup.
       - VLLM_USE_V2_MODEL_RUNNER
       - NCCL_DEBUG=WARN
-      # Disable InfiniBand when the host has none: the sync group wedges on the uninitialized OFI
-      # path instead of falling back. The EFA overlay overrides it.
+      # The no-fabric recipe (InfiniBand off, socket net), spelled the same on every service; the
+      # EFA overlay overrides both.
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      - NCCL_NET=${NCCL_NET:-Socket}
       - NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-NVL}
+      # Passed through bare from the shell or .env (unset stays unset): a protocol table set on the
+      # trainer alone hangs the first collective, so a trainer that pins NCCL_PROTO needs the server
+      # pinned the same way, on every recipe.
+      - NCCL_PROTO
       # Keep the socket transport off Docker's bridge and per-container veth pairs.
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}
       - HF_TOKEN=${HF_TOKEN:-}
@@ -97,6 +102,7 @@ services:
       - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
       - NCCL_NET=${NCCL_NET:-Socket}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^docker,veth}
+      - NCCL_PROTO
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - HF_TOKEN=${HF_TOKEN:-}
       # Keeps the Triton and FA4 JIT caches on the mounted volume instead of recompiling every run.

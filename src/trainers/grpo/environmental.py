@@ -62,7 +62,7 @@ from src.trainers.grpo.rollout.trajectory_tokenize import (
     single_trajectory_row,
 )
 from src.trainers.grpo.rollout.weight_sync import (
-    validate_backend_parallelism,
+    validate_backend_expert_layout,
     validate_weight_sync_support,
 )
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -349,7 +349,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         the first push.
         """
         validate_weight_sync_support(self.model)
-        validate_backend_parallelism(self.async_config.rollout_backend, self.parallelism_config, self.model)
+        validate_backend_expert_layout(self.async_config.rollout_backend, self.model)
 
     @property
     def _runs_logprob_recompute(self) -> bool:

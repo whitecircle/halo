@@ -23,6 +23,7 @@ plus torch. ``Dockerfile.sglang`` asserts the server side of this contract at im
 
 import atexit
 import logging
+from collections import deque
 from collections.abc import Iterator
 from urllib.parse import urlparse
 
@@ -36,11 +37,14 @@ from src.distributed.nccl.clients.base import (
     _HTTP_PROBE_TIMEOUT_S,
     _SERVER_ERROR_GRACE_S,
     _WEIGHT_UPDATE_TIMEOUT_S,
+    WEIGHT_SYNC_CHUNK_BYTES,
     BaseWeightSyncClient,
     _AsyncCall,
     _wait_for_calls,
+    describe_chunk,
+    payload_bytes,
 )
-from src.distributed.nccl.transport.pynccl import bounded_event_sync
+from src.distributed.nccl.transport.pynccl import bounded_event_sync, resolve_drain_timeout_s
 from src.distributed.nccl.transport.torch_group import (
     DEFAULT_WEIGHT_UPDATE_GROUP_NAME,
     create_weight_update_group,
@@ -55,12 +59,17 @@ logger = logging.getLogger(__name__)
 _EP_INIT_GROUP = "/init_weights_update_group"
 _EP_UPDATE_FROM_DIST = "/update_weights_from_distributed"
 _EP_CONTINUE = "/continue_generation"
-# Byte alignment of each tensor inside a staging arena: a multiple of every dtype's element size,
+# Byte alignment of each tensor inside the staging arena: a multiple of every dtype's element size,
 # so a uint8 slice can be viewed as the tensor's dtype.
 _ARENA_ALIGNMENT = 256
-# Two arenas alternate between chunks, so a chunk's uploads never wait on the host for the previous
-# chunk's sends to retire (see ``_send_chunk``).
-_ARENA_SLOTS = 2
+# Chunks whose sends the host has not settled yet: a chunk's sends are waited for this many chunks
+# later, so a chunk's declaration never waits on the previous chunk's tail (see ``_send_chunk``).
+_INFLIGHT_CHUNKS = 2
+
+
+def _aligned_bytes(nbytes: int) -> int:
+    """``nbytes`` rounded up to the arena alignment."""
+    return (nbytes + _ARENA_ALIGNMENT - 1) // _ARENA_ALIGNMENT * _ARENA_ALIGNMENT
 
 
 class SGLangWeightSyncClient(BaseWeightSyncClient):
@@ -88,11 +97,10 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         # Set once a drain deadline aborted the group; a destroy on an aborted group raises, and a
         # broadcast on one hangs.
         self._aborted = False
-        # Device staging arenas the chunks' uploads are carved from, with the event recorded after
-        # each arena's last broadcast (see ``_stage_on_device`` and ``_send_chunk``).
-        self._device_arenas: list[torch.Tensor | None] = [None] * _ARENA_SLOTS
-        self._inflight: list[torch.cuda.Event | None] = [None] * _ARENA_SLOTS
-        self._next_slot = 0
+        # Device staging arena the chunks' uploads are carved from, and the events recorded after
+        # the latest chunks' broadcasts (see ``_stage_on_device`` and ``_send_chunk``).
+        self._arena: torch.Tensor | None = None
+        self._inflight: deque[torch.cuda.Event] = deque()
         # Every upload and broadcast runs on this stream, never on the caller's: a synchronous
         # ``dist.broadcast`` orders the issuing stream behind the collective, and on the default
         # stream that would put the next chunk's staged copies (and the trainer's own work) behind
@@ -259,6 +267,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                 # The cache invalidation rides the last chunk, so with nothing left to send it is
                 # requested directly; otherwise the new weights serve against a stale prefix cache.
                 self._post("/flush_cache")
+            self._release_arena()
         finally:
             # Always lift the pause; a server left paused wedges every later rollout.
             self._lift_pause(_CLEANUP_TIMEOUT_S, context="after sync")
@@ -269,10 +278,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         The engine allocates every tensor in the chunk, issues an async broadcast per name and then
         waits on all of them, so the trainer must issue matching broadcasts in exactly this order.
         """
-        names = [name for name, _ in chunk]
-        dtypes = [str(param.dtype).split(".")[-1] for _, param in chunk]
-        shapes = [list(param.shape) for _, param in chunk]
-
+        names, dtypes, shapes = describe_chunk(chunk)
         # A repeated name desynchronizes the stream: the engine keys its receive buffers by name and
         # reads the duplicate once while this loop broadcasts it twice. Every later tensor then lands
         # one send out of step and NCCL reports a truncated message naming the wrong param, so the
@@ -300,32 +306,32 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                 },
             ),
         )
-        # Delivery is confirmed by the engine's own reply, which returns once every declared tensor
-        # landed; the host never waits on this chunk's sends themselves. A host-side drain here cost
-        # a fifth of the push rate: the engine answers as soon as the data arrived, while the sender's
-        # kernels retire a little later, and draining them per chunk serialized that tail with the
-        # next chunk's declaration. The sends are settled one arena reuse later (``_stage_on_device``)
-        # and, on any failure, right here under a short deadline that aborts the group.
-        slot = self._next_slot
-        self._next_slot = (slot + 1) % _ARENA_SLOTS
+        # Delivery is confirmed by the engine's reply, which returns once every declared tensor
+        # landed, while the sender's kernels retire a little later. The host does not wait for that
+        # tail here, where it would serialize with the next chunk's declaration: the sends are
+        # settled two chunks later (``_stage_on_device``) and, on any failure, right here under a
+        # short deadline that aborts the group.
         if self._send_stream is None:
             self._send_stream = torch.cuda.Stream(device=self.sync_device)
+        # The whole-payload path stages live params, written by the caller's stream; the streamed
+        # path's snapshots are complete by now, so it costs that path nothing.
+        self._send_stream.wait_stream(torch.cuda.current_stream(self.sync_device))
         try:
             with torch.cuda.stream(self._send_stream):
-                for tensor in self._stage_on_device([param for _, param in chunk], slot):
+                for tensor in self._stage_on_device([param for _, param in chunk]):
                     # Synchronous only at stream level: ProcessGroupNCCL's wait() orders the send
-                    # stream behind the collective and returns. An async_op work per tensor instead
-                    # hands hundreds of outstanding works to the watchdog, whose per-work event
-                    # polling costs the push a fifth of its rate.
+                    # stream behind the collective and returns. An async_op work per tensor would
+                    # hand hundreds of outstanding works to the watchdog's per-work event polling.
                     dist.broadcast(tensor, src=0, group=self._group)
                 event = torch.cuda.Event()
                 event.record(self._send_stream)
-            self._inflight[slot] = event
+            self._inflight.append(event)
             server_call.wait(timeout=_WEIGHT_UPDATE_TIMEOUT_S)
         except Exception as e:
             # A kernel whose peer answered with an error, or never answered, spins on the stream and
-            # hangs every later device synchronization; the abort ends it.
-            self._settle(slot, timeout_s=_CLEANUP_TIMEOUT_S)
+            # hangs every later device synchronization; the abort ends it. The whole stream is
+            # drained: a chunk that failed mid-upload recorded no event of its own.
+            self._drain_sends(timeout_s=_CLEANUP_TIMEOUT_S)
             self._raise_if_server_failed(
                 e,
                 server_call,
@@ -337,54 +343,73 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             )
             raise
 
-    def _stage_on_device(self, params: list[torch.Tensor], slot: int) -> Iterator[torch.Tensor]:
-        """Upload a chunk into the persistent device arena ``slot``, yielding each tensor's view as it
-        is issued.
+    def _stage_on_device(self, params: list[torch.Tensor]) -> Iterator[torch.Tensor]:
+        """Upload a chunk into the device arena, yielding each tensor's view as it is issued.
 
         One arena rather than one allocation per tensor: a block freed mid-chunk returns to the
         caching allocator carrying a pending event on the NCCL stream, and the next upload that reuses
         it waits on that event inside the allocator — a host block inside the very collective the
         settle deadline bounds — while fresh allocations per chunk churn the allocator on the critical
-        path. An arena is reused every other chunk, after the sends it last carried are settled
-        (long complete by then, since the engine acknowledged the chunk in between), sized to the
-        chunk budget and grown only for a tensor above it: the two arenas are the footprint of the
-        vLLM producer's packed buffers.
+        path. Reusing it across chunks is safe by stream order alone: uploads and sends share
+        ``_send_stream``, so a chunk's copies queue behind the previous chunk's sends on the device
+        with no host wait. The host settles a chunk's sends two chunks later, which bounds a wedged
+        peer without serializing each chunk's tail with the next declaration. The arena is sized to
+        the chunk budget, grown for a tensor above it, and lives for one sync (``_release_arena``).
 
-        A generator so the caller broadcasts each view right after its upload is issued: a collective
-        enqueued then only waits for that one copy, and the NIC drains tensor N while tensor N+1
-        crosses PCIe. Issuing every upload first would make the first send wait for the last copy,
-        serializing the two transfers per chunk.
+        A generator so each view is handed over right after its copy is issued, in the order the
+        engine receives them.
         """
-        self._settle(slot, timeout_s=_WEIGHT_UPDATE_TIMEOUT_S)
+        if len(self._inflight) == _INFLIGHT_CHUNKS:
+            self._settle(self._inflight.popleft(), timeout_s=resolve_drain_timeout_s())
         offsets: list[int] = []
         total = 0
         for param in params:
             offsets.append(total)
-            total += -(-param.numel() * param.element_size() // _ARENA_ALIGNMENT) * _ARENA_ALIGNMENT
-        arena = self._device_arenas[slot]
-        if arena is None or arena.numel() < total:
-            self._device_arenas[slot] = None  # release before growing, so both never coexist on the device
-            arena = self._device_arenas[slot] = torch.empty(total, dtype=torch.uint8, device=self.sync_device)
+            total += _aligned_bytes(payload_bytes(param))
+        if self._arena is None or self._arena.numel() < total:
+            # Regrown only once the previous chunk's sends retired: the old arena is still their input,
+            # and dropping it under a pending collective leaves the allocator to wait on that
+            # collective, outside every deadline here, if the larger block does not fit beside it.
+            self._release_arena()
+            self._arena = torch.empty(max(total, WEIGHT_SYNC_CHUNK_BYTES), dtype=torch.uint8, device=self.sync_device)
+        arena = self._arena
         for param, offset in zip(params, offsets, strict=True):
-            nbytes = param.numel() * param.element_size()
-            view = arena[offset : offset + nbytes].view(param.dtype).view(param.shape)
+            view = arena[offset : offset + payload_bytes(param)].view(param.dtype).view(param.shape)
             view.copy_(param, non_blocking=True)
             yield view
 
-    def _settle(self, slot: int, *, timeout_s: float) -> None:
-        """Wait, under a deadline, for the sends last issued from arena ``slot``; abort the group when
-        it passes.
+    def _release_arena(self) -> None:
+        """Settle the outstanding sends and drop the arena, at the end of a sync.
 
-        The event was recorded after the arena's last broadcast, so it covers every send from that
-        arena. Polling it keeps the host off the CUDA driver while a peer that never joins would
+        Held across syncs it would pin the sync GPU at the largest chunk's size (the largest tensor,
+        once a fused expert pair exceeds the budget) for the whole run; dropped, that memory is the
+        allocator's between syncs and the next sync's first chunk takes it back from the pool. One
+        settle per sync rather than per chunk keeps the deferred settle's overlap.
+        """
+        while self._inflight:
+            self._settle(self._inflight.popleft(), timeout_s=resolve_drain_timeout_s())
+        self._arena = None
+
+    def _drain_sends(self, *, timeout_s: float) -> None:
+        """Settle everything issued on the send stream so far, on the failure path.
+
+        The failing chunk recorded no event of its own, and the previous chunk's sends may be
+        spinning on the same peer, so the stream is drained as a whole rather than by chunk.
+        """
+        self._inflight.clear()
+        event = torch.cuda.Event()
+        event.record(self._send_stream)
+        self._settle(event, timeout_s=timeout_s)
+
+    def _settle(self, event: torch.cuda.Event, *, timeout_s: float) -> None:
+        """Wait, under a deadline, for the sends recorded behind ``event``; abort the group when it
+        passes.
+
+        Polling the event keeps the host off the CUDA driver while a peer that never joins would
         otherwise park the trainer indefinitely (the group carries no watchdog the trainer can rely
         on). The abort ends the spinning kernel, without which every later device synchronization
         hangs too.
         """
-        event = self._inflight[slot]
-        if event is None:
-            return
-        self._inflight[slot] = None
         try:
             bounded_event_sync(event, timeout_s=timeout_s, what=f"{self.BACKEND_NAME} weight broadcast")
         except RuntimeError:
@@ -437,8 +462,11 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         # not wedged after the trainer exits. An abort that left the engine unservable keeps its pause.
         self.abort_weight_update()
         self._lift_pause_at_close()
-        self._release_group(local_destroy=_local_destroy)
-        self._device_arenas = [None] * _ARENA_SLOTS
-        self._inflight = [None] * _ARENA_SLOTS
+        # A client that never formed its group (or already released it) has nothing to release, and
+        # the engine-side POST would only delay the close.
+        if self._group is not None or self._store is not None:
+            self._release_group(local_destroy=_local_destroy)
+        self._arena = None
+        self._inflight.clear()
         self._send_stream = None
         self._finalize_close()

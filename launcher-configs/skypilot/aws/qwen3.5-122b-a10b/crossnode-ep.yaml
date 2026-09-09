@@ -42,13 +42,12 @@ envs:
   DIST_SHARED_FILESYSTEM: "1"
   DIST_NCCL_TIMEOUT_MINUTES: "60"
   WANDB_PROJECT: halo-qwen35-122b-aws
-  # EFA tuning. NCCL_NET_PLUGIN is set explicitly rather than left to the NGC base's shinit_v2:
-  # that only fires if the run shell sources /etc/shinit_v2, and without it NCCL loads the HPC-X IB
-  # plugin on an EFA host and DeepEP aborts with "NCCL GIN is unavailable" — after the cluster is up.
+  # EFA. NCCL_NET_PLUGIN is set explicitly rather than left to the NGC base's shinit_v2, which only
+  # fires for a shell that sources /etc/shinit_v2; NCCL_NET names the plugin's net so a missing
+  # plugin fails the launch instead of falling back to sockets (DeepEP would abort with "NCCL GIN
+  # is unavailable" after the cluster is up). NCCL_PROTO is left to the plugin's own probe.
   NCCL_NET_PLUGIN: ofi
-  NCCL_PROTO: simple        # one protocol table on every rank; a rollout server joining from these ranks needs the same NCCL_PROTO
-  FI_PROVIDER: efa
-  FI_EFA_USE_DEVICE_RDMA: "1"
+  NCCL_NET: Libfabric
   NCCL_GIN_TYPE: "2"             # cross-node DeepEP proxy GIN
 
 file_mounts:

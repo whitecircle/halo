@@ -20,6 +20,7 @@ from src.distributed.nccl.clients.base import (
     BaseWeightSyncClient,
     SamplerLogprobSemantics,
     payload_bytes,
+    resolve_sync_device,
     snapshot_param,
     starts_new_chunk,
     validate_syncable_param,
@@ -242,11 +243,8 @@ class InferenceClientManager:
             logger.warning("InferenceClientManager already initialized, skipping")
             return
 
-        # Stored normalized: the shared snapshots are staged on it, and an int index (0 included) or
-        # a bare "cuda" must name the same device the clients resolve.
-        device = torch.device(device) if not isinstance(device, torch.device) else device
-        if device.type == "cuda" and device.index is None:
-            device = torch.device("cuda", torch.cuda.current_device())
+        # Stored in the form the clients resolve: the shared snapshots are staged on it.
+        device = resolve_sync_device(device)
 
         for i, config in enumerate(self.server_configs):
             url = config["url"]
@@ -351,10 +349,10 @@ class InferenceClientManager:
         """Send the tail chunk to all rollout servers and close their updates (no-op if nothing was buffered).
 
         Servers flush on concurrent threads, each client on its own NCCL communicator and streams,
-        but they share the forwarding rank's GPU, its NICs and this process: two servers measured
-        2× one server's push (27 GB/s each over EFA, against 39 GB/s each from two separate
-        processes), so the stall grows with the server count. The async snapshot copies complete
-        before any producer thread reads them. Returns only once every flush is done.
+        but they share the forwarding rank's GPU, its NICs and this process, so the fan-out costs
+        the sum of the pushes rather than the slowest one and the stall grows with the server count.
+        The async snapshot copies complete before any producer thread reads them. Returns only once
+        every flush is done.
 
         Raises RuntimeError if a server still fails after one reconnect and re-flush attempt; the
         alternative would leave that server serving stale-policy rollouts.
@@ -413,8 +411,7 @@ class InferenceClientManager:
         logger.error(f"Weight-sync {what} failed for {url}: {first_error}; attempting one reconnect")
         try:
             with self._reconnect_lock:  # NCCL groups cannot form concurrently
-                new_client = self.reconnect_client(index)
-            del new_client  # the pool entry is what `operation` reaches
+                self.reconnect_client(index)  # swaps the pool entry `operation` reaches
             operation(index)
             logger.warning(f"Weight sync to {url} recovered after reconnect")
             return None

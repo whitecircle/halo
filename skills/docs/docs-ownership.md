@@ -132,7 +132,7 @@ changes.
 |---|---|
 | `src/configs/`, `src/args/` (config/arg dataclasses) | `agent-docs/reference/configuration-reference.md` + the method page that owns the config |
 | `src/training/parser.py` (H4ArgumentParser, toolkit defaults, the unknown-key raise) | `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
-| `src/env.py` (every `HALO_`/`DIST_`/`VLLM_` knob and its default) | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
+| `src/env.py` (every `HALO_`/`DIST_`/`VLLM_`/`SGLANG_` knob and its default) | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
 | `src/log.py` (root logging setup, CLI verbosity, `warn_once`) | `agent-docs/reference/debugging.md` |
 | `src/cli.py` (`halo launch` / `halo run` surface, tool aliases) | `README.md` quick start, `agent-docs/reference/scripts-reference.md` |
 

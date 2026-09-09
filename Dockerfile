@@ -249,12 +249,11 @@ RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
       echo "=== Skipping DeepGEMM (Blackwell-only kernels) ==="; \
     fi
 
-# The EFA userspace every Halo image shares (docker/efa/install_efa_userspace.sh): the installer's
-# rdma-core and libfabric over the NGC-bundled MOFED ones, plus a GIN-capable aws-ofi-nccl (DeepEP V2
-# cross-node EP over AWS EFA; the NGC-bundled plugin exports no ncclGin symbol). A rollout server on
-# a different rdma-core build answers the plugin's in-order-write probe differently, lands on a
-# different NCCL protocol table, and hangs the weight-sync group at its first collective. GDRCopy
-# >= 2.5 backs proxy GIN, whose host gdrdrv module must be loaded at runtime.
+# The EFA userspace every Halo image shares (docker/efa/install_efa_userspace.sh owns the pins and
+# the reason all three images must match): the installer's rdma-core and libfabric over the
+# NGC-bundled MOFED ones, plus a GIN-capable aws-ofi-nccl (DeepEP V2 cross-node EP over AWS EFA; the
+# NGC-bundled plugin exports no ncclGin symbol). GDRCopy >= 2.5 backs proxy GIN, whose host gdrdrv
+# module must be loaded at runtime.
 ARG GDRCOPY_COMMIT=fcec3ce0bb40a97a6cc45dd4afeec4bccb509712
 COPY docker/efa/install_efa_userspace.sh /tmp/install_efa_userspace.sh
 RUN /tmp/install_efa_userspace.sh \

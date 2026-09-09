@@ -243,9 +243,8 @@ for your task.
 vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. GPT-OSS is
 also the only MoE family SGLang can weight-sync, because it loads experts in the
 checkpoint-fused layout that only the GPT-OSS layer gathers, and the shipped
-`sglang/gptoss-20b-code-contests-lora-ep1.yaml` is already wired for that engine. Two
-constraints come with SGLang: the trainer must run at `expert_parallel_size: 1` (SGLang
-refuses expert distribution), and `rollout_max_thinking_tokens` stays unset. That field is
+`sglang/gptoss-20b-code-contests-lora-ep1.yaml` is already wired for that engine. One
+constraint comes with SGLang: `rollout_max_thinking_tokens` stays unset. That field is
 vLLM-only; steer reasoning with the environment's `reasoning_effort` instead.
 
 Serve from the prebuilt NCCL-aligned image, since upstream SGLang images ship a different
@@ -341,8 +340,8 @@ weight sync. To serve `routing_replay: rollout`, also add `--enable-return-route
 to the server's `command:` block, since the compose file exposes no variable for it. If SFT
 overrode the chat template, point `VLLM_CHAT_TEMPLATE` at the same `.jinja` so the
 server-side render matches training. The trainer config then sets `rollout_backend: vllm`
-and `rollout_server_url: http://localhost:8000`, and launches the same way minus the NCCL
-socket variables. It may size `expert_parallel_size` to the trainer's GPU count; the
+and `rollout_server_url: http://localhost:8000`, and launches the same way. It may size
+`expert_parallel_size` to the trainer's GPU count; the
 shipped ep4 configs assume four trainer GPUs.
 
 ## Sources

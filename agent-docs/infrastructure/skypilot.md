@@ -74,18 +74,17 @@ The fabric env differs by cloud. The Nebius (IB) tasks keep the image's InfiniBa
 single-node AWS tasks (`gpt-oss-120b/nodelocal-ep`, `qwen3.5-122b-a10b/nodelocal-ep`) set no fabric
 env at all — intra-node NVLink only.
 
-The three multi-node AWS (EFA) tasks add the libfabric vars and all set `NCCL_NET_PLUGIN: ofi`
-explicitly, because the NGC base's `shinit_v2` sets it only for a shell that sources it. Without the
-plugin NCCL loads the HPC-X IB plugin on an EFA host: the cross-node EP tasks abort with "NCCL GIN is
-unavailable" once the cluster is already up, and `gpt-oss-20b/nodelocal-ep`'s cross-node DP gradient
-sync falls off EFA.
+The three multi-node AWS (EFA) tasks set `NCCL_NET_PLUGIN: ofi` explicitly, because the NGC base's
+`shinit_v2` sets it only for a shell that sources it, and `NCCL_NET: Libfabric` so a missing plugin
+fails the launch instead of falling back to sockets — silently for `gpt-oss-20b/nodelocal-ep`'s
+cross-node DP gradient sync, and as "NCCL GIN is unavailable" for the cross-node EP tasks once the
+cluster is already up. `NCCL_PROTO` is left to the plugin's own probe
+([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)).
 
 ```yaml
-envs:                       # AWS EFA
-  FI_PROVIDER: efa
-  FI_EFA_USE_DEVICE_RDMA: "1"
-  NCCL_PROTO: simple        # one protocol table on every rank; optional (the plugin probes per endpoint)
-  NCCL_NET_PLUGIN: ofi      # every multi-node AWS task (the OFI plugin, not HPC-X)
+envs:                       # AWS EFA, every multi-node AWS task
+  NCCL_NET_PLUGIN: ofi
+  NCCL_NET: Libfabric
   NCCL_GIN_TYPE: "2"        # cross-node EP only (proxy GIN)
 ```
 

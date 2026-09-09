@@ -23,19 +23,13 @@ Four facts are load-bearing and invisible in a passing run:
 import inspect
 import sys
 import threading
-from unittest.mock import patch
 
 import pytest
-import torch
 
 import src.distributed.nccl.clients.sglang as sglang_module
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.transport import torch_group
-
-
-def _offline_client() -> SGLangWeightSyncClient:
-    with patch.object(SGLangWeightSyncClient, "check_server"):
-        return SGLangWeightSyncClient(base_url="http://localhost:30000")
+from tests.common.weight_sync import offline_sglang_client
 
 
 def _teardown_probe(client, monkeypatch) -> list[tuple[str, object]]:
@@ -53,7 +47,7 @@ def test_the_pause_is_lifted_on_sglangs_own_route_with_a_body(monkeypatch):
     rejection surfaces only as a warning from ``_lift_pause``, leaving the engine quiesced and every
     later rollout queued behind it. Route and body are both class attributes; neither is otherwise
     exercised outside a live server."""
-    client = _offline_client()
+    client = offline_sglang_client()
     client._paused = True
     posts: list[tuple[str, dict]] = []
     monkeypatch.setattr(client, "_post_once", lambda path, **kwargs: posts.append((path, kwargs)))
@@ -66,7 +60,7 @@ def test_the_pause_is_lifted_on_sglangs_own_route_with_a_body(monkeypatch):
 
 
 def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):
-    client = _offline_client()
+    client = offline_sglang_client()
     group = object()
     client._group = group
     calls = _teardown_probe(client, monkeypatch)
@@ -83,7 +77,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
     """The local destroy blocks until the engine drops its half, so the engine must already have been
     asked by then. The fake destroy waits for the engine-side release to start; a client that only
     releases the engine after the destroy returned never satisfies it."""
-    client = _offline_client()
+    client = offline_sglang_client()
     client._group = object()
     remote_started = threading.Event()
     monkeypatch.setattr(client, "_destroy_remote_group", remote_started.set)
@@ -105,7 +99,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
 def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
     """After a drain deadline aborted the group torch has already removed its bookkeeping; a destroy
     raises "Invalid process group", and the engine-side release must still run."""
-    client = _offline_client()
+    client = offline_sglang_client()
     group = object()
     client._group = group
     client._aborted = True
@@ -118,76 +112,19 @@ def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
     assert ("remote", None) in calls
 
 
-def test_a_settle_deadline_aborts_the_group_and_retires_the_client(monkeypatch):
-    """A peer that never joins parks the broadcast; the settle's deadline must abort the group (or
-    every later device sync hangs behind the spinning kernel) and every later update must be refused.
-    A slot with nothing in flight settles without touching the event machinery."""
-    client = _offline_client()
-    group = object()
-    client._group = group
-    aborted: list[object] = []
-    monkeypatch.setattr(sglang_module.c10d, "_abort_process_group", aborted.append)
+def test_a_client_that_never_formed_its_group_does_not_ask_the_engine_to_release_one(monkeypatch):
+    """A failed or never-attempted formation already released the engine side; a second close would
+    only post a redundant release and delay the teardown by its timeout."""
+    client = offline_sglang_client()
+    calls = _teardown_probe(client, monkeypatch)
 
-    def expired(event, timeout_s, what):
-        raise RuntimeError(f"{what} did not complete")
+    client.close_communicator()
 
-    monkeypatch.setattr(sglang_module, "bounded_event_sync", expired)
-
-    client._settle(0, timeout_s=1.0)  # nothing recorded for the slot: no wait, no abort
-    assert aborted == []
-
-    client._inflight[0] = object()
-    with pytest.raises(RuntimeError, match="did not complete"):
-        client._settle(0, timeout_s=1.0)
-
-    assert aborted == [group], "the deadline did not abort the weight-update group"
-    assert client._aborted is True
-    assert client._inflight[0] is None, "a settled slot must not be waited on twice"
-    with pytest.raises(RuntimeError, match="aborted"):
-        client.begin_weight_update()
-
-
-def test_chunks_are_staged_in_reused_arenas_settled_before_reuse(monkeypatch):
-    """Per-tensor device allocations churn the allocator on the critical path and, once freed with a
-    pending NCCL event, block the next upload inside the allocator; the arenas sidestep both. The
-    views must reproduce every tensor's values, dtype and shape; an arena must be reused for a chunk
-    that fits and grown for one that does not; and the sends it last carried must be settled before
-    it is overwritten."""
-    client = _offline_client()
-    client._sync_device = torch.device("cpu")
-    settled: list[object] = []
-    monkeypatch.setattr(sglang_module, "bounded_event_sync", lambda event, timeout_s, what: settled.append(event))
-    first = [torch.arange(6, dtype=torch.bfloat16).reshape(2, 3), torch.full((5,), 2.5, dtype=torch.float32)]
-
-    staged = list(client._stage_on_device(first, 0))
-    arena = client._device_arenas[0]
-    assert arena is not None and arena.dtype == torch.uint8
-    for view, tensor in zip(staged, first, strict=True):
-        assert view.dtype == tensor.dtype and view.shape == tensor.shape
-        assert torch.equal(view, tensor)
-        assert view.untyped_storage().data_ptr() == arena.untyped_storage().data_ptr(), "a view outside the arena"
-    assert settled == [], "nothing was in flight, so nothing was waited on"
-
-    pending = object()
-    client._inflight[0] = pending
-    list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)], 0))
-    assert settled == [pending], "the arena's previous sends were not settled before its reuse"
-    assert client._device_arenas[0] is arena, "a chunk that fits must reuse the arena"
-
-    oversized = [torch.zeros(arena.numel() + 1, dtype=torch.uint8)]
-    staged = list(client._stage_on_device(oversized, 0))
-    assert client._device_arenas[0] is not arena and client._device_arenas[0].numel() >= oversized[0].numel()
-    assert torch.equal(staged[0], oversized[0])
-    assert client._device_arenas[1] is None, "the other slot is untouched"
-
-    client.close_communicator(_local_destroy=False)
-    assert client._device_arenas == [None, None] and client._inflight == [None, None], (
-        "a closed client must not pin device memory"
-    )
+    assert calls == [], f"close touched the group machinery with no group formed: {calls}"
 
 
 def test_the_atexit_invocation_skips_the_local_nccl_destroy(monkeypatch):
-    client = _offline_client()
+    client = offline_sglang_client()
     group = object()
     client._group = group
     calls = _teardown_probe(client, monkeypatch)
