@@ -156,7 +156,7 @@ def snapshot_param(weights: torch.Tensor, device: torch.device | None) -> torch.
     caller's stream; the flush completes it before a producer reads the tensor.
     """
     src = weights.detach().contiguous()
-    snapshot = torch.empty_like(src, device=device or src.device)
+    snapshot = torch.empty_like(src, device=src.device if device is None else device)
     snapshot.copy_(src, non_blocking=True)
     return snapshot
 

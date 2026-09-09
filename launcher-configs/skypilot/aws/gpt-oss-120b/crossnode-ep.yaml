@@ -47,7 +47,7 @@ envs:
   # that only fires if the run shell sources /etc/shinit_v2, and without it NCCL loads the HPC-X IB
   # plugin on an EFA host and DeepEP aborts with "NCCL GIN is unavailable" — after the cluster is up.
   NCCL_NET_PLUGIN: ofi
-  NCCL_PROTO: simple        # one protocol table on every rank; a rollout server joining from these ranks needs the same
+  NCCL_PROTO: simple        # one protocol table on every rank; a rollout server joining from these ranks needs the same NCCL_PROTO
   FI_PROVIDER: efa
   FI_EFA_USE_DEVICE_RDMA: "1"
   NCCL_GIN_TYPE: "2"             # cross-node DeepEP proxy GIN

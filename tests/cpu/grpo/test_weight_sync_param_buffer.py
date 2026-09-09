@@ -226,6 +226,41 @@ def test_manager_stages_one_snapshot_per_param(monkeypatch):
     assert all(client._param_buffer[0][0] == "model.layers.0.q_proj.weight" for client in clients)
 
 
+def test_manager_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
+    """``init_communicators(0)`` must stage on CUDA device 0: an int index is falsy, so a helper that
+    falls back on ``device or source`` silently stages on the source's device instead. The manager
+    stores a normalized ``torch.device`` and the helper tests for ``None`` explicitly."""
+    joined: list = []
+
+    class _StubClient:
+        BACKEND_NAME = "stub"
+
+        def __init__(self, base_url, group_port, connection_timeout, group_host=None):
+            self._param_buffer: list = []
+
+        def init_communicator(self, device):
+            joined.append(device)
+
+        def buffer_param(self, name, snapshot):
+            self._param_buffer.append((name, snapshot))
+
+    manager = InferenceClientManager(server_configs=[{"url": "http://server0:8000"}, {"url": "http://server1:8000"}])
+    manager._client_factory = _StubClient
+    manager.init_communicators(0)
+    assert manager._device == torch.device("cuda", 0), f"stored {manager._device!r} for device index 0"
+    assert joined == [torch.device("cuda", 0)] * 2, "clients must join on the same normalized device"
+
+    staged_on: list = []
+
+    def fake_snapshot(weights, device):
+        staged_on.append(device)
+        return weights.detach().clone()
+
+    monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.snapshot_param", fake_snapshot)
+    manager.update_named_param("w", torch.zeros(4))
+    assert staged_on == [torch.device("cuda", 0)], "the shared snapshot was not staged on the sync device"
+
+
 def test_manager_shared_snapshot_is_immutable_copy():
     """The shared snapshot must still be a copy: a post-buffer in-place mutation (PEFT unmerge,
     optimizer step) must not revert any client's buffered weight."""

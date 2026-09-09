@@ -33,9 +33,11 @@ config time, before any rank math.
 
 **RL weight sync stages one chunk on the forwarding rank's GPU.** For online/env GRPO the vendored
 NCCL client stages each un-sharded policy weight on the sync GPU and streams it to the engine in
-byte-bounded chunks (`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB, double-buffered packs on the vLLM path), so
-one chunk plus the largest tensor is resident at a time, never the model. The ceiling is the fabric
-behind one GPU (its NICs over EFA) and the single-producer fan-out below, not host RAM.
+byte-bounded chunks (`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB), never the model. Peak on the forwarding
+rank: the staged chunk plus the largest tensor, plus the engine path's own buffers — on vLLM two
+packed buffers the producer keeps resident (each one 1 GiB pack plus the tensor that crossed it),
+on SGLang two device arenas of the chunk budget — about 3-5 GiB at the default. The ceiling is the
+fabric behind one GPU (its NICs over EFA) and the single-producer fan-out below, not host RAM.
 
 **Checkpoint save is synchronous, and the gathered save funnels through one rank.** Training pauses
 during each gathered save — there is no async or overlapped save. Every gathered save streams (EP

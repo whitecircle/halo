@@ -242,7 +242,10 @@ class InferenceClientManager:
             logger.warning("InferenceClientManager already initialized, skipping")
             return
 
-        if isinstance(device, torch.device) and device.type == "cuda" and device.index is None:
+        # Stored normalized: the shared snapshots are staged on it, and an int index (0 included) or
+        # a bare "cuda" must name the same device the clients resolve.
+        device = torch.device(device) if not isinstance(device, torch.device) else device
+        if device.type == "cuda" and device.index is None:
             device = torch.device("cuda", torch.cuda.current_device())
 
         for i, config in enumerate(self.server_configs):
