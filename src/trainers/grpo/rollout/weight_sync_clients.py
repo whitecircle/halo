@@ -347,9 +347,11 @@ class InferenceClientManager:
     def reset_prefix_cache(self):
         """Send the tail chunk to all rollout servers and close their updates (no-op if nothing was buffered).
 
-        Servers flush concurrently (each client has its own NCCL communicator and per-call streams), so
-        the trainer stall is ~max(per-server flush) instead of the sum. The async snapshot copies
-        complete before any producer thread reads them. Returns only once every flush is done.
+        Servers flush on concurrent threads, each client on its own NCCL communicator and streams,
+        but they share the forwarding rank's GPU, its NICs and this process: two servers measured
+        2× one server's push (27 GB/s each over EFA, against 39 GB/s each from two separate
+        processes), so the stall grows with the server count. The async snapshot copies complete
+        before any producer thread reads them. Returns only once every flush is done.
 
         Raises RuntimeError if a server still fails after one reconnect and re-flush attempt; the
         alternative would leave that server serving stale-policy rollouts.

@@ -289,7 +289,7 @@ over NVLink) — which proves the rank math and the gradient algebra, not the fa
 | **Wider layouts** (4-node, 8-node, the 512-GPU layouts in [Large-Scale Scenarios](large-scale-scenarios.md)) | ❌ | rank math only — `ParallelismConfig` is exercised at world 8/16/32, no recorded run |
 | **NVL72 / MNNVL rack-wide domains** | ❌ | simulated domain sizes only; see the warning below and [Scale & Limits](../reference/scale-and-limitations.md) |
 | **InfiniBand/RoCE as a multi-node fabric** | ❌ | the recorded multi-node runs used EFA; the IB path is config guidance, not a measurement |
-| Multi-node weight sync for online / environmental GRPO — trainer node → rollout-server node over EFA, vLLM and SGLang clients (4× p6-b300) | ✅ | [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
+| Multi-node weight sync for online / environmental GRPO — trainer node → rollout-server node over EFA, vLLM (EP=2, TP=2, EP=1 + LoRA) and SGLang (EP=2) end-to-end rows, plus a two-node trainer (EP=1) syncing to a server on a third node (4× p6-b300) | ✅ | [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
 | **Cross-node gathered EP save** on a shared filesystem | ❌ | hand-run recipe in `tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py`; not exercised multi-node |
 
 ## GB200/GB300 NVL72 (multi-node NVLink)

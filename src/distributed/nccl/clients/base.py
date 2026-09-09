@@ -6,7 +6,7 @@ chunks. Both wire protocols are chunk-oriented (one quiesce, N declared payloads
 rank stages at most one chunk on its sync GPU instead of a full model. Staged on the device, not in
 pinned host memory: a chunk that transits the host is copied out and back over PCIe before it
 reaches the NIC, and those two copies, not the fabric, set the sync rate (measured 19-24 GB/s for a
-host-staged push against 54-91 GB/s device-staged over EFA). Only the HTTP verbs and the broadcast
+host-staged push against 53-80 GB/s device-staged over EFA). Only the HTTP verbs and the broadcast
 transport differ; those are in ``VLLMWeightSyncClient`` / ``SGLangWeightSyncClient``.
 
 The gather layer (``src/trainers/grpo/rollout/weight_sync.py``) drives whichever client it is given

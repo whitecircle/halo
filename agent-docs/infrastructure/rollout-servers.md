@@ -61,10 +61,12 @@ N × `/update_weights_from_distributed` between `/pause_generation` and `/contin
 SGLang), so the forwarding rank sends each chunk as the gather fills it and stages one chunk on its
 sync GPU — not one model (~800 GB at 400B), and not in host memory: a chunk that transits pinned
 host memory is copied out and back over PCIe before the NIC sees it, which capped the push at
-19-24 GB/s against 54-91 GB/s staged on the device. The chunk is cut before the budget
+19-24 GB/s against 53-80 GB/s staged on the device. The chunk is cut before the budget
 (`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB) is exceeded. In multi-server mode (`rollout_server_configs`)
-one snapshot per parameter is shared across all servers and each chunk goes out to every server
-**concurrently**, released once they all have it.
+one snapshot per parameter is shared across all servers and each chunk goes out to every server on
+concurrent threads, released once they all have it; the threads share the forwarding rank's GPU,
+NICs and process, and the fan-out measured as the sum rather than the max — two servers took 2×
+one server's push (27 GB/s each over EFA) — so the per-sync cost grows with the server count.
 The trade is that a chunk cannot be replayed: a server that fails **after** its first chunk is
 reported rather than reconnected — the trainer does not hold what already landed. One that fails
 before any chunk went out (an engine restarted between syncs, the common case) is still recovered by
@@ -512,14 +514,19 @@ IPC) — the `aws-ofi-nccl` build string, the libfabric provider, and GB/s. `--e
 makes it a gate (exit 1 on a mismatch, on an altered served model, or when the group fails to
 form); flags on [Scripts](../reference/scripts-reference.md#profiling--benchmarks).
 
-Measured on 4× p6-b300, trainer node → server node, one worker, full model per sync (NIC line rate
-~100 GB/s per GPU); the per-model columns are the per-sync cost at that rate:
+Measured on 4× p6-b300, trainer node → server node, one worker, the trainer's own streamed path
+(`update_named_param` per gathered tensor, `reset_prefix_cache`), full model per sync (NIC line
+rate ~100 GB/s per GPU; a raw NCCL broadcast reaches 93 GB/s); the per-model columns are the
+per-sync cost at that rate:
 
 | Transport | Rate | Qwen3-8B (16.4 GB, measured) | gpt-oss-20b (42 GB) | Qwen3-30B-A3B (61 GB) | gpt-oss-120b (234 GB) |
 |---|---|---|---|---|---|
-| EFA, vLLM client | 54 GB/s | 0.30 s | 0.8 s | 1.1 s | 4.3 s |
-| EFA, SGLang client | 91 GB/s | 0.18 s | 0.5 s | 0.7 s | 2.6 s |
+| EFA, vLLM client | 53 GB/s | 0.31 s | 0.8 s | 1.2 s | 4.4 s |
+| EFA, SGLang client | 80 GB/s | 0.21 s | 0.5 s | 0.8 s | 2.9 s |
 | Sockets over the ENA | 9.7 GB/s | 1.7 s | 4.3 s | 6.3 s | 24 s |
+
+The vLLM client's rate is set by its one HTTP round trip per chunk (`HALO_WEIGHT_SYNC_CHUNK_MB`:
+1 / 2 / 4 / 8 GiB → 54 / 63 / 70 / 73 GB/s at this payload); the SGLang client's by the fabric.
 
 ## Checking a server
 
@@ -577,8 +584,10 @@ the engine exactly once.
 
 Undistributed MoE (`ep_group_size == 1`, EP wrappers present) works at 20B-MoE scale with
 multi-server serving (2×TP=2 and 4×TP=1), fused expert sync, R3 rollout replay, and a flat
-trainer↔engine log-ratio. Cross-host group formation is verified for both engines over EFA
-([Servers on other nodes](#servers-on-other-nodes-efa)).
+trainer↔engine log-ratio. Over EFA, with the trainer on one p6-b300 node and the server on another,
+the end-to-end rows pass for both engines: vLLM at EP=2, TP=2 and EP=1 + LoRA (Qwen3-30B-A3B),
+SGLang at EP=2 (gpt-oss-20b), and a trainer spanning two nodes (one GPU each, EP=1, DTensor
+experts over the fabric) against vLLM on a third ([Servers on other nodes](#servers-on-other-nodes-efa)).
 
 ## Troubleshooting
 
