@@ -340,8 +340,11 @@ run. Serving-only use can run upstream directly (`SGLANG_IMAGE=lmsysorg/sglang:v
 the last SGLang release on torch 2.11 — the training image's torch and NCCL generation; 0.5.18
 moves to torch 2.13, whose NCCL does not match the pin weight sync needs on both ends. 0.5.19's
 weight updater is byte-identical, it keeps the same `NCCL_CUMEM_ENABLE=0`-unless-set default, and
-its fused-expert loader roster is unchanged (`gpt_oss` only), so nothing in it changes the recipe
-below; the pin stays at 0.5.17.
+its fused-expert loader roster is unchanged (`gpt_oss` only). Its new `--moe-a2a-backend deepep_v2`
+(DeepEP's ElasticBuffer engine) is allowlisted to `DeepseekV3ForCausalLM`, `DeepseekV4ForCausalLM`
+and `Qwen3MoeForCausalLM` and forces `--moe-runner-backend deep_gemm`, so it can serve neither the
+one family this sync loads nor the triton runner the update path needs. Nothing in it changes the
+recipe below; the pin stays at 0.5.17.
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17`, then set
 `SGLANG_IMAGE` to that tag (it defaults to the locally built `sglang-server:0.5.17`).
