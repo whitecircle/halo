@@ -330,8 +330,14 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         except Exception as e:
             # A kernel whose peer answered with an error, or never answered, spins on the stream and
             # hangs every later device synchronization; the abort ends it. The whole stream is
-            # drained: a chunk that failed mid-upload recorded no event of its own.
-            self._drain_sends(timeout_s=_CLEANUP_TIMEOUT_S)
+            # drained: a chunk that failed mid-upload recorded no event of its own. A drain that
+            # passes its deadline is the usual shape of the engine's own rejection, so the server's
+            # error is still read before the drain's is raised.
+            drain_error: RuntimeError | None = None
+            try:
+                self._drain_sends(timeout_s=_CLEANUP_TIMEOUT_S)
+            except RuntimeError as deadline:
+                drain_error = deadline
             self._raise_if_server_failed(
                 e,
                 server_call,
@@ -341,6 +347,8 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                     "the server before serving again."
                 ),
             )
+            if drain_error is not None:
+                raise drain_error from e
             raise
 
     def _stage_on_device(self, params: list[torch.Tensor]) -> Iterator[torch.Tensor]:

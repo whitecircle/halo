@@ -160,9 +160,8 @@ halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit
 Checkpoint layout and expert un-fuse rules live in
 [Checkpoints](../reference/checkpoints.md#serving-on-vllm-sglang).
 
-Which families each backend accepts for RL is gated trainer-side. Two gates are SGLang-specific — the
-[EP refusal](#ep-cannot-be-combined-with-sglang-weight-sync) and the
-[fused-layout](#the-fused-expert-layout-is-declared-per-family) sections below. Two apply to **both**
+Which families each backend accepts for RL is gated trainer-side. One gate is SGLang-specific — the
+[fused-layout](#the-fused-expert-layout-is-declared-per-family) section below. Two apply to **both**
 backends: DeepSeek-V4, Inkling, Zaya, Cohere2 MoE, GLM-5 Next and Mistral4 declare
 `_supports_weight_sync = False` (Cohere2 MoE because its sync is unverified against
 the pinned server; Mistral4 because vLLM 0.26.0 registers no `mistral4` class at all, so its

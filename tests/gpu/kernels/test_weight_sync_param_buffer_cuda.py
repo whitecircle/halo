@@ -41,10 +41,12 @@ def run(ctx) -> dict:
     client._complete_snapshots()
     _, stored = client._param_buffer[0]
 
+    # A second client: with a small HALO_WEIGHT_SYNC_CHUNK_MB the second param would flush the first.
+    client = _bare_client()
     client._sync_device = ctx.device
     client.update_named_param("v", weights.cpu())
     client._complete_snapshots()
-    _, from_host = client._param_buffer[1]
+    _, from_host = client._param_buffer[0]
 
     checks = {
         "cuda_source_staged_on_its_device": stored.device == weights.device,

@@ -63,7 +63,7 @@ image. Three situations need extra environment:
 - **Rollout server on another node** (RL): the server container needs the same
   fabric — start it with the compose EFA overlay (`-f docker-compose.vllm.efa.yml`
   or `-f docker-compose.sglang.efa.yml`) and the trainer with `make ... EFA=1`.
-  `scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --expect efa` confirms the sync
+  `python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --expect efa` confirms the sync
   formed on EFA before you train.
 
 On GB200/GB300 NVL72 racks, set `NVLINK_DOMAIN_SIZE=72` so Halo knows the NVLink

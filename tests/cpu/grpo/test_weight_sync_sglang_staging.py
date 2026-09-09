@@ -171,6 +171,32 @@ def test_a_chunk_that_fails_mid_upload_drains_the_stream_and_aborts_on_deadline(
         client.begin_weight_update()
 
 
+def test_a_drain_deadline_on_the_failure_path_still_reports_the_engines_own_error(client, monkeypatch):
+    """The engine rejecting the chunk is what usually leaves a broadcast spinning: the drain then
+    passes its deadline, and the error raised must still be the engine's, not the deadline's."""
+
+    def rejected(path, **kwargs):
+        raise RuntimeError("HTTP 500: the engine refused the declared shapes")
+
+    monkeypatch.setattr(client, "_post_once", rejected)
+
+    def failing_broadcast(tensor, src, group):
+        raise RuntimeError("NCCL error: peer answered with an error")
+
+    monkeypatch.setattr(sglang_module.dist, "broadcast", failing_broadcast)
+    monkeypatch.setattr(sglang_module.c10d, "_abort_process_group", lambda group: None)
+
+    def expired(event, timeout_s, what):
+        raise RuntimeError(f"{what} did not complete")
+
+    monkeypatch.setattr(sglang_module, "bounded_event_sync", expired)
+
+    with pytest.raises(RuntimeError, match="refused the declared shapes") as excinfo:
+        client._send_chunk([("w", torch.ones(3, dtype=torch.bfloat16))], flush_cache=False)
+    assert sglang_module._EP_UPDATE_FROM_DIST in str(excinfo.value), "the failing engine route is not named"
+    assert client._aborted, "the deadline must still have aborted the group"
+
+
 def test_the_end_of_a_sync_settles_the_outstanding_sends_and_drops_the_arena(client, monkeypatch):
     settled = _settle_probe(monkeypatch)
     list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)]))
