@@ -293,7 +293,7 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
 
         ``/update_weights`` takes one chunk of an open session (``start_weight_update``, N chunks,
         ``finish_weight_update``), so the trainer streams the model rather than declaring it all at
-        once, which would hold the whole model in pinned host memory. ``final`` is unused here: this
+        once, which would stage the whole model on the forwarding rank. ``final`` is unused here: this
         engine's close is its own ``/finish_weight_update`` call.
         """
         del final
@@ -327,7 +327,7 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
                 ),
             )
 
-            # post_iter_func re-uploads CPU-buffered tensors pack by pack, so one pack transits the GPU.
+            # post_iter_func lands each tensor on the sync device; a no-op for the device-staged chunk.
             communicator = self._require_communicator()
             device = communicator.device
             if self._packed_streams is None and torch.device(device).type == "cuda":

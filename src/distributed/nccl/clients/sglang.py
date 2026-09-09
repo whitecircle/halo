@@ -93,6 +93,11 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         self._device_arenas: list[torch.Tensor | None] = [None] * _ARENA_SLOTS
         self._inflight: list[torch.cuda.Event | None] = [None] * _ARENA_SLOTS
         self._next_slot = 0
+        # Every upload and broadcast runs on this stream, never on the caller's: a synchronous
+        # ``dist.broadcast`` orders the issuing stream behind the collective, and on the default
+        # stream that would put the next chunk's staged copies (and the trainer's own work) behind
+        # this chunk's sends, serializing the tail of one chunk with the next.
+        self._send_stream: torch.cuda.Stream | None = None
         super().__init__(
             base_url=base_url,
             group_port=group_port,
@@ -303,15 +308,18 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         # and, on any failure, right here under a short deadline that aborts the group.
         slot = self._next_slot
         self._next_slot = (slot + 1) % _ARENA_SLOTS
+        if self._send_stream is None:
+            self._send_stream = torch.cuda.Stream(device=self.sync_device)
         try:
-            for tensor in self._stage_on_device([param for _, param in chunk], slot):
-                # Synchronous only at stream level: ProcessGroupNCCL's wait() orders the current
-                # stream behind the collective and returns. An async_op work per tensor instead
-                # hands hundreds of outstanding works to the watchdog, whose per-work event polling
-                # costs the push a fifth of its rate.
-                dist.broadcast(tensor, src=0, group=self._group)
-            event = torch.cuda.Event()
-            event.record(torch.cuda.current_stream(self.sync_device))
+            with torch.cuda.stream(self._send_stream):
+                for tensor in self._stage_on_device([param for _, param in chunk], slot):
+                    # Synchronous only at stream level: ProcessGroupNCCL's wait() orders the send
+                    # stream behind the collective and returns. An async_op work per tensor instead
+                    # hands hundreds of outstanding works to the watchdog, whose per-work event
+                    # polling costs the push a fifth of its rate.
+                    dist.broadcast(tensor, src=0, group=self._group)
+                event = torch.cuda.Event()
+                event.record(self._send_stream)
             self._inflight[slot] = event
             server_call.wait(timeout=_WEIGHT_UPDATE_TIMEOUT_S)
         except Exception as e:
@@ -432,4 +440,5 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         self._release_group(local_destroy=_local_destroy)
         self._device_arenas = [None] * _ARENA_SLOTS
         self._inflight = [None] * _ARENA_SLOTS
+        self._send_stream = None
         self._finalize_close()

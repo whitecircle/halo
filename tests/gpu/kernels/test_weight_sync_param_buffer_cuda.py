@@ -1,19 +1,20 @@
 #!/usr/bin/env python
-"""The weight sync must offload a CUDA source weight to PINNED host memory, not buffer it on-device.
+"""The weight sync must stage a CUDA source weight on the sync device as a copy, never through host memory.
 
 The rest of the buffering contract is CPU-only and lives in
-``tests/cpu/grpo/test_weight_sync_param_buffer.py``; this one case needs a real GPU, and inside the
-CPU tier it was a ``skipif(not cuda)`` that the CUDA-hidden CPU suite never ran and no GPU manifest
-entry covered — so the one property that can only fail on a GPU went unasserted everywhere.
+``tests/cpu/grpo/test_weight_sync_param_buffer.py``; this case needs a real GPU. A snapshot that
+transits pinned host memory is copied out and back over PCIe before the NCCL broadcast, and those two
+copies cap the push at a third of the fabric's rate; one that aliases the source is rewritten by the
+PEFT unmerge or the optimizer step before it goes out.
 
 What it pins (the fixture is the CPU suite's own ``_bare_client``, imported so both tiers exercise
 the same client construction):
 
-  * a CUDA weight is buffered on the HOST — buffering on-device holds a full model copy on the
-    forwarding rank until the flush;
-  * the host buffer is PINNED — the per-pack re-upload to the engine is async and needs page-locked
-    memory;
-  * the snapshot carries the source values.
+  * a CUDA weight is staged on its device before ``init_communicator`` (the source's own device), and
+    on the client's sync device once one is set;
+  * the snapshot is a copy, not an alias;
+  * the snapshot carries the source values;
+  * the staged copies are covered by the event the flush waits on, recorded on the copy's stream.
 
 Run with 1 GPU:
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_weight_sync_param_buffer_cuda.py
@@ -32,18 +33,24 @@ def run(ctx) -> dict:
 
     client.update_named_param("w", weights)
     torch.cuda.current_stream().synchronize()  # the flush path syncs before reading; mirror it
-
     _, stored = client._param_buffer[0]
+
+    client._sync_device = ctx.device
+    client.update_named_param("v", weights)
+    torch.cuda.current_stream().synchronize()
+    _, on_sync_device = client._param_buffer[1]
+
+    event = client._staged_event
     checks = {
-        "cuda_source_buffered_on_host": stored.device.type == "cpu",
-        # A non-CPU buffer is not pinned memory at all, so this only means what it says on the host.
-        "host_buffer_is_pinned": stored.device.type == "cpu" and stored.is_pinned(),
-        "snapshot_carries_the_source_values": torch.equal(stored.cpu(), weights.cpu()),
+        "cuda_source_staged_on_its_device": stored.device == weights.device,
+        "snapshot_lands_on_the_sync_device": on_sync_device.device == ctx.device,
+        "snapshot_is_a_copy": stored.data_ptr() != weights.data_ptr(),
+        "snapshot_carries_the_source_values": torch.equal(stored, weights),
+        "staged_copies_are_covered_by_the_flush_event": event is not None and event.query(),
     }
-    if not checks["cuda_source_buffered_on_host"]:
-        log(f"CUDA weight buffered on {stored.device} — full model copy on GPU")
-    elif not checks["host_buffer_is_pinned"]:
-        log("CPU buffer must be pinned for the per-pack async re-upload")
+    for name, ok in checks.items():
+        if not ok:
+            log(f"{name}: FAIL (stored on {stored.device}, source on {weights.device})")
 
     return {"checks": checks}
 

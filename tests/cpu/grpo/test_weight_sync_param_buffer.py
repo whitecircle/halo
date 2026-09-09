@@ -1,23 +1,23 @@
 #!/usr/bin/env python
-"""The weight sync must STREAM to the engine: host-side it may hold one chunk, never the model.
+"""The weight sync must STREAM to the engine: it stages one chunk, never the model.
 
-Buffering the gathered tensors on the GPU holds a full model copy on the forwarding rank; buffering
-all of them on the host holds ~1× model of pinned RAM there instead — 800 GB at 400B, which no host
-has, and with N servers a per-client copy multiplies it again (4 × ~120B bf16 ≈ 0.9 TB). Both wire
-protocols take an update as a sequence of declared chunks inside one quiesce, so the client opens the
-update, sends each chunk as the budget fills, and closes it at the end. What is pinned here:
+Staging every gathered tensor before the push holds a full model copy on the forwarding rank — 800
+GB at 400B — and with N servers a per-client copy multiplies it again (4 × ~120B bf16 ≈ 0.9 TB).
+Both wire protocols take an update as a sequence of declared chunks inside one quiesce, so the client
+opens the update, sends each chunk as the budget fills, and closes it at the end. Staging lives on
+the sync GPU, not in pinned host memory: a chunk that transits the host is copied out and back over
+PCIe before the NCCL broadcast, and those two copies cap the push well below the fabric. What is
+pinned here:
 
-* the buffered weight is a CPU **snapshot**, not an alias — a later in-place mutation (PEFT unmerge,
-  the next optimizer step) must not rewrite a weight that has not gone out yet;
-* the multi-server fan-out allocates ONE host snapshot per param, shared read-only by every client;
-* **peak** host residency stays at one chunk (plus the tensor that crossed the budget), for the
-  single-server client and for the pooled multi-server fan-out — the property the streaming exists
-  for, asserted by counting live host tensors at their peak;
+* the buffered weight is a **snapshot** on the sync device, not an alias — a later in-place mutation
+  (PEFT unmerge, the next optimizer step) must not rewrite a weight that has not gone out yet;
+* the multi-server fan-out stages ONE snapshot per param, shared read-only by every client, and
+  releases it once every server has sent the chunk holding it;
+* **peak** staged residency stays at one chunk (plus the tensor that crossed the budget), for the
+  single-server client and for the multi-server fan-out — the property the streaming exists for,
+  asserted by counting live snapshots at their peak;
 * the chunk is cut BEFORE the budget is exceeded, on one rule shared by the streamed path and the
   whole-payload one, so nothing downstream has to re-split an already-budgeted chunk;
-* the pinned pool's **retention** is bounded by that same budget: it is keyed by ``(shape, dtype)``
-  and one sync presents many shapes, so an unbounded free list keeps the largest chunk seen for
-  every shape — several budgets of permanently pinned host RAM;
 * the engines are quiesced only once a chunk is ready to go out, not from the first gathered param;
 * every parameter reaches the engine exactly once, in order, across the chunk boundaries;
 * a server that failed AFTER its first chunk went out is NOT retried: the trainer kept no copy of
@@ -34,10 +34,7 @@ import weakref
 import pytest
 import torch
 
-from src.distributed.nccl.clients.base import (
-    PinnedHostBufferPool,
-    resolve_weight_sync_chunk_bytes,
-)
+from src.distributed.nccl.clients.base import resolve_weight_sync_chunk_bytes, snapshot_param
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
@@ -119,7 +116,7 @@ def _live(refs: list[weakref.ref]) -> int:
     return sum(1 for ref in refs if ref() is not None)
 
 
-def test_update_named_param_buffers_cpu_snapshot():
+def test_update_named_param_buffers_a_snapshot():
     client = _bare_client()
     weights = torch.randn(8, 8)  # contiguous, so an aliasing .contiguous() would return it as-is
     original = weights.clone()
@@ -128,15 +125,25 @@ def test_update_named_param_buffers_cpu_snapshot():
 
     name, stored = client._param_buffer[0]
     assert name == "model.layers.0.q_proj.weight"
-    assert stored.device.type == "cpu", f"buffered on {stored.device}, must be CPU"
+    assert stored.device == weights.device, "before init_communicator the snapshot stays on the source's device"
     assert stored.data_ptr() != weights.data_ptr(), "buffered by reference — must be a snapshot"
 
     weights.add_(1.0)  # simulate PEFT unmerge / optimizer step before the flush
     assert torch.equal(stored, original), "buffered weight mutated by a later in-place update"
 
 
-def test_host_residency_never_exceeds_one_chunk(monkeypatch):
-    """The bound the streaming exists for, measured: peak live host snapshots ≈ one chunk.
+def test_a_snapshot_is_contiguous_and_on_the_requested_device():
+    """A strided view is snapshotted as a contiguous copy (both wire formats send flat bytes), on the
+    device asked for — the sync GPU in production; here the CPU stands in for it."""
+    strided = torch.arange(16, dtype=torch.float32).reshape(4, 4).t()
+    snapshot = snapshot_param(strided, torch.device("cpu"))
+    assert snapshot.is_contiguous() and snapshot.device.type == "cpu"
+    assert torch.equal(snapshot, strided)
+    assert snapshot_param(strided, None).device == strided.device, "no device pins the source's own"
+
+
+def test_staged_residency_never_exceeds_one_chunk(monkeypatch):
+    """The bound the streaming exists for, measured: peak live snapshots ≈ one chunk.
 
     Ten params of an eighth of the budget each: buffering the model would leave all ten alive at
     once, streaming leaves at most a chunk's worth. Counted through weak references, so a snapshot
@@ -156,7 +163,7 @@ def test_host_residency_never_exceeds_one_chunk(monkeypatch):
         peak = max(peak, _live(refs))
 
     assert peak * param_bytes <= budget + param_bytes, (
-        f"{peak} host snapshots alive at once ({peak * param_bytes} B) — the streamed sync must not "
+        f"{peak} snapshots alive at once ({peak * param_bytes} B) — the streamed sync must not "
         f"hold more than one chunk ({budget} B) plus the tensor that crossed the budget"
     )
     assert peak < num_params, "every param stayed resident: the chunk flush never ran"
@@ -194,15 +201,15 @@ def test_a_sync_that_fits_in_one_chunk_still_opens_and_closes_one_update():
     assert (wire.opened, wire.closed) == (1, 1)
 
 
-def test_manager_allocates_one_host_snapshot_per_param(monkeypatch):
-    """The multi-server fan-out must allocate ONE host buffer per param, not one per client."""
+def test_manager_stages_one_snapshot_per_param(monkeypatch):
+    """The multi-server fan-out must stage ONE snapshot per param, not one per client."""
     manager, clients = _bare_manager(3)
 
     allocations = []
     real_empty_like = torch.empty_like
 
     def counting_empty_like(*args, **kwargs):
-        allocations.append(kwargs.get("pin_memory", False))
+        allocations.append(kwargs.get("device"))
         return real_empty_like(*args, **kwargs)
 
     monkeypatch.setattr(torch, "empty_like", counting_empty_like)
@@ -211,8 +218,8 @@ def test_manager_allocates_one_host_snapshot_per_param(monkeypatch):
     manager.update_named_param("model.layers.0.q_proj.weight", weights)
 
     assert len(allocations) == 1, (
-        f"{len(allocations)} host allocations for one param across {len(clients)} clients — "
-        f"per-client copies multiply pinned host RAM by the server count (must be exactly 1)"
+        f"{len(allocations)} staged allocations for one param across {len(clients)} clients — "
+        f"per-client copies multiply the staged chunk by the server count (must be exactly 1)"
     )
     buffered = [client._param_buffer[0][1] for client in clients]
     assert all(t is buffered[0] for t in buffered), "clients must share ONE snapshot by reference"
@@ -235,23 +242,22 @@ def test_manager_shared_snapshot_is_immutable_copy():
         assert torch.equal(stored, original), "shared snapshot mutated by a later in-place update"
 
 
-def test_manager_pool_holds_one_chunk_not_one_buffer_per_param(monkeypatch):
-    """Pooled multi-server: the pinned pool must recycle within the sync, not grow with the model.
-
-    Keyed-by-name retention was the other 1× model host pin — permanent, and independent of the
-    client buffers the tests above cover.
-    """
+def test_manager_releases_a_chunks_snapshots_once_every_server_sent_it(monkeypatch):
+    """Multi-server: a shared snapshot must die once the chunk holding it went out everywhere — the
+    manager keeps no pool, so a reference kept anywhere would grow the staged footprint with the
+    model rather than the chunk."""
     monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    manager, _clients = _bare_manager(2)
+    manager, clients = _bare_manager(2, wires=[_Wire(retain=False), _Wire(retain=False)])
+    refs: list[weakref.ref] = []
 
     for index in range(10):
         manager.update_named_param(f"w{index}", torch.zeros(128, dtype=torch.float32))
+        refs.append(weakref.ref(clients[0]._param_buffer[-1][1]))
+    assert 0 < _live(refs) < len(refs), "no chunk went out mid-stream — the flush never ran"
     manager.reset_prefix_cache()
 
-    pool = manager._host_buffer_pool
-    pooled = sum(len(buffers) for buffers in pool._free.values())
-    assert pooled <= 4096 // 512 + 1, f"the pool retained {pooled} buffers — one per param, not one chunk"
-    assert not pool._checked_out, "buffers stayed checked out after the sync — they can never be reused"
+    assert _live(refs) == 0, f"{_live(refs)} snapshots still referenced after the sync"
+    assert all(client._param_buffer == [] for client in clients)
 
 
 def test_manager_flush_failure_isolation():
@@ -319,30 +325,6 @@ def test_a_server_that_failed_before_streaming_is_still_retried(monkeypatch):
     manager.reset_prefix_cache()  # must NOT raise
 
     assert [name for name, _ in wire.sent] == ["w"], "the recovered flush did not deliver the params"
-
-
-def test_pooled_buffer_is_retained_and_reused_across_syncs():
-    """Pooled (default): the pinned buffer survives the sync and the NEXT one reuses it.
-
-    That retention IS the optimization — page-locking fresh memory per param per sync costs seconds
-    of trainer stall at 20B+. The buffer is recycled rather than kept per name, so a snapshot is
-    immutable only until the release that follows its chunk.
-    """
-    manager, clients = _bare_manager(2)
-
-    manager.update_named_param("w", torch.zeros(4, 4))
-    first = clients[0]._param_buffer[0][1]
-    assert all(client._param_buffer[0][1] is first for client in clients), "all clients share one snapshot"
-
-    manager.reset_prefix_cache()
-    snapshot_ref = weakref.ref(first)
-    del first
-    assert snapshot_ref() is not None, "pooled buffer must survive the sync (that is the amortization)"
-
-    manager.update_named_param("w", torch.ones(4, 4))
-    reused = clients[0]._param_buffer[0][1]
-    assert reused is snapshot_ref(), "second sync must reuse the pooled buffer, not allocate a new one"
-    assert torch.equal(reused, torch.ones(4, 4)), "reused buffer must carry the new sync's values"
 
 
 def test_chunks_are_cut_before_the_budget_is_exceeded(monkeypatch):
@@ -419,43 +401,6 @@ def test_sglang_declares_one_request_per_chunk(monkeypatch):
     )
 
 
-def test_the_pinned_pool_retention_is_bounded_by_one_chunk():
-    """Retention is per ``(shape, dtype)``, so an unbounded free list keeps the largest chunk seen
-    for EVERY shape — measured at ~5x the budget on a realistic per-expert + dense + embed stream,
-    and one dedicated buffer per oversize tensor (a 4 GiB fused gate_up_proj) for the process life.
-    """
-    budget = 4096
-    pool = PinnedHostBufferPool(budget)
-    shapes = [128, 192, 256, 2048]  # float32: 512 + 768 + 1024 B, plus one 8 KiB oversize tensor
-
-    for _ in range(3):
-        for numel in shapes:
-            pool.snapshot(torch.zeros(numel, dtype=torch.float32))
-        pool.release()
-
-    assert pool.retained_bytes <= budget, (
-        f"the pool is holding {pool.retained_bytes} B of pinned host RAM against a {budget} B budget"
-    )
-    retained = [tensor for buffers in pool._free.values() for tensor in buffers]
-    assert retained, "the pool retained nothing — the amortization it exists for is gone"
-    assert all(tensor.numel() * tensor.element_size() <= budget for tensor in retained), (
-        "a tensor larger than one chunk stayed pinned for the process lifetime"
-    )
-
-
-def test_the_bounded_pool_still_recycles_a_recurring_shape():
-    """Anti-vacuity for the bound: the steady state (a stream of like-shaped params) must still
-    reuse its buffers — page-locking fresh memory per param per sync is seconds of stall at 20B+."""
-    pool = PinnedHostBufferPool(4096)
-
-    first = pool.snapshot(torch.zeros(256, dtype=torch.float32))
-    pool.release()
-    second = pool.snapshot(torch.ones(256, dtype=torch.float32))
-
-    assert second is first, "a recurring shape was re-pinned instead of recycled"
-    assert torch.equal(second, torch.ones(256, dtype=torch.float32)), "the recycled buffer kept stale values"
-
-
 def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
     """The quiesce window opens at the first FULL chunk, not at the first gathered parameter.
 
@@ -475,14 +420,6 @@ def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
 
     manager.reset_prefix_cache()
     assert [wire.closed for wire in wires] == [1, 1], "the update stayed open after the final flush"
-
-
-def test_buffer_host_param_rejects_non_cpu_snapshot():
-    """Fail loud on a non-host snapshot — buffering on-device holds a model copy until the flush."""
-    client = _bare_client()
-    with pytest.raises(ValueError, match="CPU host snapshot"):
-        client.buffer_host_param("w", torch.empty(2, 2, device="meta"))
-    assert client._param_buffer == []
 
 
 def test_the_default_chunk_budget_is_one_packed_buffer(monkeypatch):

@@ -58,11 +58,13 @@ policy one optimizer step behind — and fold a PEFT merge into a copy the next 
 The push is **streamed, not buffered**: both engines take an update as a sequence of declared chunks
 inside one quiesce (`/start_weight_update` … N × `/update_weights` … `/finish_weight_update` on vLLM,
 N × `/update_weights_from_distributed` between `/pause_generation` and `/continue_generation` on
-SGLang), so the forwarding rank sends each 1 GB chunk as the gather fills it and holds one chunk of
-pinned host memory — not one model (~800 GB at 400B). The chunk is cut before the budget is
-exceeded, and the recycled pinned buffers are themselves capped at one chunk. In multi-server mode
-(`rollout_server_configs`) one page-locked snapshot per parameter is shared across all servers and
-each chunk goes out to every server **concurrently**, its buffers recycled once they all have it.
+SGLang), so the forwarding rank sends each chunk as the gather fills it and stages one chunk on its
+sync GPU — not one model (~800 GB at 400B), and not in host memory: a chunk that transits pinned
+host memory is copied out and back over PCIe before the NIC sees it, which capped the push at
+19-24 GB/s against 54-91 GB/s staged on the device. The chunk is cut before the budget
+(`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB) is exceeded. In multi-server mode (`rollout_server_configs`)
+one snapshot per parameter is shared across all servers and each chunk goes out to every server
+**concurrently**, released once they all have it.
 The trade is that a chunk cannot be replayed: a server that fails **after** its first chunk is
 reported rather than reconnected — the trainer does not hold what already landed. One that fails
 before any chunk went out (an engine restarted between syncs, the common case) is still recovered by

@@ -5,7 +5,7 @@ Per-call streams strand each sync's pack allocations (H2D uploads + the ~1GB cat
 allocator pools no later stream can reuse, growing reserved memory by ~the model size per sync until
 CUDA recycles stream handles — the production signature is 245 GiB reserved against a 72 GiB
 allocation peak on the forwarding rank. This drives the producer the way VLLMWeightSyncClient does
-(pinned host buffers re-uploaded via post_iter_func, client-owned streams) and asserts reserved
+(chunk tensors landed on the device via post_iter_func, client-owned streams) and asserts reserved
 memory stops growing after the first sync.
 """
 
