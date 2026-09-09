@@ -1,6 +1,8 @@
 # Environmental GRPO — Gemma-4 26B-A4B LoRA (r=64, attention projections) on code_contests, SGLang
 # backend, no EP, ZeRO-2, KL-free (bands + IS masking as trust region). SGLang serving contract:
 # agent-docs/infrastructure/rollout-servers.md.
+# Known issue: on the multimodal checkpoint PEFT refuses these targets (the vision tower's `q_proj` is a
+#   `Gemma4ClippableLinear`, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
 # Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2 on GPUs 4-7, ports 30000/30001,
 #   with --moe-runner-backend triton (the auto-picked runners repack the expert weights every sync
 #   writes) --tool-call-parser auto (resolves this family to the engine's gemma4 detector off the

@@ -194,6 +194,11 @@ VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
 
 ## Train a LoRA adapter
 
+On the multimodal checkpoint this recipe is refused at PEFT setup: the vision tower's
+projections share the `q_proj`…`o_proj` names and are `Gemma4ClippableLinear`, which PEFT
+cannot wrap. Open issue ([Troubleshooting](../troubleshooting.md)); the full fine-tune above
+is the working path.
+
 ```yaml
 use_peft: true
 lora_r: 16
@@ -213,7 +218,7 @@ Keep TP disabled for LoRA.
 
 ## Continue with GRPO
 
-Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests-lora-ep1.yaml`,
+Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests-full-ep1.yaml`,
 or from `examples/grpo/environmental/environmental-grpo-template.yaml`. Set
 `model_name_or_path` to the gathered checkpoint.
 

@@ -1,5 +1,7 @@
 # Environmental GRPO — Qwen3.6-35B-A3B on Codeforces, LoRA (r=64, attention projections), no EP, ZeRO-2,
 # KL-free (bands + IS masking as trust region).
+# Known issue: this attention-LoRA shape fails at the first training step (mixed Tensor/DTensor in the
+#   embedding, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 # Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton, and

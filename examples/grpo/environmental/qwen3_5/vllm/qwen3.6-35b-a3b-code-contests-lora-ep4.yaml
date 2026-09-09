@@ -1,5 +1,7 @@
 # Environmental GRPO — Qwen3.6-35B-A3B on Codeforces, LoRA (r=64, attention projections), EP=4, ZeRO-2,
 # KL-free (bands + IS masking as trust region).
+# Known issue: this attention-LoRA shape fails at the first training step (mixed Tensor/DTensor in the
+#   embedding, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
 # Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton, and
 #   VLLM_USE_V2_MODEL_RUNNER=0 in the server env (Model Runner V2 rejects the thinking_token_budget
 #   this config sends with a 400 on every rollout).

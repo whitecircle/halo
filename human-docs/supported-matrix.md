@@ -156,7 +156,7 @@ without a registered CP wrapper drop CP. Source of truth under
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | LoRA-style attention compression |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | untested | Yes | untested | VLM checkpoint; NoPE full-attention layers; averaged shared expert. Only EP is validated on the 200B+ checkpoint — CP/TP/ETP pass the tiny-model 8-GPU matrix. No online/environmental GRPO |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | untested | No | No | Yes | sigmoid router and shared expert, native in transformers (released checkpoints still load through remote code at a pinned revision); shipped configs set `attn_implementation: sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
-| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | Yes | KV-shared layers block CP/TP; no router-balancing path at all |
+| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | No | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA on the multimodal checkpoint is refused at PEFT setup — the vision tower's projections share the `q_proj`…`o_proj` names in a `Gemma4ClippableLinear` PEFT cannot wrap (open issue) |
 | Bailing/Ling | Yes | Yes | Yes | No | Yes | untested | No | Yes | EP covers Ling 2.0, Ling 3.0 and the Ring linear-attention siblings; CP on Ling 2.0 only (needs `sdpa`); no DTensor attention plan. Weight sync refused for Ling 3.0 and the linear siblings |
 | LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | short-conv layers block CP |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | neither pinned engine registers a `mistral4` class, so no online / environmental GRPO |
