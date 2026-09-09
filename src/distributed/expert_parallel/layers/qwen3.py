@@ -42,12 +42,6 @@ class EPQwen3MoELayer(EPSeparateGluMoELayerBase):
         local_down = experts.down_proj.data[start:end]  # [E_local, H, M]
         self._store_separate_glu_params(gate, up, local_down)
 
-    # No gather_fused_expert_state_dict here: SGLang 0.5.17's qwen3_moe loader maps per-expert names
-    # only (the ``*_fused`` variant is gpt_oss-only), so fused keys are dropped without error and a
-    # synced step would serve a trained router over launch-weight experts. The absent override keeps
-    # ``implements_fused_expert_layout()`` False, so the construction gate rejects SGLang here; add
-    # it only against a loader that consumes the fused pair.
-
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """``Qwen3MoeTopKRouter`` weights at ``indices``: the shared renormalized-softmax gating,
         whose ``norm_topk_prob`` this family carries as a configurable (default-off) router

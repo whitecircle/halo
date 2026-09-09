@@ -34,8 +34,6 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
     _NATIVE_BALANCING_BIAS_ATTR = "gate.e_score_correction_bias"
     # Routing is re-derived from ``gate.weight``, so ``outputs.router_logits`` stays empty under EP.
     _ep_severs_aux_loss = True
-    # vLLM's V4 loader targets the original fp8/fp4-packed release layout, which a gather cannot emit.
-    _supports_weight_sync = False
 
     # transformers registers vendor-namespace renames (^embed\.weight$ → embed_tokens.weight, …)
     # plus the expert merges for this family. Some sources are not vendor-anchored (5.16's `\.norm\.`

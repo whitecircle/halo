@@ -95,9 +95,8 @@ memory-validated shape.
 - vLLM 0.26.0 registers both `Cohere2MoeForCausalLM` and `Cohere2VisionForConditionalGeneration`
   and its loader reads the fused expert pair, so gathered saves serve directly.
 - RL weight sync is refused at construction (`_supports_weight_sync = False`): no end-to-end sync
-  has been validated against the pinned server — flip only with a validated live-server run.
-  SGLang is refused independently (the family declares no fused gather;
-  [Rollout Servers](../infrastructure/rollout-servers.md)).
+  has been validated on either pinned engine — flip only with a validated live-server run
+  ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 - Liger covers the fused SwiGLU (`Cohere2MoeMLP`, i.e. the dense and shared-expert path), cross-entropy,
   the norm when the checkpoint sets `rms_norm_eps` (a llama-style `Cohere2MoeRMSNorm`; the `null` default
   builds `Cohere2MoeLayerNorm`, a mean-subtracting LayerNorm with no bias parameter, which stays eager),

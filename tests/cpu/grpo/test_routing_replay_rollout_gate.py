@@ -25,6 +25,7 @@ from trl.trainer.utils import pad
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from src.trainers.grpo.rollout.routing_replay import decode_rollout_routing
 
 PartialState()  # the gate logs through accelerate, which refuses to log without it
 
@@ -64,7 +65,12 @@ def _host():
     """
     host = types.SimpleNamespace(
         _rollout_routing_replay=True,
-        _routing_injector=types.SimpleNamespace(num_layers=LAYERS, top_k=TOP_K, num_experts=EXPERTS),
+        _routing_injector=types.SimpleNamespace(
+            num_layers=LAYERS,
+            top_k=TOP_K,
+            num_experts=EXPERTS,
+            decode_engine_mask=lambda payload: decode_rollout_routing(payload, LAYERS, TOP_K),
+        ),
         _batch_build_error=None,
         _warned_capture_missing=False,
         _tokenizer=types.SimpleNamespace(model_max_length=4096),

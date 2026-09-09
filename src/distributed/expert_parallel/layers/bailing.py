@@ -27,11 +27,6 @@ class EPBailingMoELayer(EPSeparateGluMoELayerBase):
     # Ling-mini-2.0 / Ring-mini-linear-2.0 / Ling-3.0 (hybrid KDA+MLA attention, same MoE block)
     HF_MODEL_TYPES = ("bailing_moe", "bailing_moe_linear", "bailing_hybrid")
 
-    # Only Ling 2.0 is servable: vLLM 0.26.0 registers ``BailingMoeV2ForCausalLM`` alone. Ling 3.0's
-    # ``bailing_hybrid`` has no model class in vLLM or SGLang, and Ring's checkpoints declare
-    # ``BailingMoeLinearV2ForCausalLM`` where both engines register ``BailingMoeV2_5ForCausalLM``.
-    _WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES = ("bailing_hybrid", "bailing_moe_linear")
-
     _supports_bias_balancing = True
     _NATIVE_BALANCING_BIAS_ATTR = "gate.expert_bias"
     # Selection happens inside the gate (the forward never consults ``_balancing_bias``), so the

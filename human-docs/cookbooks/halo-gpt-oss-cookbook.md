@@ -240,9 +240,8 @@ ep1) or `examples/grpo/environmental/gptoss/vllm/` (full and LoRA, ep1 and ep4).
 `model_name_or_path` at the SFT checkpoint and set the environment and reward fields
 for your task.
 
-vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. GPT-OSS is
-also the only MoE family SGLang can weight-sync, because it loads experts in the
-checkpoint-fused layout that only the GPT-OSS layer gathers, and the shipped
+vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. SGLang
+0.5.17 serves the GPT-OSS weight sync too, and the shipped
 `sglang/gptoss-20b-code-contests-lora-ep1.yaml` is already wired for that engine. One
 constraint comes with SGLang: `rollout_max_thinking_tokens` stays unset. That field is
 vLLM-only; steer reasoning with the environment's `reasoning_effort` instead.

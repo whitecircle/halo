@@ -35,7 +35,7 @@ staleness, sync cadence, trajectory-length knobs — stay on the
 | IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/grpo/environmental-grpo.md#off-policy-mismatch-and-stability-knobs) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
 | Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side with a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`; harmony-disabled gpt-oss arms it off the toolkit plugin's marker ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) | rejected at config time |
-| Expert layout on sync | whatever the family's own `gather_expert_state_dict` emits — per-expert (Qwen3 MoE, GLM-4/Laguna, Bailing, LFM-2) or fused where that is the family's base gather (Qwen3.5/3.6, Gemma 4); 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | fused only (GptOss) |
+| Expert layout on sync | whatever the family's own `gather_expert_state_dict` emits — per-expert (Qwen3 MoE, GLM-4/Laguna, Bailing, LFM-2) or fused where that is the family's base gather (Qwen3.5/3.6, Gemma 4); 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same hub layouts, read by 0.5.17's per-family loaders; the families its loaders cannot take an update for are listed under [Which families each engine serves](#which-families-each-engine-serves) |
 | Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
 
 Use vLLM unless you need SGLang specifically: it is the only backend for Online GRPO, and the
@@ -160,15 +160,14 @@ halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit
 Checkpoint layout and expert un-fuse rules live in
 [Checkpoints](../reference/checkpoints.md#serving-on-vllm-sglang).
 
-Which families each backend accepts for RL is gated trainer-side. One gate is SGLang-specific — the
-[fused-layout](#the-fused-expert-layout-is-declared-per-family) section below. Two apply to **both**
-backends: DeepSeek-V4, Inkling, Zaya, Cohere2 MoE, GLM-5 Next and Mistral4 declare
-`_supports_weight_sync = False` (Cohere2 MoE because its sync is unverified against
-the pinned server; Mistral4 because vLLM 0.26.0 registers no `mistral4` class at all, so its
-composite loader has no text tower to build — [Mistral4](../models/mistral4.md#serving)), and Ling 3.0
-(`bailing_hybrid`) and Ring (`bailing_moe_linear`) are refused by `model_type` — no pinned engine
-registers a model class for those spellings, so the server cannot even load the base model. A
-bnb-quantized (QLoRA) base is refused for both as well.
+Which families each backend accepts for RL is gated trainer-side, at construction. Inkling, GLM-5
+Next and Cohere2 MoE declare `_supports_weight_sync = False` and are refused on both engines (their
+module-tree names land nowhere on either, or — Cohere2 MoE — no sync is validated). Every other
+refusal is an engine fact declared on that engine's client
+([Which families each engine serves](#which-families-each-engine-serves)): vLLM 0.26.0 cannot serve
+Zaya, Mistral4, DeepSeek-V4 and the Ling 3.0 / Ring spellings, SGLang 0.5.17 those two spellings
+plus Mistral4, Zaya, Laguna, Step-3.7 and DeepSeek-V4. A bnb-quantized (QLoRA) base is refused for
+both as well.
 
 **Hub-namespace families.** The sync forwards every tensor under the key a gathered checkpoint would
 carry. Where the live module tree and the hub checkpoint differ, the rewrite is derived, not
@@ -334,9 +333,11 @@ and DeepEP pick too, so on a multi-homed host set it only to an interface every 
 `Dockerfile.sglang` builds `sglang-server:0.5.17` to align NCCL: upstream's wheel trails
 `uv.lock`'s exact pin (what the training images run), and weight sync needs both ends on one
 runtime. The build bumps the wheel, installs the EFA userspace the training image runs
-(`docker/efa/install_efa_userspace.sh`), and asserts the weight-sync routes, request schemas, and
-rendezvous convention still exist, so an upstream refactor fails the build instead of a training
-run. Serving-only use can run upstream directly (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`). 0.5.17 is
+(`docker/efa/install_efa_userspace.sh`), applies the loader patches an online update needs
+(`docker/sglang/patches/`, [Which families each engine serves](#which-families-each-engine-serves)),
+and asserts the weight-sync routes, request schemas, and rendezvous convention still exist, so an
+upstream refactor fails the build instead of a training run. Serving-only use can run upstream
+directly (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`); weight sync needs this image. 0.5.17 is
 the last SGLang release on torch 2.11 — the training image's torch and NCCL generation; 0.5.18
 moves to torch 2.13, whose NCCL does not match the pin weight sync needs on both ends. 0.5.19's
 weight updater is byte-identical, it keeps the same `NCCL_CUMEM_ENABLE=0`-unless-set default, and
@@ -368,6 +369,9 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up
 | `SGLANG_ENABLE_R3` | *(unset)* | Any non-empty value adds `--enable-return-routed-experts` (R3 capture) |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) — separates reasoning from content in the response |
 | `SGLANG_CHAT_TEMPLATE` | *(unset)* | `--chat-template`: the SAME `.jinja` the trainer's `chat_template:` uses; the file must be visible inside the server container |
+| `SGLANG_ATTENTION_BACKEND` | *(unset)* | `--attention-backend`. `triton` for GLM-4 MoE Lite on Blackwell: its MLA head size has no kernel in the engine's default backend and the server exits at start (`Unsupported head dimensions`) |
+| `SGLANG_TRUST_REMOTE_CODE` | *(unset)* | Any non-empty value adds `--trust-remote-code`, which the Bailing (Ling 2.0) repos need — their modeling code ships in the checkpoint |
+| `SGLANG_EXTRA_ARGS` | *(unset)* | Further launch flags, verbatim. `--enable-deterministic-inference` for GLM-4 MoE Lite: under the triton attention backend its greedy logits differ between a prefill and a prefix-cache hit of the same prompt, which the tier's zero-noise baseline probe refuses |
 
 `SGLANG_GROUP_HOST` belongs to the **trainer** (the `VLLM_GROUP_HOST` equivalent, separate because
 the engines can sit on different hosts).
@@ -389,7 +393,10 @@ Engine behavior under RL:
   runners (`triton_kernel`, flashinfer; auto-selection picks one for most MoE shapes) bypass the
   capture hook and return nothing. The trainer opts in per request and decodes the wire format
   (response-level `sglext.routed_experts`, base64 raw int32) by the model's own layer/top-k counts.
-  Rows cover the full sequence, so prompt spans replay too.
+  Rows cover the full sequence, so prompt spans replay too. The engine's capturer is per family:
+  it serves GptOss, Qwen3 MoE, Qwen3.5/3.6 and GLM-4 MoE Lite, exits at start for Gemma 4 (whose
+  config carries no `num_experts_per_tok`; the family has no routing replay on either engine) and
+  raises at the first capture for Bailing — serve those without `SGLANG_ENABLE_R3`.
 - **`rollout_max_thinking_tokens` is rejected at config time** for every model: SGLang ignores
   unknown request fields, and the trainer wires neither of its budget mechanisms (the
   custom-logit-processor path needs a per-model class; the strict-thinking grammar needs a detector
@@ -438,30 +445,60 @@ deferred rather than per chunk because the engine acknowledges a chunk as soon a
 while the sender's kernels retire a little later, and a host-side drain after every chunk would
 serialize that tail with the next chunk's declaration, at a fifth of the push rate.
 
-### The fused expert layout is declared per family
+### Which families each engine serves
 
-SGLang loads experts fused (`experts.gate_up_proj` / `experts.down_proj`), the way transformers
-stores them; vLLM takes whichever layout the family's own gather emits. A family declares the fused
-gather through `gather_fused_expert_state_dict`, and **only the GptOss layer implements it** — the
-base raises for every other family. `gpt_oss` is also the only 0.5.17 loader reaching for the fused
-helper (`make_expert_params_mapping_fused`); `qwen3_moe` builds its mapping over per-expert names
-(`make_expert_params_mapping`), so a fused pair matches nothing there.
+Both engines' loaders read a family's experts in its hub checkpoint layout — per-expert tensors where
+the checkpoint stores them per expert (Qwen3 MoE, GLM-4 MoE Lite, Laguna, Bailing, LFM-2), the fused
+pair where it stores them fused (Qwen3.5/3.6, Gemma 4, GptOss's interleaved pair) — and that is what
+every family's `gather_expert_state_dict` emits, so the sync carries one layout per family on either
+engine. What differs per engine is which families its pinned release can take an online update for
+at all. Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), and
+`validate_weight_sync_support` refuses the pair at construction, quoting it. A family no gather can
+spell on any engine stays a family flag (`_supports_weight_sync`: Inkling, GLM-5 Next, Cohere2 MoE).
 
-A family without the override is refused at construction under `rollout_backend: sglang`, naming the
-class. The hook is additive — a family opts in by overriding `gather_fused_expert_state_dict` on its
-EP layer ([Adding a Model](../models/adding-a-model.md)) — but add it only against an engine whose
-loader verifiably consumes the fused pair.
+SGLang 0.5.17 cannot take the sync for: Mistral4 (no model class); Ling 3.0 `bailing_hybrid` (no
+class) and Ring `bailing_moe_linear` (the checkpoints declare `BailingMoeLinearV2ForCausalLM`, the
+engine registers `BailingMoeV2_5ForCausalLM`); Zaya (its loader reads the pre-transformers-5.14
+per-expert checkpoint, `zaya_block.experts.local_experts.N.linear_fc1`, not the native fused layout
+the trainer holds); Laguna (`load_weights` asserts every routed-expert tensor of every sparse layer
+in each call, so a chunked update raises); Step-3.7 (`Step3p5ForCausalLM.load_weights` asserts full
+parameter coverage per call); DeepSeek-V4 (per-expert `w1/w3/w2` loader against the fused gather,
+and no validated sync). vLLM 0.26.0's own list is on its client (Zaya, Mistral4, DeepSeek-V4, the
+two Bailing spellings). Every other family the trainer trains — dense families, GptOss, Qwen3 MoE,
+Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE — syncs into SGLang; the server tier's
+per-family pass (`HALO_TEST_ENV_GRPO_MODEL`, [CI](ci.md)) is the evidence, and it moves the served
+policy with an expert-only perturbation as well as a dense one.
 
-The sync ships hub names and full unsharded tensors into the engine's own `load_weights` mapping, and
-each TP rank narrows its slice. An expert name that mapping does not cover leaves **no server-side
-signal**: both MoE loaders `continue` on an unmatched `mlp.experts` name *before* the
-`not found in params_dict` warning (reachable only from the dense loaders), the update still returns
-`200 OK`, and the engine keeps serving its launch-weight experts under a freshly synced router.
+Three loader facts of this release shape the image and the client:
 
-The trainer-side construction gates are the whole guard. They read the family's contract off a live EP
+- **Routers that cached a derived form.** `Dockerfile.sglang` applies
+  `docker/sglang/patches/patch_sglang_weight_updates.py`: the GLM-4 gate kept an fp32 copy of its
+  weight from the first forward and never re-read the parameter (the fix later releases carry is
+  backported), and the Gemma 4 router folded `scale` into its norm once, behind a latch. Unpatched,
+  a synced router weight lands in the parameter while routing keeps the launch values, with no error.
+  The script asserts its pre-images, and `--verify` the post-images, at build.
+- **Fused a-projection halves.** The MLA loaders (GLM-4 MoE Lite here) concatenate `q_a_proj` and
+  `kv_a_proj_with_mqa` from a cache local to one `load_weights` call — one chunk — and drop a half
+  that arrives alone. The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps
+  it in one chunk, deferring the first half when the byte budget would cut between them; a pair
+  still incomplete when the sync closes refuses the close.
+- **The triton runner.** The `flashinfer_trtllm*`, aiter and quantized runners repack expert weights
+  after the load, and an online update writes the canonical layout into the repacked buffer.
+  `SGLANG_MOE_RUNNER_BACKEND=triton` (the compose default) is the runner whose weights an update
+  reaches unchanged; R3 capture needs it too.
+
+The sync ships hub names and full unsharded tensors into the engine's own `load_weights` mapping;
+each TP rank narrows its slice, and under `--ep-size` the loader keeps its local experts and drops
+the rest. An expert name that mapping does not cover leaves **no server-side signal**: the MoE
+loaders `continue` on an unmatched `mlp.experts` name *before* the `not found in params_dict`
+warning (reachable only from the dense loaders), the update still returns `200 OK`, and the engine
+keeps serving its launch-weight experts under a freshly synced router — which is why the tier's
+expert-only round exists.
+
+The trainer-side construction gate is the whole guard. It reads the family's contract off a live EP
 wrapper, or — when a run has none (`use_grouped_gemm: false` at `ep_size: 1`) — off the `model_type`
-registry (`validate_backend_expert_layout`). Expert distribution (EP, ETP) is accepted on both
-engines: the sync group is ordinary NCCL beside DeepEP's.
+registry. Expert distribution (EP, ETP) is accepted on both engines: the sync group is ordinary NCCL
+beside DeepEP's.
 
 ## Servers on other nodes (EFA)
 

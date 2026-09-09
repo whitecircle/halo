@@ -233,12 +233,10 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 Use `examples/grpo/environmental/environmental-grpo-template.yaml` as the starting point.
 Set `model_name_or_path` to the gathered SFT checkpoint.
 
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang is
-refused at construction for Qwen3 MoE: its 0.5.17 loader maps per-expert names
-only and silently drops the fused expert keys weight sync would ship, so the
-served policy would never update, and the gate fails the run before the engine
-is touched. vLLM has no family or expert-distribution restriction here and keeps
-the trainer's NVLink.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang
+0.5.17 serves and weight-syncs Qwen3 MoE too (`rollout_backend: sglang`, port
+30000): both engines read the per-expert expert names the gather emits, and
+both accept expert distribution.
 
 Run the server on the host, not inside the training container, on GPUs the
 trainer will not use. Pull the prebuilt server image, retag it to the name the

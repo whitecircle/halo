@@ -506,6 +506,77 @@ def test_decode_rollout_routing_raw_int32():
         decode_rollout_routing(base64.b64encode(b"").decode(), num_layers=3, top_k=K)
 
 
+def _raw_b64(array) -> str:
+    import base64
+
+    import numpy as np
+
+    return base64.b64encode(np.asarray(array, dtype=np.int32).tobytes()).decode()
+
+
+def test_decoder_layer_indices_read_the_layer_number_off_the_fqn():
+    from src.trainers.grpo.rollout.routing_replay import decoder_layer_indices
+
+    names = ["model.layers.3.mlp", "model.language_model.layers.7.feed_forward", "model.layers.12"]
+    assert decoder_layer_indices(names) == [3, 7, 12]
+    with pytest.raises(ValueError, match="decoder-layer index"):
+        decoder_layer_indices(["model.mlp"])
+
+
+def test_engine_rows_of_dense_layers_are_dropped_from_the_mask():
+    """Both engines' capturers emit one row per decoder layer (``num_hidden_layers``), so a family
+    whose first layers are dense ships rows the trainer has no EP layer for; the mask keeps only the
+    EP layers' rows, in layer order, on both wire formats."""
+    import numpy as np
+
+    injector = RoutingReplayInjector([_BareLayer(), _BareLayer()], engine_layers=4, layer_indices=[1, 3])
+    src = np.random.randint(0, E, size=(5, 4, K), dtype=np.int32)
+    expected = torch.from_numpy(src[:, [1, 3], :].astype("int16"))
+    assert torch.equal(injector.decode_engine_mask(_raw_b64(src)), expected)
+    assert torch.equal(injector.decode_engine_mask(_npy_b64(src)), expected)
+    # A payload sized to the EP layers alone is the shape the engine never sends for this family.
+    with pytest.raises(ValueError, match="multiple"):
+        injector.decode_engine_mask(_raw_b64(src[:, [1, 3], :]))
+    with pytest.raises(ValueError, match="decoder layers"):
+        injector.decode_engine_mask(_npy_b64(src[:, :3, :]))
+
+
+def test_an_all_moe_model_keeps_every_engine_row():
+    """The bare form: every decoder layer is an EP layer, so the wire is the mask."""
+    import numpy as np
+
+    injector = RoutingReplayInjector([_BareLayer(), _BareLayer(), _BareLayer()])
+    src = np.random.randint(0, E, size=(2, 3, K), dtype=np.int32)
+    assert torch.equal(injector.decode_engine_mask(_raw_b64(src)), torch.from_numpy(src.astype("int16")))
+
+
+def test_the_wire_description_must_cover_every_ep_layer():
+    with pytest.raises(ValueError, match="describe the wire together"):
+        RoutingReplayInjector([_BareLayer(), _BareLayer()], engine_layers=4, layer_indices=[1])
+    with pytest.raises(ValueError, match="distinct decoder layers"):
+        RoutingReplayInjector([_BareLayer(), _BareLayer()], engine_layers=4, layer_indices=[1, 4])
+    with pytest.raises(ValueError, match="distinct decoder layers"):
+        RoutingReplayInjector([_BareLayer(), _BareLayer()], engine_layers=4, layer_indices=[1, 1])
+
+
+def test_the_builder_reads_the_layer_count_and_indices_off_the_model():
+    from transformers import PretrainedConfig
+
+    from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
+
+    class _Block(nn.Module):
+        def __init__(self, moe: bool):
+            super().__init__()
+            self.mlp = _BareLayer() if moe else nn.Identity()
+
+    model = nn.Module()
+    model.layers = nn.ModuleList([_Block(False), _Block(True), _Block(False), _Block(True)])
+    model.config = PretrainedConfig(num_hidden_layers=4)
+    injector = build_routing_replay_injector(model)
+    assert injector.num_layers == 2
+    assert injector._engine_layers == 4 and injector._layer_indices == [1, 3]
+
+
 def test_assemble_rollout_masks_conventions():
     from src.trainers.grpo.rollout.routing_replay import assemble_rollout_masks
 

@@ -12,32 +12,14 @@ import sys
 from unittest.mock import patch
 
 import pytest
-import torch
 
 import src.environments.engine_wire as engine_wire
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.environments.ray_actors import RolloutConfig
-from src.trainers.grpo.rollout.weight_sync import validate_backend_expert_layout
-
-
-def _model_holding(layer_cls: type) -> torch.nn.Module:
-    """A module tree carrying one uninitialized instance of ``layer_cls``.
-
-    ``object.__new__`` skips the family ``__init__`` (which needs a live EP process group and a model
-    config) while leaving ``type(module)`` — all the gate reads — exactly right.
-    """
-    layer = object.__new__(layer_cls)
-    torch.nn.Module.__init__(layer)
-    root = torch.nn.Module()
-    root.add_module("mlp", layer)
-    return root
-
 
 # --- Registry — derived from the client hierarchy, not a hand-maintained table ---
 
@@ -83,70 +65,48 @@ def test_sglang_clients_default_to_distinct_group_names_per_server():
     assert named.group_name == "custom"
 
 
-def test_a_family_without_a_fused_gather_is_refused_before_the_engine_is_touched():
-    """SGLang loads experts fused, and ``gather_fused_expert_state_dict`` is a per-family hook whose
-    base default raises. Reaching the first sync before discovering that leaves the engine paused and
-    partly written — exactly what this gate exists to prevent. The EP wrappers are present
-    at ``ep_group_size == 1`` too (grouped-GEMM is on by default), so this is reachable without EP.
-
-    Both sides are drawn from the REAL layer registry rather than local subclasses: a throwaway
-    subclass would join ``EPMoELayerBase.__subclasses__()``, which ``ep_layer_classes()`` walks to
-    build cached cross-family unions — and it would stop tracking the roster, so a family that gained
-    or lost the override would not move this test.
-    """
-    implementing = [c for c in ep_layer_classes() if c.implements_fused_expert_layout()]
-    missing = [c for c in ep_layer_classes() if not c.implements_fused_expert_layout()]
-    assert implementing, "no EP family implements the fused gather — the anti-vacuity side is vacuous"
-    assert missing, "every EP family now implements the fused gather; this gate is dead code — delete it"
-
-    with pytest.raises(ValueError, match="does not implement"):
-        validate_backend_expert_layout("sglang", _model_holding(missing[0]))
-
-    # Anti-vacuity: neither the missing override nor the engine alone can be what fires the raise.
-    validate_backend_expert_layout("sglang", _model_holding(implementing[0]))
-    validate_backend_expert_layout("vllm", _model_holding(missing[0]))
+# --- Engine rosters — read off the client classes, so a loader fact cannot drift silently ---
 
 
-def test_an_unrecognized_expert_layout_is_refused_rather_than_guessed():
-    """The knob is two-valued and each shipped client declares one of the two named spellings. An
-    inequality test would route a third one into whichever branch it happens to miss, and the gather
-    it picks is rejected on arrival — after the engine is paused and partly written."""
-    from src.distributed.nccl.clients.base import BaseWeightSyncClient
-    from src.trainers.grpo.rollout.weight_sync import wants_fused_experts
-
-    declared = {BaseWeightSyncClient.UNFUSED_EXPERT_LAYOUT, BaseWeightSyncClient.FUSED_EXPERT_LAYOUT}
-    assert {VLLMWeightSyncClient.EXPERT_LAYOUT, SGLangWeightSyncClient.EXPERT_LAYOUT} == declared
-
-    assert wants_fused_experts(SGLangWeightSyncClient.EXPERT_LAYOUT) is True
-    assert wants_fused_experts(VLLMWeightSyncClient.EXPERT_LAYOUT) is False
-    with pytest.raises(ValueError, match="unknown expert layout"):
-        wants_fused_experts("fused-mxfp4")
-
-
-def test_gptoss_is_the_only_family_that_carries_the_fused_gather():
-    """Pins the roster split to the ENGINE's truth so the docs' claim cannot go stale silently.
-
-    SGLang 0.5.17's fused expert mapping (``make_expert_params_mapping_fused``) exists for gpt_oss
-    alone; its qwen3_moe loader maps per-expert names and silently drops fused keys before its
-    not-found warning. A family joining this list therefore asserts its engine-side loader consumes
-    the fused pair — Qwen3-MoE re-joining without that evidence re-opens a silent expert freeze.
-    """
-    implementing = [c for c in ep_layer_classes() if c.implements_fused_expert_layout()]
-    assert implementing == [EPGptOssMoELayer]
-    assert EPQwen3MoELayer not in implementing
+def test_each_engine_pins_the_families_its_loader_cannot_take():
+    """Every entry is an engine fact quoted by the construction gate; moving a family out means its
+    loader was shown to take the online update, in an end-to-end run, not that the entry went stale."""
+    assert set(SGLangWeightSyncClient.UNSERVABLE_MODEL_TYPES) == {
+        "mistral4",
+        "bailing_hybrid",
+        "bailing_moe_linear",
+        "zaya",
+        "laguna",
+        "step3p7",
+        "step3p5",
+        "deepseek_v4",
+    }
+    assert set(VLLMWeightSyncClient.UNSERVABLE_MODEL_TYPES) == {
+        "zaya",
+        "mistral4",
+        "deepseek_v4",
+        "bailing_hybrid",
+        "bailing_moe_linear",
+    }
 
 
-def test_gptoss_fused_gather_is_the_checkpoint_gather():
-    """GptOss's hub checkpoint layout is already the fused interleaved one, so the fused gather must
-    be a pure delegation — if the two ever diverge, a fused-layout engine and a gathered checkpoint
-    would silently receive different expert tensors."""
-    sentinel = {"experts.gate_up_proj": object()}
-    layer = EPGptOssMoELayer.__new__(EPGptOssMoELayer)
-    layer.gather_expert_state_dict = lambda device="cpu", merge_lora=False, retain=True: (
-        sentinel if (device, merge_lora, retain) == ("cuda", True, True) else {}
+def test_every_unservable_spelling_is_a_family_the_toolkit_trains():
+    """Anti-rot: an entry for a spelling no EP class claims refuses nothing, and hides a rename."""
+    known = set(ep_layer_class_by_model_type())
+    for client in (SGLangWeightSyncClient, VLLMWeightSyncClient):
+        unknown = set(client.UNSERVABLE_MODEL_TYPES) - known
+        assert not unknown, f"{client.__name__} lists model types no EP family claims: {sorted(unknown)}"
+        assert all(client.UNSERVABLE_MODEL_TYPES.values()), f"{client.__name__}: an entry carries no engine fact"
+
+
+def test_sglang_declares_the_fused_a_proj_halves_as_one_request():
+    """SGLang's MLA loaders fuse ``q_a_proj`` and ``kv_a_proj_with_mqa`` from a cache local to one
+    ``load_weights`` call, so a half that arrives without the other is dropped without error. The
+    pair is pinned by suffix, which is what keeps a chunk boundary from ever separating them."""
+    assert SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS == (
+        ("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),
     )
-    assert layer.gather_fused_expert_state_dict("cuda", merge_lora=True) is sentinel
-    assert layer.gather_fused_expert_state_dict("cuda", merge_lora=True, retain=False) == {}
+    assert VLLMWeightSyncClient.CO_LOADED_PARAM_GROUPS == (), "vLLM's layerwise reload assembles a layer itself"
 
 
 def test_every_registered_backend_is_a_selectable_config_value():

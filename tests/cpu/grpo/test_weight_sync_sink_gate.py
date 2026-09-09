@@ -46,17 +46,17 @@ class _GptOssStub(nn.Module):
 
 def test_sync_refuses_fa2_removed_sinks():
     with pytest.raises(ValueError, match="reset_sinks"):
-        validate_weight_sync_support(_GptOssStub(sinks=None))
+        validate_weight_sync_support(_GptOssStub(sinks=None), "vllm")
 
 
 def test_sync_accepts_live_sinks():
-    validate_weight_sync_support(_GptOssStub(sinks=torch.zeros(NUM_HEADS)))
+    validate_weight_sync_support(_GptOssStub(sinks=torch.zeros(NUM_HEADS)), "vllm")
 
 
 def test_sync_accepts_in_place_neutralized_sinks():
     """The non-FA2 reset fills dtype.min IN PLACE — the Parameter survives, syncs, and the engine
     serves the same neutralized sinks the trainer computes with. Consistent, so allowed."""
-    validate_weight_sync_support(_GptOssStub(sinks=torch.full((NUM_HEADS,), torch.finfo(torch.bfloat16).min)))
+    validate_weight_sync_support(_GptOssStub(sinks=torch.full((NUM_HEADS,), torch.finfo(torch.bfloat16).min)), "vllm")
 
 
 if __name__ == "__main__":

@@ -176,9 +176,9 @@ Use the same model class and processor for image-and-text inference.
 Serve the gathered checkpoint with Halo's vLLM image, which listens on port
 8000: the toolkit writes Gemma 4 exports in the config schema vLLM 0.26.0's
 model code reads, and its expert loader takes the gathered save's fused layout
-directly. SGLang 0.5.17 cannot load it, because outside GPT-OSS its loaders want
-per-expert expert names and this family's gather emits the fused pair. Run the
-server on the host, not inside the training container, and add
+directly. SGLang 0.5.17 reads the same fused pair on port 30000, and the
+upstream image serves it. Run the server on the host, not inside the training
+container, and add
 `- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to
 serve a checkpoint from disk, since the compose service otherwise mounts only
 the HuggingFace cache.
@@ -217,8 +217,12 @@ Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests
 or from `examples/grpo/environmental/environmental-grpo-template.yaml`. Set
 `model_name_or_path` to the gathered checkpoint.
 
-SGLang can weight-sync only GPT-OSS among the MoE families, so Gemma 4 rollouts run on
-vLLM (`rollout_backend: vllm`, the config default). Start the server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
+serves and weight-syncs Gemma 4 as well, with ep1 configs under
+`examples/grpo/environmental/gemma4/sglang/`. That sync needs Halo's SGLang image:
+the upstream router folds `scale` into its norm once, so a synced router weight lands
+in the parameter while routing keeps the launch values, with no error. Start the
+server on separate GPUs.
 
 Run the server on the host, not inside the training container. Pull the prebuilt server
 image, retag it to the name the compose file expects, and add

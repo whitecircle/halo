@@ -40,6 +40,7 @@ from src.checkpoint.config_export import (
     restore_model_type,
 )
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
+from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.models.moe_balancing import exports_source_config_schema, legacy_per_layer_config_keys
 from tests.common.models import (
     TINY_BAILING_MOE_CONFIG,
@@ -172,13 +173,17 @@ UNPARSEABLE = tuple(
 def weight_sync_families() -> set[type]:
     """EP layer classes the weight sync admits: every family that needs a fixture here.
 
-    A refused family (``_supports_weight_sync = False``, or every claimed ``model_type`` on the
-    engine-side refusal list) is excluded: nothing syncs into it, so no server parses its export.
+    A refused family (``_supports_weight_sync = False``, or its own ``model_type`` on the vLLM client's
+    ``UNSERVABLE_MODEL_TYPES``) is excluded: nothing syncs into it, so no server parses its export.
+    A class claiming no spelling is an intermediate base, not a family.
     """
+    unservable = set(VLLMWeightSyncClient.UNSERVABLE_MODEL_TYPES)
+    # Judged on the family's own spelling (the first claimed): a wrapper spelling behind it (Mistral4's
+    # ``mistral3``) admits no MoE checkpoint the engine refuses under the family's.
     return {
         cls
         for cls in ep_layer_classes()
-        if cls._supports_weight_sync and set(cls.HF_MODEL_TYPES) - set(cls._WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES)
+        if cls.HF_MODEL_TYPES and cls._supports_weight_sync and cls.HF_MODEL_TYPES[0] not in unservable
     }
 
 

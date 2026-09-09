@@ -24,7 +24,6 @@ from src.distributed.runtime import broadcast_from_rank0, get_num_nodes
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, ray_init_kwargs
 from src.trainers.grpo.rollout.weight_sync import (
-    expert_layout_for,
     sync_trainer_weights,
     sync_weights_to_client,
 )
@@ -495,7 +494,6 @@ class AsyncRolloutMixin:
                 self._weight_sync_client,
                 is_main=True,
                 is_tp_main=True,
-                expert_layout=expert_layout_for(self),
             )
             logger.debug(f"Synced weights to the {self._rollout_engine_name} engine at step {self.state.global_step}")
         return True

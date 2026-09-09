@@ -62,7 +62,6 @@ from src.trainers.grpo.rollout.trajectory_tokenize import (
     single_trajectory_row,
 )
 from src.trainers.grpo.rollout.weight_sync import (
-    validate_backend_expert_layout,
     validate_weight_sync_support,
 )
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -348,8 +347,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         gate. A shape the sync cannot serve fails here rather than as an opaque server-side error at
         the first push.
         """
-        validate_weight_sync_support(self.model)
-        validate_backend_expert_layout(self.async_config.rollout_backend, self.model)
+        validate_weight_sync_support(self.model, self.async_config.rollout_backend)
 
     @property
     def _runs_logprob_recompute(self) -> bool:

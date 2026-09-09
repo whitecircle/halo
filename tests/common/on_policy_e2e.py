@@ -360,6 +360,39 @@ def perturbation_round(
     return what
 
 
+def expert_round(ctx, model, *, server_url: str, model_name: str, push, checks: dict[str, bool]) -> bool:
+    """The expert stream, in a round of its own; returns whether this policy carries one.
+
+    :func:`perturbation_round` moves dense and expert tensors together, so its served-policy check
+    passes on the dense delta alone: an engine loader that drops every expert tensor of the sync (a
+    layout it does not map, a name it skips without a log line) still leaves the policy visibly
+    moved. Only a push that moves nothing but experts shows they landed. Every rank runs it, since
+    ``push`` is collective.
+    """
+    reshard_fsdp2_modules(unwrap(model))
+    experts = [
+        param
+        for layer in ep_layers(model)
+        for _, param in layer.expert_named_params()
+        if param.dtype.is_floating_point
+    ]
+    if not experts:
+        return False
+    before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}
+    _unshard_with_a_forward(model, ctx.device)
+    _apply_perturbation(experts, None)
+    push()
+    ctx.barrier()
+    if ctx.rank == 0:
+        after = probe_top_logprobs(server_url, model_name)
+        checks["forced_sync_moved_the_served_experts"] = after != before
+        if after == before:
+            log("  IDENTICAL logprobs after an expert-only perturbation: the expert stream did not land")
+        log(f"  post-expert-sync: { {k: round(v, 4) for k, v in after.items()} }")
+    ctx.barrier()
+    return True
+
+
 def sink_round(ctx, model, *, server_url: str, model_name: str, push, checks: dict[str, bool]) -> bool:
     """GptOss attention sinks, in a round of their own; returns whether this policy carries any.
 

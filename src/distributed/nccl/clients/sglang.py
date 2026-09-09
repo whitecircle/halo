@@ -78,8 +78,39 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     BACKEND_KEY = "sglang"
     BACKEND_NAME = "SGLang"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
-    # SGLang loads MoE experts as transformers stores them: one fused pair per layer.
-    EXPERT_LAYOUT = BaseWeightSyncClient.FUSED_EXPERT_LAYOUT
+    # Engine facts of the pinned 0.5.17 loaders, each read off the model file named.
+    UNSERVABLE_MODEL_TYPES = {
+        "mistral4": "SGLang 0.5.17 registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
+        "bailing_hybrid": "SGLang 0.5.17 registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
+        "bailing_moe_linear": (
+            "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where SGLang 0.5.17 registers "
+            "BailingMoeV2_5ForCausalLM"
+        ),
+        "zaya": (
+            "SGLang 0.5.17's zaya loader reads the pre-transformers-5.14 per-expert checkpoint "
+            "(zaya_block.experts.local_experts.N.linear_fc1), not the native fused layout the trainer holds"
+        ),
+        "laguna": (
+            "SGLang 0.5.17's laguna loader asserts every routed-expert tensor of every sparse layer in each "
+            "load_weights call, so it refuses the chunked online update"
+        ),
+        "step3p7": (
+            "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so "
+            "it refuses the chunked online update"
+        ),
+        "step3p5": (
+            "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so "
+            "it refuses the chunked online update"
+        ),
+        "deepseek_v4": (
+            "SGLang 0.5.17's deepseek_v4 loader maps per-expert w1/w3/w2 names where the gather emits the "
+            "fused pair, and no end-to-end sync has been validated for the family"
+        ),
+    }
+    # SGLang's MLA loaders concatenate ``q_a_proj`` and ``kv_a_proj_with_mqa`` into one fused parameter
+    # from a cache local to each ``load_weights`` call, so a half arriving without the other in the
+    # same request is discarded without error.
+    CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     RESUME_ENDPOINT = _EP_CONTINUE
     # An empty body is rejected: the endpoint takes a request dataclass, so it needs JSON.
     RESUME_PAYLOAD: dict | None = {}

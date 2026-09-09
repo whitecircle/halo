@@ -89,20 +89,28 @@ log-probability sums, full-sequence pooling, and dual-model / rollout setups.
 ### Rollout engines
 
 Environmental GRPO serves rollouts from vLLM by default; `rollout_backend:
-sglang` switches engines. SGLang is the narrower path and refuses two shapes
+sglang` switches engines. Both read a family's experts in the hub checkpoint
+layout its gather emits, so the engines differ only in which families their
+pinned release can take an online weight update for. SGLang refuses two shapes
 at startup rather than mid-run:
 
 - `rollout_max_thinking_tokens`, a vLLM-only request field — steer reasoning
   with the environment's `reasoning_effort` and price it with
   `reasoning_compliance_weight` instead;
-- every MoE family except GPT-OSS. SGLang loads experts in the checkpoint-fused
-  layout that only the GPT-OSS layer gathers, and 0.5.17's Qwen3-MoE loader
-  drops fused expert keys outright (dense Qwen3 is fine).
+- the families SGLang 0.5.17's own loaders cannot take a chunked update for:
+  Mistral4, Ling 3.0 and Ring (no model class), Zaya (its loader reads the
+  pre-transformers-5.14 per-expert checkpoint), Laguna and Step-3.7 (their
+  loaders assert full coverage in every call), DeepSeek-V4. Dense families,
+  GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0 and LFM-2
+  sync into it, with expert distribution. vLLM refuses Zaya, Mistral4,
+  DeepSeek-V4, Ling 3.0 and Ring. The trainer names the family and the loader
+  reason at construction.
 
 `routing_replay: rollout` works on either engine; SGLang captures it when the
 server runs `--enable-return-routed-experts --moe-runner-backend triton`.
-SGLang must be served from this repo's `Dockerfile.sglang` image — the upstream
-one ships a different NCCL and cannot form the weight-sync group — with
+Weight sync must be served from this repo's `Dockerfile.sglang` image — the
+upstream one ships a different NCCL, and the patch this one applies is what
+lets an update reach the GLM-4 gate and the Gemma 4 router — with
 `NCCL_CUMEM_ENABLE=1` in its container (the compose default; a mismatch fails
 the first sync, [Troubleshooting](troubleshooting.md)). Engine-by-engine
 detail: [Rollout Servers](../agent-docs/infrastructure/rollout-servers.md) ↗.
@@ -138,7 +146,7 @@ without a registered CP wrapper drop CP. Source of truth under
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | broadest coverage |
 | Qwen3-VL (text) | Yes | — | Yes | No | — | — | — | Yes | keep `tensor_parallel_size=1` — both variants raise at load under TP |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | interleaved linear-attention blocks CP; VL checkpoints train too — the MoE-VL wrapper has EP, the dense 9B-VL runs plain FSDP with `sdpa` |
-| GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | interleaved fused experts; the only MoE family SGLang weight sync serves |
+| GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | interleaved fused experts; trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | LoRA-style attention compression |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | untested | Yes | untested | VLM checkpoint; NoPE full-attention layers; averaged shared expert. Only EP is validated on the 200B+ checkpoint — CP/TP/ETP pass the tiny-model 8-GPU matrix. No online/environmental GRPO |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | untested | No | No | Yes | sigmoid router and shared expert, native in transformers (released checkpoints still load through remote code at a pinned revision); shipped configs set `attn_implementation: sdpa`, so `padding_free` is rejected and they pack instead |

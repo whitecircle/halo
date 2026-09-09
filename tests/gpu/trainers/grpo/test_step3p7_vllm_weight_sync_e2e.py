@@ -280,7 +280,7 @@ def run(ctx) -> dict:
     )
     model.eval()
     checks["ep_wrapped"] = bool(named_ep_layers(model))
-    validate_weight_sync_support(model)  # the construction gate must admit the family
+    validate_weight_sync_support(model, "vllm")  # the construction gate must admit the family
     checks["construction_gate_admits_step3p7"] = True
 
     tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT)

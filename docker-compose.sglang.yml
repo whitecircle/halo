@@ -46,7 +46,9 @@ services:
       - ${SGLANG_MODEL_DIR:-/mnt/models}:${SGLANG_MODEL_DIR:-/mnt/models}:ro
     # Two flags are required and silent when wrong: --tool-call-parser (tool-using environments need
     # the calls parsed; `auto` reads the parser off the chat template) and --moe-runner-backend
-    # triton (the auto runners bypass R3 capture and repack expert weights).
+    # triton (the auto runners bypass R3 capture and repack expert weights). --attention-backend is
+    # a per-family need (GLM-4's MLA head size has no default kernel on Blackwell; `triton` serves
+    # it) and --trust-remote-code a per-checkpoint one (the Bailing repos ship their modeling code).
     command: >
       python3 -m sglang.launch_server
       --model-path ${SGLANG_MODEL:?set SGLANG_MODEL to a hub id or a local checkpoint dir}
@@ -59,6 +61,9 @@ services:
       ${SGLANG_ENABLE_R3:+--enable-return-routed-experts}
       ${SGLANG_REASONING_PARSER:+--reasoning-parser ${SGLANG_REASONING_PARSER}}
       ${SGLANG_CHAT_TEMPLATE:+--chat-template ${SGLANG_CHAT_TEMPLATE}}
+      ${SGLANG_ATTENTION_BACKEND:+--attention-backend ${SGLANG_ATTENTION_BACKEND}}
+      ${SGLANG_TRUST_REMOTE_CODE:+--trust-remote-code}
+      ${SGLANG_EXTRA_ARGS:-}
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${SGLANG_PORT:-30000}/health')\""]
       interval: 15s

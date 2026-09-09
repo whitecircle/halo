@@ -366,31 +366,6 @@ class EPExpertGatherMixin:
             state[f"experts.{i}.{down_key}.weight"] = down[i].transpose(0, 1).contiguous().to(device)
         return state
 
-    def gather_fused_expert_state_dict(
-        self, device: str = "cpu", merge_lora: bool = False, retain: bool = True
-    ) -> dict:
-        """This layer's experts in the checkpoint-fused layout.
-
-        A second layout exists because the rollout engines differ: vLLM's loader takes the per-expert
-        tensors :meth:`gather_expert_state_dict` produces, SGLang's the fused ones transformers
-        stores. Declared per family, since the fused spelling differs across the roster (interleaved,
-        prefixed, ``linear_fc``). The base raises; :meth:`implements_fused_expert_layout` is the gate
-        that rejects such a family before the engine is touched.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} declares no fused expert layout, which this rollout engine "
-            f"requires. Sending the per-expert layout instead is silently dropped or rejected on "
-            f"arrival, with the engine already paused and partly written. Implement "
-            f"gather_fused_expert_state_dict for this family, or use rollout_backend: vllm, which "
-            f"takes the per-expert layout it already gathers."
-        )
-
-    @classmethod
-    def implements_fused_expert_layout(cls) -> bool:
-        """Whether this family declares :meth:`gather_fused_expert_state_dict` or inherits the raising
-        default. Read before a sync starts, while the engine is still untouched."""
-        return cls.gather_fused_expert_state_dict is not EPExpertGatherMixin.gather_fused_expert_state_dict
-
     def gather_expert_lora_state_dict(self, device: str = "cpu", retain: bool = True) -> dict:
         """Gather this layer's grouped LoRA adapters into a checkpoint dict, keyed relative to the layer.
 

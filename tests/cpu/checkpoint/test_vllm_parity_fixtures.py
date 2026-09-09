@@ -79,7 +79,8 @@ def test_every_weight_sync_family_has_a_fixture(generate):
     assert generate.weight_sync_families(), "premise: the EP registry admits at least one family"
     assert generate.uncovered_families() == [], (
         f"{generate.uncovered_families()}: the weight sync admits these families but no parity "
-        f"fixture covers them — add one, or refuse the family with _supports_weight_sync = False"
+        f"fixture covers them — add one, or refuse the family (_supports_weight_sync = False, or the vLLM "
+        f"client's UNSERVABLE_MODEL_TYPES)"
     )
 
 

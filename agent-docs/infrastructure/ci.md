@@ -25,7 +25,7 @@ Hosted jobs are pure lint/link checks (ruff, actionlint, the docs link check) an
 
 The job's `timeout-minutes` is the budget the `core` tier has to fit inside; a new core entry that pushes the tier past it belongs in `full` ([tier composition](../contributing/README.md#tests) owns both numbers).
 
-The full GPU tier (`make test-gpu-full`) and the two inference-server tiers (`make test-gpu-vllm` / `make test-gpu-sglang`, each needing its server already running on a GPU outside `TRAINER_CUDA_DEVICES`) have no workflow — run them by hand.
+The full GPU tier (`make test-gpu-full`) and the two inference-server tiers (`make test-gpu-vllm` / `make test-gpu-sglang`, each needing its server already running on a GPU outside `TRAINER_CUDA_DEVICES`) have no workflow — run them by hand. A per-family pass of either server tier serves the family's checkpoint and points the env-GRPO wrapper at it with `HALO_TEST_ENV_GRPO_MODEL`; the rows move the served policy with an expert-only perturbation as well as a dense one, which is what proves the engine's loader took the family's expert layout.
 
 ### Enabling the test tiers (repo admin)
 

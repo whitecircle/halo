@@ -198,9 +198,10 @@ print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 
 Serve the gathered checkpoint with Halo's vLLM image on the host, not inside the
 training container; it listens on port 8000, and vLLM 0.26.0's expert loader reads
-the gathered save's fused layout directly. SGLang 0.5.17 cannot load it: outside
-GPT-OSS its loaders want per-expert expert names, and this family's gather emits the
-fused pair. The compose service mounts only the HuggingFace cache, so add
+the gathered save's fused layout directly. SGLang 0.5.17 reads the same fused pair on
+port 30000, and its text-only `Qwen3_5MoeForCausalLM` also serves a `text_only_model`
+export, which vLLM takes only after `scripts/after_training/reattach_vision_tower.py`.
+The compose service mounts only the HuggingFace cache, so add
 `- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to serve
 a checkpoint from disk.
 
@@ -239,8 +240,10 @@ Start from one of the shipped configs under `examples/grpo/environmental/qwen3_5
 from `examples/grpo/environmental/environmental-grpo-template.yaml`. Replace the model
 path with the gathered SFT checkpoint.
 
-SGLang can weight-sync only GPT-OSS among the MoE families, so Qwen3.5/3.6 rollouts run
-on vLLM (`rollout_backend: vllm`, the config default). Start the server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
+serves and weight-syncs this family too — ep1 configs under
+`examples/grpo/environmental/qwen3_5/sglang/` — but rejects
+`rollout_max_thinking_tokens` at config time. Start the server on separate GPUs.
 
 Run the server on the host, not inside the training container; the commands below retag
 the pulled image to the name the compose file expects. Its service mounts only the

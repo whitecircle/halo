@@ -55,6 +55,12 @@ beside the per-layer fields: transformers 5.16 folds the full-attention layers' 
 the two keys (`_LEGACY_PER_LAYER_CONFIG_KEYS`) and the export rewrites them back
 ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
 
+Both pinned engines read the fused expert pair the gather emits, so RL weight sync runs on either
+`rollout_backend`. On SGLang it needs this repo's image: the router folds `scale` into its norm once
+behind a latch, so a synced router weight would never reach routing, and `Dockerfile.sglang` patches
+that (`docker/sglang/patches/`). Gemma 4 has no routing replay on either engine
+([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+
 ## Configs
 
 Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-only under EP=8 at 32,768 max length. Example: `examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml`. The multimodal class loads either way, but a text-only dataset takes the **text** data path, which is what makes `packing` legal here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).

@@ -157,7 +157,7 @@ changes.
 | `scripts/after_training/merge_ep_shards.py` | `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/{quantize_to_lowp,convert_to_bf16}.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `scripts/after_training/merge_models.py` | `agent-docs/reference/scripts-reference.md` |
-| `Dockerfile*`, `docker-compose*` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files (EFA overlays included) also `agent-docs/infrastructure/rollout-servers.md` |
+| `Dockerfile*`, `docker-compose*`, `docker/sglang/patches/` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files and server patches (EFA overlays included) also `agent-docs/infrastructure/rollout-servers.md` |
 | `docker/efa/install_efa_userspace.sh` (the EFA userspace every image shares) | `agent-docs/infrastructure/docker.md` (RDMA networking), `agent-docs/infrastructure/rollout-servers.md` (Servers on other nodes), `agent-docs/parallelism/multi-node.md` (RDMA fabrics) |
 | AWS / S3 auth, `src/data/sources/s3_client.py` paths | `agent-docs/infrastructure/aws-auth.md`, `agent-docs/data/s3-utilities.md` |
 | DeepEP install / NVSHMEM / CDMC notes | `agent-docs/infrastructure/deepep.md` |

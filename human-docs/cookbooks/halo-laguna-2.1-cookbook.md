@@ -198,10 +198,10 @@ output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with Halo's SGLang image on the host, not inside the
-training container; it listens on port 30000. Pull the prebuilt image and point
-`SGLANG_IMAGE` at it (no retag needed), or build the compose file's local tag once with
-`make build-sglang`.
+Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
+container; it listens on port 30000. Serving runs on any 0.5.17 image: point
+`SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the compose file's local
+tag once with `make build-sglang`.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
@@ -241,8 +241,10 @@ Keep TP disabled for LoRA.
 Use `examples/grpo/environmental/environmental-grpo-template.yaml` as the starting point.
 Set `model_name_or_path` to the gathered checkpoint.
 
-SGLang can weight-sync only GPT-OSS among the MoE families, so Laguna rollouts run on
-vLLM (`rollout_backend: vllm`, the config default). Start the server on separate GPUs.
+Laguna rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
+refuses the weight sync for the family: its loader asserts every routed-expert tensor of
+every sparse layer in each `load_weights` call, which the chunked online update cannot
+satisfy. Start the server on separate GPUs.
 
 Run the server on the host, not inside the training container; the commands below retag
 the pulled image to the name the compose file expects. Its service mounts only the

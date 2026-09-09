@@ -10,11 +10,10 @@ the served logprobs bit-identical, which is exactly what this asserts against.
 The shared body, and what these assert beyond the existing tier, is in
 :mod:`tests.common.env_grpo_e2e`.
 
-gpt-oss, not the vLLM counterpart's Qwen3 MoE: SGLang loads MoE experts in the checkpoint-FUSED
-layout, and ``EPGptOssMoELayer`` is the only layer implementing ``gather_fused_expert_state_dict``.
-Every other MoE family is refused for this backend at construction (0.5.17's ``qwen3_moe`` loader
-maps per-expert names only and drops fused keys), so pointing this test at one could assert nothing
-but that refusal.
+gpt-oss by default; ``HALO_TEST_ENV_GRPO_MODEL`` points it at any family the SGLang client serves
+(the server must run the same checkpoint). Each family's experts travel in its own hub layout —
+gpt-oss's fused interleaved pair, Qwen3's per-expert tensors, Qwen3.5's fused pair — and the engine's
+loader takes them as it takes a checkpoint; the per-family pass is what proves that for a loader.
 
 Prerequisites (``make test-gpu-sglang`` sets these up):
     SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=unsloth/gpt-oss-20b-BF16 \
@@ -40,6 +39,7 @@ from tests.common.models import GPT_OSS_20B
 # which reads it the same way, so the client must fall back to the same URL rather than to "".
 SERVER_URL = env_str("SGLANG_SERVER_URL") or "http://localhost:30000"
 GROUP_PORT = env_int("HALO_TEST_SGLANG_GROUP_PORT", 51216)
+MODEL_NAME = env_str("HALO_TEST_ENV_GRPO_MODEL", GPT_OSS_20B)
 
 
 @gpu_test_main(exact_world_size=2, prefix="env_grpo_sglang_e2e")
@@ -64,7 +64,7 @@ def run(ctx):
         peft=args.peft,
         resume=args.resume,
         routing_replay=args.routing_replay,
-        model_name=GPT_OSS_20B,
+        model_name=MODEL_NAME,
     )
 
 

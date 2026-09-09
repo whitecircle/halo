@@ -4,7 +4,7 @@
 #   VLLM_USE_V2_MODEL_RUNNER=0 in the server env (Model Runner V2 rejects the thinking_token_budget
 #   this config sends with a 400 on every rollout).
 #   (hermes does not parse Qwen3.5/3.6 XML tool calls, so rollouts return no tool_calls).
-# vLLM only: rollout_backend sglang is rejected for this family (no fused expert gather) and under EP.
+# This file targets vLLM; the SGLang siblings under `../sglang/` ship as ep1 only.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 

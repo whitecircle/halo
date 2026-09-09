@@ -6,8 +6,7 @@
 #   VLLM_USE_V2_MODEL_RUNNER=0 in the server env (Model Runner V2 rejects the thinking_token_budget
 #   this config sends with a 400 on every rollout).
 #   (hermes does not parse Qwen3.5/3.6 XML tool calls, so rollouts return no tool_calls).
-# vLLM only: rollout_backend sglang is rejected for this family (no fused expert gather — gpt-oss is
-#   the only family that implements one; Qwen3 MoE is refused for the same reason).
+# This file targets vLLM; the sibling `../sglang/` config runs the same recipe on SGLang.
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B

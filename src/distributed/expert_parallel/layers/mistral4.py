@@ -25,17 +25,6 @@ class EPMistral4MoELayer(EPGroupLimitedMoELayerBase):
 
     _supports_bias_balancing = True
 
-    # vLLM 0.26.0 registers no ``mistral4``: the composite ``Mistral3ForConditionalGeneration`` builds
-    # its text tower off ``text_config``, whose ``mistral4`` spelling resolves to no class. The
-    # release repo serves only through vLLM's Mistral-native ``params.json`` route to
-    # ``PixtralForConditionalGeneration``, which a plain-HF toolkit export cannot take.
-    _supports_weight_sync = False
-    _WEIGHT_SYNC_REFUSAL_REASON = (
-        "no pinned rollout engine can build a mistral4 text tower — vLLM 0.26.0 registers no "
-        "Mistral4ForCausalLM and maps no mistral4 model_type, so the composite loader has no class "
-        "for the text config a toolkit export writes (agent-docs/models/mistral4.md#serving)"
-    )
-
     _NUM_EXPERTS_ATTR_PATHS = ("n_routed_experts", "experts.num_experts")
 
     _SHARED_EXPERT_ATTRS = ("shared_experts",)

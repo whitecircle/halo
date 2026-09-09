@@ -93,7 +93,7 @@ docker run --gpus all --network=host --ipc=host \
 
 | Field | Default | Purpose |
 |---|---|---|
-| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (env-GRPO only; SGLang refused for non-fused MoE families — every family but GptOss; its server needs `NCCL_CUMEM_ENABLE=1`, the compose default — `agent-docs/infrastructure/rollout-servers.md`) |
+| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (env-GRPO only; SGLang refuses the families its 0.5.17 loaders cannot take a chunked update for — Mistral4, Ling 3.0, Ring, Zaya, Laguna, Step-3.7, DeepSeek-V4 — and its server needs `NCCL_CUMEM_ENABLE=1`, the compose default — `agent-docs/infrastructure/rollout-servers.md`) |
 | `rollout_server_url` | `http://localhost:8000` | single-server URL (weight sync + generation) |
 | `rollout_server_configs` | `None` | multi-server: `[{"url": ..., "group_port": ...}]`; overrides `rollout_server_url`, enables prefetch overlap |
 | `rollout_connection_timeout` | `120.0` | wait for `/health` |

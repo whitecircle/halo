@@ -257,8 +257,12 @@ Start from the SFT checkpoint. Copy `examples/grpo/environmental/environmental-g
 set `model_name_or_path` to that checkpoint, and set the environment and reward fields
 for your task.
 
-SGLang can weight-sync only GPT-OSS among the MoE families, so GLM-4.7 rollouts run on
-vLLM (`rollout_backend: vllm`, the config default). Start the server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 serves
+and weight-syncs GLM-4 MoE Lite as well; that sync needs Halo's SGLang image, since the
+upstream gate caches its weight in fp32 at the first forward and a synced gate never
+reaches routing. The client keeps the MLA `q_a_proj`/`kv_a_proj_with_mqa` pair in one
+chunk: SGLang's loader fuses the two per request and drops a half that arrives alone.
+Start the server on separate GPUs.
 
 Run the server on the host, not inside the training container: pull the prebuilt server
 image and retag it to the name the compose file expects. Its service mounts only the

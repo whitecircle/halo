@@ -51,6 +51,7 @@ from tests.common.on_policy_e2e import (
     RestorePointSnapshot,
     adapter_file_agreement,
     expert_lora_under_etp_refusal,
+    expert_round,
     fresh_parallelism_config,
     load_policy,
     logged_lrs,
@@ -187,9 +188,8 @@ def run_env_grpo_e2e(
     """Train Environmental GRPO against a live ``backend`` server and assert the sync landed.
 
     ``model_name`` is the checkpoint both sides use: the trainer loads it and the server must already
-    serve it. It is a parameter because the two backends do not accept the same families: SGLang loads
-    MoE experts in the checkpoint-fused layout that only the GptOss layer gathers, so every other MoE
-    family is refused at construction and a shared default could only assert that refusal.
+    serve it. It is a parameter because each engine's default family differs and a per-family pass
+    points both wrappers at the family under test.
 
     ``peft`` selects the adapter path (``"lora"`` / ``"expert_lora"``) and ``resume`` adds the
     second, resumed phase; both are described in the module docstring. ``thinking_budget`` sets
@@ -355,7 +355,17 @@ def run_env_grpo_e2e(
         checks["server_usable_after_sync"] = bool(probe_top_logprobs(server_url, model_name))
     ctx.barrier()
 
-    # ── 5. GptOss attention sinks, in a round of their own ────────────────────────────────────
+    # ── 5. the expert stream alone must move the served policy ───────────────────────────────
+    # Inert for a dense policy; see :func:`expert_round` for why the mixed round above cannot show it.
+    expert_round(
+        ctx,
+        trainer.model,
+        server_url=server_url,
+        model_name=model_name,
+        push=lambda: trainer._sync_weights_to_engine(force=True),
+        checks=checks,
+    )
+    # ── 6. GptOss attention sinks, in a round of their own ────────────────────────────────────
     # Inert for a sink-less family (the vLLM half's default Qwen3 MoE); see :func:`sink_round`.
     sink_round(
         ctx,
@@ -374,7 +384,7 @@ def run_env_grpo_e2e(
     if not resume:
         return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
-    # ── 6. a resumed run's FIRST rollout must come from the checkpoint's weights ──────────────
+    # ── 7. a resumed run's FIRST rollout must come from the checkpoint's weights ──────────────
     # ``pre_perturb`` is that policy as the engine served it: with sync_weights_every_n_steps=1 the
     # last push of phase 1 ran at the top of the step after the checkpoint, so when train() returned
     # the engine held the checkpoint's weights. Everything since moved it off them.

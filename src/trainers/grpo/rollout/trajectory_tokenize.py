@@ -16,7 +16,6 @@ from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KE
 from src.environments.episode import RolloutResult
 from src.environments.registry import create_environment
 from src.models.loading.tokenizer_setup import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
-from src.trainers.grpo.rollout.routing_replay import decode_rollout_routing
 from src.trainers.grpo.rollout.trajectory_spans import TemplateSpanError, locate_assistant_spans
 
 logger = logging.getLogger(__name__)
@@ -298,12 +297,7 @@ class TrajectoryTokenizeMixin:
             turn_routing = None
             if self._rollout_routing_replay and m.routing_mask:
                 try:
-                    turn_routing = (
-                        decode_rollout_routing(
-                            m.routing_mask, self._routing_injector.num_layers, self._routing_injector.top_k
-                        ),
-                        m.routing_prompt_tokens,
-                    )
+                    turn_routing = (self._routing_injector.decode_engine_mask(m.routing_mask), m.routing_prompt_tokens)
                 except ValueError as e:
                     if self._batch_build_error is None:
                         self._batch_build_error = f"routing_replay='rollout': malformed routed_experts payload: {e}"

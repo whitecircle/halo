@@ -411,9 +411,9 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=900
     ),
     # The entries below assert the served policy changed, so the server must run the same checkpoint
-    # the test trains, and the engines differ: VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507,
-    # SGLANG_MODEL=unsloth/gpt-oss-20b-BF16 (the only family whose EP layer gathers SGLang's fused
-    # layout; every other MoE family is refused for that backend at construction).
+    # the test trains; the defaults differ per engine (VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507,
+    # SGLANG_MODEL=unsloth/gpt-oss-20b-BF16) and HALO_TEST_ENV_GRPO_MODEL points either wrapper at
+    # another family for a per-family pass.
     # Serves its own tiny hub-layout checkpoint (``--write-checkpoint``, HALO_TEST_STEP3P7_MODEL),
     # not either SERVER_TIER model — see the script header for the server launch.
     "trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py": TestSpec(

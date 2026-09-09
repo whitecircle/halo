@@ -3,7 +3,7 @@
 # Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton,
 #   plus --enable-auto-tool-choice --tool-call-parser hermes: code_contests is a native-tool env, and a
 #   server with no tool parser 400s every rollout while the wrong one leaves calls as text (reward 0).
-# vLLM only: rollout_backend sglang is rejected for this family (no fused expert gather).
+# This file targets vLLM; the sibling `../sglang/` config runs the same recipe on SGLang.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 

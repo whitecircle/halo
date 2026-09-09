@@ -47,11 +47,11 @@ class _FloatStub(nn.Module):
 
 def test_gate_rejects_quantized_model():
     with pytest.raises(ValueError, match="QLoRA .* not supported with rollout-engine weight sync"):
-        validate_weight_sync_support(_QuantizedStub())
+        validate_weight_sync_support(_QuantizedStub(), "vllm")
 
 
 def test_gate_passes_float_model():
-    validate_weight_sync_support(_FloatStub())  # must not raise
+    validate_weight_sync_support(_FloatStub(), "vllm")  # must not raise
 
 
 def _install_host(model, vllm_generation):

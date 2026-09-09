@@ -281,8 +281,9 @@ Start from the SFT checkpoint. Copy `examples/grpo/environmental/environmental-g
 set `model_name_or_path` to that checkpoint, and set the environment and reward fields
 for your task.
 
-SGLang can weight-sync only GPT-OSS among the MoE families, so LFM2 rollouts run on vLLM
-(`rollout_backend: vllm`, the config default). Start the server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 reads
+the same per-expert expert names, so it serves and weight-syncs LFM2 too. Start the
+server on separate GPUs.
 
 Run the server on the host, not inside the training container. Pull the prebuilt server
 image and retag it to the name the compose file expects. Its service mounts only the

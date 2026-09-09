@@ -75,6 +75,22 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
     BACKEND_NAME = "vLLM"
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
     RESUME_ENDPOINT = _EP_RESUME
+    UNSERVABLE_MODEL_TYPES = {
+        "zaya": "vLLM 0.26.0 ships no Zaya implementation (agent-docs/models/zaya.md)",
+        "mistral4": (
+            "vLLM 0.26.0 registers no Mistral4ForCausalLM and maps no mistral4 model_type, so the "
+            "composite loader has no class for the text tower a toolkit export writes "
+            "(agent-docs/models/mistral4.md#serving)"
+        ),
+        "deepseek_v4": (
+            "vLLM 0.26.0's DeepSeek-V4 loader targets the fp8/fp4-packed release layout, which no gather can emit"
+        ),
+        "bailing_hybrid": "vLLM 0.26.0 registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
+        "bailing_moe_linear": (
+            "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where vLLM 0.26.0 registers "
+            "BailingMoeV2_5ForCausalLM"
+        ),
+    }
     # The layerwise reload processes a layer once all its tensors arrived; one whose tensors straddled
     # the interrupted chunk boundary is materialized from uninitialized storage while it waits for the
     # rest, and that storage is live once the phase closes.
