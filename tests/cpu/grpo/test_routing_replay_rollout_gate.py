@@ -12,7 +12,6 @@ tokenizer builds the rows, the real gate judges them.
     python tests/cpu/grpo/test_routing_replay_rollout_gate.py
 """
 
-import base64
 import types
 from collections import defaultdict
 
@@ -25,19 +24,20 @@ from trl.trainer.utils import pad
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-from src.trainers.grpo.rollout.routing_replay import decode_rollout_routing
+from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from tests.common.routing import BareEPLayer, raw_routing_payload
 
 PartialState()  # the gate logs through accelerate, which refuses to log without it
 
-LAYERS, TOP_K, EXPERTS = 2, 2, 8
+# The engine's rows are per decoder layer; the EP layers are two of the four.
+ENGINE_LAYERS, EP_LAYER_INDICES, TOP_K, EXPERTS = 4, [1, 3], 2, 8
 ENGINE_PROMPT = [11, 22, 33]
 SAMPLED = [44, 55]
 
 
 def _routing_payload(tokens: int) -> str:
-    """SGLang's wire form: base64 raw little-endian int32 ``[tokens, layers, top_k]`` expert ids."""
-    ids = np.zeros((tokens, LAYERS, TOP_K), dtype=np.int32)
-    return base64.b64encode(ids.tobytes()).decode()
+    """SGLang's wire form, one row per decoder layer."""
+    return raw_routing_payload(np.zeros((tokens, ENGINE_LAYERS, TOP_K), dtype=np.int32))
 
 
 def _rollout(*, truncated: bool, routing: bool) -> RolloutResult:
@@ -65,11 +65,10 @@ def _host():
     """
     host = types.SimpleNamespace(
         _rollout_routing_replay=True,
-        _routing_injector=types.SimpleNamespace(
-            num_layers=LAYERS,
-            top_k=TOP_K,
-            num_experts=EXPERTS,
-            decode_engine_mask=lambda payload: decode_rollout_routing(payload, LAYERS, TOP_K),
+        _routing_injector=RoutingReplayInjector(
+            [BareEPLayer(top_k=TOP_K, num_experts=EXPERTS) for _ in EP_LAYER_INDICES],
+            engine_layers=ENGINE_LAYERS,
+            layer_indices=EP_LAYER_INDICES,
         ),
         _batch_build_error=None,
         _warned_capture_missing=False,
@@ -111,7 +110,7 @@ def test_engine_cut_turns_leave_a_masked_row_with_no_routing():
 
 
 def test_gate_skips_a_batch_that_trains_nothing():
-    """The fix: no routing + no trainable token is an empty step, not a capture failure."""
+    """No routing plus no trainable token is an empty step, not a capture failure."""
     host = _host()
     rows = [row for _ in range(2) for row in host._tokenize_trajectory_turns(_rollout(truncated=True, routing=True))]
     assert not any(r.completion_mask.any() for r in rows)
@@ -143,7 +142,7 @@ def test_gate_assembles_the_engine_mask_for_a_trainable_row():
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True))
     masks = _gate(host, rows)
     assert masks is not None
-    assert tuple(masks.shape) == (1, len(ENGINE_PROMPT) + len(SAMPLED), LAYERS, TOP_K)
+    assert tuple(masks.shape) == (1, len(ENGINE_PROMPT) + len(SAMPLED), len(EP_LAYER_INDICES), TOP_K)
     # Every position of the covered row carries an engine id, not the -1 natural-routing sentinel.
     assert int(masks.min()) == 0
     assert host._metrics["train"]["routing/rollout_full_frac"] == [1.0]

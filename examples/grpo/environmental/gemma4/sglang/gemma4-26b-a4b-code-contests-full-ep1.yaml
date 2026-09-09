@@ -3,16 +3,18 @@
 # agent-docs/infrastructure/rollout-servers.md.
 # Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2 on GPUs 4-7, ports 30000/30001,
 #   with --moe-runner-backend triton (the auto-picked runners repack the expert weights every sync
-#   writes) --tool-call-parser auto (reads the parser off the chat template; code_contests is a
-#   native-tool env, so a template the detector does not cover leaves calls as text and every episode
-#   scores 0). The server container needs NCCL_CUMEM_ENABLE=1 (the compose default): SGLang otherwise
-#   turns cuMem off process-wide and the trainer's first cross-container import fails.
+#   writes) --tool-call-parser auto (resolves this family to the engine's gemma4 detector off the
+#   chat template; code_contests is a native-tool env, and a server with no parser leaves calls as
+#   text, so every episode scores 0). The server container needs NCCL_CUMEM_ENABLE=1 (the compose
+#   default): SGLang otherwise turns cuMem off process-wide and the trainer's first cross-container
+#   import fails.
 # SGLang serves this family through Gemma4ForConditionalGeneration, whose router folds `scale` into
 #   its norm weight once behind a latch; docker/sglang/patches/patch_sglang_weight_updates.py (baked
 #   into the image) releases that latch from the parameter's own loader, without which every synced
 #   router scale is ignored and served routing never moves.
 # No routing replay for Gemma 4 on either engine (_supports_routing_replay = False), so routing_replay
-#   stays unset and the server needs no --enable-return-routed-experts.
+#   stays unset and the server must run without SGLANG_ENABLE_R3 (with it the engine exits at start
+#   on this family).
 # No sglang ep4 variant ships; the expert-distributed ep4 configs are the ones under ../vllm/.
 # rollout_max_thinking_tokens stays unset (vLLM-only; refused by _validate_backend_capabilities), so
 #   rollout_max_tokens is the per-turn bound.

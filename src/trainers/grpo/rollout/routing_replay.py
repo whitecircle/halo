@@ -15,7 +15,6 @@ arXiv:2510.23027).
 import base64
 import contextlib
 import io
-import re
 import sys
 from collections.abc import Iterable
 
@@ -25,14 +24,13 @@ from torch import nn
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.models.loading.config_levels import text_config
+from src.models.structure import decoder_layer_index, unwrap_framework_wrappers
 from src.trainers.mixins.ep_introspection import named_ep_layers
 
 ROUTING_MASKS_KEY = "routing_masks"
 
 
 _NPY_MAGIC = b"\x93NUMPY"
-# The decoder-layer index in an EP layer's FQN (``model.layers.12.mlp``, ``model.language_model.layers.12.mlp``).
-_DECODER_LAYER_INDEX = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 
 def decoder_layer_indices(names: Iterable[str]) -> list[int]:
@@ -45,10 +43,10 @@ def decoder_layer_indices(names: Iterable[str]) -> list[int]:
     """
     indices = []
     for name in names:
-        match = _DECODER_LAYER_INDEX.search(name)
-        if match is None:
-            raise ValueError(f"EP layer {name!r} carries no decoder-layer index (`layers.N`) to match an engine row")
-        indices.append(int(match.group(1)))
+        index = decoder_layer_index(name)
+        if index is None:
+            raise ValueError(f"EP layer {name!r} carries no decoder-layer index to match an engine row")
+        indices.append(index)
     return indices
 
 
@@ -142,25 +140,14 @@ class RoutingReplayInjector:
     The layer list is in ``named_modules`` order (identical between capture and replay); the mask's
     layer axis indexes this list. ``engine_layers`` and ``layer_indices`` describe the engine's wire:
     one row per decoder layer, of which the EP layers' rows (:func:`decoder_layer_indices`) are the
-    mask; left unset, every decoder layer is an EP layer and the wire is the mask.
+    mask.
     """
 
-    def __init__(
-        self,
-        ep_layers: list[EPMoELayerBase],
-        *,
-        engine_layers: int | None = None,
-        layer_indices: list[int] | None = None,
-    ):
+    def __init__(self, ep_layers: list[EPMoELayerBase], *, engine_layers: int, layer_indices: list[int]):
         if not ep_layers:
             raise ValueError("RoutingReplayInjector requires at least one EP MoE layer")
-        if engine_layers is None and layer_indices is None:
-            engine_layers, layer_indices = len(ep_layers), list(range(len(ep_layers)))
-        if engine_layers is None or layer_indices is None or len(layer_indices) != len(ep_layers):
-            raise ValueError(
-                f"engine_layers and layer_indices describe the wire together: got engine_layers={engine_layers}, "
-                f"{len(layer_indices or [])} indices for {len(ep_layers)} EP layers"
-            )
+        if len(layer_indices) != len(ep_layers):
+            raise ValueError(f"{len(layer_indices)} decoder-layer indices for {len(ep_layers)} EP layers")
         if len(set(layer_indices)) != len(layer_indices) or not all(0 <= i < engine_layers for i in layer_indices):
             raise ValueError(
                 f"EP layer indices {layer_indices} must be distinct decoder layers below engine_layers={engine_layers}"
@@ -184,7 +171,7 @@ class RoutingReplayInjector:
         self._armed = False
 
     @property
-    def num_layers(self) -> int:
+    def num_ep_layers(self) -> int:
         return len(self._layers)
 
     @property
@@ -336,6 +323,6 @@ def build_routing_replay_injector(model: nn.Module) -> RoutingReplayInjector:
     layers = named_ep_layers(model)
     return RoutingReplayInjector(
         list(layers.values()),
-        engine_layers=int(text_config(model.config).num_hidden_layers),
-        layer_indices=decoder_layer_indices(layers),
+        engine_layers=int(text_config(unwrap_framework_wrappers(model).config).num_hidden_layers),
+        layer_indices=decoder_layer_indices(layers.keys()),
     )

@@ -42,8 +42,7 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
     _HUB_CONVERSION_KEYS = ("deepseek_v4",)
 
     # Hub layout: ``experts.{i}.w{1,3,2}.weight`` per expert (LFM-2's spelling), per transformers'
-    # converter for this family. vLLM reads the packed release format instead, but a
-    # transformers-side reload of a gathered save reads these names.
+    # converter for this family, which a transformers-side reload of a gathered save reads.
     _HUB_PER_EXPERT_KEYS = ("w1", "w3", "w2")
 
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")

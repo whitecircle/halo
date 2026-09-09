@@ -111,6 +111,19 @@ def test_an_already_patched_file_is_not_patched_twice():
         patches.patch_glm_gate(patched)
 
 
+def test_verify_refuses_a_gate_whose_weight_was_left_in_the_default_dtype():
+    """Cache stripped and forward rewritten but the parameter not fp32: ``F.linear`` would mix dtypes."""
+    half_patched = patches._replace_once(GLM_GATE, patches._GLM_CACHE_BEFORE, "", "cache")
+    half_patched = patches._replace_once(half_patched, patches._GLM_FORWARD_BEFORE, patches._GLM_FORWARD_AFTER, "fwd")
+    with pytest.raises(SystemExit, match="hold its weight in fp32"):
+        patches.verify_glm_gate(half_patched, "glm4_moe_lite.py")
+
+
+def test_a_gemma4_file_without_the_scale_line_fails_the_build():
+    with pytest.raises(SystemExit, match="upstream changed"):
+        patches.patch_gemma4_router(GEMMA4_ROUTER.replace(patches._GEMMA4_SCALE_BEFORE, ""))
+
+
 def test_verify_refuses_the_unpatched_files():
     with pytest.raises(SystemExit, match="still caches"):
         patches.verify_glm_gate(GLM_GATE, "glm4_moe.py")

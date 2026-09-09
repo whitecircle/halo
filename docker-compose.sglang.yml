@@ -49,6 +49,7 @@ services:
     # triton (the auto runners bypass R3 capture and repack expert weights). --attention-backend is
     # a per-family need (GLM-4's MLA head size has no default kernel on Blackwell; `triton` serves
     # it) and --trust-remote-code a per-checkpoint one (the Bailing repos ship their modeling code).
+    # SGLANG_EXTRA_ARGS is appended last, so a flag repeated there overrides the ones above.
     command: >
       python3 -m sglang.launch_server
       --model-path ${SGLANG_MODEL:?set SGLANG_MODEL to a hub id or a local checkpoint dir}

@@ -8,7 +8,6 @@ and the first/last few blocks in bf16. Call after EP-patching, before FSDP2 wrap
 from __future__ import annotations
 
 import logging
-import re
 
 import torch.nn as nn
 from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_tp_plan
@@ -17,6 +16,7 @@ from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.tensor_parallel.state_dict import get_tp_mesh
 from src.kernels.grouped_gemm import GroupedGemmPrecision
 from src.kernels.lowp.linear import PRECISION_TO_FORMAT, LinearPrecision, LowPrecisionLinear
+from src.models.structure import DECODER_LAYER_INDEX, decoder_layer_index
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,6 @@ _MLP_CONTAINERS = ("mlp", "feed_forward", "ffn")
 
 # The knob spellings are the LinearPrecision values, so the enum doubles as the accepted-value list.
 _LOWP_PRECISIONS = tuple(precision.value for precision in LinearPrecision)
-
-_LAYER_INDEX = re.compile(r"\blayers\.(\d+)\b")
 
 
 def _text_backbone_prefix(model: nn.Module) -> str | None:
@@ -59,8 +57,7 @@ def block_index(module_name: str, backbone_prefix: str | None = None) -> int | N
         if not module_name.startswith(f"{backbone_prefix}."):
             return None
         module_name = module_name[len(backbone_prefix) + 1 :]
-    match = _LAYER_INDEX.search(module_name)
-    return int(match.group(1)) if match else None
+    return decoder_layer_index(module_name)
 
 
 def block_numbering_root(module_name: str) -> str | None:
@@ -70,7 +67,7 @@ def block_numbering_root(module_name: str) -> str | None:
     stack is in play. The export tool has no live module to resolve a backbone prefix from, so it
     asserts on this instead: two roots among its selected weights would keep the wrong blocks.
     """
-    match = _LAYER_INDEX.search(module_name)
+    match = DECODER_LAYER_INDEX.search(module_name)
     return module_name[: match.start()] if match else None
 
 

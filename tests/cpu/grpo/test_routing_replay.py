@@ -1,52 +1,45 @@
 """CPU tests for MoE routing replay (R2): forced-selection math on the EP layer bases, the per-family
 gate-weight re-derivation formulas (checked against the real HF routers, so formula drift fails),
-the GC double-count fix in _record_expert_load, and the trainer-side injector's assemble/arm cycle.
+the single-count expert-load accounting under GC recompute, and the trainer-side injector's assemble/arm cycle.
 
     python tests/cpu/grpo/test_routing_replay.py
 """
 
+import base64
 import sys
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
 from src.distributed.expert_parallel.gc_scope import EPCheckpointScope
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.trainers.grpo.rollout.routing_replay import (
+    RoutingReplayInjector,
+    assemble_rollout_masks,
+    build_routing_replay_injector,
+    decode_rollout_routing,
+    decoder_layer_indices,
+)
+from tests.common.routing import BareEPLayer, npy_routing_payload, raw_routing_payload
 
 T, E, K = 6, 8, 2  # tokens, experts, top_k
 
 
-class _BareLayer(EPGroupLimitedMoELayerBase):
-    """Minimal concrete EP layer for exercising the selection helpers without DeepEP/GPU: bypasses
-    ``__init__`` (no dispatcher) and sets exactly the attributes the helpers read.
-
-    Rooted at the class that OWNS the group-limited routing, so the helpers exercised here are the
-    ones the families inherit rather than a copy the base happens to also carry."""
-
+class _BareLayer(BareEPLayer):
     def __init__(self, **attrs):  # noqa: D107 — test double
-        nn.Module.__init__(self)
-        self.top_k = K
-        self.num_experts = E
-        self.n_routed_experts = E
-        self.n_group = 1
-        self.topk_group = 1
-        self.norm_topk_prob = True
-        self.routed_scaling_factor = 1.0
-        self._forced_topk_indices = None
-        self._forced_cursor = 0
-        self._forced_consumed_total = 0
-        self._capture_routing = False
-        self._captured_routing_chunks = []
-        self._replay_flip_counts = None
-        for k, v in attrs.items():
-            setattr(self, k, v)
+        super().__init__(top_k=K, num_experts=E, **attrs)
 
-    def forward(self, hidden_states, **kwargs):  # pragma: no cover — never called
-        raise NotImplementedError
+
+def _injector(layers) -> RoutingReplayInjector:
+    """An injector over ``layers`` on the bare wire: every decoder layer is an EP layer."""
+    return RoutingReplayInjector(layers, engine_layers=len(layers), layer_indices=list(range(len(layers))))
 
 
 def _shuffled_valid_indices(natural: torch.Tensor) -> torch.Tensor:
@@ -244,8 +237,6 @@ def _router_config(cls, **extra):
 
 
 def test_qwen3_gate_weights_at_matches_router():
-    from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-
     router = Qwen3MoeTopKRouter(_router_config(None))
     torch.nn.init.normal_(router.weight)
     hidden = torch.randn(T, 16)
@@ -259,8 +250,6 @@ def test_qwen3_gate_weights_at_matches_router():
 
 
 def test_qwen3_5_gate_weights_at_matches_router():
-    from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
-
     router = Qwen3_5MoeTopKRouter(_router_config(None))
     torch.nn.init.normal_(router.weight)
     hidden = torch.randn(T, 16)
@@ -276,8 +265,6 @@ def test_qwen3_5_gate_weights_at_matches_router():
 def test_bailing_gate_weights_at_formula():
     # BailingMoeV2Gate is hub remote code (not importable here); check against its documented formula:
     # sigmoid -> gather -> renorm(+1e-20) -> routed_scaling_factor (gate expert_bias is selection-only).
-    from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-
     class _Gate(nn.Module):
         routed_scaling_factor = 2.5
 
@@ -329,7 +316,7 @@ def _capture_rows(layers, rows, seq, chunks=2):
 
 def test_injector_capture_assembles_and_arm_slices_per_layer():
     layers = [_BareLayer(), _BareLayer()]
-    injector = RoutingReplayInjector(layers)
+    injector = _injector(layers)
     rows, seq = 4, 3
     with injector.capture(rows, seq) as captured:
         per_layer = _capture_rows(layers, rows, seq)
@@ -358,7 +345,7 @@ def test_injector_span_capture_scatters_and_arm_trims():
     stream, so a capture->arm round trip feeds the cursor exactly what the per-row forwards consume.
     """
     layers = [_BareLayer(), _BareLayer()]
-    injector = RoutingReplayInjector(layers)
+    injector = _injector(layers)
     rows, seq = 3, 6
     spans = [(1, 5), (0, 6), (2, 3)]  # left-pad, full row, 1-token span pre-widened by the helper rule
     widths = [hi - lo for lo, hi in spans]
@@ -394,21 +381,21 @@ def test_injector_span_capture_scatters_and_arm_trims():
 
 def test_injector_span_capture_count_mismatch_raises():
     layers = [_BareLayer()]
-    injector = RoutingReplayInjector(layers)
+    injector = _injector(layers)
     with pytest.raises(RuntimeError, match="row spans"):
         with injector.capture(2, 4, row_spans=[(0, 4), (1, 3)]):  # expects 6 tokens
             layers[0]._captured_routing_chunks.append(torch.zeros(8, K, dtype=torch.int16))  # full-width 8
 
 
 def test_injector_arm_span_row_count_mismatch_raises():
-    injector = RoutingReplayInjector([_BareLayer()])
+    injector = _injector([_BareLayer()])
     with pytest.raises(RuntimeError, match="row_spans"):
         injector.arm(torch.zeros(2, 4, 1, K, dtype=torch.int16), row_spans=[(0, 4)])
 
 
 def test_injector_capture_token_count_mismatch_raises():
     layers = [_BareLayer()]
-    injector = RoutingReplayInjector(layers)
+    injector = _injector(layers)
     with pytest.raises(RuntimeError, match="recorded"):
         with injector.capture(4, 3):
             layers[0]._captured_routing_chunks.append(torch.zeros(5, K, dtype=torch.int16))
@@ -416,7 +403,7 @@ def test_injector_capture_token_count_mismatch_raises():
 
 def test_injector_flip_rate_drains_counters():
     layers = [_BareLayer(), _BareLayer()]
-    injector = RoutingReplayInjector(layers)
+    injector = _injector(layers)
     layers[0]._replay_flip_counts = torch.tensor([2.0, 10.0])
     layers[1]._replay_flip_counts = torch.tensor([3.0, 10.0])
     assert injector.flip_rate() == pytest.approx(0.25)
@@ -425,22 +412,22 @@ def test_injector_flip_rate_drains_counters():
 
 def test_injector_rejects_unsupported_family_and_empty():
     with pytest.raises(ValueError, match="at least one EP MoE layer"):
-        RoutingReplayInjector([])
+        _injector([])
     unsupported = _BareLayer()
     unsupported._supports_routing_replay = False
     with pytest.raises(NotImplementedError, match="_BareLayer"):
-        RoutingReplayInjector([unsupported])
+        _injector([unsupported])
 
 
 def test_injector_arm_shape_validation():
-    injector = RoutingReplayInjector([_BareLayer()])
+    injector = _injector([_BareLayer()])
     with pytest.raises(RuntimeError, match="does not match"):
         injector.arm(torch.zeros(2, 3, 5, K, dtype=torch.int16))  # 5 layers vs 1
 
 
 def test_injector_disarm_flags_partial_consumption():
     layer = _BareLayer()
-    injector = RoutingReplayInjector([layer])
+    injector = _injector([layer])
     injector.arm(torch.zeros(2, T, 1, K, dtype=torch.int16))  # 2*T tokens armed
     layer._maybe_replace_selection(torch.zeros(T, K, dtype=torch.long))  # consume only half
     with pytest.raises(RuntimeError, match="mis-consumed at disarm"):
@@ -450,7 +437,7 @@ def test_injector_disarm_flags_partial_consumption():
 
 def test_injector_capture_body_exception_propagates_and_resets():
     layers = [_BareLayer(), _BareLayer()]
-    injector = RoutingReplayInjector(layers)
+    injector = _injector(layers)
     with pytest.raises(ValueError, match="boom"):  # NOT the capture-alignment RuntimeError
         with injector.capture(4, 3):
             layers[0]._captured_routing_chunks.append(torch.zeros(3, K, dtype=torch.int16))
@@ -462,39 +449,18 @@ def test_injector_capture_body_exception_propagates_and_resets():
 # R3 transport: routed_experts decode + padded-batch assembly
 
 
-def _npy_b64(array) -> str:
-    import base64
-    import io
-
-    import numpy as np
-
-    buf = io.BytesIO()
-    np.save(buf, np.asarray(array))
-    return base64.b64encode(buf.getvalue()).decode()
-
-
 def test_decode_rollout_routing_roundtrip():
-    import numpy as np
-
-    from src.trainers.grpo.rollout.routing_replay import decode_rollout_routing
-
     src = np.random.randint(0, E, size=(5, 3, K), dtype=np.uint16)
-    out = decode_rollout_routing(_npy_b64(src), num_layers=3, top_k=K)
+    out = decode_rollout_routing(npy_routing_payload(src), num_layers=3, top_k=K)
     assert out.dtype == torch.int16 and out.shape == (5, 3, K)
     assert torch.equal(out, torch.from_numpy(src.astype("int16")))
     with pytest.raises(ValueError, match="shape"):
-        decode_rollout_routing(_npy_b64(np.zeros((5, 3), dtype=np.uint8)), num_layers=3, top_k=K)
+        decode_rollout_routing(npy_routing_payload(np.zeros((5, 3), dtype=np.uint8)), num_layers=3, top_k=K)
 
 
 def test_decode_rollout_routing_raw_int32():
     """SGLang's wire format: base64 raw int32 rows, shape implied — the decoder reshapes by the
     trainer's (L, K) and must reject a byte count they do not divide."""
-    import base64
-
-    import numpy as np
-
-    from src.trainers.grpo.rollout.routing_replay import decode_rollout_routing
-
     src = np.random.randint(0, E, size=(5, 3, K), dtype=np.int32)
     payload = base64.b64encode(src.tobytes()).decode()
     out = decode_rollout_routing(payload, num_layers=3, top_k=K)
@@ -506,17 +472,7 @@ def test_decode_rollout_routing_raw_int32():
         decode_rollout_routing(base64.b64encode(b"").decode(), num_layers=3, top_k=K)
 
 
-def _raw_b64(array) -> str:
-    import base64
-
-    import numpy as np
-
-    return base64.b64encode(np.asarray(array, dtype=np.int32).tobytes()).decode()
-
-
 def test_decoder_layer_indices_read_the_layer_number_off_the_fqn():
-    from src.trainers.grpo.rollout.routing_replay import decoder_layer_indices
-
     names = ["model.layers.3.mlp", "model.language_model.layers.7.feed_forward", "model.layers.12"]
     assert decoder_layer_indices(names) == [3, 7, 12]
     with pytest.raises(ValueError, match="decoder-layer index"):
@@ -527,31 +483,27 @@ def test_engine_rows_of_dense_layers_are_dropped_from_the_mask():
     """Both engines' capturers emit one row per decoder layer (``num_hidden_layers``), so a family
     whose first layers are dense ships rows the trainer has no EP layer for; the mask keeps only the
     EP layers' rows, in layer order, on both wire formats."""
-    import numpy as np
-
     injector = RoutingReplayInjector([_BareLayer(), _BareLayer()], engine_layers=4, layer_indices=[1, 3])
     src = np.random.randint(0, E, size=(5, 4, K), dtype=np.int32)
     expected = torch.from_numpy(src[:, [1, 3], :].astype("int16"))
-    assert torch.equal(injector.decode_engine_mask(_raw_b64(src)), expected)
-    assert torch.equal(injector.decode_engine_mask(_npy_b64(src)), expected)
-    # A payload sized to the EP layers alone is the shape the engine never sends for this family.
+    assert torch.equal(injector.decode_engine_mask(raw_routing_payload(src)), expected)
+    assert torch.equal(injector.decode_engine_mask(npy_routing_payload(src)), expected)
+    # The raw wire carries no shape: a row count that does not divide is the only shape error it surfaces.
     with pytest.raises(ValueError, match="multiple"):
-        injector.decode_engine_mask(_raw_b64(src[:, [1, 3], :]))
+        injector.decode_engine_mask(raw_routing_payload(src[:, [1, 3], :]))
     with pytest.raises(ValueError, match="decoder layers"):
-        injector.decode_engine_mask(_npy_b64(src[:, :3, :]))
+        injector.decode_engine_mask(npy_routing_payload(src[:, :3, :]))
 
 
 def test_an_all_moe_model_keeps_every_engine_row():
     """The bare form: every decoder layer is an EP layer, so the wire is the mask."""
-    import numpy as np
-
-    injector = RoutingReplayInjector([_BareLayer(), _BareLayer(), _BareLayer()])
+    injector = _injector([_BareLayer(), _BareLayer(), _BareLayer()])
     src = np.random.randint(0, E, size=(2, 3, K), dtype=np.int32)
-    assert torch.equal(injector.decode_engine_mask(_raw_b64(src)), torch.from_numpy(src.astype("int16")))
+    assert torch.equal(injector.decode_engine_mask(raw_routing_payload(src)), torch.from_numpy(src.astype("int16")))
 
 
 def test_the_wire_description_must_cover_every_ep_layer():
-    with pytest.raises(ValueError, match="describe the wire together"):
+    with pytest.raises(ValueError, match="indices for 2 EP layers"):
         RoutingReplayInjector([_BareLayer(), _BareLayer()], engine_layers=4, layer_indices=[1])
     with pytest.raises(ValueError, match="distinct decoder layers"):
         RoutingReplayInjector([_BareLayer(), _BareLayer()], engine_layers=4, layer_indices=[1, 4])
@@ -560,10 +512,6 @@ def test_the_wire_description_must_cover_every_ep_layer():
 
 
 def test_the_builder_reads_the_layer_count_and_indices_off_the_model():
-    from transformers import PretrainedConfig
-
-    from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
-
     class _Block(nn.Module):
         def __init__(self, moe: bool):
             super().__init__()
@@ -573,13 +521,11 @@ def test_the_builder_reads_the_layer_count_and_indices_off_the_model():
     model.layers = nn.ModuleList([_Block(False), _Block(True), _Block(False), _Block(True)])
     model.config = PretrainedConfig(num_hidden_layers=4)
     injector = build_routing_replay_injector(model)
-    assert injector.num_layers == 2
+    assert injector.num_ep_layers == 2
     assert injector._engine_layers == 4 and injector._layer_indices == [1, 3]
 
 
 def test_assemble_rollout_masks_conventions():
-    from src.trainers.grpo.rollout.routing_replay import assemble_rollout_masks
-
     layers = 2
 
     def _m(tokens):
@@ -625,8 +571,6 @@ def test_assemble_rollout_masks_conventions():
 
 
 def test_assemble_rollout_masks_rejects_drift_and_counts_unresolved():
-    from src.trainers.grpo.rollout.routing_replay import assemble_rollout_masks
-
     bad_layers = [(torch.zeros(3, 5, K, dtype=torch.int16), None)]  # 5 layers vs model's 2
     with pytest.raises(ValueError, match="MoE shape"):
         assemble_rollout_masks(bad_layers, [1], [2], 2, 3, 2, K, E)

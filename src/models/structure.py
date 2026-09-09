@@ -25,6 +25,9 @@ _TORCH_NORM_MODULE_BASES = (
 
 # Repo-wide rather than per-family: a backbone spelling missing here is invisible to every consumer.
 DECODER_LAYER_LIST_ATTRS: tuple[str, ...] = ("layers", "h")
+# ``<attr>.<N>`` at a name boundary inside a dotted module or parameter name: the decoder-layer index
+# every consumer numbers blocks by (``xlayers.3`` and ``layers.3x`` do not match).
+DECODER_LAYER_INDEX = re.compile(rf"(?<![^.])(?:{'|'.join(map(re.escape, DECODER_LAYER_LIST_ATTRS))})\.(\d+)(?![^.])")
 
 # Parameter-name substrings marking a vocab-indexed embedding or output head (``score`` is the
 # classification/reward head), read by Muon (sparsely-updated vocab rows stay on AdamW rather than
@@ -160,6 +163,12 @@ def decoder_layers(module: torch.nn.Module) -> torch.nn.ModuleList | None:
         if layers is not None:
             return layers
     return None
+
+
+def decoder_layer_index(name: str) -> int | None:
+    """The decoder-layer index in ``name`` (``model.layers.12.mlp`` → 12), or None outside a layer."""
+    match = DECODER_LAYER_INDEX.search(name)
+    return int(match.group(1)) if match else None
 
 
 def backbone_with_layers(model: torch.nn.Module) -> torch.nn.Module | None:

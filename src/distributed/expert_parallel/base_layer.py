@@ -143,8 +143,9 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     # HF class name(s) of the MoE block this wrapper replaces; ``patching.build_moe_layer_map`` walks subclasses.
     HF_MODULE_NAMES: tuple[str, ...] = ()
 
-    # ``config.model_type`` spelling(s) served — the family's own first, then the composite wrappers and
-    # sibling spellings that carry it; unioned so a checkpoint's config.json resolves back off-line.
+    # ``config.model_type`` spelling(s) served — the family's own first (``docker/vllm/parity/generate.py``
+    # reads it), then the composite wrappers and sibling spellings that carry it; unioned so a
+    # checkpoint's config.json resolves back off-line.
     HF_MODEL_TYPES: tuple[str, ...] = ()
 
     # Every expert-weight attribute this family may hold across all config branches (fused vs separate/ETP).
@@ -154,7 +155,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     _NUM_EXPERTS_ATTR_PATHS: tuple[str, ...] = ()
 
     # ``(live module, hub)`` pairs for renames transformers applies only inside ``from_pretrained``. The
-    # gather rewrites module → hub (vLLM ignores unknown names); the lazy loader inverts it.
+    # gather rewrites module → hub (the engines ignore unknown names); the lazy loader inverts it.
     _EXPORT_KEY_RENAMES: tuple[tuple[str, str], ...] = ()
 
     # ``{flat legacy key: (layer_type, per-layer field)}`` for attention geometry the hub config spells

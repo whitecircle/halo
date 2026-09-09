@@ -213,12 +213,12 @@ reply = tokenizer.decode(output[0][inputs.input_ids.shape[-1]:], skip_special_to
 print(reply)
 ```
 
-Serve the gathered checkpoint with Halo's SGLang image on the host, not inside the
-training container; it listens on port 30000. Point `SGLANG_IMAGE` at the prebuilt image
-(no retag needed), or build the compose file's local tag once with `make build-sglang`. On
-Blackwell, first add `--attention-backend triton` to the compose file's `command:` block:
-flashinfer's MLA kernel rejects GLM-4's head config on SM100+, and the compose file
-exposes no variable for the flag.
+Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
+container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
+this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
+compose file's local tag once with `make build-sglang`. On Blackwell set
+`SGLANG_ATTENTION_BACKEND=triton`: the engine's default backend has no kernel for GLM-4's
+MLA head size and the server exits at start.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
@@ -226,6 +226,7 @@ docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
 SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
 SGLANG_MODEL=/data/checkpoints/glm-4.7-flash-ultrachat-ep8 \
 SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_ATTENTION_BACKEND=triton \
   docker compose -f docker-compose.sglang.yml up
 ```
 
@@ -257,11 +258,9 @@ Start from the SFT checkpoint. Copy `examples/grpo/environmental/environmental-g
 set `model_name_or_path` to that checkpoint, and set the environment and reward fields
 for your task.
 
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 serves
-and weight-syncs GLM-4 MoE Lite as well; that sync needs Halo's SGLang image, since the
-upstream gate caches its weight in fp32 at the first forward and a synced gate never
-reaches routing. The client keeps the MLA `q_a_proj`/`kv_a_proj_with_mqa` pair in one
-chunk: SGLang's loader fuses the two per request and drops a half that arrives alone.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
+serves and weight-syncs this family (`rollout_backend: sglang`, port 30000); that sync
+needs this repo's SGLang image ([Supported Matrix](../supported-matrix.md#rollout-engines)).
 Start the server on separate GPUs.
 
 Run the server on the host, not inside the training container: pull the prebuilt server
@@ -287,9 +286,26 @@ That command already passes `--moe-backend triton`, which is required: Blackwell
 auto-selected MoE backends repack expert weights at load and silently corrupt every
 weight sync. On Blackwell, GLM-4's MLA attention additionally needs
 `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` (a compose variable; SGLang:
-`--attention-backend triton`). Serving `routing_replay: rollout` needs
+`SGLANG_ATTENTION_BACKEND=triton`). Serving `routing_replay: rollout` needs
 `--enable-return-routed-experts`, added to the server's `command:` block, since the
 compose file exposes no variable for that one.
+
+For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
+trainer will not use.
+
+```bash
+docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
+
+SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
+SGLANG_MODEL=/data/checkpoints/glm-4.7-flash-ultrachat-ep8 \
+SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
+SGLANG_ATTENTION_BACKEND=triton \
+  docker compose -f docker-compose.sglang.yml up sglang-server
+```
+
+The compose default `--moe-runner-backend triton` is required for weight sync and for R3
+capture under `routing_replay: rollout` (add `SGLANG_ENABLE_R3=1`).
 
 ```yaml
 rollout_server_url: http://localhost:8000

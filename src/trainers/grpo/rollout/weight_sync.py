@@ -191,7 +191,7 @@ def _hub_param_name(name: str, ep_layers: dict[str, EPMoELayerBase]) -> str:
 
     The same per-family :attr:`~EPMoELayerBase._EXPORT_KEY_RENAMES` rewrite
     :func:`~src.distributed.expert_parallel.expert_weights.gather_ep_layer_weights` applies to a
-    gathered checkpoint, so vLLM receives what it would load from one. Identity outside EP layers and
+    gathered checkpoint, so the engine receives what it would load from one. Identity outside EP layers and
     for every family whose two spellings agree.
     """
     for layer_name, layer in ep_layers.items():
@@ -302,7 +302,7 @@ def _send_ep_expert_weights(
 
     Every family is gathered in its own hub checkpoint layout, the one both engines' loaders read:
     fused pairs where the checkpoint stores them fused, per-expert tensors where it stores them per
-    expert. There is no per-engine layout to choose.
+    expert.
 
     The retained assembly is the sync's largest rank-local allocation (~28 GB for one 397B layer), so
     it runs under ``guard`` like the sends do: a retained gather finishes its collectives before it
@@ -463,6 +463,10 @@ def sync_trainer_weights(trainer, client: Any | None) -> bool:
     if log_memory:
         log_cuda_memory("weight-sync pre")
 
+    # The engine fuses a co-load group only where this model declares every member, so the client's
+    # groups are scoped to its module tree before the first chunk; only the forwarding rank holds one.
+    if client is not None:
+        client.scope_co_load_groups(name for name, _ in model.named_modules())
     # Hold every rank until the forwarding rank's push lands: peers would otherwise drive rollouts
     # against a mid-update engine. Fenced because the push is main-rank-only, so a raise must not skip
     # the barrier its peers block in.

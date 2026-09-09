@@ -217,12 +217,11 @@ Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests
 or from `examples/grpo/environmental/environmental-grpo-template.yaml`. Set
 `model_name_or_path` to the gathered checkpoint.
 
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
-serves and weight-syncs Gemma 4 as well, with ep1 configs under
-`examples/grpo/environmental/gemma4/sglang/`. That sync needs Halo's SGLang image:
-the upstream router folds `scale` into its norm once, so a synced router weight lands
-in the parameter while routing keeps the launch values, with no error. Start the
-server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
+serves and weight-syncs this family (`rollout_backend: sglang`; ep1 configs under
+`examples/grpo/environmental/gemma4/sglang/`); that sync needs this repo's SGLang image
+([Supported Matrix](../supported-matrix.md#rollout-engines)). Start the server on
+separate GPUs.
 
 Run the server on the host, not inside the training container. Pull the prebuilt server
 image, retag it to the name the compose file expects, and add
@@ -241,6 +240,22 @@ VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
 That command already passes the required `--moe-backend triton`; Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
 weight sync.
+
+For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
+trainer will not use.
+
+```bash
+docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
+
+SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
+SGLANG_MODEL=/data/checkpoints/gemma-4-26b-a4b-ultrachat-ep8 \
+SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
+  docker compose -f docker-compose.sglang.yml up sglang-server
+```
+
+The compose default `--moe-runner-backend triton` is required for weight sync, and this
+family must be served without `SGLANG_ENABLE_R3` — the engine exits at start with it.
 
 ```yaml
 rollout_server_url: http://localhost:8000

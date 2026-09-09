@@ -40,8 +40,8 @@ environment_kwargs:
                              # vllm lora-ep1 config for the derivation
   reasoning_effort: random
   # One profile per effort level: CoT budget plus interaction limits. Submission and test-call
-  # allowances scale with effort. thinking_tokens is an engine cap that also bounds the turn total
-  # (thinking plus the global answer headroom).
+  # allowances scale with effort. thinking_tokens is an engine cap on vLLM; on SGLang it reaches the
+  # trajectory only (nothing caps CoT below rollout_max_tokens).
   reasoning_effort_profiles:
     low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
     medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
@@ -79,10 +79,9 @@ episode_timeout: 2700         # whole-episode wall clock; launch with DIST_NCCL_
 rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]
-rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
-                                       # (the headroom must leave a finished thought room to emit its tool call)
+rollout_max_tokens: 22000              # per-turn bound; nothing reserves answer headroom below it on SGLang
 reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
-                                 # so length control is engine-side instead (per-effort caps)
+                                 # so length control is the effort level's conditioning instead
 
 # --- Prefetch ---
 enable_prefetch: true

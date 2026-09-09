@@ -89,6 +89,9 @@ crashing mid-run. These are the ones that come up:
 | `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` | auto | trainer IP the rollout server dials back for the weight-sync group; set it when the server is on another host and the trainer's default-route NIC is not the one it can reach |
 | `VLLM_USE_V2_MODEL_RUNNER` | unset | server-side: must be `0` for any run setting `rollout_max_thinking_tokens` (V2 rejects thinking budgets with a 400) |
 | `NCCL_CUMEM_ENABLE` | `1` (SGLang compose default) | server-side: SGLang turns cuMem off unless this is pre-set, and a mismatch with the trainer fails the first weight-sync import — leave the compose default |
+| `SGLANG_ATTENTION_BACKEND` | unset | server-side: passed through as `--attention-backend`; `triton` for GLM-4 MoE Lite on Blackwell, whose MLA head size has no kernel in the default backend |
+| `SGLANG_TRUST_REMOTE_CODE` | unset | server-side: any non-empty value adds `--trust-remote-code`; the Ling repos need it |
+| `SGLANG_EXTRA_ARGS` | unset | server-side: extra launch flags appended last, so a flag repeated there overrides the compose defaults |
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is worth +9.7% on ep8 |
 

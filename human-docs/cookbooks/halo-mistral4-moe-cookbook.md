@@ -217,13 +217,12 @@ print(processor.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 ## Serving
 
 Neither pinned rollout engine serves a toolkit Mistral 4 export. vLLM 0.26.0
-registers no `mistral4` class: the public `mistralai/Mistral-Small-4-*` repos
-serve only because vLLM detects their Mistral-native `params.json` layout, and a
-toolkit export is plain HF-format with no such path. The one remaining route,
-vLLM's generic transformers backend (`--model-impl transformers`), is neither
-pinned nor verified here, and SGLang 0.5.17 registers no Mistral4 class either.
-Run inference from transformers (above), or serve the pretrained hub repo
-directly.
+registers no `mistral4` class and neither does SGLang 0.5.17: the public
+`mistralai/Mistral-Small-4-*` repos serve only because vLLM detects their
+Mistral-native `params.json` layout, and a toolkit export is plain HF-format with
+no such path. The one remaining route, vLLM's generic transformers backend
+(`--model-impl transformers`), is neither pinned nor verified here. Run inference
+from transformers (above), or serve the pretrained hub repo directly.
 
 ## Train a LoRA adapter
 

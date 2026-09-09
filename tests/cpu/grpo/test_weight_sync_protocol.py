@@ -838,6 +838,9 @@ def test_reconnect_retires_the_old_client_before_probing_the_replacement():
         def buffer_param(self, name, snapshot):
             self._param_buffer.append((name, snapshot))
 
+        def scope_co_load_groups(self, module_names):
+            order.append("scope new client")
+
     manager = InferenceClientManager(server_configs=[{"url": "http://server0:8000", "group_port": 51216}])
     old = RecordingClient(base_url="http://server0:8000")
     old.buffer_param("w", torch.zeros(4))

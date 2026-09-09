@@ -69,8 +69,8 @@ class DistributedGRPOTrainer(
         "the blocker"
     )
     # Online GRPO is vLLM-only by construction (TRL's server-mode generation), so the engine the
-    # weight-sync gates and the capture remedies read is fixed here rather than configured.
-    _rollout_backend = "vllm"
+    # weight-sync gate reads is fixed here rather than configured.
+    _rollout_backend = VLLMWeightSyncClient.BACKEND_KEY
     # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
     _loss_outside_model_forward = True
 

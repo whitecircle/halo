@@ -193,10 +193,10 @@ output = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with Halo's SGLang image, which listens on port 30000. Run
-it on the host, not inside the training container: pull the prebuilt image and point
-`SGLANG_IMAGE` at it (no retag needed), or build the compose file's local tag once with
-`make build-sglang`.
+Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
+container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
+this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
+compose file's local tag once with `make build-sglang`.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
@@ -234,9 +234,8 @@ Use `examples/grpo/environmental/environmental-grpo-template.yaml` as the starti
 Set `model_name_or_path` to the gathered SFT checkpoint.
 
 Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang
-0.5.17 serves and weight-syncs Qwen3 MoE too (`rollout_backend: sglang`, port
-30000): both engines read the per-expert expert names the gather emits, and
-both accept expert distribution.
+0.5.17 also serves and weight-syncs Qwen3 MoE (`rollout_backend: sglang`, port
+30000), with expert distribution.
 
 Run the server on the host, not inside the training container, on GPUs the
 trainer will not use. Pull the prebuilt server image, retag it to the name the

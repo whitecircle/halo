@@ -65,6 +65,11 @@ _ARENA_ALIGNMENT = 256
 # Chunks whose sends the host has not settled yet: a chunk's sends are waited for this many chunks
 # later, so a chunk's declaration never waits on the previous chunk's tail (see ``_send_chunk``).
 _INFLIGHT_CHUNKS = 2
+# Both Step-3 spellings resolve to the same SGLang model file.
+_STEP3_FULL_COVERAGE = (
+    "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so it "
+    "refuses the chunked online update"
+)
 
 
 def _aligned_bytes(nbytes: int) -> int:
@@ -78,7 +83,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     BACKEND_KEY = "sglang"
     BACKEND_NAME = "SGLang"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
-    # Engine facts of the pinned 0.5.17 loaders, each read off the model file named.
+    # Loader facts of the pinned 0.5.17 server, per ``model_type``.
     UNSERVABLE_MODEL_TYPES = {
         "mistral4": "SGLang 0.5.17 registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
         "bailing_hybrid": "SGLang 0.5.17 registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
@@ -94,14 +99,8 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             "SGLang 0.5.17's laguna loader asserts every routed-expert tensor of every sparse layer in each "
             "load_weights call, so it refuses the chunked online update"
         ),
-        "step3p7": (
-            "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so "
-            "it refuses the chunked online update"
-        ),
-        "step3p5": (
-            "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so "
-            "it refuses the chunked online update"
-        ),
+        "step3p7": _STEP3_FULL_COVERAGE,
+        "step3p5": _STEP3_FULL_COVERAGE,
         "deepseek_v4": (
             "SGLang 0.5.17's deepseek_v4 loader maps per-expert w1/w3/w2 names where the gather emits the "
             "fused pair, and no end-to-end sync has been validated for the family"
@@ -109,7 +108,8 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     }
     # SGLang's MLA loaders concatenate ``q_a_proj`` and ``kv_a_proj_with_mqa`` into one fused parameter
     # from a cache local to each ``load_weights`` call, so a half arriving without the other in the
-    # same request is discarded without error.
+    # same request is discarded without error. The fusion exists only where the model has both
+    # projections (``q_lora_rank`` set), which the per-model scoping reads off the module tree.
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     RESUME_ENDPOINT = _EP_CONTINUE
     # An empty body is rejected: the endpoint takes a request dataclass, so it needs JSON.

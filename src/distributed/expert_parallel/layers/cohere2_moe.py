@@ -31,12 +31,12 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
     # ``bias_update_transient`` is the opt-in for a trainer-only side-buffer.
     _supports_bias_balancing = True
 
-    # No end-to-end sync has been validated against the pinned vLLM 0.26.0 server, including
-    # layerwise-reload skip coverage for its FusedMoE experts.
+    # No end-to-end sync has been validated on either pinned rollout engine, including layerwise-reload
+    # skip coverage for its FusedMoE experts.
     _supports_weight_sync = False
     _WEIGHT_SYNC_REFUSAL_REASON = (
-        "no end-to-end weight sync has been validated for the Cohere2 MoE family against the "
-        "pinned vLLM 0.26.0 server (agent-docs/models/cohere2-moe.md)"
+        "no end-to-end weight sync has been validated for the Cohere2 MoE family on either pinned "
+        "rollout engine (agent-docs/models/cohere2-moe.md)"
     )
 
     # The Command A+ checkpoint index spells the vision tower ``model.vision_tower.vision_model.*``

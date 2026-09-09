@@ -4,15 +4,14 @@
 # Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2× TP=1, ports 30000/30001, with
 #   --moe-runner-backend triton (the auto-picked runners repack the expert weights every sync writes)
 #   --tool-call-parser auto (reads the parser off the chat template; code_contests is a native-tool
-#   env, so a template the detector does not cover leaves calls as text and every episode scores 0)
+#   env, and a server with no parser leaves calls as text, so every episode scores 0)
 #   --reasoning-parser qwen3. The server container needs NCCL_CUMEM_ENABLE=1 (the compose default):
 #   SGLang otherwise turns cuMem off process-wide and the trainer's first cross-container import fails.
-# SGLang 0.5.17 serves the hub checkpoint as-is through Qwen3_5MoeForConditionalGeneration, whose
-#   fused expert pair is the layout the trainer's gather emits — no un-fuse on either side.
+# SGLang 0.5.17 serves the hub checkpoint as-is (Qwen3_5MoeForConditionalGeneration) and syncs into it.
 # No sglang ep4 variant ships; the expert-distributed ep4 configs are the ones under ../vllm/.
 # rollout_max_thinking_tokens stays unset (vLLM-only; refused by _validate_backend_capabilities), so
-#   rollout_max_tokens below is the per-turn bound and the per-effort thinking_tokens profile is a
-#   soft target on the reward side rather than an engine cap.
+#   rollout_max_tokens below is the per-turn bound; the per-effort thinking_tokens profile only
+#   conditions the chat template here (reasoning_compliance_weight: 0 leaves nothing pricing it).
 # Launch: 6 train GPUs + the 2 TP=1 servers on GPUs 6 and 7;
 #   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
 #   Six trainer ranks, not four: one ~100k-token trajectory peaks near 200 GB of activations on its
@@ -86,8 +85,7 @@ episode_timeout: 2700         # whole-episode wall clock; must stay below the NC
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
-rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
-                                       # (the headroom must leave a finished thought room to emit its tool call)
+rollout_max_tokens: 22000              # per-turn bound; nothing reserves answer headroom below it on SGLang
 reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
                                  # so length control is the effort level's conditioning instead
 

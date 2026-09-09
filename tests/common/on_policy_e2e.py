@@ -256,19 +256,20 @@ def _perturbation_targets(model, adapter: str | None) -> tuple[str, list[torch.n
         for name, param in model.named_parameters()
         if "layers.0" in name and name.endswith(".weight") and param.dtype.is_floating_point
     ]
-    # Expert tensors through the EP layers themselves rather than a name match: the wrapper replaces
-    # the mapped module and registers its fused 3D params as bare attributes
-    # (``model.layers.0.mlp.gate_up_proj``), so they carry neither a ``.weight`` suffix nor an
-    # ``experts`` path component on most families. This has to catch a sync whose expert stream no-ops
-    # while dense lands (SGLang's per-expert loader drops fused keys with no log line), which a
-    # dense-only perturbation would miss.
-    experts = [
+    experts = _expert_params(model)
+    return "expert", dense + experts, len(experts)
+
+
+def _expert_params(model) -> list[torch.nn.Parameter]:
+    """Every EP layer's float expert tensors, through the layers rather than by name: the wrapper
+    registers its fused 3D params as bare attributes (``model.layers.0.mlp.gate_up_proj``), so on most
+    families they carry neither a ``.weight`` suffix nor an ``experts`` path component."""
+    return [
         param
         for layer in ep_layers(model)
         for _, param in layer.expert_named_params()
         if param.dtype.is_floating_point
     ]
-    return "expert", dense + experts, len(experts)
 
 
 def _apply_perturbation(targets: list[torch.nn.Parameter], adapter: str | None) -> None:
@@ -360,6 +361,25 @@ def perturbation_round(
     return what
 
 
+def _push_moves_served_policy(
+    ctx, stream: str, *, push, server_url: str, model_name: str, checks: dict[str, bool], check: str
+) -> None:
+    """Push a perturbation of ``stream`` alone and record under ``check`` whether the served logprobs moved.
+
+    Probed on rank 0 around a collective ``push``.
+    """
+    before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}
+    push()
+    ctx.barrier()
+    if ctx.rank == 0:
+        after = probe_top_logprobs(server_url, model_name)
+        checks[check] = after != before
+        if after == before:
+            log(f"  IDENTICAL logprobs after a {stream}-only perturbation: the {stream} stream did not land")
+        log(f"  post-{stream}-sync: { {k: round(v, 4) for k, v in after.items()} }")
+    ctx.barrier()
+
+
 def expert_round(ctx, model, *, server_url: str, model_name: str, push, checks: dict[str, bool]) -> bool:
     """The expert stream, in a round of its own; returns whether this policy carries one.
 
@@ -369,27 +389,25 @@ def expert_round(ctx, model, *, server_url: str, model_name: str, push, checks: 
     moved. Only a push that moves nothing but experts shows they landed. Every rank runs it, since
     ``push`` is collective.
     """
+    if not ep_layers(model):
+        return False
     reshard_fsdp2_modules(unwrap(model))
-    experts = [
-        param
-        for layer in ep_layers(model)
-        for _, param in layer.expert_named_params()
-        if param.dtype.is_floating_point
-    ]
+    experts = _expert_params(model)
+    # Guard: an EP wrapper that stopped exposing its expert params would otherwise skip the round silently.
+    checks["expert_perturbation_engaged"] = bool(experts)
     if not experts:
         return False
-    before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}
     _unshard_with_a_forward(model, ctx.device)
     _apply_perturbation(experts, None)
-    push()
-    ctx.barrier()
-    if ctx.rank == 0:
-        after = probe_top_logprobs(server_url, model_name)
-        checks["forced_sync_moved_the_served_experts"] = after != before
-        if after == before:
-            log("  IDENTICAL logprobs after an expert-only perturbation: the expert stream did not land")
-        log(f"  post-expert-sync: { {k: round(v, 4) for k, v in after.items()} }")
-    ctx.barrier()
+    _push_moves_served_policy(
+        ctx,
+        "expert",
+        push=push,
+        server_url=server_url,
+        model_name=model_name,
+        checks=checks,
+        check="forced_sync_moved_the_served_experts",
+    )
     return True
 
 
@@ -409,7 +427,6 @@ def sink_round(ctx, model, *, server_url: str, model_name: str, push, checks: di
         return False
     # Every write below goes through the registered params, which a preceding push left unsharded.
     reshard_fsdp2_modules(unwrap(model))
-    before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}
     with torch.no_grad():
         perturbed = 0
         for name, param in model.named_parameters():
@@ -420,15 +437,15 @@ def sink_round(ctx, model, *, server_url: str, model_name: str, push, checks: di
     # Guard: a live-sinks policy whose sinks left named_parameters() (the FA2 reset) has nothing in
     # the sync stream to move, which is what the trainer's own sync gate refuses.
     checks["sink_perturbation_engaged"] = perturbed > 0
-    push()
-    ctx.barrier()
-    if ctx.rank == 0:
-        after = probe_top_logprobs(server_url, model_name)
-        checks["forced_sync_moved_the_served_sinks"] = after != before
-        if after == before:
-            log("  IDENTICAL logprobs after a sink-only perturbation: the sinks were not synced")
-        log(f"  post-sink-sync: { {k: round(v, 4) for k, v in after.items()} }")
-    ctx.barrier()
+    _push_moves_served_policy(
+        ctx,
+        "sink",
+        push=push,
+        server_url=server_url,
+        model_name=model_name,
+        checks=checks,
+        check="forced_sync_moved_the_served_sinks",
+    )
     return True
 
 

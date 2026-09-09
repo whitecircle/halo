@@ -167,8 +167,8 @@ distributed shards back into a standard HuggingFace checkpoint — see
 Online and Environmental GRPO generate completions with vLLM (0.26.0). vLLM pins its own
 torch/transformers stack, so it is never imported into the training environment — it runs as its
 own container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). Environmental GRPO can target SGLang
-instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`), which its
-0.5.17 loaders refuse for a few families — see
+instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). Each
+engine's pinned loaders refuse a few families — see
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
 The training process talks to it over two channels: HTTP for generation, and a vendored NCCL client

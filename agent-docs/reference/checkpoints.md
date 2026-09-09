@@ -185,7 +185,7 @@ A gathered checkpoint is a standard HF checkpoint — stock `from_pretrained` lo
 (That is serving a **saved artifact**; live RL weight-sync support is narrower —
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).)
 
-Some MoE models need two things.
+Two rules apply to some MoE families, on both engines.
 
 **Un-fuse experts.** transformers keeps MoE experts fused in memory
 (`experts.gate_up_proj` / `experts.down_proj`) and reads that layout back on load. Most hub
@@ -207,7 +207,9 @@ which its pinned engines read directly.
 | vLLM 0.26.0 `FusedMoE` (`cohere2_moe`, `step3p5`) | Cohere2 MoE, Step-3.7 Flash | loaded directly |
 | vLLM 0.26.0 per-expert-only | GLM-4 MoE Lite, Laguna, LFM-2, Bailing/Ling 2.0 | hard-fail or silent drop — un-fuse first |
 | vLLM 0.26.0 — no model class | Mistral4, Ling 3.0 (`bailing_hybrid`), Ring (`bailing_moe_linear`) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
-| SGLang 0.5.17 | the same families, in the same layouts | its per-family loaders read each family's hub layout too, so the same un-fuse rule applies; it registers no class for Mistral4, Ling 3.0 or Ring |
+
+SGLang 0.5.17 reads each family's hub layout through its own per-family loader, so the same un-fuse
+rule applies; it registers no class for Mistral4, Ling 3.0 or Ring either.
 
 **MLA backend on Blackwell.** GLM-4 MoE Lite uses MLA; flashinfer's MLA kernel rejects its head
 config on SM100+ — serve with vLLM `--attention-backend CUTLASS_MLA` or SGLang

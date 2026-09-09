@@ -17,7 +17,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import NamedTuple
 from urllib.parse import urlparse
 
@@ -124,16 +124,15 @@ def split_co_loaded(
     that arrives without the rest, so the incomplete set waits for the chunk its partners land in.
     Order is preserved on both sides.
     """
+    keys = [_co_load_key(name, groups) for name, _ in chunk]
     members: dict[tuple[int, str], set[str]] = {}
-    for name, _ in chunk:
-        key = _co_load_key(name, groups)
+    for (name, _), key in zip(chunk, keys, strict=True):
         if key is not None:
             members.setdefault(key, set()).add(name)
     sendable, held = [], []
-    for name, param in chunk:
-        key = _co_load_key(name, groups)
+    for item, key in zip(chunk, keys, strict=True):
         complete = key is None or len(members[key]) == len(groups[key[0]])
-        (sendable if complete else held).append((name, param))
+        (sendable if complete else held).append(item)
     return sendable, held
 
 
@@ -156,7 +155,7 @@ def chunk_by_bytes(
             sendable, current = split_co_loaded(current, groups)
             if sendable:
                 chunks.append(sendable)
-            current_bytes = sum(payload_bytes(held) for _, held in current)
+            current_bytes = sum(payload_bytes(param) for _, param in current)
         current.append((name, param))
         current_bytes += item_bytes
     if current:
@@ -343,7 +342,7 @@ class BaseWeightSyncClient:
     UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
     # Parameter-name suffixes the engine's loader consumes only as a set, per module: each entry lists
     # the suffixes, and parameters sharing the prefix before them must ride one chunk. Empty where the
-    # engine loads every tensor on its own.
+    # engine loads every tensor on its own. Scoped per model by :meth:`scope_co_load_groups`.
     CO_LOADED_PARAM_GROUPS: tuple[tuple[str, ...], ...] = ()
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal that
     # follows one. Declared per client because it follows from the engine's own reload model.
@@ -591,6 +590,7 @@ class BaseWeightSyncClient:
         it belongs to. Kept in one place so a bare or reconnected client cannot start with half of it."""
         self._param_buffer: list[tuple[str, torch.Tensor]] = []
         self._buffered_bytes = 0
+        self._co_load_groups = self.CO_LOADED_PARAM_GROUPS
         # A quiesced update this client opened mid-gather and has not closed yet.
         self._update_open = False
         # Chunks already on the wire in the open update. Non-zero means the engine is partly
@@ -670,7 +670,7 @@ class BaseWeightSyncClient:
         # carry fails while the server is still serving.
         for name, param in named_params:
             validate_syncable_param(name, param)
-        chunks = chunk_by_bytes(named_params, WEIGHT_SYNC_CHUNK_BYTES, self.CO_LOADED_PARAM_GROUPS)
+        chunks = chunk_by_bytes(named_params, WEIGHT_SYNC_CHUNK_BYTES, self._co_load_groups)
         self._open_update()
         try:
             for chunk in chunks[:-1]:
@@ -684,6 +684,31 @@ class BaseWeightSyncClient:
     def update_model_params(self, model: nn.Module):
         """Sync every model param in one quiesced update."""
         self.sync_model_weights([(n, p.data) for n, p in model.named_parameters()])
+
+    @classmethod
+    def scoped_co_load_groups(cls, module_names: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+        """``CO_LOADED_PARAM_GROUPS`` narrowed to the members whose module ``module_names`` carries.
+
+        An engine fuses a group only where the model declares every member (an MLA block without
+        ``q_lora_rank`` has no ``q_a_proj``), so a member no module spells is dropped, and a group
+        left with one member is complete on its own.
+        """
+        names = set(module_names)
+
+        def declared(suffix: str) -> bool:
+            module = suffix.rsplit(".", 1)[0]
+            return any(name == module or name.endswith("." + module) for name in names)
+
+        return tuple(tuple(suffix for suffix in group if declared(suffix)) for group in cls.CO_LOADED_PARAM_GROUPS)
+
+    def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
+        """Bind the co-load groups to the model whose modules ``module_names`` are, for every sync."""
+        self._co_load_groups = self.scoped_co_load_groups(module_names)
+
+    @property
+    def buffered_bytes(self) -> int:
+        """Bytes staged for the next chunk, the members held for a co-load partner included."""
+        return self._buffered_bytes
 
     def buffer_param(self, name: str, snapshot: torch.Tensor):
         """Buffer a pre-made snapshot (from ``snapshot_param``) by reference, for the next chunk.
@@ -724,7 +749,7 @@ class BaseWeightSyncClient:
         The members of a co-load group the buffer holds only part of stay buffered for the next
         chunk (:func:`split_co_loaded`); a buffer that is nothing but such members sends nothing.
         """
-        chunk, held = split_co_loaded(self._param_buffer, self.CO_LOADED_PARAM_GROUPS)
+        chunk, held = split_co_loaded(self._param_buffer, self._co_load_groups)
         if not chunk:
             return
         # Completed before the quiesce, so a sticky CUDA error here leaves the engine serving rather
@@ -733,10 +758,9 @@ class BaseWeightSyncClient:
         self._open_update()
         self.send_weights(chunk)
         # Dropped only once on the wire: a chunk that failed while the sync is still replayable is
-        # re-sent by the reconnect path, and draining first would lose those params.
-        self.drain_param_buffer()
-        for name, snapshot in held:
-            self.buffer_param(name, snapshot)
+        # re-sent by the reconnect path, and dropping it first would lose those params.
+        self._param_buffer = held
+        self._buffered_bytes = sum(payload_bytes(snapshot) for _, snapshot in held)
 
     def reset_prefix_cache(self):
         """Send the tail chunk, close the update and resume the engine; no-op if nothing was buffered.
@@ -747,7 +771,7 @@ class BaseWeightSyncClient:
             return
         # A group still incomplete at the tail never completes: the engine would take the half and
         # drop it without error, so the update is refused rather than closed as landed.
-        _, held = split_co_loaded(self._param_buffer, self.CO_LOADED_PARAM_GROUPS)
+        _, held = split_co_loaded(self._param_buffer, self._co_load_groups)
         if held:
             raise RuntimeError(
                 f"the weight sync ended with co-loaded parameters missing their partners: "

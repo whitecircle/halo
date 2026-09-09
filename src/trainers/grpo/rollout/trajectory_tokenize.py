@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 import torch
 
+from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, Trajectory
 from src.environments.episode import RolloutResult
 from src.environments.registry import create_environment
@@ -239,7 +240,7 @@ class TrajectoryTokenizeMixin:
                 # server does not accept.
                 remedy = (
                     "Run the vLLM server with --return-tokens-as-token-ids (docker-compose.vllm.yml passes it)."
-                    if self._rollout_backend == "vllm"
+                    if self._rollout_backend == VLLMWeightSyncClient.BACKEND_KEY
                     else "SGLang needs no server flag for this — the ids are requested per call, so a "
                     "rollout that returned none usually means the engine errored or was killed mid-turn."
                 )

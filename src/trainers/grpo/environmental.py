@@ -158,8 +158,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         "adds Ray-driven multi-turn async rollouts whose generation lengths vary per turn — the "
         "pipeline freezes its boundary activation shape on the first step"
     )
-    # Set from async_config in __init__; declared here so the weight-sync layout resolver has a
-    # rank-uniform attribute to read on any trainer, constructed or not.
+    # Set from async_config in __init__; declared here so the tokenize path's engine-specific remedy
+    # reads a value on any trainer, constructed or not.
     _rollout_backend: str | None = None
     # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
     _loss_outside_model_forward = True
@@ -390,7 +390,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "off, beta=0). Enable the IS correction (or beta/num_iterations>1) or set "
                 "routing_replay='none'."
             )
-        logger.info(f"Routing replay enabled (mode={mode}) over {injector.num_layers} EP MoE layers")
+        logger.info(f"Routing replay enabled (mode={mode}) over {injector.num_ep_layers} EP MoE layers")
         return injector
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -848,7 +848,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                         [len(c) for c in all_completion_ids],
                         prompt_ids.size(1),
                         completion_ids.size(1),
-                        self._routing_injector.num_layers,
+                        self._routing_injector.num_ep_layers,
                         self._routing_injector.top_k,
                         self._routing_injector.num_experts,
                     )

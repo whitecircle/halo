@@ -178,8 +178,8 @@ def weight_sync_families() -> set[type]:
     A class claiming no spelling is an intermediate base, not a family.
     """
     unservable = set(VLLMWeightSyncClient.UNSERVABLE_MODEL_TYPES)
-    # Judged on the family's own spelling (the first claimed): a wrapper spelling behind it (Mistral4's
-    # ``mistral3``) admits no MoE checkpoint the engine refuses under the family's.
+    # Judged on the family's own spelling — the first claimed (``base_layer.HF_MODEL_TYPES``); the
+    # composite wrappers and sibling spellings behind it are refused under their own entries.
     return {
         cls
         for cls in ep_layer_classes()
@@ -251,7 +251,7 @@ def write_all() -> None:
         raise SystemExit(
             f"{uncovered}: the weight sync admits these families but no fixture covers them — the "
             f"gate would certify a roster the server was never checked against. Add a fixture, or "
-            f"refuse the family with _supports_weight_sync = False."
+            f"refuse the family (_supports_weight_sync = False, or the vLLM client's UNSERVABLE_MODEL_TYPES)."
         )
     for role, fixtures, rewrite in (("fixtures", FIXTURES, True), ("unparseable", UNPARSEABLE, False)):
         for fixture in fixtures:

@@ -77,8 +77,8 @@ from tests.common.thinking_budget import (
 )
 from tests.common.utils import cleanup_memory, log
 
-# Default for the vLLM half (its callers take it via run_env_grpo_e2e's model_name default); the
-# SGLang caller passes gpt-oss explicitly, so HALO_TEST_ENV_GRPO_MODEL does not reach it.
+# Default for the vLLM legs; the SGLang and 4-GPU wrappers own their own knob (their servers and
+# default families differ).
 MODEL_NAME = env_str("HALO_TEST_ENV_GRPO_MODEL", QWEN3_30B_A3B)
 MAX_STEPS = env_int("HALO_TEST_ENV_GRPO_MAX_STEPS", 2)
 # Deliberately large: the sync has to move the served weights measurably within MAX_STEPS.

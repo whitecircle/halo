@@ -6,7 +6,7 @@ Two families do that in this release:
 
 * GLM-4 MoE (``glm4_moe.py``, ``glm4_moe_lite.py``): the router gate keeps an fp32 copy of its
   weight, filled once on the first forward; a pushed gate weight lands in the parameter and routing
-  never reads it. Replaced by the fp32 gate weight later releases store outright.
+  never reads it. The gate is rewritten to hold its weight in fp32 and read it live.
 * Gemma 4 (``gemma4_causal.py``, shared by the multimodal classes): the router folds ``scale`` into
   its norm weight once, behind a latch, so a pushed ``scale`` never reaches the fold. The latch is
   released by the parameter's own loader.
@@ -21,7 +21,6 @@ image build rather than shipping a server that silently serves stale routing.
 import argparse
 import importlib.util
 import pathlib
-import sys
 
 _GLM_GATE_FILES = ("glm4_moe.py", "glm4_moe_lite.py")
 _GEMMA4_ROUTER_FILE = "gemma4_causal.py"
@@ -85,12 +84,14 @@ def patch_gemma4_router(text: str) -> str:
 
 
 def verify_glm_gate(text: str, path: pathlib.Path) -> None:
-    if "_weight_fp32" in text or _GLM_FORWARD_AFTER not in text:
+    if "_weight_fp32" in text:
         raise SystemExit(f"{path}: the GLM gate still caches its fp32 weight")
+    if _GLM_WEIGHT_AFTER not in text or _GLM_FORWARD_AFTER not in text:
+        raise SystemExit(f"{path}: the GLM gate does not hold its weight in fp32 and read it live")
 
 
 def verify_gemma4_router(text: str, path: pathlib.Path) -> None:
-    if _GEMMA4_SCALE_AFTER not in text or "self._scale_fused = False\n\n    def fuse_scale" not in text:
+    if _GEMMA4_SCALE_AFTER not in text or _GEMMA4_FUSE_AFTER not in text:
         raise SystemExit(f"{path}: the Gemma4 router scale loader does not release the fold latch")
 
 
@@ -120,4 +121,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

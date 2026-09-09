@@ -412,8 +412,8 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # The entries below assert the served policy changed, so the server must run the same checkpoint
     # the test trains; the defaults differ per engine (VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507,
-    # SGLANG_MODEL=unsloth/gpt-oss-20b-BF16) and HALO_TEST_ENV_GRPO_MODEL points either wrapper at
-    # another family for a per-family pass.
+    # SGLANG_MODEL=unsloth/gpt-oss-20b-BF16), and HALO_TEST_ENV_GRPO_MODEL / HALO_TEST_ENV_GRPO_SGLANG_MODEL
+    # point a wrapper at another family for a per-family pass.
     # Serves its own tiny hub-layout checkpoint (``--write-checkpoint``, HALO_TEST_STEP3P7_MODEL),
     # not either SERVER_TIER model — see the script header for the server launch.
     "trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py": TestSpec(

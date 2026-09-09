@@ -173,7 +173,7 @@ ignore = [
 "docker/vllm/parity/*.py" = ["T20"]
 # Build-time pin resolver: the printed version IS its interface (a Dockerfile reads it off stdout).
 "docker/nccl_pin.py" = ["T20"]
-# Build-time patch script for the SGLang image: printing each rewritten file is its interface.
+# Build-time patch script for the SGLang image: the build log is where the rewrites are recorded.
 "docker/sglang/patches/patch_sglang_weight_updates.py" = ["T20"]
 # Gradio's documented progress idiom is `def fn(..., progress=gr.Progress())` — the call in the
 # default is how Gradio injects the tracker, so B008 (call in arg default) does not apply here.

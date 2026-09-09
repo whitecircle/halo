@@ -22,12 +22,9 @@ from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
 
 # Families whose gathered export no engine can load under the names the sync sends; each reason is
-# stated at the class declaration. Relaxing one out means its export was made to match a loader.
-# Inkling: the hub namespace is WeightConverters-only. Cohere2 MoE: no validated end-to-end sync.
-# GLM-5 Next: the KDA/hyper-connection module tree exists only behind a from_pretrained conversion.
-# What one engine alone cannot serve (Zaya, Mistral4, DeepSeek-V4 …) is that engine client's
-# ``UNSERVABLE_MODEL_TYPES``, pinned in test_rollout_backend_selection.py. Step-3.7 is NOT here:
-# ``_EXPORTS_HUB_NAMESPACE`` sends hub names (test_weight_sync_hub_namespace.py).
+# stated at the class declaration. What one engine alone cannot serve is that engine client's
+# ``UNSERVABLE_MODEL_TYPES`` (test_rollout_backend_selection.py); Step-3.7 sends hub names
+# (test_weight_sync_hub_namespace.py) and is not here.
 EXPECTED_UNSUPPORTED = {
     "EPCohere2MoELayer",
     "EPGlm5NextMoELayer",

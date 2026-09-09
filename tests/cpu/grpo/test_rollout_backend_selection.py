@@ -8,6 +8,7 @@ rejections and the payload gating that stand in the way.
 """
 
 import logging
+import re
 import sys
 from unittest.mock import patch
 
@@ -20,6 +21,8 @@ from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.environments.ray_actors import RolloutConfig
+from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from tests.common.weight_sync import StockModel
 
 # --- Registry — derived from the client hierarchy, not a hand-maintained table ---
 
@@ -45,7 +48,6 @@ def test_a_client_defined_outside_the_package_cannot_capture_a_backend_key():
     class Impostor(VLLMWeightSyncClient):
         BACKEND_KEY = "vllm"
 
-    assert Impostor.__module__ != VLLMWeightSyncClient.__module__
     assert resolve_weight_sync_client("vllm") is VLLMWeightSyncClient
     assert rollout_backends() == ["sglang", "vllm"]
 
@@ -53,9 +55,8 @@ def test_a_client_defined_outside_the_package_cannot_capture_a_backend_key():
 def test_sglang_clients_default_to_distinct_group_names_per_server():
     """c10d registers group names process-globally on the trainer, so two servers' clients sharing
     one fixed name fail group formation with "group name has already been created". The default is
-    keyed on the server endpoint, NOT on group_port: port 0 means "auto-pick at group formation",
-    so a port-keyed default collided every auto-port client on one name. An explicit name still
-    wins."""
+    keyed on the server endpoint, not on group_port: port 0 means "auto-pick at group formation",
+    which is one value for every auto-port client. An explicit name wins."""
     with patch.object(SGLangWeightSyncClient, "check_server"):
         a = SGLangWeightSyncClient(base_url="http://localhost:30000", group_port=0)
         b = SGLangWeightSyncClient(base_url="http://localhost:30001", group_port=0)
@@ -96,7 +97,15 @@ def test_every_unservable_spelling_is_a_family_the_toolkit_trains():
     for client in (SGLangWeightSyncClient, VLLMWeightSyncClient):
         unknown = set(client.UNSERVABLE_MODEL_TYPES) - known
         assert not unknown, f"{client.__name__} lists model types no EP family claims: {sorted(unknown)}"
-        assert all(client.UNSERVABLE_MODEL_TYPES.values()), f"{client.__name__}: an entry carries no engine fact"
+
+
+@pytest.mark.parametrize("client", [SGLangWeightSyncClient, VLLMWeightSyncClient])
+def test_every_unservable_entry_refuses_its_family_with_its_loader_fact(client):
+    """Each entry is what the construction gate quotes: a model of that spelling is refused under the
+    client's backend key, and the refusal carries the entry's reason verbatim."""
+    for model_type, reason in client.UNSERVABLE_MODEL_TYPES.items():
+        with pytest.raises(ValueError, match=re.escape(reason)):
+            validate_weight_sync_support(StockModel(model_type), client.BACKEND_KEY)
 
 
 def test_sglang_declares_the_fused_a_proj_halves_as_one_request():

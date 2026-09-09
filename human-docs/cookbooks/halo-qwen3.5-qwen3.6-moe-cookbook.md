@@ -198,9 +198,10 @@ print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 
 Serve the gathered checkpoint with Halo's vLLM image on the host, not inside the
 training container; it listens on port 8000, and vLLM 0.26.0's expert loader reads
-the gathered save's fused layout directly. SGLang 0.5.17 reads the same fused pair on
-port 30000, and its text-only `Qwen3_5MoeForCausalLM` also serves a `text_only_model`
-export, which vLLM takes only after `scripts/after_training/reattach_vision_tower.py`.
+the gathered save's fused layout directly. SGLang 0.5.17 registers the multimodal
+`Qwen3_5MoeForConditionalGeneration` as well as the text-only `Qwen3_5MoeForCausalLM`,
+so on port 30000 it serves the hub checkpoint and a `text_only_model` export alike;
+vLLM takes the latter only after `scripts/after_training/reattach_vision_tower.py`.
 The compose service mounts only the HuggingFace cache, so add
 `- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to serve
 a checkpoint from disk.
@@ -240,10 +241,12 @@ Start from one of the shipped configs under `examples/grpo/environmental/qwen3_5
 from `examples/grpo/environmental/environmental-grpo-template.yaml`. Replace the model
 path with the gathered SFT checkpoint.
 
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
-serves and weight-syncs this family too — ep1 configs under
-`examples/grpo/environmental/qwen3_5/sglang/` — but rejects
-`rollout_max_thinking_tokens` at config time. Start the server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
+serves and weight-syncs this family (`rollout_backend: sglang`; ep1 configs under
+`examples/grpo/environmental/qwen3_5/sglang/`), but rejects `rollout_max_thinking_tokens`
+at config time; that sync needs this repo's SGLang image
+([Supported Matrix](../supported-matrix.md#rollout-engines)). Start the server on
+separate GPUs.
 
 Run the server on the host, not inside the training container; the commands below retag
 the pulled image to the name the compose file expects. Its service mounts only the
@@ -271,6 +274,23 @@ reasoning parser above **and** `VLLM_USE_V2_MODEL_RUNNER=0` in the server
 environment; Model Runner V2 rejects thinking budgets with a 400 on every request.
 To serve `routing_replay: rollout`, also add `--enable-return-routed-experts` to the
 server's `command:` block — the compose file exposes no variable for it.
+
+For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
+trainer will not use.
+
+```bash
+docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
+
+SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
+SGLANG_MODEL=/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8 \
+SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
+SGLANG_REASONING_PARSER=qwen3 \
+  docker compose -f docker-compose.sglang.yml up sglang-server
+```
+
+The compose default `--moe-runner-backend triton` is required for weight sync and for R3
+capture under `routing_replay: rollout` (add `SGLANG_ENABLE_R3=1`).
 
 ```yaml
 rollout_server_url: http://localhost:8000

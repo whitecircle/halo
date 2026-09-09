@@ -24,7 +24,7 @@ class EPQwen3MoELayer(EPSeparateGluMoELayerBase):
 
     _NUM_EXPERTS_ATTR_PATHS = ("num_experts", "experts.num_experts", "experts")
 
-    # Hub checkpoint / vLLM loader layout: ``experts.{i}.{gate,up,down}_proj.weight`` (per expert).
+    # Hub checkpoint layout: ``experts.{i}.{gate,up,down}_proj.weight`` (per expert).
     # transformers fuses them into ``experts.gate_up_proj`` on load and reverts on save.
     _HUB_PER_EXPERT_KEYS = ("gate_proj", "up_proj", "down_proj")
 

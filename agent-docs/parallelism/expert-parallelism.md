@@ -68,11 +68,8 @@ EP surface. The table is pinned against the classes by
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine: each client declares the model types its pinned release cannot take an online update for
 (`UNSERVABLE_MODEL_TYPES` in `src/distributed/nccl/clients/`), and `validate_weight_sync_support`
-refuses that model+backend pair at trainer construction, quoting the loader fact. vLLM 0.26.0 lists
-Zaya, Mistral4, DeepSeek-V4, Ling 3.0 (`bailing_hybrid`) and Ring (`bailing_moe_linear`); SGLang
-0.5.17 lists those five plus Laguna and Step-3.7, whose loaders assert full expert or parameter
-coverage in each `load_weights` call and so refuse a chunked update. Ling 2.0 syncs on both. Full
-roster with each reason:
+refuses that model+backend pair at trainer construction, quoting the loader fact. SGLang 0.5.17's
+list is the longer of the two — Laguna and Step-3.7 sync on vLLM only. Full roster with each reason:
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
 Attention-side support is a separate question owned by each axis: which families TP can shard is

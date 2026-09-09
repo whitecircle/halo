@@ -47,7 +47,7 @@ class _StubEPLayer(EPMoELayerBase):
 
 def _armed_injector(layer=None):
     layer = layer or _StubEPLayer()
-    injector = RoutingReplayInjector([layer])
+    injector = RoutingReplayInjector([layer], engine_layers=1, layer_indices=[0])
     masks = torch.randint(0, E, (ROWS, SEQ, 1, K), dtype=torch.int16)
     injector.arm(masks)
     return injector, layer

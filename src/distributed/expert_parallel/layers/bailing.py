@@ -37,7 +37,7 @@ class EPBailingMoELayer(EPSeparateGluMoELayerBase):
     # modeling computes an aux loss regardless; the family balances through ``expert_bias``.
     _ep_severs_aux_loss = True
 
-    # Hub checkpoint / vLLM loader layout: ``experts.{i}.{gate,up,down}_proj.weight`` (per expert).
+    # Hub checkpoint layout: ``experts.{i}.{gate,up,down}_proj.weight`` (per expert).
     _HUB_PER_EXPERT_KEYS = ("gate_proj", "up_proj", "down_proj")
 
     _NUM_EXPERTS_ATTR_PATHS = ("experts", "gate.num_experts")

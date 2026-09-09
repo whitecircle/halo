@@ -39,53 +39,10 @@ from src.distributed.nccl.clients.base import resolve_sync_device, resolve_weigh
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
-from tests.common.weight_sync import offline_sglang_client
+from tests.common.weight_sync import Wire, offline_sglang_client
 
 
-class _Wire:
-    """The engine side of one client: records each chunk put on the wire, in order.
-
-    Stubs the per-engine seams only (``_broadcast_chunk`` and the phase calls), so the client's own
-    chunk accounting — the count ``can_replay_sync`` reads — runs as it does in production.
-    """
-
-    def __init__(self, fail_on_send: bool = False, retain: bool = True):
-        self.chunks: list[list[tuple[str, torch.Tensor]]] = []
-        self.opened = 0
-        self.closed = 0
-        self.fail_on_send = fail_on_send
-        # A real engine copies what it receives into its own storage and keeps no reference to the
-        # trainer's snapshot. The lifetime tests need that; the others want the values back.
-        self.retain = retain
-        self.client: VLLMWeightSyncClient | None = None
-
-    def attach(self, client: VLLMWeightSyncClient) -> VLLMWeightSyncClient:
-        self.client = client
-        client.begin_weight_update = self._begin
-        client._broadcast_chunk = self._send
-        client.end_weight_update = self._end
-        return client
-
-    def _begin(self):
-        self.opened += 1
-
-    def _send(self, named_params, final: bool = False):
-        if self.fail_on_send:
-            raise ConnectionError("server died mid-flush")
-        self.chunks.append(list(named_params) if self.retain else [(name, None) for name, _ in named_params])
-
-    def _end(self, tail):
-        try:
-            self.client.send_weights(tail, final=True)  # as both real clients close: through the seam
-        finally:
-            self.closed += 1  # the real clients close and resume in a finally too
-
-    @property
-    def sent(self) -> list[tuple[str, torch.Tensor]]:
-        return [item for chunk in self.chunks for item in chunk]
-
-
-def _bare_client(wire: _Wire | None = None) -> VLLMWeightSyncClient:
+def _bare_client(wire: Wire | None = None) -> VLLMWeightSyncClient:
     """A client without the HTTP handshake (``__init__`` probes a live server), wired to ``wire``.
 
     Only the three engine phases are stubbed; the buffering, the chunk budget and the update
@@ -93,12 +50,12 @@ def _bare_client(wire: _Wire | None = None) -> VLLMWeightSyncClient:
     """
     client = VLLMWeightSyncClient.__new__(VLLMWeightSyncClient)
     client._reset_buffer_state()
-    (wire or _Wire()).attach(client)
+    (wire or Wire()).attach(client)
     return client
 
 
 def _bare_manager(
-    num_clients: int, wires: list[_Wire] | None = None
+    num_clients: int, wires: list[Wire] | None = None
 ) -> tuple[InferenceClientManager, list[VLLMWeightSyncClient]]:
     """A manager over ``num_clients`` bare clients, without the NCCL/HTTP handshake."""
     configs = [{"url": f"http://server{i}:8000", "group_port": 51216 + i} for i in range(num_clients)]
@@ -154,7 +111,7 @@ def test_staged_residency_never_exceeds_one_chunk(monkeypatch):
     """
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     param_bytes, num_params, budget = 512, 10, 4096
-    client = _bare_client(_Wire(retain=False))
+    client = _bare_client(Wire(retain=False))
     refs: list[weakref.ref] = []
     peak = 0
 
@@ -174,7 +131,7 @@ def test_staged_residency_never_exceeds_one_chunk(monkeypatch):
 def test_streaming_sends_every_param_once_in_order(monkeypatch):
     """Anti-vacuity for the bound above: chunking must not drop, duplicate or reorder a param."""
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    wire = _Wire()
+    wire = Wire()
     client = _bare_client(wire)
     names = [f"w{index}" for index in range(10)]
 
@@ -192,7 +149,7 @@ def test_streaming_sends_every_param_once_in_order(monkeypatch):
 
 def test_a_sync_that_fits_in_one_chunk_still_opens_and_closes_one_update():
     """The small-model path: no mid-gather chunk, everything rides the closing flush."""
-    wire = _Wire()
+    wire = Wire()
     client = _bare_client(wire)
 
     client.update_named_param("w", torch.zeros(64, dtype=torch.float32))
@@ -247,6 +204,9 @@ def test_manager_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
         def buffer_param(self, name, snapshot):
             self._param_buffer.append((name, snapshot))
 
+        def scope_co_load_groups(self, module_names):
+            pass
+
     manager = InferenceClientManager(server_configs=[{"url": "http://server0:8000"}, {"url": "http://server1:8000"}])
     manager._client_factory = _StubClient
     manager.init_communicators(0)
@@ -285,7 +245,7 @@ def test_manager_releases_a_chunks_snapshots_once_every_server_sent_it(monkeypat
     manager keeps no pool, so a reference kept anywhere would grow the staged footprint with the
     model rather than the chunk."""
     monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    manager, clients = _bare_manager(2, wires=[_Wire(retain=False), _Wire(retain=False)])
+    manager, clients = _bare_manager(2, wires=[Wire(retain=False), Wire(retain=False)])
     refs: list[weakref.ref] = []
 
     for index in range(10):
@@ -301,7 +261,7 @@ def test_manager_releases_a_chunks_snapshots_once_every_server_sent_it(monkeypat
 def test_manager_flush_failure_isolation():
     """A failed flush on server A clears only A's buffer; B still flushes the intact shared
     snapshot afterwards, and the manager raises (fail loud, no stale-policy rollouts)."""
-    wires = [_Wire(fail_on_send=True), _Wire(), _Wire()]
+    wires = [Wire(fail_on_send=True), Wire(), Wire()]
     manager, clients = _bare_manager(3, wires=wires)
 
     weights = torch.randn(4, 4)
@@ -327,7 +287,7 @@ def test_a_server_that_already_streamed_a_chunk_is_not_retried(monkeypatch):
     answering /health. The failure has to reach the caller with that reason instead.
     """
     monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    wire = _Wire()
+    wire = Wire()
     manager, clients = _bare_manager(1, wires=[wire])
     reconnects = []
     monkeypatch.setattr(InferenceClientManager, "reconnect_client", lambda self, index: reconnects.append(index))
@@ -345,10 +305,30 @@ def test_a_server_that_already_streamed_a_chunk_is_not_retried(monkeypatch):
     assert clients[0]._param_buffer == [], "the unsendable buffer must be dropped, not re-broadcast"
 
 
+def test_manager_scopes_every_client_it_holds_and_builds():
+    """The co-load scope is the served model's, so a client rebuilt by a reconnect must carry it too."""
+    manager, clients = _bare_manager(2)
+
+    def factory(**kwargs):
+        client = _bare_client()
+        client.init_communicator = lambda device: None  # no NCCL group to form here
+        return client
+
+    manager._client_factory = factory
+    manager._device = torch.device("cpu")
+    manager.scope_co_load_groups(["model.layers.0.self_attn.kv_a_proj_with_mqa"])
+    scoped = VLLMWeightSyncClient.scoped_co_load_groups(["model.layers.0.self_attn.kv_a_proj_with_mqa"])
+    assert all(client._co_load_groups == scoped for client in clients)
+    old = clients[0]
+    old.close_communicator = lambda: None  # a bare client has no group to tear down
+    rebuilt = manager.reconnect_client(0)
+    assert rebuilt is not old and rebuilt._co_load_groups == scoped
+
+
 def test_a_server_that_failed_before_streaming_is_still_retried(monkeypatch):
     """Anti-over-rejection: the dominant recovery case — an engine restarted BETWEEN syncs, whose
     first chunk fails — is still reconnected and re-sent, because nothing has landed on it yet."""
-    wire = _Wire(fail_on_send=True)
+    wire = Wire(fail_on_send=True)
     manager, clients = _bare_manager(1, wires=[wire])
 
     def reconnect(self, index):
@@ -374,7 +354,7 @@ def test_chunks_are_cut_before_the_budget_is_exceeded(monkeypatch):
     """
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     budget, oversize = 4096, 4096 + 512
-    wire = _Wire()
+    wire = Wire()
     client = _bare_client(wire)
     sizes = [1536, 1536, 1536, 512, oversize, 256]  # irregular, one tensor above the budget
 
@@ -400,13 +380,13 @@ def test_the_whole_payload_path_cuts_on_the_same_boundaries(monkeypatch):
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     params = [(f"w{index}", torch.zeros(384, dtype=torch.float32)) for index in range(10)]
 
-    streamed_wire = _Wire()
+    streamed_wire = Wire()
     streamed = _bare_client(streamed_wire)
     for name, tensor in params:
         streamed.update_named_param(name, tensor)
     streamed.reset_prefix_cache()
 
-    whole_wire = _Wire()
+    whole_wire = Wire()
     _bare_client(whole_wire).sync_model_weights(params)
 
     boundaries = [[name for name, _ in chunk] for chunk in streamed_wire.chunks]
@@ -445,7 +425,7 @@ def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
     while the gather is still assembling the first chunk's worth of weights.
     """
     monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    wires = [_Wire(), _Wire()]
+    wires = [Wire(), Wire()]
     manager, _clients = _bare_manager(2, wires=wires)
 
     for index in range(8):  # 512 B each: exactly the budget, nothing to send yet
