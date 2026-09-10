@@ -145,7 +145,7 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # Gemma4 has no aux-loss wiring and no bias-update support
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: false      # no EP → non-reentrant GC
+  use_reentrant: false      # overridden to True at runtime: the ep1 grouped-GEMM expert layer counts as EP (the trainer warns)
 fp32_grad_reduce: true
 
 # --- Output ---

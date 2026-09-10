@@ -2,10 +2,13 @@
 # KL-free (bands + IS masking as trust region).
 # Known issue: this attention-LoRA shape fails at the first training step (mixed Tensor/DTensor in the
 #   embedding, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
-# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton, and
-#   VLLM_USE_V2_MODEL_RUNNER=0 in the server env (Model Runner V2 rejects the thinking_token_budget
-#   this config sends with a 400 on every rollout).
-#   (hermes does not parse Qwen3.5/3.6 XML tool calls, so rollouts return no tool_calls).
+# Serve with: --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3
+#   --moe-backend triton, and VLLM_USE_V2_MODEL_RUNNER=0 in the server env (Model Runner V2 rejects
+#   the thinking_token_budget this config sends with a 400 on every rollout).
+#   (hermes does not parse Qwen3.5/3.6 XML tool calls; without --enable-auto-tool-choice vLLM 400s
+#   every request that carries tools.)
+# Serve from the patched vllm-server image (Dockerfile.vllm): its layerwise-reload patch covers
+#   FusedMoE, without which every /update_weights reverts the experts and still answers 200 OK.
 # This file targets vLLM; the SGLang siblings under `../sglang/` ship as ep1 only.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>

@@ -21,7 +21,7 @@ changes.
 | `src/trainers/preference/` (DPO, SMPO, KTO) | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/smpo.md`, `agent-docs/training-methods/preference/kto.md` |
 | `src/trainers/grpo/` (online, offline, environmental) | `agent-docs/training-methods/grpo/{online-grpo,offline-grpo,environmental-grpo,grpo-comparison}.md` |
 | `src/trainers/reward/` | `agent-docs/training-methods/preference/reward-modeling.md`, `agent-docs/training-methods/classification.md` |
-| `src/trainers/distillation/` | `agent-docs/training-methods/distillation/{index,teacher-distillation,self-distillation,online-sdpg}.md` |
+| `src/trainers/distillation/` | `agent-docs/training-methods/distillation/{README,teacher-distillation,self-distillation,online-sdpg}.md` |
 | `src/trainers/embedding/` (SBERT trainer, `sentence_transformers_compat.py` patches + preloaded-model shim) | `agent-docs/training-methods/embedding.md` |
 | any new trainer | `agent-docs/reference/trainer-architecture.md` + new method page + the section `README.md` + `CLAUDE.md` index |
 
@@ -45,6 +45,7 @@ changes.
 | `src/trainers/grpo/rollout/routing_replay.py` (R2/R3 capture, wire decode, engine-layer slicing) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/infrastructure/rollout-servers.md` |
 | `src/trainers/grpo/rollout/trajectory_tokenize.py` (trajectory → training rows: whole-render spans, per-turn sampled ids) | `agent-docs/training-methods/grpo/environmental-grpo.md` |
 | `src/trainers/grpo/rollout/rollout_metrics.py` (completion logs, per-episode rollout diagnostics) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/training-methods/callbacks.md` |
+| `src/trainers/grpo/objective/logratio.py` (truncated IS ratio, the k3 KL clamp, the band/veto/OPSM mask stages, the engine-referenced mask log-ratio) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/environments/ray_actors.py` (actor pool, dispatch, Ray init) | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/grpo/environmental-grpo.md` (trainer-side knobs) |
 | `src/distributed/checkpoint/` (save ladder, weight loader, OptimizerShardStore, PeftAdapterSaver) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/format.py` (on-disk spellings, save-dtype casts, the layout cascade, state-dict IO) | `agent-docs/reference/checkpoints.md` |

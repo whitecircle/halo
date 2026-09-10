@@ -59,13 +59,15 @@ sliding, `min(L, attention_chunk_size)` for chunked, the top-k plus a pooled ind
 attention, `L / compress_rate` plus the local band for DeepSeek-V4's compressed layers, and nothing for
 linear-attention / conv layers. Full attention is costed at every key (the PaLM convention, not the causal
 half); bounded layers at the keys their kernel visits. `L` is each **document's** length: the trainer costs
-every batch's documents (`cu_seq_lens`, `position_ids` resets, or the padded row) and the callback swaps that
+every batch's documents (`cu_seq_lens_q`, `position_ids` resets, or the padded row) and the callback swaps that
 rank-local measurement in per step, so a packed 64k row of 1–40k-token documents is not costed as one 64k
 sequence. A trainer whose collator emits no `input_ids` keeps the config term (every token in a `max_seq_len`
 document) — every GRPO trainer, KTO, SMPO and embedding. The layer set is this rank's own, so under PP
 ([not yet available](../parallelism/pipeline-parallelism.md)) each stage's term would match its real slice
-rather than an even split of the depth. The measured term carries the same divisors as the tokens: `tp_size` (heads are sharded) and, under
-Ulysses CP, `cp_size` (the wrapper splits the sequence's heads inside forward).
+rather than an even split of the depth. The measured term divides by `tp_size` (heads are sharded) and,
+under Ulysses CP, by `cp_size` (the wrapper splits the sequence's heads inside forward); the tokens divide
+by `world_size` and `cp_size`, never by `ep_size`. Per-step wiring and the logged fields:
+[Callbacks](../training-methods/callbacks.md#efficiencycallback).
 
 **S-MFU** (sparsity-aware utilization) is the meaningful roofline fraction for MoE: it scales the *expert*
 FLOP term by `(top_k / num_experts) × ep_size` before dividing by `step_time × peak_gpu_flops`, so it does

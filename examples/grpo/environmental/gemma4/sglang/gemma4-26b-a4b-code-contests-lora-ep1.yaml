@@ -66,7 +66,8 @@ environment_kwargs:
     medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
-  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
+  # regardless of outcome at every effort level; on this backend the interaction budgets and the effort
+  # level's own conditioning price effort (SGLang enforces no thinking cap).
   submission_reward: 0.25
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
@@ -98,7 +99,8 @@ rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_max_tokens: 22000              # per-turn total (CoT + a 4k answer headroom). The only CoT bound on
                                        # this backend: rollout_max_thinking_tokens is refused here, and the
-                                       # per-effort thinking_tokens profile only conditions the template.
+                                       # per-effort thinking_tokens profile only conditions the chat template
+                                       # (reasoning_compliance_weight: 0 leaves nothing pricing it).
 reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
                                  # so length control is the effort level's conditioning instead
 

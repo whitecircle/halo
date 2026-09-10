@@ -111,8 +111,8 @@ footprint plus about one sync of pack buffers. The SGLang client keeps one persi
 for the same reason and drops its arena at the end of every sync, so between syncs that memory is
 the allocator's rather than pinned at the largest chunk's size.
 
-Each rank logs a `[mem rankNN] weight-sync pre/post` line per collective sync to watch exactly
-this ([Debugging](../reference/debugging.md#3-gpu-memory-profiling)); `reserved` far above
+`HALO_WEIGHT_SYNC_MEM_LOG=1` brackets each collective sync with a per-rank memory line to watch
+exactly this ([Debugging](../reference/debugging.md#3-gpu-memory-profiling)); `reserved` far above
 `peak_alloc` on the forwarding rank means stranded allocator pools.
 
 **Served weights must stay in checkpoint layout.** The sync writes bf16 checkpoint-layout tensors
@@ -197,8 +197,10 @@ emits — per-expert tensors for Qwen3 MoE, GLM-4 MoE Lite, Laguna, Bailing and 
 for Qwen3.5/3.6 and Gemma 4, GptOss's interleaved pair — so the sync carries one layout per family
 on either engine. What differs per engine is which families its pinned release can take an online
 update for at all. Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), and
-`validate_weight_sync_support` refuses the pair at construction, quoting it. A family no gather can
-spell on any engine stays a family flag (`_supports_weight_sync`: Inkling, GLM-5 Next, Cohere2 MoE).
+`validate_weight_sync_support` refuses the pair at construction, quoting it. A family neither
+engine can take the sync for at all stays a family flag (`_supports_weight_sync`): Inkling and
+GLM-5 Next are served under a checkpoint namespace no gather spells, Cohere2 MoE has no validated
+end-to-end sync on either engine.
 
 | Family (`model_type`) | vLLM 0.26.0 | SGLang 0.5.17 | Loader fact |
 |---|:--:|:--:|---|
@@ -343,8 +345,7 @@ generation exceeds it; the worst-case multi-turn budget only warns, since a roll
 window OOMs the training forward before the fail-on-overflow check.
 
 R3 runs add one flag, `--enable-return-routed-experts` (`routing_replay: rollout`) — without it the
-trainer raises at the first capture. The compose `command:` has no interpolation slot for it, so edit
-it or launch `vllm serve` directly, as the R3 example config headers instruct. The FlashInfer
+trainer raises at the first capture. Set `VLLM_ENABLE_R3=1` and the compose `command:` adds it. The FlashInfer
 monolithic MoE kernels bypass the capturer and return all-zero expert ids, hence the triton backend.
 
 `VLLM_USE_V2_MODEL_RUNNER=0` is not a serve flag but an env var the compose file already passes
@@ -396,12 +397,9 @@ and asserts the weight-sync routes, request schemas, and rendezvous convention s
 upstream refactor fails the build instead of a training run. Serving-only use can run upstream
 directly (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`); weight sync needs this image. 0.5.17 is
 the last SGLang release on torch 2.11 — the training image's torch and NCCL generation; 0.5.18
-moves to torch 2.13, whose NCCL does not match the pin weight sync needs on both ends. 0.5.19's
-weight updater is byte-identical and it keeps the same `NCCL_CUMEM_ENABLE=0`-unless-set default;
-its `--moe-a2a-backend deepep_v2` (DeepEP's ElasticBuffer engine) is allowlisted to
-`DeepseekV3ForCausalLM`, `DeepseekV4ForCausalLM` and `Qwen3MoeForCausalLM` and forces
-`--moe-runner-backend deep_gemm`, a runner an online update does not reach (the triton runner
-above), so it adds nothing to the recipe and the pin stays at 0.5.17.
+moves to torch 2.13, whose NCCL does not match the pin weight sync needs on both ends. A later
+release changes nothing here: 0.5.19's `--moe-a2a-backend deepep_v2` forces
+`--moe-runner-backend deep_gemm`, which an online update does not reach.
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17`, then set
 `SGLANG_IMAGE` to that tag (it defaults to the locally built `sglang-server:0.5.17`).
@@ -420,7 +418,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up
 | `SGLANG_TP` | `1` | Tensor-parallel size; pair with `SGLANG_CUDA_DEVICES` |
 | `SGLANG_CUDA_DEVICES` | `7` | Server GPUs — must exclude the trainer's |
 | `SGLANG_GPU_MEM` | `0.85` | `--mem-fraction-static` |
-| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`. `auto` reads the parser off the chat template — its harmony channel-marker rule resolves gpt-oss to the harmony parser on 0.5.14 and 0.5.17 alike, so no per-family pin is needed. Override only for a template the detector does not cover |
+| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`. `auto` reads the parser off the chat template — its harmony channel-marker rule resolves gpt-oss to the harmony parser, so no per-family pin is needed. Override only for a template the detector does not cover |
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | `--moe-runner-backend`; keep `triton` for MoE RL and for R3 capture |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any non-empty value adds `--enable-return-routed-experts` (R3 capture) |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) — separates reasoning from content in the response |
@@ -461,6 +459,7 @@ Engine behavior under RL:
 - **`--dp-size > 1` needs `--enable-dp-attention`**, or the client refuses at group formation: plain
   DP replicas each restart `tp_rank` at 0, so their workers collide on `rank_offset + tp_rank` in the
   update group and no sizing can address them. The client reads the layout off `/server_info`.
+- **`isr_engine_reference`** re-scores through `/generate` with `logprob_start_len`; no server flag.
 - **`--enable-torch-compile` must stay off under R3 capture**: no step-time gain, and capture ×
   compile produces isolated catastrophic log-ratio rows (the IS veto/geo-band masks them — the
   trust region absorbing an engine numerics fault).
@@ -605,11 +604,14 @@ the server must own a GPU outside `TRAINER_CUDA_DEVICES`.
   caps a turn; on vLLM `rollout_max_thinking_tokens` caps CoT engine-side, on SGLang only the
   environment's per-effort budgets price it.
 - **Memory**: raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 when the server GPUs
-- **`isr_engine_reference` headroom**: the trainer's engine re-score sends `prompt_logprobs` requests, and vLLM materializes an fp32 log-softmax over the vocabulary for every prefill chunk of one (`max_num_batched_tokens × vocab × 4 B`, 8 GB at 8192 × 248k) outside its memory profile — at 0.90 the engine dies of CUDA OOM under load. Serve at `--gpu-memory-utilization` ≤ 0.80 or a smaller `--max-num-batched-tokens` when that knob is on.
   are dedicated; more KV cache means more concurrent rollouts per server. Do not pass
   `--enforce-eager` — the in-place weight sync keeps captured CUDA graphs valid, and CUDA-graph
   decode is several-fold faster on long generations. On B200 pin the backend through the compose
   slot `VLLM_ATTENTION_BACKEND=FLASH_ATTN` (FlashInfer can JIT-fail on SM 10.0).
+- **`isr_engine_reference` headroom (vLLM)**: the re-score is one `prompt_logprobs` prefill per row,
+  and vLLM materializes an fp32 log-softmax over the vocabulary for every prefill chunk of one
+  (`max_num_batched_tokens × vocab × 4 B`, 8 GB at 8192 × 248k) outside its memory profile — at 0.90
+  the engine dies of CUDA OOM under load. Serve at ≤ 0.80, or lower `--max-num-batched-tokens`.
 - **Sync cadence**: `sync_weights_every_n_steps: 2–4` for slow environments
   ([Environmental GRPO](../training-methods/grpo/environmental-grpo.md#nccl-weight-synchronization)).
 - **Not available**: speculative decoding — no config knob passes draft-model arguments, and weight
@@ -626,7 +628,7 @@ tier, the EP rows on Qwen3-30B-A3B and gpt-oss; two trainer ranks unless the row
 | FSDP2 DP (dense) | works | works |
 | TP=2 | works | works |
 | EP=2 (MoE, Qwen3-30B-A3B) | works | works |
-| EP=2 + ETP=2, EP=2 + TP=2, EP=4 (four trainer ranks; gpt-oss and Qwen3-30B-A3B, with and without LoRA / expert LoRA) | works | works |
+| EP=2 + ETP=2, EP=2 + TP=2, EP=4 (four trainer ranks; gpt-oss, with and without LoRA / expert LoRA) | works | works |
 | Expert LoRA (EP=2, with resume) | works | works |
 
 gpt-oss syncs cleanly under trainer TP=2 on SGLang: the hand-sliced attention `sinks` are skipped

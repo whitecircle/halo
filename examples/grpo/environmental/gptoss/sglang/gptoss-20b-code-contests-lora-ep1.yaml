@@ -68,7 +68,8 @@ environment_kwargs:
     medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
-  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
+  # regardless of outcome at every effort level; on this backend the interaction budgets and the effort
+  # level's own conditioning price effort (SGLang enforces no thinking cap).
   submission_reward: 0.25
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle

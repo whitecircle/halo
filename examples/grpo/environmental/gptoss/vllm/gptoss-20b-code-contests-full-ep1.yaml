@@ -1,7 +1,7 @@
 # Environmental GRPO — gpt-oss-20b full fine-tune on Codeforces, no EP, ZeRO-3, KL-free
 # (bands + IS masking as trust region) + routing_replay: rollout (R3, exact engine-token alignment).
 # R3 servers: vLLM 0.26.0 with --enable-return-routed-experts + --moe-backend triton (and
-#   VLLM_USE_V2_MODEL_RUNNER=0, since Model Runner V2 drops thinking_token_budget), image must
+#   VLLM_USE_V2_MODEL_RUNNER=0, since Model Runner V2 400s thinking_token_budget), image must
 #   carry the layerwise-reload patch (docker/vllm/patches/vllm_layerwise_reload_patch.py).
 #   Parsers (harmony is disabled on this path, so both are needed and neither is the vLLM default):
 #     --enable-auto-tool-choice --tool-parser-plugin /opt/gpt_oss_text_tool_parser.py
@@ -155,7 +155,7 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: false      # no EP → non-reentrant GC
+  use_reentrant: false      # overridden to True at runtime: the ep1 grouped-GEMM expert layer counts as EP (the trainer warns)
 fp32_grad_reduce: true
 
 # --- Output ---
