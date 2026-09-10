@@ -17,6 +17,7 @@ from src.environments.base import (
     Trajectory,
     resolve_reasoning_effort,
 )
+from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 # Reasoning-budget calibration band, as fractions of the episode's applied CoT budget, and the two
 # penalty weights outside it (over-use weighs more than under-use). See
@@ -167,7 +168,9 @@ def step_context_from_generation(context: dict[str, Any] | None, gen: TurnGenera
     """
     step_ctx = dict(context) if context else {}
     step_ctx["finish_reason"] = gen.finish_reason
-    if gen.tool_calls:
+    # A cut turn is a fragment whatever the parser salvaged from it: the call it holds was never
+    # finished, and executing it books a malformed call and trains the fragment as a normal row.
+    if gen.tool_calls and gen.finish_reason not in ENGINE_CUT_FINISH_REASONS:
         step_ctx["tool_calls"] = gen.tool_calls
     if gen.reasoning:
         step_ctx["reasoning"] = gen.reasoning

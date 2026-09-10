@@ -27,7 +27,9 @@ All five are **magnitudes** (≥ 0); the minus is applied at the use site and a 
 
 `turn_overflow_penalty` is charged on any **truncated** episode, not only one that burned `max_turns` — `finalize_truncated` marks an episode killed mid-flight (a generation failure, an external abort) the same way, so it pays too.
 
-**A turn the engine cut short** (`finish_reason` `length` — its token cap — or `abort`) **with no tool call is a failed turn, not an answer.** The episode appends a nudge naming what happened and retries on its remaining `max_turns` budget; the count surfaces as `episode/length_cutoff_turns`. A turn that emitted its tool call before the cut takes the normal tool path.
+**A turn the engine cut short** (`finish_reason` `length` — its token cap — or `abort`) **is a fragment, not an answer, whatever the parser salvaged from it.** The episode appends a nudge naming what happened and retries on its remaining `max_turns` budget; the count surfaces as `episode/length_cutoff_turns`. A salvaged tool call is dropped, never executed: the call was cut before its arguments, and running it would book a malformed call the model never finished.
+
+The cap is read off the token count, not only the label. vLLM reports `tool_calls` whenever its parser extracted a call from the text, so a turn cut inside its call arrives labelled complete, with the call's name and `{}` for arguments; a completion whose `usage.completion_tokens` reached its `max_tokens` is a cut on both rollout drivers (`get_finish_reason`). Under a thinking budget this is the common cut: the forced end of thinking leaves the model mid-thought, and it resumes the thought inside the code argument of its next call until the answer headroom runs out.
 
 The cutoff is **unpriced** — a penalty would be avoidable only by reasoning well short of the budget. Bound the frequency structurally instead, through the per-effort caps and the answer headroom (`rollout_max_tokens - rollout_max_thinking_tokens`).
 

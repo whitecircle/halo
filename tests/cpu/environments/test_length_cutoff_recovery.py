@@ -15,6 +15,7 @@ import pytest
 from src.environments.base import Message, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.episode import TurnGeneration, step_context_from_generation
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
@@ -100,6 +101,41 @@ def test_every_engine_cut_reason_takes_the_recovery_path(finish_reason):
     assert traj.info["completed"] is False
     assert traj.info["length_cutoff_turns"] == 1
     assert traj.messages[-1].content == NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE
+
+
+_SALVAGED_CALL = [{"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}]
+
+
+def _generation(finish_reason: str) -> TurnGeneration:
+    return TurnGeneration(
+        text="Let me implement this", tool_calls=_SALVAGED_CALL, reasoning="", tokens=4300, finish_reason=finish_reason
+    )
+
+
+@pytest.mark.parametrize("finish_reason", ENGINE_CUT_FINISH_REASONS)
+def test_a_cut_turn_executes_nothing_the_parser_salvaged(finish_reason):
+    """A turn cut inside its tool call reaches the driver with the call's name and empty arguments.
+    Executed, it books a malformed call the model never finished, and because the label says the
+    turn completed, the fragment trains as a normal row and the model retries into the same cap."""
+    ctx = step_context_from_generation({}, _generation(finish_reason))
+    assert "tool_calls" not in ctx
+
+    env = _make_env()
+    eid = _reset(env)
+    step = env.step([eid], ["Let me implement this"], [ctx])[0]
+
+    assert step.done is False
+    traj = env.get_trajectories([eid])[0]
+    assert traj.info["length_cutoff_turns"] == 1
+    assert traj.info.get("total_tool_calls", 0) == 0
+    fragment, nudge = traj.messages[-2], traj.messages[-1]
+    assert fragment.role == "assistant" and fragment.truncated is True and not fragment.tool_calls
+    assert nudge.content == NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE
+
+
+def test_a_completed_turn_keeps_its_tool_calls():
+    ctx = step_context_from_generation({}, _generation("tool_calls"))
+    assert ctx["tool_calls"] == _SALVAGED_CALL
 
 
 @pytest.mark.parametrize("finish_reason", ENGINE_CUT_FINISH_REASONS)
