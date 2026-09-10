@@ -74,6 +74,8 @@ episode_timeout: 2700         # whole-episode wall clock; must stay below the NC
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
+rollout_max_tokens: 22000              # per-turn total (CoT + a 4k answer headroom; 2k left a finished
+                                       # thought too little room to emit its tool call). It is the ONLY
                                        # CoT bound here: rollout_max_thinking_tokens is left unset, and
                                        # taking it needs the server on VLLM_REASONING_PARSER=gemma4 (0.26.0
                                        # does register one) AND VLLM_USE_V2_MODEL_RUNNER=0, else every
