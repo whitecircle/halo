@@ -1,7 +1,8 @@
-"""Per-token training-FLOPS estimation behind MFU / S-MFU: PaLM/Megatron ``6·N + 12·L·S·H``.
+"""Per-token training-FLOPS estimation behind MFU / S-MFU: PaLM/Megatron ``6·N`` plus the
+attention-score term of :mod:`src.models.attention_layout`.
 
-Every count is per rank (``local_numel`` reads the TP/PP shard off the parameter, and the layer count
-comes from this rank's module tree), so the estimate describes what this GPU computes.
+Every count is the RANK's own (``local_numel`` reads the TP/PP shard off the parameter, the layout
+comes off this rank's decoder layers), so the estimate describes what this GPU computes.
 """
 
 from transformers.utils import logging
@@ -9,7 +10,8 @@ from transformers.utils import logging
 from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
 from src.distributed.runtime import local_numel
-from src.models.structure import backbone_with_layers, decoder_layers
+from src.models.attention_layout import AttentionLayout, attention_layout
+from src.models.loading.config_levels import get_config_field, text_config
 
 logger = logging.get_logger(__name__)
 
@@ -50,17 +52,9 @@ def compute_expert_params(model, trainable_only: bool = False) -> float:
     )
 
 
-def estimate_model_flops_per_token(
-    model, seq_length: int = ASSUMED_MAX_SEQ_LEN, pp_size: int = 1, tp_size: int = 1
-) -> float:
-    """Estimate training FLOPS per token: PaLM/Megatron ``6·N_local + 12·L·S·H`` (incl. attention scores).
-
-    6N = linear projections (fwd 2N + bwd 4N); 12LSH = attention QK^T+Attn·V (fwd+bwd) per layer.
-    Both terms are per-shard and per-stage, so ``pp_size``/``tp_size`` only reach the attention term
-    (see :func:`estimate_attention_flops`); the parameter counts already carry the sharding.
-    """
-    attn_flops = estimate_attention_flops(model, seq_length, pp_size, tp_size)
-
+def estimate_linear_flops_per_token(model) -> float:
+    """The projection term: ``6·N_trainable + 4·N_frozen`` (fwd 2N + bwd 4N; a frozen LoRA base or
+    frozen layers skip the weight gradient). A parameter-less (meta) model falls back to ``12·d²·L``."""
     if next(model.parameters(), None) is None:
         config = getattr(model, "config", None)
         d_model = getattr(config, "hidden_size", None)
@@ -70,52 +64,54 @@ def estimate_model_flops_per_token(
                 "Cannot estimate model FLOPS/token: the model exposes no parameters and its config "
                 "carries neither hidden_size nor num_hidden_layers."
             )
-        return 6 * (12 * d_model * d_model * n_layers) + attn_flops
+        return 6 * (12 * d_model * d_model * n_layers)
 
     all_params, trainable_params = count_model_parameters(model)
-
-    # Frozen params (LoRA base) cost 4N rather than 6N; counting only trainable params would report
-    # MFU near zero for adapter runs.
     if trainable_params == 0:
-        base_flops = 6 * all_params
-    else:
-        frozen_params = max(all_params - trainable_params, 0)
-        base_flops = 6 * trainable_params + 4 * frozen_params
-
-    return base_flops + attn_flops
+        return 6 * all_params
+    return 6 * trainable_params + 4 * max(all_params - trainable_params, 0)
 
 
-def estimate_attention_flops(model, seq_length: int, pp_size: int = 1, tp_size: int = 1) -> float:
-    """Estimate attention score FLOPS per token: 12 × L × S × H / tp (QK^T + Attn·V, fwd+bwd). 0 if no config.
+def estimate_model_flops_per_token(
+    model, seq_length: int = ASSUMED_MAX_SEQ_LEN, pp_size: int = 1, tp_size: int = 1
+) -> float:
+    """Training FLOPS per token with every token in a ``seq_length`` document: the projection term
+    plus the attention-score term (:func:`estimate_attention_flops`)."""
+    return estimate_linear_flops_per_token(model) + estimate_attention_flops(model, seq_length, pp_size, tp_size)
 
-    The term derives from ``hidden_size``, which stays global on every rank, so the ``tp_size``
-    division is explicit here while the ``6·N`` term takes it from the DTensor shard. CP does not
-    divide it (the term is already per-token). ``hidden_size`` comes from
-    ``config.get_text_config()``, so a VLM contributes its language tower rather than dropping the
-    term; its vision attention is not modelled, which makes VLM MFU a slight under-estimate.
+
+def resolve_attention_layout(model, pp_size: int = 1) -> tuple[AttentionLayout, float] | None:
+    """This rank's attention layout and the share of it the rank computes.
+
+    The share is 1 when the layout was read off the rank's own decoder layers (a pipeline stage holds
+    exactly its slice) and ``1 / pp_size`` when the tree exposes no layer list and the config's full
+    depth stands in. ``None`` for a model without a config, or one whose config describes no depth
+    (the term is then omitted, loudly — an under-estimate rather than a guess).
     """
     config = getattr(model, "config", None)
     if config is None:
-        return 0.0
-
-    text_config = config.get_text_config()
-
-    hidden_size = getattr(text_config, "hidden_size", None)
-    # This rank's own layers rather than config.num_hidden_layers / pp_size: the default pipeline
-    # partition is head-weighted, not even (gpt-oss-20b at pp4 splits 8/8/6/2 against an assumed 6).
-    backbone = backbone_with_layers(model)
-    layers = decoder_layers(backbone) if backbone is not None else None
-    n_layers = len(layers) if layers is not None else None
-    if n_layers is None:
-        config_layers = getattr(text_config, "num_hidden_layers", None)
-        n_layers = config_layers / pp_size if config_layers is not None else None
-
-    if n_layers is None or hidden_size is None:
+        return None
+    decoder = text_config(config)
+    if get_config_field(decoder, "layer_types") is None and get_config_field(decoder, "num_hidden_layers") is None:
         logger.warning_once(
-            f"{type(config).__name__} exposes neither a decoder-layer list nor num_hidden_layers/"
-            "hidden_size (text config included); the attention-score term is omitted from the FLOPS "
-            "estimate, so reported MFU is an under-estimate."
+            f"{type(config).__name__} declares neither layer_types nor num_hidden_layers (text config "
+            "included); the attention-score term is omitted from the FLOPS estimate, so reported MFU "
+            "is an under-estimate."
         )
-        return 0.0
+        return None
+    layout = attention_layout(model)
+    return layout, 1.0 if layout.source == "layers" else 1.0 / max(pp_size, 1)
 
-    return 12.0 * n_layers * seq_length * hidden_size / max(tp_size, 1)
+
+def estimate_attention_flops(model, seq_length: int, pp_size: int = 1, tp_size: int = 1) -> float:
+    """Attention-score FLOPS per token for documents of ``seq_length`` tokens, over this rank's
+    layers and its ``1 / tp_size`` share of every layer's heads. 0 without a config.
+
+    The per-layer rule (full, sliding, chunked, sparse, compressed, none) and head width come from
+    the layout; CP does not divide the term (already per-token).
+    """
+    resolved = resolve_attention_layout(model, pp_size)
+    if resolved is None:
+        return 0.0
+    layout, share = resolved
+    return layout.flops_per_token(seq_length) * share / max(tp_size, 1)

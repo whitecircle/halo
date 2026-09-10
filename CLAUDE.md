@@ -117,6 +117,7 @@ src/
 │                        #   moe_balancing.py (mode resolve + router/EP-family registries the layer classes
 │                        #     push into, and the offline balancing-slot apply), modality.py (multimodal
 │                        #   checkpoint detection), attention_geometry.py (head-dim / KV-head resolve),
+│                        #   attention_layout.py (per-layer attention cost rules off layer_types — the MFU term),
 │                        #   seq_cls_heads.py (Gemma4 + Qwen3.5-MoE seq-cls, registered by an explicit
 │                        #   import in loading/model_preparation.py),
 │                        #   patches/(attention — backend select off hardware.py's arch predicates —
