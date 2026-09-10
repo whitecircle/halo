@@ -3,7 +3,7 @@
 # Known issue: on the multimodal checkpoint PEFT refuses these targets (the vision tower's `q_proj` is a
 #   `Gemma4ClippableLinear`, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
 # Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton,
-#   plus --enable-auto-tool-choice --tool-call-parser hermes: code_contests is a native-tool env, and a
+#   plus --enable-auto-tool-choice --tool-call-parser gemma4: code_contests is a native-tool env, and a
 #   server with no tool parser 400s every rollout while the wrong one leaves calls as text (reward 0);
 #   plus --reasoning-parser gemma4 with VLLM_USE_V2_MODEL_RUNNER=0 in the server env: the per-effort
 #   thinking_tokens profile sends thinking_token_budget on every request, which vLLM 400s without them.
