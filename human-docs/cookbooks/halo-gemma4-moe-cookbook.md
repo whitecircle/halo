@@ -222,9 +222,6 @@ Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests
 or from `examples/grpo/environmental/environmental-grpo-template.yaml`. Set
 `model_name_or_path` to the gathered checkpoint.
 
-Open issue: on this env's multi-turn tool trajectories every trajectory is IS-masked and
-the run trains nothing, on both engines ([Troubleshooting](../troubleshooting.md)).
-
 Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
 serves and weight-syncs this family (`rollout_backend: sglang`; ep1 configs under
 `examples/grpo/environmental/gemma4/sglang/`); that sync needs this repo's SGLang image

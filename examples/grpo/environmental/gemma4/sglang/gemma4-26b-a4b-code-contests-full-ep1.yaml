@@ -1,9 +1,6 @@
 # Environmental GRPO — Gemma-4 26B-A4B full fine-tune on code_contests, SGLang backend, no EP, ZeRO-3,
 # KL-free (bands + IS masking as trust region). SGLang serving contract:
 # agent-docs/infrastructure/rollout-servers.md.
-# Known issue: on the multi-turn tool trajectories this env produces, every trajectory is masked by the IS
-#   band on both engines (sampling/is_masked_traj_frac 1, logratio_mean about -0.7) and the run trains
-#   nothing (agent-docs/reference/troubleshooting.md).
 # Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2 on GPUs 4-7, ports 30000/30001,
 #   with --moe-runner-backend triton (the auto-picked runners repack the expert weights every sync
 #   writes) --tool-call-parser auto (resolves this family to the engine's gemma4 detector off the

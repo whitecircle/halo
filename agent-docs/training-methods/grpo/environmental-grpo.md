@@ -304,7 +304,7 @@ Otherwise the usual memory levers apply: `gradient_checkpointing: true` with `us
 
 ### Chunked log-probs
 
-`use_chunked_grpo_logprobs: true` (default off) removes the logits wall. Instead of TRL's full `[B, T, vocab]` logits → `selective_log_softmax`, the completion log-probs come from the backbone's `last_hidden_state` and a dual-chunked (sequence × vocab) matmul + online softmax (`src/trainers/grpo/mixins/chunked_logprobs.py`), so peak memory is bounded by the tile size. The objective is **identical** — the resulting `(B, T)` log-probs feed TRL's unchanged `_compute_loss` and match the full path to bf16 tolerance. The cost is a recompute backward; entropy is fused into the same vocab sweep, so logging it adds no second pass.
+`use_chunked_grpo_logprobs: true` (default off) removes the logits wall. Instead of TRL's full `[B, T, vocab]` logits → `selective_log_softmax`, the completion log-probs come from the backbone's `last_hidden_state` and a dual-chunked (sequence × vocab) matmul + online softmax (`src/trainers/grpo/mixins/chunked_logprobs.py`), so peak memory is bounded by the tile size. The objective is **identical** — the resulting `(B, T)` log-probs feed TRL's unchanged `_compute_loss` and match the full path to bf16 tolerance, the head's `final_logit_softcapping` included where the family caps its logits (Gemma). The cost is a recompute backward; entropy is fused into the same vocab sweep, so logging it adds no second pass.
 
 Turn it on for large-vocab models on long trajectories. The gpt-oss code-contests configs require it: at `rollout_max_tokens: 22000` per turn over `max_turns: 12`, one trajectory's full-vocab logits run to tens of GiB (OOM) even at `per_device_train_batch_size: 1`.
 

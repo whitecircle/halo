@@ -1,8 +1,5 @@
 # Environmental GRPO — Gemma-4 26B-A4B on Codeforces, LoRA (r=64, attention projections), no EP, ZeRO-2,
 # KL-free (bands + IS masking as trust region).
-# Known issue: on the multi-turn tool trajectories this env produces, every trajectory is masked by the IS
-#   band on both engines (sampling/is_masked_traj_frac 1, logratio_mean about -0.7) and the run trains
-#   nothing (agent-docs/reference/troubleshooting.md).
 # Known issue: on the multimodal checkpoint PEFT refuses these targets (the vision tower's `q_proj` is a
 #   `Gemma4ClippableLinear`, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
 # Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton,

@@ -1,8 +1,5 @@
 # Environmental GRPO — Gemma-4 26B-A4B full fine-tune on Codeforces, EP=4, ZeRO-2, KL-free
 # (bands + IS masking as trust region).
-# Known issue: on the multi-turn tool trajectories this env produces, every trajectory is masked by the IS
-#   band on both engines (sampling/is_masked_traj_frac 1, logratio_mean about -0.7) and the run trains
-#   nothing (agent-docs/reference/troubleshooting.md).
 # Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton,
 #   plus --enable-auto-tool-choice --tool-call-parser hermes: code_contests is a native-tool env, and a
 #   server with no tool parser 400s every rollout while the wrong one leaves calls as text (reward 0);
