@@ -144,10 +144,11 @@ class FakeVLLMServer:
                         self._reply(503)
                         return
                     if path == "/generate" and server.bodies[path].get("return_logprob"):
-                        # SGLang's prefill log-probs: [logprob, token_id, text] per input token from logprob_start_len.
+                        # SGLang's prefill log-probs: [logprob, token_id, text] per input token from
+                        # logprob_start_len; the window's first entry is its anchor and carries None.
                         body = server.bodies[path]
                         ids = body["input_ids"][body["logprob_start_len"] :]
-                        echo = [[-((tok % 7) + 1) / 10, tok, None] for tok in ids]
+                        echo = [[None, ids[0], None]] + [[-((tok % 7) + 1) / 10, tok, None] for tok in ids[1:]]
                         self._reply(200, {"meta_info": {"input_token_logprobs": echo}})
                         return
                     if path == "/v1/completions" and "prompt_logprobs" in server.bodies[path]:
@@ -911,8 +912,9 @@ def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
 
 
 def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
-    """SGLang's re-score goes through /generate with logprob_start_len at the completion start: the
-    entries come back as [logprob, token_id, text] and must carry the completion's own ids in order."""
+    """SGLang's re-score goes through /generate with logprob_start_len on the last prompt token, whose
+    entry anchors the window with no log-prob; the completion's entries follow, [logprob, token_id,
+    text] each, and must carry the completion's own ids in order."""
     server = FakeVLLMServer()
     try:
         client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
@@ -921,8 +923,21 @@ def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
         values = client.score_completion_logprobs([11, 12, 13], [14, 15])
         assert values == [pytest.approx(-((14 % 7) + 1) / 10), pytest.approx(-((15 % 7) + 1) / 10)]
         body = server.bodies["/generate"]
-        assert body["input_ids"] == [11, 12, 13, 14, 15] and body["logprob_start_len"] == 3
+        assert body["input_ids"] == [11, 12, 13, 14, 15] and body["logprob_start_len"] == 2
         assert body["return_logprob"] is True
+    finally:
+        server.close()
+
+
+def test_sglang_score_completion_logprobs_refuses_a_window_that_does_not_open_on_the_prompt():
+    """A window whose anchor is not the last prompt token is a shifted reference, never silently read."""
+    server = FakeVLLMServer()
+    try:
+        client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
+        client.base_url = server.url
+        client.session = requests.Session()
+        with pytest.raises(ValueError, match="at least one prompt token"):
+            client.score_completion_logprobs([], [14, 15])
     finally:
         server.close()
 

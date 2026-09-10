@@ -118,22 +118,32 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
 
     def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
         """SGLang's prefill log-probs come from its native ``/generate`` route: ``return_logprob`` with
-        ``logprob_start_len`` at the completion start returns one ``[logprob, token_id, text]`` entry
-        per completion token. The ids are checked position by position — an off-by-one in the
-        engine's contract must surface as a miss, never as a shifted reference.
+        ``logprob_start_len`` returns one ``[logprob, token_id, text]`` entry per input token from
+        that position on, and the first entry of the window is its anchor with no log-prob. The
+        window therefore opens on the last prompt token, whose entry is dropped, and the completion's
+        entries follow it. The ids are checked position by position — an off-by-one in the engine's
+        contract must surface as a miss, never as a shifted reference.
         """
+        if not prompt_ids:
+            raise ValueError(f"{self.BACKEND_NAME} re-score needs at least one prompt token to anchor the window")
         body = {
             "input_ids": list(prompt_ids) + list(completion_ids),
             "sampling_params": {"max_new_tokens": 0},  # prefill-only request
             "return_logprob": True,
-            "logprob_start_len": len(prompt_ids),
+            "logprob_start_len": len(prompt_ids) - 1,
         }
         resp = self.session.post(f"{self.base_url}/generate", json=body, timeout=_RESCORE_TIMEOUT_S)
         resp.raise_for_status()
         entries = resp.json()["meta_info"]["input_token_logprobs"]
-        if len(entries) != len(completion_ids):
+        if len(entries) != len(completion_ids) + 1:
             raise ValueError(
-                f"{self.BACKEND_NAME} returned {len(entries)} input log-probs for a {len(completion_ids)}-token completion"
+                f"{self.BACKEND_NAME} returned {len(entries)} input log-probs for a {len(completion_ids)}-token "
+                f"completion and its anchor"
+            )
+        anchor, entries = entries[0], entries[1:]
+        if int(anchor[1]) != int(prompt_ids[-1]):
+            raise ValueError(
+                f"{self.BACKEND_NAME} input log-probs open on token {anchor[1]}, not the last prompt token {prompt_ids[-1]}"
             )
         values = []
         for position, (tok, entry) in enumerate(zip(completion_ids, entries, strict=True)):
