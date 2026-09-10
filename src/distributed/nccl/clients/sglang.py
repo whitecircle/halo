@@ -35,6 +35,7 @@ from src.distributed.nccl.clients.base import (
     _CLEANUP_TIMEOUT_S,
     _GROUP_FORMATION_TIMEOUT_S,
     _HTTP_PROBE_TIMEOUT_S,
+    _RESCORE_TIMEOUT_S,
     _SERVER_ERROR_GRACE_S,
     _WEIGHT_UPDATE_TIMEOUT_S,
     WEIGHT_SYNC_CHUNK_BYTES,
@@ -114,6 +115,35 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     RESUME_ENDPOINT = _EP_CONTINUE
     # An empty body is rejected: the endpoint takes a request dataclass, so it needs JSON.
     RESUME_PAYLOAD: dict | None = {}
+
+    def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
+        """SGLang's prefill log-probs come from its native ``/generate`` route: ``return_logprob`` with
+        ``logprob_start_len`` at the completion start returns one ``[logprob, token_id, text]`` entry
+        per completion token. The ids are checked position by position — an off-by-one in the
+        engine's contract must surface as a miss, never as a shifted reference.
+        """
+        body = {
+            "input_ids": list(prompt_ids) + list(completion_ids),
+            "sampling_params": {"max_new_tokens": 0},  # prefill-only request
+            "return_logprob": True,
+            "logprob_start_len": len(prompt_ids),
+        }
+        resp = self.session.post(f"{self.base_url}/generate", json=body, timeout=_RESCORE_TIMEOUT_S)
+        resp.raise_for_status()
+        entries = resp.json()["meta_info"]["input_token_logprobs"]
+        if len(entries) != len(completion_ids):
+            raise ValueError(
+                f"{self.BACKEND_NAME} returned {len(entries)} input log-probs for a {len(completion_ids)}-token completion"
+            )
+        values = []
+        for position, (tok, entry) in enumerate(zip(completion_ids, entries, strict=True)):
+            if int(entry[1]) != int(tok):
+                raise ValueError(
+                    f"{self.BACKEND_NAME} input log-probs are misaligned at completion position {position}: "
+                    f"token {entry[1]} where {tok} was sent"
+                )
+            values.append(float(entry[0]))
+        return values
 
     def __init__(
         self,

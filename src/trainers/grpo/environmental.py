@@ -8,6 +8,7 @@ import contextlib
 import dataclasses
 import math
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, get_args
 
 import torch
@@ -20,6 +21,7 @@ from trl.extras.profiling import profiling_context
 from trl.trainer.utils import pad
 
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
     EPISODE_INVALID_REASON_KEY,
@@ -48,6 +50,7 @@ from src.trainers.grpo.objective.logratio import (
     apply_opsm,
     clamp_ref_logps,
     compute_is_ratio,
+    select_mask_logratio,
 )
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
 from src.trainers.grpo.rollout.completions_logging import log_with_decoupled_completions
@@ -79,6 +82,8 @@ ROUTING_REPLAY_MODES: tuple[str, ...] = get_args(AsyncTrainingConfig.__annotatio
 # from RolloutConfig, so a value set on GRPOConfig never reaches a sampler. ``temperature`` is the
 # one exception, reconciled the other way round: the trainer scores at the sampling temperature.
 _ROLLOUT_OWNED_SAMPLING_KNOBS = ("top_p", "top_k", "min_p", "repetition_penalty", "generation_kwargs")
+# Concurrent re-score prefills per rank under isr_engine_reference (each is one HTTP request in flight).
+_ENGINE_RESCORE_CONCURRENCY = 16
 
 # Consecutive steps with no valid episode anywhere before the run is halted. One such step can be a
 # blip (a grader outage, a restarting engine); a second means the rollout path is down and every
@@ -312,6 +317,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "least one IS mask stage (isr_band/isr_geo_band/isr_veto/isr_opsm) — without them no "
                 "trajectory is ever masked and the circuit breaker would silently never fire."
             )
+        self._isr_engine_reference = self.async_config.isr_engine_reference
+        if self._isr_engine_reference:
+            self._validate_engine_reference(resolve_weight_sync_client(self._rollout_backend))
         if self._is_correction:
             self.use_vllm = True
         if self.args.vllm_importance_sampling_mode != "sequence_mask":
@@ -667,6 +675,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # ranks (unequal forwards deadlock) and to a multiple of steps_per_generation (TRL drops remainders).
         self._raise_batch_error_uniformly(device)
 
+        # After the uniform raise: the re-score never raises, but it must not sit between a rank's
+        # collectives either. Train mode only — eval runs no IS correction.
+        all_engine_logps: list[torch.Tensor | None] | None = None
+        if use_is_correction and self._isr_engine_reference and mode == "train":
+            all_engine_logps = self._rescore_rows_on_engine(
+                all_prompt_ids, all_completion_ids, row_has_sampling, turns_per_traj, mode
+            )
+
         num_dummy_rows = 0
         if self._train_on_sampled_tokens:
             global_rows = torch.tensor([len(all_prompt_ids)], device=device)
@@ -684,6 +700,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 all_sampling_logps.append(torch.zeros(1, device=device))  # masked out
                 all_turn_routing.append(None)  # dummy rows keep natural routing (-1 sentinel)
                 row_has_sampling.append(False)
+                if all_engine_logps is not None:
+                    all_engine_logps.append(None)
 
         rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, self._train_on_sampled_tokens)
 
@@ -726,6 +744,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 rows,
                 device,
                 mode,
+                all_engine_logps,
             )
 
             ref_per_token_logps = self._compute_ref_logps(prompt_completion_ids, attention_mask, logits_to_keep)
@@ -947,11 +966,15 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         rows: BatchRows,
         device: torch.device,
         mode: str,
+        all_engine_logps: list[torch.Tensor | None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """The rollout-vs-trainer importance ratio and its mask stages.
 
-        Returns ``(ratio, logps_diff, corrected_mask, traj_row_ids)``; the ratio is all-ones and the
-        rest ``None`` with the correction off — a config-derived gate every rank takes alike.
+        Returns ``(ratio, mask_logps_diff, corrected_mask, traj_row_ids)``; the ratio is all-ones and
+        the rest ``None`` with the correction off — a config-derived gate every rank takes alike.
+        ``mask_logps_diff`` is what the mask stages (and the caller's OPSM stage) read: the trainer
+        diff, or under ``isr_engine_reference`` the engine's current-vs-sampling diff on every
+        re-scored row (:func:`select_mask_logratio`). The IS weight itself is always trainer-vs-sampling.
         """
         importance_sampling_ratio = torch.ones_like(completion_mask, dtype=torch.float32)
         corrected_mask = None
@@ -976,6 +999,17 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 ((with_sampling & ~corrected_mask).sum() / with_sampling.sum().clamp(min=1)).item()
             )
             traj_row_ids = rows.to_rows(torch.arange(len(rows.rollout_results), device=device), dummy_fill=-1)
+            if all_engine_logps is not None:
+                engine_logps = torch.zeros_like(sampling_logps)
+                for i, scored in enumerate(all_engine_logps):
+                    if scored is not None:
+                        engine_logps[i, : scored.numel()] = scored
+                row_has_engine = torch.tensor([o is not None for o in all_engine_logps], device=device)
+                logps_diff, engine_stats = select_mask_logratio(
+                    logps_diff, recompute_logps, sampling_logps, engine_logps, corrected_mask, row_has_engine
+                )
+                for key, value in engine_stats.items():
+                    self._metrics[mode][key].append(value)
             if self._is_mask_config.any_mask_active:
                 importance_sampling_ratio, mask_stats = apply_is_masks(
                     importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids, self._is_mask_config
@@ -983,6 +1017,81 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 for key, value in mask_stats.items():
                     self._metrics[mode][key].append(value)
         return importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids
+
+    def _validate_engine_reference(self, client_cls) -> None:
+        """Construction gate for ``isr_engine_reference``: the re-score needs the sampling log-probs
+        it is compared against, an engine that returns prefill log-probs of a given sequence, and a
+        sampler whose recorded log-probs are the raw distribution the prefill returns (temperature
+        and top-p of 1) — at any other setting the two references would not be the same function."""
+        if not self._is_correction:
+            raise ValueError(
+                "isr_engine_reference requires the vLLM importance-sampling correction "
+                "(train_on_sampled_tokens + vllm_importance_sampling_correction): the engine re-score "
+                "is compared against the sampling log-probs that correction captures."
+            )
+        if not client_cls.SUPPORTS_ENGINE_RESCORE:
+            raise ValueError(
+                f"isr_engine_reference is not available on {client_cls.BACKEND_NAME}: its client declares "
+                "no route that returns per-token log-probs of a given sequence under the current weights."
+            )
+        if self.async_config.rollout_temperature != 1.0 or self.async_config.rollout_top_p != 1.0:
+            raise ValueError(
+                "isr_engine_reference requires rollout_temperature 1.0 and rollout_top_p 1.0 (got "
+                f"{self.async_config.rollout_temperature} / {self.async_config.rollout_top_p}): the engine "
+                "echoes the raw distribution's log-probs while the sampling log-probs are the processed "
+                "ones, so only at the identity sampler do the two share a reference."
+            )
+
+    def _engine_rescore_clients(self) -> list:
+        """The weight-sync clients, one per rollout server, that the re-score fans out over."""
+        return self._weight_sync_client.clients if self._multi_server_mode else [self._weight_sync_client]
+
+    def _rescore_rows_on_engine(
+        self,
+        all_prompt_ids: list[torch.Tensor],
+        all_completion_ids: list[torch.Tensor],
+        row_has_sampling: list[bool],
+        turns_per_traj: list[int],
+        mode: str,
+    ) -> list[torch.Tensor | None]:
+        """Every sampled row's completion re-scored on the rollout engine under the weights synced for
+        this step; ``None`` where the row carries no sampling log-probs or its request failed (that
+        row's mask stages fall back to the trainer diff). A trajectory's rows go to one server so
+        its turns share the prefix cache. Never raises: a rank-local raise here would desync the
+        collectives that follow, so a failed step is reported (``sampling/engine_rescore_miss_frac``,
+        a warning, an error when nothing succeeded) and trains on the trainer's reference.
+        """
+        clients = self._engine_rescore_clients()
+        row_traj = [traj for traj, turns in enumerate(turns_per_traj) for _ in range(turns)]
+        indices = [i for i, has in enumerate(row_has_sampling) if has]
+
+        def score(i: int) -> list[float]:
+            client = clients[row_traj[i] % len(clients)]
+            return client.score_completion_logprobs(all_prompt_ids[i].tolist(), all_completion_ids[i].tolist())
+
+        scored: list[torch.Tensor | None] = [None] * len(all_prompt_ids)
+        failures: list[Exception] = []
+        with ThreadPoolExecutor(max_workers=_ENGINE_RESCORE_CONCURRENCY) as pool:
+            futures = {i: pool.submit(score, i) for i in indices}
+            for i, future in futures.items():
+                try:
+                    values = future.result()
+                    if len(values) != all_completion_ids[i].numel():
+                        raise ValueError(
+                            f"row {i}: {len(values)} log-probs for {all_completion_ids[i].numel()} tokens"
+                        )
+                    scored[i] = torch.tensor(values, dtype=torch.float32, device=all_completion_ids[i].device)
+                except Exception as e:  # noqa: BLE001 — a transport/shape failure on one row is that row's miss
+                    failures.append(e)
+        miss_frac = len(failures) / len(indices) if indices else 0.0
+        self._metrics[mode]["sampling/engine_rescore_miss_frac"].append(miss_frac)
+        if failures:
+            report = logger.error if len(failures) == len(indices) else logger.warning
+            report(
+                f"isr_engine_reference: {len(failures)}/{len(indices)} re-score requests failed this step "
+                f"(those rows read the trainer's log-ratio instead); last error: {failures[-1]}"
+            )
+        return scored
 
     def _narrow_masks_and_normalizer(
         self,

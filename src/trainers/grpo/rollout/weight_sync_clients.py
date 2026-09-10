@@ -233,6 +233,11 @@ class InferenceClientManager:
             f"InferenceClientManager created for {len(server_configs)} servers: {[c['url'] for c in server_configs]}"
         )
 
+    @property
+    def clients(self) -> list[BaseWeightSyncClient]:
+        """The per-server clients, in ``server_configs`` order (read-only view for request fan-out)."""
+        return list(self._clients)
+
     def _group_port(self, index: int) -> int:
         """The trainer-side NCCL group port for one server: its configured value, else the base + index."""
         return self.server_configs[index].get("group_port", self.base_group_port + index)

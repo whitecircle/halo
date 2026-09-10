@@ -120,8 +120,9 @@ epsilon: 0.2
 epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
-isr_geo_band_min: 0.95       # +-0.05 nats: the vLLM<->trainer numerical floor grows with entropy (~0.002/token at
-isr_geo_band_max: 1.05       #   entropy 0.4, 0.01 at 0.7, 0.04 at 1.0); a band under the floor masks every step
+isr_engine_reference: true   # mask stages read the engine's current-vs-sampling log-ratio: pure staleness, no numerical floor
+isr_geo_band_min: 0.98       # trajectory geometric-mean band on that staleness; on sustained masking lower LR, never widen
+isr_geo_band_max: 1.02
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # zero the step's gradient when > this fraction of trajectories is masked

@@ -57,6 +57,8 @@ _HEALTH_RETRY_INTERVAL_S = 2.0
 # Sampler-logprob semantics probe: 1-token completions of one prompt under three sampler settings.
 _LOGPROB_PROBE_PROMPT = "The capital of France is"
 _LOGPROB_PROBE_TIMEOUT_S = 60.0
+# A re-score is one prefill of a training row: a 250k-token row on a server that is also generating.
+_RESCORE_TIMEOUT_S = 600.0
 _LOGPROB_PROBE_TEMPERATURE = 2.0
 _LOGPROB_PROBE_TOP_P = 0.5
 # Temperature-processed logprobs halve the top-1/top-2 gap at temperature 2; raw ones leave it whole.
@@ -325,6 +327,11 @@ class BaseWeightSyncClient:
     * ``UNSERVABLE_MODEL_TYPES`` / ``CO_LOADED_PARAM_GROUPS``: the engine's loader facts the trainer
       side reads — which families it cannot serve, and which parameters its loader consumes only
       together.
+    * ``SUPPORTS_ENGINE_RESCORE`` (default ``True``): whether :meth:`score_completion_logprobs` can
+      re-score a token sequence under the engine's current weights (the ``isr_engine_reference``
+      trust region), read by the trainer's construction gate. The base implementation is the OpenAI
+      completions ``prompt_logprobs`` echo (vLLM); an engine with a different prefill-log-prob route
+      overrides the method (SGLang: ``/generate`` with ``logprob_start_len``).
     """
 
     BACKEND_KEY = ""
@@ -344,6 +351,8 @@ class BaseWeightSyncClient:
     # the suffixes, and parameters sharing the prefix before them must ride one chunk. Empty where the
     # engine loads every tensor on its own. Scoped per model by :meth:`scope_co_load_groups`.
     CO_LOADED_PARAM_GROUPS: tuple[tuple[str, ...], ...] = ()
+    # Whether the engine can return per-token log-probs of a given sequence under its current weights.
+    SUPPORTS_ENGINE_RESCORE = True
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal that
     # follows one. Declared per client because it follows from the engine's own reload model.
     INTERRUPTED_UPDATE_STATE = "a model that is part old weights and part new"
@@ -352,6 +361,8 @@ class BaseWeightSyncClient:
     # than inferred: the flush runs on a worker thread when several servers sync at once, and torch's
     # current device and current stream are both thread-local.
     _sync_device: torch.device | None = None
+    # Cached by ``served_model_id``; None until the first completions-route call.
+    _served_model_id: str | None = None
     # Set once an interrupted sync left the engine unservable; every later sync is refused with it.
     _unusable_reason: str | None = None
     # Update-phase state, defaulted here as well as set in ``__init__``: the methods reading it decide
@@ -450,6 +461,40 @@ class BaseWeightSyncClient:
         resp = self.session.get(f"{self.base_url}/v1/models", timeout=timeout)
         resp.raise_for_status()
         return list(resp.json().get("data", []))
+
+    def served_model_id(self) -> str:
+        """The id the engine serves the policy under, read once and cached for the completions route."""
+        if self._served_model_id is None:
+            self._served_model_id = str(self.served_model_cards()[0]["id"])
+        return self._served_model_id
+
+    def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
+        """Per-token log-probs of ``completion_ids`` after ``prompt_ids`` under the engine's CURRENT
+        weights: one prefill through the completions ``prompt_logprobs`` echo, the raw (pre-sampler)
+        distribution. Raises on a transport, shape or key error — the caller decides what a failed
+        row means.
+        """
+        body = {
+            "model": self.served_model_id(),
+            "prompt": list(prompt_ids) + list(completion_ids),
+            "max_tokens": 1,
+            "prompt_logprobs": 0,
+            "temperature": 0.0,
+        }
+        resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=_RESCORE_TIMEOUT_S)
+        resp.raise_for_status()
+        entries = resp.json()["choices"][0]["prompt_logprobs"]
+        expected = len(prompt_ids) + len(completion_ids)
+        if entries is None or len(entries) != expected:
+            raise ValueError(
+                f"{self.BACKEND_NAME} returned {None if entries is None else len(entries)} prompt log-probs "
+                f"for a {expected}-token sequence"
+            )
+        # Keyed by the token id (as a string); the actual token is always present at prompt_logprobs=0.
+        return [
+            float(entry[str(tok)]["logprob"])
+            for tok, entry in zip(completion_ids, entries[len(prompt_ids) :], strict=True)
+        ]
 
     def served_max_model_len(self) -> int | None:
         """Context window the served model declares, or ``None`` when no card carries one."""
