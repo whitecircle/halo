@@ -336,8 +336,8 @@ VLLM_USE_V2_MODEL_RUNNER=0 \
 
 That command already passes `--moe-backend triton`, which is required: Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also add `--enable-return-routed-experts`
-to the server's `command:` block, since the compose file exposes no variable for it. If SFT
+weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`). If SFT
 overrode the chat template, point `VLLM_CHAT_TEMPLATE` at the same `.jinja` so the
 server-side render matches training. The trainer config then sets `rollout_backend: vllm`
 and `rollout_server_url: http://localhost:8000`, and launches the same way. It may size

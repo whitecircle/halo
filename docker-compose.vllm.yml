@@ -63,6 +63,7 @@ services:
       --weight-transfer-config '{"backend": "nccl"}'
       --moe-backend ${VLLM_MOE_BACKEND:-triton}
       ${VLLM_ATTENTION_BACKEND:+--attention-backend ${VLLM_ATTENTION_BACKEND}}
+      ${VLLM_ENABLE_R3:+--enable-return-routed-experts}
       --return-tokens-as-token-ids
       --logprobs-mode processed_logprobs
       --enable-auto-tool-choice

@@ -176,11 +176,20 @@ def expert_lora_under_etp_refusal(expert_tp_size: int) -> str:
     return ""
 
 
-def load_policy(weights_source: str, parallelism_config: ParallelismConfig, peft: str | None):
+def load_policy(
+    weights_source: str,
+    parallelism_config: ParallelismConfig,
+    peft: str | None,
+    *,
+    attn_implementation: str | None = None,
+    lora_target_modules: list[str] | None = None,
+):
     """Load the policy (plus adapters) through the production path; ``(model, peft_config)``.
 
     ``weights_source`` is what ``model_name_or_path`` would be on this phase: the base checkpoint, or
     the resume checkpoint where the EP/CP loader expects the model to be constructed from it.
+    ``attn_implementation`` and ``lora_target_modules`` are the per-family overrides a suite's knobs
+    carry; ``None`` keeps the loader's auto-selection and the checkpoint-derived targets.
     """
     if peft is None:
         model, _ = load_distributed_model(
@@ -188,6 +197,7 @@ def load_policy(weights_source: str, parallelism_config: ParallelismConfig, peft
             parallelism_config=parallelism_config,
             dtype=torch.bfloat16,
             trust_remote_code=True,
+            attn_implementation=attn_implementation,
             # On-policy RL trains the policy the engine runs, which serves the checkpoint's pretrained
             # sinks: the loader's fine-tuning reset would train a different model from the one sampled
             # and the sync would push neutralized sinks into the server
@@ -195,7 +205,14 @@ def load_policy(weights_source: str, parallelism_config: ParallelismConfig, peft
             reset_sinks=False,
         )
         return model, None
-    model, _, peft_config = load_peft_model(peft, parallelism_config, model_name=weights_source, reset_sinks=False)
+    model, _, peft_config = load_peft_model(
+        peft,
+        parallelism_config,
+        model_name=weights_source,
+        reset_sinks=False,
+        attn_implementation=attn_implementation,
+        lora_target_modules=lora_target_modules,
+    )
     return model, peft_config
 
 

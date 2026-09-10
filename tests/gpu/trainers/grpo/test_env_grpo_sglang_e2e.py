@@ -48,7 +48,7 @@ def run(ctx):
     parser = argparse.ArgumentParser()
     parser.add_argument("--ep-size", type=int, choices=(1, 2), default=1)
     parser.add_argument("--tp-size", type=int, choices=(1, 2), default=1)
-    parser.add_argument("--peft", choices=("lora",), default=None)
+    parser.add_argument("--peft", choices=("lora", "expert_lora"), default=None)
     parser.add_argument("--resume", action="store_true")
     # R3: the engine returns the experts it routed each token through, and the trainer replays them
     # instead of its own router. Needs the server on --enable-return-routed-experts and

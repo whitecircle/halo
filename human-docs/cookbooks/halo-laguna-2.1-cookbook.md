@@ -262,8 +262,8 @@ VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
 
 That command already passes `--moe-backend triton`, which is required: Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also add `--enable-return-routed-experts` to the
-server's `command:` block — the compose file exposes no variable for it.
+weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`).
 
 Save the config as `laguna-grpo.yaml`:
 

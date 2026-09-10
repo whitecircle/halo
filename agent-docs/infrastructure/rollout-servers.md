@@ -311,6 +311,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 | `VLLM_TP` | `1` | `--tensor-parallel-size` |
 | `VLLM_GPU_MEM` | `0.85` | `--gpu-memory-utilization` |
 | `VLLM_MOE_BACKEND` | `triton` | Keep `triton` for MoE RL ([Weight sync](#weight-sync)) |
+| `VLLM_ENABLE_R3` | *(unset)* | Any non-empty value adds `--enable-return-routed-experts` (R3 capture); the `triton` MoE backend is the one the capture hook reaches |
 | `VLLM_ATTENTION_BACKEND` | *(unset = auto)* | `--attention-backend`. GLM-4 MoE Lite (MLA) on Blackwell needs `CUTLASS_MLA`: the auto-selected FlashInfer MLA decode kernel rejects its head config at graph capture ([MLA backend](../reference/checkpoints.md#serving-on-vllm-sglang)) |
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
 | `VLLM_TOOL_PARSER_PLUGIN` | *(unset)* | `--tool-parser-plugin` path (gpt-oss uses the baked `/opt/gpt_oss_text_tool_parser.py`) |
@@ -615,18 +616,26 @@ the server must own a GPU outside `TRAINER_CUDA_DEVICES`.
 
 ## Coverage
 
-What works, per parallelism axis (env-GRPO, 2 trainer ranks, live server; dense rows on the dense
-server tier, the EP row on Qwen3-30B-A3B):
+What works, per parallelism axis (env-GRPO against a live server; dense rows on the dense server
+tier, the EP rows on Qwen3-30B-A3B and gpt-oss; two trainer ranks unless the row says four):
 
 | axis | vLLM | SGLang |
 |---|---|---|
 | FSDP2 DP (dense) | works | works |
 | TP=2 | works | works |
 | EP=2 (MoE, Qwen3-30B-A3B) | works | works |
+| EP=2 + ETP=2, EP=2 + TP=2, EP=4 (four trainer ranks; gpt-oss and Qwen3-30B-A3B, with and without LoRA / expert LoRA) | works | works |
+| Expert LoRA (EP=2, with resume) | works | works |
 
 gpt-oss syncs cleanly under trainer TP=2 on SGLang: the hand-sliced attention `sinks` are skipped
 by the dense parameter walk and sent once from the gathered-full drain, so each hub name reaches
 the engine exactly once.
+
+An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`)
+takes the sync for Qwen3 MoE: the loader keeps its local experts and drops the rest, and the
+expert-only round moves the served policy. gpt-oss cannot be served that way on 0.5.17 at all — its
+fused expert loader crash-loops at start under `--ep-size` (`_load_w2`, local against global expert
+count), before any sync.
 
 Undistributed MoE (`ep_group_size == 1`, EP wrappers present) works at 20B-MoE scale with
 multi-server serving (2×TP=2 and 4×TP=1), expert sync, R3 rollout replay, and a flat

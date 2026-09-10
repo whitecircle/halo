@@ -87,6 +87,7 @@ crashing mid-run. These are the ones that come up:
 | `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels — net-slower at the MoE shapes benchmarked here |
 | `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote` |
 | `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` | auto | trainer IP the rollout server dials back for the weight-sync group; set it when the server is on another host and the trainer's default-route NIC is not the one it can reach |
+| `VLLM_ENABLE_R3` | unset | server-side: any non-empty value adds `--enable-return-routed-experts` for `routing_replay: rollout` (`SGLANG_ENABLE_R3` on the SGLang compose file) |
 | `VLLM_USE_V2_MODEL_RUNNER` | unset | server-side: must be `0` for any run setting `rollout_max_thinking_tokens` (V2 rejects thinking budgets with a 400) |
 | `NCCL_CUMEM_ENABLE` | `1` (SGLang compose default) | server-side: SGLang turns cuMem off unless this is pre-set, and a mismatch with the trainer fails the first weight-sync import — leave the compose default |
 | `SGLANG_ATTENTION_BACKEND` | unset | server-side: passed through as `--attention-backend`; `triton` for GLM-4 MoE Lite on Blackwell, whose MLA head size has no kernel in the default backend |

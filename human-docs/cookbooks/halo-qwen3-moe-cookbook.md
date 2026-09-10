@@ -253,9 +253,8 @@ VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
 
 That command already passes the required `--moe-backend triton`; Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt
-every weight sync. To serve `routing_replay: rollout`, also add
-`--enable-return-routed-experts` to the server's `command:` block, since the
-compose file exposes no variable for it.
+every weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`).
 
 ```yaml
 rollout_backend: vllm

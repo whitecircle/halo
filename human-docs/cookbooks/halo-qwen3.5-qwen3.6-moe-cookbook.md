@@ -272,8 +272,8 @@ stay plain text, every episode ends unsolved, and training runs on a flat zero
 gradient. The shipped configs set `rollout_max_thinking_tokens`, which needs the
 reasoning parser above **and** `VLLM_USE_V2_MODEL_RUNNER=0` in the server
 environment; Model Runner V2 rejects thinking budgets with a 400 on every request.
-To serve `routing_replay: rollout`, also add `--enable-return-routed-experts` to the
-server's `command:` block — the compose file exposes no variable for it.
+To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`).
 
 For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
 trainer will not use.

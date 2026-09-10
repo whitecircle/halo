@@ -81,6 +81,11 @@ from tests.common.utils import cleanup_memory, log
 # default families differ).
 MODEL_NAME = env_str("HALO_TEST_ENV_GRPO_MODEL", QWEN3_30B_A3B)
 MAX_STEPS = env_int("HALO_TEST_ENV_GRPO_MAX_STEPS", 2)
+# Per-family overrides for a pass on a family the defaults do not fit: an attention backend the
+# family's code lacks (Bailing's remote code has no FA4), or projection names the checkpoint index
+# cannot derive (``query_key_value``). Unset keeps auto-selection and the derived targets.
+ATTN_IMPL = env_str("HALO_TEST_ENV_GRPO_ATTN_IMPL") or None
+LORA_TARGETS = [name for name in env_str("HALO_TEST_ENV_GRPO_LORA_TARGETS", "").split(",") if name] or None
 # Deliberately large: the sync has to move the served weights measurably within MAX_STEPS.
 LEARNING_RATE = 1e-4
 
@@ -240,7 +245,9 @@ def run_env_grpo_e2e(
     )
 
     parallelism_config = fresh_parallelism_config(ep_size, tp_size, expert_tp_size)
-    model, peft_config = load_policy(model_name, parallelism_config, peft)
+    model, peft_config = load_policy(
+        model_name, parallelism_config, peft, attn_implementation=ATTN_IMPL, lora_target_modules=LORA_TARGETS
+    )
 
     trainer_kwargs = {
         "model": model,
@@ -422,7 +429,9 @@ def run_env_grpo_e2e(
     checks["resume_weights_source_resolved"] = weights_source == (model_name if peft is not None else checkpoint)
     log(f"  resume: policy weights from {weights_source}")
 
-    model, peft_config = load_policy(weights_source, parallelism_config, peft)
+    model, peft_config = load_policy(
+        weights_source, parallelism_config, peft, attn_implementation=ATTN_IMPL, lora_target_modules=LORA_TARGETS
+    )
     trainer = _make_trainer(
         model=model,
         tokenizer=tokenizer,

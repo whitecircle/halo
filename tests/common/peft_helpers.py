@@ -96,7 +96,7 @@ def _mode_targets(mode: str, model_name: str, revision: str | None) -> list[str]
         return list(_EXPERT_TARGETS)
     if mode == "mixed":
         return attention_target_modules(model_name, revision) + _EXPERT_TARGETS
-    return list(_DEFAULT_ATTENTION_TARGETS)
+    return attention_target_modules(model_name, revision)
 
 
 def model_name_for(mode: str, parallelism_config) -> str:
@@ -118,8 +118,10 @@ def parallelism_config_for(mode: str, size: int):
     return ParallelismConfig()
 
 
-def _build_model_config(mode: str, model_name: str, revision: str | None = None) -> ModelConfig:
-    targets = _mode_targets(mode, model_name, revision)
+def _build_model_config(
+    mode: str, model_name: str, revision: str | None = None, targets: list[str] | None = None
+) -> ModelConfig:
+    targets = targets or _mode_targets(mode, model_name, revision)
     return ModelConfig(
         model_name_or_path=model_name,
         # Carried here as well as on the load: split_expert_lora_targets reads the config off the hub
@@ -149,6 +151,7 @@ def load_peft_model(
     attn_implementation: str | None = None,
     use_liger_kernel: bool = True,
     reset_sinks: bool = True,
+    lora_target_modules: list[str] | None = None,
 ):
     """Load a model + adapters through the production path. Returns (model, tokenizer, peft_config).
 
@@ -164,9 +167,11 @@ def load_peft_model(
 
     ``reset_sinks`` is forwarded to the loader: on-policy RL keeps GptOss's pretrained sinks live and
     frozen, and a run that reset them would train a different model from the one the engine samples.
+    ``lora_target_modules`` replaces the mode's targets where the checkpoint's index cannot name them
+    (a family whose projections do not end in ``_proj``).
     """
     model_name = model_name or model_name_for(mode, parallelism_config)
-    model_config = _build_model_config(mode, model_name, revision)
+    model_config = _build_model_config(mode, model_name, revision, targets=lora_target_modules)
 
     # Peel expert targets to native grouped-LoRA before the load (no-op for attention-only modes).
     parallelism_config.expert_lora = split_expert_lora_targets(model_config)

@@ -287,8 +287,7 @@ auto-selected MoE backends repack expert weights at load and silently corrupt ev
 weight sync. On Blackwell, GLM-4's MLA attention additionally needs
 `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` (a compose variable; SGLang:
 `SGLANG_ATTENTION_BACKEND=triton`). Serving `routing_replay: rollout` needs
-`--enable-return-routed-experts`, added to the server's `command:` block, since the
-compose file exposes no variable for that one.
+`VLLM_ENABLE_R3=1` (`--enable-return-routed-experts`; SGLang: `SGLANG_ENABLE_R3=1`).
 
 For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
 trainer will not use.
