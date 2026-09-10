@@ -7,12 +7,14 @@ weights back to vLLM over NCCL. CP unsupported (``logits_to_keep`` + global log-
 import contextlib
 import dataclasses
 import math
+import weakref
 from typing import Any, get_args
 
 import torch
 import torch.distributed as dist
 from accelerate.logging import get_logger
 from accelerate.utils import gather
+from transformers import TrainerCallback
 from trl import GRPOTrainer
 from trl.extras.profiling import profiling_context
 from trl.trainer.utils import pad
@@ -133,6 +135,21 @@ def batch_reward_std(rewards: torch.Tensor) -> float:
     return rewards.std().item() if rewards.numel() > 1 else 0.0
 
 
+class _BreakerOptimizerSkipCallback(TrainerCallback):
+    """Turns a tripped trust-region breaker into a skipped optimizer step
+    (:meth:`DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped`).
+    Pre-optimizer-step is the one hook between gradient clipping and ``optimizer.step``. Weak
+    reference: the trainer owns the callback handler that owns this."""
+
+    def __init__(self, trainer):
+        self._trainer = weakref.ref(trainer)
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        trainer = self._trainer()
+        if trainer is not None:
+            trainer._skip_optimizer_step_if_breaker_tripped()
+
+
 class DistributedAsyncEnvironmentalGRPOTrainer(
     OnPolicyGRPOInitMixin,
     AsyncRolloutMixin,
@@ -242,6 +259,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._skip_update_masked_frac = self.async_config.skip_update_masked_frac
         if self._skip_update_masked_frac is not None and not 0.0 < self._skip_update_masked_frac <= 1.0:
             raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self._skip_update_masked_frac}")
+        # Armed by _update_breaker_tripped, consumed once at pre-optimizer-step.
+        self._breaker_tripped_this_step = False
+        self.add_callback(_BreakerOptimizerSkipCallback(self))
 
         # Advantage surgery: built eagerly to validate the knobs, applied only when != "mean".
         self._advantage_shaping = self.async_config.build_advantage_shaping()
@@ -1201,19 +1221,25 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     ) -> bool:
         """Whether the trust-region circuit breaker fires on the IS-mask stages (``skip_update_masked_frac``).
 
-        A trajectory counts as masked when every one of its IS-corrected loss tokens had its ratio
-        zeroed by the band/veto/OPSM stages. When the global masked fraction exceeds the threshold,
-        the surviving trajectories are a selection-biased sample of wherever the drifted policy still
-        agrees with the rollouts, so the caller zeroes the step's advantages and the next weight sync
-        re-anchors the rollouts. Any configured KL term still applies (anchor-only step); at beta=0
-        the step is a no-op. The verdict is returned rather than applied because both the per-row and
-        the per-trajectory advantages must follow it, the latter being what the completions record
-        writes. The decision uses the global fraction so every DP rank acts identically.
+        Two GLOBAL fractions feed it and either one above the threshold trips it: the share of
+        IS-corrected trajectories whose every corrected loss token had its ratio zeroed by the
+        band/veto/OPSM stages, and the share of corrected loss tokens zeroed — the masked
+        trajectories are the long ones, so a trajectory count alone reads a step that lost most of
+        its tokens as healthy. Past the threshold the survivors are a selection-biased sample of
+        wherever the drifted policy still agrees with the rollouts — training on them amplifies
+        the drift — so the caller zeroes the step's advantages and the optimizer step is skipped
+        at pre-optimizer-step (:meth:`_skip_optimizer_step_if_breaker_tripped`); the next weight
+        sync ships unchanged weights and the rollouts re-anchor. Any configured KL term is dropped
+        with the step. The verdict is returned rather than applied because the per-row and the
+        per-trajectory advantages both have to follow it — the second is what the durable
+        completions record writes. Global fractions, so every DP rank acts identically.
         """
         if self._skip_update_masked_frac is None or mode != "train" or traj_row_ids is None:
             return False
         device = importance_sampling_ratio.device
         rows_valid = traj_row_ids >= 0
+        corrected_tokens = eff_corrected & rows_valid.unsqueeze(1)
+        masked_tokens = corrected_tokens & (importance_sampling_ratio <= 0)
         row_corrected = eff_corrected.any(dim=1) & rows_valid
         row_surviving = ((importance_sampling_ratio > 0) & eff_corrected).any(dim=1) & rows_valid
         traj_corrected = torch.zeros(num_trajectories, dtype=torch.bool, device=device)
@@ -1221,22 +1247,35 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         traj_corrected[traj_row_ids[row_corrected]] = True
         traj_surviving[traj_row_ids[row_surviving]] = True
         masked = traj_corrected & ~traj_surviving
-        counts = (
-            self.accelerator.gather(torch.stack([masked.sum(), traj_corrected.sum()]).to(device))
-            .view(-1, 2)
-            .sum(dim=0)
-        )
-        frac = (counts[0] / counts[1].clamp(min=1)).item()
-        self._metrics[mode]["sampling/is_masked_traj_frac"].append(frac)
-        skipped = frac > self._skip_update_masked_frac
+        local = torch.stack([masked.sum(), traj_corrected.sum(), masked_tokens.sum(), corrected_tokens.sum()])
+        counts = self.accelerator.gather(local.to(device)).view(-1, 4).sum(dim=0)
+        traj_frac = (counts[0] / counts[1].clamp(min=1)).item()
+        token_frac = (counts[2] / counts[3].clamp(min=1)).item()
+        self._metrics[mode]["sampling/is_masked_traj_frac"].append(traj_frac)
+        self._metrics[mode]["sampling/is_masked_token_frac"].append(token_frac)
+        skipped = max(traj_frac, token_frac) > self._skip_update_masked_frac
         self._metrics[mode]["sampling/update_skipped"].append(float(skipped))
         if not skipped:
             return False
+        self._breaker_tripped_this_step = True
         logger.warning(
-            f"IS trust region: {frac:.0%} of corrected trajectories fully masked "
-            f"(> skip_update_masked_frac={self._skip_update_masked_frac}) — zeroing this step's "
-            f"policy gradient; rollouts re-anchor at the next weight sync."
+            f"IS trust region: {traj_frac:.0%} of corrected trajectories fully masked, {token_frac:.0%} of "
+            f"corrected tokens masked (> skip_update_masked_frac={self._skip_update_masked_frac}) — zeroing "
+            "this step's policy gradient and skipping its optimizer step; rollouts re-anchor at the next weight sync."
         )
+        return True
+
+    def _skip_optimizer_step_if_breaker_tripped(self) -> bool:
+        """Drop the step's gradients when the breaker tripped, so the optimizer steps no parameter.
+
+        Every optimizer skips a parameter whose ``.grad`` is ``None``, moments included, while a
+        zeroed loss still hands it zero gradients and Adam keeps stepping on momentum alone. Runs
+        at pre-optimizer-step (after clipping), once per optimizer step; the flag is single-use.
+        """
+        if not self._breaker_tripped_this_step:
+            return False
+        self._breaker_tripped_this_step = False
+        self.optimizer.zero_grad(set_to_none=True)
         return True
 
     def training_step(self, model, inputs, num_items_in_batch=None):

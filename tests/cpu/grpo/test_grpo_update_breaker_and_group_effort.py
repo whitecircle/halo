@@ -24,6 +24,7 @@
 
 import ast
 import inspect
+import pathlib
 import textwrap
 import types
 from collections import defaultdict
@@ -34,7 +35,7 @@ from accelerate import PartialState
 
 from src.environments.base import VALID_REASONING_EFFORTS
 from src.environments.episode import resolve_episode_effort
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer, _BreakerOptimizerSkipCallback
 
 PartialState()  # the breaker warns through accelerate's logger, which refuses to log without it
 
@@ -43,6 +44,7 @@ def _breaker_host(threshold):
     """Minimal stand-in exposing exactly what ``_update_breaker_tripped`` reads."""
     host = types.SimpleNamespace(
         _skip_update_masked_frac=threshold,
+        _breaker_tripped_this_step=False,
         accelerator=types.SimpleNamespace(gather=lambda x: x),  # single-process: identity
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
     )
@@ -148,6 +150,87 @@ def _rebinds_to_zeros(stmt: ast.stmt, name: str) -> bool:
         return False
     func = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", None)
     return func == "zeros_like" and isinstance(call.args[0], ast.Name) and call.args[0].id == name
+
+
+def test_breaker_trips_on_masked_token_share():
+    """One masked trajectory in four is 25% by count but can carry most of the step's tokens; the
+    breaker reads the token share too, or a step that lost its long trajectories trains on the
+    short survivors alone."""
+    tripped, host = _breaker_host(0.4)
+    ratio = torch.ones(4, 20)
+    ratio[0] = 0.0
+    eff_corrected = torch.zeros(4, 20, dtype=torch.bool)
+    eff_corrected[0] = True  # 20 corrected tokens, all masked
+    eff_corrected[1:, :2] = True  # 6 corrected tokens, all surviving
+    assert tripped(ratio, eff_corrected, torch.arange(4), 4, "train")
+    assert host._metrics["train"]["sampling/is_masked_traj_frac"][-1] == pytest.approx(0.25)
+    assert host._metrics["train"]["sampling/is_masked_token_frac"][-1] == pytest.approx(20 / 26)
+    assert host._breaker_tripped_this_step
+
+
+def test_breaker_below_both_fractions_leaves_the_optimizer_skip_unarmed():
+    tripped, host = _breaker_host(0.4)
+    ratio, eff_corrected, traj_row_ids, _ = _masked_batch([True, False, False, False])
+    assert not tripped(ratio, eff_corrected, traj_row_ids, 4, "train")
+    assert host._metrics["train"]["sampling/is_masked_token_frac"][-1] == pytest.approx(0.25)
+    assert not host._breaker_tripped_this_step
+
+
+def test_a_tripped_breaker_drops_the_gradients_once():
+    """A zeroed loss still hands the optimizer zero gradients, on which Adam steps by momentum; the
+    skip must set every grad to None (what makes an optimizer skip a parameter) and disarm itself,
+    so the following step trains normally."""
+    calls = []
+    host = types.SimpleNamespace(
+        _breaker_tripped_this_step=True,
+        optimizer=types.SimpleNamespace(zero_grad=lambda set_to_none: calls.append(set_to_none)),
+    )
+    skip = DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped.__get__(host)
+    assert skip() is True
+    assert calls == [True]
+    assert host._breaker_tripped_this_step is False
+    assert skip() is False
+    assert calls == [True]
+
+
+def test_none_gradients_leave_adam_state_and_weights_untouched():
+    """The skip relies on the optimizer contract the fix is built on: a parameter with ``grad=None``
+    is skipped outright, so neither its weights nor its moments move even with momentum built up."""
+    param = torch.nn.Parameter(torch.ones(4))
+    opt = torch.optim.AdamW([param], lr=0.1, weight_decay=0.0)
+    param.grad = torch.ones(4)
+    opt.step()
+    moved = param.detach().clone()
+    exp_avg = opt.state[param]["exp_avg"].clone()
+    opt.zero_grad(set_to_none=True)
+    opt.step()
+    assert torch.equal(param.detach(), moved)
+    assert torch.equal(opt.state[param]["exp_avg"], exp_avg)
+    param.grad = torch.zeros(4)
+    opt.step()
+    assert not torch.equal(param.detach(), moved), "a ZERO gradient still steps the weights by momentum"
+
+
+def test_toolkit_optimizers_skip_none_gradients():
+    """Guards the same contract for the toolkit's own optimizers, whose step loops are hand-written."""
+    for name in ("adamw_bf16", "flash_adamw", "muon"):
+        source = (pathlib.Path("src/optimizers") / f"{name}.py").read_text()
+        assert "grad is None" in source or "grad is not None" in source, f"{name}: no None-grad guard in the step loop"
+
+
+def test_pre_optimizer_step_callback_reaches_the_trainer():
+    class Host:
+        def __init__(self):
+            self.calls = 0
+
+        def _skip_optimizer_step_if_breaker_tripped(self):
+            self.calls += 1
+            return True
+
+    host = Host()
+    callback = _BreakerOptimizerSkipCallback(host)
+    callback.on_pre_optimizer_step(None, None, None)
+    assert host.calls == 1
 
 
 def test_a_tripped_breaker_zeroes_both_advantage_tensors():
