@@ -47,12 +47,11 @@ environment_kwargs:
   # allowances scale with effort. thinking_tokens is an engine cap on vLLM; on SGLang it reaches the
   # trajectory only (nothing caps CoT below rollout_max_tokens).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
-    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
-  # token_cost: reward units per 1k generated tokens (both channels), charged by the trainer.
-  # A per-token cost rather than a length target: it is reduced only by generating less, whereas a
-  # length floor or band can be satisfied by padding. The high tier is not charged.
+  # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
+  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
   submission_reward: 0.25
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
@@ -109,14 +108,16 @@ max_prompt_length: null
 num_generations: 8
 use_chunked_grpo_logprobs: true # required for Qwen3.6 (~248k vocab)
 loss_type: dapo
-advantage_mode: neg_mask_hard
-advantage_hard_group_threshold: 0.5
+advantage_mode: asymmetric   # failures run 3-4x longer than solves, so under the token-level normalizer
+advantage_neg_scale: 0.7     #   their negatives carry the gradient mass and push entropy up; 0.7 nets ~0
 beta: 0.0
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28
-isr_geo_band_min: 0.98
-isr_geo_band_max: 1.02
+isr_engine_reference: false  # the engine re-score costs server headroom and removes only the trainer<->engine
+                             #   part of the numerical floor; the band below is sized above the whole floor
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
+isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
 isr_veto_min: 1.0e-4
 isr_opsm_delta: 0.05
 skip_update_masked_frac: 0.4
@@ -161,6 +162,7 @@ save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size abo
 # --- Eval ---
 eval_strategy: steps
 eval_steps: 50
+eval_on_start: true         # base-policy reference before the first update
 
 # --- Logging ---
 logging_steps: 1

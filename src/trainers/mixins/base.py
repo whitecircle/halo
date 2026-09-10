@@ -1269,9 +1269,11 @@ class DistributedTrainerMixin(
             logs["num_unmasked_output_tokens_seen"] = total_output_tokens
 
     def training_step(self, model, inputs, num_items_in_batch=None):
-        """Count loss-contributing tokens (accumulated as ``num_unmasked_output_tokens_seen``) and arm
-        FSDP2's per-window backward reshard, before delegating the actual step."""
+        """Count loss-contributing tokens (accumulated as ``num_unmasked_output_tokens_seen``) and the
+        batch's attention-score work, and arm FSDP2's per-window backward reshard, before delegating
+        the actual step."""
         self._accumulate_unmasked_output_tokens(self._extract_output_token_count(inputs))
+        self._accumulate_attention_flops(inputs)
         if self._pp_runtime is not None:
             # The schedule drives forward and backward, so the inherited step must not also run them.
             return self._pp_training_step(inputs, num_items_in_batch)
