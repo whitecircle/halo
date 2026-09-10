@@ -17,6 +17,7 @@ import logging
 import socket
 import threading
 import time
+from collections.abc import Iterable, Mapping
 from typing import NamedTuple
 from urllib.parse import urlparse
 
@@ -56,6 +57,8 @@ _HEALTH_RETRY_INTERVAL_S = 2.0
 # Sampler-logprob semantics probe: 1-token completions of one prompt under three sampler settings.
 _LOGPROB_PROBE_PROMPT = "The capital of France is"
 _LOGPROB_PROBE_TIMEOUT_S = 60.0
+# A re-score is one prefill of a training row: a 250k-token row on a server that is also generating.
+_RESCORE_TIMEOUT_S = 600.0
 _LOGPROB_PROBE_TEMPERATURE = 2.0
 _LOGPROB_PROBE_TOP_P = 0.5
 # Temperature-processed logprobs halve the top-1/top-2 gap at temperature 2; raw ones leave it whole.
@@ -105,11 +108,45 @@ def starts_new_chunk(buffered_bytes: int, item_bytes: int, budget: int) -> bool:
     return buffered_bytes > 0 and buffered_bytes + item_bytes > budget
 
 
-def chunk_by_bytes(named_params: list[tuple[str, torch.Tensor]], budget: int) -> list[list[tuple[str, torch.Tensor]]]:
+def _co_load_key(name: str, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:
+    """``(group index, module prefix)`` of a parameter one of ``groups`` claims, else ``None``."""
+    for index, suffixes in enumerate(groups):
+        for suffix in suffixes:
+            if name == suffix or name.endswith("." + suffix):
+                return index, name[: len(name) - len(suffix)]
+    return None
+
+
+def split_co_loaded(
+    chunk: list[tuple[str, torch.Tensor]], groups: tuple[tuple[str, ...], ...]
+) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
+    """``(sendable, held)``: the members of a co-load group not yet complete in ``chunk`` are held.
+
+    An engine whose loader fuses a module's tensors from a cache local to one request drops a member
+    that arrives without the rest, so the incomplete set waits for the chunk its partners land in.
+    Order is preserved on both sides.
+    """
+    keys = [_co_load_key(name, groups) for name, _ in chunk]
+    members: dict[tuple[int, str], set[str]] = {}
+    for (name, _), key in zip(chunk, keys, strict=True):
+        if key is not None:
+            members.setdefault(key, set()).add(name)
+    sendable, held = [], []
+    for item, key in zip(chunk, keys, strict=True):
+        complete = key is None or len(members[key]) == len(groups[key[0]])
+        (sendable if complete else held).append(item)
+    return sendable, held
+
+
+def chunk_by_bytes(
+    named_params: list[tuple[str, torch.Tensor]], budget: int, groups: tuple[tuple[str, ...], ...] = ()
+) -> list[list[tuple[str, torch.Tensor]]]:
     """Split a whole payload into chunks, on the same boundary rule the streamed path buffers by.
 
     One rule for both entry points, so a payload handed over in a single call is cut where streaming
-    it would have cut it rather than re-split by a second budget downstream.
+    it would have cut it rather than re-split by a second budget downstream. ``groups`` are the
+    engine's co-load groups (:func:`split_co_loaded`): a group a boundary would split moves whole
+    into the next chunk, and one the payload never completes raises, since the engine would drop it.
     """
     chunks: list[list[tuple[str, torch.Tensor]]] = []
     current: list[tuple[str, torch.Tensor]] = []
@@ -117,12 +154,17 @@ def chunk_by_bytes(named_params: list[tuple[str, torch.Tensor]], budget: int) ->
     for name, param in named_params:
         item_bytes = payload_bytes(param)
         if starts_new_chunk(current_bytes, item_bytes, budget):
-            chunks.append(current)
-            current, current_bytes = [], 0
+            sendable, current = split_co_loaded(current, groups)
+            if sendable:
+                chunks.append(sendable)
+            current_bytes = sum(payload_bytes(param) for _, param in current)
         current.append((name, param))
         current_bytes += item_bytes
     if current:
-        chunks.append(current)
+        sendable, held = split_co_loaded(current, groups)
+        if held:
+            raise ValueError(f"co-loaded parameters never completed in this payload: {[name for name, _ in held]}")
+        chunks.append(sendable)
     return chunks
 
 
@@ -282,7 +324,14 @@ class BaseWeightSyncClient:
       the two servers can sit on different hosts.
     * ``RESUME_ENDPOINT`` / ``RESUME_PAYLOAD``: the route (and body, where the engine's handler takes
       a request object) that lifts the sync quiesce, used by :meth:`_lift_pause`.
-    * ``EXPERT_LAYOUT`` (default ``"unfused"``): which expert layout this engine's loader accepts.
+    * ``UNSERVABLE_MODEL_TYPES`` / ``CO_LOADED_PARAM_GROUPS``: the engine's loader facts the trainer
+      side reads — which families it cannot serve, and which parameters its loader consumes only
+      together.
+    * ``SUPPORTS_ENGINE_RESCORE`` (default ``True``): whether :meth:`score_completion_logprobs` can
+      re-score a token sequence under the engine's current weights (the ``isr_engine_reference``
+      trust region), read by the trainer's construction gate. The base implementation is the OpenAI
+      completions ``prompt_logprobs`` echo (vLLM); an engine with a different prefill-log-prob route
+      overrides the method (SGLang: ``/generate`` with ``logprob_start_len``).
     """
 
     BACKEND_KEY = ""
@@ -294,13 +343,16 @@ class BaseWeightSyncClient:
     # dataclass rejects an empty body, so it declares {}.
     RESUME_ENDPOINT: str
     RESUME_PAYLOAD: dict | None = None
-    # Which expert layout this engine's loader accepts. vLLM takes the per-expert tensors, SGLang the
-    # fused pair transformers stores, and the gather must produce whichever the receiver expects; the
-    # other is rejected on arrival, mid-update. Both spellings are named so the gather can recognize
-    # either, rather than routing an unrecognized third layout into a `!=` branch.
-    UNFUSED_EXPERT_LAYOUT = "unfused"
-    FUSED_EXPERT_LAYOUT = "fused"
-    EXPERT_LAYOUT = UNFUSED_EXPERT_LAYOUT
+    # ``model_type`` → why this engine cannot serve the family (no model class registered, or a loader
+    # that cannot take an online update of the layout the trainer holds). Quoted by the construction
+    # gate; per engine, since the two pinned servers register different rosters.
+    UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
+    # Parameter-name suffixes the engine's loader consumes only as a set, per module: each entry lists
+    # the suffixes, and parameters sharing the prefix before them must ride one chunk. Empty where the
+    # engine loads every tensor on its own. Scoped per model by :meth:`scope_co_load_groups`.
+    CO_LOADED_PARAM_GROUPS: tuple[tuple[str, ...], ...] = ()
+    # Whether the engine can return per-token log-probs of a given sequence under its current weights.
+    SUPPORTS_ENGINE_RESCORE = True
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal that
     # follows one. Declared per client because it follows from the engine's own reload model.
     INTERRUPTED_UPDATE_STATE = "a model that is part old weights and part new"
@@ -309,6 +361,8 @@ class BaseWeightSyncClient:
     # than inferred: the flush runs on a worker thread when several servers sync at once, and torch's
     # current device and current stream are both thread-local.
     _sync_device: torch.device | None = None
+    # Cached by ``served_model_id``; None until the first completions-route call.
+    _served_model_id: str | None = None
     # Set once an interrupted sync left the engine unservable; every later sync is refused with it.
     _unusable_reason: str | None = None
     # Update-phase state, defaulted here as well as set in ``__init__``: the methods reading it decide
@@ -407,6 +461,40 @@ class BaseWeightSyncClient:
         resp = self.session.get(f"{self.base_url}/v1/models", timeout=timeout)
         resp.raise_for_status()
         return list(resp.json().get("data", []))
+
+    def served_model_id(self) -> str:
+        """The id the engine serves the policy under, read once and cached for the completions route."""
+        if self._served_model_id is None:
+            self._served_model_id = str(self.served_model_cards()[0]["id"])
+        return self._served_model_id
+
+    def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
+        """Per-token log-probs of ``completion_ids`` after ``prompt_ids`` under the engine's CURRENT
+        weights: one prefill through the completions ``prompt_logprobs`` echo, the raw (pre-sampler)
+        distribution. Raises on a transport, shape or key error — the caller decides what a failed
+        row means.
+        """
+        body = {
+            "model": self.served_model_id(),
+            "prompt": list(prompt_ids) + list(completion_ids),
+            "max_tokens": 1,
+            "prompt_logprobs": 0,
+            "temperature": 0.0,
+        }
+        resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=_RESCORE_TIMEOUT_S)
+        resp.raise_for_status()
+        entries = resp.json()["choices"][0]["prompt_logprobs"]
+        expected = len(prompt_ids) + len(completion_ids)
+        if entries is None or len(entries) != expected:
+            raise ValueError(
+                f"{self.BACKEND_NAME} returned {None if entries is None else len(entries)} prompt log-probs "
+                f"for a {expected}-token sequence"
+            )
+        # Keyed by the token id (as a string); the actual token is always present at prompt_logprobs=0.
+        return [
+            float(entry[str(tok)]["logprob"])
+            for tok, entry in zip(completion_ids, entries[len(prompt_ids) :], strict=True)
+        ]
 
     def served_max_model_len(self) -> int | None:
         """Context window the served model declares, or ``None`` when no card carries one."""
@@ -547,6 +635,7 @@ class BaseWeightSyncClient:
         it belongs to. Kept in one place so a bare or reconnected client cannot start with half of it."""
         self._param_buffer: list[tuple[str, torch.Tensor]] = []
         self._buffered_bytes = 0
+        self._co_load_groups = self.CO_LOADED_PARAM_GROUPS
         # A quiesced update this client opened mid-gather and has not closed yet.
         self._update_open = False
         # Chunks already on the wire in the open update. Non-zero means the engine is partly
@@ -626,7 +715,7 @@ class BaseWeightSyncClient:
         # carry fails while the server is still serving.
         for name, param in named_params:
             validate_syncable_param(name, param)
-        chunks = chunk_by_bytes(named_params, WEIGHT_SYNC_CHUNK_BYTES)
+        chunks = chunk_by_bytes(named_params, WEIGHT_SYNC_CHUNK_BYTES, self._co_load_groups)
         self._open_update()
         try:
             for chunk in chunks[:-1]:
@@ -640,6 +729,31 @@ class BaseWeightSyncClient:
     def update_model_params(self, model: nn.Module):
         """Sync every model param in one quiesced update."""
         self.sync_model_weights([(n, p.data) for n, p in model.named_parameters()])
+
+    @classmethod
+    def scoped_co_load_groups(cls, module_names: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+        """``CO_LOADED_PARAM_GROUPS`` narrowed to the members whose module ``module_names`` carries.
+
+        An engine fuses a group only where the model declares every member (an MLA block without
+        ``q_lora_rank`` has no ``q_a_proj``), so a member no module spells is dropped, and a group
+        left with one member is complete on its own.
+        """
+        names = set(module_names)
+
+        def declared(suffix: str) -> bool:
+            module = suffix.rsplit(".", 1)[0]
+            return any(name == module or name.endswith("." + module) for name in names)
+
+        return tuple(tuple(suffix for suffix in group if declared(suffix)) for group in cls.CO_LOADED_PARAM_GROUPS)
+
+    def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
+        """Bind the co-load groups to the model whose modules ``module_names`` are, for every sync."""
+        self._co_load_groups = self.scoped_co_load_groups(module_names)
+
+    @property
+    def buffered_bytes(self) -> int:
+        """Bytes staged for the next chunk, the members held for a co-load partner included."""
+        return self._buffered_bytes
 
     def buffer_param(self, name: str, snapshot: torch.Tensor):
         """Buffer a pre-made snapshot (from ``snapshot_param``) by reference, for the next chunk.
@@ -675,17 +789,23 @@ class BaseWeightSyncClient:
         self.buffer_param(name, snapshot_param(weights, self.sync_device))
 
     def flush_chunk(self):
-        """Send what is buffered as one chunk, leaving the update open for the chunks that follow."""
-        if not self._param_buffer:
+        """Send what is buffered as one chunk, leaving the update open for the chunks that follow.
+
+        The members of a co-load group the buffer holds only part of stay buffered for the next
+        chunk (:func:`split_co_loaded`); a buffer that is nothing but such members sends nothing.
+        """
+        chunk, held = split_co_loaded(self._param_buffer, self._co_load_groups)
+        if not chunk:
             return
         # Completed before the quiesce, so a sticky CUDA error here leaves the engine serving rather
         # than paused behind a reload phase.
         self._complete_snapshots()
         self._open_update()
-        self.send_weights(self._param_buffer)
+        self.send_weights(chunk)
         # Dropped only once on the wire: a chunk that failed while the sync is still replayable is
-        # re-sent by the reconnect path, and draining first would lose those params.
-        self.drain_param_buffer()
+        # re-sent by the reconnect path, and dropping it first would lose those params.
+        self._param_buffer = held
+        self._buffered_bytes = sum(payload_bytes(snapshot) for _, snapshot in held)
 
     def reset_prefix_cache(self):
         """Send the tail chunk, close the update and resume the engine; no-op if nothing was buffered.
@@ -694,6 +814,15 @@ class BaseWeightSyncClient:
         """
         if not self._param_buffer and not self._update_open:
             return
+        # A group still incomplete at the tail never completes: the engine would take the half and
+        # drop it without error, so the update is refused rather than closed as landed.
+        _, held = split_co_loaded(self._param_buffer, self._co_load_groups)
+        if held:
+            raise RuntimeError(
+                f"the weight sync ended with co-loaded parameters missing their partners: "
+                f"{[name for name, _ in held]}. The {self.BACKEND_NAME} loader discards a half that "
+                f"arrives on its own, so this update cannot be closed as complete."
+            )
         self._open_update()
         self._close_update(self._param_buffer)
         self.drain_param_buffer()  # only once the tail landed — see flush_chunk

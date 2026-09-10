@@ -51,6 +51,7 @@ from tests.common.on_policy_e2e import (
     RestorePointSnapshot,
     adapter_file_agreement,
     expert_lora_under_etp_refusal,
+    expert_round,
     fresh_parallelism_config,
     load_policy,
     logged_lrs,
@@ -76,10 +77,15 @@ from tests.common.thinking_budget import (
 )
 from tests.common.utils import cleanup_memory, log
 
-# Default for the vLLM half (its callers take it via run_env_grpo_e2e's model_name default); the
-# SGLang caller passes gpt-oss explicitly, so HALO_TEST_ENV_GRPO_MODEL does not reach it.
+# Default for the vLLM legs; the SGLang and 4-GPU wrappers own their own knob (their servers and
+# default families differ).
 MODEL_NAME = env_str("HALO_TEST_ENV_GRPO_MODEL", QWEN3_30B_A3B)
 MAX_STEPS = env_int("HALO_TEST_ENV_GRPO_MAX_STEPS", 2)
+# Per-family overrides for a pass on a family the defaults do not fit: an attention backend the
+# family's code lacks (Bailing's remote code has no FA4), or projection names the checkpoint index
+# cannot derive (``query_key_value``). Unset keeps auto-selection and the derived targets.
+ATTN_IMPL = env_str("HALO_TEST_ENV_GRPO_ATTN_IMPL") or None
+LORA_TARGETS = [name for name in env_str("HALO_TEST_ENV_GRPO_LORA_TARGETS", "").split(",") if name] or None
 # Deliberately large: the sync has to move the served weights measurably within MAX_STEPS.
 LEARNING_RATE = 1e-4
 
@@ -187,9 +193,8 @@ def run_env_grpo_e2e(
     """Train Environmental GRPO against a live ``backend`` server and assert the sync landed.
 
     ``model_name`` is the checkpoint both sides use: the trainer loads it and the server must already
-    serve it. It is a parameter because the two backends do not accept the same families: SGLang loads
-    MoE experts in the checkpoint-fused layout that only the GptOss layer gathers, so every other MoE
-    family is refused at construction and a shared default could only assert that refusal.
+    serve it. It is a parameter because each engine's default family differs and a per-family pass
+    points both wrappers at the family under test.
 
     ``peft`` selects the adapter path (``"lora"`` / ``"expert_lora"``) and ``resume`` adds the
     second, resumed phase; both are described in the module docstring. ``thinking_budget`` sets
@@ -240,7 +245,9 @@ def run_env_grpo_e2e(
     )
 
     parallelism_config = fresh_parallelism_config(ep_size, tp_size, expert_tp_size)
-    model, peft_config = load_policy(model_name, parallelism_config, peft)
+    model, peft_config = load_policy(
+        model_name, parallelism_config, peft, attn_implementation=ATTN_IMPL, lora_target_modules=LORA_TARGETS
+    )
 
     trainer_kwargs = {
         "model": model,
@@ -355,7 +362,17 @@ def run_env_grpo_e2e(
         checks["server_usable_after_sync"] = bool(probe_top_logprobs(server_url, model_name))
     ctx.barrier()
 
-    # ── 5. GptOss attention sinks, in a round of their own ────────────────────────────────────
+    # ── 5. the expert stream alone must move the served policy ───────────────────────────────
+    # Inert for a dense policy; see :func:`expert_round` for why the mixed round above cannot show it.
+    expert_round(
+        ctx,
+        trainer.model,
+        server_url=server_url,
+        model_name=model_name,
+        push=lambda: trainer._sync_weights_to_engine(force=True),
+        checks=checks,
+    )
+    # ── 6. GptOss attention sinks, in a round of their own ────────────────────────────────────
     # Inert for a sink-less family (the vLLM half's default Qwen3 MoE); see :func:`sink_round`.
     sink_round(
         ctx,
@@ -374,7 +391,7 @@ def run_env_grpo_e2e(
     if not resume:
         return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
-    # ── 6. a resumed run's FIRST rollout must come from the checkpoint's weights ──────────────
+    # ── 7. a resumed run's FIRST rollout must come from the checkpoint's weights ──────────────
     # ``pre_perturb`` is that policy as the engine served it: with sync_weights_every_n_steps=1 the
     # last push of phase 1 ran at the top of the step after the checkpoint, so when train() returned
     # the engine held the checkpoint's weights. Everything since moved it off them.
@@ -412,7 +429,9 @@ def run_env_grpo_e2e(
     checks["resume_weights_source_resolved"] = weights_source == (model_name if peft is not None else checkpoint)
     log(f"  resume: policy weights from {weights_source}")
 
-    model, peft_config = load_policy(weights_source, parallelism_config, peft)
+    model, peft_config = load_policy(
+        weights_source, parallelism_config, peft, attn_implementation=ATTN_IMPL, lora_target_modules=LORA_TARGETS
+    )
     trainer = _make_trainer(
         model=model,
         tokenizer=tokenizer,

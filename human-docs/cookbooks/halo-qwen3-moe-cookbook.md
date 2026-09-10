@@ -193,10 +193,10 @@ output = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with Halo's SGLang image, which listens on port 30000. Run
-it on the host, not inside the training container: pull the prebuilt image and point
-`SGLANG_IMAGE` at it (no retag needed), or build the compose file's local tag once with
-`make build-sglang`.
+Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
+container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
+this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
+compose file's local tag once with `make build-sglang`.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
@@ -233,12 +233,9 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 Use `examples/grpo/environmental/environmental-grpo-template.yaml` as the starting point.
 Set `model_name_or_path` to the gathered SFT checkpoint.
 
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang is
-refused at construction for Qwen3 MoE: its 0.5.17 loader maps per-expert names
-only and silently drops the fused expert keys weight sync would ship, so the
-served policy would never update, and the gate fails the run before the engine
-is touched. vLLM has no family or expert-distribution restriction here and keeps
-the trainer's NVLink.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang
+0.5.17 also serves and weight-syncs Qwen3 MoE (`rollout_backend: sglang`, port
+30000), with expert distribution.
 
 Run the server on the host, not inside the training container, on GPUs the
 trainer will not use. Pull the prebuilt server image, retag it to the name the
@@ -256,9 +253,8 @@ VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
 
 That command already passes the required `--moe-backend triton`; Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt
-every weight sync. To serve `routing_replay: rollout`, also add
-`--enable-return-routed-experts` to the server's `command:` block, since the
-compose file exposes no variable for it.
+every weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`).
 
 ```yaml
 rollout_backend: vllm

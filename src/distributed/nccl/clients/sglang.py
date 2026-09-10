@@ -35,6 +35,7 @@ from src.distributed.nccl.clients.base import (
     _CLEANUP_TIMEOUT_S,
     _GROUP_FORMATION_TIMEOUT_S,
     _HTTP_PROBE_TIMEOUT_S,
+    _RESCORE_TIMEOUT_S,
     _SERVER_ERROR_GRACE_S,
     _WEIGHT_UPDATE_TIMEOUT_S,
     WEIGHT_SYNC_CHUNK_BYTES,
@@ -65,6 +66,11 @@ _ARENA_ALIGNMENT = 256
 # Chunks whose sends the host has not settled yet: a chunk's sends are waited for this many chunks
 # later, so a chunk's declaration never waits on the previous chunk's tail (see ``_send_chunk``).
 _INFLIGHT_CHUNKS = 2
+# Both Step-3 spellings resolve to the same SGLang model file.
+_STEP3_FULL_COVERAGE = (
+    "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so it "
+    "refuses the chunked online update"
+)
 
 
 def _aligned_bytes(nbytes: int) -> int:
@@ -78,11 +84,66 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     BACKEND_KEY = "sglang"
     BACKEND_NAME = "SGLang"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
-    # SGLang loads MoE experts as transformers stores them: one fused pair per layer.
-    EXPERT_LAYOUT = BaseWeightSyncClient.FUSED_EXPERT_LAYOUT
+    # Loader facts of the pinned 0.5.17 server, per ``model_type``.
+    UNSERVABLE_MODEL_TYPES = {
+        "mistral4": "SGLang 0.5.17 registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
+        "bailing_hybrid": "SGLang 0.5.17 registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
+        "bailing_moe_linear": (
+            "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where SGLang 0.5.17 registers "
+            "BailingMoeV2_5ForCausalLM"
+        ),
+        "zaya": (
+            "SGLang 0.5.17's zaya loader reads the pre-transformers-5.14 per-expert checkpoint "
+            "(zaya_block.experts.local_experts.N.linear_fc1), not the native fused layout the trainer holds"
+        ),
+        "laguna": (
+            "SGLang 0.5.17's laguna loader asserts every routed-expert tensor of every sparse layer in each "
+            "load_weights call, so it refuses the chunked online update"
+        ),
+        "step3p7": _STEP3_FULL_COVERAGE,
+        "step3p5": _STEP3_FULL_COVERAGE,
+        "deepseek_v4": (
+            "SGLang 0.5.17's deepseek_v4 loader maps per-expert w1/w3/w2 names where the gather emits the "
+            "fused pair, and no end-to-end sync has been validated for the family"
+        ),
+    }
+    # SGLang's MLA loaders concatenate ``q_a_proj`` and ``kv_a_proj_with_mqa`` into one fused parameter
+    # from a cache local to each ``load_weights`` call, so a half arriving without the other in the
+    # same request is discarded without error. The fusion exists only where the model has both
+    # projections (``q_lora_rank`` set), which the per-model scoping reads off the module tree.
+    CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     RESUME_ENDPOINT = _EP_CONTINUE
     # An empty body is rejected: the endpoint takes a request dataclass, so it needs JSON.
     RESUME_PAYLOAD: dict | None = {}
+
+    def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
+        """SGLang's prefill log-probs come from its native ``/generate`` route: ``return_logprob`` with
+        ``logprob_start_len`` at the completion start returns one ``[logprob, token_id, text]`` entry
+        per completion token. The ids are checked position by position — an off-by-one in the
+        engine's contract must surface as a miss, never as a shifted reference.
+        """
+        body = {
+            "input_ids": list(prompt_ids) + list(completion_ids),
+            "sampling_params": {"max_new_tokens": 0},  # prefill-only request
+            "return_logprob": True,
+            "logprob_start_len": len(prompt_ids),
+        }
+        resp = self.session.post(f"{self.base_url}/generate", json=body, timeout=_RESCORE_TIMEOUT_S)
+        resp.raise_for_status()
+        entries = resp.json()["meta_info"]["input_token_logprobs"]
+        if len(entries) != len(completion_ids):
+            raise ValueError(
+                f"{self.BACKEND_NAME} returned {len(entries)} input log-probs for a {len(completion_ids)}-token completion"
+            )
+        values = []
+        for position, (tok, entry) in enumerate(zip(completion_ids, entries, strict=True)):
+            if int(entry[1]) != int(tok):
+                raise ValueError(
+                    f"{self.BACKEND_NAME} input log-probs are misaligned at completion position {position}: "
+                    f"token {entry[1]} where {tok} was sent"
+                )
+            values.append(float(entry[0]))
+        return values
 
     def __init__(
         self,

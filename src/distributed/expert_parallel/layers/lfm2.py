@@ -31,7 +31,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     # no-op at creation) and the config flag below flips so serving engines load and apply it.
     _NATIVE_BALANCING_BIAS_ATTR = "expert_bias"
     _NATIVE_BALANCING_CONFIG_FLAG = "use_expert_bias"
-    # Hub checkpoint / vLLM loader layout: ``experts.{i}.w{1,3,2}.weight`` (Llama-style names).
+    # Hub checkpoint layout: ``experts.{i}.w{1,3,2}.weight`` (Llama-style names).
     _PER_EXPERT_UNFUSED_KEYS = ("w1", "w3", "w2")  # w1 = gate, w3 = up, w2 = down
 
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")

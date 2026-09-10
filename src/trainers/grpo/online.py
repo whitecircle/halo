@@ -68,9 +68,9 @@ class DistributedGRPOTrainer(
         "is a single forward over precomputed advantages and reference log-probs, so the loss is not "
         "the blocker"
     )
-    # No rollout backend of its own: online GRPO is vLLM-only by construction, so the weight-sync
-    # layout resolver falls through to the base client's default.
-    _rollout_backend: str | None = None
+    # Online GRPO is vLLM-only by construction (TRL's server-mode generation), so the engine the
+    # weight-sync gate reads is fixed here rather than configured.
+    _rollout_backend = VLLMWeightSyncClient.BACKEND_KEY
     # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
     _loss_outside_model_forward = True
 
@@ -417,7 +417,7 @@ class DistributedGRPOTrainer(
         Also the construction gate for syncable weights: a quantized (QLoRA) base must fail here, not
         as an opaque server-side error at the first sync.
         """
-        validate_weight_sync_support(self.model)
+        validate_weight_sync_support(self.model, self._rollout_backend)
         if getattr(self, "vllm_generation", None) is None:
             raise RuntimeError(
                 "TRL built no vllm_generation for this trainer, so the distributed-aware weight sync "

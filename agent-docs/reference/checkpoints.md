@@ -183,11 +183,11 @@ resume demands of the topology, is the
 
 A gathered checkpoint is a standard HF checkpoint — stock `from_pretrained` loads it as-is.
 (That is serving a **saved artifact**; live RL weight-sync support is narrower —
-[Rollout Servers](../infrastructure/rollout-servers.md#the-fused-expert-layout-is-declared-per-family).)
+[Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).)
 
-**vLLM** needs two things for some MoE models.
+Two rules apply to some MoE families, on both engines.
 
-**Un-fuse experts (vLLM only).** transformers keeps MoE experts fused in memory
+**Un-fuse experts.** transformers keeps MoE experts fused in memory
 (`experts.gate_up_proj` / `experts.down_proj`) and reads that layout back on load. Most hub
 checkpoints are per-expert (`experts.{i}.{gate,up,down}_proj.weight` /
 `experts.{i}.w{1,3,2}.weight`) and `from_pretrained` fuses them on load. The wrapper-less writer
@@ -207,7 +207,9 @@ which its pinned engines read directly.
 | vLLM 0.26.0 `FusedMoE` (`cohere2_moe`, `step3p5`) | Cohere2 MoE, Step-3.7 Flash | loaded directly |
 | vLLM 0.26.0 per-expert-only | GLM-4 MoE Lite, Laguna, LFM-2, Bailing/Ling 2.0 | hard-fail or silent drop — un-fuse first |
 | vLLM 0.26.0 — no model class | Mistral4, Ling 3.0 (`bailing_hybrid`), Ring (`bailing_moe_linear`) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
-| SGLang 0.5.17 | gpt-oss | loaded directly; every other family needs per-expert |
+
+SGLang 0.5.17 reads each family's hub layout through its own per-family loader, so the same un-fuse
+rule applies; it registers no class for Mistral4, Ling 3.0 or Ring either.
 
 **MLA backend on Blackwell.** GLM-4 MoE Lite uses MLA; flashinfer's MLA kernel rejects its head
 config on SM100+ — serve with vLLM `--attention-backend CUTLASS_MLA` or SGLang
@@ -236,9 +238,9 @@ layer class declares the pairs in `_EXPORT_KEY_RENAMES` and the gather rewrites 
 one such family). Four families declare transformers' load-side conversion for their hub checkpoints
 (`_HUB_CONVERSION_KEYS`), which the lazy loaders replay per key. Three of them are bridged read-side
 only, so their gathered exports keep the canonical module spelling: Inkling — which is exactly why
-its layer refuses weight sync (`_supports_weight_sync = False`) — DeepSeek-V4, whose sync is refused
-because vLLM's V4 loader targets the packed fp8/fp4 release layout, and GLM-5 Next, which no pinned
-engine loads. Step-3.7 Flash additionally declares `_EXPORTS_HUB_NAMESPACE`, so its gathered save
+its layer refuses weight sync (`_supports_weight_sync = False`) — DeepSeek-V4, whose sync neither pinned engine
+takes (vLLM's V4 loader targets the packed fp8/fp4 release layout, SGLang's maps per-expert expert
+names), and GLM-5 Next, which no pinned engine loads. Step-3.7 Flash additionally declares `_EXPORTS_HUB_NAMESPACE`, so its gathered save
 runs transformers' own save-side revert per chunk and lands in the hub namespace
 ([Step-3.7](../models/step3p7.md#checkpoint)). The conversion sources are not all vendor-anchored
 (DeepSeek-V4's `\.norm\.` → `.kv_norm.` also matches the canonical final norm), so the lazy loaders

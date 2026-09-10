@@ -77,7 +77,6 @@ def test_registrations():
     assert EPCohere2MoELayer._supports_gradient_checkpointing
     assert not EPCohere2MoELayer._supports_weight_sync
     assert not EPCohere2MoELayer._supports_lazy_loading
-    assert not EPCohere2MoELayer.implements_fused_expert_layout()  # SGLang stays refused
 
 
 def test_model_type_registry_resolves_both_spellings():

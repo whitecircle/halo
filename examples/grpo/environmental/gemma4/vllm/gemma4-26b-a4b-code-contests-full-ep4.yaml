@@ -3,7 +3,7 @@
 # Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton,
 #   plus --enable-auto-tool-choice --tool-call-parser hermes: code_contests is a native-tool env, and a
 #   server with no tool parser 400s every rollout while the wrong one leaves calls as text (reward 0).
-# vLLM only: rollout_backend sglang is rejected for this family (no fused expert gather) and under EP.
+# This file targets vLLM; the SGLang siblings under `../sglang/` ship as ep1 only.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 
@@ -41,12 +41,11 @@ environment_kwargs:
   # allowances scale with effort. thinking_tokens is an engine cap that also bounds the turn total
   # (thinking plus the global answer headroom).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
-    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
-  # token_cost: reward units per 1k generated tokens (both channels), charged by the trainer.
-  # A per-token cost rather than a length target: it is reduced only by generating less, whereas a
-  # length floor or band can be satisfied by padding. The high tier is not charged.
+  # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
+  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
   # Reward ladder: see code_contests.py _compute_reward.
   submission_reward: 0.25    # bonus for reaching the graded channel
   execution_progress_reward: 0.05
@@ -75,6 +74,8 @@ episode_timeout: 2700         # whole-episode wall clock; must stay below the NC
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
+rollout_max_tokens: 22000              # per-turn total (CoT + a 4k answer headroom; 2k left a finished
+                                       # thought too little room to emit its tool call). It is the ONLY
                                        # CoT bound here: rollout_max_thinking_tokens is left unset, and
                                        # taking it needs the server on VLLM_REASONING_PARSER=gemma4 (0.26.0
                                        # does register one) AND VLLM_USE_V2_MODEL_RUNNER=0, else every
@@ -103,16 +104,18 @@ max_prompt_length: null
 num_generations: 8
 use_chunked_grpo_logprobs: true # required for gemma-4 (~262k vocab)
 loss_type: dapo
-advantage_mode: neg_mask_hard  # zero negative advantages in hard groups; the entropy brake at beta=0
-advantage_hard_group_threshold: 0.5      # hard = no member reached this reward/objective
+advantage_mode: asymmetric   # failures run 3-4x longer than solves, so under the token-level normalizer
+advantage_neg_scale: 0.7     #   their negatives carry the gradient mass and push entropy up; 0.7 nets ~0
 beta: 0.0                   # KL-free; drift observability = sampling/logratio_mean + entropy + eval
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
-isr_geo_band_min: 0.98       # trajectory geometric-mean band; on sustained masking lower LR, never widen the band
-isr_geo_band_max: 1.02
+isr_engine_reference: false  # the engine re-score needs ~12 GB of server headroom (an 8192-token prefill chunk's fp32
+                             #   log-softmax over a 248k vocab) and removes only the trainer<->engine part of the floor
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
+isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # zero the step's gradient when > this fraction of trajectories is masked
@@ -157,6 +160,7 @@ save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size abo
 # --- Eval (held-out test split, 200 problems, pass@1) ---
 eval_strategy: steps
 eval_steps: 50
+eval_on_start: true         # base-policy reference before the first update
 
 # --- Logging ---
 logging_steps: 1

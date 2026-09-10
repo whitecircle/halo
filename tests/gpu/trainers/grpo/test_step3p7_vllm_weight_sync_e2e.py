@@ -280,8 +280,13 @@ def run(ctx) -> dict:
     )
     model.eval()
     checks["ep_wrapped"] = bool(named_ep_layers(model))
-    validate_weight_sync_support(model)  # the construction gate must admit the family
-    checks["construction_gate_admits_step3p7"] = True
+    gate_refusal = ""
+    try:
+        validate_weight_sync_support(model, "vllm")
+    except ValueError as e:
+        gate_refusal = str(e)
+    checks["construction_gate_admits_step3p7"] = not gate_refusal
+    log(f"  vllm construction gate: {gate_refusal or 'admitted'}")
 
     tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT)
     prompt_ids = tokenizer(PROBE_PROMPT)["input_ids"]

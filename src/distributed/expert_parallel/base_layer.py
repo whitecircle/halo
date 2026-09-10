@@ -143,7 +143,9 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     # HF class name(s) of the MoE block this wrapper replaces; ``patching.build_moe_layer_map`` walks subclasses.
     HF_MODULE_NAMES: tuple[str, ...] = ()
 
-    # ``config.model_type`` spelling(s) served; unioned so a checkpoint's config.json resolves back off-line.
+    # ``config.model_type`` spelling(s) served — the family's own first (``docker/vllm/parity/generate.py``
+    # reads it), then the composite wrappers and sibling spellings that carry it; unioned so a
+    # checkpoint's config.json resolves back off-line.
     HF_MODEL_TYPES: tuple[str, ...] = ()
 
     # Every expert-weight attribute this family may hold across all config branches (fused vs separate/ETP).
@@ -153,7 +155,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     _NUM_EXPERTS_ATTR_PATHS: tuple[str, ...] = ()
 
     # ``(live module, hub)`` pairs for renames transformers applies only inside ``from_pretrained``. The
-    # gather rewrites module → hub (vLLM ignores unknown names); the lazy loader inverts it.
+    # gather rewrites module → hub (the engines ignore unknown names); the lazy loader inverts it.
     _EXPORT_KEY_RENAMES: tuple[tuple[str, str], ...] = ()
 
     # ``{flat legacy key: (layer_type, per-layer field)}`` for attention geometry the hub config spells
@@ -218,18 +220,16 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     # (``export_source_config_schema``); registered per claimed ``model_type`` by ``__init_subclass__``.
     _EXPORTS_SOURCE_CONFIG_SCHEMA: bool = False
 
-    # False makes ``validate_weight_sync_support`` reject online/env GRPO: the export must load into
-    # vLLM under the names the trainer sends.
+    # False makes ``validate_weight_sync_support`` reject online/env GRPO on every engine: the names
+    # the trainer sends cannot land in the family's served namespace, or no end-to-end sync has been
+    # validated. What one pinned engine cannot serve is the engine client's ``UNSERVABLE_MODEL_TYPES``.
     _supports_weight_sync: bool = True
 
-    # Surfaced verbatim in the refusal above; override where the namespace is not the reason (Zaya).
+    # Surfaced verbatim in the refusal above; override where the namespace is not the reason.
     _WEIGHT_SYNC_REFUSAL_REASON: str = (
         "this family is served under a different checkpoint namespace/dtype than the HuggingFace "
         "module tree the trainer holds, so no weight would land where it is read"
     )
-
-    # Spellings no pinned rollout engine can serve — refused even though the family flag above is True.
-    _WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES: tuple[str, ...] = ()
 
     # False where GC recompute on top of EP is architecturally broken (Zaya's cross-layer EDA/CCA state).
     _supports_gradient_checkpointing: bool = True

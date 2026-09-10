@@ -191,9 +191,10 @@ output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with Halo's SGLang image on the host, not inside the
-training container; it listens on port 30000. Point `SGLANG_IMAGE` at the prebuilt image
-(no retag needed), or build the compose file's local tag once with `make build-sglang`.
+Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
+container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
+this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
+compose file's local tag once with `make build-sglang`.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
@@ -240,9 +241,8 @@ ep1) or `examples/grpo/environmental/gptoss/vllm/` (full and LoRA, ep1 and ep4).
 `model_name_or_path` at the SFT checkpoint and set the environment and reward fields
 for your task.
 
-vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. GPT-OSS is
-also the only MoE family SGLang can weight-sync, because it loads experts in the
-checkpoint-fused layout that only the GPT-OSS layer gathers, and the shipped
+vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. SGLang
+0.5.17 serves the GPT-OSS weight sync too, and the shipped
 `sglang/gptoss-20b-code-contests-lora-ep1.yaml` is already wired for that engine. One
 constraint comes with SGLang: `rollout_max_thinking_tokens` stays unset. That field is
 vLLM-only; steer reasoning with the environment's `reasoning_effort` instead.
@@ -336,8 +336,8 @@ VLLM_USE_V2_MODEL_RUNNER=0 \
 
 That command already passes `--moe-backend triton`, which is required: Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also add `--enable-return-routed-experts`
-to the server's `command:` block, since the compose file exposes no variable for it. If SFT
+weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`). If SFT
 overrode the chat template, point `VLLM_CHAT_TEMPLATE` at the same `.jinja` so the
 server-side render matches training. The trainer config then sets `rollout_backend: vllm`
 and `rollout_server_url: http://localhost:8000`, and launches the same way. It may size

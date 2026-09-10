@@ -155,7 +155,7 @@ Method-specific fields (`beta`, `loss_type`, `advantage_method`, `environment_ty
 
 ## Config file locations
 
-Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`. Environmental GRPO adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` present for gpt-oss only. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
+Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`. Environmental GRPO adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` files for gpt-oss, Qwen3.5/3.6 and Gemma 4. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
 
 A family directory is the snake_case hub family (`qwen3_5`, `deepseek_v4`, `ling_mini_2`), and file names lead with the same family token (`gptoss-20b-…`, `gemma4-26b-a4b-…`). One deviation: `qwen3_5/` also holds the `qwen3.6-*` configs, since Qwen3.6 ships under the Qwen3.5 model types.
 

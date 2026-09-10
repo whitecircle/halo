@@ -209,6 +209,29 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "masked). None (default) = off."
         },
     )
+    isr_engine_reference: bool = field(
+        default=False,
+        metadata={
+            "help": "Re-score every training row on the rollout engine under the weights just synced "
+            "(one prefill per row through the completions prompt_logprobs echo) and feed the mask "
+            "stages (isr_geo_band/isr_veto/isr_opsm) the log-ratio between the engine's current and "
+            "sampling log-probs instead of the trainer-vs-engine one. That removes the trainer<->engine "
+            "disagreement from the stages; the engine's own decode-vs-prefill disagreement stays in "
+            "the reference (measured -0.003 nats/token at sampling entropy 0.36 with identical weights, "
+            "against -0.0003 for trainer-vs-engine-prefill), and like every such floor it grows with "
+            "entropy, so the band still needs room above it. The IS weight itself stays "
+            "trainer-vs-sampling. Logged as sampling/engine_logratio_mean (staleness plus the "
+            "decode-vs-prefill floor), sampling/numerics_logratio_mean (trainer minus engine-prefill) "
+            "and sampling/engine_rescore_coverage. Requires the IS correction, rollout_temperature "
+            "and rollout_top_p of 1.0 (prefill log-probs are the raw distribution); vLLM re-scores through "
+            "the completions prompt_logprobs echo, SGLang through /generate with logprob_start_len. The "
+            "server must hold headroom for that pass: vLLM materializes an fp32 log-softmax over the "
+            "vocabulary for every prefill chunk of a prompt_logprobs request (max_num_batched_tokens x "
+            "vocab x 4 B — 8 GB at 8192 x 248k, outside its memory profile), so serve with "
+            "--gpu-memory-utilization <= 0.80 or a smaller --max-num-batched-tokens; at 0.90 the "
+            "engine dies of CUDA OOM under load."
+        },
+    )
 
     routing_replay: Literal["none", "recompute", "rollout"] = field(
         default="none",
@@ -233,12 +256,15 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         default=None,
         metadata={
             "help": "Trust-region circuit breaker (KL-free): when the fraction of IS-corrected "
-            "trajectories masked by the geo-band/veto/OPSM stages exceeds this, ZERO the whole step's "
-            "policy gradient instead of training on the unmasked survivors. At high masked fractions the "
-            "surviving trajectories are a selection-biased sample (exactly the rows where the drifted "
-            "policy still agrees with the rollout), so continuing to train amplifies the drift; skipping "
-            "holds the policy still until the next weight-sync re-anchors the rollouts. Logged as "
-            "`sampling/update_skipped`. None (default) = off; 0.3-0.5 is a sane range."
+            "trajectories fully masked by the geo-band/veto/OPSM stages, OR the fraction of corrected "
+            "tokens masked (the masked trajectories are the long ones), exceeds this, ZERO the step's "
+            "advantages and SKIP its optimizer step (gradients dropped to None, so Adam's momentum "
+            "cannot step the weights either) instead of training on the unmasked survivors. At high "
+            "masked fractions the survivors are a selection-biased sample (exactly the rows where the "
+            "drifted policy still agrees with the rollout), so continuing to train amplifies the drift; "
+            "skipping holds the policy still until the next weight-sync re-anchors the rollouts. Logged "
+            "as `sampling/update_skipped` with `sampling/is_masked_traj_frac` / "
+            "`sampling/is_masked_token_frac`. None (default) = off; 0.3-0.5 is a sane range."
         },
     )
 

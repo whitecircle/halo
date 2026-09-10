@@ -40,6 +40,7 @@ from src.checkpoint.config_export import (
     restore_model_type,
 )
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
+from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.models.moe_balancing import exports_source_config_schema, legacy_per_layer_config_keys
 from tests.common.models import (
     TINY_BAILING_MOE_CONFIG,
@@ -172,13 +173,17 @@ UNPARSEABLE = tuple(
 def weight_sync_families() -> set[type]:
     """EP layer classes the weight sync admits: every family that needs a fixture here.
 
-    A refused family (``_supports_weight_sync = False``, or every claimed ``model_type`` on the
-    engine-side refusal list) is excluded: nothing syncs into it, so no server parses its export.
+    A refused family (``_supports_weight_sync = False``, or its own ``model_type`` on the vLLM client's
+    ``UNSERVABLE_MODEL_TYPES``) is excluded: nothing syncs into it, so no server parses its export.
+    A class claiming no spelling is an intermediate base, not a family.
     """
+    unservable = set(VLLMWeightSyncClient.UNSERVABLE_MODEL_TYPES)
+    # Judged on the family's own spelling — the first claimed (``base_layer.HF_MODEL_TYPES``); the
+    # composite wrappers and sibling spellings behind it are refused under their own entries.
     return {
         cls
         for cls in ep_layer_classes()
-        if cls._supports_weight_sync and set(cls.HF_MODEL_TYPES) - set(cls._WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES)
+        if cls.HF_MODEL_TYPES and cls._supports_weight_sync and cls.HF_MODEL_TYPES[0] not in unservable
     }
 
 
@@ -246,7 +251,7 @@ def write_all() -> None:
         raise SystemExit(
             f"{uncovered}: the weight sync admits these families but no fixture covers them — the "
             f"gate would certify a roster the server was never checked against. Add a fixture, or "
-            f"refuse the family with _supports_weight_sync = False."
+            f"refuse the family (_supports_weight_sync = False, or the vLLM client's UNSERVABLE_MODEL_TYPES)."
         )
     for role, fixtures, rewrite in (("fixtures", FIXTURES, True), ("unparseable", UNPARSEABLE, False)):
         for fixture in fixtures:

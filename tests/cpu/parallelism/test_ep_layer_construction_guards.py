@@ -226,10 +226,10 @@ def test_replay_capable_families_set_top_k_at_construction():
 
 def test_injector_reads_top_k_from_constructed_layers():
     layers = _build_all()
-    injector = RoutingReplayInjector(layers)
+    injector = RoutingReplayInjector(layers, engine_layers=len(layers), layer_indices=list(range(len(layers))))
     assert injector.top_k == K
     assert injector.num_experts == E
-    assert injector.num_layers == len(layers)
+    assert injector.num_ep_layers == len(layers)
 
 
 def test_injector_rejects_layer_without_top_k():
@@ -238,7 +238,7 @@ def test_injector_rejects_layer_without_top_k():
     layer = _build_all()[0]
     del layer.top_k
     with pytest.raises(AttributeError, match="top_k"):
-        RoutingReplayInjector([layer])
+        RoutingReplayInjector([layer], engine_layers=1, layer_indices=[0])
 
 
 def test_full_finetune_trainable_params_all_synced():

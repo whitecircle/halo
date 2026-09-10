@@ -216,13 +216,6 @@ class EPGptOssMoELayer(EPMoELayerBase):
             device, partial(self._materialize_expert_weight, merge_lora=merge_lora), retain=retain
         )
 
-    def gather_fused_expert_state_dict(
-        self, device: str = "cpu", merge_lora: bool = False, retain: bool = True
-    ) -> dict:
-        """GptOss's checkpoint layout is already the fused one (interleaved gate/up + biases), so the
-        gather a fused-layout engine loads and the checkpoint gather coincide."""
-        return self.gather_expert_state_dict(device, merge_lora=merge_lora, retain=retain)
-
     def gather_expert_grads(self, device: str = "cpu") -> dict:
         """Expert gradients in the same interleaved layout (see the base method)."""
         return self._gather_interleaved_experts(device, self._expert_grad)

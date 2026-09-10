@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""QLoRA × vLLM weight sync must fail at trainer construction, not opaquely at the first sync.
+"""QLoRA bases must fail at trainer construction on either rollout engine, not opaquely at the first sync.
 
 A dense-model QLoRA RL run constructs cleanly (the loader's rejection covers only MoE + EP/TP/
 grouped-GEMM), and ``_send_dense_weights`` then ships the bnb ``Params4bit`` packed uint8 storage
-under base-weight names — the vLLM server fails opaquely after full startup, and each sync's LoRA
+under base-weight names — the server fails opaquely after full startup, and each sync's LoRA
 merge/unmerge round-trip through 4-bit weights is lossy. ``validate_weight_sync_support`` is the
 construction gate; both the online and environmental GRPO trainers must wire it.
 
@@ -45,13 +45,15 @@ class _FloatStub(nn.Module):
         self.proj = nn.Linear(4, 4)
 
 
-def test_gate_rejects_quantized_model():
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_gate_rejects_quantized_model(backend):
     with pytest.raises(ValueError, match="QLoRA .* not supported with rollout-engine weight sync"):
-        validate_weight_sync_support(_QuantizedStub())
+        validate_weight_sync_support(_QuantizedStub(), backend)
 
 
-def test_gate_passes_float_model():
-    validate_weight_sync_support(_FloatStub())  # must not raise
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_gate_passes_float_model(backend):
+    validate_weight_sync_support(_FloatStub(), backend)  # must not raise
 
 
 def _install_host(model, vllm_generation):

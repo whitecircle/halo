@@ -1,8 +1,8 @@
 """``EfficiencyCallback``'s attention term must describe what THIS RANK computes, on both axes.
 
 The ``6*N`` half of the FLOPs estimate is already per-rank — ``local_numel`` reads each shard off its
-DTensor under TP, and each stage's own parameters under PP. The ``12*L*S*H`` half is derived from the
-config instead, so both corrections have to be explicit:
+DTensor under TP, and each stage's own parameters under PP. The attention-score half is derived from
+the config's layer layout instead, so both corrections have to be explicit:
 
 * **TP** — ``H`` stays global on every rank, so the term is divided by ``tp_size``. Without it a TP
   rank is credited with the whole model's attention scores and MFU over-reports by up to
@@ -35,6 +35,9 @@ from tests.common.parallelism import make_parallelism_config
 # partition uneven. 32k sequence is where the attention term is a material share of total FLOPs.
 NUM_LAYERS = 24
 HIDDEN = 2880
+HEADS = 64
+HEAD_DIM = 64
+SLIDING_WINDOW = 128
 SEQ_LEN = 32768
 TP_SIZES = (1, 2, 4, 8)
 PP_SIZES = (1, 2, 4, 8)
@@ -45,9 +48,10 @@ class _Config:
     hidden_size = HIDDEN
     num_hidden_layers = NUM_LAYERS
     vocab_size = 201088
-    num_attention_heads = 64
+    num_attention_heads = HEADS
     num_key_value_heads = 8
-    head_dim = 64
+    head_dim = HEAD_DIM
+    sliding_window = SLIDING_WINDOW
     intermediate_size = HIDDEN
     moe_intermediate_size = HIDDEN
     num_experts_per_tok = 4
@@ -85,8 +89,12 @@ def _default_partition(pp_size: int) -> list[tuple[int, int]]:
 
 
 def _attention_flops(n_layers: float) -> float:
-    """12 * L * S * H — QK^T and Attn*V, forward plus backward, for an unsharded ``n_layers`` stack."""
-    return 12.0 * n_layers * SEQ_LEN * HIDDEN
+    """QK^T and Attn*V, forward plus backward, for an unsharded ``n_layers`` stack of the alternating
+    sliding/full pattern: half the layers attend the sequence, half their window, at width
+    ``heads * (d_qk + d_v)``. Linear in ``n_layers`` because the pattern's period is 2 and every
+    stage the splitter produces holds whole periods."""
+    per_pair = 6.0 * HEADS * (2 * HEAD_DIM) * (SEQ_LEN + min(SEQ_LEN, SLIDING_WINDOW))
+    return per_pair * n_layers / 2
 
 
 def _param_term(n_layers: int) -> float:

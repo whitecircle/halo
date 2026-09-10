@@ -34,8 +34,6 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
     _NATIVE_BALANCING_BIAS_ATTR = "gate.e_score_correction_bias"
     # Routing is re-derived from ``gate.weight``, so ``outputs.router_logits`` stays empty under EP.
     _ep_severs_aux_loss = True
-    # vLLM's V4 loader targets the original fp8/fp4-packed release layout, which a gather cannot emit.
-    _supports_weight_sync = False
 
     # transformers registers vendor-namespace renames (^embed\.weight$ → embed_tokens.weight, …)
     # plus the expert merges for this family. Some sources are not vendor-anchored (5.16's `\.norm\.`
@@ -44,8 +42,7 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
     _HUB_CONVERSION_KEYS = ("deepseek_v4",)
 
     # Hub layout: ``experts.{i}.w{1,3,2}.weight`` per expert (LFM-2's spelling), per transformers'
-    # converter for this family. vLLM reads the packed release format instead, but a
-    # transformers-side reload of a gathered save reads these names.
+    # converter for this family, which a transformers-side reload of a gathered save reads.
     _HUB_PER_EXPERT_KEYS = ("w1", "w3", "w2")
 
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")

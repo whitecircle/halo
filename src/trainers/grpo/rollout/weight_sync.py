@@ -4,8 +4,9 @@ Both push the trained policy to the rollout server over the vendored NCCL client
 first, then the FSDP2-DP / TP shards of every dense param. The gathers must run on **every** rank
 (``full_tensor()`` and ``gather_expert_state_dict`` are collectives that hang if a rank skips them),
 while only the forwarding rank (global-main, TP-rank 0 under TP) sends. PEFT/LoRA is folded into the
-base and forwarded under base-model param names. The engine is a parameter: the expert layout is read
-off the resolved client class (vLLM or SGLang).
+base and forwarded under base-model param names. Every family is gathered in its own hub checkpoint
+layout, which both engines' loaders read; which families an engine serves at all is read off its
+client class at construction.
 
 Those sends sit between the gathers, so each runs under a :class:`DeferredRankFailure` and the verdict
 is taken at a rank-uniform ``reject``; a forwarding rank raising mid-loop would otherwise leave every
@@ -40,7 +41,7 @@ from src.distributed.expert_parallel.expert_weights import (
     to_hub_layer_key,
 )
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.nccl.clients.base import WEIGHT_SYNC_CHUNK_BYTES, BaseWeightSyncClient, payload_bytes
+from src.distributed.nccl.clients.base import WEIGHT_SYNC_CHUNK_BYTES, payload_bytes
 from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import DeferredRankFailure, barrier_on_exit, materialize_dtensor
 from src.distributed.tensor_parallel.state_dict import (
@@ -73,8 +74,8 @@ logger = logging.getLogger(__name__)
 _HELD_CONVERTER_BUDGET_BYTES = WEIGHT_SYNC_CHUNK_BYTES
 
 
-def validate_weight_sync_support(model: torch.nn.Module) -> None:
-    """Construction gate for the trainers that push weights to a rollout engine.
+def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
+    """Construction gate for the trainers that push weights to the ``backend`` rollout engine.
 
     Six failure classes are rejected here rather than at the first sync:
 
@@ -89,11 +90,13 @@ def validate_weight_sync_support(model: torch.nn.Module) -> None:
       ``reset_sinks: false`` are on-policy by construction; a sink that moves every step has no
       validated end-to-end sync into either rollout engine.
     - **Families whose layer class declares ``_supports_weight_sync = False``**: the names this sync
-      forwards go straight into vLLM's ``model.load_weights`` and cannot land; each class's
-      ``_WEIGHT_SYNC_REFUSAL_REASON`` states the family's gap. Enforced through live EP instances when present, else through the registry off
-      ``config.model_type``, since a wrapper-less run carries the same contract.
-    - **Model types no pinned engine can serve** (``_WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES``): these
-      spellings have no model class in the pinned engines, so the server cannot load the base model.
+      forwards go straight into the engine's ``model.load_weights`` and cannot land on any engine;
+      each class's ``_WEIGHT_SYNC_REFUSAL_REASON`` states the family's gap. Enforced through live EP
+      instances when present, else through the registry off ``config.model_type``, since a
+      wrapper-less run carries the same contract.
+    - **Model types the pinned ``backend`` cannot serve** (the client's ``UNSERVABLE_MODEL_TYPES``):
+      no model class for the spelling, or a loader reading a layout no gather can emit, so the server
+      has no base model for the stream to land in.
     - **Live bias-update balancing state**: the sync payload is parameters only, so an adopted native
       slot (a buffer) or a transient side-buffer is never pushed and trainer routing drifts from the
       generator. The shipped GRPO scripts downgrade ``moe_balancing`` to ``none`` before any bias
@@ -123,7 +126,16 @@ def validate_weight_sync_support(model: torch.nn.Module) -> None:
             "that change every step, so the trainer would drift from its generator with no error at sync "
             "time. On-policy GptOss RL keeps the pretrained sinks live and frozen (reset_sinks: false)."
         )
-    model_types = config_model_types(model)
+    client_cls = resolve_weight_sync_client(backend)
+    unservable = sorted(config_model_types(model) & client_cls.UNSERVABLE_MODEL_TYPES.keys())
+    if unservable:
+        facts = "; ".join(
+            f"{model_type}: {client_cls.UNSERVABLE_MODEL_TYPES[model_type]}" for model_type in unservable
+        )
+        raise ValueError(
+            f"rollout_backend={backend!r} cannot serve model_type {unservable}, so the weight sync has "
+            f"no served model to land in — {facts}. See {client_cls.__name__}.UNSERVABLE_MODEL_TYPES."
+        )
     # isinstance, not an attribute probe: a PEFT wrapper forwards ``__getattr__``, so a probe matches the wrapper.
     for where, cls in _sync_contract_classes(model):
         if not cls._supports_weight_sync:
@@ -133,18 +145,10 @@ def validate_weight_sync_support(model: torch.nn.Module) -> None:
                 f"{cls._WEIGHT_SYNC_REFUSAL_REASON}. Online/environmental GRPO with weight sync "
                 f"is unsupported for this model — see {cls.__name__}._supports_weight_sync."
             )
-        unservable = model_types & set(cls._WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES)
-        if unservable:
-            raise ValueError(
-                f"{cls.__name__} (at {where!r}) refuses weight sync for model_type "
-                f"{sorted(unservable)}: no pinned rollout engine registers a model class for this "
-                f"spelling, so the server cannot load the base model — see "
-                f"{cls.__name__}._WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES for the engine facts."
-            )
     # Enabled bias-update state, not the mode string: the shipped scripts downgrade the mode before any
     # state exists, so reaching here with an adopted slot or side-buffer means a hand-built driver
     # enabled balancing itself. These probes do not fire on Zaya's always-present native buffer (never
-    # adopted, never transient), which its _supports_weight_sync=False refuses above.
+    # adopted, never transient); both engines list the family as unservable above.
     balancing = sorted(
         {
             type(m).__name__
@@ -187,7 +191,7 @@ def _hub_param_name(name: str, ep_layers: dict[str, EPMoELayerBase]) -> str:
 
     The same per-family :attr:`~EPMoELayerBase._EXPORT_KEY_RENAMES` rewrite
     :func:`~src.distributed.expert_parallel.expert_weights.gather_ep_layer_weights` applies to a
-    gathered checkpoint, so vLLM receives what it would load from one. Identity outside EP layers and
+    gathered checkpoint, so the engine receives what it would load from one. Identity outside EP layers and
     for every family whose two spellings agree.
     """
     for layer_name, layer in ep_layers.items():
@@ -289,92 +293,27 @@ class _HubForwarder:
             self._client.update_named_param(hub_name, hub_tensor)
 
 
-def wants_fused_experts(expert_layout: str) -> bool:
-    """Whether ``expert_layout`` is the checkpoint-fused one the engine loads.
-
-    Both declared spellings are recognized and anything else raises: an inequality test would route an
-    unknown third layout into one branch, and the gather it picks is rejected on arrival, after the
-    engine is paused and partly written.
-    """
-    if expert_layout == BaseWeightSyncClient.FUSED_EXPERT_LAYOUT:
-        return True
-    if expert_layout == BaseWeightSyncClient.UNFUSED_EXPERT_LAYOUT:
-        return False
-    raise ValueError(
-        f"unknown expert layout {expert_layout!r}: a weight-sync client declares "
-        f"{BaseWeightSyncClient.UNFUSED_EXPERT_LAYOUT!r} (per-expert tensors) or "
-        f"{BaseWeightSyncClient.FUSED_EXPERT_LAYOUT!r} (the checkpoint-fused pair), and the gather "
-        f"must produce the one its receiver loads."
-    )
-
-
-def validate_backend_expert_layout(backend: str, model: torch.nn.Module) -> None:
-    """Reject an engine/model pair whose expert layout the weight sync cannot ship, at construction.
-
-    Caught here rather than at the first sync: by then the run has loaded the model, collected a
-    round of rollouts and paused the engine, and the failure lands mid-broadcast with the served
-    weights already partly overwritten.
-    """
-    client_cls = resolve_weight_sync_client(backend)
-    # An engine that takes the per-expert layout has no fused contract to check.
-    if not wants_fused_experts(client_cls.EXPERT_LAYOUT):
-        return
-    for where, cls in _sync_contract_classes(model):
-        if not cls.implements_fused_expert_layout():
-            raise ValueError(
-                f"rollout_backend={backend!r} loads experts in the checkpoint-fused layout, which "
-                f"{cls.__name__} (at {where!r}) does not implement — its "
-                f"gather_fused_expert_state_dict is the base default. Sending the per-expert layout "
-                f"instead is silently dropped or rejected on arrival, after the engine is paused and "
-                f"partly written. Use rollout_backend='vllm', which takes the per-expert layout this "
-                f"family already gathers."
-            )
-
-
-def expert_layout_for(trainer) -> str:
-    """The receiving engine's expert layout, resolved identically on every rank.
-
-    Read off the trainer's declared ``_rollout_backend`` rather than the client object: only the
-    forwarding rank holds a client, and the gathers this selects are collective, so reading it from
-    the instance would have the ranks build different layouts and hang. Online GRPO leaves the
-    attribute ``None`` and keeps the base default, which is correct since it is vLLM-only.
-    """
-    backend = getattr(trainer, "_rollout_backend", None)
-    return resolve_weight_sync_client(backend).EXPERT_LAYOUT if backend else BaseWeightSyncClient.EXPERT_LAYOUT
-
-
 def _send_ep_expert_weights(
     ep_layers: dict[str, EPMoELayerBase],
     forwarder: _HubForwarder | None,
     guard: DeferredRankFailure,
-    expert_layout: str = BaseWeightSyncClient.EXPERT_LAYOUT,
 ) -> None:
     """Gather expert shards across the EP group and forward them. Collective on all ranks.
 
-    ``expert_layout`` is the receiving engine's, not a property of the checkpoint. The gathers below
-    are collective and must be decided identically on every rank, hence a threaded-in value rather
-    than one read off ``forwarder``, which is ``None`` everywhere but the forwarding rank.
+    Every family is gathered in its own hub checkpoint layout, the one both engines' loaders read:
+    fused pairs where the checkpoint stores them fused, per-expert tensors where it stores them per
+    expert.
 
     The retained assembly is the sync's largest rank-local allocation (~28 GB for one 397B layer), so
     it runs under ``guard`` like the sends do: a retained gather finishes its collectives before it
     assembles, and an OOM there must reach the peers as a reason rather than drop this rank out of the
     next layer's gather. Retaining then stops, since there is nothing left to send.
     """
-    # Resolved once, before the first gather: an unrecognized layout must refuse the sync outright,
-    # not partway through the layers with the engine already paused.
-    fused = wants_fused_experts(expert_layout)
     for layer_name, module in ep_layers.items():
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
         # PEFT's merge_adapter covers only the attention adapters, so the native expert-LoRA is folded here.
-        # A family declaring no fused layout raises inside the base gather: an empty result is what
-        # a non-retaining rank returns, so it cannot also carry the refusal.
-        gather = partial(
-            module.gather_fused_expert_state_dict if fused else module.gather_expert_state_dict,
-            "cuda",
-            merge_lora=True,
-            retain=retain,
-        )
+        gather = partial(module.gather_expert_state_dict, "cuda", merge_lora=True, retain=retain)
         # Guarded only where it retains: a non-retaining rank runs the same collectives and keeps
         # nothing, so a raise there is a group-wide failure rather than this rank's own.
         gathered = guard.run(gather) if retain else gather()
@@ -445,13 +384,7 @@ def _flush_and_close(sender: Any) -> None:
         raise
 
 
-def sync_weights_to_client(
-    model: torch.nn.Module,
-    client: Any | None,
-    is_main: bool,
-    is_tp_main: bool,
-    expert_layout: str = BaseWeightSyncClient.EXPERT_LAYOUT,
-) -> bool:
+def sync_weights_to_client(model: torch.nn.Module, client: Any | None, is_main: bool, is_tp_main: bool) -> bool:
     """Gather the policy and push it to ``client``, then flush the buffered broadcast. Returns is-PEFT.
 
     Runs on **every** rank (the gathers are collective); only the forwarding rank (global-main, TP-rank 0
@@ -461,7 +394,7 @@ def sync_weights_to_client(
     # leave the buffering rank never closing the update it opened.
     sender = client if (is_main and is_tp_main) else None
     try:
-        peft = gather_and_send_weights(model, sender, expert_layout)
+        peft = gather_and_send_weights(model, sender)
     except BaseException:
         # The push streams chunks into an update it opened mid-gather, so a raise past this point
         # would leave the engine quiesced behind an open reload, refusing every later sync and
@@ -479,17 +412,12 @@ def sync_weights_to_client(
     return peft
 
 
-def gather_and_send_weights(
-    model: torch.nn.Module,
-    sender: Any | None,
-    expert_layout: str = BaseWeightSyncClient.EXPERT_LAYOUT,
-) -> bool:
+def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
     """Gather EP + dense/TP weights from ``model`` and forward to the engine via ``sender``.
 
     Runs on **every** rank (the gathers are collective); ``sender`` is the engine client on the
-    forwarding rank and ``None`` elsewhere, so ``expert_layout`` is passed in rather than read off it.
-    PEFT/LoRA is merged and forwarded under base-model names. The caller flushes afterwards with
-    ``sender.reset_prefix_cache()``. Returns whether ``model`` is PEFT.
+    forwarding rank and ``None`` elsewhere. PEFT/LoRA is merged and forwarded under base-model names.
+    The caller flushes afterwards with ``sender.reset_prefix_cache()``. Returns whether ``model`` is PEFT.
     """
     # FSDP2 leaves a forward's transient unsharded params registered while the optimizer steps the
     # shards, so the params a mid-training sync finds registered predate the last update: every
@@ -511,7 +439,7 @@ def gather_and_send_weights(
             if sender
             else None
         )
-        _send_ep_expert_weights(ep_layers, forwarder, guard, expert_layout)
+        _send_ep_expert_weights(ep_layers, forwarder, guard)
         _send_dense_weights(model, ep_layers, forwarder)
     # Collective on every rank. Raises on all of them with the forwarding rank's cause, after the
     # adapters are unmerged, so a failed sync leaves the trainer's own weights untouched.
@@ -535,11 +463,15 @@ def sync_trainer_weights(trainer, client: Any | None) -> bool:
     if log_memory:
         log_cuda_memory("weight-sync pre")
 
+    # The engine fuses a co-load group only where this model declares every member, so the client's
+    # groups are scoped to its module tree before the first chunk; only the forwarding rank holds one.
+    if client is not None:
+        client.scope_co_load_groups(name for name, _ in model.named_modules())
     # Hold every rank until the forwarding rank's push lands: peers would otherwise drive rollouts
     # against a mid-update engine. Fenced because the push is main-rank-only, so a raise must not skip
     # the barrier its peers block in.
     with barrier_on_exit():
-        peft = sync_weights_to_client(model, client, is_main, is_tp_main, expert_layout_for(trainer))
+        peft = sync_weights_to_client(model, client, is_main, is_tp_main)
 
     if log_memory:
         log_cuda_memory("weight-sync post")

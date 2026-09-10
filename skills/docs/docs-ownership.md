@@ -42,6 +42,7 @@ changes.
 | `src/trainers/grpo/rollout/weight_sync.py` (gather/gates/memory bracket) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/reference/debugging.md` (memory bracket) |
 | `src/trainers/grpo/rollout/weight_sync_clients.py` (per-server weight-sync client pool, `/v1/models` context preflight) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/training-methods/grpo/online-grpo.md` |
 | `src/trainers/grpo/rollout/async_rollouts.py` (Ray-actor collection, prefetch thread, engine weight-sync entry points) | `agent-docs/training-methods/grpo/environmental-grpo.md` |
+| `src/trainers/grpo/rollout/routing_replay.py` (R2/R3 capture, wire decode, engine-layer slicing) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/infrastructure/rollout-servers.md` |
 | `src/trainers/grpo/rollout/trajectory_tokenize.py` (trajectory → training rows: whole-render spans, per-turn sampled ids) | `agent-docs/training-methods/grpo/environmental-grpo.md` |
 | `src/trainers/grpo/rollout/rollout_metrics.py` (completion logs, per-episode rollout diagnostics) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/training-methods/callbacks.md` |
 | `src/environments/ray_actors.py` (actor pool, dispatch, Ray init) | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/grpo/environmental-grpo.md` (trainer-side knobs) |
@@ -72,6 +73,7 @@ changes.
 | `src/models/loading/config_levels.py` (composite-config field access, run-scoped writes, `config_export_ready`) | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
 | `src/models/modality.py` (multimodal checkpoint detection) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `src/models/attention_geometry.py` (head-dim and KV-head resolution across composite/per-layer configs) | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md` |
+| `src/models/attention_layout.py` (per-layer attention cost rules off `layer_types` + head geometry — the MFU attention term) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | new model support | new `agent-docs/models/<family>.md` + model matrices in `expert-parallelism.md`/`grouped-gemm.md` + `agent-docs/models/README.md` + `CLAUDE.md` index |
 
 ## Collators & data
@@ -157,7 +159,7 @@ changes.
 | `scripts/after_training/merge_ep_shards.py` | `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/{quantize_to_lowp,convert_to_bf16}.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `scripts/after_training/merge_models.py` | `agent-docs/reference/scripts-reference.md` |
-| `Dockerfile*`, `docker-compose*` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files (EFA overlays included) also `agent-docs/infrastructure/rollout-servers.md` |
+| `Dockerfile*`, `docker-compose*`, `docker/sglang/patches/` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files and server patches (EFA overlays included) also `agent-docs/infrastructure/rollout-servers.md` |
 | `docker/efa/install_efa_userspace.sh` (the EFA userspace every image shares) | `agent-docs/infrastructure/docker.md` (RDMA networking), `agent-docs/infrastructure/rollout-servers.md` (Servers on other nodes), `agent-docs/parallelism/multi-node.md` (RDMA fabrics) |
 | AWS / S3 auth, `src/data/sources/s3_client.py` paths | `agent-docs/infrastructure/aws-auth.md`, `agent-docs/data/s3-utilities.md` |
 | DeepEP install / NVSHMEM / CDMC notes | `agent-docs/infrastructure/deepep.md` |

@@ -14,7 +14,7 @@
 
 All three extend `DistributedTrainerMixin` and support EP, TP, pure ETP, EP+TP and EP+ETP; **none supports CP** (GRPO needs whole sequences per rank for its global log-prob sums). Offline GRPO is the only one that declares `_supports_pp` — [pipeline parallelism itself is not yet available in this release](../../parallelism/pipeline-parallelism.md).
 
-Environmental GRPO is the only variant with a rollout-engine choice (`rollout_backend: vllm` default, or `sglang` — refused for every MoE family but GptOss, see [Rollout backend](environmental-grpo.md#rollout-backend)). RLVR online GRPO is vLLM-only by construction: it drives TRL's vLLM generation path with the vendored NCCL client and rejects in-process and colocate modes.
+Environmental GRPO is the only variant with a rollout-engine choice (`rollout_backend: vllm` default, or `sglang`, whose 0.5.17 loaders cannot take an online update for some families — see [Rollout backend](environmental-grpo.md#rollout-backend)). RLVR online GRPO is vLLM-only by construction: it drives TRL's vLLM generation path with the vendored NCCL client and rejects in-process and colocate modes.
 
 The online and environmental trainers take TRL's `GRPOConfig` directly, so their objective is tuned through `loss_type` / `epsilon` / `scale_rewards` / `beta`. For a verifiable-reward task (pass-rate in `[0, 1]`, small group) the tuned setting is DAPO + clip-higher + batch-std scaling — see [GRPO objective for verifiable rewards](online-grpo.md#grpo-objective-for-verifiable-rewards). Offline GRPO has its own loss and advantage machinery ([Offline GRPO](offline-grpo.md)).
 

@@ -51,7 +51,7 @@ Online and environmental GRPO sync into vLLM 0.26.0, which serves the family fro
 - `--moe-backend triton` and the layerwise-reload patch, as for every MoE family ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)); the experts are a `FusedMoE`, which the patch already excludes from the reload lifecycle.
 - The router's selection bias (`moe.router_bias`) is a buffer and the sync ships parameters only: it stays at its checkpoint value on both sides, which is exact because weight-sync RL runs `moe_balancing: none` (bias-update balancing is downgraded before any bias state exists).
 - vLLM's clamped fused-MoE kernel accepts `swiglu_limits` of exactly 7 (the release value); any other clamp fails at server start, not silently.
-- SGLang is refused for the family at construction: its loader needs the fused pair, which only GptOss gathers.
+- SGLang is refused for the family at construction: `Step3p5ForCausalLM.load_weights` asserts full parameter coverage in each call, which the chunked online update cannot satisfy ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 ## Router balancing
 

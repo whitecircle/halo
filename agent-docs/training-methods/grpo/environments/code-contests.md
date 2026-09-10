@@ -45,7 +45,7 @@ Overrides merge per level over the defaults, so a profile that sets only interac
 
 Eval (`eval_runner.py`) binds the same per-level profile through `bind_episode_effort`, narrows its own `RolloutConfig` to the level's `max_tokens` / `max_thinking_tokens`, and sends the result through `generation_control_fields` — so the interaction budgets and the CoT cap both apply, and the resolved budget is recorded on every trajectory (`reasoning_budget`).
 
-The interaction half is what makes effort buy **iteration**, not just longer CoT: the shipped configs scale both budgets by effort (2/3/3 submissions, 2/4/6 scratchpad runs), keeping the verdict→fix loop available at medium and high. Without an interaction limit the strategy collapses to submit-and-fix at every level. No shipped config sets `tested_submission_reward`, so the test-first bonus is off by default.
+The interaction half is what makes effort buy **iteration**, not just longer CoT: the shipped configs scale both budgets by effort (2/3/3 submissions, 2/4/6 scratchpad runs), keeping the verdict→fix loop available at medium and high. Without an interaction limit the strategy collapses to submit-and-fix at every level. No shipped config sets `tested_submission_reward` or `token_cost`. The test-first bonus is off by default; a token price is paid **within the GRPO group**, so at every effort level the sibling that reasons less wins it regardless of outcome, and the policy learns to stop thinking (a 35B run went from 16k to under 1k reasoning characters in 30 steps) — effort is priced by the thinking caps and interaction budgets instead.
 
 Interaction budgets apply only when the level is concrete at reset (a trainer-stamped group level, a non-`random` env setting, or eval's per-episode draw, which is stamped before reset — `BaseEnvironment.reset_effort_level`); an undetermined level keeps the class caps.
 
@@ -152,9 +152,9 @@ environment_kwargs:
   language: python            # or cpp / c
   timeout_per_test: 5         # the training configs' value; the class default is 15
   max_grading_seconds: 150
-  reasoning_effort_profiles:  # effort = thinking budget + interaction + compute price (see Reasoning effort)
-    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
-    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
+  reasoning_effort_profiles:  # effort = thinking budget + interaction budgets (see Reasoning effort)
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   output_comparison: tokens   # codeforces preset default; "exact" for code_contests
   stop_on_first_failure: false

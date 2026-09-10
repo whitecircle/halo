@@ -9,7 +9,7 @@ the rollout server (NCCL requires distinct devices); one server URL per weight-s
 import concurrent.futures
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import partial
 from typing import Any
 
@@ -209,6 +209,8 @@ class InferenceClientManager:
         self._clients = []
         self._initialized = False
         self._device = None
+        # The served model's module names, applied to every client built (rebuilt ones included).
+        self._co_load_module_names: tuple[str, ...] = ()
         # Bytes buffered since the last chunk went out. The manager makes the chunk decision because
         # only it can tell when every server is done with the shared snapshots.
         self._buffered_bytes = 0
@@ -230,6 +232,11 @@ class InferenceClientManager:
         logger.info(
             f"InferenceClientManager created for {len(server_configs)} servers: {[c['url'] for c in server_configs]}"
         )
+
+    @property
+    def clients(self) -> list[BaseWeightSyncClient]:
+        """The per-server clients, in ``server_configs`` order (read-only view for request fan-out)."""
+        return list(self._clients)
 
     def _group_port(self, index: int) -> int:
         """The trainer-side NCCL group port for one server: its configured value, else the base + index."""
@@ -266,6 +273,7 @@ class InferenceClientManager:
 
             try:
                 client.init_communicator(device=device)
+                client.scope_co_load_groups(self._co_load_module_names)
                 self._clients.append(client)
                 logger.info(f"  Connected to {url}")
             except Exception as e:
@@ -327,6 +335,12 @@ class InferenceClientManager:
             client.buffer_param(name, snapshot)
         self._buffered_bytes += payload_bytes(snapshot)
 
+    def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
+        """Bind every client's co-load groups to the served model (see the client method)."""
+        self._co_load_module_names = tuple(module_names)
+        for client in self._clients:
+            client.scope_co_load_groups(self._co_load_module_names)
+
     def abort_weight_update(self):
         """Close the open update on every server after a failed sync; never raises (see the client)."""
         for client in self._clients:
@@ -343,7 +357,8 @@ class InferenceClientManager:
         wire everywhere.
         """
         self._run_on_every_client(lambda index: self._clients[index].flush_chunk(), "chunk flush")
-        self._buffered_bytes = 0
+        # Every client holds the same snapshots, so what one kept back for a co-load partner they all did.
+        self._buffered_bytes = max((client.buffered_bytes for client in self._clients), default=0)
 
     def reset_prefix_cache(self):
         """Send the tail chunk to all rollout servers and close their updates (no-op if nothing was buffered).
@@ -459,6 +474,7 @@ class InferenceClientManager:
             group_host=config.get("group_host"),
         )
         client.init_communicator(device=self._device)
+        client.scope_co_load_groups(self._co_load_module_names)
         for name, snapshot in buffered:
             client.buffer_param(name, snapshot)
         self._clients[index] = client

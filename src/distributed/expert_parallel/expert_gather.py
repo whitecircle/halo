@@ -96,7 +96,7 @@ class EPExpertGatherMixin:
 
         Shards are equal by construction (:meth:`EPConfig.finalize_expert_assignment` rejects
         ``num_experts % ep_size``, :meth:`_etp_shard_size` rejects an indivisible expert
-        intermediate), so one collective suffices on this save / vLLM-sync hot path.
+        intermediate), so one collective suffices on this save / weight-sync hot path.
 
         ``dim == 0`` (every EP expert-axis gather) receives into one preallocated output: a shard list
         plus a ``cat`` would hold the gathered tensor twice on every rank, and the expert axis holds
@@ -130,7 +130,7 @@ class EPExpertGatherMixin:
         """This rank's full (FSDP-gathered) expert weight ``attr`` in matmul convention.
 
         Folds in the grouped-LoRA delta ``scaling·(A@B)`` when ``merge_lora`` is set and ``attr``
-        carries an adapter, so the vLLM weight sync ships the trained experts rather than the frozen
+        carries an adapter, so the RL weight sync ships the trained experts rather than the frozen
         base. Folds on the full plain tensor :func:`~src.distributed.runtime.materialize_dtensor`
         returns. ``expert_tp_size==1`` only (expert-LoRA + ETP is rejected at config)."""
         base = materialize_dtensor(getattr(self, attr).data)
@@ -145,7 +145,7 @@ class EPExpertGatherMixin:
         """Raise when a gather would fold a real adapter under expert TP, where the sharded expert
         params have no fold seam.
 
-        Gated on :attr:`has_expert_lora`, not on ``merge_lora`` alone: the vLLM sync asks for the fold
+        Gated on :attr:`has_expert_lora`, not on ``merge_lora`` alone: the weight sync asks for the fold
         unconditionally, so raising on the flag would reject every full fine-tune under
         ``expert_tp_size > 1``. :class:`EPConfig` already rejects expert LoRA there.
         """
@@ -161,9 +161,9 @@ class EPExpertGatherMixin:
         EP layer (e.g. ``experts.gate_up_proj``).
 
         Returns the fused-GLU layout of :meth:`_gather_fused_expert_state_dict`; families whose hub
-        checkpoint / vLLM loader store one tensor per expert declare ``_PER_EXPERT_UNFUSED_KEYS`` and
-        the fused result is split into that layout here — no per-family override needed.
-        ``merge_lora`` folds the expert-LoRA delta for the vLLM sync; off for checkpointing.
+        checkpoint stores one tensor per expert declare ``_PER_EXPERT_UNFUSED_KEYS`` and the fused
+        result is split into that layout here — no per-family override needed. ``merge_lora`` folds
+        the expert-LoRA delta for the weight sync; off for checkpointing.
 
         ``retain=False`` enters every collective and returns ``{}``: the gathers are group-wide, so a
         rank that skipped one would hang its peers, but only the writer needs the assembled tensors.
@@ -353,7 +353,7 @@ class EPExpertGatherMixin:
     ) -> dict:
         """Gather separately-stored gate/up/down expert weights into the family's per-expert hub layout
         ``experts.{i}.<gate|up|down>.weight`` (Qwen3, Bailing; names from
-        ``_HUB_PER_EXPERT_KEYS``). ``merge_lora`` folds the expert-LoRA delta for the vLLM
+        ``_HUB_PER_EXPERT_KEYS``). ``merge_lora`` folds the expert-LoRA delta for the weight
         sync; ``retain=False`` gathers and drops (see :meth:`gather_expert_state_dict`)."""
         gate_key, up_key, down_key = self._individual_glu_hub_keys()
         gate, up, down = self._gather_separate_glu_full(merge_lora)
@@ -365,31 +365,6 @@ class EPExpertGatherMixin:
             state[f"experts.{i}.{up_key}.weight"] = up[i].transpose(0, 1).contiguous().to(device)
             state[f"experts.{i}.{down_key}.weight"] = down[i].transpose(0, 1).contiguous().to(device)
         return state
-
-    def gather_fused_expert_state_dict(
-        self, device: str = "cpu", merge_lora: bool = False, retain: bool = True
-    ) -> dict:
-        """This layer's experts in the checkpoint-fused layout.
-
-        A second layout exists because the rollout engines differ: vLLM's loader takes the per-expert
-        tensors :meth:`gather_expert_state_dict` produces, SGLang's the fused ones transformers
-        stores. Declared per family, since the fused spelling differs across the roster (interleaved,
-        prefixed, ``linear_fc``). The base raises; :meth:`implements_fused_expert_layout` is the gate
-        that rejects such a family before the engine is touched.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} declares no fused expert layout, which this rollout engine "
-            f"requires. Sending the per-expert layout instead is silently dropped or rejected on "
-            f"arrival, with the engine already paused and partly written. Implement "
-            f"gather_fused_expert_state_dict for this family, or use rollout_backend: vllm, which "
-            f"takes the per-expert layout it already gathers."
-        )
-
-    @classmethod
-    def implements_fused_expert_layout(cls) -> bool:
-        """Whether this family declares :meth:`gather_fused_expert_state_dict` or inherits the raising
-        default. Read before a sync starts, while the engine is still untouched."""
-        return cls.gather_fused_expert_state_dict is not EPExpertGatherMixin.gather_fused_expert_state_dict
 
     def gather_expert_lora_state_dict(self, device: str = "cpu", retain: bool = True) -> dict:
         """Gather this layer's grouped LoRA adapters into a checkpoint dict, keyed relative to the layer.

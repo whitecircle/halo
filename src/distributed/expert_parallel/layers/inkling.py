@@ -29,7 +29,7 @@ class EPInklingMoELayer(EPMoELayerBase):
     HF_MODULE_NAMES = ("InklingMoE",)
     # The composite (multimodal) config spells its model_type "inkling_mm_model"; no bare "inkling"
     # spelling exists in transformers (through 5.16) or on the hub checkpoint.
-    HF_MODEL_TYPES = ("inkling_mm_model", "inkling_text")
+    HF_MODEL_TYPES = ("inkling_text", "inkling_mm_model")
 
     _supports_bias_balancing = True
     # ``_route`` adds this native slot to the selection score (selection-only, like upstream) and the

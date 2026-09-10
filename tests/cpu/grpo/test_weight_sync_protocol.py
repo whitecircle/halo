@@ -43,6 +43,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
 from src.distributed.nccl.clients import vllm as wsc
+from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES, DEFAULT_PACKED_NUM_BUFFERS
 from src.distributed.nccl.transport.pynccl import PyNcclCommunicator
@@ -141,6 +142,19 @@ class FakeVLLMServer:
                         server.bodies[path] = json.loads(raw)
                     if path in server.refuse:
                         self._reply(503)
+                        return
+                    if path == "/generate" and server.bodies[path].get("return_logprob"):
+                        # SGLang's prefill log-probs: [logprob, token_id, text] per input token from logprob_start_len.
+                        body = server.bodies[path]
+                        ids = body["input_ids"][body["logprob_start_len"] :]
+                        echo = [[-((tok % 7) + 1) / 10, tok, None] for tok in ids]
+                        self._reply(200, {"meta_info": {"input_token_logprobs": echo}})
+                        return
+                    if path == "/v1/completions" and "prompt_logprobs" in server.bodies[path]:
+                        # Prefill echo: one entry per prompt token (None for the first), keyed by token id.
+                        prompt = server.bodies[path]["prompt"]
+                        echo = [None] + [{str(tok): {"logprob": -((tok % 7) + 1) / 10}} for tok in prompt[1:]]
+                        self._reply(200, {"choices": [{"text": "", "prompt_logprobs": echo}]})
                         return
                     if path == "/v1/completions":
                         values = self._completion_logprobs(server.bodies[path])
@@ -838,6 +852,9 @@ def test_reconnect_retires_the_old_client_before_probing_the_replacement():
         def buffer_param(self, name, snapshot):
             self._param_buffer.append((name, snapshot))
 
+        def scope_co_load_groups(self, module_names):
+            order.append("scope new client")
+
     manager = InferenceClientManager(server_configs=[{"url": "http://server0:8000", "group_port": 51216}])
     old = RecordingClient(base_url="http://server0:8000")
     old.buffer_param("w", torch.zeros(4))
@@ -874,6 +891,40 @@ def test_unconfigured_group_ports_are_seeded_from_the_run_knob():
         base_group_port=52000,
     )
     assert [manager._group_port(i) for i in range(3)] == [52000, 52001, 9000]
+
+
+def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
+    """The re-score reads the prompt_logprobs echo: entries keyed by the token id (as a string),
+    aligned to the whole prompt+completion sequence; only the completion slice comes back, in order."""
+    server = FakeVLLMServer()
+    try:
+        client = VLLMWeightSyncClient.__new__(VLLMWeightSyncClient)
+        client.base_url = server.url
+        client.session = requests.Session()
+        values = client.score_completion_logprobs([11, 12, 13], [14, 15])
+        assert values == [pytest.approx(-((14 % 7) + 1) / 10), pytest.approx(-((15 % 7) + 1) / 10)]
+        assert server.bodies["/v1/completions"]["prompt"] == [11, 12, 13, 14, 15]
+        assert server.bodies["/v1/completions"]["prompt_logprobs"] == 0
+        assert client.served_model_id() == "fake-model"
+    finally:
+        server.close()
+
+
+def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
+    """SGLang's re-score goes through /generate with logprob_start_len at the completion start: the
+    entries come back as [logprob, token_id, text] and must carry the completion's own ids in order."""
+    server = FakeVLLMServer()
+    try:
+        client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
+        client.base_url = server.url
+        client.session = requests.Session()
+        values = client.score_completion_logprobs([11, 12, 13], [14, 15])
+        assert values == [pytest.approx(-((14 % 7) + 1) / 10), pytest.approx(-((15 % 7) + 1) / 10)]
+        body = server.bodies["/generate"]
+        assert body["input_ids"] == [11, 12, 13, 14, 15] and body["logprob_start_len"] == 3
+        assert body["return_logprob"] is True
+    finally:
+        server.close()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """MFU / throughput accounting: step time, token throughput, MFU / S-MFU and GPU memory per step."""
 
 import time
+import weakref
 from dataclasses import dataclass
 
 import torch
@@ -11,13 +12,14 @@ from transformers.utils import logging
 from src.callbacks.model_flops import (
     ASSUMED_MAX_SEQ_LEN,
     compute_expert_params,
-    estimate_attention_flops,
-    estimate_model_flops_per_token,
+    estimate_linear_flops_per_token,
+    resolve_attention_layout,
 )
 from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import get_global_world_size, is_global_main_process
 from src.hardware import detect_gpu_model, get_gpu_peak_flops
+from src.models.attention_layout import AttentionLayout
 from src.models.loading.dtype import resolve_training_dtype
 from src.models.moe_balancing import detect_moe_experts_topk
 
@@ -81,6 +83,13 @@ class State:
 
     total_active_flops: float = 0.0
     active_model_flops_per_token: float | None = None
+
+    # The attention-score share of both per-token estimates, at the declared length bound. A step
+    # that measured its documents' attention work swaps this config term out for the measurement.
+    attention_flops_per_token: float | None = None
+    attention_layout: AttentionLayout | None = None
+    # Share of the layout this rank computes: the config-depth fallback under PP holds every stage.
+    attention_share: float = 1.0
 
 
 @dataclass
@@ -301,6 +310,9 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self.memory = Memory()
         self.model_ref = None
         self._warned_token_estimate = False
+        self._noted_attention_fallback = False
+        # The trainer that accumulates measured attention work per batch (bound duck-typed by it).
+        self._attention_source = None
         self._parallelism_config = parallelism_config
         self._full_model_params = num_full_model_params
         # Caller-resolved: the GRPO configs declare neither max_length nor max_prompt_length.
@@ -384,6 +396,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
+        # Before the warmup gate, so a warmup step's work never leaks into the first measured one.
+        measured_attention_flops = self._drain_measured_attention_flops()
         if self._is_warmup_step(state):
             if state.num_input_tokens_seen is not None:
                 self.state.step_start_tokens_seen = state.num_input_tokens_seen
@@ -391,8 +405,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
 
         step_time = self._compute_step_time()
         step_tokens_seen = self._compute_token_metrics(state, step_time)
-        self._compute_mfu(step_tokens_seen, step_time)
-        self._compute_smfu(step_tokens_seen, step_time)
+        self._compute_mfu(step_tokens_seen, step_time, measured_attention_flops)
+        self._compute_smfu(step_tokens_seen, step_time, measured_attention_flops)
         self._compute_memory()
 
         if state.num_input_tokens_seen is not None:
@@ -492,10 +506,50 @@ class EfficiencyCallback(transformers.TrainerCallback):
         )
         return step_tokens_seen
 
-    def _compute_mfu(self, step_tokens_seen: int, step_time: float):
+    def bind_attention_work_source(self, source) -> AttentionLayout | None:
+        """Take ``source`` (the trainer) as the per-step supplier of measured attention work and hand
+        it the layout to cost batches with — ``None`` when this callback could not build one, which
+        keeps the trainer's accumulator off and this callback on the config term."""
+        self._attention_source = weakref.ref(source)
+        return self.state.attention_layout
+
+    def _drain_measured_attention_flops(self) -> float | None:
+        """This rank's measured attention-score FLOPs for the step, or ``None`` when no bound source
+        measured any document (the config term at the length bound then stands in)."""
+        source = self._attention_source() if self._attention_source is not None else None
+        if source is None:
+            return None
+        flops, documents = source.drain_attention_flops()
+        if documents <= 0:
+            return None
+        parallelism = self._parallelism_config
+        # The rank's share of the layout, its 1/tp of every layer's heads, and under Ulysses CP its
+        # 1/cp of the sequence's heads — the divisors the per-token config term carries too.
+        scaled = flops * self.state.attention_share / max(parallelism.tp_size, 1)
+        if parallelism.cp_size > 1:
+            scaled /= parallelism.cp_size
+        return scaled
+
+    def _step_flops(self, per_token: float, step_tokens_seen: int, measured_attention_flops: float | None) -> float:
+        """``step_tokens × per_token``, with the config attention share replaced by the measurement
+        where the step has one."""
+        step_flops = step_tokens_seen * per_token
+        if measured_attention_flops is None or self.state.attention_flops_per_token is None:
+            if not self._noted_attention_fallback and self.state.attention_flops_per_token:
+                self._noted_attention_fallback = True
+                logger.info(
+                    "EfficiencyCallback: no measured attention work reached this step, so the "
+                    "attention-score term is the config model at the declared length bound (every "
+                    "token in a max_seq_len document). Trainers whose collator emits no 'input_ids' "
+                    "stay on that model."
+                )
+            return step_flops
+        return step_flops - step_tokens_seen * self.state.attention_flops_per_token + measured_attention_flops
+
+    def _compute_mfu(self, step_tokens_seen: int, step_time: float, measured_attention_flops: float | None = None):
         """Compute Model FLOPs Utilization metrics."""
         if self.state.model_flops_per_token and self.state.gpu_peak_flops:
-            step_flops = step_tokens_seen * self.state.model_flops_per_token
+            step_flops = self._step_flops(self.state.model_flops_per_token, step_tokens_seen, measured_attention_flops)
             self.state.total_flops += step_flops
             report = _utilization_report(
                 step_flops,
@@ -516,10 +570,12 @@ class EfficiencyCallback(transformers.TrainerCallback):
             self.mfu.avg_distributed_efficiency,
         ) = report
 
-    def _compute_smfu(self, step_tokens_seen: int, step_time: float):
+    def _compute_smfu(self, step_tokens_seen: int, step_time: float, measured_attention_flops: float | None = None):
         """Compute Sparse MFU (MoE-aware) metrics."""
         if self.state.active_model_flops_per_token and self.state.gpu_peak_flops:
-            step_active_flops = step_tokens_seen * self.state.active_model_flops_per_token
+            step_active_flops = self._step_flops(
+                self.state.active_model_flops_per_token, step_tokens_seen, measured_attention_flops
+            )
             self.state.total_active_flops += step_active_flops
             has_baseline = self.smfu.full_active_params > self.smfu.local_active_params > 0
             report = _utilization_report(
@@ -605,6 +661,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
                 # An observability failure must not abort a run; unset estimates disable MFU only.
                 self.state.model_flops_per_token = None
                 self.state.active_model_flops_per_token = None
+                self.state.attention_flops_per_token = None
+                self.state.attention_layout = None
                 logger.warning(f"MFU reporting disabled — could not estimate model FLOPS/token: {exc}")
 
         if not is_global_main_process():
@@ -618,6 +676,13 @@ class EfficiencyCallback(transformers.TrainerCallback):
 
         if self.state.model_flops_per_token:
             logger.info(f"Model FLOPS/token: {self.state.model_flops_per_token / 1e12:.4f} TFLOPS")
+            if self.state.attention_layout is not None:
+                max_seq, _ = self._max_seq_len()
+                logger.info(
+                    f"  Attention layout (this rank): {self.state.attention_layout.describe()} — score term "
+                    f"measured per document from each batch; config fallback at max_seq_len={max_seq}: "
+                    f"{(self.state.attention_flops_per_token or 0.0) / 1e12:.4f} TFLOPS/token"
+                )
             logger.info(f"Local params: {self.mfu.local_params / 1e9:.2f}B")
             if self.mfu.params_ratio > 1.0:
                 logger.info(
@@ -646,9 +711,18 @@ class EfficiencyCallback(transformers.TrainerCallback):
         Model introspection only — raises on a model it cannot measure; the caller degrades.
         """
         parallelism = self._parallelism_config
-        self.state.model_flops_per_token = estimate_model_flops_per_token(
-            model, seq_len, parallelism.pp_size, parallelism.tp_size
-        )
+        resolved = resolve_attention_layout(model, parallelism.pp_size)
+        if resolved is None:
+            self.state.attention_layout, self.state.attention_share, attn_flops = None, 1.0, 0.0
+        else:
+            self.state.attention_layout, self.state.attention_share = resolved
+            attn_flops = (
+                self.state.attention_layout.flops_per_token(seq_len)
+                * self.state.attention_share
+                / max(parallelism.tp_size, 1)
+            )
+        self.state.attention_flops_per_token = attn_flops
+        self.state.model_flops_per_token = estimate_linear_flops_per_token(model) + attn_flops
 
         local_params, trainable_params = count_model_parameters(model)
         if local_params == 0:
@@ -691,7 +765,6 @@ class EfficiencyCallback(transformers.TrainerCallback):
         trainable_active_flops = trainable_params - trainable_expert_params * (1.0 - expert_duty)
         frozen_active_flops = frozen_params - frozen_expert_params * (1.0 - expert_duty)
 
-        attn_flops = estimate_attention_flops(model, seq_len, parallelism.pp_size, parallelism.tp_size)
         self.state.active_model_flops_per_token = 6.0 * trainable_active_flops + 4.0 * frozen_active_flops + attn_flops
 
         self.smfu.num_experts = num_experts

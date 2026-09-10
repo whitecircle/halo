@@ -64,6 +64,13 @@ on, so without it the trainer re-tokenizes a re-render) and
 `network_mode: host`; healthcheck polls `/health`; the `training` service
 `depends_on` it being healthy and gets `VLLM_SERVER_URL=http://localhost:8000`.
 
+`docker-compose.sglang.yml`: `SGLANG_MODEL`, `SGLANG_PORT` (30000), `SGLANG_TP`, `SGLANG_GPU_MEM`,
+`SGLANG_MOE_RUNNER_BACKEND` (default `triton` — required for MoE weight sync and R3),
+`SGLANG_ENABLE_R3`, `SGLANG_ATTENTION_BACKEND`, `SGLANG_TRUST_REMOTE_CODE`, `SGLANG_EXTRA_ARGS`,
+`NCCL_CUMEM_ENABLE=1`. Weight sync needs the repo's `sglang-server:0.5.17` image, not upstream: it
+carries the GLM-4 gate and Gemma 4 router loader patches (`docker/sglang/patches/`) without which a
+synced router never reaches routing.
+
 **Thinking budget is enforced engine-side.** `rollout_max_thinking_tokens` becomes the
 per-request `thinking_token_budget`, which vLLM honors only with a reasoning parser
 (`--reasoning-parser qwen3` for Qwen3.x; for gpt-oss the bundled
@@ -93,7 +100,7 @@ docker run --gpus all --network=host --ipc=host \
 
 | Field | Default | Purpose |
 |---|---|---|
-| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (env-GRPO only; SGLang refused for non-fused MoE families — every family but GptOss; its server needs `NCCL_CUMEM_ENABLE=1`, the compose default — `agent-docs/infrastructure/rollout-servers.md`) |
+| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (env-GRPO only). SGLang's 0.5.17 loaders refuse a longer family list than vLLM's, quoted at trainer construction; its server needs `NCCL_CUMEM_ENABLE=1` (compose default) and must be the repo's `Dockerfile.sglang` image — `agent-docs/infrastructure/rollout-servers.md#which-families-each-engine-serves` |
 | `rollout_server_url` | `http://localhost:8000` | single-server URL (weight sync + generation) |
 | `rollout_server_configs` | `None` | multi-server: `[{"url": ..., "group_port": ...}]`; overrides `rollout_server_url`, enables prefetch overlap |
 | `rollout_connection_timeout` | `120.0` | wait for `/health` |
