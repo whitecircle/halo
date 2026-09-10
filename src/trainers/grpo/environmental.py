@@ -1042,10 +1042,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "ones, so only at the identity sampler do the two share a reference."
             )
 
-    def _engine_rescore_clients(self) -> list:
-        """The weight-sync clients, one per rollout server, that the re-score fans out over."""
-        return self._weight_sync_client.clients if self._multi_server_mode else [self._weight_sync_client]
-
     def _rescore_rows_on_engine(
         self,
         all_prompt_ids: list[torch.Tensor],
@@ -1056,9 +1052,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     ) -> list[torch.Tensor | None]:
         """Every sampled row's completion re-scored on the rollout engine under the weights synced for
         this step; ``None`` where the row carries no sampling log-probs or its request failed (that
-        row's mask stages fall back to the trainer diff). A trajectory's rows go to one server so
-        its turns share the prefix cache. Never raises: a rank-local raise here would desync the
-        collectives that follow, so a failed step is reported (``sampling/engine_rescore_miss_frac``,
+        row's mask stages fall back to the trainer diff). Runs on every rank over its own rows through
+        the rank's score-only clients (``_engine_rescore_clients``); a trajectory's rows go to one
+        server so its turns share the prefix cache. Never raises: a rank-local raise here would desync
+        the collectives that follow, so a failed step is reported (``sampling/engine_rescore_miss_frac``,
         a warning, an error when nothing succeeded) and trains on the trainer's reference.
         """
         clients = self._engine_rescore_clients()

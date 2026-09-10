@@ -18,7 +18,7 @@ from accelerate.utils import is_peft_model
 from transformers import TrainerCallback
 from trl.extras.profiling import profiling_context
 
-from src.distributed.nccl.clients.base import resolve_sync_device
+from src.distributed.nccl.clients.base import BaseWeightSyncClient, resolve_sync_device
 from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import broadcast_from_rank0, get_num_nodes
 from src.environments.episode import RolloutResult
@@ -92,6 +92,8 @@ class AsyncRolloutMixin:
         """Rollout-manager, weight-sync-client and prefetch state, before any of them is built."""
         self._rollout_manager = None
         self._weight_sync_client = None  # one engine client, or an InferenceClientManager over several
+        # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference); built on first use.
+        self._engine_rescore_clients_list: list[BaseWeightSyncClient] | None = None
         self._loop = None
         # Two separate questions: which client shape to build (a configs list of any length carries
         # its own per-server url/ports) and how many engines serve (a one-entry list is one server).
@@ -263,6 +265,27 @@ class AsyncRolloutMixin:
                 f"{client_cls.BACKEND_NAME} weight-sync client initialized: {self.async_config.rollout_server_url}, "
                 f"device={device}, group_port={self.args.vllm_group_port}"
             )
+
+    def _engine_rescore_clients(self) -> list[BaseWeightSyncClient]:
+        """The score-only clients the engine re-score fans out over, one per rollout server.
+
+        Every rank builds its own: the re-score is an HTTP prefill each rank issues for its own rows,
+        unlike the weight sync, which only the main process drives over NCCL (its client is
+        ``None`` everywhere else). No communicator is formed — the constructor only opens the HTTP
+        session and checks the server.
+        """
+        if self._engine_rescore_clients_list is None:
+            client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
+            urls = (
+                [server["url"] for server in self.async_config.rollout_server_configs]
+                if self._multi_server_mode
+                else [self.async_config.rollout_server_url]
+            )
+            self._engine_rescore_clients_list = [
+                client_cls(base_url=url, connection_timeout=self.async_config.rollout_connection_timeout)
+                for url in urls
+            ]
+        return self._engine_rescore_clients_list
 
     def _cleanup_async_components(self):
         """Cleanup Ray actors and the engine weight-sync client(s)."""

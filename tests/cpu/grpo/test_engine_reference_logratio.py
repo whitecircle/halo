@@ -2,6 +2,7 @@
 re-scored rows (pure staleness), the trainer diff elsewhere; the re-score fans a trajectory's rows out
 to one server, never raises, and is refused at construction where it could not mean what it says."""
 
+import inspect
 import types
 from collections import defaultdict
 
@@ -13,6 +14,7 @@ from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import select_mask_logratio
+from src.trainers.grpo.rollout import async_rollouts
 
 PartialState()  # the re-score reports through accelerate's logger, which refuses to log without it
 
@@ -60,12 +62,51 @@ class _FakeClient:
 
 def _rescore_host(clients):
     host = types.SimpleNamespace(
-        _multi_server_mode=True,
-        _weight_sync_client=types.SimpleNamespace(clients=clients),
+        _engine_rescore_clients_list=clients,
+        _weight_sync_client=None,  # every rank but the main one holds no sync client
         _metrics={"train": defaultdict(list)},
     )
     host._engine_rescore_clients = DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)
     return DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine.__get__(host), host
+
+
+def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
+    """The weight-sync client exists on the main process only; the re-score runs on every rank, so
+    its clients come from the server URLs, score-only (no communicator), one per server."""
+    built = []
+
+    class _Scorer:
+        def __init__(self, base_url, connection_timeout):
+            built.append((base_url, connection_timeout))
+
+    monkeypatch.setattr(async_rollouts, "resolve_weight_sync_client", lambda backend: _Scorer)
+    host = types.SimpleNamespace(
+        _engine_rescore_clients_list=None,
+        _weight_sync_client=None,
+        _multi_server_mode=True,
+        async_config=types.SimpleNamespace(
+            rollout_backend="vllm",
+            rollout_connection_timeout=7.0,
+            rollout_server_configs=[{"url": "http://a:8000"}, {"url": "http://b:8001"}],
+        ),
+    )
+    clients = DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)()
+    assert built == [("http://a:8000", 7.0), ("http://b:8001", 7.0)]
+    assert DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)() is clients, "built once"
+    host.async_config.rollout_server_configs = []
+    host._multi_server_mode = False
+    host.async_config.rollout_server_url = "http://single:8000"
+    host._engine_rescore_clients_list = None
+    DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)()
+    assert built[-1] == ("http://single:8000", 7.0)
+
+
+def test_rescore_path_never_reads_the_main_process_sync_client():
+    for method in (
+        DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients,
+        DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine,
+    ):
+        assert "self._weight_sync_client" not in inspect.getsource(method), method.__name__
 
 
 def _rows():
