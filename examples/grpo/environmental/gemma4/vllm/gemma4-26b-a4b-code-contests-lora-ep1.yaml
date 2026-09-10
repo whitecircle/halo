@@ -1,10 +1,15 @@
 # Environmental GRPO — Gemma-4 26B-A4B on Codeforces, LoRA (r=64, attention projections), no EP, ZeRO-2,
 # KL-free (bands + IS masking as trust region).
+# Known issue: on the multi-turn tool trajectories this env produces, every trajectory is masked by the IS
+#   band on both engines (sampling/is_masked_traj_frac 1, logratio_mean about -0.7) and the run trains
+#   nothing (agent-docs/reference/troubleshooting.md).
 # Known issue: on the multimodal checkpoint PEFT refuses these targets (the vision tower's `q_proj` is a
 #   `Gemma4ClippableLinear`, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
 # Serving needs the patched vllm-server image (layerwise-reload covers Gemma4Router) + --moe-backend triton,
 #   plus --enable-auto-tool-choice --tool-call-parser hermes: code_contests is a native-tool env, and a
-#   server with no tool parser 400s every rollout while the wrong one leaves calls as text (reward 0).
+#   server with no tool parser 400s every rollout while the wrong one leaves calls as text (reward 0);
+#   plus --reasoning-parser gemma4 with VLLM_USE_V2_MODEL_RUNNER=0 in the server env: the per-effort
+#   thinking_tokens profile sends thinking_token_budget on every request, which vLLM 400s without them.
 # This file targets vLLM; the sibling `../sglang/` config runs the same recipe on SGLang.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
@@ -82,11 +87,9 @@ episode_timeout: 2700         # whole-episode wall clock; must stay below the NC
 rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_max_tokens: 22000              # per-turn total (CoT + a 4k answer headroom; 2k left a finished
-                                       # thought too little room to emit its tool call). It is the ONLY
-                                       # CoT bound here: rollout_max_thinking_tokens is left unset, and
-                                       # taking it needs the server on VLLM_REASONING_PARSER=gemma4 (0.26.0
-                                       # does register one) AND VLLM_USE_V2_MODEL_RUNNER=0, else every
-                                       # rollout 400s
+                                       # thought too little room to emit its tool call).
+                                       # rollout_max_thinking_tokens stays unset: the per-effort thinking_tokens
+                                       # profile is the CoT cap (server flags in the header)
 reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
                                  # so length control is engine-side instead (per-effort caps)
 

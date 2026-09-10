@@ -239,12 +239,15 @@ docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
 
 VLLM_MODEL=/data/checkpoints/gemma-4-26b-a4b-ultrachat-ep8 \
 VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
+VLLM_REASONING_PARSER=gemma4 VLLM_USE_V2_MODEL_RUNNER=0 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
 That command already passes the required `--moe-backend triton`; Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync.
+weight sync. The reasoning parser and the V1 model runner are what the per-effort
+`thinking_tokens` profile needs: the trainer sends `thinking_token_budget` on every
+request, and vLLM refuses it with a 400 without them.
 
 For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
 trainer will not use.
