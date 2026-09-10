@@ -443,6 +443,36 @@ async def test_sglang_length_cutoff_survives_the_rollout_transport():
     )
 
 
+async def test_a_turn_that_used_its_whole_cap_is_a_cut_even_when_vllm_says_tool_calls():
+    """vLLM labels the finish ``tool_calls`` whenever its parser extracted a call, including one it
+    salvaged from a turn max_tokens cut mid-call (the name survives, the arguments come back ``{}``).
+    The transport reads the cap off ``usage.completion_tokens`` so the env takes the cut path."""
+    from src.environments.ray_actors import RolloutConfig
+    from src.inference.response import FINISH_REASON_LENGTH
+
+    actor = _make_actor("native_math")
+    salvaged = {"id": "c1", "type": "function", "function": {"name": "python_repl", "arguments": "{}"}}
+    session = _FakeChatCompletionsSession(
+        {
+            "choices": [
+                {
+                    "message": {"content": "Let me implement this", "tool_calls": [salvaged]},
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"completion_tokens": 4300},
+        }
+    )
+
+    generation = await actor._generate(
+        session, "server:8000", [{"role": "user", "content": "2+2?"}], RolloutConfig(max_retries=0, max_tokens=4300)
+    )
+
+    assert generation.finish_reason == FINISH_REASON_LENGTH, (
+        "a completion that consumed max_tokens was taken at vLLM's word: the salvaged call executes as a malformed one"
+    )
+
+
 # Test: stateful-env session cleanup across rollouts (leak fix)
 
 

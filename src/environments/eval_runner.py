@@ -34,7 +34,7 @@ from src.environments.episode import (
     step_context_from_generation,
 )
 from src.inference.openai_client import generate_openai_response
-from src.inference.response import FINISH_REASON_LENGTH
+from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +202,10 @@ async def run_episode(
                 logger.warning("generation failed, ending episode early", exc_info=True)
                 break
 
-            finish_reasons.append(resp.finish_reason)
+            finish_reason = get_finish_reason(
+                resp, completion_tokens=resp.completion_tokens, max_tokens=episode_rollout.max_tokens
+            )
+            finish_reasons.append(finish_reason)
             completion_tokens += resp.completion_tokens or 0
             # The same stamp the training rollout uses, so an eval treats a turn cut off at the token
             # cap the way training does instead of grading the fragment.
@@ -211,7 +214,7 @@ async def run_episode(
                 tool_calls=serialize_tool_calls(resp.tool_calls),
                 reasoning=resp.reasoning or "",
                 tokens=resp.completion_tokens or 0,
-                finish_reason=resp.finish_reason,
+                finish_reason=finish_reason,
             )
             steps = await episode.step([eid], [gen.text], [step_context_from_generation(context, gen)])
             step = steps[0]

@@ -316,7 +316,9 @@ class EnvironmentActor:
                 routing_mask=routing_mask,
                 routing_prompt_tokens=routing_prompt_tokens,
                 prompt_token_ids=prompt_token_ids,
-                finish_reason=get_finish_reason(choice),
+                finish_reason=get_finish_reason(
+                    choice, completion_tokens=usage.get("completion_tokens"), max_tokens=config.max_tokens
+                ),
             )
 
         return await _request()
