@@ -561,7 +561,7 @@ libfabric provider, and GB/s. `--expect efa|ib|socket|p2p|shm` makes it a gate (
 mismatch, on an altered served model, or when the group fails to form); flags on
 [Scripts](../reference/scripts-reference.md#profiling--benchmarks).
 
-Measured on 4× p6-b300, trainer node → server node, one worker, the trainer's own streamed path
+Measured on 8× B300 nodes, trainer node → server node, one worker, the trainer's own streamed path
 (`update_named_param` per gathered tensor, `reset_prefix_cache`), full model per sync (NIC line
 rate ~100 GB/s per GPU; a raw NCCL broadcast reaches 93 GB/s); the per-model columns are the
 per-sync cost at that rate:
@@ -643,7 +643,7 @@ count), before any sync.
 
 Undistributed MoE (`ep_group_size == 1`, EP wrappers present) works at 20B-MoE scale with
 multi-server serving (2×TP=2 and 4×TP=1), expert sync, R3 rollout replay, and a flat
-trainer↔engine log-ratio. Over EFA, with the trainer on one p6-b300 node and the server on another,
+trainer↔engine log-ratio. Over EFA, with the trainer on one B300 node and the server on another,
 the end-to-end rows pass for both engines: vLLM at EP=2, TP=2 and EP=1 + LoRA (Qwen3-30B-A3B),
 SGLang at EP=2 (gpt-oss-20b), and a trainer spanning two nodes (one GPU each, EP=1, DTensor
 experts over the fabric) against vLLM on a third ([Servers on other nodes](#servers-on-other-nodes-efa)).
