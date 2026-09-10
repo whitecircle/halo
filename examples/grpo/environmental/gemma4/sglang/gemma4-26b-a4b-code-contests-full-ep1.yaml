@@ -112,6 +112,8 @@ beta: 0.0
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28
+isr_engine_reference: false  # the engine re-score costs server headroom and removes only the trainer<->engine
+                             #   part of the numerical floor; the band below is sized above the whole floor
 isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
 isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
 isr_veto_min: 1.0e-4

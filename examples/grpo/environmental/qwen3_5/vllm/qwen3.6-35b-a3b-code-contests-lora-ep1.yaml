@@ -120,9 +120,10 @@ epsilon: 0.2
 epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
-isr_engine_reference: true   # band/veto/OPSM read engine-prefill vs engine-sampling: the trainer<->engine part drops out,
-isr_geo_band_min: 0.98       #   the engine's decode-vs-prefill floor (~0.003/token at entropy 0.4) stays and grows with entropy;
-isr_geo_band_max: 1.02       #   on sustained masking at LOW entropy fix the disagreement, never widen the band
+isr_engine_reference: false  # the engine re-score needs ~12 GB of server headroom (an 8192-token prefill chunk's fp32
+                             #   log-softmax over a 248k vocab) and removes only the trainer<->engine part of the floor
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
+isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # zero the step's gradient when > this fraction of trajectories is masked

@@ -604,6 +604,7 @@ the server must own a GPU outside `TRAINER_CUDA_DEVICES`.
   caps a turn; on vLLM `rollout_max_thinking_tokens` caps CoT engine-side, on SGLang only the
   environment's per-effort budgets price it.
 - **Memory**: raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 when the server GPUs
+- **`isr_engine_reference` headroom**: the trainer's engine re-score sends `prompt_logprobs` requests, and vLLM materializes an fp32 log-softmax over the vocabulary for every prefill chunk of one (`max_num_batched_tokens × vocab × 4 B`, 8 GB at 8192 × 248k) outside its memory profile — at 0.90 the engine dies of CUDA OOM under load. Serve at `--gpu-memory-utilization` ≤ 0.80 or a smaller `--max-num-batched-tokens` when that knob is on.
   are dedicated; more KV cache means more concurrent rollouts per server. Do not pass
   `--enforce-eager` — the in-place weight sync keeps captured CUDA graphs valid, and CUDA-graph
   decode is several-fold faster on long generations. On B200 pin the backend through the compose

@@ -224,7 +224,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "decode-vs-prefill floor), sampling/numerics_logratio_mean (trainer minus engine-prefill) "
             "and sampling/engine_rescore_coverage. Requires the IS correction, rollout_temperature "
             "and rollout_top_p of 1.0 (prefill log-probs are the raw distribution); vLLM re-scores through "
-            "the completions prompt_logprobs echo, SGLang through /generate with logprob_start_len."
+            "the completions prompt_logprobs echo, SGLang through /generate with logprob_start_len. The "
+            "server must hold headroom for that pass: vLLM materializes an fp32 log-softmax over the "
+            "vocabulary for every prefill chunk of a prompt_logprobs request (max_num_batched_tokens x "
+            "vocab x 4 B — 8 GB at 8192 x 248k, outside its memory profile), so serve with "
+            "--gpu-memory-utilization <= 0.80 or a smaller --max-num-batched-tokens; at 0.90 the "
+            "engine dies of CUDA OOM under load."
         },
     )
 
