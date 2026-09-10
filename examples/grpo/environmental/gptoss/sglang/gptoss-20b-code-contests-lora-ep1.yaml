@@ -128,9 +128,9 @@ beta: 0.0
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28
-isr_engine_reference: true   # mask stages read the engine's current-vs-sampling log-ratio: pure staleness, no numerical floor
-isr_geo_band_min: 0.98       # trajectory geometric-mean band on that staleness; on sustained masking lower LR, never widen
-isr_geo_band_max: 1.02
+isr_engine_reference: true   # band/veto/OPSM read engine-prefill vs engine-sampling: the trainer<->engine part drops out,
+isr_geo_band_min: 0.98       #   the engine's decode-vs-prefill floor (~0.003/token at entropy 0.4) stays and grows with entropy;
+isr_geo_band_max: 1.02       #   on sustained masking at LOW entropy fix the disagreement, never widen the band
 isr_veto_min: 1.0e-4
 isr_opsm_delta: 0.05
 skip_update_masked_frac: 0.4
