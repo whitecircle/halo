@@ -1,9 +1,11 @@
-"""Engine-agnostic half of the weight-sync clients: HTTP plumbing, group addressing, host buffering.
+"""Engine-agnostic half of the weight-sync clients: HTTP plumbing, group addressing, chunk staging.
 
 Both supported rollout engines take the same shape: the trainer joins the engine's process group as
 rank 0 and, while the engine is quiesced, streams the gathered parameters to it in byte-bounded
-chunks. Both wire protocols are chunk-oriented (one quiesce, N declared payloads), so the host holds
-at most one chunk instead of a full model of pinned RAM on the forwarding rank. Only the HTTP verbs
+chunks. Both wire protocols are chunk-oriented (one quiesce, N declared payloads), so the forwarding
+rank stages at most one chunk on its sync GPU instead of a full model. Staged on the device, not in
+pinned host memory: a chunk that transits the host is copied out and back over PCIe before it
+reaches the NIC, and those two copies, not the fabric, would set the sync rate. Only the HTTP verbs
 and the broadcast transport differ; those are in ``VLLMWeightSyncClient`` / ``SGLangWeightSyncClient``.
 
 The gather layer (``src/trainers/grpo/rollout/weight_sync.py``) drives whichever client it is given
@@ -15,6 +17,7 @@ import logging
 import socket
 import threading
 import time
+from collections.abc import Iterable, Mapping
 from typing import NamedTuple
 from urllib.parse import urlparse
 
@@ -26,15 +29,10 @@ from torch.distributed.tensor import DTensor
 from urllib3.util.retry import Retry
 
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
-from src.env import env_str
+from src.env import env_positive_int, env_str
 
 logger = logging.getLogger(__name__)
 
-# Host-side budget for one streamed chunk. The buffer drains into the engine as soon as it is
-# reached, so the forwarding rank's host footprint is this plus the largest single tensor (one above
-# the budget becomes its own chunk, since both wire protocols describe whole tensors). Matched to the
-# packed transport's staging buffer, which a chunk is re-packed into.
-WEIGHT_SYNC_CHUNK_BYTES = DEFAULT_PACKED_BUFFER_SIZE_BYTES
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "0.0.0.0", "::1", "localhost"}
 # UDP "connect" target used only to make the kernel pick this host's outbound interface, whose local
@@ -59,6 +57,8 @@ _HEALTH_RETRY_INTERVAL_S = 2.0
 # Sampler-logprob semantics probe: 1-token completions of one prompt under three sampler settings.
 _LOGPROB_PROBE_PROMPT = "The capital of France is"
 _LOGPROB_PROBE_TIMEOUT_S = 60.0
+# A re-score is one prefill of a training row: a 250k-token row on a server that is also generating.
+_RESCORE_TIMEOUT_S = 600.0
 _LOGPROB_PROBE_TEMPERATURE = 2.0
 _LOGPROB_PROBE_TOP_P = 0.5
 # Temperature-processed logprobs halve the top-1/top-2 gap at temperature 2; raw ones leave it whole.
@@ -67,27 +67,86 @@ _TEMPERATURE_APPLIED_GAP_RATIO_MAX = 0.75
 _NUCLEUS_RENORM_MIN_SHIFT_NATS = 1e-3
 
 
+def resolve_weight_sync_chunk_bytes() -> int:
+    """Budget for one streamed chunk on the sync GPU: ``HALO_WEIGHT_SYNC_CHUNK_MB``, default 1024.
+
+    The staged chunk drains into the engine as soon as the budget is reached, so the forwarding
+    rank's staged footprint is this plus the largest single tensor (one above the budget becomes its
+    own chunk, since both wire protocols describe whole tensors); the SGLang client's staging arena
+    is at least this size, while the vLLM producer's packed buffers stay at their own size. Each
+    chunk costs one engine round trip, so a larger budget trades staged memory for fewer round trips
+    (the vLLM path's remaining per-chunk cost).
+    """
+    return env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", DEFAULT_PACKED_BUFFER_SIZE_BYTES >> 20) << 20
+
+
+WEIGHT_SYNC_CHUNK_BYTES = resolve_weight_sync_chunk_bytes()
+
+
 def payload_bytes(tensor: torch.Tensor) -> int:
     """Wire size of one tensor, the unit the chunk budgets below are counted in."""
     return tensor.numel() * tensor.element_size()
+
+
+def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], list[str], list[list[int]]]:
+    """``(names, dtype names, shapes)`` of one chunk in wire order: what both engines' update requests
+    declare ahead of the broadcasts, so the consumer allocates and unpacks against them."""
+    names = [name for name, _ in chunk]
+    dtypes = [str(param.dtype).split(".")[-1] for _, param in chunk]
+    shapes = [list(param.shape) for _, param in chunk]
+    return names, dtypes, shapes
 
 
 def starts_new_chunk(buffered_bytes: int, item_bytes: int, budget: int) -> bool:
     """Whether the next tensor must open a new chunk; the budget is applied before it is exceeded.
 
     Cutting after the budget is reached would put the tensor that crossed it into the chunk that goes
-    out, costing a budget's worth of extra pinned host memory on the trainer and the same overshoot in
+    out, costing a budget's worth of extra staged memory on the trainer and the same overshoot in
     the engine's receive buffers. A tensor larger than the budget gets a chunk of its own, since both
     wire protocols describe whole tensors.
     """
     return buffered_bytes > 0 and buffered_bytes + item_bytes > budget
 
 
-def chunk_by_bytes(named_params: list[tuple[str, torch.Tensor]], budget: int) -> list[list[tuple[str, torch.Tensor]]]:
+def _co_load_key(name: str, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:
+    """``(group index, module prefix)`` of a parameter one of ``groups`` claims, else ``None``."""
+    for index, suffixes in enumerate(groups):
+        for suffix in suffixes:
+            if name == suffix or name.endswith("." + suffix):
+                return index, name[: len(name) - len(suffix)]
+    return None
+
+
+def split_co_loaded(
+    chunk: list[tuple[str, torch.Tensor]], groups: tuple[tuple[str, ...], ...]
+) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
+    """``(sendable, held)``: the members of a co-load group not yet complete in ``chunk`` are held.
+
+    An engine whose loader fuses a module's tensors from a cache local to one request drops a member
+    that arrives without the rest, so the incomplete set waits for the chunk its partners land in.
+    Order is preserved on both sides.
+    """
+    keys = [_co_load_key(name, groups) for name, _ in chunk]
+    members: dict[tuple[int, str], set[str]] = {}
+    for (name, _), key in zip(chunk, keys, strict=True):
+        if key is not None:
+            members.setdefault(key, set()).add(name)
+    sendable, held = [], []
+    for item, key in zip(chunk, keys, strict=True):
+        complete = key is None or len(members[key]) == len(groups[key[0]])
+        (sendable if complete else held).append(item)
+    return sendable, held
+
+
+def chunk_by_bytes(
+    named_params: list[tuple[str, torch.Tensor]], budget: int, groups: tuple[tuple[str, ...], ...] = ()
+) -> list[list[tuple[str, torch.Tensor]]]:
     """Split a whole payload into chunks, on the same boundary rule the streamed path buffers by.
 
     One rule for both entry points, so a payload handed over in a single call is cut where streaming
-    it would have cut it rather than re-split by a second budget downstream.
+    it would have cut it rather than re-split by a second budget downstream. ``groups`` are the
+    engine's co-load groups (:func:`split_co_loaded`): a group a boundary would split moves whole
+    into the next chunk, and one the payload never completes raises, since the engine would drop it.
     """
     chunks: list[list[tuple[str, torch.Tensor]]] = []
     current: list[tuple[str, torch.Tensor]] = []
@@ -95,12 +154,17 @@ def chunk_by_bytes(named_params: list[tuple[str, torch.Tensor]], budget: int) ->
     for name, param in named_params:
         item_bytes = payload_bytes(param)
         if starts_new_chunk(current_bytes, item_bytes, budget):
-            chunks.append(current)
-            current, current_bytes = [], 0
+            sendable, current = split_co_loaded(current, groups)
+            if sendable:
+                chunks.append(sendable)
+            current_bytes = sum(payload_bytes(param) for _, param in current)
         current.append((name, param))
         current_bytes += item_bytes
     if current:
-        chunks.append(current)
+        sendable, held = split_co_loaded(current, groups)
+        if held:
+            raise ValueError(f"co-loaded parameters never completed in this payload: {[name for name, _ in held]}")
+        chunks.append(sendable)
     return chunks
 
 
@@ -135,15 +199,29 @@ def _is_local_address(host: str) -> bool:
         return False
 
 
-def _host_snapshot(src: torch.Tensor, into: torch.Tensor | None = None) -> torch.Tensor:
-    """Copy ``src`` (already detached and contiguous) to the host, reusing ``into`` when given.
+def resolve_sync_device(device: torch.device | str | int) -> torch.device:
+    """The explicit ``cuda:N`` form of ``device``.
 
-    The buffer is page-locked exactly when the source is CUDA, and the D2H copy is async on the
-    caller's stream; the flush synchronizes before reading.
+    An index (0 included) and a bare ``"cuda"`` must name the same GPU the transport is formed on
+    and the snapshots are staged on, and ``torch.device("cuda")`` compares unequal to ``cuda:0``.
     """
-    host = torch.empty_like(src, device="cpu", pin_memory=src.is_cuda) if into is None else into
-    host.copy_(src, non_blocking=src.is_cuda)
-    return host
+    resolved = device if isinstance(device, torch.device) else torch.device(device)
+    if resolved.type == "cuda" and resolved.index is None:
+        resolved = torch.device("cuda", torch.cuda.current_device())
+    return resolved
+
+
+def snapshot_param(weights: torch.Tensor, device: torch.device | None) -> torch.Tensor:
+    """A contiguous copy of ``weights`` on ``device`` (the source's own when ``None``), never an alias.
+
+    A snapshot: an in-place mutation of the source after buffering (a PEFT unmerge, the next
+    optimizer step) cannot revert a staged weight before it is sent. One copy even from a strided
+    source, since ``copy_`` reads any layout. It is async on the caller's stream; the flush
+    completes it before a producer reads the tensor.
+    """
+    snapshot = torch.empty_like(weights, memory_format=torch.contiguous_format, device=device)
+    snapshot.copy_(weights.detach(), non_blocking=True)
+    return snapshot
 
 
 class _AsyncCall:
@@ -226,59 +304,6 @@ def validate_syncable_param(name: str, param: torch.Tensor) -> None:
         )
 
 
-class PinnedHostBufferPool:
-    """Recycled pinned host buffers for weight-sync snapshots, keyed by ``(shape, dtype)``.
-
-    Page-locking fresh memory is slow, so a new pinned buffer per param per sync stalls the trainer
-    for seconds at 20B+ scale; buffers are pinned once and reused across syncs. They are also reused
-    within a sync: :meth:`release` returns a chunk's buffers to the free list once that chunk is on
-    the wire, so the pool holds one chunk's worth rather than one buffer per parameter.
-
-    The free list is bounded by the same budget and a buffer past it is dropped. Retention is per
-    ``(shape, dtype)`` and one sync presents many shapes (per-expert tensors, dense layers, the
-    embedding pair), so an unbounded list would keep the largest chunk seen for every shape.
-
-    Reuse safety: a chunk's broadcast completes synchronously before its buffers are released, so a
-    released buffer is not in flight. A snapshot stays immutable only until the release that follows
-    its chunk; consumers must not retain references past it.
-    """
-
-    def __init__(self, budget: int):
-        self._budget = budget
-        self._free: dict[tuple[tuple[int, ...], torch.dtype], list[torch.Tensor]] = {}
-        self._free_bytes = 0
-        self._checked_out: list[torch.Tensor] = []
-
-    def snapshot(self, weights: torch.Tensor) -> torch.Tensor:
-        """Copy ``weights`` into a pooled host buffer (pinned on first use for this shape/dtype)."""
-        src = weights.detach().contiguous()
-        available = self._free.get((tuple(src.shape), src.dtype))
-        reused = available.pop() if available else None
-        if reused is not None:
-            self._free_bytes -= payload_bytes(reused)
-        host = _host_snapshot(src, reused)
-        self._checked_out.append(host)
-        return host
-
-    def release(self) -> None:
-        """Return the checked-out buffers to the free list, dropping what the budget cannot hold.
-
-        Call only once the chunk holding them has been fully broadcast.
-        """
-        for host in self._checked_out:
-            host_bytes = payload_bytes(host)
-            if self._free_bytes + host_bytes > self._budget:
-                continue  # dropped rather than pinned for the process lifetime (see the class docstring)
-            self._free.setdefault((tuple(host.shape), host.dtype), []).append(host)
-            self._free_bytes += host_bytes
-        self._checked_out = []
-
-    @property
-    def retained_bytes(self) -> int:
-        """Pinned host memory this pool is holding for reuse, bounded by its budget."""
-        return self._free_bytes
-
-
 class SamplerLogprobSemantics(NamedTuple):
     """What the engine's reported per-token logprobs already account for; ``None`` = the probe could not tell."""
 
@@ -287,7 +312,7 @@ class SamplerLogprobSemantics(NamedTuple):
 
 
 class BaseWeightSyncClient:
-    """HTTP session, group addressing and host-side parameter buffering shared by every engine.
+    """HTTP session, group addressing and chunk staging shared by every engine.
 
     Subclasses implement the engine-specific half (``init_communicator``, ``begin_weight_update``,
     ``_broadcast_chunk``, ``end_weight_update``, ``close_communicator``) and declare:
@@ -299,9 +324,14 @@ class BaseWeightSyncClient:
       the two servers can sit on different hosts.
     * ``RESUME_ENDPOINT`` / ``RESUME_PAYLOAD``: the route (and body, where the engine's handler takes
       a request object) that lifts the sync quiesce, used by :meth:`_lift_pause`.
-    * ``EXPERT_LAYOUT`` (default ``"unfused"``): which expert layout this engine's loader accepts.
-    * ``SUPPORTS_EXPERT_PARALLEL`` (default ``True``): whether this engine's weight sync works
-      alongside DeepEP in one trainer process, read by the gather layer.
+    * ``UNSERVABLE_MODEL_TYPES`` / ``CO_LOADED_PARAM_GROUPS``: the engine's loader facts the trainer
+      side reads — which families it cannot serve, and which parameters its loader consumes only
+      together.
+    * ``SUPPORTS_ENGINE_RESCORE`` (default ``True``): whether :meth:`score_completion_logprobs` can
+      re-score a token sequence under the engine's current weights (the ``isr_engine_reference``
+      trust region), read by the trainer's construction gate. The base implementation is the OpenAI
+      completions ``prompt_logprobs`` echo (vLLM); an engine with a different prefill-log-prob route
+      overrides the method (SGLang: ``/generate`` with ``logprob_start_len``).
     """
 
     BACKEND_KEY = ""
@@ -313,16 +343,16 @@ class BaseWeightSyncClient:
     # dataclass rejects an empty body, so it declares {}.
     RESUME_ENDPOINT: str
     RESUME_PAYLOAD: dict | None = None
-    # Which expert layout this engine's loader accepts. vLLM takes the per-expert tensors, SGLang the
-    # fused pair transformers stores, and the gather must produce whichever the receiver expects; the
-    # other is rejected on arrival, mid-update. Both spellings are named so the gather can recognize
-    # either, rather than routing an unrecognized third layout into a `!=` branch.
-    UNFUSED_EXPERT_LAYOUT = "unfused"
-    FUSED_EXPERT_LAYOUT = "fused"
-    EXPERT_LAYOUT = UNFUSED_EXPERT_LAYOUT
-    # Whether this engine's weight sync survives alongside DeepEP in one trainer process. Declared
-    # per client because the obstruction is the engine's transport, not anything about the model.
-    SUPPORTS_EXPERT_PARALLEL = True
+    # ``model_type`` → why this engine cannot serve the family (no model class registered, or a loader
+    # that cannot take an online update of the layout the trainer holds). Quoted by the construction
+    # gate; per engine, since the two pinned servers register different rosters.
+    UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
+    # Parameter-name suffixes the engine's loader consumes only as a set, per module: each entry lists
+    # the suffixes, and parameters sharing the prefix before them must ride one chunk. Empty where the
+    # engine loads every tensor on its own. Scoped per model by :meth:`scope_co_load_groups`.
+    CO_LOADED_PARAM_GROUPS: tuple[tuple[str, ...], ...] = ()
+    # Whether the engine can return per-token log-probs of a given sequence under its current weights.
+    SUPPORTS_ENGINE_RESCORE = True
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal that
     # follows one. Declared per client because it follows from the engine's own reload model.
     INTERRUPTED_UPDATE_STATE = "a model that is part old weights and part new"
@@ -331,6 +361,8 @@ class BaseWeightSyncClient:
     # than inferred: the flush runs on a worker thread when several servers sync at once, and torch's
     # current device and current stream are both thread-local.
     _sync_device: torch.device | None = None
+    # Cached by ``served_model_id``; None until the first completions-route call.
+    _served_model_id: str | None = None
     # Set once an interrupted sync left the engine unservable; every later sync is refused with it.
     _unusable_reason: str | None = None
     # Update-phase state, defaulted here as well as set in ``__init__``: the methods reading it decide
@@ -429,6 +461,40 @@ class BaseWeightSyncClient:
         resp = self.session.get(f"{self.base_url}/v1/models", timeout=timeout)
         resp.raise_for_status()
         return list(resp.json().get("data", []))
+
+    def served_model_id(self) -> str:
+        """The id the engine serves the policy under, read once and cached for the completions route."""
+        if self._served_model_id is None:
+            self._served_model_id = str(self.served_model_cards()[0]["id"])
+        return self._served_model_id
+
+    def score_completion_logprobs(self, prompt_ids: list[int], completion_ids: list[int]) -> list[float]:
+        """Per-token log-probs of ``completion_ids`` after ``prompt_ids`` under the engine's CURRENT
+        weights: one prefill through the completions ``prompt_logprobs`` echo, the raw (pre-sampler)
+        distribution. Raises on a transport, shape or key error — the caller decides what a failed
+        row means.
+        """
+        body = {
+            "model": self.served_model_id(),
+            "prompt": list(prompt_ids) + list(completion_ids),
+            "max_tokens": 1,
+            "prompt_logprobs": 0,
+            "temperature": 0.0,
+        }
+        resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=_RESCORE_TIMEOUT_S)
+        resp.raise_for_status()
+        entries = resp.json()["choices"][0]["prompt_logprobs"]
+        expected = len(prompt_ids) + len(completion_ids)
+        if entries is None or len(entries) != expected:
+            raise ValueError(
+                f"{self.BACKEND_NAME} returned {None if entries is None else len(entries)} prompt log-probs "
+                f"for a {expected}-token sequence"
+            )
+        # Keyed by the token id (as a string); the actual token is always present at prompt_logprobs=0.
+        return [
+            float(entry[str(tok)]["logprob"])
+            for tok, entry in zip(completion_ids, entries[len(prompt_ids) :], strict=True)
+        ]
 
     def served_max_model_len(self) -> int | None:
         """Context window the served model declares, or ``None`` when no card carries one."""
@@ -569,11 +635,14 @@ class BaseWeightSyncClient:
         it belongs to. Kept in one place so a bare or reconnected client cannot start with half of it."""
         self._param_buffer: list[tuple[str, torch.Tensor]] = []
         self._buffered_bytes = 0
+        self._co_load_groups = self.CO_LOADED_PARAM_GROUPS
         # A quiesced update this client opened mid-gather and has not closed yet.
         self._update_open = False
         # Chunks already on the wire in the open update. Non-zero means the engine is partly
         # rewritten, so no replay of this sync can put it back in a known state.
         self._chunks_sent = 0
+        # Recorded after the newest staged copy; the flush waits on it, not on the whole device.
+        self._staged_event: torch.cuda.Event | None = None
 
     @property
     def sync_device(self) -> torch.device | None:
@@ -581,16 +650,9 @@ class BaseWeightSyncClient:
         return self._sync_device
 
     def _resolve_sync_device(self, device: torch.device | str | int) -> torch.device:
-        """The explicit ``cuda:N`` form of ``device``, recorded as this client's :attr:`sync_device`.
-
-        The index is made explicit because ``torch.device("cuda")`` compares unequal to ``cuda:0`` and
-        carries no index for the D2H completion sync to name.
-        """
-        resolved = device if isinstance(device, torch.device) else torch.device(device)
-        if resolved.type == "cuda" and resolved.index is None:
-            resolved = torch.device("cuda", torch.cuda.current_device())
-        self._sync_device = resolved
-        return resolved
+        """Record :func:`resolve_sync_device` of ``device`` as this client's :attr:`sync_device`."""
+        self._sync_device = resolve_sync_device(device)
+        return self._sync_device
 
     def init_communicator(self, device: torch.device | str | int = 0):
         raise NotImplementedError
@@ -653,7 +715,7 @@ class BaseWeightSyncClient:
         # carry fails while the server is still serving.
         for name, param in named_params:
             validate_syncable_param(name, param)
-        chunks = chunk_by_bytes(named_params, WEIGHT_SYNC_CHUNK_BYTES)
+        chunks = chunk_by_bytes(named_params, WEIGHT_SYNC_CHUNK_BYTES, self._co_load_groups)
         self._open_update()
         try:
             for chunk in chunks[:-1]:
@@ -668,62 +730,82 @@ class BaseWeightSyncClient:
         """Sync every model param in one quiesced update."""
         self.sync_model_weights([(n, p.data) for n, p in model.named_parameters()])
 
-    @staticmethod
-    def snapshot_to_host(weights: torch.Tensor) -> torch.Tensor:
-        """One host snapshot of ``weights`` (pinned when the source is CUDA), copy-not-alias.
+    @classmethod
+    def scoped_co_load_groups(cls, module_names: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+        """``CO_LOADED_PARAM_GROUPS`` narrowed to the members whose module ``module_names`` carries.
 
-        The snapshot is read-only after creation, so one can be shared across several clients'
-        buffers (see ``buffer_host_param``). The D2H copy is async on the caller's stream;
-        ``reset_prefix_cache`` synchronizes before reading it.
+        An engine fuses a group only where the model declares every member (an MLA block without
+        ``q_lora_rank`` has no ``q_a_proj``), so a member no module spells is dropped, and a group
+        left with one member is complete on its own.
         """
-        return _host_snapshot(weights.detach().contiguous())
+        names = set(module_names)
 
-    def buffer_host_param(self, name: str, host: torch.Tensor):
-        """Buffer a pre-made host snapshot (from ``snapshot_to_host``) by reference, for the next chunk.
+        def declared(suffix: str) -> bool:
+            module = suffix.rsplit(".", 1)[0]
+            return any(name == module or name.endswith("." + module) for name in names)
 
-        The snapshot may be shared across clients (a multi-server fan-out buffers one pinned copy per
-        param), so it must not be mutated, and the sharer must not recycle it until every client has
-        sent the chunk holding it. This only buffers; the multi-server caller decides when the chunk
+        return tuple(tuple(suffix for suffix in group if declared(suffix)) for group in cls.CO_LOADED_PARAM_GROUPS)
+
+    def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
+        """Bind the co-load groups to the model whose modules ``module_names`` are, for every sync."""
+        self._co_load_groups = self.scoped_co_load_groups(module_names)
+
+    @property
+    def buffered_bytes(self) -> int:
+        """Bytes staged for the next chunk, the members held for a co-load partner included."""
+        return self._buffered_bytes
+
+    def buffer_param(self, name: str, snapshot: torch.Tensor):
+        """Buffer a pre-made snapshot (from ``snapshot_param``) by reference, for the next chunk.
+
+        The snapshot may be shared across clients (a multi-server fan-out stages one copy per param),
+        so it must not be mutated. This only buffers; the multi-server caller decides when the chunk
         goes out, which is what keeps the shared snapshots alive long enough for all of them.
         """
-        if host.device.type != "cpu":
-            raise ValueError(
-                f"buffer_host_param expects a CPU host snapshot for {name!r}, got {host.device} — "
-                f"buffering on-device tensors holds a full model copy until the flush. "
-                f"Use snapshot_to_host()."
-            )
-        self._param_buffer.append((name, host))
-        self._buffered_bytes += payload_bytes(host)
+        self._param_buffer.append((name, snapshot))
+        self._buffered_bytes += payload_bytes(snapshot)
+        if snapshot.is_cuda:
+            # Re-recorded per param on the copy's own stream (this thread's current one on that
+            # device), so the newest record covers every staged copy issued before it.
+            if self._staged_event is None:
+                self._staged_event = torch.cuda.Event()
+            self._staged_event.record(torch.cuda.current_stream(snapshot.device))
 
     def update_named_param(self, name: str, weights: torch.Tensor):
         """Buffer one gathered param, streaming a chunk to the engine whenever the next would overflow.
 
-        Buffered on CPU (pinned when the source is CUDA); buffering on GPU would hold a full model
-        copy on the forwarding rank. The host copy is a snapshot, so a later in-place mutation (e.g.
-        PEFT unmerge) cannot revert a buffered weight before it is sent. The chunk goes out mid-gather,
-        which bounds the host footprint; the caller's rank-uniform failure guard covers a failure here.
+        Staged on the sync GPU (see the module docstring for why not pinned host memory). The chunk
+        goes out mid-gather, which bounds the staged footprint to one chunk plus the largest tensor;
+        the caller's rank-uniform failure guard covers a failure here.
         """
         # On the source, before the snapshot. It cannot be checked before the quiesce: this path opens
         # the update as soon as the first chunk fills, so a later rejection lands mid-stream and the
         # abort path handles the engine's state.
         validate_syncable_param(name, weights)
-        host = self.snapshot_to_host(weights)
-        if starts_new_chunk(self._buffered_bytes, payload_bytes(host), WEIGHT_SYNC_CHUNK_BYTES):
+        # Flushed before the snapshot, so the staged chunk never holds more than the budget plus this
+        # param. Before init_communicator there is no sync device and the copy stays on the source's.
+        if starts_new_chunk(self._buffered_bytes, payload_bytes(weights), WEIGHT_SYNC_CHUNK_BYTES):
             self.flush_chunk()
-        self.buffer_host_param(name, host)
+        self.buffer_param(name, snapshot_param(weights, self.sync_device))
 
     def flush_chunk(self):
-        """Send what is buffered as one chunk, leaving the update open for the chunks that follow."""
-        if not self._param_buffer:
+        """Send what is buffered as one chunk, leaving the update open for the chunks that follow.
+
+        The members of a co-load group the buffer holds only part of stay buffered for the next
+        chunk (:func:`split_co_loaded`); a buffer that is nothing but such members sends nothing.
+        """
+        chunk, held = split_co_loaded(self._param_buffer, self._co_load_groups)
+        if not chunk:
             return
         # Completed before the quiesce, so a sticky CUDA error here leaves the engine serving rather
         # than paused behind a reload phase.
-        self._complete_host_snapshots()
+        self._complete_snapshots()
         self._open_update()
-        self.send_weights(self._param_buffer)
+        self.send_weights(chunk)
         # Dropped only once on the wire: a chunk that failed while the sync is still replayable is
-        # re-sent by the reconnect path, and draining first would lose those params.
-        self.drain_param_buffer()
+        # re-sent by the reconnect path, and dropping it first would lose those params.
+        self._param_buffer = held
+        self._buffered_bytes = sum(payload_bytes(snapshot) for _, snapshot in held)
 
     def reset_prefix_cache(self):
         """Send the tail chunk, close the update and resume the engine; no-op if nothing was buffered.
@@ -732,6 +814,15 @@ class BaseWeightSyncClient:
         """
         if not self._param_buffer and not self._update_open:
             return
+        # A group still incomplete at the tail never completes: the engine would take the half and
+        # drop it without error, so the update is refused rather than closed as landed.
+        _, held = split_co_loaded(self._param_buffer, self._co_load_groups)
+        if held:
+            raise RuntimeError(
+                f"the weight sync ended with co-loaded parameters missing their partners: "
+                f"{[name for name, _ in held]}. The {self.BACKEND_NAME} loader discards a half that "
+                f"arrives on its own, so this update cannot be closed as complete."
+            )
         self._open_update()
         self._close_update(self._param_buffer)
         self.drain_param_buffer()  # only once the tail landed — see flush_chunk
@@ -756,12 +847,12 @@ class BaseWeightSyncClient:
         """
         snapshot_error: Exception | None = None
         try:
-            self._complete_host_snapshots()
+            self._complete_snapshots()
         except Exception as e:
             # Inside the close rather than before it: the engine is already quiesced behind an open
             # reload only this close can end. The tail is dropped with it, since those copies may not
             # have landed.
-            logger.error(f"Weight-sync host snapshots did not complete for {self.base_url}: {e}")
+            logger.error(f"Weight-sync snapshots did not complete for {self.base_url}: {e}")
             snapshot_error, tail = e, []
             if self._chunks_sent:
                 # Dropping the tail after earlier chunks landed leaves the same mixed model a failed
@@ -774,17 +865,17 @@ class BaseWeightSyncClient:
         if snapshot_error is not None:
             raise snapshot_error
 
-    def _complete_host_snapshots(self) -> None:
-        """Complete the async D2H snapshot copies before a producer reads that host memory.
+    def _complete_snapshots(self) -> None:
+        """Complete the async snapshot copies before a producer's own streams read them.
 
-        Bound to :attr:`sync_device`, and a whole-device synchronize: the flush runs on a worker
-        thread once more than one server is synced at a time, and torch's current device and current
-        stream are both thread-local, so a fresh worker would complete device 0's copies while this
-        rank's are still in flight.
+        A host wait on the event recorded after the newest copy, not a whole-device synchronize: the
+        device also carries the previous chunk's broadcasts and, in a multi-server fan-out, every
+        other server's, and waiting for those serialized each chunk's tail with the next one. The
+        event is bound to the copies' own stream on the sync device, so it is correct from a worker
+        thread whose current device and stream are its own (both are thread-local).
         """
-        device = self.sync_device
-        if device is not None and device.type == "cuda":
-            torch.cuda.synchronize(device)
+        if self._staged_event is not None:
+            self._staged_event.synchronize()
 
     def abort_weight_update(self):
         """Close an update the sync opened but cannot finish, and drop what is still buffered.

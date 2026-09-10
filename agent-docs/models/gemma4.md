@@ -55,9 +55,17 @@ beside the per-layer fields: transformers 5.16 folds the full-attention layers' 
 the two keys (`_LEGACY_PER_LAYER_CONFIG_KEYS`) and the export rewrites them back
 ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
 
+Both pinned engines read the fused expert pair the gather emits, so RL weight sync runs on either
+`rollout_backend`. On SGLang it needs this repo's image: the router folds `scale` into its norm once
+behind a latch, so a synced router weight would never reach routing, and `Dockerfile.sglang` patches
+that (`docker/sglang/patches/`). Gemma 4 has no routing replay on either engine
+([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+
 ## Configs
 
 Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-only under EP=8 at 32,768 max length. Example: `examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml`. The multimodal class loads either way, but a text-only dataset takes the **text** data path, which is what makes `packing` legal here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
+
+Environmental GRPO: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Environmental GRPO](../training-methods/grpo/environmental-grpo.md#chunked-log-probs)). The `-lora-` files are refused at PEFT setup on the multimodal checkpoint (the vision tower's projections share the `q_proj`…`o_proj` names in a `Gemma4ClippableLinear` PEFT cannot wrap — open issue, [Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix)).
 
 **Long-context attention**: Gemma 4's full-attention layers run at `global_head_dim=512`, which every FlashAttention kernel and cuDNN SDPA reject (FA2 caps at 256; FA4's SM100 kernel overflows tensor memory). `load_distributed_model` redirects any FlashAttention impl to SDPA for Gemma 4, then `patch_sdpa_for_gemma4_long_seq()` forces the mem-efficient SDPA kernel — the only backend handling this head dim — with manual KV repeat (`use_gqa_in_sdpa → False`). That avoids the math kernel's `[B, heads, S, S]` score matrix, which OOMs at seq 32k. Set `attn_implementation: sdpa` to skip the warning.
 

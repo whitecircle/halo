@@ -1,14 +1,13 @@
 #!/usr/bin/env python
-"""EP families vLLM cannot load must be rejected at trainer construction, not at the first sync.
+"""EP families no engine can load must be rejected at trainer construction, not at the first sync.
 
-``sync_weights_to_client`` forwards trainer parameter names straight into vLLM's
+``sync_weights_to_client`` forwards trainer parameter names straight into the engine's
 ``model.load_weights``, so a family whose served implementation uses a different checkpoint
 namespace than the HuggingFace module tree the trainer trains has nowhere to put the weights.
-DeepSeek-V4 is that family: vLLM serves it from an out-of-tree package that loads per-expert
-``layers.{i}.ffn.experts.{e}.w{1,3,2}.weight`` (fp8/fp4) while the EP wrapper gathers fused bf16
-``model.layers.{i}.mlp.experts.gate_up_proj`` — and the dense namespace differs too
-(``attn.fused_wqa_wkv`` vs ``self_attn.q_a_proj``/``q_b_proj``, ``embed.weight`` vs
-``model.embed_tokens.weight``). ``validate_weight_sync_support`` is the construction gate.
+Inkling is that family: its hub keeps Thinking Machines' namespace (``model.llm.*``, ``wq_du``,
+interleaved ``w13_weight``) that only a from_pretrained conversion maps onto the module tree, so
+the module-spelled names the sync sends land nowhere on either engine.
+``validate_weight_sync_support`` is the construction gate.
 
 Run: ``python tests/cpu/grpo/test_grpo_weight_sync_ep_family_gate.py`` (or ``pytest -m cpu``).
 """
@@ -22,19 +21,14 @@ from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
 
-# Families whose gathered export vLLM cannot load under the names the sync sends; each reason is
-# stated at the class declaration. Relaxing one out means its export was made to match vLLM's loader.
-# Inkling: the hub namespace is WeightConverters-only. Cohere2 MoE: no validated end-to-end sync.
-# GLM-5 Next: the KDA/hyper-connection module tree exists only behind a from_pretrained conversion.
-# Mistral4: vLLM 0.26.0 registers no mistral4 class, so there is no namespace the sync could match.
-# Step-3.7 is NOT here: ``_EXPORTS_HUB_NAMESPACE`` sends hub names (test_weight_sync_hub_namespace.py).
+# Families whose gathered export no engine can load under the names the sync sends; each reason is
+# stated at the class declaration. What one engine alone cannot serve is that engine client's
+# ``UNSERVABLE_MODEL_TYPES`` (test_rollout_backend_selection.py); Step-3.7 sends hub names
+# (test_weight_sync_hub_namespace.py) and is not here.
 EXPECTED_UNSUPPORTED = {
     "EPCohere2MoELayer",
-    "EPDeepseekV4MoELayer",
     "EPGlm5NextMoELayer",
     "EPInklingMoELayer",
-    "EPMistral4MoELayer",
-    "EPZayaMoELayer",
 }
 
 
@@ -79,11 +73,13 @@ def test_unsupported_family_roster_is_pinned():
     assert unsupported == EXPECTED_UNSUPPORTED
 
 
-def test_gate_rejects_unsupported_ep_family():
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_gate_rejects_unsupported_ep_family(backend):
+    """The family flag is engine-independent: what no gather can spell lands on neither engine."""
     model = nn.Module()
     model.mlp = _UnsupportedEPModuleStub()
-    with pytest.raises(ValueError, match="does not support vLLM weight sync"):
-        validate_weight_sync_support(model)
+    with pytest.raises(ValueError, match="does not support weight sync"):
+        validate_weight_sync_support(model, backend)
 
 
 def test_gate_reports_the_offending_module_path():
@@ -91,13 +87,13 @@ def test_gate_reports_the_offending_module_path():
     model = nn.Module()
     model.layers = nn.ModuleList([_EPModuleStub(), _UnsupportedEPModuleStub()])
     with pytest.raises(ValueError, match=r"layers\.1"):
-        validate_weight_sync_support(model)
+        validate_weight_sync_support(model, "vllm")
 
 
 def test_gate_passes_supported_ep_family():
     model = nn.Module()
     model.mlp = _EPModuleStub()
-    validate_weight_sync_support(model)  # must not raise
+    validate_weight_sync_support(model, "vllm")  # must not raise
 
 
 def test_gate_ignores_non_ep_modules_declaring_the_flag():
@@ -106,7 +102,7 @@ def test_gate_ignores_non_ep_modules_declaring_the_flag():
     model = nn.Module()
     model.dense = nn.Linear(4, 4)
     model.dense._supports_weight_sync = False
-    validate_weight_sync_support(model)  # must not raise
+    validate_weight_sync_support(model, "vllm")  # must not raise
 
 
 def test_gate_survives_a_peft_wrapper_around_a_supported_family():
@@ -114,15 +110,15 @@ def test_gate_survives_a_peft_wrapper_around_a_supported_family():
     would raise AttributeError on a family that IS supported."""
     model = nn.Module()
     model.mlp = _PeftStyleWrapper(_EPModuleStub())
-    validate_weight_sync_support(model)  # must not raise
+    validate_weight_sync_support(model, "vllm")  # must not raise
 
 
 def test_gate_still_rejects_an_unsupported_family_behind_a_peft_wrapper():
     """Skipping the wrapper must not lose the rejection — the wrapped layer is its own child module."""
     model = nn.Module()
     model.mlp = _PeftStyleWrapper(_UnsupportedEPModuleStub())
-    with pytest.raises(ValueError, match="does not support vLLM weight sync"):
-        validate_weight_sync_support(model)
+    with pytest.raises(ValueError, match="does not support weight sync"):
+        validate_weight_sync_support(model, "vllm")
 
 
 if __name__ == "__main__":

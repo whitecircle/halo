@@ -20,6 +20,7 @@ from src.distributed.nccl.clients.base import (
     BaseWeightSyncClient,
     _AsyncCall,
     _wait_for_calls,
+    describe_chunk,
 )
 from src.distributed.nccl.transport.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -74,6 +75,22 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
     BACKEND_NAME = "vLLM"
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
     RESUME_ENDPOINT = _EP_RESUME
+    UNSERVABLE_MODEL_TYPES = {
+        "zaya": "vLLM 0.26.0 ships no Zaya implementation (agent-docs/models/zaya.md)",
+        "mistral4": (
+            "vLLM 0.26.0 registers no Mistral4ForCausalLM and maps no mistral4 model_type, so the "
+            "composite loader has no class for the text tower a toolkit export writes "
+            "(agent-docs/models/mistral4.md#serving)"
+        ),
+        "deepseek_v4": (
+            "vLLM 0.26.0's DeepSeek-V4 loader targets the fp8/fp4-packed release layout, which no gather can emit"
+        ),
+        "bailing_hybrid": "vLLM 0.26.0 registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
+        "bailing_moe_linear": (
+            "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where vLLM 0.26.0 registers "
+            "BailingMoeV2_5ForCausalLM"
+        ),
+    }
     # The layerwise reload processes a layer once all its tensors arrived; one whose tensors straddled
     # the interrupted chunk boundary is materialized from uninitialized storage while it waits for the
     # rest, and that storage is live once the phase closes.
@@ -293,17 +310,13 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
 
         ``/update_weights`` takes one chunk of an open session (``start_weight_update``, N chunks,
         ``finish_weight_update``), so the trainer streams the model rather than declaring it all at
-        once, which would hold the whole model in pinned host memory. ``final`` is unused here: this
+        once, which would stage the whole model on the forwarding rank. ``final`` is unused here: this
         engine's close is its own ``/finish_weight_update`` call.
         """
         del final
         # The payload was validated where it entered the client (before any quiesce); here it is only
         # described, in the order the consumer will unpack it.
-        names, dtype_names, shapes = [], [], []
-        for name, param in named_params:
-            names.append(name)
-            dtype_names.append(str(param.dtype).split(".")[-1])
-            shapes.append(list(param.shape))
+        names, dtype_names, shapes = describe_chunk(named_params)
 
         server_call: _AsyncCall | None = None
         try:
@@ -327,12 +340,18 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
                 ),
             )
 
-            # post_iter_func re-uploads CPU-buffered tensors pack by pack, so one pack transits the GPU.
+            # post_iter_func lands each tensor on the sync device; a no-op for the device-staged chunk.
             communicator = self._require_communicator()
             device = communicator.device
-            if self._packed_streams is None and torch.device(device).type == "cuda":
-                with torch.cuda.device(device):
-                    self._packed_streams = [torch.cuda.Stream() for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
+            if torch.device(device).type == "cuda":
+                if self._packed_streams is None:
+                    with torch.cuda.device(device):
+                        self._packed_streams = [torch.cuda.Stream() for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
+                # The whole-payload path packs live params, written by the caller's stream; the
+                # streamed path's snapshots are complete by now, so it costs that path nothing.
+                current = torch.cuda.current_stream(device)
+                for stream in self._packed_streams:
+                    stream.wait_stream(current)
             packed_broadcast_producer(
                 iterator=iter(named_params),
                 group=communicator,

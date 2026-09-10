@@ -1,14 +1,18 @@
 """CPU tests for the SGLang weight-sync client's teardown contract.
 
-Two facts are load-bearing and invisible in a passing run:
+Four facts are load-bearing and invisible in a passing run:
 
+  * the engine-side release of the group name runs WHILE the local ``dist.destroy_process_group``
+    runs, not after it returns: under NCCL's cuMem transports each side's finalize waits for the
+    other, so a local-first order parks the local destroy forever;
   * the atexit invocation must NOT enter ``dist.destroy_process_group``: the group's peers are
     engine processes that never enter destroy, so with an interrupted sync in flight the destroy
     BLOCKS rather than raises — wedging interpreter exit. The engine-side name release and the
     rendezvous-store drop still run, or the server refuses every future join under the name;
   * the explicit ``close_communicator()`` (the reconnect path) must keep the full local destroy,
     or the c10d group name and rendezvous port leak and the next client to the same server cannot
-    form its group;
+    form its group — unless a drain deadline aborted the group, after which torch has dropped its
+    bookkeeping and a destroy raises;
   * the quiesce this teardown has to lift is lifted on SGLang's OWN route, with the body its
     handler requires — the class attributes that carry both are read once, on a failing path, where
     a wrong value is a warning line and an engine left paused.
@@ -18,18 +22,14 @@ Two facts are load-bearing and invisible in a passing run:
 
 import inspect
 import sys
-from unittest.mock import patch
+import threading
 
 import pytest
 
 import src.distributed.nccl.clients.sglang as sglang_module
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.transport import torch_group
-
-
-def _offline_client() -> SGLangWeightSyncClient:
-    with patch.object(SGLangWeightSyncClient, "check_server"):
-        return SGLangWeightSyncClient(base_url="http://localhost:30000")
+from tests.common.weight_sync import offline_sglang_client
 
 
 def _teardown_probe(client, monkeypatch) -> list[tuple[str, object]]:
@@ -47,7 +47,7 @@ def test_the_pause_is_lifted_on_sglangs_own_route_with_a_body(monkeypatch):
     rejection surfaces only as a warning from ``_lift_pause``, leaving the engine quiesced and every
     later rollout queued behind it. Route and body are both class attributes; neither is otherwise
     exercised outside a live server."""
-    client = _offline_client()
+    client = offline_sglang_client()
     client._paused = True
     posts: list[tuple[str, dict]] = []
     monkeypatch.setattr(client, "_post_once", lambda path, **kwargs: posts.append((path, kwargs)))
@@ -60,7 +60,7 @@ def test_the_pause_is_lifted_on_sglangs_own_route_with_a_body(monkeypatch):
 
 
 def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):
-    client = _offline_client()
+    client = offline_sglang_client()
     group = object()
     client._group = group
     calls = _teardown_probe(client, monkeypatch)
@@ -73,8 +73,58 @@ def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):
     assert client._group is None and client._store is None
 
 
+def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch):
+    """The local destroy blocks until the engine drops its half, so the engine must already have been
+    asked by then. The fake destroy waits for the engine-side release to start; a client that only
+    releases the engine after the destroy returned never satisfies it."""
+    client = offline_sglang_client()
+    client._group = object()
+    remote_started = threading.Event()
+    monkeypatch.setattr(client, "_destroy_remote_group", remote_started.set)
+    seen_during_destroy: list[bool] = []
+    monkeypatch.setattr(
+        sglang_module,
+        "destroy_weight_update_group",
+        lambda group: seen_during_destroy.append(remote_started.wait(timeout=2.0)),
+    )
+
+    client.close_communicator()
+
+    assert seen_during_destroy == [True], (
+        "the engine-side /destroy_weights_update_group did not start while the local destroy ran — "
+        "under cuMem transports that order parks destroy_process_group forever"
+    )
+
+
+def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
+    """After a drain deadline aborted the group torch has already removed its bookkeeping; a destroy
+    raises "Invalid process group", and the engine-side release must still run."""
+    client = offline_sglang_client()
+    group = object()
+    client._group = group
+    client._aborted = True
+    calls = _teardown_probe(client, monkeypatch)
+
+    client.close_communicator()
+
+    assert all(kind != "destroy" for kind, _ in calls), "close entered dist.destroy_process_group on an aborted group"
+    assert ("drop", group) in calls
+    assert ("remote", None) in calls
+
+
+def test_a_client_that_never_formed_its_group_does_not_ask_the_engine_to_release_one(monkeypatch):
+    """A failed or never-attempted formation already released the engine side; a second close would
+    only post a redundant release and delay the teardown by its timeout."""
+    client = offline_sglang_client()
+    calls = _teardown_probe(client, monkeypatch)
+
+    client.close_communicator()
+
+    assert calls == [], f"close touched the group machinery with no group formed: {calls}"
+
+
 def test_the_atexit_invocation_skips_the_local_nccl_destroy(monkeypatch):
-    client = _offline_client()
+    client = offline_sglang_client()
     group = object()
     client._group = group
     calls = _teardown_probe(client, monkeypatch)

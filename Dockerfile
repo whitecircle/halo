@@ -249,33 +249,20 @@ RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
       echo "=== Skipping DeepGEMM (Blackwell-only kernels) ==="; \
     fi
 
-# GIN-capable aws-ofi-nccl + GDRCopy (DeepEP V2 cross-node EP over AWS EFA): the NGC-bundled
-# aws-ofi-nccl exports no ncclGin symbol, so V2 inter-node EP aborts without this build. The same
-# .so is exposed as libnccl-gin.so (the file NCCL loads the GIN plugin from); GDRCopy >= 2.5 backs
-# proxy GIN, whose host gdrdrv module must be loaded at runtime. --disable-tests: they need mpi.h.
-ARG AWS_OFI_NCCL_COMMIT=1f0a976f537f859d8ea70c6699f7d92ac89eb7af
+# The EFA userspace every Halo image shares (docker/efa/install_efa_userspace.sh owns the pins and
+# the reason all three images must match): the installer's rdma-core and libfabric over the
+# NGC-bundled MOFED ones, plus a GIN-capable aws-ofi-nccl (DeepEP V2 cross-node EP over AWS EFA; the
+# NGC-bundled plugin exports no ncclGin symbol). GDRCopy >= 2.5 backs proxy GIN, whose host gdrdrv
+# module must be loaded at runtime.
 ARG GDRCOPY_COMMIT=fcec3ce0bb40a97a6cc45dd4afeec4bccb509712
-RUN apt-get update && apt-get install -y --no-install-recommends libtool hwloc libhwloc-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    && NCCL_HOME="$(python -c 'import nvidia.nccl; print(nvidia.nccl.__path__[0])')" \
-    && git clone https://github.com/aws/aws-ofi-nccl.git /tmp/aws-ofi-nccl \
-    && cd /tmp/aws-ofi-nccl \
-    && git checkout ${AWS_OFI_NCCL_COMMIT} \
-    && git submodule update --init --recursive \
-    && ./autogen.sh \
-    && ./configure --prefix=/opt/amazon/aws-ofi-nccl \
-        --with-libfabric=/opt/amazon/efa \
-        --with-cuda=/usr/local/cuda \
-        --with-nccl="${NCCL_HOME}" \
-        --enable-platform-aws \
-        --disable-tests \
-    && make -j"$(nproc)" && make install \
-    && ln -sf /opt/amazon/aws-ofi-nccl/lib/libnccl-net-ofi.so /usr/lib/x86_64-linux-gnu/libnccl-gin.so \
+COPY docker/efa/install_efa_userspace.sh /tmp/install_efa_userspace.sh
+RUN /tmp/install_efa_userspace.sh \
+    && rm /tmp/install_efa_userspace.sh \
     && git clone https://github.com/NVIDIA/gdrcopy.git /tmp/gdrcopy \
     && git -C /tmp/gdrcopy checkout ${GDRCOPY_COMMIT} \
     && make -C /tmp/gdrcopy PREFIX=/usr/local lib lib_install \
     && ldconfig \
-    && rm -rf /tmp/aws-ofi-nccl /tmp/gdrcopy
+    && rm -rf /tmp/gdrcopy
 
 # Re-install apt-shipped Python packages with pip RECORD files so the uv reconcile can
 # uninstall them cleanly (--ignore-installed writes fresh copies with sys.path priority).

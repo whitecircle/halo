@@ -20,7 +20,7 @@ from trl.models.utils import _ForwardRedirection
 from src.distributed.expert_parallel.dispatcher import bump_forward_generation
 from src.distributed.runtime import materialize_dtensor, rank_consensus
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
-from src.models.loading.config_levels import text_config
+from src.models.loading.config_levels import get_config_field, text_config
 from src.models.modality import config_declares_multimodality
 
 # Tiles of the chunked matmul / online softmax. The working set is a few [seq, vocab] fp32 tiles
@@ -92,18 +92,38 @@ def chunked_selective_log_softmax(
     completion_ids: torch.Tensor,
     bias: torch.Tensor | None,
     temperature: float,
+    softcap: float | None = None,
 ) -> torch.Tensor:
     """Log-probs of ``completion_ids`` from ``hidden`` without materializing ``[B, T, vocab]`` logits.
 
     ``hidden`` ``(B, T, H)``, ``weight`` ``(V, H)``, ``completion_ids`` ``(B, T)`` -> ``(B, T)``
     log-probs. Differentiable in ``hidden``/``weight``; ``temperature`` matches TRL's pre-softmax
-    division.
+    division. ``softcap`` is the family's ``final_logit_softcapping`` (``cap · tanh(logits / cap)``,
+    applied before the temperature as the model's own head applies it).
     """
     b, t, h = hidden.shape
     logps, _entropy = _ChunkedSelectiveLogProbEntropyFunction.apply(
-        hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, _VOCAB_CHUNK, False
+        hidden.reshape(b * t, h),
+        weight,
+        completion_ids.reshape(b * t),
+        bias,
+        temperature,
+        softcap,
+        _VOCAB_CHUNK,
+        False,
     )
     return logps.reshape(b, t)
+
+
+def _logits_tile(hidden_chunk, weight_chunk, bias, vocab_start, vocab_end, softcap, inv_t) -> torch.Tensor:
+    """One ``[seq, vocab-tile]`` plane of temperature-scaled logits, softcapped where the family caps
+    its head (``cap · tanh(logits / cap)`` before the temperature, as the model's forward orders it)."""
+    logits_chunk = (hidden_chunk @ weight_chunk.to(hidden_chunk.dtype).t()).float()
+    if bias is not None:
+        logits_chunk.add_(bias[vocab_start:vocab_end].to(torch.float32))
+    if softcap is not None:
+        logits_chunk.div_(softcap).tanh_().mul_(softcap)
+    return logits_chunk.mul_(inv_t)
 
 
 @torch.no_grad()
@@ -113,6 +133,7 @@ def _selective_logprob_entropy_forward(
     targets: torch.Tensor,
     bias: torch.Tensor | None,
     temperature: float,
+    softcap: float | None,
     vocab_chunk_size: int,
     compute_entropy: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -149,10 +170,7 @@ def _selective_logprob_entropy_forward(
         for vocab_start in range(0, vocab_size, vocab_chunk_size):
             vocab_end = min(vocab_start + vocab_chunk_size, vocab_size)
             weight_chunk = weight[vocab_start:vocab_end]
-            logits_chunk = (hidden_chunk @ weight_chunk.to(hidden.dtype).t()).float()
-            if bias is not None:
-                logits_chunk.add_(bias[vocab_start:vocab_end].to(torch.float32))
-            logits_chunk.mul_(inv_t)
+            logits_chunk = _logits_tile(hidden_chunk, weight_chunk, bias, vocab_start, vocab_end, softcap, inv_t)
 
             chunk_max = logits_chunk.amax(dim=-1)
             max_new = torch.maximum(max_old, chunk_max)
@@ -177,10 +195,13 @@ def _selective_logprob_entropy_forward(
     return logprobs, log_z, entropy
 
 
-def _selective_logprob_backward(hidden, weight, targets, bias, log_z, grad_logprobs, temperature, vocab_chunk_size):
+def _selective_logprob_backward(
+    hidden, weight, targets, bias, log_z, grad_logprobs, temperature, softcap, vocab_chunk_size
+):
     """Dual-chunked backward: each logits tile is recomputed from the saved ``log_z`` instead of a
     stored ``[T, V]`` plane. Both gradients accumulate in fp32; the row activations are upcast once per
-    sequence tile rather than once per vocab tile."""
+    sequence tile rather than once per vocab tile. Under a softcap the tile's gradient carries the
+    ``tanh`` derivative, ``1 − (logits / cap)²`` on the capped logits."""
     inv_t = 1.0 / temperature
     n_rows, _ = hidden.shape
     vocab_size = weight.shape[0]
@@ -203,10 +224,7 @@ def _selective_logprob_backward(hidden, weight, targets, bias, log_z, grad_logpr
         for vocab_start in range(0, vocab_size, vocab_chunk_size):
             vocab_end = min(vocab_start + vocab_chunk_size, vocab_size)
             weight_chunk = weight[vocab_start:vocab_end]
-            logits_chunk = (hidden_chunk @ weight_chunk.to(hidden.dtype).t()).float()
-            if has_bias:
-                logits_chunk.add_(bias[vocab_start:vocab_end].to(torch.float32))
-            logits_chunk.mul_(inv_t)
+            logits_chunk = _logits_tile(hidden_chunk, weight_chunk, bias, vocab_start, vocab_end, softcap, inv_t)
 
             probs = torch.exp(logits_chunk - logz_chunk.unsqueeze(-1))
             grad_logits = (-grad_chunk).unsqueeze(-1) * probs
@@ -215,6 +233,8 @@ def _selective_logprob_backward(hidden, weight, targets, bias, log_z, grad_logpr
             local_idx = torch.clamp(targets_chunk - vocab_start, 0, vocab_end - vocab_start - 1)
             grad_logits[row_idx, local_idx] += grad_chunk * in_chunk
             grad_logits.mul_(inv_t)
+            if softcap is not None:
+                grad_logits.mul_(1.0 - (logits_chunk * (temperature / softcap)).square())
 
             grad_hidden[seq_start:seq_end].add_(grad_logits @ weight_chunk.float())
             grad_weight[vocab_start:vocab_end].add_(grad_logits.t() @ hidden_chunk_f32)
@@ -248,15 +268,16 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, hidden, weight, targets, bias, temperature, vocab_chunk_size, compute_entropy):
+    def forward(ctx, hidden, weight, targets, bias, temperature, softcap, vocab_chunk_size, compute_entropy):
         logprobs, log_z, entropy = _selective_logprob_entropy_forward(
-            hidden, weight, targets, bias, temperature, vocab_chunk_size, compute_entropy
+            hidden, weight, targets, bias, temperature, softcap, vocab_chunk_size, compute_entropy
         )
         if bias is None:
             bias = hidden.new_empty((0,))
         ctx.save_for_backward(hidden, weight, targets, bias, log_z)
         ctx.has_bias = bias.numel() > 0
         ctx.temperature = temperature
+        ctx.softcap = softcap
         ctx.vocab_chunk_size = vocab_chunk_size
         ctx.mark_non_differentiable(entropy)
         return logprobs, entropy
@@ -272,6 +293,7 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
             log_z=log_z,
             grad_logprobs=grad_logprobs,
             temperature=ctx.temperature,
+            softcap=ctx.softcap,
             vocab_chunk_size=ctx.vocab_chunk_size,
         )
         return (
@@ -279,6 +301,7 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
             grad_weight.to(weight.dtype),
             None,
             grad_bias.to(bias.dtype) if ctx.has_bias else None,
+            None,
             None,
             None,
             None,
@@ -291,6 +314,7 @@ def chunked_selective_log_softmax_with_entropy(
     completion_ids: torch.Tensor,
     bias: torch.Tensor | None,
     temperature: float,
+    softcap: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Log-probs of ``completion_ids`` and token entropy from one chunked vocab sweep.
 
@@ -300,7 +324,7 @@ def chunked_selective_log_softmax_with_entropy(
     """
     b, t, h = hidden.shape
     logps, entropy = _ChunkedSelectiveLogProbEntropyFunction.apply(
-        hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, _VOCAB_CHUNK, True
+        hidden.reshape(b * t, h), weight, completion_ids.reshape(b * t), bias, temperature, softcap, _VOCAB_CHUNK, True
     )
     return logps.reshape(b, t), entropy.reshape(b, t)
 
@@ -368,14 +392,17 @@ class ChunkedLogprobsCore:
         self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
         weight = materialize_dtensor(lm_head.weight)
         bias = materialize_dtensor(getattr(lm_head, "bias", None))
+        # The head's own forward caps its logits (Gemma); the sweep reproduces that cap or scores a
+        # sharper distribution than the one the model samples from.
+        softcap = get_config_field(unwrapped_model.config, "final_logit_softcapping")
         dense = rows_forward_densely(unwrapped_model, batch_size)
 
         def sweep(hidden, completion_ids):
             if compute_entropy:
                 return chunked_selective_log_softmax_with_entropy(
-                    hidden, weight, completion_ids, bias, self.temperature
+                    hidden, weight, completion_ids, bias, self.temperature, softcap
                 )
-            return chunked_selective_log_softmax(hidden, weight, completion_ids, bias, self.temperature), None
+            return chunked_selective_log_softmax(hidden, weight, completion_ids, bias, self.temperature, softcap), None
 
         all_logps, all_entropies = [], []
         for start in range(0, input_ids.size(0), batch_size):

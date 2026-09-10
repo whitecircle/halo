@@ -62,6 +62,33 @@ def compute_is_ratio(
     return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff, corrected_mask
 
 
+def select_mask_logratio(
+    logps_diff: torch.Tensor,
+    recompute_logps: torch.Tensor,
+    sampling_logps: torch.Tensor,
+    engine_logps: torch.Tensor,
+    corrected_mask: torch.Tensor,
+    row_has_engine: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """The log-ratio the mask stages read when the engine re-scored the rows under the trainer's
+    current weights: ``logπ_engine_now − logπ_sampling`` on rows that carry a re-score — pure policy
+    staleness, since the two engine passes share their numerics — and the trainer diff elsewhere.
+    Returns it with the step's diagnostics over the re-scored tokens: the staleness mean, the
+    numerics mean ``logπ_recompute − logπ_engine_now`` (the floor the bands would otherwise read) and
+    the coverage of the re-score over the corrected tokens.
+    """
+    use_engine = corrected_mask & row_has_engine.unsqueeze(1)
+    engine_diff = (engine_logps - sampling_logps) * use_engine
+    mask_diff = torch.where(use_engine, engine_diff, logps_diff)
+    n = use_engine.sum().clamp(min=1)
+    stats = {
+        "sampling/engine_logratio_mean": (engine_diff.sum() / n).item(),
+        "sampling/numerics_logratio_mean": (((recompute_logps - engine_logps) * use_engine).sum() / n).item(),
+        "sampling/engine_rescore_coverage": (use_engine.sum() / corrected_mask.sum().clamp(min=1)).item(),
+    }
+    return mask_diff, stats
+
+
 @dataclass(frozen=True)
 class ISMaskConfig:
     """Mask/veto stages layered on the truncated IS ratio (see module docstring). All default off.

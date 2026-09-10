@@ -63,6 +63,8 @@ A multi-stage fine-tune must agree on `reset_sinks` across stages — a continua
 
 Use the BF16-dequantized mirrors `unsloth/gpt-oss-{20b,120b}-BF16`. EP materializes experts as plain parameters, so a natively MXFP4 checkpoint (the original `openai/gpt-oss-*`, uint8 expert blocks) fails fast at patching with "Expert Parallelism requires a de-quantized (BF16) checkpoint". MXFP4 still serves on vLLM — but not under weight sync: its expert loader has no branch for a bf16 expert tensor, so a synced update drops every expert weight while the biases land, silently ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)). On-policy RL serves the BF16 mirror.
 
+Environmental GRPO: `examples/grpo/environmental/gptoss/vllm/` plus the `sglang/` ep1 siblings — both pinned engines read the interleaved expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+
 The example sets `use_grouped_gemm: false`: at its EP=16 the 20B keeps 2 experts per rank, few enough that the loop is competitive, and gpt-oss's square expert FFN (`intermediate == hidden == 2880`, not a multiple of the kernel's 128-tile K) pays a CUTLASS tail epilogue the loop avoids. Grouped GEMM remains the default and wins at low EP and at high EP through moderate batch. See [Grouped GEMM](../optimization/grouped-gemm.md#when-the-loop-path-wins).
 
 ## Chat template
@@ -87,7 +89,7 @@ With harmony disabled, five settings are load-bearing.
 
 Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer matches by freezing the same sinks, so recompute equals vLLM to ~0 nats (`is_ratio ~1`).
 
-GPT-OSS also serves from **SGLang** for env-GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.17); thinking budgets are rejected at config time for this backend, and the trainer needs `fsdp_reshard_after_backward: false` or the forced-socket NCCL makes FSDP2's per-microstep reshard the dominant step cost. Flags, constraints, and the measured step-cost ratio: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
+GPT-OSS serves from **SGLang** for env-GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.17); thinking budgets are rejected at config time for this backend, and the server container needs `NCCL_CUMEM_ENABLE=1` (the compose default). Flags and constraints: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
 
 ## Router balancing
 

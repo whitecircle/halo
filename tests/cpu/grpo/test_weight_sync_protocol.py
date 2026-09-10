@@ -43,6 +43,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
 from src.distributed.nccl.clients import vllm as wsc
+from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES, DEFAULT_PACKED_NUM_BUFFERS
 from src.distributed.nccl.transport.pynccl import PyNcclCommunicator
@@ -141,6 +142,20 @@ class FakeVLLMServer:
                         server.bodies[path] = json.loads(raw)
                     if path in server.refuse:
                         self._reply(503)
+                        return
+                    if path == "/generate" and server.bodies[path].get("return_logprob"):
+                        # SGLang's prefill log-probs: [logprob, token_id, text] per input token from
+                        # logprob_start_len; the window's first entry is its anchor and carries None.
+                        body = server.bodies[path]
+                        ids = body["input_ids"][body["logprob_start_len"] :]
+                        echo = [[None, ids[0], None]] + [[-((tok % 7) + 1) / 10, tok, None] for tok in ids[1:]]
+                        self._reply(200, {"meta_info": {"input_token_logprobs": echo}})
+                        return
+                    if path == "/v1/completions" and "prompt_logprobs" in server.bodies[path]:
+                        # Prefill echo: one entry per prompt token (None for the first), keyed by token id.
+                        prompt = server.bodies[path]["prompt"]
+                        echo = [None] + [{str(tok): {"logprob": -((tok % 7) + 1) / 10}} for tok in prompt[1:]]
+                        self._reply(200, {"choices": [{"text": "", "prompt_logprobs": echo}]})
                         return
                     if path == "/v1/completions":
                         values = self._completion_logprobs(server.bodies[path])
@@ -451,7 +466,7 @@ def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, c
 
 
 def test_a_failed_snapshot_completion_still_closes_the_update(server, client, monkeypatch):
-    """The D2H completion runs INSIDE the close: a sticky CUDA error there is exactly the state a
+    """The snapshot completion runs INSIDE the close: a sticky CUDA error there is exactly the state a
     failing sync is in, and skipping ``/finish_weight_update`` leaves the engine mid-reload while
     ``/health`` answers 200 — every later ``/start_weight_update`` fails and the probe cannot see it."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
@@ -459,19 +474,19 @@ def test_a_failed_snapshot_completion_still_closes_the_update(server, client, mo
     def sticky_cuda_error(self):
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_host_snapshots", sticky_cuda_error)
+    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_snapshots", sticky_cuda_error)
 
     client.update_named_param("w", torch.zeros(4, dtype=torch.bfloat16))
     with pytest.raises(RuntimeError, match="illegal memory access"):
         client.reset_prefix_cache()
 
-    assert server.update_open is False, "the layerwise reload was left open by the failed D2H sync"
-    assert server.paused is False, "the engine was left quiesced by the failed D2H sync"
+    assert server.update_open is False, "the layerwise reload was left open by the failed snapshot completion"
+    assert server.paused is False, "the engine was left quiesced by the failed snapshot completion"
     assert client._update_open is False
 
 
 def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, monkeypatch):
-    """The third way a sync ends mid-model: the D2H sync fails, so the tail is dropped rather than
+    """The third way a sync ends mid-model: the snapshot completion fails, so the tail is dropped rather than
     sent. The engine then holds the earlier chunks and its old weights for the rest — the same mixed
     model, so the close must still refuse to resume it."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
@@ -484,7 +499,7 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
     def sticky_cuda_error(self):
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_host_snapshots", sticky_cuda_error)
+    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_snapshots", sticky_cuda_error)
     with pytest.raises(RuntimeError, match="illegal memory access"):
         client.reset_prefix_cache()
 
@@ -494,21 +509,31 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
     )
 
 
-def test_the_d2h_completion_names_the_forwarding_ranks_device(client, monkeypatch):
-    """The flush runs on a worker thread once more than one server is synced, and torch's current
-    device AND current stream are thread-local: a device-implicit sync there completes device 0's
-    copies while this rank's are still in flight, and the engine is broadcast whatever the pinned
-    buffers happen to hold."""
+def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(client, monkeypatch):
+    """The flush must wait for the staged copies alone: a whole-device synchronize also waits for the
+    previous chunk's broadcasts and, in a multi-server fan-out, every other server's, which
+    serializes each chunk's tail with the next. And it must not touch the device when nothing was
+    staged (before ``init_communicator``, or an empty tail)."""
     synchronized: list = []
     monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: synchronized.append(device))
+    client._sync_device = torch.device("cuda", 3)  # a guarded whole-device sync would fire on it
 
-    client._sync_device = torch.device("cuda", 3)
-    client._complete_host_snapshots()
-    assert synchronized == [torch.device("cuda", 3)], f"synchronized {synchronized} instead of the client's device"
+    class _Event:
+        def __init__(self):
+            self.waited = 0
 
-    client._sync_device = None  # before init_communicator there is nothing to complete
-    client._complete_host_snapshots()
-    assert synchronized == [torch.device("cuda", 3)]
+        def synchronize(self):
+            self.waited += 1
+
+    event = _Event()
+    client._staged_event = event
+    client._complete_snapshots()
+    assert event.waited == 1, "the flush did not wait for the staged copies"
+    assert synchronized == [], "the flush synchronized the whole device instead of the staged copies"
+
+    client._staged_event = None
+    client._complete_snapshots()
+    assert synchronized == [] and event.waited == 1
 
 
 def test_check_server_honours_the_deadline_on_a_non_200_health(server, monkeypatch):
@@ -825,12 +850,15 @@ def test_reconnect_retires_the_old_client_before_probing_the_replacement():
             buffered, self._param_buffer = self._param_buffer, []
             return buffered
 
-        def buffer_host_param(self, name, host):
-            self._param_buffer.append((name, host))
+        def buffer_param(self, name, snapshot):
+            self._param_buffer.append((name, snapshot))
+
+        def scope_co_load_groups(self, module_names):
+            order.append("scope new client")
 
     manager = InferenceClientManager(server_configs=[{"url": "http://server0:8000", "group_port": 51216}])
     old = RecordingClient(base_url="http://server0:8000")
-    old.buffer_host_param("w", torch.zeros(4))
+    old.buffer_param("w", torch.zeros(4))
     order.clear()
     manager._clients = [old]
     manager._initialized = True
@@ -864,6 +892,54 @@ def test_unconfigured_group_ports_are_seeded_from_the_run_knob():
         base_group_port=52000,
     )
     assert [manager._group_port(i) for i in range(3)] == [52000, 52001, 9000]
+
+
+def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
+    """The re-score reads the prompt_logprobs echo: entries keyed by the token id (as a string),
+    aligned to the whole prompt+completion sequence; only the completion slice comes back, in order."""
+    server = FakeVLLMServer()
+    try:
+        client = VLLMWeightSyncClient.__new__(VLLMWeightSyncClient)
+        client.base_url = server.url
+        client.session = requests.Session()
+        values = client.score_completion_logprobs([11, 12, 13], [14, 15])
+        assert values == [pytest.approx(-((14 % 7) + 1) / 10), pytest.approx(-((15 % 7) + 1) / 10)]
+        assert server.bodies["/v1/completions"]["prompt"] == [11, 12, 13, 14, 15]
+        assert server.bodies["/v1/completions"]["prompt_logprobs"] == 0
+        assert client.served_model_id() == "fake-model"
+    finally:
+        server.close()
+
+
+def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
+    """SGLang's re-score goes through /generate with logprob_start_len on the last prompt token, whose
+    entry anchors the window with no log-prob; the completion's entries follow, [logprob, token_id,
+    text] each, and must carry the completion's own ids in order."""
+    server = FakeVLLMServer()
+    try:
+        client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
+        client.base_url = server.url
+        client.session = requests.Session()
+        values = client.score_completion_logprobs([11, 12, 13], [14, 15])
+        assert values == [pytest.approx(-((14 % 7) + 1) / 10), pytest.approx(-((15 % 7) + 1) / 10)]
+        body = server.bodies["/generate"]
+        assert body["input_ids"] == [11, 12, 13, 14, 15] and body["logprob_start_len"] == 2
+        assert body["return_logprob"] is True
+    finally:
+        server.close()
+
+
+def test_sglang_score_completion_logprobs_refuses_a_window_that_does_not_open_on_the_prompt():
+    """A window whose anchor is not the last prompt token is a shifted reference, never silently read."""
+    server = FakeVLLMServer()
+    try:
+        client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
+        client.base_url = server.url
+        client.session = requests.Session()
+        with pytest.raises(ValueError, match="at least one prompt token"):
+            client.score_completion_logprobs([], [14, 15])
+    finally:
+        server.close()
 
 
 if __name__ == "__main__":

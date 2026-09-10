@@ -10,7 +10,8 @@ splitting), and neither is Pipeline Parallelism.
 
 The rollout server runs in its own container, never in the training process:
 ``docker compose -f docker-compose.vllm.yml up vllm-server``, or ``docker-compose.sglang.yml`` for
-``rollout_backend: sglang`` (gpt-oss only, no expert distribution). Each example config's header
+``rollout_backend: sglang`` (the families its loaders take an update for, expert distribution
+included — agent-docs/infrastructure/rollout-servers.md). Each example config's header
 lists the server flags that config needs: the ``--moe-backend triton`` gate, the tool-call and
 reasoning parsers, and the GPU split between trainer and server.
 
@@ -25,7 +26,7 @@ Usage (each config's header carries its own exact launch line):
         scripts/training/environmental_grpo.py \\
         examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml
 
-    # SGLang rollouts (gpt-oss, no expert distribution)
+    # SGLang rollouts
     CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 \\
         scripts/training/environmental_grpo.py \\
         examples/grpo/environmental/gptoss/sglang/gptoss-20b-code-contests-full-ep1.yaml

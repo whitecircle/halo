@@ -45,18 +45,29 @@ throughput/memory only.
 
 All metrics computed by `EfficiencyCallback` (`src/callbacks/efficiency.py`).
 
-**Achieved TFLOPS** = `(tokens_per_gpu × (6·N_trainable + 4·N_frozen + 12·L·S·H / tp_size)) / step_time` (PaLM/Megatron
-FLOP count). The linear-projection term is `6·N` for trainable params (2N forward + 4N backward) and `4·N`
-for frozen ones (forward + input-gradient backward, no weight gradient — a LoRA base or frozen layers);
-`12·L·S·H` is the attention-score term (QKᵀ and Attn·V, forward + backward, per layer). For full fine-tuning
-`N_frozen = 0` and the linear term is the usual `6·N_local`.
+**Achieved TFLOPS** = `(tokens_per_gpu × (6·N_trainable + 4·N_frozen) + attention_score_flops / tp_size) / step_time`
+(PaLM/Megatron FLOP count). The linear-projection term is `6·N` for trainable params (2N forward + 4N backward)
+and `4·N` for frozen ones (forward + input-gradient backward, no weight gradient — a LoRA base or frozen
+layers); for full fine-tuning `N_frozen = 0` and it is the usual `6·N_local`. `N` counts all params physically
+on this GPU (DTensor-aware for TP). `tokens_per_gpu` = `num_input_tokens_seen / world_size`, further divided by
+`cp_size` (each CP rank receives the full `input_ids`; the wrapper splits inside forward).
 
-`N` counts all params physically on this GPU (DTensor-aware for TP); `L` is this rank's own decoder-layer
-count, so under PP ([not yet available](../parallelism/pipeline-parallelism.md)) each stage's attention
-term would match its real slice of the layer list. The attention term is divided by `tp_size`
-explicitly, since `H` is read from the config and stays global on every rank unlike `N`. `tokens_per_gpu` =
-`num_input_tokens_seen / world_size`, further divided by `cp_size` (each CP rank receives the full
-`input_ids`; the wrapper splits inside forward).
+The attention-score term costs each decoder layer at `6 × keys × heads·(d_qk + d_v)` per token (QKᵀ and Attn·V,
+forward + backward — `12·S·H` for standard heads), with `keys` set by the layer's `config.layer_types` entry
+(`src/models/attention_layout.py`): the document length for full attention, `min(L, sliding_window)` for
+sliding, `min(L, attention_chunk_size)` for chunked, the top-k plus a pooled indexer for GLM-5's sparse
+attention, `L / compress_rate` plus the local band for DeepSeek-V4's compressed layers, and nothing for
+linear-attention / conv layers. Full attention is costed at every key (the PaLM convention, not the causal
+half); bounded layers at the keys their kernel visits. `L` is each **document's** length: the trainer costs
+every batch's documents (`cu_seq_lens_q`, `position_ids` resets, or the padded row) and the callback swaps that
+rank-local measurement in per step, so a packed 64k row of 1–40k-token documents is not costed as one 64k
+sequence. A trainer whose collator emits no `input_ids` keeps the config term (every token in a `max_seq_len`
+document) — every GRPO trainer, KTO, SMPO and embedding. The layer set is this rank's own, so under PP
+([not yet available](../parallelism/pipeline-parallelism.md)) each stage's term would match its real slice
+rather than an even split of the depth. The measured term divides by `tp_size` (heads are sharded) and,
+under Ulysses CP, by `cp_size` (the wrapper splits the sequence's heads inside forward); the tokens divide
+by `world_size` and `cp_size`, never by `ep_size`. Per-step wiring and the logged fields:
+[Callbacks](../training-methods/callbacks.md#efficiencycallback).
 
 **S-MFU** (sparsity-aware utilization) is the meaningful roofline fraction for MoE: it scales the *expert*
 FLOP term by `(top_k / num_experts) × ep_size` before dividing by `step_time × peak_gpu_flops`, so it does
@@ -87,11 +98,11 @@ EP distributes experts; DP = world_size = 8. Small-batch pure EP is **communicat
 
 | EP | batch | tok/s/GPU | TFLOPS | peak mem | step |
 |----|-------|:---------:|--------|----------|------|
-| 1 | 1 | 9,401 | 1,212 | 148.3 GB | 0.44s |
-| 2 | 1 | 10,551 | 755 | 77.3 GB | 0.39s |
-| 2 | 4 | 17,874 | 1,279 | 91.5 GB | 0.92s |
-| 8 | 1 | 8,225 | 235 | 25.3 GB | 0.50s |
-| 8 | 4 | 10,051 | 287 | 57.1 GB | 1.63s |
+| 1 | 1 | 9,401 | 1,203 | 148.3 GB | 0.44s |
+| 2 | 1 | 10,551 | 745 | 77.3 GB | 0.39s |
+| 2 | 4 | 17,874 | 1,263 | 91.5 GB | 0.92s |
+| 8 | 1 | 8,225 | 228 | 25.3 GB | 0.50s |
+| 8 | 4 | 10,051 | 278 | 57.1 GB | 1.63s |
 
 Rows are the grouped-GEMM path (default); the ep1 rows here hold experts replicated per rank (`fsdp_shard_ep1_experts: false`) — the fixed config the b1 golden baselines in `tests/baselines/` measure. Nothing reads those files automatically: `tokens_per_second` and `peak_allocated_gb` are diffed by hand ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
 
@@ -110,9 +121,9 @@ CP splits sequences via Ulysses attention. ep8 + CP=8 (DP=1), GC on:
 
 | SeqLen | tok/s/GPU | TFLOPS | peak mem | step |
 |--------|-----------|--------|----------|------|
-| 16,384 | 5,460 | 211 | 23.6 GB | 0.38s |
-| 32,768 | 6,042 | 316 | 26.5 GB | 0.68s |
-| 65,536 | 5,231 | 416 | 33.9 GB | 1.57s |
+| 16,384 | 5,460 | 190 | 23.6 GB | 0.38s |
+| 32,768 | 6,042 | 269 | 26.5 GB | 0.68s |
+| 65,536 | 5,231 | 334 | 33.9 GB | 1.57s |
 
 Achieved TFLOPS rises with sequence length (longer sequences amortize the Ulysses all-to-all); memory stays near-flat (24–34 GB) from 16k to 64k. CP trades per-GPU throughput for cheap long context.
 
@@ -122,9 +133,9 @@ TP shards attention (Q/K/V/O) via DTensor; EP distributes experts. **EP+TP requi
 
 | SeqLen | tok/s/GPU | TFLOPS | peak mem | step |
 |--------|-----------|--------|----------|------|
-| 4,096 | 7,641 | 192 | 33.0 GB | 0.54s |
-| 16,384 | 9,557 | 338 | 70.7 GB | 1.71s |
-| 32,768 | 10,247 | 502 | 122.3 GB | 3.20s |
+| 4,096 | 7,641 | 191 | 33.0 GB | 0.54s |
+| 16,384 | 9,557 | 333 | 70.7 GB | 1.71s |
+| 32,768 | 10,247 | 492 | 122.3 GB | 3.20s |
 
 Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). TP width is a minor lever: at s4096 the three widths are within ~1% (`ep8tp2` 7,715 ≈ `ep8tp4` 7,714 > `ep8tp8` 7,641 tok/s/GPU); at s16384 `ep8tp4` leads (10,009 vs `ep8tp2` 9,559, `ep8tp8` 9,557).
 
@@ -134,8 +145,8 @@ It is not idle hardware. gpt-oss-20b fires top-4 of 32 experts (3.5B active of 2
 approach a dense model's plain MFU. Higher EP also shrinks `N_local` (ep2 = 11.36B → ep8 = 4.19B) at similar
 throughput: ep8 trades per-GPU utilization for memory, not compute waste.
 
-Levers to raise it: lower EP (more local params), longer sequence (the EP-independent `12·L·S·H` term),
-larger batch.
+Levers to raise it: lower EP (more local params), longer sequence (the EP-independent attention-score
+term), larger batch.
 
 ### Maximizing achieved TFLOPS
 
@@ -143,12 +154,12 @@ Keep more params local (low EP), then drop GC if activations fit, then add batch
 
 | model | topology | config | tok/s/GPU | TFLOPS | peak mem |
 |-------|----------|--------|-----------|--------|----------|
-| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-off | **24,456** | **3,152** | 136.0 GB |
-| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-on | 20,174 | 2,600 | 80.6 GB |
-| gpt-oss-20b | ep2 | b6, s8192 (loop) | 16,624 | 1,246 | 157.6 GB |
-| gpt-oss-20b | ep8 | b2, s16384 (loop) | 10,041 | 389 | 96.0 GB |
-| qwen3.5-35b-a3b | ep2 | b4, s4096 | 12,584 | 1,435 | 138.5 GB |
-| qwen3.5-35b-a3b | ep8 | b8, s4096 | 10,012 | 416 | 132.9 GB |
+| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-off | **24,456** | **3,130** | 136.0 GB |
+| gpt-oss-20b | ep1 (dense FSDP, sharded experts) | b4, s4096, GC-on | 20,174 | 2,582 | 80.6 GB |
+| gpt-oss-20b | ep2 | b6, s8192 (loop) | 16,624 | 1,215 | 157.6 GB |
+| gpt-oss-20b | ep8 | b2, s16384 (loop) | 10,041 | 350 | 96.0 GB |
+| qwen3.5-35b-a3b | ep2 | b4, s4096 | 12,584 | 1,410 | 138.5 GB |
+| qwen3.5-35b-a3b | ep8 | b8, s4096 | 10,012 | 396 | 132.9 GB |
 
 - **Local params decide the ceiling.** ep1 keeps all 20.7B local and tops the table; ep2 ~11.4B; ep8 ~4.2B;
   qwen3.5-35b ep2 ~17.5B. Choose the lowest EP that fits. (The ep1 row counts every local expert as active,
@@ -240,12 +251,12 @@ GC-off: communication ≈93% @ s4096 → ≈88% @ s16384). Compute–comm overla
 
 | EP | batch | tok/s/GPU | TFLOPS | peak mem | step |
 |----|-------|-----------|--------|----------|------|
-| 2 | 1 | 5,964 | 680 | 127.9 GB | 0.69s |
-| 2 | 4 | **12,584** | 1,435 | 138.5 GB | 1.30s |
-| 8 | 1 | 6,401 | 266 | 41.1 GB | 0.64s |
-| 8 | 4 | 9,408 | 391 | 81.0 GB | 1.74s |
+| 2 | 1 | 5,964 | 668 | 127.9 GB | 0.69s |
+| 2 | 4 | **12,584** | 1,410 | 138.5 GB | 1.30s |
+| 8 | 1 | 6,401 | 253 | 41.1 GB | 0.64s |
+| 8 | 4 | 9,408 | 372 | 81.0 GB | 1.74s |
 
-ep2 keeps ~17.5B params local and reaches **1,435 TFLOPS at batch 4** — the highest of the MoE rosters here, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41 GB at batch 1 vs 128 GB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.1×; ep8 b1→b4 = 1.5×), since small-batch pure EP is all-to-all-bound.
+ep2 keeps ~17.5B params local and reaches **1,410 TFLOPS at batch 4** — the highest of the MoE rosters here, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41 GB at batch 1 vs 128 GB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.1×; ep8 b1→b4 = 1.5×), since small-batch pure EP is all-to-all-bound.
 
 At ep2 batch 4 the per-MoE-layer step splits ≈ **77% DeepEP dispatch all-to-all / 21% expert GEMM / 2% combine** (`--comm_profile`) — dispatch-bound on the top_k=8 token-count exchange. Raising sequence to 8192 amortizes the all-to-all to **13,484 tok/s/GPU** (b4).
 

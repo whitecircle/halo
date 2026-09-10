@@ -3,10 +3,10 @@
 #   --enable-return-routed-experts --moe-runner-backend triton (the auto-picked triton_kernel runner
 #   bypasses the R3 capture hook, and a repacking runner corrupts every weight update)
 #   --tool-call-parser auto --reasoning-parser gpt-oss, and --chat-template on the same file this
-#   config forces below. Keep --enable-torch-compile off under R3 capture. The five NCCL socket vars
-#   and the fsdp_reshard_after_backward rationale: sglang/gptoss-20b-code-contests-lora-ep1.yaml.
-# SGLang + expert distribution is rejected at construction (mutually exclusive NCCL transports) —
-# there is no sglang ep4 variant; use rollout_backend: vllm for EP runs.
+#   config forces below. Keep --enable-torch-compile off under R3 capture. The server's
+#   NCCL_CUMEM_ENABLE=1 requirement and the fsdp_reshard_after_backward note:
+#   sglang/gptoss-20b-code-contests-lora-ep1.yaml.
+# No sglang ep4 variant ships; the expert-distributed ep4 configs are the ones under ../vllm/.
 # rollout_max_thinking_tokens stays unset (vLLM-only; enforced by _validate_backend_capabilities).
 # Launch: 4 train GPUs + the 2 TP=2 servers on the other 4;
 #   CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
@@ -21,11 +21,9 @@ force_chat_template: true
 # --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-2) ---
 expert_parallel_size: 1
 fsdp_reshard_after_forward: false   # ZeRO-2; ZeRO-3 is rejected together with the reshard flag below
-fsdp_reshard_after_backward: false  # sglang's sync forces socket NCCL process-global; without this,
-                                    # FSDP2 re-all-gathers the full model on every grad-accum microstep
-                                    # over loopback TCP, which dominates step time. Leaves one gather
-                                    # per optimizer step (the window's last backward still reshards),
-                                    # and costs one unsharded bf16 param copy per GPU (fine at 20B).
+fsdp_reshard_after_backward: false  # optional: one FSDP2 re-gather per optimizer step instead of one
+                                    # per grad-accum microstep (the window's last backward still
+                                    # reshards), for one unsharded bf16 param copy per GPU (fine at 20B).
 
 # --- Full fine-tune (no PEFT) ---
 use_peft: false
@@ -42,15 +40,15 @@ environment_kwargs:
                              # vllm lora-ep1 config for the derivation
   reasoning_effort: random
   # One profile per effort level: CoT budget plus interaction limits. Submission and test-call
-  # allowances scale with effort. thinking_tokens is an engine cap that also bounds the turn total
-  # (thinking plus the global answer headroom).
+  # allowances scale with effort. thinking_tokens is an engine cap on vLLM; on SGLang it reaches the
+  # trajectory only (nothing caps CoT below rollout_max_tokens).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
-    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
-  # token_cost: reward units per 1k generated tokens (both channels), charged by the trainer.
-  # A per-token cost rather than a length target: it is reduced only by generating less, whereas a
-  # length floor or band can be satisfied by padding. The high tier is not charged.
+  # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
+  # regardless of outcome at every effort level; on this backend the interaction budgets and the effort
+  # level's own conditioning price effort (SGLang enforces no thinking cap).
   submission_reward: 0.25
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
@@ -81,10 +79,9 @@ episode_timeout: 2700         # whole-episode wall clock; launch with DIST_NCCL_
 rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]
-rollout_max_tokens: 22000              # per-turn total: thinking budget + a 4k answer headroom
-                                       # (the headroom must leave a finished thought room to emit its tool call)
+rollout_max_tokens: 22000              # per-turn bound; nothing reserves answer headroom below it on SGLang
 reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
-                                 # so length control is engine-side instead (per-effort caps)
+                                 # so length control is the effort level's conditioning instead
 
 # --- Prefetch ---
 enable_prefetch: true
@@ -106,14 +103,16 @@ max_prompt_length: null
 num_generations: 8
 use_chunked_grpo_logprobs: true
 loss_type: dapo
-advantage_mode: neg_mask_hard
-advantage_hard_group_threshold: 0.5
+advantage_mode: asymmetric   # failures run 3-4x longer than solves, so under the token-level normalizer
+advantage_neg_scale: 0.7     #   their negatives carry the gradient mass and push entropy up; 0.7 nets ~0
 beta: 0.0
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28
-isr_geo_band_min: 0.98
-isr_geo_band_max: 1.02
+isr_engine_reference: false  # the engine re-score needs ~12 GB of server headroom (an 8192-token prefill chunk's fp32
+                             #   log-softmax over a 248k vocab) and removes only the trainer<->engine part of the floor
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
+isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
 isr_veto_min: 1.0e-4
 isr_opsm_delta: 0.05
 skip_update_masked_frac: 0.4
@@ -159,6 +158,7 @@ save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size abo
 # --- Eval ---
 eval_strategy: steps
 eval_steps: 50
+eval_on_start: true         # base-policy reference before the first update
 
 # --- Logging ---
 logging_steps: 1

@@ -40,7 +40,7 @@ def test_registration():
     assert MOE_LAYER_MAP["InklingMoE"] is EPInklingMoELayer
     # The composite hub config spells its model_type "inkling_mm_model" (there is no bare
     # "inkling"); the text config spells "inkling_text". Both feed every model_type-keyed consumer.
-    assert EPInklingMoELayer.HF_MODEL_TYPES == ("inkling_mm_model", "inkling_text")
+    assert EPInklingMoELayer.HF_MODEL_TYPES == ("inkling_text", "inkling_mm_model")
     assert EPInklingMoELayer._supports_bias_balancing
     assert EPInklingMoELayer._ep_severs_aux_loss
     # gate.weight is [n_routed + n_shared, hidden]; inferring the expert count from it over-counts.

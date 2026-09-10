@@ -1,0 +1,191 @@
+# Environmental GRPO — Gemma-4 26B-A4B LoRA (r=64, attention projections) on code_contests, SGLang
+# backend, no EP, ZeRO-2, KL-free (bands + IS masking as trust region). SGLang serving contract:
+# agent-docs/infrastructure/rollout-servers.md.
+# Known issue: on the multimodal checkpoint PEFT refuses these targets (the vision tower's `q_proj` is a
+#   `Gemma4ClippableLinear`, agent-docs/reference/troubleshooting.md); the -full- sibling trains and syncs.
+# Servers: sglang-server:0.5.17 (Dockerfile.sglang, NCCL-aligned), 2 on GPUs 4-7, ports 30000/30001,
+#   with --moe-runner-backend triton (the auto-picked runners repack the expert weights every sync
+#   writes) --tool-call-parser auto (resolves this family to the engine's gemma4 detector off the
+#   chat template; code_contests is a native-tool env, and a server with no parser leaves calls as
+#   text, so every episode scores 0). The server container needs NCCL_CUMEM_ENABLE=1 (the compose
+#   default): SGLang otherwise turns cuMem off process-wide and the trainer's first cross-container
+#   import fails.
+# SGLang serves this family through Gemma4ForConditionalGeneration, whose router folds `scale` into
+#   its norm weight once behind a latch; docker/sglang/patches/patch_sglang_weight_updates.py (baked
+#   into the image) releases that latch from the parameter's own loader, without which every synced
+#   router scale is ignored and served routing never moves.
+# No routing replay for Gemma 4 on either engine (_supports_routing_replay = False), so routing_replay
+#   stays unset and the server must run without SGLANG_ENABLE_R3 (with it the engine exits at start
+#   on this family).
+# No sglang ep4 variant ships; the expert-distributed ep4 configs are the ones under ../vllm/.
+# rollout_max_thinking_tokens stays unset (vLLM-only; refused by _validate_backend_capabilities), so
+#   rollout_max_tokens is the per-turn bound.
+# Launch: 4 train GPUs + the 2 servers on GPUs 4-7;
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+
+# --- Model ---
+model_name_or_path: google/gemma-4-26B-A4B-it
+attn_implementation: sdpa  # only viable backend (global_head_dim=512; mem-efficient SDPA auto-forced)
+
+# --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-2) ---
+expert_parallel_size: 1            # pure DP; attention-only LoRA fits per-rank, no expert sharding needed
+fsdp_reshard_after_forward: false  # ZeRO-2
+
+# --- LoRA (r=64, attention projections only) ---
+# Expert projections need EP grouped adapters (split_expert_lora_targets) — attention-only stays on plain PEFT.
+use_peft: true
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_task_type: CAUSAL_LM
+lora_target_modules:
+- q_proj
+- k_proj
+- v_proj
+- o_proj
+
+# --- Environment (identical ladder to the vLLM config) ---
+environment_type: codeforces
+max_turns: 12               # high's worst case (3 subs + 6 scratchpad runs) plus room to recover
+                            # from a length-cutoff turn, which costs a turn instead of the episode
+environment_kwargs:
+  language: python
+  timeout_per_test: 5
+  stop_on_first_failure: false
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit — see
+                             # gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml for the derivation
+  reasoning_effort: random
+  # One profile per effort level: CoT budget plus interaction limits. Submission and test-call
+  # allowances scale with effort. thinking_tokens is an engine cap on vLLM; on SGLang it reaches the
+  # trajectory only (nothing caps CoT below rollout_max_tokens).
+  reasoning_effort_profiles:
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
+    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
+  # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
+  # regardless of outcome at every effort level; on this backend the interaction budgets and the effort
+  # level's own conditioning price effort (SGLang enforces no thinking cap).
+  submission_reward: 0.25
+  execution_progress_reward: 0.05
+  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
+  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first; prices probing the judge
+  no_tool_use_penalty: 0.1
+  multi_turn_reward: 0.05    # binary, once per episode, gated on a real submission: pays the >1-call
+                             # episode even when a scratchpad test crashes
+  tool_success_reward: 0     # env default; a per-call reward would be inflated by duplicate re-runs
+  turn_overflow_penalty: 0.1
+  tool_error_penalty: 0.05
+
+# --- Ray Workers ---
+num_rollout_workers: 32
+max_concurrent_rollouts: 32
+
+# --- Rollout servers (SGLang) ---
+rollout_backend: sglang
+rollout_server_configs:
+- url: "http://localhost:30000"
+  group_port: 51216
+- url: "http://localhost:30001"
+  group_port: 51217
+rollout_connection_timeout: 180.0
+request_timeout: 300.0
+episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
+
+# --- Rollout Generation ---
+rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
+rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
+rollout_max_tokens: 22000              # per-turn total (CoT + a 4k answer headroom). The only CoT bound on
+                                       # this backend: rollout_max_thinking_tokens is refused here, and the
+                                       # per-effort thinking_tokens profile only conditions the chat template
+                                       # (reasoning_compliance_weight: 0 leaves nothing pricing it).
+reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
+                                 # so length control is the effort level's conditioning instead
+
+# --- Prefetch ---
+enable_prefetch: true
+
+# --- Dataset ---
+# The two pools scripts/environments/preparation/prepare_code_dataset.py writes, listed side by
+# side — the loader concatenates them, so no merged pool has to exist. The held-out split is the
+# codeforces pool's own: deepcoder-taco ships train only (its source has no test split), so it
+# contributes training rows and nothing to the eval set. Placeholder paths: point them at the
+# --output_dir you wrote (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+dataset:
+- /mnt/s3_datasets/codeforces-verifiable-rl
+- /mnt/s3_datasets/deepcoder-taco-rl
+
+# --- Sequence Lengths ---
+max_prompt_length: null
+
+# --- GRPO objective: KL-free, bands as the trust region (identical to the vLLM config) ---
+num_generations: 8
+use_chunked_grpo_logprobs: true # required for gemma-4 (~262k vocab)
+loss_type: dapo
+advantage_mode: asymmetric   # failures run 3-4x longer than solves, so under the token-level normalizer
+advantage_neg_scale: 0.7     #   their negatives carry the gradient mass and push entropy up; 0.7 nets ~0
+beta: 0.0
+num_iterations: 1
+epsilon: 0.2
+epsilon_high: 0.28
+isr_engine_reference: false  # the engine re-score costs server headroom and removes only the trainer<->engine
+                             #   part of the numerical floor; the band below is sized above the whole floor
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
+isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
+isr_veto_min: 1.0e-4
+isr_opsm_delta: 0.05
+skip_update_masked_frac: 0.4
+scale_rewards_std_floor: 0.2
+num_generations_eval: 1
+scale_rewards: batch
+drop_degenerate_groups: true
+top_entropy_quantile: 1.0
+mask_truncated_completions: false  # `truncated` covers only the max_turns overflow (a length-cut turn is
+                                   # charged and retried in-episode, and its fragment is skipped at
+                                   # tokenization), and exhausting the turn budget is a failure worth
+                                   # its negative advantage
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 24
+steps_per_generation: 24
+max_steps: 300              # the cosine horizon matches the run's useful length, not the dataset's: a
+                            # full-epoch horizon would decay so slowly that the whole run trains near
+                            # peak LR
+num_train_epochs: 1
+learning_rate: 3.0e-06
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 10
+
+# --- Optimization ---
+optim: adamw_torch_fused
+moe_balancing: none          # Gemma4 has no aux-loss wiring and no bias-update support
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+fp32_grad_reduce: true
+
+# --- Output ---
+output_dir: checkpoints/env-grpo-gemma4-26b-a4b-code-contests-lora-ep1-sglang
+save_strategy: steps
+save_steps: 15
+save_total_limit: 6        # bounds checkpoint disk; archive the eval-peak checkpoint before it rotates out
+
+# --- Eval ---
+eval_strategy: steps
+eval_steps: 50
+eval_on_start: true         # base-policy reference before the first update
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: ["wandb"]
+log_completions: false
+save_completions: true       # trajectories → <output_dir>/completions/*.parquet
+num_completions_to_print: 2
+
+# --- Data ---
+dataloader_num_workers: 0
+remove_unused_columns: false
+seed: 42

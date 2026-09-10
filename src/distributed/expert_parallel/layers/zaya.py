@@ -36,14 +36,6 @@ class EPZayaMoELayer(EPMoELayerBase):
     # Per-layer GC re-wraps the cross-layer EDA state with a fresh grad_fn → polynomial backward.
     _supports_gradient_checkpointing = False
 
-    # vLLM 0.26.0 ships no Zaya implementation (agent-docs/models/zaya.md), so online/env GRPO is
-    # rejected at construction rather than syncing into an engine that cannot serve the family.
-    _supports_weight_sync = False
-    _WEIGHT_SYNC_REFUSAL_REASON = (
-        "vLLM 0.26.0 ships no native Zaya implementation — there is no served model for the "
-        "stream to land in (agent-docs/models/zaya.md)"
-    )
-
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts",)
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:

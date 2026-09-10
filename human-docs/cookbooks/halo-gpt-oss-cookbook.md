@@ -191,9 +191,10 @@ output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with Halo's SGLang image on the host, not inside the
-training container; it listens on port 30000. Point `SGLANG_IMAGE` at the prebuilt image
-(no retag needed), or build the compose file's local tag once with `make build-sglang`.
+Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
+container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
+this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
+compose file's local tag once with `make build-sglang`.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
@@ -240,12 +241,10 @@ ep1) or `examples/grpo/environmental/gptoss/vllm/` (full and LoRA, ep1 and ep4).
 `model_name_or_path` at the SFT checkpoint and set the environment and reward fields
 for your task.
 
-vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. GPT-OSS is
-also the only MoE family SGLang can weight-sync, because it loads experts in the
-checkpoint-fused layout that only the GPT-OSS layer gathers, and the shipped
-`sglang/gptoss-20b-code-contests-lora-ep1.yaml` is already wired for that engine. Two
-constraints come with SGLang: the trainer must run at `expert_parallel_size: 1` (SGLang
-refuses expert distribution), and `rollout_max_thinking_tokens` stays unset. That field is
+vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. SGLang
+0.5.17 serves the GPT-OSS weight sync too, and the shipped
+`sglang/gptoss-20b-code-contests-lora-ep1.yaml` is already wired for that engine. One
+constraint comes with SGLang: `rollout_max_thinking_tokens` stays unset. That field is
 vLLM-only; steer reasoning with the environment's `reasoning_effort` instead.
 
 Serve from the prebuilt NCCL-aligned image, since upstream SGLang images ship a different
@@ -285,31 +284,27 @@ fsdp_reshard_after_backward: false
 
 `rollout_stop_tokens` matters because `<|call|>` is not an eos here: without it the
 model generates past its tool call and hallucinates the result for most of the turn.
-`fsdp_reshard_after_backward: false` is required for performance on this engine. Its sync
-forces process-global socket NCCL, and without the flag FSDP2 re-gathers the whole model
-over loopback TCP once per grad-accum microstep.
+`fsdp_reshard_after_backward: false` is optional: it leaves one FSDP2 re-gather per
+optimizer step instead of one per grad-accumulation microstep, for one unsharded bf16
+parameter copy per GPU (fine at 20B).
 `reset_sinks: false` keeps the pretrained sinks live and frozen so the trainer's log
 probabilities match the served policy. Live sinks restrict the attention backend to a
 sink-carrying implementation: FA4 on Blackwell, or `flex_attention`, `eager`, or an FA3
 build exposing `s_aux` on Hopper (the shipped Hopper FA3 does not).
 FA2 and SDPA are rejected, and CP is unavailable in this mode.
 
-Launch the trainer on the remaining GPUs with the same five NCCL socket variables the
-server's compose file sets, because the weight-sync group crosses the container boundary
-and NCCL transport state is process-global. Expect a slower step than on vLLM for the same
-reason: socket NCCL also costs the trainer NVLink between its own ranks.
+Launch the trainer on the remaining GPUs. The weight-sync group is ordinary NCCL between
+the two containers — CUDA IPC over NVLink on one host — and its one server-side
+requirement, `NCCL_CUMEM_ENABLE=1`, is the compose file's default.
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_IB_DISABLE=1 NCCL_NET=Socket NCCL_NET_PLUGIN=none \
-  halo launch environmental-grpo gpt-oss-grpo.yaml -n 4
+CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gpt-oss-grpo.yaml -n 4
 ```
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
-The trainer keeps `expert_parallel_size: 1` on this engine, whatever its GPU count.
 
-vLLM (`rollout_backend: vllm`, the config default) is the other engine, and it is required
-for the expert-distributed ep4 configs and for `rollout_max_thinking_tokens`. Pull the
+vLLM (`rollout_backend: vllm`, the config default) is the other engine, the one the shipped
+expert-distributed ep4 configs target, and the only one for `rollout_max_thinking_tokens`. Pull the
 prebuilt server image and retag it to the name the compose file expects:
 
 ```bash
@@ -341,12 +336,12 @@ VLLM_USE_V2_MODEL_RUNNER=0 \
 
 That command already passes `--moe-backend triton`, which is required: Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also add `--enable-return-routed-experts`
-to the server's `command:` block, since the compose file exposes no variable for it. If SFT
+weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`). If SFT
 overrode the chat template, point `VLLM_CHAT_TEMPLATE` at the same `.jinja` so the
 server-side render matches training. The trainer config then sets `rollout_backend: vllm`
-and `rollout_server_url: http://localhost:8000`, and launches the same way minus the NCCL
-socket variables. It may size `expert_parallel_size` to the trainer's GPU count; the
+and `rollout_server_url: http://localhost:8000`, and launches the same way. It may size
+`expert_parallel_size` to the trainer's GPU count; the
 shipped ep4 configs assume four trainer GPUs.
 
 ## Sources

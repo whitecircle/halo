@@ -64,8 +64,11 @@ make build-sglang                            # sglang-server:0.5.17 (NCCL matche
 make build-all                               # all four
 
 # Rollout-server GPU tiers (the server must already serve on a GPU outside TRAINER_CUDA_DEVICES;
-# both force NCCL_IB_DISABLE=1 NCCL_NET=Socket and check /health first; the SGLang target adds
-# NCCL_NET_PLUGIN=none NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1).
+# both check /health first and, without EFA=1, force the no-fabric NCCL_IB_DISABLE=1 NCCL_NET=Socket
+# both compose bases default to. EFA=1 passes --device=/dev/infiniband plus NCCL_NET=Libfabric
+# NCCL_NET_PLUGIN=ofi NCCL_IB_DISABLE=0 to every DOCKER_RUN instead — start the server with its
+# compose EFA overlay (-f docker-compose.{vllm,sglang}.efa.yml) then. The SGLang server needs
+# NCCL_CUMEM_ENABLE=1 on top, the compose default.)
 # SERVER_TIER=moe runs the MoE half against a MoE-serving server — no one server satisfies both.
 # The vLLM server needs VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0: the benchmarks
 # send a per-effort CoT budget, which draws a 400 without a reasoning parser and another under

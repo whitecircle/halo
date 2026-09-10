@@ -3,8 +3,9 @@ name: rl-setup
 description: >-
   Wire up online GRPO (RLVR) or environmental (multi-turn tool-use) GRPO for
   Halo: bring up the separate rollout container — vLLM 0.26.0 (cu13), or
-  SGLang 0.5.17 for environmental GRPO (rollout_backend: sglang, gpt-oss + ep1
-  only) — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
+  SGLang 0.5.17 for environmental GRPO (rollout_backend: sglang, the families
+  its loaders can take an update for)
+  — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
   NCCL weight sync through the vendored client in src/distributed/nccl/
   (parallelism-aware gather — EP/TP/ETP and multi-rank FSDP2 all participate),
   select the RL environment by registry name, and set the key GRPO
@@ -54,7 +55,9 @@ and full launch examples see [`wiring.md`](wiring.md).
    same ABI on both ends.
 
 2. **Point the trainer at it.** Env GRPO reads `AsyncTrainingConfig` from YAML:
-   `rollout_backend` (`vllm` default, `sglang` where supported), then
+   `rollout_backend` (`vllm` default, `sglang` for the families its 0.5.17
+   loaders take an update for — the trainer refuses the rest at construction,
+   naming the loader reason), then
    `rollout_server_url` (single server) or `rollout_server_configs`
    (multi-server) and `rollout_connection_timeout`. The NCCL TCPStore port is
    TRL's own `vllm_group_port` on `GRPOConfig`, not an `AsyncTrainingConfig`

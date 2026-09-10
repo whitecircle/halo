@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Repeated packed_broadcast_producer calls with persistent streams must not ratchet reserved memory.
 
-Per-call streams strand each sync's pack allocations (H2D uploads + the ~1GB cat) in per-stream
-allocator pools no later stream can reuse, growing reserved memory by ~the model size per sync until
-CUDA recycles stream handles — the production signature is 245 GiB reserved against a 72 GiB
-allocation peak on the forwarding rank. This drives the producer the way VLLMWeightSyncClient does
-(pinned host buffers re-uploaded via post_iter_func, client-owned streams) and asserts reserved
-memory stops growing after the first sync.
+Per-call streams strand each sync's pack allocations (the ~1GB cat) in per-stream allocator pools no
+later stream can reuse, growing reserved memory by ~the model size per sync until CUDA recycles
+stream handles — the production signature is 245 GiB reserved against a 72 GiB allocation peak on
+the forwarding rank. This drives the producer the way VLLMWeightSyncClient does (chunk tensors
+already staged on the device, client-owned streams) and asserts reserved memory stops growing after
+the first sync.
 """
 
 import sys
@@ -39,14 +39,12 @@ class _SinkGroup:
 
 
 def _run_syncs(streams):
-    host_params = [
-        (f"p{i}", torch.randn(_PARAM_BYTES // 4, device="cpu", pin_memory=True)) for i in range(_PARAMS_PER_SYNC)
-    ]
     device = torch.device("cuda", torch.cuda.current_device())
+    staged_params = [(f"p{i}", torch.randn(_PARAM_BYTES // 4, device=device)) for i in range(_PARAMS_PER_SYNC)]
     reserved = []
     for _ in range(_SYNCS):
         packed_broadcast_producer(
-            iterator=iter(host_params),
+            iterator=iter(staged_params),
             group=_SinkGroup(),
             src=0,
             post_iter_func=lambda item: item[1].to(device, non_blocking=True),

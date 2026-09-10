@@ -74,6 +74,7 @@ toolchain at the host's large volume. `/mnt` is
 | Flash Attention 4 (`flash-attn-4[cu13]==4.0.0b16`, `flash_attn.cute`) | No | Yes |
 | DeepEP V2 (commit `af9a040`, built `9.0+PTX`) | Yes | Yes |
 | NCCL `nvidia-nccl-cu13` at `uv.lock`'s exact pin, shared with the vLLM/SGLang images — weight sync needs one runtime (asserted at build) | Yes | Yes |
+| EFA userspace — AWS libfabric + `aws-ofi-nccl` at one pinned build (`docker/efa/install_efa_userspace.sh`), shared with the vLLM/SGLang images | Yes | Yes |
 | NVSHMEM (`nvidia-nvshmem-cu13`, transitive via torch) | Yes | Yes |
 | `nvidia-cutlass-dsl` 4.5.2 + `quack-kernels` 0.5.0 | Yes | Yes |
 | FlashAdamW (`flashoptim==0.1.4`) | Yes | Yes |
@@ -127,8 +128,8 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
   `LICENSE` + `APACHE-2.0.txt` in `/workspace`.
 - **Every upstream clone is pinned to a commit or tag.** DeepEP `af9a040`; Hopper's FA2
   `v2.8.3.post1` and its FA3 a `main` commit (`c46b8144`) — no FA release supports CUDA 13;
-  `aws-ofi-nccl` and `gdrcopy` at the `AWS_OFI_NCCL_COMMIT` / `GDRCOPY_COMMIT` build args, so a rebuild
-  reproduces the shipped images. Blackwell never builds FA2 — it inherits it from `BASE_IMAGE`, which is
+  `aws-ofi-nccl` at the commit `docker/efa/install_efa_userspace.sh` pins (one script for all three
+  images) and `gdrcopy` at the `GDRCOPY_COMMIT` build arg, so a rebuild reproduces the shipped images. Blackwell never builds FA2 — it inherits it from `BASE_IMAGE`, which is
   the pin, and the build asserts the base still delivers it rather than depending on it silently.
   `aws-ofi-nccl` is configured `--disable-tests` because its functional tests need `mpi.h`, which the
   image does not carry.
@@ -173,19 +174,30 @@ base image's own older system copy would otherwise reach the weight-sync communi
 
 ## RDMA networking (InfiniBand and EFA)
 
-Both training images are EFA-ready as built. IB works on the baked defaults; **EFA is a per-job
-opt-in** (its env vars degrade IB clusters, so they are not baked). The image matrix keys on GPU arch only —
-no separate `-efa` tag.
+Both training images are EFA-ready as built, and so are the vLLM and SGLang server images:
+`docker/efa/install_efa_userspace.sh` installs the EFA installer 1.46.0's rdma-core (60) and AWS
+libfabric 2.3.1amzn4.0 — replacing the NGC base's MOFED rdma-core in the training images and the
+distro rdma-core of the server bases — and builds `aws-ofi-nccl` at one pinned commit against the
+`uv.lock` NCCL, in all three. One build everywhere is the point, rdma-core included; why both ends of
+a weight-sync group must match down to it:
+[Rollout Servers → Servers on other nodes](rollout-servers.md#servers-on-other-nodes-efa). IB works
+on the baked defaults; **EFA is a per-job opt-in** (its env vars degrade IB clusters, so they are not
+baked). The image matrix keys on GPU arch only — no separate `-efa` tag.
 
-- **InfiniBand / RoCE** (no extra env) — HPC-X `libnccl-net.so` (`/opt/hpcx`), loaded by NCCL by default.
+- **InfiniBand / RoCE** (no extra env) — NCCL's built-in IB transport. The OFI plugin also sits under
+  NCCL's default plugin name, so it is tried on every host and yields to the built-in transports
+  where libfabric finds no provider.
 - **AWS EFA** (opt-in) — libfabric (`/opt/amazon/efa`) + a GIN-capable `aws-ofi-nccl` built at the pinned
   commit (exporting `ncclGinPlugin_v13`; the NGC-bundled 1.17.3 exports no `ncclGin`) exposed as
-  `libnccl-gin.so`, plus GDRCopy `libgdrapi`. Select it per job with the libfabric env block on the
-  page linked below, and for DeepEP cross-node EP add `NCCL_GIN_TYPE=2` (proxy GIN; EFA has no IBGDA)
+  `libnccl-gin.so`, plus GDRCopy `libgdrapi`. Select it per job with `NCCL_NET_PLUGIN=ofi
+  NCCL_NET=Libfabric` ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)), and
+  for DeepEP cross-node EP add `NCCL_GIN_TYPE=2` (proxy GIN; EFA has no IBGDA)
   and `--device /dev/gdrdrv` (host `gdrdrv` module).
 
 Prerequisites and measured EFA ceilings: [DeepEP → EFA](deepep.md#expert-parallelism-over-aws-efa);
-per-fabric launch env: [Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics).
+per-fabric launch env: [Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics). A
+rollout server on another node selects EFA through its compose overlay and the trainer through
+`make ... EFA=1`: [Rollout Servers → Servers on other nodes](rollout-servers.md#servers-on-other-nodes-efa).
 
 ## vLLM inference server
 

@@ -1,8 +1,9 @@
 # SGLang server image with the NCCL version used by the Halo training image.
 #
-# Upstream `lmsysorg/sglang` serves fine on its own; this image exists only because Environmental
+# Upstream `lmsysorg/sglang` serves fine on its own; this image exists because Environmental
 # GRPO broadcasts weights into the live engine over a shared NCCL group, and both ends must load
-# the same NCCL runtime. Bumping the wheel to uv.lock's exact pin is the whole delta. transformers
+# the same NCCL runtime and, across nodes, the same EFA userspace. The NCCL wheel bump to uv.lock's
+# exact pin and docker/efa/install_efa_userspace.sh are the whole delta. transformers
 # stays at sglang's own exact pin (0.5.17 -> transformers==5.12.1); 0.5.17 is the last release on
 # torch 2.11, so it is the ceiling here.
 # Build: make build-sglang — prebuilt: public.ecr.aws/whitecircle/halo:sglang-0.5.17.
@@ -27,11 +28,20 @@ LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
 COPY LICENSE APACHE-2.0.txt /opt/halo-license/
 
 # Use the NCCL version from uv.lock so the server matches the training image: a skew hangs the
-# weight-sync ncclCommInitRank with no error. `--no-deps` keeps pip off torch; `--verify` checks the
-# wheel and the libnccl.so.2 actually resolved, of which a wheel copy and a system copy both exist.
+# weight-sync ncclCommInitRank with no error. `--no-deps` keeps pip off torch.
 COPY uv.lock docker/nccl_pin.py /tmp/
 RUN NCCL_V=$(python3 /tmp/nccl_pin.py /tmp/uv.lock) \
-    && pip install --no-cache-dir "nvidia-nccl-cu13==${NCCL_V}" --no-deps \
+    && pip install --no-cache-dir "nvidia-nccl-cu13==${NCCL_V}" --no-deps
+
+# The EFA userspace every Halo image shares (docker/efa/install_efa_userspace.sh owns the pins and
+# the reason the builds must match), so the weight-sync group can ride EFA between this container
+# and a trainer on another node. The upstream base ships a distro rdma-core and libfabric and no
+# plugin, and NCCL then falls back to sockets with no message. Built against the NCCL wheel above;
+# `--verify` runs after it, since the script rewrites the loader path, and checks the wheel and the
+# libnccl.so.2 actually resolved, of which a wheel copy and a system copy both exist.
+COPY docker/efa/install_efa_userspace.sh /tmp/install_efa_userspace.sh
+RUN /tmp/install_efa_userspace.sh \
+    && rm /tmp/install_efa_userspace.sh \
     && python3 /tmp/nccl_pin.py /tmp/uv.lock --verify \
     && rm /tmp/uv.lock /tmp/nccl_pin.py
 
@@ -78,17 +88,22 @@ assert 'rank_offset + self.tp_rank' in inspect.getsource(owner.init_weights_upda
     'sglang changed the rank_offset convention'; \
 print('rendezvous + broadcast convention: OK (trainer is rank 0, store prefixed by group_name)')"
 
-# Verify fused-expert loader support for each allowed model family: only gpt_oss consumes the fused
-# expert pair the trainer streams, while qwen3_moe maps per-expert names and drops fused keys, which
-# is why the trainer refuses qwen3-moe + sglang. A flip either way fails the build, so the roster is
-# re-decided rather than drifting.
+# The trainer streams each family's experts in its hub checkpoint layout, and these loaders read
+# exactly that: gpt_oss the fused interleaved pair, qwen3_moe the per-expert tensors. A loader that
+# moved to the other spelling would drop every expert of a sync without error, so both are asserted.
 RUN python3 -c "\
 import pathlib, sglang; \
 models = pathlib.Path(sglang.__file__).parent / 'srt' / 'models'; \
 gpt_oss = (models / 'gpt_oss.py').read_text(); \
 qwen3_moe = (models / 'qwen3_moe.py').read_text(); \
-assert 'make_expert_params_mapping_fused' in gpt_oss, \
-    'gpt_oss no longer loads fused experts — the one supported sglang sync family is broken'; \
-assert 'make_expert_params_mapping_fused' not in qwen3_moe, \
-    'qwen3_moe gained a fused loader — the toolkit refusal for qwen3-moe+sglang may be liftable (see EPQwen3MoELayer)'; \
-print('fused-expert loader roster: OK (gpt_oss only)')"
+assert 'make_expert_params_mapping_fused' in gpt_oss, 'gpt_oss does not load the fused hub pair'; \
+assert 'make_expert_params_mapping_fused' not in qwen3_moe and 'make_expert_params_mapping(' in qwen3_moe, \
+    'qwen3_moe does not map the per-expert hub tensors'; \
+print('expert loader layouts: OK (gpt_oss fused, qwen3_moe per-expert)')"
+
+# Two loaders cache a derived form of a router parameter and keep serving it after an online update
+# rewrites the parameter (docker/sglang/patches/patch_sglang_weight_updates.py names both); the
+# patch makes the update reach them. Its pre-image assertions fail the build on an upstream change,
+# and it stays in the image so `--verify` can be run against a container.
+COPY docker/sglang/patches/patch_sglang_weight_updates.py /opt/halo/patch_sglang_weight_updates.py
+RUN python3 /opt/halo/patch_sglang_weight_updates.py

@@ -7,17 +7,21 @@ weights back to vLLM over NCCL. CP unsupported (``logits_to_keep`` + global log-
 import contextlib
 import dataclasses
 import math
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, get_args
 
 import torch
 import torch.distributed as dist
 from accelerate.logging import get_logger
 from accelerate.utils import gather
+from transformers import TrainerCallback
 from trl import GRPOTrainer
 from trl.extras.profiling import profiling_context
 from trl.trainer.utils import pad
 
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
     EPISODE_INVALID_REASON_KEY,
@@ -46,6 +50,7 @@ from src.trainers.grpo.objective.logratio import (
     apply_opsm,
     clamp_ref_logps,
     compute_is_ratio,
+    select_mask_logratio,
 )
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
 from src.trainers.grpo.rollout.completions_logging import log_with_decoupled_completions
@@ -62,7 +67,6 @@ from src.trainers.grpo.rollout.trajectory_tokenize import (
     single_trajectory_row,
 )
 from src.trainers.grpo.rollout.weight_sync import (
-    validate_backend_parallelism,
     validate_weight_sync_support,
 )
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -78,6 +82,8 @@ ROUTING_REPLAY_MODES: tuple[str, ...] = get_args(AsyncTrainingConfig.__annotatio
 # from RolloutConfig, so a value set on GRPOConfig never reaches a sampler. ``temperature`` is the
 # one exception, reconciled the other way round: the trainer scores at the sampling temperature.
 _ROLLOUT_OWNED_SAMPLING_KNOBS = ("top_p", "top_k", "min_p", "repetition_penalty", "generation_kwargs")
+# Concurrent re-score prefills per rank under isr_engine_reference (each is one HTTP request in flight).
+_ENGINE_RESCORE_CONCURRENCY = 16
 
 # Consecutive steps with no valid episode anywhere before the run is halted. One such step can be a
 # blip (a grader outage, a restarting engine); a second means the rollout path is down and every
@@ -134,6 +140,21 @@ def batch_reward_std(rewards: torch.Tensor) -> float:
     return rewards.std().item() if rewards.numel() > 1 else 0.0
 
 
+class _BreakerOptimizerSkipCallback(TrainerCallback):
+    """Turns a tripped trust-region breaker into a skipped optimizer step
+    (:meth:`DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped`).
+    Pre-optimizer-step is the one hook between gradient clipping and ``optimizer.step``. Weak
+    reference: the trainer owns the callback handler that owns this."""
+
+    def __init__(self, trainer):
+        self._trainer = weakref.ref(trainer)
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        trainer = self._trainer()
+        if trainer is not None:
+            trainer._skip_optimizer_step_if_breaker_tripped()
+
+
 class DistributedAsyncEnvironmentalGRPOTrainer(
     OnPolicyGRPOInitMixin,
     AsyncRolloutMixin,
@@ -159,8 +180,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         "adds Ray-driven multi-turn async rollouts whose generation lengths vary per turn — the "
         "pipeline freezes its boundary activation shape on the first step"
     )
-    # Set from async_config in __init__; declared here so the weight-sync layout resolver has a
-    # rank-uniform attribute to read on any trainer, constructed or not.
+    # Set from async_config in __init__; declared here so the tokenize path's engine-specific remedy
+    # reads a value on any trainer, constructed or not.
     _rollout_backend: str | None = None
     # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
     _loss_outside_model_forward = True
@@ -243,6 +264,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._skip_update_masked_frac = self.async_config.skip_update_masked_frac
         if self._skip_update_masked_frac is not None and not 0.0 < self._skip_update_masked_frac <= 1.0:
             raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self._skip_update_masked_frac}")
+        # Armed by _update_breaker_tripped, consumed once at pre-optimizer-step.
+        self._breaker_tripped_this_step = False
+        self.add_callback(_BreakerOptimizerSkipCallback(self))
 
         # Advantage surgery: built eagerly to validate the knobs, applied only when != "mean".
         self._advantage_shaping = self.async_config.build_advantage_shaping()
@@ -293,6 +317,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "least one IS mask stage (isr_band/isr_geo_band/isr_veto/isr_opsm) — without them no "
                 "trajectory is ever masked and the circuit breaker would silently never fire."
             )
+        self._isr_engine_reference = self.async_config.isr_engine_reference
+        if self._isr_engine_reference:
+            self._validate_engine_reference(resolve_weight_sync_client(self._rollout_backend))
         if self._is_correction:
             self.use_vllm = True
         if self.args.vllm_importance_sampling_mode != "sequence_mask":
@@ -348,8 +375,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         gate. A shape the sync cannot serve fails here rather than as an opaque server-side error at
         the first push.
         """
-        validate_weight_sync_support(self.model)
-        validate_backend_parallelism(self.async_config.rollout_backend, self.parallelism_config, self.model)
+        validate_weight_sync_support(self.model, self.async_config.rollout_backend)
 
     @property
     def _runs_logprob_recompute(self) -> bool:
@@ -392,7 +418,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "off, beta=0). Enable the IS correction (or beta/num_iterations>1) or set "
                 "routing_replay='none'."
             )
-        logger.info(f"Routing replay enabled (mode={mode}) over {injector.num_layers} EP MoE layers")
+        logger.info(f"Routing replay enabled (mode={mode}) over {injector.num_ep_layers} EP MoE layers")
         return injector
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -649,6 +675,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # ranks (unequal forwards deadlock) and to a multiple of steps_per_generation (TRL drops remainders).
         self._raise_batch_error_uniformly(device)
 
+        # After the uniform raise: the re-score never raises, but it must not sit between a rank's
+        # collectives either. Train mode only — eval runs no IS correction.
+        all_engine_logps: list[torch.Tensor | None] | None = None
+        if use_is_correction and self._isr_engine_reference and mode == "train":
+            all_engine_logps = self._rescore_rows_on_engine(
+                all_prompt_ids, all_completion_ids, row_has_sampling, turns_per_traj, mode
+            )
+
         num_dummy_rows = 0
         if self._train_on_sampled_tokens:
             global_rows = torch.tensor([len(all_prompt_ids)], device=device)
@@ -666,6 +700,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 all_sampling_logps.append(torch.zeros(1, device=device))  # masked out
                 all_turn_routing.append(None)  # dummy rows keep natural routing (-1 sentinel)
                 row_has_sampling.append(False)
+                if all_engine_logps is not None:
+                    all_engine_logps.append(None)
 
         rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, self._train_on_sampled_tokens)
 
@@ -708,6 +744,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 rows,
                 device,
                 mode,
+                all_engine_logps,
             )
 
             ref_per_token_logps = self._compute_ref_logps(prompt_completion_ids, attention_mask, logits_to_keep)
@@ -850,7 +887,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                         [len(c) for c in all_completion_ids],
                         prompt_ids.size(1),
                         completion_ids.size(1),
-                        self._routing_injector.num_layers,
+                        self._routing_injector.num_ep_layers,
                         self._routing_injector.top_k,
                         self._routing_injector.num_experts,
                     )
@@ -929,11 +966,15 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         rows: BatchRows,
         device: torch.device,
         mode: str,
+        all_engine_logps: list[torch.Tensor | None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """The rollout-vs-trainer importance ratio and its mask stages.
 
-        Returns ``(ratio, logps_diff, corrected_mask, traj_row_ids)``; the ratio is all-ones and the
-        rest ``None`` with the correction off — a config-derived gate every rank takes alike.
+        Returns ``(ratio, mask_logps_diff, corrected_mask, traj_row_ids)``; the ratio is all-ones and
+        the rest ``None`` with the correction off — a config-derived gate every rank takes alike.
+        ``mask_logps_diff`` is what the mask stages (and the caller's OPSM stage) read: the trainer
+        diff, or under ``isr_engine_reference`` the engine's current-vs-sampling diff on every
+        re-scored row (:func:`select_mask_logratio`). The IS weight itself is always trainer-vs-sampling.
         """
         importance_sampling_ratio = torch.ones_like(completion_mask, dtype=torch.float32)
         corrected_mask = None
@@ -958,6 +999,17 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 ((with_sampling & ~corrected_mask).sum() / with_sampling.sum().clamp(min=1)).item()
             )
             traj_row_ids = rows.to_rows(torch.arange(len(rows.rollout_results), device=device), dummy_fill=-1)
+            if all_engine_logps is not None:
+                engine_logps = torch.zeros_like(sampling_logps)
+                for i, scored in enumerate(all_engine_logps):
+                    if scored is not None:
+                        engine_logps[i, : scored.numel()] = scored
+                row_has_engine = torch.tensor([o is not None for o in all_engine_logps], device=device)
+                logps_diff, engine_stats = select_mask_logratio(
+                    logps_diff, recompute_logps, sampling_logps, engine_logps, corrected_mask, row_has_engine
+                )
+                for key, value in engine_stats.items():
+                    self._metrics[mode][key].append(value)
             if self._is_mask_config.any_mask_active:
                 importance_sampling_ratio, mask_stats = apply_is_masks(
                     importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids, self._is_mask_config
@@ -965,6 +1017,78 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 for key, value in mask_stats.items():
                     self._metrics[mode][key].append(value)
         return importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids
+
+    def _validate_engine_reference(self, client_cls) -> None:
+        """Construction gate for ``isr_engine_reference``: the re-score needs the sampling log-probs
+        it is compared against, an engine that returns prefill log-probs of a given sequence, and a
+        sampler whose recorded log-probs are the raw distribution the prefill returns (temperature
+        and top-p of 1) — at any other setting the two references would not be the same function."""
+        if not self._is_correction:
+            raise ValueError(
+                "isr_engine_reference requires the vLLM importance-sampling correction "
+                "(train_on_sampled_tokens + vllm_importance_sampling_correction): the engine re-score "
+                "is compared against the sampling log-probs that correction captures."
+            )
+        if not client_cls.SUPPORTS_ENGINE_RESCORE:
+            raise ValueError(
+                f"isr_engine_reference is not available on {client_cls.BACKEND_NAME}: its client declares "
+                "no route that returns per-token log-probs of a given sequence under the current weights."
+            )
+        if self.async_config.rollout_temperature != 1.0 or self.async_config.rollout_top_p != 1.0:
+            raise ValueError(
+                "isr_engine_reference requires rollout_temperature 1.0 and rollout_top_p 1.0 (got "
+                f"{self.async_config.rollout_temperature} / {self.async_config.rollout_top_p}): the engine "
+                "echoes the raw distribution's log-probs while the sampling log-probs are the processed "
+                "ones, so only at the identity sampler do the two share a reference."
+            )
+
+    def _rescore_rows_on_engine(
+        self,
+        all_prompt_ids: list[torch.Tensor],
+        all_completion_ids: list[torch.Tensor],
+        row_has_sampling: list[bool],
+        turns_per_traj: list[int],
+        mode: str,
+    ) -> list[torch.Tensor | None]:
+        """Every sampled row's completion re-scored on the rollout engine under the weights synced for
+        this step; ``None`` where the row carries no sampling log-probs or its request failed (that
+        row's mask stages fall back to the trainer diff). Runs on every rank over its own rows through
+        the rank's score-only clients (``_engine_rescore_clients``); a trajectory's rows go to one
+        server so its turns share the prefix cache. Never raises: a rank-local raise here would desync
+        the collectives that follow, so a failed step is reported (``sampling/engine_rescore_miss_frac``,
+        a warning, an error when nothing succeeded) and trains on the trainer's reference.
+        """
+        clients = self._engine_rescore_clients()
+        row_traj = [traj for traj, turns in enumerate(turns_per_traj) for _ in range(turns)]
+        indices = [i for i, has in enumerate(row_has_sampling) if has]
+
+        def score(i: int) -> list[float]:
+            client = clients[row_traj[i] % len(clients)]
+            return client.score_completion_logprobs(all_prompt_ids[i].tolist(), all_completion_ids[i].tolist())
+
+        scored: list[torch.Tensor | None] = [None] * len(all_prompt_ids)
+        failures: list[Exception] = []
+        with ThreadPoolExecutor(max_workers=_ENGINE_RESCORE_CONCURRENCY) as pool:
+            futures = {i: pool.submit(score, i) for i in indices}
+            for i, future in futures.items():
+                try:
+                    values = future.result()
+                    if len(values) != all_completion_ids[i].numel():
+                        raise ValueError(
+                            f"row {i}: {len(values)} log-probs for {all_completion_ids[i].numel()} tokens"
+                        )
+                    scored[i] = torch.tensor(values, dtype=torch.float32, device=all_completion_ids[i].device)
+                except Exception as e:  # noqa: BLE001 — a transport/shape failure on one row is that row's miss
+                    failures.append(e)
+        miss_frac = len(failures) / len(indices) if indices else 0.0
+        self._metrics[mode]["sampling/engine_rescore_miss_frac"].append(miss_frac)
+        if failures:
+            report = logger.error if len(failures) == len(indices) else logger.warning
+            report(
+                f"isr_engine_reference: {len(failures)}/{len(indices)} re-score requests failed this step "
+                f"(those rows read the trainer's log-ratio instead); last error: {failures[-1]}"
+            )
+        return scored
 
     def _narrow_masks_and_normalizer(
         self,
@@ -1203,19 +1327,25 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     ) -> bool:
         """Whether the trust-region circuit breaker fires on the IS-mask stages (``skip_update_masked_frac``).
 
-        A trajectory counts as masked when every one of its IS-corrected loss tokens had its ratio
-        zeroed by the band/veto/OPSM stages. When the global masked fraction exceeds the threshold,
-        the surviving trajectories are a selection-biased sample of wherever the drifted policy still
-        agrees with the rollouts, so the caller zeroes the step's advantages and the next weight sync
-        re-anchors the rollouts. Any configured KL term still applies (anchor-only step); at beta=0
-        the step is a no-op. The verdict is returned rather than applied because both the per-row and
-        the per-trajectory advantages must follow it, the latter being what the completions record
-        writes. The decision uses the global fraction so every DP rank acts identically.
+        Two GLOBAL fractions feed it and either one above the threshold trips it: the share of
+        IS-corrected trajectories whose every corrected loss token had its ratio zeroed by the
+        band/veto/OPSM stages, and the share of corrected loss tokens zeroed — the masked
+        trajectories are the long ones, so a trajectory count alone reads a step that lost most of
+        its tokens as healthy. Past the threshold the survivors are a selection-biased sample of
+        wherever the drifted policy still agrees with the rollouts — training on them amplifies
+        the drift — so the caller zeroes the step's advantages and the optimizer step is skipped
+        at pre-optimizer-step (:meth:`_skip_optimizer_step_if_breaker_tripped`); the next weight
+        sync ships unchanged weights and the rollouts re-anchor. Any configured KL term is dropped
+        with the step. The verdict is returned rather than applied because the per-row and the
+        per-trajectory advantages both have to follow it — the second is what the durable
+        completions record writes. Global fractions, so every DP rank acts identically.
         """
         if self._skip_update_masked_frac is None or mode != "train" or traj_row_ids is None:
             return False
         device = importance_sampling_ratio.device
         rows_valid = traj_row_ids >= 0
+        corrected_tokens = eff_corrected & rows_valid.unsqueeze(1)
+        masked_tokens = corrected_tokens & (importance_sampling_ratio <= 0)
         row_corrected = eff_corrected.any(dim=1) & rows_valid
         row_surviving = ((importance_sampling_ratio > 0) & eff_corrected).any(dim=1) & rows_valid
         traj_corrected = torch.zeros(num_trajectories, dtype=torch.bool, device=device)
@@ -1223,22 +1353,35 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         traj_corrected[traj_row_ids[row_corrected]] = True
         traj_surviving[traj_row_ids[row_surviving]] = True
         masked = traj_corrected & ~traj_surviving
-        counts = (
-            self.accelerator.gather(torch.stack([masked.sum(), traj_corrected.sum()]).to(device))
-            .view(-1, 2)
-            .sum(dim=0)
-        )
-        frac = (counts[0] / counts[1].clamp(min=1)).item()
-        self._metrics[mode]["sampling/is_masked_traj_frac"].append(frac)
-        skipped = frac > self._skip_update_masked_frac
+        local = torch.stack([masked.sum(), traj_corrected.sum(), masked_tokens.sum(), corrected_tokens.sum()])
+        counts = self.accelerator.gather(local.to(device)).view(-1, 4).sum(dim=0)
+        traj_frac = (counts[0] / counts[1].clamp(min=1)).item()
+        token_frac = (counts[2] / counts[3].clamp(min=1)).item()
+        self._metrics[mode]["sampling/is_masked_traj_frac"].append(traj_frac)
+        self._metrics[mode]["sampling/is_masked_token_frac"].append(token_frac)
+        skipped = max(traj_frac, token_frac) > self._skip_update_masked_frac
         self._metrics[mode]["sampling/update_skipped"].append(float(skipped))
         if not skipped:
             return False
+        self._breaker_tripped_this_step = True
         logger.warning(
-            f"IS trust region: {frac:.0%} of corrected trajectories fully masked "
-            f"(> skip_update_masked_frac={self._skip_update_masked_frac}) — zeroing this step's "
-            f"policy gradient; rollouts re-anchor at the next weight sync."
+            f"IS trust region: {traj_frac:.0%} of corrected trajectories fully masked, {token_frac:.0%} of "
+            f"corrected tokens masked (> skip_update_masked_frac={self._skip_update_masked_frac}) — zeroing "
+            "this step's policy gradient and skipping its optimizer step; rollouts re-anchor at the next weight sync."
         )
+        return True
+
+    def _skip_optimizer_step_if_breaker_tripped(self) -> bool:
+        """Drop the step's gradients when the breaker tripped, so the optimizer steps no parameter.
+
+        Every optimizer skips a parameter whose ``.grad`` is ``None``, moments included, while a
+        zeroed loss still hands it zero gradients and Adam keeps stepping on momentum alone. Runs
+        at pre-optimizer-step (after clipping), once per optimizer step; the flag is single-use.
+        """
+        if not self._breaker_tripped_this_step:
+            return False
+        self._breaker_tripped_this_step = False
+        self.optimizer.zero_grad(set_to_none=True)
         return True
 
     def training_step(self, model, inputs, num_items_in_batch=None):

@@ -58,20 +58,19 @@ EP surface. The table is pinned against the classes by
 | Bailing MoE / Ling | transient balancing bias — routing runs entirely inside the hub gate, so bias-update balancing requires the native `expert_bias` slot and raises rather than falling back to a trainer-only side-buffer ([MoE balancing modes](../training-methods/callbacks.md#moe-balancing-modes)) | `_supports_transient_balancing_bias` |
 | Gemma 4 MoE | routing replay | `_supports_routing_replay` |
 | Gemma 4 MoE | `fp32_non_ep_params` — refused at load ([Precision control](#precision-control)) | `_supports_fp32_non_ep_params` |
-| DeepSeek-V4 | vLLM weight sync — online and environmental GRPO are rejected at construction | `_supports_weight_sync` |
-| Inkling | vLLM weight sync — the hub namespace is WeightConverters-only, so a server loading hub names would silently skip every synced tensor | `_supports_weight_sync` |
-| Mistral4 | vLLM weight sync — vLLM 0.26.0 registers no `mistral4` class at all, so the composite loader has no text tower to build for an export ([mistral4.md](../models/mistral4.md#serving)) | `_supports_weight_sync` |
+| Inkling | RL weight sync — the hub namespace is WeightConverters-only, so a server loading hub names would silently skip every synced tensor | `_supports_weight_sync` |
 | Zaya | gradient checkpointing | `_supports_gradient_checkpointing` |
 | Zaya | routing replay | `_supports_routing_replay` |
-| Zaya | vLLM weight sync — vLLM 0.26.0 ships no Zaya implementation | `_supports_weight_sync` |
-| Cohere2 MoE | vLLM weight sync — no end-to-end sync validated against the pinned vLLM 0.26.0 server | `_supports_weight_sync` |
+| Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `_supports_weight_sync` |
 | Cohere2 MoE | lazy loading — the Command A+ index spells the vision tower `model.vision_tower.vision_model.*`, a from_pretrained-only conversion the lazy loader does not apply | `_supports_lazy_loading` |
-| GLM-5 Next | vLLM weight sync — the live tree spells the KDA/hyper-connection tensors differently from the hub namespace a server reads, and no pinned rollout engine loads `glm5_next` | `_supports_weight_sync` |
+| GLM-5 Next | RL weight sync — the live tree spells the KDA/hyper-connection tensors differently from the hub namespace a server reads, and no pinned rollout engine loads `glm5_next` | `_supports_weight_sync` |
 
-One restriction sits outside that table because it is keyed on a model type, not a flag: **Bailing**
-declares `_WEIGHT_SYNC_UNSUPPORTED_MODEL_TYPES = ("bailing_hybrid", "bailing_moe_linear")`, so online
-and environmental GRPO are refused for Ling 3.0 and Ring-mini-linear-2.0 — no pinned rollout engine
-registers a model class for those spellings. Ling 2.0 syncs normally.
+A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
+the engine: each client declares the model types its pinned release cannot take an online update for
+(`UNSERVABLE_MODEL_TYPES` in `src/distributed/nccl/clients/`), and `validate_weight_sync_support`
+refuses that model+backend pair at trainer construction, quoting the loader fact. SGLang 0.5.17's
+list is the longer of the two — Laguna and Step-3.7 sync on vLLM only. Full roster with each reason:
+[Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
 Attention-side support is a separate question owned by each axis: which families TP can shard is
 `TP_SHARDABLE_ATTENTION_CLASSES` ([TP](tensor-parallelism.md#supported-models)), and which CP can

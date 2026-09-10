@@ -241,9 +241,10 @@ reply = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special
 print(reply)
 ```
 
-Serve the gathered checkpoint with Halo's SGLang image on the host, not inside the
-training container; it listens on port 30000. Point `SGLANG_IMAGE` at the prebuilt image
-(no retag needed), or build the compose file's local tag once with `make build-sglang`.
+Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
+container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
+this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
+compose file's local tag once with `make build-sglang`.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
@@ -281,8 +282,9 @@ Start from the SFT checkpoint. Copy `examples/grpo/environmental/environmental-g
 set `model_name_or_path` to that checkpoint, and set the environment and reward fields
 for your task.
 
-SGLang can weight-sync only GPT-OSS among the MoE families, so LFM2 rollouts run on vLLM
-(`rollout_backend: vllm`, the config default). Start the server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
+serves and weight-syncs LFM-2 (`rollout_backend: sglang`, port 30000), with expert
+distribution. Start the server on separate GPUs.
 
 Run the server on the host, not inside the training container. Pull the prebuilt server
 image and retag it to the name the compose file expects. Its service mounts only the
@@ -300,8 +302,8 @@ VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
 
 That command already passes `--moe-backend triton`, which is required: Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also add `--enable-return-routed-experts` to the
-server's `command:` block, since the compose file exposes no variable for it.
+weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
+(`--enable-return-routed-experts`).
 
 ```yaml
 rollout_server_url: http://localhost:8000

@@ -9,7 +9,7 @@ the rollout server (NCCL requires distinct devices); one server URL per weight-s
 import concurrent.futures
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import partial
 from typing import Any
 
@@ -18,9 +18,10 @@ import torch
 from src.distributed.nccl.clients.base import (
     WEIGHT_SYNC_CHUNK_BYTES,
     BaseWeightSyncClient,
-    PinnedHostBufferPool,
     SamplerLogprobSemantics,
     payload_bytes,
+    resolve_sync_device,
+    snapshot_param,
     starts_new_chunk,
     validate_syncable_param,
 )
@@ -208,9 +209,8 @@ class InferenceClientManager:
         self._clients = []
         self._initialized = False
         self._device = None
-        # Page-locking is amortized across params and across syncs: a fresh pinned allocation per
-        # param stalls the trainer for seconds at 20B+. Bounded to one chunk (see the pool).
-        self._host_buffer_pool = PinnedHostBufferPool(WEIGHT_SYNC_CHUNK_BYTES)
+        # The served model's module names, applied to every client built (rebuilt ones included).
+        self._co_load_module_names: tuple[str, ...] = ()
         # Bytes buffered since the last chunk went out. The manager makes the chunk decision because
         # only it can tell when every server is done with the shared snapshots.
         self._buffered_bytes = 0
@@ -233,6 +233,11 @@ class InferenceClientManager:
             f"InferenceClientManager created for {len(server_configs)} servers: {[c['url'] for c in server_configs]}"
         )
 
+    @property
+    def clients(self) -> list[BaseWeightSyncClient]:
+        """The per-server clients, in ``server_configs`` order (read-only view for request fan-out)."""
+        return list(self._clients)
+
     def _group_port(self, index: int) -> int:
         """The trainer-side NCCL group port for one server: its configured value, else the base + index."""
         return self.server_configs[index].get("group_port", self.base_group_port + index)
@@ -245,8 +250,8 @@ class InferenceClientManager:
             logger.warning("InferenceClientManager already initialized, skipping")
             return
 
-        if isinstance(device, torch.device) and device.type == "cuda" and device.index is None:
-            device = torch.device("cuda", torch.cuda.current_device())
+        # Stored in the form the clients resolve: the shared snapshots are staged on it.
+        device = resolve_sync_device(device)
 
         for i, config in enumerate(self.server_configs):
             url = config["url"]
@@ -268,6 +273,7 @@ class InferenceClientManager:
 
             try:
                 client.init_communicator(device=device)
+                client.scope_co_load_groups(self._co_load_module_names)
                 self._clients.append(client)
                 logger.info(f"  Connected to {url}")
             except Exception as e:
@@ -305,13 +311,13 @@ class InferenceClientManager:
         """Send one pre-gathered named parameter to all servers, for trainers that must gather EP/TP
         weights first (``update_model_params`` iterates ``model.named_parameters()`` instead).
 
-        One read-only host snapshot per param is shared by reference across every client's buffer, so
-        pinned host RAM stays ~1× chunk rather than N_servers×, and a client's flush/clear drops only
-        its own references.
+        One read-only snapshot per param on the sync device is shared by reference across every
+        client's buffer, so the staged chunk costs ~1× rather than N_servers×, and a client's
+        flush/clear drops only its own references.
 
-        The chunk decision is the manager's, not each client's: a shared snapshot may only be recycled
+        The chunk decision is the manager's, not each client's: a shared snapshot may only be released
         once every server has sent the chunk holding it. The buffer is therefore drained here, on every
-        server concurrently, and the pool released after.
+        server concurrently.
         """
         if not self._initialized:
             raise RuntimeError("InferenceClientManager not initialized. Call init_communicators() first.")
@@ -321,40 +327,47 @@ class InferenceClientManager:
         # reaches the client's own update_named_param, which is where the single-server check lives).
         validate_syncable_param(name, weights)
         # Flushed before the budget is exceeded, on the same rule the clients buffer by, and before
-        # the snapshot, so the pool can hand this param a buffer the flush just recycled.
+        # the snapshot, so the staged chunk never holds more than the budget plus this param.
         if starts_new_chunk(self._buffered_bytes, payload_bytes(weights), WEIGHT_SYNC_CHUNK_BYTES):
             self._flush_chunk_to_every_server()
-        host = self._host_buffer_pool.snapshot(weights)
+        snapshot = snapshot_param(weights, self._device)
         for client in self._clients:
-            client.buffer_host_param(name, host)
-        self._buffered_bytes += payload_bytes(host)
+            client.buffer_param(name, snapshot)
+        self._buffered_bytes += payload_bytes(snapshot)
+
+    def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
+        """Bind every client's co-load groups to the served model (see the client method)."""
+        self._co_load_module_names = tuple(module_names)
+        for client in self._clients:
+            client.scope_co_load_groups(self._co_load_module_names)
 
     def abort_weight_update(self):
         """Close the open update on every server after a failed sync; never raises (see the client)."""
         for client in self._clients:
             client.abort_weight_update()
-        self._host_buffer_pool.release()
         self._buffered_bytes = 0
 
     def _flush_chunk_to_every_server(self):
-        """Send the buffered chunk to every server concurrently, then recycle its host buffers.
+        """Send the buffered chunk to every server concurrently.
 
         The mid-gather half of the streamed sync: the update stays open on each server (the tail and
         the close come from ``reset_prefix_cache``), so this is the point where a chunk stops being
-        replayable. A server that fails from here on is reported rather than reconnected.
+        replayable. A server that fails from here on is reported rather than reconnected. The shared
+        snapshots are released as each client drains its buffer, i.e. only once the chunk is on the
+        wire everywhere.
         """
         self._run_on_every_client(lambda index: self._clients[index].flush_chunk(), "chunk flush")
-        # Only now: every server has broadcast the chunk holding these buffers.
-        self._host_buffer_pool.release()
-        self._buffered_bytes = 0
+        # Every client holds the same snapshots, so what one kept back for a co-load partner they all did.
+        self._buffered_bytes = max((client.buffered_bytes for client in self._clients), default=0)
 
     def reset_prefix_cache(self):
         """Send the tail chunk to all rollout servers and close their updates (no-op if nothing was buffered).
 
-        Servers flush concurrently (each client has its own NCCL communicator and per-call streams), so
-        the trainer stall is ~max(per-server flush) instead of the sum. The async D2H snapshot copies
-        complete before any producer thread reads host memory. Returns only once every flush is done,
-        which is what makes the pooled host buffers safe to recycle.
+        Servers flush on concurrent threads, each client on its own NCCL communicator and streams,
+        but they share the forwarding rank's GPU, its NICs and this process, so the fan-out costs
+        the sum of the pushes rather than the slowest one and the stall grows with the server count.
+        The async snapshot copies complete before any producer thread reads them. Returns only once
+        every flush is done.
 
         Raises RuntimeError if a server still fails after one reconnect and re-flush attempt; the
         alternative would leave that server serving stale-policy rollouts.
@@ -362,7 +375,6 @@ class InferenceClientManager:
         if not self._initialized or not self._clients:
             return
         self._run_on_every_client(lambda index: self._clients[index].reset_prefix_cache(), "final flush")
-        self._host_buffer_pool.release()
         self._buffered_bytes = 0
 
     def _run_on_every_client(self, operation: Callable[[int], None], what: str) -> None:
@@ -414,8 +426,7 @@ class InferenceClientManager:
         logger.error(f"Weight-sync {what} failed for {url}: {first_error}; attempting one reconnect")
         try:
             with self._reconnect_lock:  # NCCL groups cannot form concurrently
-                new_client = self.reconnect_client(index)
-            del new_client  # the pool entry is what `operation` reaches
+                self.reconnect_client(index)  # swaps the pool entry `operation` reaches
             operation(index)
             logger.warning(f"Weight sync to {url} recovered after reconnect")
             return None
@@ -463,8 +474,9 @@ class InferenceClientManager:
             group_host=config.get("group_host"),
         )
         client.init_communicator(device=self._device)
-        for name, host in buffered:
-            client.buffer_host_param(name, host)
+        client.scope_co_load_groups(self._co_load_module_names)
+        for name, snapshot in buffered:
+            client.buffer_param(name, snapshot)
         self._clients[index] = client
         return client
 

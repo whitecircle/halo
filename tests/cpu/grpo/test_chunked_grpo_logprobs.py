@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM, PretrainedConfig
+from transformers import Gemma2Config, Gemma2ForCausalLM, LlamaConfig, LlamaForCausalLM, PretrainedConfig
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
 from src.distributed.runtime import materialize_dtensor
@@ -32,10 +32,12 @@ HIDDEN = 32
 B, T = 2, 16
 
 
-def _ref_logits(hidden, weight, bias, temperature):
+def _ref_logits(hidden, weight, bias, temperature, softcap=None):
     logits = torch.matmul(hidden, weight.t())
     if bias is not None:
         logits = logits + bias
+    if softcap is not None:
+        logits = torch.tanh(logits / softcap) * softcap
     return logits / temperature
 
 
@@ -388,6 +390,80 @@ def test_sweep_matches_full_path_across_sequence_and_vocab_tiles(monkeypatch):
     torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(hidden.grad, h_ref.grad, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(weight.grad, w_ref.grad, atol=1e-4, rtol=1e-4)
+
+
+def test_softcapped_sweep_matches_the_capped_full_path(monkeypatch):
+    # A Gemma head caps its logits (``cap · tanh(logits / cap)``) before the softmax; a sweep that skips
+    # the cap scores a sharper distribution than the one the model samples from. Forward, entropy and
+    # every gradient are checked across tile boundaries at a cap small enough for random weights to
+    # saturate it, so an uncapped sweep is off by whole nats rather than rounding.
+    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
+    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    vocab, softcap, temperature = 23, 0.5, 0.8
+    torch.manual_seed(3)
+    hidden0 = torch.randn(B, T, HIDDEN)
+    weight0 = torch.randn(vocab, HIDDEN) * 0.3
+    bias0 = torch.randn(vocab) * 0.2
+    ids = torch.randint(0, vocab, (B, T))
+    upstream = torch.randn(B, T)
+
+    ref_h, ref_w, ref_b = (x.clone().requires_grad_(True) for x in (hidden0, weight0, bias0))
+    ref_logits = _ref_logits(ref_h, ref_w, ref_b, temperature, softcap)
+    ref_logps, ref_entropy = selective_log_softmax(ref_logits, ids), entropy_from_logits(ref_logits)
+    (ref_logps * upstream).sum().backward()
+
+    got_h, got_w, got_b = (x.clone().requires_grad_(True) for x in (hidden0, weight0, bias0))
+    logps, entropy = chunked_selective_log_softmax_with_entropy(got_h, got_w, ids, got_b, temperature, softcap)
+    (logps * upstream).sum().backward()
+
+    uncapped = selective_log_softmax(_ref_logits(hidden0, weight0, bias0, temperature), ids)
+    assert (uncapped - ref_logps).abs().max() > 0.5, "the cap must matter at this scale or the test proves nothing"
+    torch.testing.assert_close(logps, ref_logps, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
+    for got, ref in ((got_h, ref_h), (got_w, ref_w), (got_b, ref_b)):
+        torch.testing.assert_close(got.grad, ref.grad, atol=1e-4, rtol=1e-4)
+
+
+class _CappedHeadHarness(ChunkedGRPOLogprobsMixin):
+    """A tiny Gemma 2 behind the mixin: its head declares ``final_logit_softcapping``."""
+
+    temperature = 1.0
+
+    def __init__(self, softcap: float):
+        config = Gemma2Config(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            max_position_embeddings=64,
+            final_logit_softcapping=softcap,
+            attn_implementation="eager",
+        )
+        torch.manual_seed(0)
+        self.model = Gemma2ForCausalLM(config).eval()
+
+    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
+        hidden = model.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
+        return hidden[:, :-1, :][:, -logits_to_keep:, :]
+
+
+def test_the_sweep_reads_the_heads_softcap_off_the_model_config():
+    # The reference is the model's own forward, whose head applies the cap; the mixin has to find the
+    # cap on the config by itself. A cap of 0.5 saturates random-init logits, so a sweep that ignores
+    # it disagrees with the model by more than a nat on most tokens.
+    harness = _CappedHeadHarness(softcap=0.5)
+    torch.manual_seed(1)
+    input_ids = torch.randint(0, 64, (2, 12))
+    attention_mask = torch.ones_like(input_ids)
+    ltk = 7
+    with torch.no_grad():
+        logits = harness.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
+        ref = selective_log_softmax(logits[:, :-1][:, -ltk:] / harness.temperature, input_ids[:, -ltk:])
+        got, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+    torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":

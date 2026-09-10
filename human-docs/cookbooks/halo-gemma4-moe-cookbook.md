@@ -176,9 +176,9 @@ Use the same model class and processor for image-and-text inference.
 Serve the gathered checkpoint with Halo's vLLM image, which listens on port
 8000: the toolkit writes Gemma 4 exports in the config schema vLLM 0.26.0's
 model code reads, and its expert loader takes the gathered save's fused layout
-directly. SGLang 0.5.17 cannot load it, because outside GPT-OSS its loaders want
-per-expert expert names and this family's gather emits the fused pair. Run the
-server on the host, not inside the training container, and add
+directly. SGLang 0.5.17 reads the same fused pair on port 30000, and the
+upstream image serves it. Run the server on the host, not inside the training
+container, and add
 `- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to
 serve a checkpoint from disk, since the compose service otherwise mounts only
 the HuggingFace cache.
@@ -193,6 +193,11 @@ VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
 ```
 
 ## Train a LoRA adapter
+
+On the multimodal checkpoint this recipe is refused at PEFT setup: the vision tower's
+projections share the `q_proj`…`o_proj` names and are `Gemma4ClippableLinear`, which PEFT
+cannot wrap. Open issue ([Troubleshooting](../troubleshooting.md)); the full fine-tune above
+is the working path.
 
 ```yaml
 use_peft: true
@@ -213,12 +218,15 @@ Keep TP disabled for LoRA.
 
 ## Continue with GRPO
 
-Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests-lora-ep1.yaml`,
+Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests-full-ep1.yaml`,
 or from `examples/grpo/environmental/environmental-grpo-template.yaml`. Set
 `model_name_or_path` to the gathered checkpoint.
 
-SGLang can weight-sync only GPT-OSS among the MoE families, so Gemma 4 rollouts run on
-vLLM (`rollout_backend: vllm`, the config default). Start the server on separate GPUs.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
+serves and weight-syncs this family (`rollout_backend: sglang`; ep1 configs under
+`examples/grpo/environmental/gemma4/sglang/`); that sync needs this repo's SGLang image
+([Supported Matrix](../supported-matrix.md#rollout-engines)). Start the server on
+separate GPUs.
 
 Run the server on the host, not inside the training container. Pull the prebuilt server
 image, retag it to the name the compose file expects, and add
@@ -231,12 +239,31 @@ docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
 
 VLLM_MODEL=/data/checkpoints/gemma-4-26b-a4b-ultrachat-ep8 \
 VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
+VLLM_REASONING_PARSER=gemma4 VLLM_USE_V2_MODEL_RUNNER=0 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
 That command already passes the required `--moe-backend triton`; Blackwell's
 auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync.
+weight sync. The reasoning parser and the V1 model runner are what the per-effort
+`thinking_tokens` profile needs: the trainer sends `thinking_token_budget` on every
+request, and vLLM refuses it with a 400 without them.
+
+For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
+trainer will not use.
+
+```bash
+docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
+
+SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
+SGLANG_MODEL=/data/checkpoints/gemma-4-26b-a4b-ultrachat-ep8 \
+SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
+  docker compose -f docker-compose.sglang.yml up sglang-server
+```
+
+The compose default `--moe-runner-backend triton` is required for weight sync, and this
+family must be served without `SGLANG_ENABLE_R3` — the engine exits at start with it.
 
 ```yaml
 rollout_server_url: http://localhost:8000

@@ -89,23 +89,36 @@ log-probability sums, full-sequence pooling, and dual-model / rollout setups.
 ### Rollout engines
 
 Environmental GRPO serves rollouts from vLLM by default; `rollout_backend:
-sglang` switches engines. SGLang is the narrower path and refuses three shapes
-at startup rather than mid-run:
+sglang` switches engines. Both read a family's experts in the hub checkpoint
+layout its gather emits, so the engines differ in which families their pinned
+release can take an online weight update for, and in one request field. SGLang
+refuses two shapes at startup rather than mid-run:
 
-- any distributed experts (`expert_parallel_size × expert_tensor_parallel_size > 1`);
 - `rollout_max_thinking_tokens`, a vLLM-only request field — steer reasoning
   with the environment's `reasoning_effort` and price it with
   `reasoning_compliance_weight` instead;
-- every MoE family except GPT-OSS. SGLang loads experts in the checkpoint-fused
-  layout that only the GPT-OSS layer gathers, and 0.5.17's Qwen3-MoE loader
-  drops fused expert keys outright (dense Qwen3 is fine).
+- the families SGLang 0.5.17 cannot serve or update: Mistral4 and Ling 3.0 (no
+  model class), Ring (its checkpoints declare `BailingMoeLinearV2ForCausalLM`,
+  the engine registers `BailingMoeV2_5ForCausalLM`), Zaya (its loader reads the
+  pre-transformers-5.14 per-expert checkpoint), Laguna and Step-3.7 (their
+  loaders assert full coverage in each `load_weights` call, which a chunked
+  update cannot satisfy), DeepSeek-V4 (per-expert `w1/w3/w2` names against the
+  fused gather). Dense families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE
+  Lite, Gemma 4, Ling 2.0 and LFM-2 sync into it, with expert distribution.
 
-`routing_replay: rollout` works on either engine; SGLang captures it when the
-server runs `--enable-return-routed-experts --moe-runner-backend triton`.
-SGLang must be served from this repo's `Dockerfile.sglang` image — the upstream
-one ships a different NCCL and cannot form the weight-sync group — and its
-weight sync costs the trainer NVLink between its own ranks, so its step runs
-slower than vLLM's ([Troubleshooting](troubleshooting.md)). Engine-by-engine
+vLLM 0.26.0 refuses Zaya, Mistral4, DeepSeek-V4, Ling 3.0 and Ring; Inkling,
+GLM-5 Next and Cohere2 MoE sync into neither. The trainer names the family and
+the loader reason at construction.
+
+`routing_replay: rollout` runs on either engine. SGLang captures it for GPT-OSS,
+Qwen3 MoE, Qwen3.5/3.6 and GLM-4 MoE Lite with `--enable-return-routed-experts
+--moe-runner-backend triton`; Gemma 4 and Zaya have no routing replay on either
+engine, and SGLang's R3 capture raises on Bailing at the first rollout.
+Weight sync must be served from this repo's `Dockerfile.sglang` image — the
+upstream one ships a different NCCL, and the patch this one applies is what
+lets an update reach the GLM-4 gate and the Gemma 4 router — with
+`NCCL_CUMEM_ENABLE=1` in its container (the compose default; a mismatch fails
+the first sync, [Troubleshooting](troubleshooting.md)). Engine-by-engine
 detail: [Rollout Servers](../agent-docs/infrastructure/rollout-servers.md) ↗.
 
 ## Parallelism modes
@@ -139,19 +152,19 @@ without a registered CP wrapper drop CP. Source of truth under
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | broadest coverage |
 | Qwen3-VL (text) | Yes | — | Yes | No | — | — | — | Yes | keep `tensor_parallel_size=1` — both variants raise at load under TP |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | interleaved linear-attention blocks CP; VL checkpoints train too — the MoE-VL wrapper has EP, the dense 9B-VL runs plain FSDP with `sdpa` |
-| GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | interleaved fused experts; the only MoE family SGLang weight sync serves |
+| GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | interleaved fused experts; trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | LoRA-style attention compression |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | untested | Yes | untested | VLM checkpoint; NoPE full-attention layers; averaged shared expert. Only EP is validated on the 200B+ checkpoint — CP/TP/ETP pass the tiny-model 8-GPU matrix. No online/environmental GRPO |
-| Laguna S / XS 2.1 | Yes | Yes | No | No | untested | No | No | Yes | sigmoid router and shared expert, native in transformers (released checkpoints still load through remote code at a pinned revision); shipped configs set `attn_implementation: sdpa`, so `padding_free` is rejected and they pack instead |
-| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | Yes | KV-shared layers block CP/TP; no router-balancing path at all |
+| Laguna S / XS 2.1 | Yes | Yes | No | No | untested | No | No | Yes | sigmoid router and shared expert, native in transformers (released checkpoints still load through remote code at a pinned revision); shipped configs set `attn_implementation: sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
+| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | No | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA on the multimodal checkpoint is refused at PEFT setup — the vision tower's projections share the `q_proj`…`o_proj` names in a `Gemma4ClippableLinear` PEFT cannot wrap (open issue) |
 | Bailing/Ling | Yes | Yes | Yes | No | Yes | untested | No | Yes | EP covers Ling 2.0, Ling 3.0 and the Ring linear-attention siblings; CP on Ling 2.0 only (needs `sdpa`); no DTensor attention plan. Weight sync refused for Ling 3.0 and the linear siblings |
 | LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | short-conv layers block CP |
-| Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | vLLM 0.26.0 registers no `mistral4` class, so no online / environmental GRPO |
+| Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | neither pinned engine registers a `mistral4` class, so no online / environmental GRPO |
 | DeepSeek-V4 | Yes | Yes | No | No | untested | No | No | Yes | shared-KV MQA + CSA/HCA compressor block CP/TP; eager-only, so `padding_free` is rejected (packing works but warns — compressors see across document boundaries); no rollout weight sync |
 | Zaya | Yes | Yes | No | No | Yes | No | No | Yes | EP or ETP, always without gradient checkpointing; CCA blocks CP, `num_kv_heads=2` blocks TP; no rollout weight sync |
 | Inkling | Yes | Yes | No | No | Yes | No | No | untested | multimodal MoE (276B total / 12B active); short-conv layers and an additive relative-logits bias block CP, no `tp_plan`; no rollout weight sync |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM (321B total / 18B active); KDA linear-attention blocks CP, no TP shard plan; SDPA only; the fp8 release needs a one-time BF16 conversion (`halo run convert-glm5-bf16`); no rollout weight sync |
-| Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM (198B total / ~11B active); per-layer head counts block TP, no CP wrapper; SDPA only; GRPO works on vLLM (serve with `--trust-remote-code`); sharded EP saves are refused — use the gathered save |
+| Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM (198B total / ~11B active); per-layer head counts block TP, no CP wrapper; SDPA only; GRPO on vLLM only (serve with `--trust-remote-code`; SGLang's loader refuses the chunked update); sharded EP saves are refused — use the gathered save |
 | Any other HF causal LM | Yes | — | family-specific | native if `tp_plan` exists | — | — | — | Yes | standard FSDP path; a dense model without a TP plan raises at load instead of sharding |
 
 Three rules cut across the table:

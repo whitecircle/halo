@@ -41,7 +41,7 @@ reference.
 | "Checkpoint not found" on resume, or duplicate per-node saves | The filesystem flag doesn't match reality: `DIST_SHARED_FILESYSTEM` is `1` for a shared FS, `0` for per-node disks. |
 | `OSError: Stale file handle` while loading a model or dataset cache | A cross-node read-after-write on NFS/EFS. Set `DIST_INPUT_SHARED_FILESYSTEM=0` and leave the output side shared — see [Clusters](clusters.md). |
 | A rank waits hours then aborts during a download or corpus pack | The rank going first outlasted `DIST_STORE_TIMEOUT_HOURS` (default 4). Raise it. |
-| Slow cross-node traffic on AWS | EFA needs opt-in env (`FI_PROVIDER=efa`, …) — see [Clusters](clusters.md). Those same vars degrade an InfiniBand cluster if left set. |
+| Slow cross-node traffic on AWS | EFA needs opt-in env (`NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric`, `--device /dev/infiniband`) — see [Clusters](clusters.md). Those same vars degrade an InfiniBand cluster if left set. |
 | `Xid 145` NVLink messages flooding dmesg | Usually benign FEC churn. `halo run nvlink-health` exits non-zero only on real faults — trust it, not dmesg volume. |
 
 ## RL runs (vLLM / SGLang)
@@ -49,9 +49,13 @@ reference.
 | Symptom | Cause → fix |
 | --- | --- |
 | Weight-sync group never forms ("1/2 clients joined") | Both containers must run `network_mode: host`; the sync rendezvouses on an ephemeral port a bridge network won't publish. Under SGLang, check the server came from this repo's `Dockerfile.sglang` — the upstream image ships a different NCCL. |
-| Startup rejection under `rollout_backend: sglang` | SGLang refuses distributed experts, `rollout_max_thinking_tokens`, and every MoE family but GPT-OSS ([Supported Matrix](supported-matrix.md#rollout-engines)). Drop the knob it names, or use `rollout_backend: vllm`. |
-| SGLang step time far above the same config on vLLM | Its cross-container sync forces process-global socket NCCL, so FSDP2 re-gathers the whole model over loopback TCP once per grad-accum microstep. Set `fsdp_reshard_after_backward: false` (the shipped SGLang configs do); rejected under TP. The step still runs slower than vLLM's. |
-| `routing_replay: rollout` captures nothing on SGLang | The server needs `--enable-return-routed-experts --moe-runner-backend triton`; the fused runners bypass the capture hook. Keep `--enable-torch-compile` off. |
+| Startup rejection under `rollout_backend: sglang` | Weight-sync support is per family and per engine: the trainer names the family and the SGLang loader fact behind the refusal at construction ([Supported Matrix](supported-matrix.md#rollout-engines)). `rollout_max_thinking_tokens` is vLLM-only and refused here too. Drop the knob it names, or use `rollout_backend: vllm`. |
+| Weight sync hangs at the first collective after the group formed | The two containers run different NCCL transports or different `aws-ofi-nccl` + libfabric builds (an upstream server image on an EFA host, say) — the pair forms the group and then hangs. Serve from Halo's images, run the same fabric recipe on both ends (the compose EFA overlay + `make ... EFA=1`), and check with `python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --expect efa`, which reports the transport and plugin build each side formed on. |
+| `ncclP2pImportShareableBuffer ... invalid argument` in the SGLang log on the first update | cuMem differs between the containers: SGLang turns it off unless `NCCL_CUMEM_ENABLE` is pre-set. Keep the compose default `NCCL_CUMEM_ENABLE=1` on the server and restart it — it holds a half-written model. |
+| `routing_replay: rollout` captures nothing on SGLang | The server needs `--enable-return-routed-experts --moe-runner-backend triton`; the fused runners bypass the capture hook. Keep `--enable-torch-compile` off. R3 is per family on SGLang — the server exits at start for Gemma 4 and raises at the first capture for Bailing; serve those without `SGLANG_ENABLE_R3`. |
+| SGLang exits at start with "Unsupported head dimensions" | GLM-4 MoE Lite's MLA head size on Blackwell: set `SGLANG_ATTENTION_BACKEND=triton` on the server. |
+| Qwen3.5 / Qwen3.6 MoE with attention LoRA fails at the first environmental-GRPO step with "mixed torch.Tensor and DTensor" | Open issue in this family's LoRA path under environmental GRPO. Full fine-tuning works; the shipped `qwen3.6-*-lora-*` env-GRPO examples share the failing shape. |
+| Gemma 4 with attention LoRA: "Target module Gemma4ClippableLinear ... is not supported" at PEFT setup | Open issue: the vision tower shares the projection names and PEFT cannot wrap its module. Full fine-tuning works; the shipped `gemma4-*-lora-*` env-GRPO examples hit it. |
 | `GENERATION is wedged` at startup | A previous trainer died attached to the vLLM engine. Restart the vLLM container before relaunching. |
 | Rewards fine, policy silently degrades | Under environmental GRPO, watch `sampling/logratio_mean` — a steady negative drift means broken weight sync. Also serve MoE models with `--moe-backend triton`; the auto-selected backends silently corrupt synced expert weights. |
 

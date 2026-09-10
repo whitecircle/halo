@@ -98,7 +98,7 @@ FSDP2 (`fully_shard`) is applied automatically for all `torchrun` modes: gradien
 Two resharding knobs, both `torchrun`-only:
 
 - `fsdp_reshard_after_forward` (default `false` = SHARD_GRAD_OP: parameters stay unsharded between forward and backward). `true` is FULL_SHARD/ZeRO-3 and is rejected wherever an expert-distribution group exists (`ep_group_size > 1`, pure ETP included — the backward all-gather races the DeepEP combine), under TP with `data_parallel_size > 1`, and under PP.
-- `fsdp_reshard_after_backward` (default `true`). `false` keeps parameters unsharded across a gradient-accumulation window's microsteps — its last backward still reshards — at the cost of one unsharded bf16 param copy per GPU for the run. This is the lever for `rollout_backend: sglang`, whose weight sync forces NCCL onto sockets and makes the per-microstep reshard the dominant step cost. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
+- `fsdp_reshard_after_backward` (default `true`). `false` keeps parameters unsharded across a gradient-accumulation window's microsteps — its last backward still reshards — at the cost of one unsharded bf16 param copy per GPU for the run. The saving is the per-microstep re-gather — negligible over NVLink, large when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
 
 ## Example SFT config
 
@@ -155,7 +155,7 @@ Method-specific fields (`beta`, `loss_type`, `advantage_method`, `environment_ty
 
 ## Config file locations
 
-Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`. Environmental GRPO adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` present for gpt-oss only. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
+Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`. Environmental GRPO adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` files for gpt-oss, Qwen3.5/3.6 and Gemma 4. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
 
 A family directory is the snake_case hub family (`qwen3_5`, `deepseek_v4`, `ling_mini_2`), and file names lead with the same family token (`gptoss-20b-…`, `gemma4-26b-a4b-…`). One deviation: `qwen3_5/` also holds the `qwen3.6-*` configs, since Qwen3.6 ships under the Qwen3.5 model types.
 

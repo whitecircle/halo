@@ -45,7 +45,7 @@ Overrides merge per level over the defaults, so a profile that sets only interac
 
 Eval (`eval_runner.py`) binds the same per-level profile through `bind_episode_effort`, narrows its own `RolloutConfig` to the level's `max_tokens` / `max_thinking_tokens`, and sends the result through `generation_control_fields` — so the interaction budgets and the CoT cap both apply, and the resolved budget is recorded on every trajectory (`reasoning_budget`).
 
-The interaction half is what makes effort buy **iteration**, not just longer CoT: the shipped configs scale both budgets by effort (2/3/3 submissions, 2/4/6 scratchpad runs), keeping the verdict→fix loop available at medium and high. Without an interaction limit the strategy collapses to submit-and-fix at every level. No shipped config sets `tested_submission_reward`, so the test-first bonus is off by default.
+The interaction half is what makes effort buy **iteration**, not just longer CoT: the shipped configs scale both budgets by effort (2/3/3 submissions, 2/4/6 scratchpad runs), keeping the verdict→fix loop available at medium and high. Without an interaction limit the strategy collapses to submit-and-fix at every level. No shipped config sets `tested_submission_reward` or `token_cost`. The test-first bonus is off by default; a token price is paid **within the GRPO group**, so at every effort level the sibling that reasons less wins it regardless of outcome, and the policy learns to stop thinking — effort is priced by the thinking caps and interaction budgets instead.
 
 Interaction budgets apply only when the level is concrete at reset (a trainer-stamped group level, a non-`random` env setting, or eval's per-episode draw, which is stamped before reset — `BaseEnvironment.reset_effort_level`); an undetermined level keeps the class caps.
 
@@ -70,7 +70,7 @@ The objective is the fraction of hidden tests passed by the **submitted** soluti
 
 This env defaults `tool_success_reward` and `tool_error_penalty` to `0` (overriding the native per-call shaping), so the ladder below is the only extra signal unless a config re-enables them — the canonical config does, at `tool_error_penalty: 0.05`.
 
-Every rung pays only on a **contentful** grade. A zero-test row, a submission whose arguments never parsed into runnable code, or a grading-backend outage pays nothing — such rows would otherwise be guaranteed-payout attractors.
+Every rung *pays* only on a **contentful** grade; the `resubmission_penalty` charge is the exception, priced per accepted submit call. A zero-test row, a submission whose arguments never parsed into runnable code, or a grading-backend outage pays nothing — such rows would otherwise be guaranteed-payout attractors.
 
 `episode/grading_infra_outage` is logged as `0.0`/`1.0` on every graded episode that had tests, so its mean is the outage rate. An outage also marks the episode invalid, so the trainer drops it from the GRPO group baseline instead of scoring it as a wrong answer.
 
@@ -81,16 +81,16 @@ Every rung pays only on a **contentful** grade. A zero-test row, a submission wh
 | episode burned `max_turns` without terminating | `−turn_overflow_penalty` (on top of whatever it earned) |
 | a contentful graded submission | `+submission_reward` |
 | a scratchpad run before the first submission | `+tested_submission_reward` (from the effort profile; once per episode) |
-| each graded submission after the first | `−resubmission_penalty` per extra submission (a magnitude, default `0`; the shipped configs price a probe at `0.1`) |
+| each accepted `submit_solution` call after the first | `−resubmission_penalty` per extra call, charged whether or not the grade was contentful (a magnitude, default `0`; the shipped configs price a probe at `0.1`) |
 | submitted AND used > 1 tool call | `+multi_turn_reward` |
 | fraction of graded tests that **ran cleanly** (right or wrong) | `frac × execution_progress_reward` |
 | fraction of hidden tests passed | `frac × success_reward` (dominant) |
 
-All five shaping rungs are non-negative magnitudes defaulting to `0` (off). They bootstrap the tool-use loop a weak base model otherwise can't escape: answering in plain text and never submitting scores `failure_reward` every time, leaving GRPO no gradient toward "submit". Keep each small next to `success_reward` — a rung self-neutralizes within a GRPO group once all completions reach it, so it shapes early then fades.
+Every shaping rung is a non-negative magnitude defaulting to `0` (off). They bootstrap the tool-use loop a weak base model otherwise can't escape: answering in plain text and never submitting scores `failure_reward` every time, leaving GRPO no gradient toward "submit". Keep each small next to `success_reward` — a rung self-neutralizes within a GRPO group once all completions reach it, so it shapes early then fades.
 
 The execution rung is the anti-sparsity signal: on a hard problem where every completion fails, it separates runnable-but-wrong from crashes and restores the within-group signal. `turn_overflow_penalty` prices the turn cap, which the reward is otherwise blind to.
 
-The env logs the decomposition as `reward/objective`, `reward/submission`, `reward/tested_submission`, `reward/execution`, `reward/tool_shaping`, and `reward/turn_shaping`; the components sum exactly to the scalar reward, and the trainer's `reward/composition_residue` metric flags any channel that bypasses them ([metrics](../environmental-grpo.md#logged-metrics)).
+The env logs the decomposition as `reward/objective`, `reward/submission`, `reward/tested_submission`, `reward/resubmission`, `reward/execution`, `reward/tool_shaping`, and `reward/turn_shaping`; the components sum exactly to the scalar reward, and the trainer's `reward/composition_residue` metric flags any channel that bypasses them ([metrics](../environmental-grpo.md#logged-metrics)).
 
 C++/C need a compiling backend; see [Code Execution Sandboxes](sandbox.md).
 
@@ -146,21 +146,21 @@ A pool keeps whatever splits its source shipped, and the script carves none of i
 
 ```yaml
 environment_type: codeforces  # or code_contests (exact-match default)
-max_turns: 15
+max_turns: 12               # the training configs' value; the class default is 15
 answer_field: answer
 environment_kwargs:
   language: python            # or cpp / c
   timeout_per_test: 5         # the training configs' value; the class default is 15
   max_grading_seconds: 150
-  reasoning_effort_profiles:  # effort = thinking budget + interaction + compute price (see Reasoning effort)
-    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2, token_cost: 0.05}
-    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4, token_cost: 0.02}
+  reasoning_effort_profiles:  # effort = thinking budget + interaction budgets (see Reasoning effort)
+    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   output_comparison: tokens   # codeforces preset default; "exact" for code_contests
   stop_on_first_failure: false
 ```
 
-The canonical training config is `examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml`: gpt-oss-20b, `codeforces` preset, `reasoning_effort: random`, `max_grading_seconds: 150`, the shaping rungs (`submission_reward: 0.25`, `execution_progress_reward: 0.05`, `no_tool_use_penalty: 0.1`, `multi_turn_reward: 0.05`, `turn_overflow_penalty: 0.1`), the [tuned verifiable-reward objective](../online-grpo.md#grpo-objective-for-verifiable-rewards) and [chunked log-probs](../environmental-grpo.md#chunked-log-probs). It also re-enables the per-call `tool_error_penalty: 0.05` the env defaults off, leaving `tool_success_reward` at 0 — any per-call pay is farmable by duplicate re-runs.
+The canonical training config is `examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml`: gpt-oss-20b, `codeforces` preset, `reasoning_effort: random`, `max_grading_seconds: 150`, the shaping rungs (`submission_reward: 0.25`, `execution_progress_reward: 0.05`, `no_tool_use_penalty: 0.1`, `multi_turn_reward: 0.05`, `turn_overflow_penalty: 0.1`, `resubmission_penalty: 0.1`, `verdict_detail: outcome`), the [tuned verifiable-reward objective](../online-grpo.md#grpo-objective-for-verifiable-rewards), [chunked log-probs](../environmental-grpo.md#chunked-log-probs) and the trust region from [the stability knobs](../environmental-grpo.md#off-policy-mismatch-and-stability-knobs). It also re-enables the per-call `tool_error_penalty: 0.05` the env defaults off, leaving `tool_success_reward` at 0 — any per-call pay is farmable by duplicate re-runs.
 
 It sets `episode_timeout: 2700`, which needs `DIST_NCCL_TIMEOUT_MINUTES=60` on the trainer ([Environmental GRPO — Troubleshooting](../environmental-grpo.md#troubleshooting)). Sibling variants in the same tree swap the backend (`sglang/`), adapter (`-full-`), or expert distribution (`-ep4` — one 4-rank DeepEP group; use it when expert weights or optimizer state are the memory pressure).
 

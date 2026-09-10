@@ -73,17 +73,19 @@ carries: [Docker → Image matrix](../infrastructure/docker.md#image-matrix).
 `make test-gpu-vllm` is the `vllm_server` slice of the full tier and needs the `docker-compose.vllm.yml`
 server already serving on a GPU outside `TRAINER_CUDA_DEVICES` (default `0,1,2,3,4,5,6`, which the target
 pins as the trainer's `CUDA_VISIBLE_DEVICES`) — weight sync is an NCCL broadcast, and a rank cannot
-broadcast to itself. It forces `NCCL_IB_DISABLE=1 NCCL_NET=Socket` (why:
-[Rollout Servers → vLLM](../infrastructure/rollout-servers.md#vllm)).
+broadcast to itself. Without `EFA=1` it forces the no-fabric recipe both compose bases default to
+(`NCCL_IB_DISABLE=1 NCCL_NET=Socket`; why: [Rollout Servers → vLLM](../infrastructure/rollout-servers.md#vllm));
+`EFA=1` passes `/dev/infiniband` and the fabric variables instead, matching a server started with
+its compose EFA overlay ([Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
 
 Each server slice takes **two passes**, because the tests broadcast the trainer's own weights into the
 served model and assert the served policy moved — server and trainer must hold the same checkpoint, and
 no one server covers both halves. `SERVER_TIER` defaults to `not moe` (serve a dense model); restart the
 server on a MoE checkpoint and rerun with `SERVER_TIER=moe`.
 
-`make test-gpu-sglang` is the `sglang_server` slice and has the same server requirement, but forces
-three more variables — `NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_NET_PLUGIN=none` (why:
-[Rollout Servers → NCCL transport](../infrastructure/rollout-servers.md#nccl-transport-sglang-only)).
+`make test-gpu-sglang` is the `sglang_server` slice with the same server requirement and the same
+`EFA=1` switch; the server needs only cuMem parity on top — `NCCL_CUMEM_ENABLE=1`, the compose default
+(why: [Rollout Servers → NCCL transport](../infrastructure/rollout-servers.md#nccl-transport-sglang)).
 
 ```bash
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8
@@ -206,8 +208,8 @@ below. The cross-suite ones:
 | `HALO_TEST_ATTN` / `HALO_TEST_GC` / `HALO_TEST_REVISION` | Attention implementation, gradient checkpointing (default **on**), hub revision for the suites that sweep them. The per-family `HALO_TEST_ZAYA_GC` defaults the other way — see the per-suite table. |
 | `HALO_TEST_OFFGRPO_PARALLEL` | `tp` (default, dense Qwen3) or `ep` (gpt-oss MoE) leg of `trainers/grpo/test_offline_grpo_tp_resume.py`. |
 | `HALO_TEST_MAX_STEPS`, `HALO_TEST_BATCH_SIZE`, `HALO_TEST_GRAD_ACCUM`, `HALO_TEST_NUM_GENERATIONS`, `HALO_TEST_NUM_WORKERS`, `HALO_TEST_MAX_CONCURRENT`, `HALO_TEST_ROLLOUT_MAX_TOKENS`, `HALO_TEST_MAX_COMPLETION` | Step count and rollout sizing for `trainers/grpo/test_environmental_grpo_benchmarks.py`, whose defaults are sized for one vLLM server. |
-| `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Weight-transfer NCCL group port the e2e rollout suites open (default `51216`; `51220` for the Step-3.7 sync suite, `51340` / `51380` for the online-GRPO MoE / dense e2e pair — each row owns `base + 2×row-index`, its resume phase 2 the next port up, so back-to-back rows never contend through TIME_WAIT; `51240` for the 4-GPU env file; `51228` for the weight-transfer re-init suite, which rebinds it once per cycle); the server must be started on the same one. |
-| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated rollout endpoints the environmental legs of `trainers/grpo/test_online_grpo_vllm_e2e.py` drive (default: the single `VLLM_SERVER_URL`). Two or more put the weight sync on the rolling multi-server path — one server updated at a time while the rest keep serving — and the leg then asserts the served policy moved on **every** one of them. Each server serves the same model on its own GPU; the leg binds one trainer-side group port per server, counting up from its own base (`51219` for the environmental leg, `51230` for the LoRA one). |
+| `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Weight-transfer NCCL group port the e2e rollout suites open (default `51216`; `51220` for the Step-3.7 sync suite, `51340` / `51380` for the online-GRPO MoE / dense e2e pair — each row owns `base + 2×row-index`, its resume phase 2 the next port up, so back-to-back rows never contend through TIME_WAIT; `51240` for both 4-GPU env files (the vLLM and SGLang wrappers, each on its own engine's knob); `51228` for the weight-transfer re-init suite, which rebinds it once per cycle); the server must be started on the same one. |
+| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated rollout endpoints the environmental legs of `trainers/grpo/test_online_grpo_vllm_e2e.py` drive (default: the single `VLLM_SERVER_URL`). Two or more put the weight sync on the rolling multi-server path — one server updated at a time while the rest keep serving — and the leg then asserts the served policy moved on **every** one of them. Each server serves the same model on its own GPU; the leg binds one trainer-side group port per server, each allocated by `free_port()` (`tests/common/ports.py`) rather than pinned, so back-to-back rows cannot contend. |
 | `VLLM_MODEL` | Checkpoint the running vLLM server serves, read by the rollout benchmark itself — not by the launcher, and **not** forwarded by the `make` tiers, so put it in `.env` or export it. It must be the model the test trains: unset, the benchmark falls back to Qwen3-0.6B and a MoE-serving tier silently tests the wrong pairing. (`SGLANG_MODEL` is the compose file's server-side spelling; no test reads it.) |
 
 Suites that pin one family or one phase add their own `HALO_TEST_<SUITE>_*` knobs on top; the manifest
@@ -223,8 +225,10 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_EP1_KNOB_ATTN` / `HALO_TEST_EP1_KNOB_LAZY` | ep1 `fsdp_shard_ep1_experts` weight-sync suite (`tests/gpu/parallelism/ep/test_ep1_knob_weight_sync.py`): attention impl (default `flash_attention_2`) and `ep_lazy_loading` (default on; `=0` routes the load through `from_pretrained` + EP patching instead). |
 | `HALO_TEST_RESUME_FSDP_RESHARD` | `fsdp_reshard_after_forward` (default off = ZeRO-2) for the `fsdp` and `cp` modes of `tests/gpu/trainers/sft/test_sft_checkpoint_resume.py`; the `tp` / `ep` modes ignore it (TP+DP+FULL_SHARD is config-rejected). |
 | `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense half of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_dense_e2e.py`, default `http://localhost:8010`) and of the weight-transfer re-init suite, which serves the same checkpoint. The pair's two files train different checkpoints and each asserts on its own server's logprobs, so one `VLLM_SERVER_URL` cannot carry both; unset, both fall back to `VLLM_SERVER_URL`. |
-| `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of the online-GRPO/SDPG e2e pair (`tests/common/online_grpo_e2e.py`): the MoE half's default `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP rows) and the dense half's `Qwen/Qwen3-0.6B` (TP and FSDP2-DP rows). Every row asserts on the served logprobs, so the running server must serve the same checkpoint. |
-| `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and step count (default `2`) of the Environmental-GRPO e2e body (`tests/common/env_grpo_e2e.py`). The model reaches the **vLLM** leg only — the SGLang and 4-GPU legs pass their own — and the served model must be the same checkpoint. |
+| `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_moe_e2e.py` and its dense sibling): the MoE half's default `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP rows) and the dense half's `Qwen/Qwen3-0.6B` (TP and FSDP2-DP rows). Every row asserts on the served logprobs, so the running server must serve the same checkpoint. |
+| `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and step count (default `2`) of the Environmental-GRPO e2e body (`tests/common/env_grpo_e2e.py`), the vLLM 2-GPU leg's; the SGLang and 4-GPU wrappers own their own checkpoint knobs. |
+| `HALO_TEST_ENV_GRPO_SGLANG_MODEL` | Checkpoint of the SGLang Environmental-GRPO e2e wrappers (`trainers/grpo/test_env_grpo_sglang_e2e.py` and its four-rank sibling `test_env_grpo_sglang_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`); a per-family pass points it at the family and serves the same checkpoint. Its own knob because its server and default family differ from the vLLM leg's. |
+| `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` | Per-family overrides for the Environmental-GRPO e2e body: the policy's `attn_implementation` (unset = the loader's auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset = the attention projections read off the checkpoint's index, which MLA families resolve to their own names; needed where the projections do not end in `_proj`, such as Ling's `query_key_value,dense`). |
 | `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoint of the 4-rank Environmental-GRPO e2e (`trainers/grpo/test_env_grpo_vllm_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`), whose rows hold two parallelism axes at once (EP+ETP, EP+TP, ep4). Its own knob because it shares the 2-GPU file's server but not its default family. |
 | `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_vllm_weight_transfer_reinit.py`. Each cycle leaked ~633 MiB of NCCL communicator on both ends before the re-init patch, so twelve overshoot the suite's 1 GiB growth budget several times over. |
 | `HALO_TEST_VLLM_SERVER_GPU` | The vLLM server's GPU as `nvidia-smi` indexes it, for the same suite's device-memory read. Unset means "every GPU the trainer does not own", which is exactly the server's on the tier's own topology (`TRAINER_CUDA_DEVICES` covers the rest); set it when another job holds a third GPU. |
@@ -243,7 +247,7 @@ neighbour's timeout. That is also why the twelve `gpt-oss` SFT scripts under `tr
 
 `core` is the pre-merge gate, and small-and-fast is its *intent* — ≤2 GPUs, tiny model. Size the host
 from the manifest, not from that intent: over half of `tests/gpu/manifest.py` carries `core`
-(120 of 195 entries, more pytest nodes once the `args_matrix` rows expand), and within that tier some
+(120 of 196 entries, more pytest nodes once the `args_matrix` rows expand), and within that tier some
 entries need 4 GPUs, 18 declare a timeout ≥1500 s (three at 2400 s), and a large minority load a real
 multi-billion-parameter checkpoint (gpt-oss-20b, GLM-4.7-Flash, ZAYA1-8B, Qwen3-30B-A3B, Qwen3.5-2B,
 Qwen3-VL-2B and three Ling/Ring checkpoints), so summed worst-case timeouts run to tens of hours.

@@ -15,7 +15,7 @@ PP is refused at load: `tie_word_embeddings` is `True` — the config-class defa
 - Routing: sigmoid scores, plus optional `expert_bias` for top-k selection only; the selected weights come from the unbiased scores, normalized to sum 1 when `norm_topk_prob` (default), then scaled by `routed_scaling_factor`. `expert_bias` is a buffer (not trainable), so it affects selection but doesn't appear in gradients and needs no grad-sync hook.
 - Storage: fused `gate_up_proj` and `down_proj` as 3D tensors. Compute via Grouped GEMM (fused-GLU path).
 - No shared experts (the wrapper extends `EPSharedExpertsMoELayerBase` with `shared_experts=None`, so the shared leg is skipped).
-- Gathered saves write the per-expert hub layout (`experts.{i}.w{1,3,2}.weight`) via `_PER_EXPERT_UNFUSED_KEYS` — the layout vLLM's per-expert loader reads. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm-sglang).
+- Gathered saves write the per-expert hub layout (`experts.{i}.w{1,3,2}.weight`) via `_PER_EXPERT_UNFUSED_KEYS` — the names both pinned engines' per-expert loaders read, so either serves the export and takes the RL weight sync. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm-sglang).
 
 ## TP and ETP
 

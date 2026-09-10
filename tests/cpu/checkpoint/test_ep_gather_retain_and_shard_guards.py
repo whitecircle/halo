@@ -186,16 +186,6 @@ def test_per_expert_split_never_runs_off_the_writer(ep_group, monkeypatch):
     assert len(retained) == LOCAL_EXPERTS * EP_SIZE * 3
 
 
-def test_fused_gather_refusal_is_explicit_not_an_empty_result():
-    """``retain=False`` returns ``{}`` from every gather, so the "no fused layout" answer cannot also
-    be an empty dict — a non-sending rank would be indistinguishable from a family SGLang cannot load.
-    The base raises, and the pre-flight gate reads the override off the class."""
-    layer = _FusedGatherLayer()
-    assert not type(layer).implements_fused_expert_layout()
-    with pytest.raises(NotImplementedError, match="no fused expert layout"):
-        layer.gather_fused_expert_state_dict()
-
-
 def test_layer_gather_rejects_a_family_that_ignores_retain(ep_group):
     """Silently keeping the tensors would put a whole gathered layer on every non-writing rank —
     the memory the flag exists to avoid, with nothing in the logs."""

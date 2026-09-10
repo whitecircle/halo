@@ -8,8 +8,10 @@ secrets there and pass them in with `docker run --env-file .env` (or a plain
 reads the repo-root `.env` itself.
 
 **The image already sets the tricky ones** — NCCL tuning, CUDA connection
-limits, the TF32 fix. Don't paste `-e NCCL_*=...` flags in from elsewhere; the
-baked defaults are deliberate.
+limits, the TF32 fix. Don't paste `-e NCCL_*=...` flags in from other clusters;
+the baked defaults are deliberate. The exceptions are the EFA recipe
+(`make ... EFA=1`) and `NCCL_SOCKET_IFNAME` on a multi-homed host — see
+[Clusters](clusters.md).
 
 ## Paths — pass these, pointed at a big disk
 
@@ -58,7 +60,7 @@ elsewhere and every `make` target mounts and caches there.
 | `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when slow dataset prep or 100B-scale checkpoint saves outlast the NCCL watchdog |
 | `NVLINK_DOMAIN_SIZE` | GPUs per node | `72` on GB200/GB300 NVL72 racks |
 | `NCCL_SOCKET_IFNAME` | auto | pin NCCL to the fast NIC on multi-homed nodes |
-| `FI_PROVIDER=efa` + friends | unset | AWS EFA fabrics only — see [Clusters](clusters.md) |
+| `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` | unset | AWS EFA only: the trainer via `make ... EFA=1`, a rollout server via its compose EFA overlay — see [Clusters](clusters.md) |
 
 A side variable inherits the umbrella while unset and overrides it once set.
 The case for splitting them: on a multi-node run over NFS/EFS, rank 0 writing
@@ -84,8 +86,13 @@ crashing mid-run. These are the ones that come up:
 | `HALO_DEEPEP_NUM_QPS` | auto | RDMA queue pairs; helps on EFA |
 | `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels — net-slower at the MoE shapes benchmarked here |
 | `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote` |
-| `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` | auto | trainer IP the rollout server dials back for the weight-sync group; set it when the server runs on another host |
+| `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` | auto | trainer IP the rollout server dials back for the weight-sync group; set it when the server is on another host and the trainer's default-route NIC is not the one it can reach |
+| `VLLM_ENABLE_R3` | unset | server-side: any non-empty value adds `--enable-return-routed-experts` for `routing_replay: rollout` (`SGLANG_ENABLE_R3` on the SGLang compose file) |
 | `VLLM_USE_V2_MODEL_RUNNER` | unset | server-side: must be `0` for any run setting `rollout_max_thinking_tokens` (V2 rejects thinking budgets with a 400) |
+| `NCCL_CUMEM_ENABLE` | `1` (SGLang compose default) | server-side: SGLang turns cuMem off unless this is pre-set, and a mismatch with the trainer fails the first weight-sync import — leave the compose default |
+| `SGLANG_ATTENTION_BACKEND` | unset | server-side: passed through as `--attention-backend`; `triton` for GLM-4 MoE Lite on Blackwell, whose MLA head size has no kernel in the default backend |
+| `SGLANG_TRUST_REMOTE_CODE` | unset | server-side: any non-empty value adds `--trust-remote-code`; the Ling repos need it |
+| `SGLANG_EXTRA_ARGS` | unset | server-side: extra launch flags appended last, so a flag repeated there overrides the compose defaults |
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is worth +9.7% on ep8 |
 

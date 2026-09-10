@@ -25,7 +25,7 @@ class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
     # DeepSeek-V3 style) and the slot is part of the checkpoint. GLM-4's shipped configs all set
     # ``moe_balancing: bias_update``.
     _NATIVE_BALANCING_BIAS_ATTR = "gate.e_score_correction_bias"
-    # Hub checkpoint / vLLM loader layout: ``experts.{i}.{gate,up,down}_proj.weight`` (per expert).
+    # Hub checkpoint layout: ``experts.{i}.{gate,up,down}_proj.weight`` (per expert).
     _PER_EXPERT_UNFUSED_KEYS = ("gate_proj", "up_proj", "down_proj")
 
     # The remote-code revisions this wrapper also serves declare no group limiting, so those two fall

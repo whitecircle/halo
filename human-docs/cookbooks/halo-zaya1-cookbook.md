@@ -204,12 +204,12 @@ gradient_checkpointing: false
 ## No online RL for ZAYA1
 
 Online and environmental GRPO are refused at construction for this family. Both
-need weight sync into a rollout server, and the Zaya EP layer declares
-`_supports_weight_sync = False`: vLLM 0.26.0 ships no native Zaya
-implementation, so there is no served model for the stream to land in. SGLang
-cannot take it either: its weight sync accepts only GPT-OSS among the MoE
-families. Offline GRPO, which needs no rollout server, remains available:
-[Offline GRPO](../../agent-docs/training-methods/grpo/offline-grpo.md) ↗.
+need weight sync into a rollout server, and both pinned engines list `zaya` as
+unservable: vLLM 0.26.0 ships no native Zaya implementation, so there is no
+served model for the stream to land in, and SGLang 0.5.17's Zaya loader reads
+the pre-transformers-5.14 per-expert checkpoint rather than the native fused
+layout the trainer holds. Offline GRPO, which needs no rollout server, remains
+available: [Offline GRPO](../../agent-docs/training-methods/grpo/offline-grpo.md) ↗.
 
 ## Sources
 

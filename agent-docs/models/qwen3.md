@@ -41,11 +41,10 @@ The per-method canonical examples (DPO, SMPO, KTO, reward, classification, disti
 - Activation: `act(gate(x)) * up(x)` → `down`, where `act` is read off `Qwen3MoeExperts.act_fn` (the resolved `hidden_act`, SiLU on every released checkpoint) rather than assumed.
 - Storage: pre-fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]`, split at wrapper construction into separate `gate_proj` / `up_proj` / `down_proj` for sharding.
 - Compute: Grouped GEMM on SM90+, falling back to a per-expert loop with `index_add_`.
-- RL weight sync: `gather_expert_state_dict` emits the per-expert layout vLLM loads. `rollout_backend:
-  sglang` is **refused** — 0.5.17's `qwen3_moe` loader maps per-expert names only
-  (`make_expert_params_mapping`; the fused variant is `gpt_oss`-only), so a fused pair would be
-  dropped with no server-side signal, and the EP layer declares no `gather_fused_expert_state_dict`
-  ([Rollout Servers](../infrastructure/rollout-servers.md#the-fused-expert-layout-is-declared-per-family)).
+- RL weight sync: `gather_expert_state_dict` emits the per-expert hub layout, which both pinned
+  engines read — vLLM 0.26.0 and SGLang 0.5.17's `qwen3_moe` loader
+  (`make_expert_params_mapping`) alike, so either `rollout_backend` takes the sync
+  ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 **Router balancing** — the wrapper re-derives selection from the router's own logits, applying the DeepSeek-V3 bias to the selection scores while the gate weights stay on the unbiased softmax (honoring the family's `norm_topk_prob`).
 

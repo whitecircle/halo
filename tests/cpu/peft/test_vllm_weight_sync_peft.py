@@ -2,15 +2,16 @@
 """PEFT vLLM weight-sync must broadcast the *merged* adapter, not the reverted base.
 
 ``gather_and_send_weights`` merges the LoRA adapter into the base for the body, forwards the base
-params to the vLLM client, then unmerges. The vendored client buffers ``update_named_param`` payloads
-**by reference** (``.contiguous()`` is a no-op on an already-contiguous tensor) and flushes them later
-via ``reset_prefix_cache``. For a plain (non-DTensor) param — single-process or DDP PEFT runs — the
-unmerge then reverts that aliased storage *before* the flush, so vLLM would serve the base model and
-on-policy RL would silently train against the wrong policy.
+params to the client inside that merged window, then unmerges. The vendored client snapshots each
+``update_named_param`` payload when it is forwarded and flushes the snapshots later via
+``reset_prefix_cache``; for a plain (non-DTensor) param — single-process or DDP PEFT runs — the
+unmerge rewrites the live storage before that flush, so a forward moved outside the merged window,
+or a client that buffered by reference, would have vLLM serve the base model and on-policy RL
+silently train against the wrong policy.
 
-This reproduces the buffer-by-reference + late-flush ordering with a recording fake client and asserts
-the flushed weight equals the merged weight (``W + B @ A``), not the base ``W``. It is a CPU test: the
-aliasing is independent of the device or the real NCCL transport.
+This reproduces the snapshot-then-late-flush ordering with a recording client that stages exactly as
+the real one does and asserts the flushed weight equals the merged weight (``W + B @ A``), not the
+base ``W``. It is a CPU test: the ordering is independent of the device or the real NCCL transport.
 
 Run: ``python tests/cpu/peft/test_vllm_weight_sync_peft.py`` (or ``pytest -m cpu``).
 """
@@ -22,6 +23,7 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
+from src.distributed.nccl.clients.base import snapshot_param
 from src.models.structure import normalize_peft_param_name
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 
@@ -38,15 +40,15 @@ class _TinyModel(nn.Module):
 
 
 class _RecordingClient:
-    """Faithful stand-in for the vendored NCCL client's buffer-by-reference + late-flush semantics."""
+    """Stand-in for the vendored NCCL client's snapshot-then-late-flush semantics."""
 
     def __init__(self):
         self._buffer: list[tuple[str, torch.Tensor]] = []
         self.flushed: dict[str, torch.Tensor] = {}
 
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
-        # Mirrors BaseWeightSyncClient.update_named_param exactly (no clone).
-        self._buffer.append((name, weights.contiguous()))
+        # The client's own staging: a snapshot taken before the unmerge, never a reference.
+        self._buffer.append((name, snapshot_param(weights, None)))
 
     def reset_prefix_cache(self) -> None:
         # The broadcast happens here, after gather_and_send_weights has unmerged the adapter.

@@ -19,7 +19,11 @@ from src.env import env_positive_float, env_str
 logger = logging.getLogger(__name__)
 
 
-# Parsed once at import so a malformed value can't raise mid-RL-step.
+# Deadline for draining one chunk's broadcasts (a vLLM packed buffer, a SGLang chunk's sends), sized
+# for a full chunk over a slow link. The override replaces it alone: the warm-up and the failure-path
+# cleanup keep their own shorter deadlines. Parsed once at import so a malformed value can't raise
+# mid-RL-step.
+BROADCAST_DRAIN_TIMEOUT_S = 600.0
 _SYNC_TIMEOUT_OVERRIDE = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", None)
 
 # vLLM's own truthy spellings for VLLM_DISABLE_PYNCCL, and only those. It is the server's variable:
@@ -30,8 +34,16 @@ _VLLM_TRUE_VALUES = ("1", "true")
 # Deadline for the one-element warm-up all-reduce that proves the freshly built communicator can
 # actually talk; generous because it also covers the peer's own NCCL init.
 _WARMUP_SYNC_TIMEOUT_S = 120.0
-# Poll cadence of the bounded sync loop: responsive without holding the GIL during the transfer.
-_SYNC_POLL_INTERVAL_S = 0.05
+# Poll cadence of the bounded sync loop. It sits on the critical path once per drained buffer or
+# chunk, a few milliseconds of transfer each, so the granularity is a direct per-chunk tax; 1 ms
+# still yields the GIL between polls.
+_SYNC_POLL_INTERVAL_S = 0.001
+
+
+def resolve_drain_timeout_s() -> float:
+    """The per-chunk broadcast drain deadline: ``HALO_NCCL_SYNC_TIMEOUT_SECONDS`` when set, else
+    :data:`BROADCAST_DRAIN_TIMEOUT_S`."""
+    return BROADCAST_DRAIN_TIMEOUT_S if _SYNC_TIMEOUT_OVERRIDE is None else _SYNC_TIMEOUT_OVERRIDE
 
 
 def vllm_pynccl_disabled() -> bool:
@@ -39,24 +51,29 @@ def vllm_pynccl_disabled() -> bool:
     return env_str("VLLM_DISABLE_PYNCCL", "").strip().lower() in _VLLM_TRUE_VALUES
 
 
-def bounded_stream_sync(stream: torch.cuda.Stream, timeout_s: float, what: str) -> None:
-    """Drain ``stream`` with a deadline: a collective whose peer never arrives spins forever, and these comms have no torch watchdog."""
-    if _SYNC_TIMEOUT_OVERRIDE is not None:
-        timeout_s = _SYNC_TIMEOUT_OVERRIDE
-    event = torch.cuda.Event()
-    event.record(stream)
+def bounded_event_sync(event: torch.cuda.Event, timeout_s: float, what: str) -> None:
+    """Wait for a recorded ``event`` with a deadline: a collective whose peer never arrives spins forever, and these comms have no torch watchdog."""
     deadline = time.monotonic() + timeout_s
     while not event.query():
         if time.monotonic() > deadline:
             raise RuntimeError(
                 f"NCCL weight-sync {what} did not complete within {timeout_s:.0f}s — the peer "
-                f"never joined the collective. Causes: dead/wedged vLLM server; a group address "
-                f"the peer cannot reach (VLLM_GROUP_HOST — same-host setups need loopback, "
-                f"multi-homed nodes the NIC the vLLM host can route to); or, on hosts WITHOUT "
-                f"InfiniBand, the training image's OFI/Gin NCCL plugin wedging the transport — "
-                f"launch the trainer with NCCL_NET=Socket NCCL_IB_DISABLE=1."
+                f"never joined the collective. Causes: a dead or wedged rollout server; a group "
+                f"address the peer cannot reach (VLLM_GROUP_HOST / SGLANG_GROUP_HOST — same-host "
+                f"setups need loopback, multi-homed nodes the NIC the server can route to); the two "
+                f"containers on different NCCL transports (NCCL_NET / NCCL_NET_PLUGIN must match) or "
+                f"on different aws-ofi-nccl builds; or cuMem disabled on one side only "
+                f"(NCCL_CUMEM_ENABLE). scripts/profiling/weight_sync_transport.py reports the "
+                f"transport the group actually formed on."
             )
         time.sleep(_SYNC_POLL_INTERVAL_S)
+
+
+def bounded_stream_sync(stream: torch.cuda.Stream, timeout_s: float, what: str) -> None:
+    """Drain everything queued on ``stream`` so far, under :func:`bounded_event_sync`'s deadline."""
+    event = torch.cuda.Event()
+    event.record(stream)
+    bounded_event_sync(event, timeout_s, what)
 
 
 class PyNcclCommunicator:

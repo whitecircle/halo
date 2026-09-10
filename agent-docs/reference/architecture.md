@@ -167,18 +167,18 @@ distributed shards back into a standard HuggingFace checkpoint — see
 Online and Environmental GRPO generate completions with vLLM (0.26.0). vLLM pins its own
 torch/transformers stack, so it is never imported into the training environment — it runs as its
 own container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). Environmental GRPO can target SGLang
-instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`), under
-narrower model and expert-distribution limits — see
-[Rollout Servers](../infrastructure/rollout-servers.md).
+instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). Each
+engine's pinned loaders refuse a few families — see
+[Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
 The training process talks to it over two channels: HTTP for generation, and a vendored NCCL client
-(`src/distributed/nccl/`, `VLLMWeightSyncClient`) for weight sync, replacing TRL's `VLLMClient`
-which would pull in the vLLM package.
+(`src/distributed/nccl/`, one client per engine: `VLLMWeightSyncClient` / `SGLangWeightSyncClient`)
+for weight sync, replacing TRL's `VLLMClient` which would pull in the vLLM package.
 
 Before each generation round that follows a weight update (environmental GRPO: every
 `sync_weights_every_n_steps`), the trainer gathers EP expert shards, unfolds FSDP2 DTensors via
-`full_tensor()`, gathers TP shards, pushes the weights to vLLM over NCCL, and resets the prefix
-cache. See [Online GRPO](../training-methods/grpo/online-grpo.md) and
+`full_tensor()`, gathers TP shards, pushes the weights to the rollout server over NCCL, and resets
+the prefix cache. See [Online GRPO](../training-methods/grpo/online-grpo.md) and
 [Environmental GRPO](../training-methods/grpo/environmental-grpo.md).
 
 ## Related pages

@@ -35,11 +35,12 @@ staleness, sync cadence, trajectory-length knobs — stay on the
 | IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/grpo/environmental-grpo.md#off-policy-mismatch-and-stability-knobs) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
 | Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side with a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`; harmony-disabled gpt-oss arms it off the toolkit plugin's marker ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) | rejected at config time |
-| Expert layout on sync | whatever the family's own `gather_expert_state_dict` emits — per-expert (Qwen3 MoE, GLM-4/Laguna, Bailing, LFM-2) or fused where that is the family's base gather (Qwen3.5/3.6, Gemma 4); 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | fused only (GptOss) |
-| Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | refused at construction |
+| Expert layout on sync | whatever the family's own `gather_expert_state_dict` emits — per-expert (Qwen3 MoE, GLM-4/Laguna, Bailing, LFM-2) or fused where that is the family's base gather (Qwen3.5/3.6, Gemma 4); 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families its loaders cannot take an update for are listed under [Which families each engine serves](#which-families-each-engine-serves) |
+| Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
 
-Use vLLM unless you need SGLang specifically — vLLM is the only backend for expert-distributed
-runs and for Online GRPO.
+Use vLLM unless you need SGLang specifically: it is the only backend for Online GRPO, the only
+one that enforces a thinking budget, and its 0.26.0 loaders take the sync for two families SGLang's
+do not.
 
 ## Weight sync
 
@@ -58,11 +59,19 @@ policy one optimizer step behind — and fold a PEFT merge into a copy the next 
 The push is **streamed, not buffered**: both engines take an update as a sequence of declared chunks
 inside one quiesce (`/start_weight_update` … N × `/update_weights` … `/finish_weight_update` on vLLM,
 N × `/update_weights_from_distributed` between `/pause_generation` and `/continue_generation` on
-SGLang), so the forwarding rank sends each 1 GB chunk as the gather fills it and holds one chunk of
-pinned host memory — not one model (~800 GB at 400B). The chunk is cut before the budget is
-exceeded, and the recycled pinned buffers are themselves capped at one chunk. In multi-server mode
-(`rollout_server_configs`) one page-locked snapshot per parameter is shared across all servers and
-each chunk goes out to every server **concurrently**, its buffers recycled once they all have it.
+SGLang), so the forwarding rank sends each chunk as the gather fills it and stages one chunk on its
+sync GPU — not one model (~800 GB at 400B), and not in host memory: a chunk that transits pinned
+host memory is copied out and back over PCIe before the NIC sees it — 19-24 GB/s against 53-80 GB/s
+staged on the device. The chunk is cut before the budget
+(`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB) is exceeded; a tensor above it is a chunk of its own. The
+forwarding rank's peak during a sync is therefore the assembled EP layer being sent (the largest
+rank-local allocation, ~28 GB for one 397B layer), the staged chunk, the snapshot of the largest
+tensor, and the engine path's buffers (two vLLM packed buffers, one SGLang arena), each grown to
+the largest chunk seen. In multi-server mode (`rollout_server_configs`)
+one snapshot per parameter is shared across all servers and each chunk goes out to every server on
+concurrent threads, released once they all have it; the threads share the forwarding rank's GPU,
+NICs and process, and the fan-out costs the sum rather than the max — two servers each push at
+27 GB/s over EFA, half of one server's rate — so the per-sync cost grows with the server count.
 The trade is that a chunk cannot be replayed: a server that fails **after** its first chunk is
 reported rather than reconnected — the trainer does not hold what already landed. One that fails
 before any chunk went out (an engine restarted between syncs, the common case) is still recovered by
@@ -98,11 +107,12 @@ double-buffered) on vLLM and typed 1 GB chunks on SGLang.
 On vLLM, each client owns **one persistent CUDA stream pair** for the pack uploads, because PyTorch's
 caching allocator keeps freed blocks in per-stream pools: a fresh stream per sync would strand one
 payload of reserved memory every sync. The forwarding rank's steady state is therefore its training
-footprint plus about one sync of pack buffers. SGLang stages its chunks on the default stream and has
-no equivalent hazard.
+footprint plus about one sync of pack buffers. The SGLang client keeps one persistent send stream
+for the same reason and drops its arena at the end of every sync, so between syncs that memory is
+the allocator's rather than pinned at the largest chunk's size.
 
-Each rank logs a `[mem rankNN] weight-sync pre/post` line per collective sync to watch exactly
-this ([Debugging](../reference/debugging.md#3-gpu-memory-profiling)); `reserved` far above
+`HALO_WEIGHT_SYNC_MEM_LOG=1` brackets each collective sync with a per-rank memory line to watch
+exactly this ([Debugging](../reference/debugging.md#3-gpu-memory-profiling)); `reserved` far above
 `peak_alloc` on the forwarding rank means stranded allocator pools.
 
 **Served weights must stay in checkpoint layout.** The sync writes bf16 checkpoint-layout tensors
@@ -151,16 +161,11 @@ halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit
 Checkpoint layout and expert un-fuse rules live in
 [Checkpoints](../reference/checkpoints.md#serving-on-vllm-sglang).
 
-Which families each backend accepts for RL is gated trainer-side. Two gates are SGLang-specific — the
-[EP refusal](#ep-cannot-be-combined-with-sglang-weight-sync) and the
-[fused-layout](#the-fused-expert-layout-is-declared-per-family) sections below. Two apply to **both**
-backends: DeepSeek-V4, Inkling, Zaya, Cohere2 MoE, GLM-5 Next and Mistral4 declare
-`_supports_weight_sync = False` (Cohere2 MoE because its sync is unverified against
-the pinned server; Mistral4 because vLLM 0.26.0 registers no `mistral4` class at all, so its
-composite loader has no text tower to build — [Mistral4](../models/mistral4.md#serving)), and Ling 3.0
-(`bailing_hybrid`) and Ring (`bailing_moe_linear`) are refused by `model_type` — no pinned engine
-registers a model class for those spellings, so the server cannot even load the base model. A
-bnb-quantized (QLoRA) base is refused for both as well.
+Which families each backend accepts for RL is gated trainer-side at construction. Inkling, GLM-5
+Next and Cohere2 MoE declare `_supports_weight_sync = False` and are refused on both engines; every
+other refusal is an engine fact on that engine's client
+([Which families each engine serves](#which-families-each-engine-serves)). A bnb-quantized (QLoRA)
+base is refused on both as well.
 
 **Hub-namespace families.** The sync forwards every tensor under the key a gathered checkpoint would
 carry. Where the live module tree and the hub checkpoint differ, the rewrite is derived, not
@@ -185,6 +190,65 @@ sync cannot carry: `train_sinks: true` (sinks that change every step, SFT-only),
 router bias-update balancing bias, adopted or transient, which the parameter-only payload never
 pushes. The shipped GRPO scripts downgrade `moe_balancing` to `none` themselves.
 
+### Which families each engine serves
+
+Both engines' loaders read a family's experts in the layout its own `gather_expert_state_dict`
+emits — per-expert tensors for Qwen3 MoE, GLM-4 MoE Lite, Laguna, Bailing and LFM-2, the fused pair
+for Qwen3.5/3.6 and Gemma 4, GptOss's interleaved pair — so the sync carries one layout per family
+on either engine. What differs per engine is which families its pinned release can take an online
+update for at all. Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), and
+`validate_weight_sync_support` refuses the pair at construction, quoting it. A family neither
+engine can take the sync for at all stays a family flag (`_supports_weight_sync`): Inkling and
+GLM-5 Next are served under a checkpoint namespace no gather spells, Cohere2 MoE has no validated
+end-to-end sync on either engine.
+
+| Family (`model_type`) | vLLM 0.26.0 | SGLang 0.5.17 | Loader fact |
+|---|:--:|:--:|---|
+| Mistral4 | ✗ | ✗ | neither registers a class ([Mistral4](../models/mistral4.md#serving)) |
+| Ling 3.0 (`bailing_hybrid`) | ✗ | ✗ | no class for `BailingMoeV3ForCausalLM` |
+| Ring (`bailing_moe_linear`) | ✗ | ✗ | the checkpoints declare `BailingMoeLinearV2ForCausalLM`; both register `BailingMoeV2_5ForCausalLM` |
+| Zaya | ✗ | ✗ | vLLM ships no native class; SGLang's loader reads the pre-transformers-5.14 per-expert checkpoint (`zaya_block.experts.local_experts.N.linear_fc1`) |
+| DeepSeek-V4 | ✗ | ✗ | vLLM's loader targets the fp8/fp4-packed release layout; SGLang's maps per-expert `w1/w3/w2` |
+| Laguna | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call |
+| Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
+
+Every other family the trainer trains — dense families, GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4
+MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE — syncs on both engines, expert distribution included
+([CI](ci.md) has the per-family pass).
+
+Three SGLang 0.5.17 loader facts shape its image and its client:
+
+- **Routers that cache a derived form.** Upstream, the GLM-4 gate caches an fp32 copy of its
+  weight at the first forward and never re-reads the parameter, and the Gemma 4 router folds `scale`
+  into its norm once, behind a latch: a synced router weight lands in the parameter while routing
+  keeps the launch values, with no error. `Dockerfile.sglang` applies
+  `docker/sglang/patches/patch_sglang_weight_updates.py` (the gate reads its fp32 weight live, a
+  load of `scale` releases the latch); the script asserts its pre-images before rewriting and its
+  post-images after, at build, and stays in the image (`/opt/halo/`) so `--verify` re-checks a
+  running container.
+- **Fused a-projection halves.** The MLA loaders (GLM-4 MoE Lite here) concatenate `q_a_proj` and
+  `kv_a_proj_with_mqa` from a cache local to one `load_weights` call — one chunk — and drop a half
+  that arrives alone. The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps
+  it in one chunk, deferring the first half when the byte budget would cut between them; a pair
+  still incomplete when the sync closes refuses the close.
+- **The triton runner.** The `flashinfer_trtllm*`, aiter and quantized runners repack expert weights
+  after the load, and an online update writes the canonical layout into the repacked buffer.
+  `SGLANG_MOE_RUNNER_BACKEND=triton` (the compose default) is the runner whose weights an update
+  reaches unchanged; R3 capture needs it too.
+
+The sync ships hub names and full unsharded tensors into the engine's own `load_weights` mapping;
+each TP rank narrows its slice, and under `--ep-size` the loader keeps its local experts and drops
+the rest. An expert name that mapping does not cover leaves **no server-side signal**: the MoE
+loaders `continue` on an unmatched `mlp.experts` name *before* the `not found in params_dict`
+warning (reachable only from the dense loaders), the update still returns `200 OK`, and the engine
+keeps serving its launch-weight experts under a freshly synced router; the server tier's
+expert-only round is what catches it.
+
+The trainer-side construction gate is the whole guard. It reads the family's contract off a live EP
+wrapper, or — when a run has none (`use_grouped_gemm: false` at `ep_size: 1`) — off the `model_type`
+registry. Expert distribution (EP, ETP) is accepted on both engines: the sync group is ordinary NCCL
+beside DeepEP's.
+
 ## vLLM
 
 `Dockerfile.vllm` builds `vllm-server:0.26.0` with the native NCCL weight-transfer engine, the
@@ -194,7 +258,9 @@ images run — with `VLLM_NCCL_SO_PATH` baked to that wheel so the base image's 
 can never win the soname race. A skew fails `ncclCommInitRank` at `/init_weight_transfer_engine`
 (HTTP 500, `NCCL error: internal error`) — rebuild the image after any lock bump of the pin. 0.26.0
 is the last vLLM release on torch 2.11 — the training image's torch and NCCL generation; 0.27 moves
-to torch 2.13, whose NCCL does not match that pin.
+to torch 2.13, whose NCCL does not match that pin. The image also installs the EFA userspace the
+training image runs (`docker/efa/install_efa_userspace.sh`), so the group can ride EFA from a
+trainer on another node ([Servers on other nodes](#servers-on-other-nodes-efa)).
 
 ### Config-schema parity {#config-schema-parity}
 
@@ -247,6 +313,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 | `VLLM_TP` | `1` | `--tensor-parallel-size` |
 | `VLLM_GPU_MEM` | `0.85` | `--gpu-memory-utilization` |
 | `VLLM_MOE_BACKEND` | `triton` | Keep `triton` for MoE RL ([Weight sync](#weight-sync)) |
+| `VLLM_ENABLE_R3` | *(unset)* | Any non-empty value adds `--enable-return-routed-experts` (R3 capture); the `triton` MoE backend is the one the capture hook reaches |
 | `VLLM_ATTENTION_BACKEND` | *(unset = auto)* | `--attention-backend`. GLM-4 MoE Lite (MLA) on Blackwell needs `CUTLASS_MLA`: the auto-selected FlashInfer MLA decode kernel rejects its head config at graph capture ([MLA backend](../reference/checkpoints.md#serving-on-vllm-sglang)) |
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
 | `VLLM_TOOL_PARSER_PLUGIN` | *(unset)* | `--tool-parser-plugin` path (gpt-oss uses the baked `/opt/gpt_oss_text_tool_parser.py`) |
@@ -278,8 +345,7 @@ generation exceeds it; the worst-case multi-turn budget only warns, since a roll
 window OOMs the training forward before the fail-on-overflow check.
 
 R3 runs add one flag, `--enable-return-routed-experts` (`routing_replay: rollout`) — without it the
-trainer raises at the first capture. The compose `command:` has no interpolation slot for it, so edit
-it or launch `vllm serve` directly, as the R3 example config headers instruct. The FlashInfer
+trainer raises at the first capture. Set `VLLM_ENABLE_R3=1` and the compose `command:` adds it. The FlashInfer
 monolithic MoE kernels bypass the capturer and return all-zero expert ids, hence the triton backend.
 
 `VLLM_USE_V2_MODEL_RUNNER=0` is not a serve flag but an env var the compose file already passes
@@ -301,20 +367,20 @@ the trainer sends `tools` for any env with a tool registry:
 | Qwen3 / Qwen3.5 / 3.6 | `qwen3_xml` (hermes does NOT parse their XML calls) |
 | GPT-OSS | bundled plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4 | `glm45` / `glm47` |
+| Gemma 4 | `gemma4` (hermes leaves its `<|tool_call>call:…<tool_call|>` calls as text, so no tool ever runs); with a thinking budget (`rollout_max_thinking_tokens`, or an env's per-effort `thinking_tokens` profile) also `VLLM_REASONING_PARSER=gemma4` and `VLLM_USE_V2_MODEL_RUNNER=0`, else every request 400s |
 | most others | `hermes` (`<tool_call>` XML) |
 
-`docker-compose.vllm.yml` defaults **both** containers to the no-InfiniBand recipe, overriding the
-training image's baked IB/Gin NCCL env so the cross-container transfer group takes NVLink + socket
-instead of the uninitialized OFI/Gin NET path: `NCCL_IB_DISABLE=1` + `NCCL_NET=Socket` on the
-trainer, `NCCL_IB_DISABLE=1` + `NCCL_P2P_LEVEL=NVL` on the server. Without the recipe the first
-collective wedges: both GPUs spin at 100% and the trainer raises after 120 s (`NCCL weight-sync
-warm-up all-reduce did not complete`).
+`docker-compose.vllm.yml` defaults **both** containers to the no-fabric recipe (`NCCL_IB_DISABLE=1`
+and `NCCL_NET=Socket` on each, `NCCL_P2P_LEVEL=NVL` on the server), so on a host without a fabric
+the cross-container group takes NVLink + sockets on both ends by declaration rather than by each
+side's own fallback — two containers that land on different nets form the group and hang at the
+first collective ([Troubleshooting](#troubleshooting)). On an EFA host layer
+`docker-compose.vllm.efa.yml` over it ([Servers on other nodes](#servers-on-other-nodes-efa)):
+`NCCL_NET` is process-global, so a trainer left at `Socket` there sends every collective over TCP
+and breaks DeepEP.
 
-`NCCL_NET=Socket` disables the Gin plugin and is process-global, so those defaults fit EP=1 /
-no-DeepEP runs on single-node, no-RDMA hosts. On a multi-node IB/EFA cluster **override both**
-(`NCCL_IB_DISABLE=0` and a non-Socket `NCCL_NET`) or every trainer collective goes to TCP and DeepEP
-breaks. Steer the transfer group with `VLLM_GROUP_HOST` instead: it names the trainer address the
-server dials back to and touches nothing else. Unset, the client resolves loopback for a local
+Steer the transfer group with `VLLM_GROUP_HOST`: it names the trainer address the server dials back
+to and touches nothing else. Unset, the client resolves loopback for a local
 server and the default-route NIC otherwise, so a same-host compose stack needs no value; a
 `rollout_server_configs` entry's `group_host` overrides it for that one server. `NCCL_SOCKET_IFNAME`
 is not a transfer-group knob; it is process-wide, filtering the interfaces the default process group
@@ -324,11 +390,16 @@ and DeepEP pick too, so on a multi-homed host set it only to an interface every 
 
 `Dockerfile.sglang` builds `sglang-server:0.5.17` to align NCCL: upstream's wheel trails
 `uv.lock`'s exact pin (what the training images run), and weight sync needs both ends on one
-runtime. The build bumps the wheel and asserts the weight-sync routes, request schemas, and
-rendezvous convention still exist, so an upstream refactor fails the build instead of a training
-run. Serving-only use can run upstream directly (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`). 0.5.17 is
+runtime. The build bumps the wheel, installs the EFA userspace the training image runs
+(`docker/efa/install_efa_userspace.sh`), applies the loader patches an online update needs
+(`docker/sglang/patches/`, [Which families each engine serves](#which-families-each-engine-serves)),
+and asserts the weight-sync routes, request schemas, and rendezvous convention still exist, so an
+upstream refactor fails the build instead of a training run. Serving-only use can run upstream
+directly (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`); weight sync needs this image. 0.5.17 is
 the last SGLang release on torch 2.11 — the training image's torch and NCCL generation; 0.5.18
-moves to torch 2.13, whose NCCL does not match the pin weight sync needs on both ends.
+moves to torch 2.13, whose NCCL does not match the pin weight sync needs on both ends. A later
+release changes nothing here: 0.5.19's `--moe-a2a-backend deepep_v2` forces
+`--moe-runner-backend deep_gemm`, which an online update does not reach.
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17`, then set
 `SGLANG_IMAGE` to that tag (it defaults to the locally built `sglang-server:0.5.17`).
@@ -347,11 +418,14 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up
 | `SGLANG_TP` | `1` | Tensor-parallel size; pair with `SGLANG_CUDA_DEVICES` |
 | `SGLANG_CUDA_DEVICES` | `7` | Server GPUs — must exclude the trainer's |
 | `SGLANG_GPU_MEM` | `0.85` | `--mem-fraction-static` |
-| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`. `auto` reads the parser off the chat template — its harmony channel-marker rule resolves gpt-oss to the harmony parser on 0.5.14 and 0.5.17 alike, so no per-family pin is needed. Override only for a template the detector does not cover |
+| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`. `auto` reads the parser off the chat template — its harmony channel-marker rule resolves gpt-oss to the harmony parser, so no per-family pin is needed. Override only for a template the detector does not cover |
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | `--moe-runner-backend`; keep `triton` for MoE RL and for R3 capture |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any non-empty value adds `--enable-return-routed-experts` (R3 capture) |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) — separates reasoning from content in the response |
 | `SGLANG_CHAT_TEMPLATE` | *(unset)* | `--chat-template`: the SAME `.jinja` the trainer's `chat_template:` uses; the file must be visible inside the server container |
+| `SGLANG_ATTENTION_BACKEND` | *(unset)* | `--attention-backend`. `triton` for GLM-4 MoE Lite on Blackwell: its MLA head size has no kernel in the engine's default backend and the server exits at start (`Unsupported head dimensions`) |
+| `SGLANG_TRUST_REMOTE_CODE` | *(unset)* | Any non-empty value adds `--trust-remote-code`, which the Bailing (Ling 2.0) repos need — their modeling code ships in the checkpoint |
+| `SGLANG_EXTRA_ARGS` | *(unset)* | Further launch flags, verbatim. `--enable-deterministic-inference` for GLM-4 MoE Lite: under the triton attention backend its greedy logits differ between a prefill and a prefix-cache hit of the same prompt, which the tier's zero-noise baseline probe refuses |
 
 `SGLANG_GROUP_HOST` belongs to the **trainer** (the `VLLM_GROUP_HOST` equivalent, separate because
 the engines can sit on different hosts).
@@ -373,7 +447,10 @@ Engine behavior under RL:
   runners (`triton_kernel`, flashinfer; auto-selection picks one for most MoE shapes) bypass the
   capture hook and return nothing. The trainer opts in per request and decodes the wire format
   (response-level `sglext.routed_experts`, base64 raw int32) by the model's own layer/top-k counts.
-  Rows cover the full sequence, so prompt spans replay too.
+  Rows cover the full sequence, so prompt spans replay too. The engine's capturer is per family:
+  it serves GptOss, Qwen3 MoE, Qwen3.5/3.6 and GLM-4 MoE Lite, exits at start for Gemma 4 (whose
+  config carries no `num_experts_per_tok`; the family has no routing replay on either engine) and
+  raises at the first capture for Bailing — serve those without `SGLANG_ENABLE_R3`.
 - **`rollout_max_thinking_tokens` is rejected at config time** for every model: SGLang ignores
   unknown request fields, and the trainer wires neither of its budget mechanisms (the
   custom-logit-processor path needs a per-model class; the strict-thinking grammar needs a detector
@@ -382,87 +459,121 @@ Engine behavior under RL:
 - **`--dp-size > 1` needs `--enable-dp-attention`**, or the client refuses at group formation: plain
   DP replicas each restart `tp_rank` at 0, so their workers collide on `rank_offset + tp_rank` in the
   update group and no sizing can address them. The client reads the layout off `/server_info`.
+- **`isr_engine_reference`** re-scores through `/generate` with `logprob_start_len`; no server flag.
 - **`--enable-torch-compile` must stay off under R3 capture**: no step-time gain, and capture ×
   compile produces isolated catastrophic log-ratio rows (the IS veto/geo-band masks them — the
   trust region absorbing an engine numerics fault).
-- **Set `fsdp_reshard_after_backward: false` on the trainer** for step time: the
-  socket-global NCCL below puts FSDP2's per-microstep re-gather of the full model
-  ([ZeRO reshard](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)) on
-  loopback TCP (~15 s × `gradient_accumulation_steps` per step otherwise; the flag leaves one
-  such gather per optimizer step). Plain-DP/CP/EP runs
-  only — the flag is rejected under trainer TP or PP, which pay the re-gather. With it, R3-mode SGLang runs within
-  ~1.4× of the same config on vLLM (20B MoE, 2×(TP=2)+DP=4: ~215 s vs ~150 s per step);
-  engine kernels are near parity, and the residual is the weight-sync gather and once-per-step
-  collectives over sockets.
 
-### NCCL transport (SGLang only)
+### NCCL transport (SGLang)
 
-The trainer and engine are same-host but different containers; NCCL's CUDA-IPC path fails across
-that boundary (`ncclP2pImportShareableBuffer ... invalid argument`) mid-update. Both ends therefore
-need the socket transport, process-global:
+The group is ordinary NCCL, the same as vLLM's: on one host it takes CUDA IPC between the two
+containers (`P2P/CUMEM`, NVLink), across nodes the fabric. The one engine-side requirement is
+**cuMem parity**: SGLang's engine entry point sets `NCCL_CUMEM_ENABLE=0` process-wide unless the
+variable is already set, the trainer's NCCL has cuMem on, and the mismatch fails the first
+cross-container buffer import (`ncclP2pImportShareableBuffer ... invalid argument`, then
+`Cuda failure 'invalid argument'. The full weights of the ModelRunner are partially updated`).
+`docker-compose.sglang.yml` sets `NCCL_CUMEM_ENABLE=1`; keep it on a hand-run server. The trainer
+keeps NVLink for its own FSDP2 collectives, so nothing about this engine changes the trainer's
+NCCL env.
 
-```text
-NCCL_P2P_DISABLE=1  NCCL_SHM_DISABLE=1  NCCL_NET=Socket  NCCL_IB_DISABLE=1  NCCL_NET_PLUGIN=none
-NCCL_SOCKET_IFNAME=^docker,veth
-```
-
-`NCCL_NET_PLUGIN=none` is separate and load-bearing: the images bundle the aws-ofi plugin, which
-NCCL prefers and then wedges group formation on a host with no OFI fabric. `NCCL_SOCKET_IFNAME`
-keeps the socket transport off Docker's bridge and the per-container `veth` pairs: on a host running
-other containers NCCL otherwise enumerates them too, and a veth carries no host-to-host traffic (the
-first collective after the sync hangs) or disappears when its container exits (`Call to bind failed:
-No such device` on the server, `400` on the update). Setting the flags only on the server is not
-enough — the group still forms (a TCP rendezvous) and the first broadcast hangs, because the trainer
-still reaches for CUDA-IPC. Both compose files pass `NCCL_SOCKET_IFNAME=^docker,veth` by default
-(the vLLM file to its training service too); override it to pin one NIC on a multi-homed host.
-
-The cost is process-global: a multi-rank trainer
-loses NVLink between its own ranks for the whole job (the reason for
-`fsdp_reshard_after_backward: false` above). vLLM's pynccl cannot form rings under this environment
-— the two engines' sync transports are **mutually exclusive per process**. (The vLLM no-IB recipe
-above uses only `NCCL_IB_DISABLE`/`NCCL_NET=Socket`, which both engines tolerate; the other three
-are SGLang-only.)
+`NCCL_SOCKET_IFNAME` keeps the socket bootstrap off Docker's bridge and the per-container `veth`
+pairs: on a host running other containers NCCL otherwise enumerates them too, and a veth carries no
+host-to-host traffic (the first collective after the sync hangs) or disappears when its container
+exits (`Call to bind failed: No such device` on the server, `400` on the update). Both base compose
+files pass `NCCL_SOCKET_IFNAME=^docker,veth` by default (the vLLM file to its training service too)
+— a same-host value; the fabric recipe excludes `lo` as well
+([Servers on other nodes](#servers-on-other-nodes-efa)). Override it to pin one NIC on a
+multi-homed host.
 
 The trainer's default process group cannot contain the engine's ranks (new groups split from a
 parent can only subset it), so `create_weight_update_group` forms the trainer↔engine group through
-a fresh TCP-store handshake both sides can reach.
+a fresh TCP-store handshake both sides can reach. Teardown asks the engine to drop its half of the
+group concurrently with the local destroy — under cuMem transports each side's finalize waits for
+the other. A chunk's uploads go through one device arena on the sync GPU (the chunk budget,
+`HALO_WEIGHT_SYNC_CHUNK_MB`, grown for a tensor above it and released at the end of each sync),
+reused across chunks by stream order alone: uploads and broadcasts share one stream, so a chunk's
+copies queue behind the previous chunk's sends with no host wait. The host settles a chunk's sends
+two chunks later, under the same 600 s drain deadline as the vLLM path
+(`HALO_NCCL_SYNC_TIMEOUT_SECONDS` overrides it), and a failed chunk drains the whole stream under a
+30 s deadline; on expiry the group is aborted instead of parking the trainer. The settle is
+deferred rather than per chunk because the engine acknowledges a chunk as soon as its data arrived
+while the sender's kernels retire a little later, and a host-side drain after every chunk would
+serialize that tail with the next chunk's declaration, at a fifth of the push rate.
 
-### EP cannot be combined with SGLang weight sync
+## Servers on other nodes (EFA)
 
-`rollout_backend: sglang` with any expert distribution (`ep_size × expert_tp_size > 1`) is refused
-at construction (`validate_backend_parallelism`): the sync communicator needs CUDA-IPC disabled,
-DeepEP needs it enabled for symmetric memory, and both are process-global. All four flag
-combinations fail — DeepEP symmetric-memory error, truncated broadcast, engine-side
-`ncclUnhandledCudaError`, or truncation under a scoped window; NCCL caches the flags on first read.
-`ep_buffer_backend: legacy` removes only the DeepEP half; the cross-container broadcast still fails.
+The weight-sync group rides the node's fabric when both containers can drive it. All three images
+carry one EFA userspace, installed whole by `docker/efa/install_efa_userspace.sh` — rdma-core, AWS
+libfabric and one `aws-ofi-nccl` build; the pins live in the script, the inventory on
+[Docker](docker.md#rdma-networking-infiniband-and-efa). The stack is wire-sensitive down to rdma-core: at init the
+plugin probes libfabric for in-order RDMA writes and forces `NCCL_PROTO=simple` when the probe
+fails, and the answer comes from rdma-core's EFA provider (`libefa`). The NGC base's MOFED `libefa`
+fails it, the installer's passes, and two containers whose answers differ form the group
+with different NCCL protocol tables and hang at the first collective — the same signature as a
+plugin-version mismatch. So both ends must run images built from the same script; a pair that
+cannot be rebuilt runs with `NCCL_PROTO=simple` on both ends instead — either restores the full
+rate. The preflight below reports a side whose plugin forced the simple protocol. The
+upstream vLLM and SGLang bases ship no EFA userspace, and NCCL then falls back to sockets with no
+message.
 
-The gate fires at trainer construction — after the model loads, before any rollout or sync —
-because the failure it prevents lands at the first sync with the served weights partly overwritten.
-Use `rollout_backend: vllm` for expert-distributed runs.
+Server side, layer the EFA overlay after the base compose file:
 
-### The fused expert layout is declared per family
+```bash
+docker compose -f docker-compose.vllm.yml -f docker-compose.vllm.efa.yml up -d vllm-server
+SGLANG_MODEL=... docker compose -f docker-compose.sglang.yml -f docker-compose.sglang.efa.yml up -d
+```
 
-SGLang loads experts fused (`experts.gate_up_proj` / `experts.down_proj`), the way transformers
-stores them; vLLM takes whichever layout the family's own gather emits. A family declares the fused
-gather through `gather_fused_expert_state_dict`, and **only the GptOss layer implements it** — the
-base raises for every other family. `gpt_oss` is also the only 0.5.17 loader reaching for the fused
-helper (`make_expert_params_mapping_fused`); `qwen3_moe` builds its mapping over per-expert names
-(`make_expert_params_mapping`), so a fused pair matches nothing there.
+Each overlay adds `devices: /dev/infiniband` (a `-v` bind mount does not grant access), `ulimits:
+memlock: -1`, and `NCCL_NET=Libfabric NCCL_NET_PLUGIN=ofi NCCL_IB_DISABLE=0
+NCCL_SOCKET_IFNAME=^lo,docker,veth,tailscale`. Naming the plugin's net is deliberate: a missing or
+mismatched plugin then fails group formation instead of silently falling back to sockets. `lo` is
+in the exclusion because an excluded-only list still ranks loopback first: a server started with
+the base files' `^docker,veth` advertises its NCCL bootstrap address as `127.0.0.1`, and a trainer
+on another node fails group formation with `remote process exited or there was a network error`;
+`tailscale` because `^docker,veth` leaves a Tailscale interface eligible. The base files keep the
+no-fabric, same-host recipe.
 
-A family without the override is refused at construction under `rollout_backend: sglang`, naming the
-class. The hook is additive — a family opts in by overriding `gather_fused_expert_state_dict` on its
-EP layer ([Adding a Model](../models/adding-a-model.md)) — but add it only against an engine whose
-loader verifiably consumes the fused pair.
+Trainer side, the same env: `make ... EFA=1` adds `--device=/dev/infiniband` and those variables to
+every `DOCKER_RUN` (and drops the socket forcing from `test-gpu-vllm` / `test-gpu-sglang`); a
+hand-written `docker run` passes them itself. The trainer sets no NCCL env in code, and `NCCL_NET`
+/ `NCCL_NET_PLUGIN` are process-global — shared by the sync group and every trainer collective — so
+this is the env the [multi-node recipes](../parallelism/launch-recipes.md#environment-variables)
+already use. GPUDirect RDMA runs through dmabuf with no `nvidia_peermem`; `/dev/gdrdrv` is a
+cross-node DeepEP GIN requirement, not a sync one. Name the trainer address the server dials back
+to with the entry's `group_host` (or `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`) when the default-route
+NIC is not the one the server can reach; Online GRPO has only the env var (TRL builds its client
+without `group_host`).
 
-The sync ships hub names and full unsharded tensors into the engine's own `load_weights` mapping, and
-each TP rank narrows its slice. An expert name that mapping does not cover leaves **no server-side
-signal**: both MoE loaders `continue` on an unmatched `mlp.experts` name *before* the
-`not found in params_dict` warning (reachable only from the dense loaders), the update still returns
-`200 OK`, and the engine keeps serving its launch-weight experts under a freshly synced router.
+Verify the transport before training:
 
-The trainer-side construction gates are the whole guard. They read the family's contract off a live EP
-wrapper, or — when a run has none (`use_grouped_gemm: false` at `ep_size: 1`) — off the `model_type`
-registry. This gate is independent of the transport conflict.
+```bash
+python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --backend vllm --expect efa
+```
+
+Run it from the trainer container, launched as the trainer would be (same image, devices and NCCL
+env), on a GPU the server does not own. It forms the group against the live server (either
+backend), pushes one real parameter of the served checkpoint (the input embedding by default, value
+unchanged, so the served model is unchanged — the checkpoint read on the trainer side must be the
+one the server loaded, `--model-id` when the served id is a server-side path or an alias) and
+reports the transport NCCL formed on — `NET/Libfabric/…/GDRDMA` (EFA with GPUDirect), `NET/IB`,
+`NET/Socket`, `P2P/CUMEM` (same-host CUDA IPC) or `SHM` — the `aws-ofi-nccl` build string, the
+libfabric provider, and GB/s. `--expect efa|ib|socket|p2p|shm` makes it a gate (exit 1 on a
+mismatch, on an altered served model, or when the group fails to form); flags on
+[Scripts](../reference/scripts-reference.md#profiling--benchmarks).
+
+Measured on 4× p6-b300, trainer node → server node, one worker, the trainer's own streamed path
+(`update_named_param` per gathered tensor, `reset_prefix_cache`), full model per sync (NIC line
+rate ~100 GB/s per GPU; a raw NCCL broadcast reaches 93 GB/s); the per-model columns are the
+per-sync cost at that rate:
+
+| Transport | Rate | Qwen3-8B (16.4 GB, measured) | gpt-oss-20b (42 GB) | Qwen3-30B-A3B (61 GB) | gpt-oss-120b (234 GB) |
+|---|---|---|---|---|---|
+| EFA, vLLM client | 53 GB/s | 0.31 s | 0.8 s | 1.2 s | 4.4 s |
+| EFA, SGLang client | 80 GB/s | 0.21 s | 0.5 s | 0.8 s | 2.9 s |
+| Sockets over the ENA | 9.7 GB/s | 1.7 s | 4.3 s | 6.3 s | 24 s |
+
+The vLLM client's rate is set by its one HTTP round trip per chunk (`HALO_WEIGHT_SYNC_CHUNK_MB`:
+1 / 2 / 4 / 8 GiB → 54 / 63 / 70 / 73 GB/s at this payload); the SGLang client's by the fabric.
 
 ## Checking a server
 
@@ -497,6 +608,10 @@ the server must own a GPU outside `TRAINER_CUDA_DEVICES`.
   `--enforce-eager` — the in-place weight sync keeps captured CUDA graphs valid, and CUDA-graph
   decode is several-fold faster on long generations. On B200 pin the backend through the compose
   slot `VLLM_ATTENTION_BACKEND=FLASH_ATTN` (FlashInfer can JIT-fail on SM 10.0).
+- **`isr_engine_reference` headroom (vLLM)**: the re-score is one `prompt_logprobs` prefill per row,
+  and vLLM materializes an fp32 log-softmax over the vocabulary for every prefill chunk of one
+  (`max_num_batched_tokens × vocab × 4 B`, 8 GB at 8192 × 248k) outside its memory profile — at 0.90
+  the engine dies of CUDA OOM under load. Serve at ≤ 0.80, or lower `--max-num-batched-tokens`.
 - **Sync cadence**: `sync_weights_every_n_steps: 2–4` for slow environments
   ([Environmental GRPO](../training-methods/grpo/environmental-grpo.md#nccl-weight-synchronization)).
 - **Not available**: speculative decoding — no config knob passes draft-model arguments, and weight
@@ -505,24 +620,33 @@ the server must own a GPU outside `TRAINER_CUDA_DEVICES`.
 
 ## Coverage
 
-What works, per parallelism axis (env-GRPO, 2 trainer ranks, live server; dense rows on the dense
-server tier, the EP row on Qwen3-30B-A3B):
+What works, per parallelism axis (env-GRPO against a live server; dense rows on the dense server
+tier, the EP rows on Qwen3-30B-A3B and gpt-oss; two trainer ranks unless the row says four):
 
 | axis | vLLM | SGLang |
 |---|---|---|
 | FSDP2 DP (dense) | works | works |
 | TP=2 | works | works |
-| EP=2 (MoE) | works | refused (above) |
+| EP=2 (MoE, Qwen3-30B-A3B) | works | works |
+| EP=2 + ETP=2, EP=2 + TP=2, EP=4 (four trainer ranks; gpt-oss, with and without LoRA / expert LoRA) | works | works |
+| Expert LoRA (EP=2, with resume) | works | works |
 
-SGLang under trainer TP=2 runs without `fsdp_reshard_after_backward: false` (rejected under TP)
-and pays the per-microstep re-gather — correct, but not tuned for step time. gpt-oss syncs cleanly
-there: the hand-sliced attention `sinks` are skipped by the dense parameter walk and sent once from
-the gathered-full drain, so each hub name reaches the engine exactly once.
+gpt-oss syncs cleanly under trainer TP=2 on SGLang: the hand-sliced attention `sinks` are skipped
+by the dense parameter walk and sent once from the gathered-full drain, so each hub name reaches
+the engine exactly once.
+
+An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`)
+takes the sync for Qwen3 MoE: the loader keeps its local experts and drops the rest, and the
+expert-only round moves the served policy. gpt-oss cannot be served that way on 0.5.17 at all — its
+fused expert loader crash-loops at start under `--ep-size` (`_load_w2`, local against global expert
+count), before any sync.
 
 Undistributed MoE (`ep_group_size == 1`, EP wrappers present) works at 20B-MoE scale with
-multi-server serving (2×TP=2 and 4×TP=1), fused expert sync, R3 rollout replay, and a flat
-trainer↔engine log-ratio. Multi-node group formation (`*_GROUP_HOST` across hosts) is **not**
-covered.
+multi-server serving (2×TP=2 and 4×TP=1), expert sync, R3 rollout replay, and a flat
+trainer↔engine log-ratio. Over EFA, with the trainer on one p6-b300 node and the server on another,
+the end-to-end rows pass for both engines: vLLM at EP=2, TP=2 and EP=1 + LoRA (Qwen3-30B-A3B),
+SGLang at EP=2 (gpt-oss-20b), and a trainer spanning two nodes (one GPU each, EP=1, DTensor
+experts over the fabric) against vLLM on a third ([Servers on other nodes](#servers-on-other-nodes-efa)).
 
 ## Troubleshooting
 
@@ -535,10 +659,12 @@ covered.
 | Log-ratio drifts on SGLang while the server log stays clean | No server-side signal exists: the MoE loaders skip unmapped expert names before their `not found in params_dict` warning → do not read a clean log as proof of a landed sync; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild `vllm-server` |
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → the engine strands a communicator per trainer connection until the GPU runs out; rebuild `vllm-server` and recreate the server container |
-| `ncclBuildRings: ring 0 does not contain rank 1` (vLLM) | Trainer launched with SGLang's socket vars — the sync transports are mutually exclusive |
-| Broadcast hangs at the first sync (SGLang) | The NCCL socket vars missing on one end — both processes need the same set |
+| First sync hangs at the first collective after the group formed, both ends idle | The two containers drive different transports (`NCCL_NET` / `NCCL_NET_PLUGIN` differ) or different `aws-ofi-nccl` + libfabric builds (an upstream server image, a host-installed plugin) — the pair forms the group and then hangs → both ends from the Halo images with the same recipe (compose EFA overlay + `make ... EFA=1`, or both on the no-fabric defaults); `scripts/profiling/weight_sync_transport.py` reports the transport and build each side formed on |
+| `ncclP2pImportShareableBuffer ... invalid argument` on the first update, `The full weights of the ModelRunner are partially updated` (SGLang) | cuMem off on the server only — SGLang sets `NCCL_CUMEM_ENABLE=0` unless it is pre-set → `NCCL_CUMEM_ENABLE=1` in the server container (the compose default); restart the server, it holds a half-written model |
+| Sync rate in the single-digit GB/s on an EFA host | The group formed on sockets: a server without its EFA overlay or an image without the EFA userspace → `weight_sync_transport.py --expect efa` on each server, then fix the end it names |
 | `/init_weight_transfer_engine` answers 500 with `ncclP2pImportShareableBuffer ... Cuda failure 101 'invalid device ordinal'` in the server log | The server container does not see the trainer's GPU — expose all GPUs to it and select with `CUDA_VISIBLE_DEVICES` (`VLLM_CUDA_DEVICES`), as the compose file does |
-| `Call to bind failed: No such device` in the server log (`400` on `/update_weights_from_distributed`), or a trainer collective hanging right after the first sync | NCCL's socket transport picked a Docker `veth` — set `NCCL_SOCKET_IFNAME=^docker,veth` on both ends |
+| `Call to bind failed: No such device` in the server log (`400` on `/update_weights_from_distributed`), or a trainer collective hanging right after the first sync | NCCL's socket bootstrap picked a Docker `veth` — set `NCCL_SOCKET_IFNAME=^docker,veth` on both ends (the base compose default, same host only; the fabric recipe is `^lo,docker,veth,tailscale`) |
+| Cross-node group formation fails with `remote process exited or there was a network error` | The server's `NCCL_SOCKET_IFNAME` does not exclude `lo`, so it advertised `127.0.0.1` as its bootstrap address → start it under the EFA overlay (`^lo,docker,veth,tailscale`), not the base file alone |
 | `Errno 98` binding the group port at trainer start | Previous run's port in TIME_WAIT → wait for `ss -tln` to clear, or change `group_port` |
 | `/health` answers but generation is wedged after a killed trainer | Scheduler left attached to the dead transfer group → restart the server container |
 | `RESTART the … server` in the trainer log; that server stays paused and refuses the next sync | A sync was interrupted after part of the model went out → the engine holds a half-written model on purpose ([Weight sync](#weight-sync)); restart it, do not `/resume` it |

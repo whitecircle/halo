@@ -39,14 +39,12 @@ envs:
   OUTPUT_DIR: /data/checkpoints/oss-20b
   DIST_SHARED_FILESYSTEM: "1"
   WANDB_PROJECT: halo-20b-nodelocal-aws
-  # EFA tuning. NCCL_NET_PLUGIN is set explicitly rather than left to the NGC base's shinit_v2:
-  # that only fires if the run shell sources /etc/shinit_v2, and without it NCCL loads the HPC-X IB
-  # plugin on an EFA host — here the cross-node DP grad sync then falls back off EFA. Node-local EP
-  # needs no proxy GIN / gdrdrv.
+  # EFA for the cross-node DP gradient sync. NCCL_NET_PLUGIN is set explicitly rather than left to
+  # the NGC base's shinit_v2, which only fires for a shell that sources /etc/shinit_v2; NCCL_NET
+  # names the plugin's net so a missing plugin fails the launch instead of falling back to sockets.
+  # NCCL_PROTO is left to the plugin's own probe. Node-local EP needs no proxy GIN / gdrdrv.
   NCCL_NET_PLUGIN: ofi
-  NCCL_PROTO: simple
-  FI_PROVIDER: efa
-  FI_EFA_USE_DEVICE_RDMA: "1"
+  NCCL_NET: Libfabric
 
 file_mounts:
   /workspace: {source: ., mode: COPY}

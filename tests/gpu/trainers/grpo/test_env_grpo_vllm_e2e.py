@@ -42,6 +42,9 @@ def run(ctx):
     # VLLM_USE_V2_MODEL_RUNNER=0 (see tests/common/thinking_budget.py); it reports the server's own
     # 400 when it was not.
     parser.add_argument("--thinking-budget", type=int, default=None)
+    # R3: needs the server on --enable-return-routed-experts (VLLM_ENABLE_R3=1) with the triton MoE
+    # backend, which the compose file already passes.
+    parser.add_argument("--routing-replay", choices=("none", "rollout"), default="none")
     args = parser.parse_args()
     return run_env_grpo_e2e(
         ctx,
@@ -54,6 +57,7 @@ def run(ctx):
         peft=args.peft,
         resume=args.resume,
         thinking_budget=args.thinking_budget,
+        routing_replay=args.routing_replay,
     )
 
 

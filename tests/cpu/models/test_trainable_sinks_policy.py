@@ -131,11 +131,11 @@ def test_weight_sync_refuses_trainable_sinks():
     model, config = _tiny_gpt_oss()
     apply_sinks_policy(model, config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
     with pytest.raises(ValueError, match="SFT-only"):
-        validate_weight_sync_support(model)
+        validate_weight_sync_support(model, "vllm")
     # The frozen live policy — the shipped RL shape — passes the same gate.
     model, config = _tiny_gpt_oss()
     apply_sinks_policy(model, config, policy=SinksPolicy.LIVE, attn_implementation="eager")
-    validate_weight_sync_support(model)
+    validate_weight_sync_support(model, "vllm")
 
 
 if __name__ == "__main__":

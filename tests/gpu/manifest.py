@@ -33,10 +33,12 @@ Markers (selection):
                                    * the server must own a GPU the trainer does not use, since weight
                                      sync is an NCCL broadcast and a rank cannot broadcast to itself
                                      (drive the trainer with ``CUDA_VISIBLE_DEVICES`` excluding it);
-                                   * on a host without InfiniBand, launch with ``NCCL_IB_DISABLE=1
-                                     NCCL_NET=Socket``. The image's OFI/Gin defaults hang the
-                                     cross-container group instead of failing: both GPUs spin until
-                                     the 120 s formation deadline, per test.
+                                   * the trainer and the server must agree on the NCCL transport:
+                                     the socket recipe both compose bases default to (``make``
+                                     passes it), or EFA on both ends (``EFA=1`` plus the compose
+                                     overlay). A mismatch hangs the cross-container group instead of
+                                     failing: both GPUs spin until the 120 s formation deadline, per
+                                     test.
                                  A trainer killed while attached to the weight-transfer engine leaves
                                  the server's scheduler stuck while ``/health`` still answers 200;
                                  restart the container before re-running.
@@ -409,9 +411,9 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=900
     ),
     # The entries below assert the served policy changed, so the server must run the same checkpoint
-    # the test trains, and the engines differ: VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507,
-    # SGLANG_MODEL=unsloth/gpt-oss-20b-BF16 (the only family whose EP layer gathers SGLang's fused
-    # layout; every other MoE family is refused for that backend at construction).
+    # the test trains; the defaults differ per engine (VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507,
+    # SGLANG_MODEL=unsloth/gpt-oss-20b-BF16), and HALO_TEST_ENV_GRPO_MODEL / HALO_TEST_ENV_GRPO_SGLANG_MODEL
+    # point a wrapper at another family for a per-family pass.
     # Serves its own tiny hub-layout checkpoint (``--write-checkpoint``, HALO_TEST_STEP3P7_MODEL),
     # not either SERVER_TIER model — see the script header for the server launch.
     "trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py": TestSpec(
@@ -424,7 +426,9 @@ MANIFEST: dict[str, TestSpec] = {
     # --thinking-budget is not a row: the budget is a gpt-oss shape (its arming marker lives in the
     # server image's reasoning plugin, agent-docs/models/gpt-oss.md#serving-for-grpo-vllm) while this
     # file's server runs Qwen3-30B. It needs HALO_TEST_ENV_GRPO_MODEL and VLLM_MODEL both pointed at
-    # a gpt-oss checkpoint, against a server carrying that plugin.
+    # a gpt-oss checkpoint, against a server carrying that plugin. The --routing-replay rows need the
+    # server on VLLM_ENABLE_R3=1 (--enable-return-routed-experts); the flag is additive, so one server
+    # carrying it runs the whole entry.
     "trainers/grpo/test_env_grpo_vllm_e2e.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "etp", "tp", "lora", "moe", "qwen3", "vllm_server"),
@@ -440,6 +444,8 @@ MANIFEST: dict[str, TestSpec] = {
             "--ep-size 1 --peft lora --resume",
             "--ep-size 2 --peft expert_lora --resume",
             "--ep-size 2 --resume",
+            "--ep-size 1 --routing-replay rollout",
+            "--ep-size 2 --routing-replay rollout",
         ),
         # The full-finetune resume sets the budget: two model builds plus a checkpoint round-trip.
         # 2400s covers the FA4-JIT and checkpoint-download cold paths on top of it.
@@ -462,13 +468,28 @@ MANIFEST: dict[str, TestSpec] = {
         # FA4-JIT and checkpoint-download cold paths on top of it.
         timeout=1800,
     ),
-    # No --ep-size 2 row: SGLang weight sync and DeepEP need opposite process-global NCCL transport
-    # settings, so the trainer refuses that pairing at construction (validate_backend_parallelism).
+    # The SGLang counterpart of the 4-GPU entry above: the same two-axis shapes into the engine
+    # whose loader assembles nothing itself. Same server as the 2-GPU SGLang entry.
+    "trainers/grpo/test_env_grpo_sglang_4gpu_e2e.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "ep", "etp", "tp", "lora", "moe", "gptoss", "sglang_server"),
+        args_matrix=(
+            "--ep-size 2 --etp-size 2",
+            "--ep-size 2 --tp-size 2",
+            "--ep-size 2 --etp-size 2 --peft lora",
+            "--ep-size 4",
+            "--ep-size 4 --peft expert_lora",
+        ),
+        timeout=1800,
+    ),
+    # --ep-size 2 gathers FSDP-ignored plain experts through DeepEP with the SGLang group in the same
+    # process; the server's cuMem parity (docker-compose.sglang.yml) is what lets the two coexist.
     "trainers/grpo/test_env_grpo_sglang_e2e.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "tp", "lora", "moe", "gptoss", "sglang_server"),
+        markers=("gpu", "full", "2gpu", "ep", "tp", "lora", "moe", "gptoss", "sglang_server"),
         args_matrix=(
             "--ep-size 1",
+            "--ep-size 2",
             "--tp-size 2",
             "--ep-size 1 --peft lora",
             "--ep-size 1 --resume",
@@ -476,6 +497,8 @@ MANIFEST: dict[str, TestSpec] = {
             "--ep-size 1 --peft lora --routing-replay rollout",
             "--tp-size 2 --routing-replay rollout",
             "--ep-size 1 --resume --routing-replay rollout",
+            "--ep-size 2 --peft expert_lora",
+            "--ep-size 2 --peft expert_lora --resume",
         ),
         # The --routing-replay rows need more of the server than the others: SGLANG_ENABLE_R3=1
         # (--enable-return-routed-experts) with SGLANG_MOE_RUNNER_BACKEND=triton, since the fused

@@ -28,6 +28,7 @@ THIRD_PARTY_ROWS = {
     "WANDB_RESUME": "read by the wandb SDK; the row exists to pair it with WANDB_RUN_ID",
     "HALO_SCRATCH": "consumed by the Makefile and compose files on the host; derives the in-container HALO_DATA_ROOT",
     "VLLM_USE_V2_MODEL_RUNNER": "read by the vLLM server; the row exists because rollout_max_thinking_tokens requires it",
+    "NCCL_CUMEM_ENABLE": "read by NCCL in the SGLang server; the row exists because docker-compose.sglang.yml must pre-set it",
 }
 
 # An env var name: SCREAMING_SNAKE with at least two segments, which is what every read spells.

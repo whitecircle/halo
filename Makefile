@@ -48,11 +48,31 @@ DOCKER_RUN = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_
   $(if $(strip $(ENV_FILE)),--env-file $(ENV_FILE),) \
   -e HF_HOME=$(HALO_SCRATCH)/hf -e HF_DATASETS_CACHE=$(HALO_SCRATCH)/hf/datasets \
   -e TMPDIR=$(HALO_SCRATCH)/tmp -e HALO_DATA_ROOT=$(HALO_SCRATCH) \
-  -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EXTRA_DOCKER_ENV) \
+  -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(NCCL_PROTO_ENV) $(EXTRA_DOCKER_ENV) \
   -v $(CURDIR):/workspace $(MNT_MOUNT) $(if $(strip $(AWS_DIR)),-v $(AWS_DIR):/root/.aws,) -w /workspace \
   $(IMAGE)
 # Per-target additions to the run above (see test-gpu-vllm).
 EXTRA_DOCKER_ENV ?=
+# Fabric for NCCL in the container: the weight-sync group to a rollout server on another node, and
+# every other trainer collective. EFA=1 passes the EFA devices and names the aws-ofi-nccl net (a
+# missing plugin then fails loudly instead of falling back to sockets); the rollout server must run
+# under the matching compose overlay (docker-compose.*.efa.yml). Without it the two server test
+# tiers force the no-fabric socket recipe the compose files default to.
+# NCCL_SOCKET_IFNAME (from the shell or the make command line; make does not read .env) overrides
+# either recipe's interface selection. The fabric default excludes lo:
+# an excluded-only list still ranks loopback first, and a bootstrap address of 127.0.0.1 never
+# reaches a peer on another node; the no-fabric default keeps the same-host loopback path.
+# NCCL_PROTO, when set in the calling shell, reaches the container: a protocol table on the trainer
+# alone hangs the first collective, so the compose EFA overlays pass it to the server the same way.
+EFA ?=
+NCCL_SOCKET_IFNAME ?=
+EFA_SOCKET_IFNAME_DEFAULT = ^lo,docker,veth,tailscale
+NO_FABRIC_SOCKET_IFNAME_DEFAULT = ^docker,veth
+EFA_DOCKER_FLAGS = $(if $(filter 1,$(EFA)),--device=/dev/infiniband -e NCCL_NET=Libfabric -e NCCL_NET_PLUGIN=ofi \
+  -e NCCL_IB_DISABLE=0 -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(EFA_SOCKET_IFNAME_DEFAULT)),)
+NO_FABRIC_ENV = $(if $(filter 1,$(EFA)),,-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket \
+  -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(NO_FABRIC_SOCKET_IFNAME_DEFAULT)))
+NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
 # CPU-only variant (no --gpus): CPU tests, lint, docs inside the image. The Hugging Face cache is
 # mounted read-write so the tests that load a real tokenizer work without the hub; set HF_CACHE= to
 # disable that mount.
@@ -103,32 +123,28 @@ TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 # Both ends of a weight-sync test must serve the same checkpoint, so the dense and MoE halves are
 # separate passes with the server restarted in between; SERVER_TIER=moe selects the MoE half.
 SERVER_TIER ?= not moe
-# NCCL_IB_DISABLE/NCCL_NET: the trainer↔server weight-transfer group is NCCL over the host network.
-# On a host without InfiniBand the image's OFI/Gin defaults hang on the first collective rather than
-# falling back, so force sockets. NCCL_SOCKET_IFNAME keeps that transport off Docker's bridge and the
-# per-container veth pairs, which NCCL otherwise enumerates and cannot carry host-to-host traffic on.
-test-gpu-vllm: EXTRA_DOCKER_ENV = -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_SOCKET_IFNAME=^docker,veth \
+# The trainer↔server weight-transfer group is NCCL between two containers: without EFA=1 the socket
+# recipe the compose bases default to (InfiniBand off, socket net; NCCL_SOCKET_IFNAME keeps it off
+# Docker's bridge and the per-container veth pairs, which NCCL otherwise enumerates and cannot carry
+# host-to-host traffic on). The SGLang server needs only cuMem parity on top (docker-compose.sglang.yml).
+test-gpu-vllm: EXTRA_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e VLLM_SERVER_URL=$(VLLM_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=vllm
-test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half)
+test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half; EFA=1 on an EFA host)
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No vLLM server at $(VLLM_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 \
 	  VLLM_USE_V2_MODEL_RUNNER=0 docker compose -f docker-compose.vllm.yml up -d vllm-server \
-	  (both are required by the benchmarks: their per-effort CoT budget draws a 400 without a \
-	  reasoning parser, and another under Model Runner V2)"; exit 1; }
+	  (EFA=1: add -f docker-compose.vllm.efa.yml; both are required by the benchmarks: their per-effort \
+	  CoT budget draws a 400 without a reasoning parser, and another under Model Runner V2)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_ENTRYPOINTS) $(PYTEST_ARGS)"
 
-# NCCL_P2P_DISABLE/NCCL_SHM_DISABLE: the trainer and SGLang run in separate containers, across which
-# NCCL's same-node CUDA-IPC path cannot import a shareable buffer. NCCL_NET_PLUGIN=none: the bundled
-# aws-ofi plugin outranks the socket transport and wedges group formation on a host with no OFI
-# fabric. The server sets the same set (docker-compose.sglang.yml).
-test-gpu-sglang: EXTRA_DOCKER_ENV = -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_NET_PLUGIN=none \
-  -e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_SOCKET_IFNAME=^docker,veth \
+test-gpu-sglang: EXTRA_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e SGLANG_SERVER_URL=$(SGLANG_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=sglang
-test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half)
+test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half; EFA=1 on an EFA host)
 	@curl -sf $(SGLANG_SERVER_URL)/health >/dev/null || { echo "No SGLang server at $(SGLANG_SERVER_URL). Start it on a \
-	  GPU the trainer does not use: SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d"; exit 1; }
+	  GPU the trainer does not use: SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d \
+	  (EFA=1: add -f docker-compose.sglang.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and sglang_server and ($(SERVER_TIER))' $(GPU_ENTRYPOINTS) $(PYTEST_ARGS)"
 
 bench: ## run the EP/TP throughput benchmarks
