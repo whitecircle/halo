@@ -1,7 +1,8 @@
 """Remote SandboxFusion-compatible backend: HTTP client for the stateless ``/run_code`` API.
 
 The endpoint is stateless, so :class:`RemoteSession` carries the working set client-side: written
-files are accumulated and resent each :meth:`run`. Files *produced* on the service aren't read back.
+files are accumulated and resent each :meth:`run`, and a compiled language is rebuilt by the service
+on every request. Files *produced* on the service aren't read back.
 See https://github.com/bytedance/SandboxFusion.
 """
 
@@ -19,6 +20,32 @@ from src.environments.sandbox.base import (
 # HTTP budget on top of the program's own timeout: the service still has to queue, provision and
 # tear down the run, so the client must not give up before the server's own deadline.
 _REQUEST_OVERHEAD_SECONDS = 30.0
+
+# SandboxFusion ``CommandRunStatus`` values that mean the step ran to completion (lower-cased).
+_STEP_FINISHED_STATUSES = ("finished", "success", "")
+# The shell's exit code for a command it could not exec: a missing compiler, not a source verdict.
+_COMMAND_NOT_FOUND = 127
+
+
+def _command_result(value: object) -> dict[str, object]:
+    """A SandboxFusion ``compile_result`` / ``run_result`` block; ``{}`` when absent or malformed."""
+    return value if isinstance(value, dict) else {}
+
+
+def _return_code(value: object) -> int | None:
+    """``return_code`` may arrive as an int, a numeric string, or be absent; normalize to int/None."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _is_time_limit(status: str) -> bool:
+    return "timelimit" in status or "timeout" in status
 
 
 class RemoteSandbox(SandboxExecutor):
@@ -68,30 +95,44 @@ class RemoteSandbox(SandboxExecutor):
 
     @staticmethod
     def _parse(data: dict[str, object]) -> SandboxResult:
-        """Map a SandboxFusion response into a :class:`SandboxResult` (tolerant of partial bodies)."""
-        run = data.get("run_result") or {}
-        if not isinstance(run, dict):
-            run = {}
-        run_status = str(run.get("status", "")).lower()
-        timed_out = "timelimit" in run_status or "timeout" in run_status
+        """Map a SandboxFusion response into a :class:`SandboxResult` (tolerant of partial bodies).
+
+        A ``compile_result`` the compiler rejected is the program's verdict (``compile_failed``); a
+        compile time limit is a backend/limit failure (``error``) — the local backend's split.
+        """
+        compile_step = _command_result(data.get("compile_result"))
+        compile_status = str(compile_step.get("status", "")).lower()
+        if _is_time_limit(compile_status):
+            message = "remote compilation exceeded the service's compile time limit"
+            return SandboxResult(stderr=message, error=message)
+        compile_rc = _return_code(compile_step.get("return_code"))
+        if compile_step and (compile_status not in _STEP_FINISHED_STATUSES or compile_rc == _COMMAND_NOT_FOUND):
+            # The compiler step did not run to completion (or the compiler is absent): the service's
+            # fault, never a verdict on the source.
+            diagnostics = str(compile_step.get("stderr") or compile_step.get("stdout") or compile_status)
+            return SandboxResult(
+                stderr=diagnostics.strip(), error=f"remote compile step failed: {diagnostics.strip()}"
+            )
+        if compile_step and compile_rc not in (0, None):
+            diagnostics = str(compile_step.get("stderr") or compile_step.get("stdout") or "compilation failed")
+            return SandboxResult(stderr=diagnostics.strip(), returncode=compile_rc, compile_failed=True)
+
+        run = _command_result(data.get("run_result"))
+        timed_out = _is_time_limit(str(run.get("status", "")).lower())
 
         status = str(data.get("status", "")).lower()
         error: str | None = None
         if status not in ("success", "") and not timed_out:
             error = str(data.get("message") or data.get("status"))
-
-        # ``return_code`` may arrive as an int, a numeric string, or be absent; normalize to int/None.
-        returncode = run.get("return_code")
-        if isinstance(returncode, str):
-            try:
-                returncode = int(returncode)
-            except ValueError:
-                returncode = None
+        elif not run and not timed_out:
+            # A body with no run block carries no program output: reporting it as an empty clean run
+            # would pass a test whose expected output is empty and read as a no-output REPL success.
+            error = "remote sandbox returned no run result"
 
         return SandboxResult(
             stdout=str(run.get("stdout", "") or ""),
             stderr=str(run.get("stderr", "") or ""),
-            returncode=returncode,
+            returncode=_return_code(run.get("return_code")),
             timed_out=timed_out,
             error=error,
         )

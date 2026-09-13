@@ -34,7 +34,7 @@ Resolve built-in types by name via `src/environments/registry.py`:
 | `swe` | `SweEnvironment` | `run_code` + persistent file ops (accepts `language`) |
 | `mcp` | `NativeMCPClientEnvironment` | MCP server tools |
 | `qa_search` | `NativeToolUseEnvironment` (factory) | `web_search` (+ optional `python`) |
-| `code_contests` | `CodeContestsEnvironment` | test REPL + `submit_solution`, exact-match grading (accepts `language`) |
+| `code_contests` | `CodeContestsEnvironment` | test tool + `submit_solution`, exact-match grading (`language`: one name, or a list the model chooses from per call) |
 | `codeforces` | `CodeContestsEnvironment` | same env, token comparison — the only difference between the two presets |
 | `exam_qa` | `ExamQAEnvironment` | none, or `web_search` in open-book mode |
 

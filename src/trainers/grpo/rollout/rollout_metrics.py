@@ -1,12 +1,13 @@
 """Rollout diagnostics for environmental GRPO: completion logs and per-episode metric aggregation.
 
-Every metric here is computed over the gathered-global episode population, so a single DP rank's
-rollouts do not set the logged mean.
+Every metric here is computed over the GATHERED-GLOBAL episode population, so a DP rank's own
+rollouts never set the logged mean on their own.
 """
 
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Mapping
 
 import torch
 import torch.distributed as dist
@@ -17,21 +18,24 @@ from src.distributed.runtime import (
     is_multi_rank_run,
     is_output_shared_filesystem,
 )
-from src.environments.base import SOLVE_RATE_KEY, Trajectory
+from src.environments.base import EPISODE_SLICES_KEY, SOLVE_RATE_KEY, Trajectory
 from src.environments.episode import RolloutResult
 
 logger = logging.getLogger(__name__)
 
 
 def _gather_to_completion_writers(values: list) -> list | None:
-    """Gather ``values`` across the world in rank order, delivering only to the ranks that write the
-    completions artifact; ``None`` on every other rank. Collective: every rank must call it.
+    """Gather ``values`` across the world in rank order, delivering only to the ranks that WRITE the
+    completions artifact; ``None`` on every other rank. COLLECTIVE — every rank must call it.
 
-    The payload is the full multi-turn trajectory render, the heaviest object this trainer moves, and
-    an all-gather stages the pickle through every rank's CUDA device, so the transient grows linearly
-    in world size. With a shared output filesystem the sole consumer is global rank 0, so the payload
-    is gathered there alone; without one, every node's local rank 0 writes its own copy and needs the
-    all-gather. The receiving set is :func:`fs_aware_save_rank`, the predicate that elects the writer.
+    The payload is the full multi-turn trajectory render, the heaviest object this trainer moves. An
+    all-gather hands the whole world's text to every rank and (on NCCL) stages the pickle through
+    that rank's CUDA device, so the transient grows linearly in world size while the only consumer
+    is ``emit_completion_artifacts`` on the writer rank. With a shared output filesystem that writer
+    is global rank 0 alone, so the payload is gathered there and nowhere else; without one, every
+    node's local rank 0 writes its own copy of the world record, and the all-gather is what feeds
+    them. The receiving set is :func:`fs_aware_save_rank` itself — the same predicate that elects
+    the writer — so the two cannot drift into gathering to a rank that does not write.
     """
     if not is_multi_rank_run():
         return list(values)
@@ -77,11 +81,11 @@ class RolloutMetricsMixin:
     computes no training signal, so every method here is safe to call on any rank.
     """
 
-    # Cumulative totals, accumulated from the gathered-global population :meth:`_log_rollout_metrics`
-    # already builds rather than from this rank's shard, which would under-report the job by the DP
+    # Cumulative infra totals, accumulated from the GATHERED-GLOBAL population :meth:`_log_rollout_metrics`
+    # already builds — never from this rank's own shard, which would under-report the job by the DP
     # size while reading as a job total. Class-level so no __init__ is needed; ``+=`` rebinds per
     # instance. Under TP/ETP each group's leader rollouts appear once per member, matching the
-    # duplicate generation those ranks performed.
+    # duplicate generation those ranks really performed.
     _total_rollouts = 0
     _total_rollout_latency = 0.0
     _total_generation_tokens = 0
@@ -141,15 +145,34 @@ class RolloutMetricsMixin:
     def _assistant_turn_reasoning_tokens(self, traj) -> list[int]:
         """Per-assistant-turn CoT token counts for calibration and the per-effort metrics.
 
-        Every assistant turn counts, a thinking-free one as 0. Skipping those would leave "no thinking
-        at all" unpenalized while brief thinking pays the under-band penalty, rewarding the opposite
-        of what the calibration term intends.
+        Every assistant turn counts, a thinking-free one as 0: skipping them would score "no thinking
+        at all" as 0 while brief thinking pays the under-band penalty — a preference for dropping CoT
+        entirely, the opposite of the calibration term's intent.
         """
         return [
             len(self._tokenizer(m.thinking, add_special_tokens=False)["input_ids"]) if m.thinking else 0
             for m in traj.messages
             if m.role == "assistant"
         ]
+
+    @staticmethod
+    def _episode_slices(traj) -> dict[str, str]:
+        """The categorical facts an episode's metrics are sliced by: its resolved effort level under
+        ``effort`` plus whatever the env stamped under :data:`EPISODE_SLICES_KEY` (string values only;
+        a non-string stamp would fan out into one metric key per object repr)."""
+        if traj is None:
+            return {}
+        slices: dict[str, str] = {}
+        if traj.reasoning_effort is not None:
+            slices["effort"] = str(traj.reasoning_effort)
+        stamps = traj.info.get(EPISODE_SLICES_KEY)
+        if not isinstance(stamps, Mapping):
+            return slices
+        for name, value in stamps.items():
+            # ``effort`` is the trainer's own slice; an env stamp cannot rename the resolved level.
+            if name != "effort" and isinstance(value, str) and value:
+                slices[str(name)] = value
+        return slices
 
     def _log_rollout_metrics(self, results: list[RolloutResult], mode: str):
         """Log per-rollout diagnostics grouped by prefix (``async/*``, ``episode/*``, ``outcome/*``,
@@ -164,7 +187,7 @@ class RolloutMetricsMixin:
                 "truncated": bool(r.trajectory and r.trajectory.truncated),
                 "error": bool(r.error),
                 "total_reward": r.total_reward,
-                "effort": getattr(r.trajectory, "reasoning_effort", None) if r.trajectory else None,
+                "slices": self._episode_slices(r.trajectory),
                 "reasoning_tokens": sum(self._assistant_turn_reasoning_tokens(r.trajectory)) if r.trajectory else 0,
                 "metrics": r.metrics,
             }
@@ -199,7 +222,7 @@ class RolloutMetricsMixin:
             if vals:
                 m[key].append(_mean(vals))
 
-        # Components must sum exactly to the reward; a nonzero mean |residue| means a channel bypasses them.
+        # Components must sum EXACTLY to the reward; a nonzero mean |residue| means a channel bypasses them.
         residues = [
             abs(e["total_reward"] - sum(v for k, v in e["metrics"].items() if k.startswith("reward/")))
             for e in episodes
@@ -208,12 +231,15 @@ class RolloutMetricsMixin:
         if residues:
             m["reward/composition_residue"].append(_mean(residues))
 
-        by_effort: dict[str, list[dict]] = defaultdict(list)
+        # Every slice an episode carries (its effort level, the env's own categorical stamps such as
+        # the language it submitted in) gets the same per-value breakdown, so a run's balance across
+        # the values and each value's outcome read off ``<slice>/<value>/count`` and ``.../solve_rate``.
+        groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
         for e in episodes:
-            if e["effort"] is not None:
-                by_effort[e["effort"]].append(e)
-        for effort, group in by_effort.items():
-            prefix = f"effort/{effort}"
+            for name, value in e["slices"].items():
+                groups[(name, value)].append(e)
+        for (name, value), group in groups.items():
+            prefix = f"{name}/{value}"
             m[f"{prefix}/count"].append(float(len(group)))
             m[f"{prefix}/reward"].append(_mean([e["total_reward"] for e in group]))
             m[f"{prefix}/generation_tokens"].append(_mean([e["generation_tokens"] for e in group]))
@@ -223,8 +249,8 @@ class RolloutMetricsMixin:
             solves = [e["metrics"][SOLVE_RATE_KEY] for e in group if SOLVE_RATE_KEY in e["metrics"]]
             if solves:
                 m[f"{prefix}/solve_rate"].append(_mean(solves))
-            # The env's per-episode strategy metrics (episode/*), sliced by the effort level that
-            # conditions them. Env-agnostic: any environment's episode/* keys split automatically.
+            # The env's per-episode strategy metrics (episode/*), sliced by the value that conditions
+            # them — env-agnostic: any environment's episode/* keys split automatically.
             for key in {k for e in group for k in e["metrics"] if k.startswith("episode/")}:
                 vals = [e["metrics"][key] for e in group if key in e["metrics"]]
                 m[f"{prefix}/{key.removeprefix('episode/')}"].append(_mean(vals))

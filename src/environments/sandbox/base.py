@@ -88,13 +88,16 @@ class SandboxResult:
     stderr: str = ""
     returncode: int | None = None
     timed_out: bool = False
+    # The compiler rejected the program's own source (non-zero exit; ``returncode`` is the compiler's).
+    # A missing compiler or a compile timeout is a backend/limit failure and sets ``error`` instead.
+    compile_failed: bool = False
     # Backend/transport failure, distinct from the program's own non-zero exit or a compile error.
     error: str | None = None
 
     @property
     def ok(self) -> bool:
-        """True only when the program ran to completion with a zero exit code."""
-        return self.returncode == 0 and not self.timed_out and self.error is None
+        """True only when the program built and ran to completion with a zero exit code."""
+        return self.returncode == 0 and not self.timed_out and not self.compile_failed and self.error is None
 
 
 @dataclass(frozen=True)
@@ -198,6 +201,12 @@ class SandboxSession(ABC):
     def list_files(self) -> list[str]:
         """List relative paths of files currently in the session."""
         raise NotImplementedError
+
+    def reset_to_staged(self) -> None:  # noqa: B027 — optional hook; a stateless backend keeps nothing to drop
+        """Drop whatever the last :meth:`run` produced in the working directory, keeping what it staged
+        and built, so consecutive runs of one program start from the same state (a grader running
+        hidden tests through one session). A backend whose service starts every run fresh has nothing
+        to drop."""
 
     def close(self) -> None:  # noqa: B027 — optional hook; a base session holds no resources to free
         """Release session resources (e.g. delete the working directory). Idempotent."""

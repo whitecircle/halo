@@ -55,17 +55,18 @@ environment_kwargs:
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit — see
                              # gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml for the derivation
   reasoning_effort: random
+  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past two recoveries the episode ends truncated
   # One profile per effort level: CoT budget plus interaction limits. Submission and test-call
   # allowances scale with effort. thinking_tokens is an engine cap on vLLM; on SGLang it reaches the
   # trajectory only (nothing caps CoT below rollout_max_tokens).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
+    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
-  # regardless of outcome at every effort level; on this backend the interaction budgets and the effort
-  # level's own conditioning price effort (SGLang enforces no thinking cap).
-  submission_reward: 0.25
+  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
+  submission_reward: 0.1     # bonus for reaching the graded channel; small so a weak submission cannot out-earn a careful one
+  pass_fraction_exponent: 2.0  # convex partial credit: a half-right submission earns a quarter of a solve
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
   resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first; prices probing the judge
@@ -88,31 +89,28 @@ rollout_server_configs:
 - url: "http://localhost:30001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 300.0
+request_timeout: 1200.0       # per HTTP call = one turn: at least twice the 24k-token turn cap over the per-sequence decode
+                              # speed at peak concurrency (agent-docs/training-methods/grpo/environmental-grpo.md#sizing-a-run)
+max_retries: 1                # a timeout re-runs the WHOLE episode; 2 attempts x 1200 s stays under the
+                              # 80%-of-watchdog retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
-rollout_max_tokens: 22000              # per-turn total (CoT + a 4k answer headroom). The only CoT bound on
+rollout_max_tokens: 24000              # per-turn total (CoT + a 6k answer headroom). The only CoT bound on
                                        # this backend: rollout_max_thinking_tokens is refused here, and the
-                                       # per-effort thinking_tokens profile only conditions the chat template
-                                       # (reasoning_compliance_weight: 0 leaves nothing pricing it).
+                                       # per-effort thinking_tokens profile only conditions the template.
 reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
                                  # so length control is the effort level's conditioning instead
 
 # --- Prefetch ---
 enable_prefetch: true
 
-# --- Dataset ---
-# The two pools scripts/environments/preparation/prepare_code_dataset.py writes, listed side by
-# side — the loader concatenates them, so no merged pool has to exist. The held-out split is the
-# codeforces pool's own: deepcoder-taco ships train only (its source has no test split), so it
-# contributes training rows and nothing to the eval set. Placeholder paths: point them at the
-# --output_dir you wrote (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+# HardTests problems with sound checkers, banded by Codeforces rating; `medium` (1500-1999) is the entry band,
+# `hard` and `extra-hard` the later curriculum stages (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
 dataset:
-- /mnt/s3_datasets/codeforces-verifiable-rl
-- /mnt/s3_datasets/deepcoder-taco-rl
+- your-org/code-contests-hardtests-rl:medium
 
 # --- Sequence Lengths ---
 max_prompt_length: null
@@ -149,7 +147,6 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 4      # rows per eval loss-forward chunk
 eval_rollout_batch_size: 50       # the 200-problem eval split in one rollout round across 4 ranks
 gradient_accumulation_steps: 24
-steps_per_generation: 24
 max_steps: 300              # the cosine horizon matches the run's useful length, not the dataset's: a
                             # full-epoch horizon would decay so slowly that the whole run trains near
                             # peak LR

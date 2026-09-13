@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import inspect
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -10,20 +11,22 @@ from typing import Any
 from src.environments.base import Message
 
 
-class MissingToolArguments(ValueError):
-    """A model-authored call omitted arguments the tool's schema declares as required."""
-
-    def __init__(self, tool: str, missing: list[str]):
-        self.tool = tool
-        self.missing = missing
-        super().__init__(f"tool '{tool}' call is missing required argument(s): {', '.join(missing)}")
-
-
 class ToolBudgetExhausted(Exception):
-    """Raised when an episode has spent its per-episode call budget for a tool.
+    """A tool refusing a call because the episode spent its per-episode budget for that tool.
 
-    Expected control flow rather than a fault: the protocol records a tool error (so an over-cap call
-    does not earn ``tool_success_reward``) but logs it without a traceback.
+    Expected control flow, not a fault: the protocol still books it as a tool ERROR (so an over-cap
+    call never earns ``tool_success_reward``) but logs it without a traceback, which is reserved for
+    a tool that actually broke.
+    """
+
+
+class ToolArgumentError(TypeError):
+    """A call whose model-authored arguments the handler cannot bind: a required parameter missing
+    (``submit_solution`` with no ``code``) or a name it has no keyword for.
+
+    Raised before the handler runs, so the model reads ``Error: <tool>: missing a required argument:
+    'code'`` instead of a Python signature. Expected control flow like :class:`ToolBudgetExhausted`:
+    booked as a tool ERROR, logged without a traceback.
     """
 
 
@@ -60,6 +63,9 @@ class NativeTool:
     parameters: list[ToolParameter] = field(default_factory=list)
     handler: Callable[..., Any] | None = None
     async_handler: Callable[..., Any] | None = None
+    # The observation for a call refused over the episode's cap on this tool (``{cap}`` and ``{name}``
+    # format fields); ``None`` takes the generic wording.
+    budget_message: str | None = None
 
     def to_openai_schema(self) -> dict[str, Any]:
         """Convert to OpenAI function calling schema."""
@@ -94,27 +100,64 @@ class NativeTool:
     def bind_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Keep only the arguments this tool declares in :attr:`parameters`.
 
-        The argument dict is model-authored and the handlers are ``functools.partial`` objects
-        carrying pre-bound safety keywords (sandbox ``timeout``, ``allow_imports``); a call-time
-        keyword of the same name would override them, raising the execution timeout or lifting the
-        import guard. Filtering against the declared schema (the set advertised in
-        :meth:`to_openai_schema`) drops any argument the tool does not declare.
+        The argument dict is model-authored, and the handlers are ``functools.partial`` objects
+        carrying pre-bound safety keywords (sandbox ``timeout``, ``allow_imports``) that a call-time
+        keyword of the same name silently overrides — a model could raise its own execution timeout or
+        lift the import guard. Filtering against the declared schema (the same set advertised in
+        :meth:`to_openai_schema`) keeps a hallucinated or adversarial extra out of the handler.
 
-        A tool that declares no parameters has no schema to filter against (an MCP server may
-        advertise a tool without ``properties``), so its arguments pass through unchanged.
+        A tool that declares no parameters has no schema to filter against — an MCP server may
+        advertise a tool without ``properties`` — so its arguments pass through untouched rather than
+        being silently dropped.
         """
         if not self.parameters:
             return arguments
         declared = {parameter.name for parameter in self.parameters}
-        bound = {name: value for name, value in arguments.items() if name in declared}
-        # The schema advertises these as required, so a call without them is the model's error to
-        # observe, not a TypeError inside the handler.
-        missing = [
-            parameter.name for parameter in self.parameters if parameter.required and parameter.name not in bound
-        ]
-        if missing:
-            raise MissingToolArguments(self.name, missing)
+        return {name: value for name, value in arguments.items() if name in declared}
+
+    def _bind_for_call(self, handler: Callable[..., Any], arguments: dict[str, Any]) -> dict[str, Any]:
+        """The schema-filtered arguments, checked against ``handler``'s signature before the call.
+
+        Binding up front turns the ``TypeError`` the call itself would raise into
+        :class:`ToolArgumentError`; a handler without an introspectable signature is called unchecked.
+        """
+        bound = self.bind_arguments(arguments)
+        for parameter in self.parameters:
+            # The schema is the contract the model was shown: a required parameter left out, or an enum
+            # value outside it, is a malformed call refused before the handler (and before the episode's
+            # budget), even when the handler would supply a default of its own.
+            if parameter.required and parameter.name not in bound:
+                raise ToolArgumentError(f"{self.name}: missing a required argument: {parameter.name!r}")
+            if parameter.enum and parameter.name in bound and bound[parameter.name] not in parameter.enum:
+                raise ToolArgumentError(
+                    f"{self.name}: {parameter.name} must be one of {', '.join(parameter.enum)}, "
+                    f"got {bound[parameter.name]!r}"
+                )
+        try:
+            signature = inspect.signature(handler)
+        except (TypeError, ValueError):
+            return bound
+        try:
+            signature.bind(**bound)
+        except TypeError as e:
+            raise ToolArgumentError(f"{self.name}: {e}") from None
         return bound
+
+    def bind(self, arguments: dict[str, Any], *, for_async: bool = False) -> dict[str, Any]:
+        """Admit a call's model-authored arguments: the schema-filtered set the handler can bind, or
+        :class:`ToolArgumentError`. The protocols call it before spending the episode's budget on the
+        call, so a call the handler could never run is refused without being counted. ``for_async``
+        binds against the handler :meth:`execute_async` will run, which may differ from the sync one; a sync
+        call binds only the sync handler, so an async-only tool is refused before it is counted."""
+        handler = (self.async_handler or self.handler) if for_async else self.handler
+        if handler is None:
+            raise NotImplementedError(f"Tool '{self.name}' has no handler")
+        return self._bind_for_call(handler, arguments)
+
+    def budget_exhausted_message(self, cap: int) -> str:
+        """The observation for a call refused over the episode's cap of ``cap`` calls on this tool."""
+        template = self.budget_message or "{name} limit reached ({cap}); this call was not executed."
+        return template.format(name=self.name, cap=cap)
 
     @staticmethod
     def _as_text(result: Any) -> str:
@@ -124,16 +167,15 @@ class NativeTool:
     def execute(self, **kwargs) -> str:
         """Execute the tool synchronously."""
         if self.handler:
-            return self._as_text(self.handler(**self.bind_arguments(kwargs)))
+            return self._as_text(self.handler(**self._bind_for_call(self.handler, kwargs)))
         raise NotImplementedError(f"Tool '{self.name}' has no sync handler")
 
     async def execute_async(self, **kwargs) -> str:
         """Execute the tool asynchronously."""
-        bound = self.bind_arguments(kwargs)
         if self.async_handler:
-            return self._as_text(await self.async_handler(**bound))
+            return self._as_text(await self.async_handler(**self._bind_for_call(self.async_handler, kwargs)))
         if self.handler:
-            return self._as_text(await asyncio.to_thread(self.handler, **bound))
+            return self._as_text(await asyncio.to_thread(self.handler, **self._bind_for_call(self.handler, kwargs)))
         raise NotImplementedError(f"Tool '{self.name}' has no handler")
 
 
@@ -161,10 +203,13 @@ class NativeToolRegistry:
         return list(self._tools.keys())
 
     def unknown_tool_message(self, name: str) -> str:
-        """The observation returned for a call naming a tool that is not registered.
+        """The observation for a call naming a tool that is not registered — one wording for every
+        protocol.
 
-        The registered names are listed, sorted and comma-separated, so a model that invented a tool
-        name can correct the call from the observation it already receives.
+        Names the real tools: a policy that has drifted off the tool syntax late in training invents
+        plausible names (``test``, ``test_tool``, ``repl``) and then burns turns probing for a
+        listing, so the correction has to be in the observation it already gets. Rendered as sorted
+        prose — a bare ``list`` repr is not text a model reads.
         """
         return f"Error: Unknown tool '{name}'. Available tools: {', '.join(sorted(self.names()))}"
 
@@ -202,9 +247,9 @@ class NativeToolCall:
     def from_openai_format(cls, tool_call: dict[str, Any]) -> "NativeToolCall":
         """Create from one OpenAI tool-call object (``{"id", "function": {"name", "arguments"}}``).
 
-        A malformed payload (explicit ``"function": null`` or a non-dict) degrades to an empty-name
-        call, which the registry rejects as an unknown tool, rather than raising an AttributeError
-        that would end the episode.
+        Tolerant of a malformed payload (explicit ``"function": null`` or a non-dict): it degrades to
+        an empty-name call the registry rejects as unknown-tool, instead of an AttributeError killing
+        the whole episode.
         """
         function = tool_call.get("function")
         if not isinstance(function, dict):
@@ -230,10 +275,10 @@ class NativeToolResult:
     name: str
     content: str
     success: bool = True
-    # Set when the registry held no such tool, so nothing ran. Determined structurally rather than by
-    # matching the observation text: a registered tool can produce the same wording (an MCP server
-    # answering "Tool not found: x" is a genuine failure of a real tool), and the protocol drops a
-    # turn from training on this flag alone.
+    # The environment refused the call because the registry holds no such tool — the model invented it,
+    # nothing ran. Structural, never inferred from the observation text: a TOOL's own failure message
+    # can reproduce any wording of it (an MCP server answering "Tool not found: x" is a real failure of
+    # a real tool), and the protocol drops a turn from training on this flag alone.
     unknown_tool: bool = False
 
     def to_message(self):

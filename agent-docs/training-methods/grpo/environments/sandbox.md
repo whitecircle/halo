@@ -9,7 +9,7 @@ This page covers `SandboxExecutor`.
 
 ## Backends
 
-Three backends implement one interface (`src/environments/sandbox/base.py`) and return the same `SandboxResult` (`stdout`, `stderr`, `returncode`, `timed_out`, `error`), so environment code is backend-agnostic.
+Three backends implement one interface (`src/environments/sandbox/base.py`) and return the same `SandboxResult` (`stdout`, `stderr`, `returncode`, `timed_out`, `compile_failed`, `error`), so environment code is backend-agnostic. The local backends decode a program's output as UTF-8 with replacement characters, so bytes outside UTF-8 (C++ undefined behavior, a binary dump) reach the grader as a judgeable wrong answer rather than failing the run.
 
 | Backend | Class | Isolation | Languages |
 |---------|-------|-----------|-----------|
@@ -19,7 +19,7 @@ Three backends implement one interface (`src/environments/sandbox/base.py`) and 
 
 `BubblewrapSandbox` needs the `bwrap` binary (the `bubblewrap` apt package, installed in the training `Dockerfile`) **and** the right to create user + mount namespaces, which Docker's default seccomp profile denies. The constructor probes once and raises a `RuntimeError` if the jail can't be created, so the failure lands at construction rather than on every run. Grant the namespaces with `--privileged` (or an equivalent seccomp/AppArmor relaxation) on a host that permits unprivileged user namespaces (`kernel.unprivileged_userns_clone=1`).
 
-An error the *program* caused (non-zero exit, compile error, timeout) leaves `error` unset, so grading counts it as a failed solution. A missing compiler, compile timeout, or transport failure sets `error` — a backend outage, not a verdict.
+An error the *program* caused (non-zero exit, compile error, timeout) leaves `error` unset, so grading counts it as a failed solution. A compile the compiler rejected additionally sets `compile_failed` (`returncode` is the compiler's exit code, `stderr` its diagnostics), so a grader can name the verdict; `ok` is False whenever it is set. A missing compiler, compile timeout, or transport failure sets `error` — a backend outage, not a verdict. The remote backend reads these off SandboxFusion's `compile_result`: a finished compiler step with a non-zero exit becomes `compile_failed`; a compile time limit, a step that did not run to completion or a missing compiler (exit 127) becomes `error`, as does a body with no run block.
 
 ### Selection
 
@@ -57,7 +57,7 @@ Pass `sandbox=` to an environment to inject a pre-built executor. That is also t
 
 `SandboxExecutor.open_session()` returns a `SandboxSession` — a working directory that survives across `run()` calls, which is what a multi-turn SWE agent or tool-use rollout needs. Its API: `run(code, *, stdin, timeout, language, files)`, `write_file`, `read_file` (`None` if absent), `list_files`, and an idempotent `close()` that deletes the working dir (also via context-manager exit). On the local backends a path that would escape the working directory is rejected.
 
-The local and bubblewrap backends back a session with a `LocalSession` over the real working directory (the jail wraps each command). `RemoteSession` accumulates written files client-side and resends them with every request, since `/run_code` is stateless. One session per episode keeps concurrent rollouts isolated. `SandboxExecutor.run()` is the one-shot path used for stateless grading.
+The local and bubblewrap backends back a session with a `LocalSession` over the real working directory (the jail wraps each command). A `LocalSession` compiles a compiled-language source once and reruns the binary on later `run()` calls with the same language, source and `files` — a rejected compile is cached the same way and returns its `compile_failed` result again — which is what the competitive-programming grader relies on when it opens one session per graded submission and runs every hidden test through it, calling `reset_to_staged()` after each run — the session drops whatever the run produced and keeps the staged source and the build, so no test sees files an earlier one left behind (a no-op on the stateless remote backend). The session holds one build (every registered compile writes `./main`): a run of different code, an interpreted run, or a `write_file` drops it, since any of them may change an included header. `RemoteSession` accumulates written files client-side and resends them with every request, since `/run_code` is stateless; the service compiles on every request. One session per episode keeps concurrent rollouts isolated. `SandboxExecutor.run()` is the one-shot path: a throwaway session, so it compiles every time.
 
 ## Performance and parallelism
 

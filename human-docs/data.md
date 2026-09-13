@@ -82,6 +82,11 @@ Training configs carry the matching field `tokenizer_backend` (`hf` by default,
 `gigatoken` to opt in). Embedding training rejects anything but `hf` —
 SentenceTransformers owns its own tokenization there.
 
+The code-contests RL environment reads a prepared pool. `halo run compact-code-tests` caps a
+test corpus to one suite per problem; `halo run prepare-code-dataset` builds the pool and, with
+`--push_bands`, one config per rating band — the `<repo>:<band>` the shipped examples name in
+`dataset:`. Details: [Code Contests](../agent-docs/training-methods/grpo/environments/code-contests.md) ↗.
+
 Full schema (including multimodal content), collators, and the S3 utilities:
 [Dataset Formats](../agent-docs/data/dataset-formats.md) ↗ ·
 [Pre-Processing](../agent-docs/data/dataset-preparation.md) ↗ ·
