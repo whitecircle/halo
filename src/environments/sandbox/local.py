@@ -39,16 +39,26 @@ KILL_DRAIN_TIMEOUT = 10.0
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
 
+# What a session's staged build was made from: language, source text, auxiliary file contents.
+_BuildKey = tuple[str, str, tuple[tuple[str, str], ...]]
+
 
 def _safe_member_name(name: str) -> bool:
     """Reject auxiliary-file names that would escape the sandbox working directory."""
     return name not in ("", ".", "..") and not name.startswith(("/", "\\")) and ".." not in name.split("/")
 
 
+def _build_key(spec: LanguageSpec, code: str, files: dict[str, str] | None) -> _BuildKey:
+    """Identity of a compiled program's inputs; runs with equal keys share one build."""
+    return (spec.name, code, tuple(sorted((files or {}).items())))
+
+
 class LocalSubprocessSandbox(SandboxExecutor):
     """Run code in a child process under POSIX resource limits, in a managed working directory.
 
-    Python runs with ``-s -E``; C/C++ compile with ``g++``/``gcc``. The run step is bounded by CPU
+    Python runs with ``-s -E``; C/C++ compile with ``g++``/``gcc``. An execution is three steps —
+    :meth:`_stage_sources`, :meth:`_compile` (compiled languages), :meth:`_run_program` — which
+    :class:`LocalSession` sequences so a session can reuse a build. The run step is bounded by CPU
     time, address space, and file size; the compile step gets a larger time/memory budget.
 
     Stateless aside from config, with a per-execution working dir and per-call limits, so one instance
@@ -109,12 +119,16 @@ class LocalSubprocessSandbox(SandboxExecutor):
         ``start_new_session`` puts the child in a fresh process group, so a timeout SIGKILLs the whole
         group; killing only the child would leave forked grandchildren running.
         """
+        # Decoded with replacement: a program that emits bytes that are not UTF-8 (C++ undefined
+        # behavior, a binary dump) is judged on the replaced text, never lost to a decode error.
         with subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=cwd,
             env=env,
             start_new_session=True,
@@ -144,63 +158,24 @@ class LocalSubprocessSandbox(SandboxExecutor):
             "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
         }
 
-    def _exec_in_workdir(
-        self,
-        workdir: str,
-        code: str,
-        *,
-        stdin: str,
-        timeout: float,
-        language: str,
-        files: dict[str, str] | None,
-        allow_network: bool,
-    ) -> SandboxResult:
-        """Compile (if needed) and run ``code`` inside an already-prepared ``workdir``."""
-        try:
-            spec = require_language(language)
-        except ValueError as exc:
-            return SandboxResult(error=str(exc))
-
-        for name, content in (files or {}).items():
+    def _stage_sources(
+        self, workdir: str, spec: LanguageSpec, code: str, files: dict[str, str] | None
+    ) -> SandboxResult | None:
+        """Write ``files`` and the source into ``workdir``. Returns None, or an error result for an unsafe path."""
+        files = files or {}
+        for name in files:
             if not _safe_member_name(name):
                 return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
+        for name, content in files.items():
             self._write_member(workdir, name, content)
-
         self._write_member(workdir, spec.source_name, code)
-
-        # One slot for compile+run, so the timeout below measures near-dedicated-core time.
-        with SANDBOX_EXECUTION_GATE.slot():
-            if spec.is_compiled:
-                compile_failure = self._compile(workdir, spec, allow_network=allow_network)
-                if compile_failure is not None:
-                    return compile_failure
-
-            run_argv = [PYTHON_INTERPRETER if tok == INTERPRETER_PLACEHOLDER else tok for tok in spec.run_argv]
-            run_argv = self._wrap_command(run_argv, workdir, allow_network=allow_network)
-
-            # RLIMIT_CPU backstop: SIGXCPU still kills a busy loop if timeout delivery lags.
-            run_argv = self._limit_wrap(
-                run_argv,
-                int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
-                self.memory_limit_mb,
-                nproc=LOCAL_NPROC_LIMIT,
-            )
-            stdout, stderr, returncode, timed_out = self._run_in_new_session(
-                run_argv, stdin=stdin, timeout=timeout, cwd=workdir, env=self._child_env(workdir)
-            )
-            # SIGXCPU (the backstop) is reported as a timeout so callers bucket it as TLE.
-            return SandboxResult(
-                stdout=stdout or "",
-                stderr=stderr or "",
-                returncode=None if timed_out else returncode,
-                timed_out=timed_out or returncode == -signal.SIGXCPU,
-            )
+        return None
 
     def _compile(self, workdir: str, spec: LanguageSpec, *, allow_network: bool) -> SandboxResult | None:
-        """Build a compiled language's source. Returns None on success, a failure result otherwise.
+        """Build a compiled language's staged source. Returns None on success, a failure result otherwise.
 
-        A non-zero compiler exit is the source's fault (``returncode``/``stderr``, ``error`` unset);
-        a missing compiler or compile timeout is a backend/limit failure (``error`` set).
+        A non-zero compiler exit is the source's fault (``compile_failed``, ``returncode``/``stderr``,
+        ``error`` unset); a missing compiler or compile timeout is a backend/limit failure (``error`` set).
         """
         compile_argv = self._wrap_command(list(spec.compile_argv), workdir, allow_network=allow_network)
         compile_argv = self._limit_wrap(
@@ -208,9 +183,10 @@ class LocalSubprocessSandbox(SandboxExecutor):
             int(math.ceil(self.compile_timeout + RLIMIT_CPU_SLACK_SECONDS)),
             self.compile_memory_limit_mb,
         )
-        stdout, stderr, returncode, timed_out = self._run_in_new_session(
-            compile_argv, stdin="", timeout=self.compile_timeout, cwd=workdir, env=self._child_env(workdir)
-        )
+        with SANDBOX_EXECUTION_GATE.slot():
+            stdout, stderr, returncode, timed_out = self._run_in_new_session(
+                compile_argv, stdin="", timeout=self.compile_timeout, cwd=workdir, env=self._child_env(workdir)
+            )
         if timed_out:
             return SandboxResult(
                 stderr=f"compilation exceeded {self.compile_timeout:g}s",
@@ -222,8 +198,34 @@ class LocalSubprocessSandbox(SandboxExecutor):
         if returncode != 0:
             # gcc/g++ emit diagnostics on stderr; fall back to stdout if a toolchain uses it.
             diagnostics = stderr.strip() or stdout.strip() or "compilation failed"
-            return SandboxResult(stderr=diagnostics, returncode=returncode)
+            return SandboxResult(stderr=diagnostics, returncode=returncode, compile_failed=True)
         return None
+
+    def _run_program(
+        self, workdir: str, spec: LanguageSpec, *, stdin: str, timeout: float, allow_network: bool
+    ) -> SandboxResult:
+        """Run the staged (and built) program in ``workdir`` under the run-step limits."""
+        run_argv = [PYTHON_INTERPRETER if tok == INTERPRETER_PLACEHOLDER else tok for tok in spec.run_argv]
+        run_argv = self._wrap_command(run_argv, workdir, allow_network=allow_network)
+        # RLIMIT_CPU backstop: SIGXCPU still kills a busy loop if timeout delivery lags.
+        run_argv = self._limit_wrap(
+            run_argv,
+            int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
+            self.memory_limit_mb,
+            nproc=LOCAL_NPROC_LIMIT,
+        )
+        # The slot is held for the whole run, so ``timeout`` measures near-dedicated-core time.
+        with SANDBOX_EXECUTION_GATE.slot():
+            stdout, stderr, returncode, timed_out = self._run_in_new_session(
+                run_argv, stdin=stdin, timeout=timeout, cwd=workdir, env=self._child_env(workdir)
+            )
+        # SIGXCPU (the backstop) is reported as a timeout so callers bucket it as TLE.
+        return SandboxResult(
+            stdout=stdout or "",
+            stderr=stderr or "",
+            returncode=None if timed_out else returncode,
+            timed_out=timed_out or returncode == -signal.SIGXCPU,
+        )
 
     @staticmethod
     def _write_member(workdir: str, name: str, content: str) -> None:
@@ -236,13 +238,19 @@ class LocalSubprocessSandbox(SandboxExecutor):
 class LocalSession(SandboxSession):
     """Persistent working directory for a local backend, reused across :meth:`run` calls.
 
-    Source and compiled artifacts written into ``workdir`` survive between turns.
+    Source and compiled artifacts written into ``workdir`` survive between turns. A compiled program
+    is built once and rerun from its binary while language, source and ``files`` stay the same.
     """
 
     def __init__(self, workdir: str, executor: LocalSubprocessSandbox, *, allow_network: bool = False):
         self.workdir = workdir
         self._executor = executor
         self._allow_network = allow_network
+        # The compiled program staged in ``workdir`` and its compile verdict (None = built, runnable).
+        self._build: tuple[_BuildKey, SandboxResult | None] | None = None
+        # Directory entries present once the program was staged and built: what a run may not remove
+        # and what :meth:`reset_to_staged` keeps.
+        self._staged_entries: set[str] | None = None
 
     def run(
         self,
@@ -253,19 +261,57 @@ class LocalSession(SandboxSession):
         language: str = "python",
         files: dict[str, str] | None = None,
     ) -> SandboxResult:
-        return self._executor._exec_in_workdir(
-            self.workdir,
-            code,
-            stdin=stdin,
-            timeout=timeout,
-            language=language,
-            files=files,
-            allow_network=self._allow_network,
+        try:
+            spec = require_language(language)
+        except ValueError as exc:
+            return SandboxResult(error=str(exc))
+        failure = self._prepare(spec, code, files)
+        if failure is not None:
+            return failure
+        return self._executor._run_program(
+            self.workdir, spec, stdin=stdin, timeout=timeout, allow_network=self._allow_network
         )
+
+    def _prepare(self, spec: LanguageSpec, code: str, files: dict[str, str] | None) -> SandboxResult | None:
+        """Stage ``code`` + ``files`` and build them when ``spec`` compiles; None once the program is runnable.
+
+        One build slot per session (every registered compile writes ``./main``): a compiled program is
+        rebuilt only when language, source or ``files`` differ from the staged build, and its compile
+        verdict — built, or the failure result — is reused until then. Any other write through the
+        session (an interpreted run, :meth:`write_file`) drops the slot, since it may have changed an
+        included header.
+        """
+        key = _build_key(spec, code, files)
+        if spec.is_compiled and self._build is not None and self._build[0] == key:
+            return self._build[1]
+        self._build = None
+        staged = self._executor._stage_sources(self.workdir, spec, code, files)
+        if staged is not None:
+            return staged
+        if spec.is_compiled:
+            failure = self._executor._compile(self.workdir, spec, allow_network=self._allow_network)
+            self._build = (key, failure)
+        else:
+            failure = None
+        self._staged_entries = set(os.listdir(self.workdir))
+        return failure
+
+    def reset_to_staged(self) -> None:
+        if self._staged_entries is None:
+            return
+        for entry in set(os.listdir(self.workdir)) - self._staged_entries:
+            path = os.path.join(self.workdir, entry)
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(path)
 
     def write_file(self, path: str, content: str) -> None:
         if not _safe_member_name(path):
             raise ValueError(f"unsafe session file path: {path!r}")
+        self._build = None
+        self._staged_entries = None
         LocalSubprocessSandbox._write_member(self.workdir, path, content)
 
     def read_file(self, path: str) -> str | None:

@@ -22,7 +22,8 @@ rollout_server_configs:          # one entry per server
 ```
 
 `url` is required; `group_port` and `group_host` are optional. Ports must be unique across servers
-(enforced), and an entry's keys are read by name with no per-entry validation — a misspelled
+(enforced) and must not be handed out as ephemeral source ports by the trainer host — the defaults sit inside
+Linux's 32768–60999 range, so reserve them (`net.ipv4.ip_local_reserved_ports`) or choose ports outside it, and an entry's keys are read by name with no per-entry validation — a misspelled
 `group_port` silently falls back to `vllm_group_port + index`. The top-level keys are engine-neutral
 and the parser renames none: any other spelling raises the unknown-key error. Trainer-side rollout mechanics — prefetch and its one-step
 staleness, sync cadence, trajectory-length knobs — stay on the
@@ -621,7 +622,10 @@ the server must own a GPU outside `TRAINER_CUDA_DEVICES`.
   rest. Step latency grows with running sequences (about 14 ms + 0.22 ms per sequence here under
   MTP), so per-sequence speed falls as concurrency rises — 101 tok/s at 48 running, 71 at 96 — while
   aggregate throughput rises sub-linearly (+44% for that doubling). Kernel-level gains (tuned MoE
-  tiles, another attention backend) do not show at this concurrency; fewer steps per token do.
+  tiles, another attention backend) do not show at this concurrency; fewer steps per token do. Run
+  one engine per GPU: two half-memory engines on one B300 deliver less at 96 sequences (5.4k tok/s)
+  than a single engine at the same load (6.25k), because the second engine only time-slices the GPU,
+  and two engines starting on one GPU at the same moment fail their memory profiling.
   Turning these numbers into batch sizes and timeouts: [Sizing a run](../training-methods/grpo/environmental-grpo.md#sizing-a-run).
 - **Speculative decoding (MTP)**: a checkpoint that ships a multi-token-prediction head (Qwen3.5/3.6,
   `mtp.*` tensors) drafts with it through `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`
@@ -716,7 +720,7 @@ experts over the fabric) against vLLM on a third ([Servers on other nodes](#serv
 | `/init_weight_transfer_engine` answers 500 with `ncclP2pImportShareableBuffer ... Cuda failure 101 'invalid device ordinal'` in the server log | The server container does not see the trainer's GPU — expose all GPUs to it and select with `CUDA_VISIBLE_DEVICES` (`VLLM_CUDA_DEVICES`), as the compose file does |
 | `Call to bind failed: No such device` in the server log (`400` on `/update_weights_from_distributed`), or a trainer collective hanging right after the first sync | NCCL's socket bootstrap picked a Docker `veth` — set `NCCL_SOCKET_IFNAME=^docker,veth` on both ends (the base compose default, same host only; the fabric recipe is `^lo,docker,veth,tailscale`) |
 | Cross-node group formation fails with `remote process exited or there was a network error` | The server's `NCCL_SOCKET_IFNAME` does not exclude `lo`, so it advertised `127.0.0.1` as its bootstrap address → start it under the EFA overlay (`^lo,docker,veth,tailscale`), not the base file alone |
-| `Errno 98` binding the group port at trainer start | Previous run's port in TIME_WAIT → wait for `ss -tln` to clear, or change `group_port` |
+| `Errno 98` binding the group port at trainer start | The port is taken: a previous run's sockets not yet closed (wait for `ss -tan \| grep <port>` to clear), or — the default 51216/51217 lie inside Linux's ephemeral range 32768–60999 — an outbound connection (W&B, Hub) grabbed it as its source port. Reserve the ports on every trainer host: add them to `net.ipv4.ip_local_reserved_ports` (`sysctl net.ipv4.ip_local_reserved_ports` prints the current list; write the merged list back and persist it under `/etc/sysctl.d/`), or pick ports outside the range |
 | `/health` answers but generation is wedged after a killed trainer | Scheduler left attached to the dead transfer group → restart the server container |
 | `RESTART the … server` in the trainer log; that server stays paused and refuses the next sync | A sync was interrupted after part of the model went out → the engine holds a half-written model on purpose ([Weight sync](#weight-sync)); restart it, do not `/resume` it |
 | `EngineDeadError` on the first request after a restart, `reshape_and_cache_flash … Meta tensors` in the engine log | The reloaded AOT compile cache does not match the attention backend the restarted engine auto-selected (free GPU memory steers that choice, so a co-tenant server changes it) → pin the backend (compose `VLLM_ATTENTION_BACKEND=FLASH_ATTN`, which becomes `--attention-backend`; 0.26.0 reads no such environment variable itself), or clear `/root/.cache/vllm/torch_compile_cache` before restarting. vLLM respawns the engine core, so later requests answer |

@@ -41,6 +41,14 @@ The unknown-tool observation names the real tools (`Error: Unknown tool 'X'. Ava
 
 `require_tool_use` only flags a zero-tool-call finish in the step info; it gates no reward. `no_tool_use_penalty` is charged once by `_tool_use_shaping` for any episode ending with zero tool calls, flag set or not.
 
+### Per-tool budgets
+
+`tool_budgets: {tool_name: cap}` caps calls per tool per episode — validated against the registry at construction, `0` disables the tool, an unlisted tool is uncapped. Every episode is stamped with `episode_tool_budgets` and counts admitted calls per tool in `tool_call_counts`. A call past its cap is refused with the tool's `budget_message` (a `NativeTool` field with `{cap}` / `{name}` format fields; default `<name> limit reached (<cap>); this call was not executed.`) and is not counted; a call whose arguments cannot bind (`ToolArgumentError` — a required argument missing, a value outside a parameter's `enum`) is refused before the budget is spent and not counted either. Admission runs synchronously before any await, so two concurrent calls in one turn cannot both pass a one-call cap.
+
+Either refusal is a failed call like any other — the model reads `Error: submit_solution: missing a required argument: 'code'`, charged `tool_error_penalty` and never paid `tool_success_reward` — and the protocol logs it without a traceback, which is reserved for a tool that actually broke.
+
+A subclass tightens the stamp per episode through `_apply_effort_profile` ([Custom Environments](custom-environments.md)): code-contests maps `max_submissions` / `max_test_calls` onto `submit_solution` and its test tool. The [ReAct](react.md#reward-structure) protocol takes the same `tool_budgets` with the same admission rule.
+
 ## Tool factories
 
 Factories in `src/environments/tools/factories.py` build tool registries. Stateless factories (`create_native_*`) make each call independent; session-backed factories (`create_session_*`) bind to a live [`SandboxSession`](sandbox.md#sessions-persistent-multi-turn-state) whose working directory persists across turns.
@@ -66,8 +74,8 @@ Each tool observation is capped at `max_observation_chars` (default 16384, set i
 
 ## Tool-call parsing and async
 
-OpenAI tool-call parsing and serialization live on the data model in `src/environments/tools/definitions.py`; `registry.to_openai_tools()` supplies the schemas vLLM needs at generation time. `NativeTool.execute` / `execute_async` bind the model's argument dict against the tool's declared `parameters` and drop anything else: the handlers carry pre-bound configuration (sandbox `timeout`, `allow_imports`), and a call-time keyword of the same name would otherwise override it — so a tool's own limits stay out of the model's reach. See [Custom Environments](custom-environments.md#registering-custom-tools) for the method-level contract.
+OpenAI tool-call parsing and serialization live on the data model in `src/environments/tools/definitions.py`; `registry.to_openai_tools()` supplies the schemas vLLM needs at generation time. `NativeTool.bind` (admission) and `execute` / `execute_async` bind the model's argument dict against the tool's declared `parameters` and drop anything else: the handlers carry pre-bound configuration (sandbox `timeout`, `allow_imports`), and a call-time keyword of the same name would otherwise override it — so a tool's own limits stay out of the model's reach. See [Custom Environments](custom-environments.md#registering-custom-tools) for the method-level contract.
 
-For async I/O use `AsyncNativeToolUseEnvironment` (`reset_async` / `step_async`, tool calls within a turn executed concurrently); `NativeMCPClientEnvironment` extends it, see [MCP](mcp.md).
+Every tool batch runs inside the episode's binding (`_episode_binding`, sync and async), so a handler reads the executing episode through `NativeToolUseEnvironment.active_trajectory()` — `None` outside a binding, as for a handler called directly. For async I/O use `AsyncNativeToolUseEnvironment` (`reset_async` / `step_async`, tool calls within a turn executed concurrently — `gather`'s tasks copy the context, so the binding reaches every handler); `NativeMCPClientEnvironment` extends it, see [MCP](mcp.md).
 
 The Ray rollout path drives sync and async environments alike. `RolloutManager` dispatches episodes to its `EnvironmentActor` pool, and each actor picks `step` / `step_async` from an `isinstance(env, AsyncBaseEnvironment)` check on its own instance, offloading a sync env to a thread so blocking tool work cannot stall the actor's loop.

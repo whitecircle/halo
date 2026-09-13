@@ -122,5 +122,65 @@ def test_an_unstamped_run_falls_back_to_the_rebuilt_environment():
     assert spec.with_meta({}, stop_on_first_failure=True, max_grading_seconds=None).default_timeout == 4.0
 
 
+# --- Per-submission language and the stamped submission budget ---
+
+
+def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
+    """A recorded ``submit_solution`` call the tool refused (no code, a missing or foreign language,
+    unparseable arguments) never ran and spent no budget, so it takes no slot in the re-graded prefix;
+    the admitted ones carry the language each call named."""
+
+    def call(arguments):
+        return {"function": {"name": "submit_solution", "arguments": arguments}}
+
+    episode = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    call(json.dumps({"code": "x", "language": "cpp"})),
+                    call(json.dumps({"code": "y"})),
+                    call(json.dumps({"code": "z", "language": "java"})),
+                    call(json.dumps({"language": "python"})),
+                    call("not json"),
+                    call(json.dumps({"code": "w", "language": "python"})),
+                    {"function": {"name": "run_code", "arguments": json.dumps({"code": "q", "language": "cpp"})}},
+                ],
+            }
+        ]
+    }
+    choosing = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
+    assert regrade_trajectories.submitted_solutions(episode, choosing.registry.get("submit_solution")) == [
+        ("x", "cpp"),
+        ("w", "python"),
+    ]
+    fixed = CodeContestsEnvironment(language="python", sandbox_backend="local")
+    # A fixed-language run has no language argument: the schema filter drops it and every coded call binds.
+    assert regrade_trajectories.submitted_solutions(episode, fixed.registry.get("submit_solution")) == [
+        ("x", None),
+        ("y", None),
+        ("z", None),
+        ("w", None),
+    ]
+
+
+def test_display_language_joins_a_model_chosen_set():
+    assert regrade_trajectories.display_language("python") == "python"
+    assert regrade_trajectories.display_language(["python", "cpp"]) == "python,cpp"
+
+
+def test_episode_submission_budget_reads_the_stamped_tool_budget():
+    env = CodeContestsEnvironment(language="python", sandbox_backend="local", max_submissions=2)
+    stamped = {"info": {"episode_tool_budgets": {"submit_solution": 3, "python_repl": 6}}}
+    assert regrade_trajectories.episode_submission_budget(stamped, env) == 3
+    assert regrade_trajectories.episode_submission_budget({"info": {}}, env) == 2
+
+
+def test_a_language_list_in_the_meta_rebuilds_the_choosing_environment():
+    env = regrade_trajectories.resolve_environment("code_contests", {"language": ["python", "cpp"]})
+    assert env.chooses_language and env.languages == ("python", "cpp")
+    assert env.grading_spec.language == "python", "the contract's language is the set's first"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

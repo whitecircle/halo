@@ -11,9 +11,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from src.environments.base import BaseEnvironment, Message, Trajectory, require_magnitudes
+from src.environments.base import (
+    EPISODE_TOOL_BUDGETS_KEY,
+    TOOL_CALL_COUNTS_KEY,
+    BaseEnvironment,
+    Message,
+    Trajectory,
+    require_magnitudes,
+)
+from src.environments.envs.protocols.native import validate_tool_budgets
 from src.environments.rewards import compute_answer_reward
-from src.environments.tools.definitions import MissingToolArguments, NativeToolRegistry
+from src.environments.tools.definitions import NativeToolRegistry, ToolArgumentError, ToolBudgetExhausted
 from src.environments.tools.factories import (
     create_native_math_tools,
     create_native_python_tools,
@@ -75,16 +83,15 @@ def parse_react_output(text: str) -> ReActStep:
 
 
 def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
-    """Parse an action: ``tool_name(arg=...)``, JSON ``{"name":..., "arguments":...}``,
-    ``tool_name: arg=...``, or a bare name."""
+    """Parse an action: ``tool_name(arg=...)``, JSON ``{"name":..., "arguments":...}``, ``tool_name: arg=...``, or bare name."""
     action_text = action_text.strip()
 
     if action_text.startswith("{"):
         try:
             data = json.loads(action_text)
-            # Model-authored JSON: a non-dict ``function`` or ``arguments`` degrades to an
-            # unknown-tool / empty-args call the protocol penalizes, rather than raising
-            # AttributeError/TypeError out of the parser and failing the episode.
+            # Model-authored JSON: a non-dict ``function`` or non-dict ``arguments`` must degrade to an
+            # unknown-tool / empty-args call the protocol penalizes, not an AttributeError/TypeError
+            # that escapes the parser and errors the whole episode.
             function = data.get("function")
             function = function if isinstance(function, dict) else {}
             name = data.get("name") or function.get("name")
@@ -125,7 +132,7 @@ def _parse_function_args(args_str: str) -> dict[str, Any]:
     pattern = r'(\w+)\s*=\s*(?:"([^"]*?)"|\'([^\']*?)\'|(\{[^}]*\})|(\[[^\]]*\])|([^,\s]+))'
     for match in re.finditer(pattern, args_str):
         key = match.group(1)
-        # First matched alternative by ``is not None``: truthiness would turn ``expression=""`` into None.
+        # First MATCHED alternative by ``is not None``: truthiness would turn ``expression=""`` into None.
         value = next((g for g in match.groups()[1:] if g is not None), None)
 
         if value and (value.startswith("{") or value.startswith("[")):
@@ -145,11 +152,12 @@ class ReActEnvironment(BaseEnvironment):
 
     ``require_thought`` penalizes acting without a Thought. The action is read out of the assistant
     text, so no tool schema is advertised to the server and no server-side tool-call parser is
-    involved; the tools are named in the system prompt.
+    involved — the tools are named in the system prompt.
     """
 
-    # Asks only for the next Action or Final Answer, not for shorter reasoning: this text is trained
-    # on wherever a recovery succeeds, so any instruction here generalizes beyond the cutoff case.
+    # Asks for the protocol's own next move (an Action or a Final Answer) and never for shorter
+    # reasoning: the text is trained on wherever a recovery succeeds, so an instruction here becomes a
+    # global lesson learned far outside the situation it was written for.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you produced an Action or a Final Answer, so nothing "
         "was recorded. Give your next Action now, or your Final Answer if you already have the "
@@ -186,13 +194,15 @@ Always think before acting, and provide a Final Answer when you're done."""
         no_thought_penalty: float = 0.05,
         require_thought: bool = True,
         answer_validator: Callable[[Any, Any], bool] | None = None,
+        tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
         """Reward = per-step thought/tool deltas + terminal answer reward.
 
-        Penalty knobs must be magnitudes (>= 0); the sign is applied at the use site so a positive
-        config value cannot turn a penalty into a bonus. ``answer_validator`` overrides the default
-        check.
+        Penalty knobs must be magnitudes (>= 0); minus is applied at the use site so a positive config
+        value cannot farm the penalty as a bonus. ``answer_validator`` overrides the default check.
+        ``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``); a call past its cap is
+        refused as a tool error and never runs.
         """
         super().__init__(**kwargs)
 
@@ -204,6 +214,7 @@ Always think before acting, and provide a Final Answer when you're done."""
         )
 
         self.registry = tool_registry
+        self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
         self.success_reward = success_reward
         self.failure_reward = failure_reward
         self.tool_success_reward = tool_success_reward
@@ -245,13 +256,15 @@ Always think before acting, and provide a Final Answer when you're done."""
                 "total_tool_calls": 0,
                 "successful_tool_calls": 0,
                 "total_thoughts": 0,
+                TOOL_CALL_COUNTS_KEY: {},
+                EPISODE_TOOL_BUDGETS_KEY: dict(self.tool_budgets),
             },
         )
 
     def _step_single(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
-        """Process model output in ReAct format (Thought, then either Action or Final Answer)."""
+        """Process model output in ReAct format (Thought: <reasoning>; Action: <tool_call> OR Final Answer: <answer>)."""
         reward = 0.0
         info = {}
 
@@ -292,22 +305,29 @@ Always think before acting, and provide a Final Answer when you're done."""
                 info["tool_error"] = f"Unknown tool: {step.action}"
             else:
                 try:
-                    args = step.action_args or {}
+                    # Bind before spending the episode's budget: a call the handler cannot run is
+                    # refused without being counted, as under the native protocol.
+                    args = tool.bind(step.action_args or {})
+                    cap = self._tool_budget_exhausted(trajectory, step.action)
+                    if cap is not None:
+                        raise ToolBudgetExhausted(tool.budget_exhausted_message(cap))
+                    self._count_tool_call(trajectory, step.action)
                     result = tool.execute(**args)
                     observation = result
                     reward += self.tool_success_reward
                     trajectory.info["successful_tool_calls"] += 1
                     info["tool_success"] = True
-                except MissingToolArguments as e:  # the model's mistake, observed without a traceback
-                    logger.warning(
-                        "Tool %r called without required argument(s): %s", step.action, ", ".join(e.missing)
-                    )
-                    observation = f"Error: {str(e)}"
+                except (ToolBudgetExhausted, ToolArgumentError) as e:
+                    # A refusal is expected control flow: charged like any tool error, logged without
+                    # the traceback that a tool which actually broke gets below.
+                    logger.debug("Tool %r refused the call: %s", step.action, e)
+                    observation = f"Error: {e}"
                     reward -= self.tool_error_penalty
                     info["tool_error"] = str(e)
                 except Exception as e:
-                    # The observation carries the message, but a broken tool is diagnosed from the
-                    # logs, not the trajectory, which only records failure_reward.
+                    # Without this line the episode just scores failure_reward with nothing anywhere
+                    # saying why: the observation carries the message, but the trajectory is not where
+                    # a broken tool gets debugged.
                     logger.warning("Tool %r raised during execution", step.action, exc_info=True)
                     observation = f"Error: {str(e)}"
                     reward -= self.tool_error_penalty
@@ -363,8 +383,7 @@ Always think before acting, and provide a Final Answer when you're done."""
                 else:
                     return base_reward + self.failure_reward
             except Exception:
-                # Without the warning, an always-raising validator re-grades every episode with the
-                # default check unnoticed.
+                # Unwarned, an always-raising validator silently re-grades every episode by default.
                 logger.warning("answer_validator raised; falling back to the default check", exc_info=True)
 
         answer_reward = compute_answer_reward(

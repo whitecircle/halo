@@ -12,6 +12,10 @@ python/remote/grading basics):
 - Missing-compiler handling (a backend error) via a sandbox pointed at a bogus toolchain.
 - Sessions: state persists across runs (write a file, read it next run; cross-language sharing),
   two sessions are isolated, and concurrent sessions on one shared instance don't cross-contaminate.
+- Session build reuse: a compiled source is built once across runs with different stdin (the grader's
+  one-session-per-submission pattern), rebuilt when the source, an auxiliary header, a session-written
+  file or an interpreted run changes the working dir, and a rejected compile is cached as
+  ``compile_failed`` instead of recompiling per test.
 - RemoteSession: client-side file accumulation resent on every request (no network — fake session).
 - BubblewrapSandbox: construction guard when bwrap is absent, and — when bwrap IS present —
   network is unshared and the host filesystem is hidden while the working dir stays writable.
@@ -98,6 +102,7 @@ def test_cpp_compiles_and_runs_with_stdin():
     assert res.ok, f"expected clean exit, got {res}"
     assert res.stdout.strip() == "42"
     assert res.returncode == 0
+    assert not res.compile_failed
 
 
 def test_cpp_alias_runs():
@@ -122,10 +127,22 @@ def test_cpp_compile_error_is_program_fault_not_backend_error():
         return _skip("g++ not installed")
     res = LocalSubprocessSandbox().run("int main(){ this is not valid c++ }", language="cpp")
     assert not res.ok
+    assert res.compile_failed, "a rejected compile must be flagged so the grader can name the verdict"
     assert res.error is None, "compile error must NOT set the backend-error flag"
     assert res.returncode not in (0, None), "compile failure should carry the compiler's exit code"
     assert "error" in res.stderr.lower(), "compiler diagnostics should be surfaced on stderr"
     assert not res.timed_out
+
+
+def test_python_runs_never_set_compile_failed():
+    """``compile_failed`` is a compile-step verdict; an interpreted run has no compile step, so neither
+    a clean nor a crashing Python program may carry it (a grader would misname the crash)."""
+    sb = LocalSubprocessSandbox()
+    clean = sb.run("print(1)")
+    assert clean.ok and not clean.compile_failed
+    crashed = sb.run("raise ValueError('boom')")
+    assert not crashed.ok and crashed.returncode not in (0, None)
+    assert not crashed.compile_failed
 
 
 def test_cpp_runtime_timeout():
@@ -176,6 +193,7 @@ def test_missing_compiler_is_backend_error():
         res = sb.run("int main(){}", language="cpp")
         assert res.error is not None
         assert "compiler not found" in res.error.lower()
+        assert not res.compile_failed, "a missing compiler is a backend failure, not the source's fault"
     finally:
         _base.LANGUAGES["cpp"] = original
 
@@ -298,6 +316,116 @@ def test_concurrent_sessions_keep_separate_state():
     finally:
         for session in sessions.values():
             session.close()
+
+
+# Session build reuse (one compile per distinct source across a session's runs)
+
+
+class _CountingSandbox(LocalSubprocessSandbox):
+    """Counts compiler launches so a test fails the moment the session stops reusing its build."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.compiles = 0
+
+    def _compile(self, workdir, spec, *, allow_network):
+        self.compiles += 1
+        return super()._compile(workdir, spec, allow_network=allow_network)
+
+
+_CPP_HEADER_VAL = '#include <iostream>\n#include "h.h"\nint main(){ std::cout << val(); }'
+
+
+def _header(value: int) -> str:
+    return f"inline int val(){{return {value};}}"
+
+
+def test_session_compiles_same_source_once_across_runs():
+    """The grader's pattern: one session per submission, one run per hidden test. The source must be
+    built once and rerun from the binary, not recompiled per test."""
+    if not _HAS_GPP:
+        return _skip("g++ not installed")
+    sb = _CountingSandbox()
+    with sb.open_session() as session:
+        for n in range(1, 6):
+            res = session.run(_CPP_DOUBLE, stdin=str(n), language="cpp")
+            assert res.ok and res.stdout.strip() == str(2 * n), f"run {n}: {res}"
+            assert not res.compile_failed
+    assert sb.compiles == 1, f"expected one compile across 5 runs, got {sb.compiles}"
+
+
+def test_session_rebuilds_when_source_changes():
+    """A different source must not run the previous build's binary (the output check would read the
+    stale program's answer); the same source again rebuilds too, since a session holds one build."""
+    if not _HAS_GPP:
+        return _skip("g++ not installed")
+    triple = "#include <iostream>\nint main() { long n; std::cin >> n; std::cout << n * 3; return 0; }"
+    sb = _CountingSandbox()
+    with sb.open_session() as session:
+        assert session.run(_CPP_DOUBLE, stdin="5", language="cpp").stdout.strip() == "10"
+        assert session.run(triple, stdin="5", language="cpp").stdout.strip() == "15"
+        assert session.run(_CPP_DOUBLE, stdin="5", language="cpp").stdout.strip() == "10"
+    assert sb.compiles == 3
+
+
+def test_session_rebuilds_when_auxiliary_header_changes():
+    """``files`` are part of the build's identity: a changed header with byte-identical source rebuilds."""
+    if not _HAS_GPP:
+        return _skip("g++ not installed")
+    sb = _CountingSandbox()
+    with sb.open_session() as session:
+        first = session.run(_CPP_HEADER_VAL, language="cpp", files={"h.h": _header(7)})
+        assert first.ok and first.stdout.strip() == "7"
+        again = session.run(_CPP_HEADER_VAL, language="cpp", files={"h.h": _header(7)})
+        assert again.ok and again.stdout.strip() == "7"
+        changed = session.run(_CPP_HEADER_VAL, language="cpp", files={"h.h": _header(8)})
+        assert changed.ok and changed.stdout.strip() == "8", f"stale binary served: {changed}"
+    assert sb.compiles == 2
+
+
+def test_session_write_file_and_interpreted_run_drop_the_build():
+    """A header rewritten outside the compiled run's own ``files`` — via ``write_file`` or by an
+    interpreted run — must invalidate the build, or the same source keeps answering from a stale binary."""
+    if not _HAS_GPP:
+        return _skip("g++ not installed")
+    sb = _CountingSandbox()
+    with sb.open_session() as session:
+        session.write_file("h.h", _header(1))
+        assert session.run(_CPP_HEADER_VAL, language="cpp").stdout.strip() == "1"
+        session.write_file("h.h", _header(2))
+        assert session.run(_CPP_HEADER_VAL, language="cpp").stdout.strip() == "2", "write_file kept a stale build"
+        rewrite = session.run(f"open('h.h', 'w').write({_header(3)!r})", language="python")
+        assert rewrite.ok
+        assert session.run(_CPP_HEADER_VAL, language="cpp").stdout.strip() == "3", "python run kept a stale build"
+    assert sb.compiles == 3
+
+
+def test_session_caches_a_rejected_compile():
+    """A source the compiler rejects is compiled once; every later run of it returns the cached
+    ``compile_failed`` verdict with the diagnostics, never a backend error."""
+    if not _HAS_GPP:
+        return _skip("g++ not installed")
+    sb = _CountingSandbox()
+    with sb.open_session() as session:
+        results = [session.run("int main(){ this is not valid c++ }", stdin=str(n), language="cpp") for n in range(3)]
+    assert sb.compiles == 1, f"a rejected source must not be recompiled per test, got {sb.compiles}"
+    for res in results:
+        assert res.compile_failed
+        assert not res.ok
+        assert res.error is None
+        assert res.returncode not in (0, None)
+        assert "error" in res.stderr.lower(), "diagnostics must survive the cache"
+
+
+def test_one_shot_run_builds_every_time():
+    """``SandboxExecutor.run`` is a throwaway session: back-to-back one-shot runs of one source each
+    compile (nothing persists across them)."""
+    if not _HAS_GPP:
+        return _skip("g++ not installed")
+    sb = _CountingSandbox()
+    assert sb.run(_CPP_DOUBLE, stdin="1", language="cpp").stdout.strip() == "2"
+    assert sb.run(_CPP_DOUBLE, stdin="2", language="cpp").stdout.strip() == "4"
+    assert sb.compiles == 2
 
 
 # RemoteSession (client-side file accumulation, no network)
@@ -439,6 +567,33 @@ def test_bubblewrap_parallel_safe():
     for t in threads:
         t.join()
     assert results == {i: str(i * i) for i in range(8)}, "concurrent jailed runs cross-contaminated"
+
+
+def test_session_reset_to_staged_drops_run_output_and_keeps_the_build():
+    """``reset_to_staged`` removes what a run produced (files, directories) and leaves the staged source
+    and the built binary, so the next run of the same program starts clean without recompiling."""
+    if not _HAS_GPP:
+        return _skip("g++ not installed")
+
+    class _Counting(LocalSubprocessSandbox):
+        compiles = 0
+
+        def _compile(self, *args, **kwargs):
+            type(self).compiles += 1
+            return super()._compile(*args, **kwargs)
+
+    src = (
+        '#include <cstdio>\n#include <sys/stat.h>\nint main(){ FILE* f = fopen("marker", "r"); '
+        'puts(f ? "seen" : "fresh"); if (f) fclose(f); fopen("marker", "w"); mkdir("out", 0700); return 0; }'
+    )
+    with _Counting().open_session() as session:
+        assert session.run(src, language="cpp").stdout.strip() == "fresh"
+        assert "marker" in session.list_files() and os.path.isdir(os.path.join(session.workdir, "out"))
+        session.reset_to_staged()
+        assert "marker" not in session.list_files() and not os.path.exists(os.path.join(session.workdir, "out"))
+        assert session.read_file("main.cpp") == src
+        assert session.run(src, language="cpp").stdout.strip() == "fresh"
+    assert _Counting.compiles == 1, "the reset keeps the build slot: no recompile for the same source"
 
 
 if __name__ == "__main__":

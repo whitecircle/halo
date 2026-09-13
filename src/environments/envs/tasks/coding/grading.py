@@ -1,7 +1,7 @@
 """Grading for competitive-programming solutions: code + tests -> pass count.
 
-Shared by CodeContestsEnvironment and the offline eval runner, so online and offline scoring match.
-Verdict primitives share the ``(test_input, expected, actual) -> bool`` signature.
+Shared by CodeContestsEnvironment and the offline eval runner (identical online/offline scoring). Verdict
+primitives share the ``(test_input, expected, actual) -> bool`` signature.
 
 ``CheckerVerdict`` contract (``open-r1/codeforces`` ``generated_checker``):
 ``python checker.py input.txt correct_output.txt solution_output.txt`` printing ``1``/``0`` to stdout.
@@ -9,11 +9,18 @@ Verdict primitives share the ``(test_input, expected, actual) -> bool`` signatur
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from typing import Any, NamedTuple
 
-from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxResult, resolve_language
+from src.environments.sandbox.base import (
+    SANDBOX_DEFAULT_TIMEOUT,
+    SandboxExecutor,
+    SandboxResult,
+    SandboxSession,
+    resolve_language,
+)
 from src.environments.sandbox.resolve import resolve_sandbox
 
 logger = logging.getLogger(__name__)
@@ -22,14 +29,13 @@ VerdictFn = Callable[[str, str, str], bool]
 
 _FLOAT_TOL = 1e-6
 
-# Bytes of stdout compared per test; sized generously, since truncating below the real output would
-# fail a correct solution.
+# Bytes of stdout compared per test; generous, since truncating below real output fails a correct solution.
 DEFAULT_MAX_OUTPUT_SIZE = 1_000_000
 
 _STDERR_EXCERPT_CHARS = 200
 _OUTPUT_EXCERPT_CHARS = 100
-# Verdict detail lists failures only and is capped: per-test PASS lines add nothing to the summary's
-# pass count, and an uncapped failure list would run to hundreds of entries.
+# Verdict detail is failures-only, capped: per-test PASS lines carry no information the summary's
+# pass count doesn't, and an uncapped failure list turns a broken solution into a page of noise.
 _MAX_FAILURE_DETAILS = 5
 # What a non-passing test's detail line shows the policy. ``full`` adds the expected and produced
 # output to a wrong answer; ``outcome`` states the verdict alone, the Codeforces contract.
@@ -55,9 +61,8 @@ def _tokenize(text: str) -> list[str]:
 def _tokens_equal(expected: str, actual: str) -> bool:
     """Compare one output token, tolerant of float rounding.
 
-    Exact match first; only when the *expected* token looks like a float (``.``/``e``/``E``) do both
-    parse as floats within :data:`_FLOAT_TOL`, so integer problems stay byte-exact
-    (``5`` != ``5.0000001``).
+    Exact match first; only when the *expected* token looks like a float (``.``/``e``/``E``) do both parse
+    as floats within :data:`_FLOAT_TOL` — so integer problems stay byte-exact (``5`` != ``5.0000001``).
     """
     if expected == actual:
         return True
@@ -79,11 +84,9 @@ def compare_tokens(expected: str, actual: str) -> bool:
 
 
 def exact_output_match(expected: str, actual: str) -> bool:
-    """Compare program output exactly after stripping leading/trailing whitespace from both sides.
-
-    Legacy CodeContests behavior. Distinct from :func:`src.environments.rewards.exact_match`, which
-    normalizes a free-text answer.
-    """
+    """Exact comparison of a program's OUTPUT after stripping leading/trailing whitespace from both
+    sides (legacy CodeContests). Distinct from :func:`src.environments.rewards.exact_match`, which
+    normalizes a free-text answer."""
     return expected.strip() == actual.strip()
 
 
@@ -96,14 +99,15 @@ def as_verdict(comparator: Callable[[str, str], bool]) -> VerdictFn:
     return _verdict
 
 
-def _run_in_sandbox(sandbox: SandboxExecutor, code: str, **kwargs) -> SandboxResult:
-    """Execute ``code`` through ``sandbox``, reporting an executor fault as ``SandboxResult(error=...)``.
+def _run_in_sandbox(sandbox: SandboxExecutor | SandboxSession, code: str, **kwargs) -> SandboxResult:
+    """Execute ``code`` through ``sandbox`` (an executor or an open session), reporting an executor
+    fault as ``SandboxResult(error=...)``.
 
-    Grading requires that a run lost to the backend arrive as an ``error`` result rather than an
-    exception. The remote backend already does this; a local one raises instead (no interpreter,
-    missing ``bwrap``, fork exhaustion, ENOSPC writing the working dir). An escaping exception would
-    leave ``submit_solution`` as an ordinary tool error, scoring ``failure_reward`` without triggering
-    the infra-outage guard, so a host fault would enter the GRPO baseline as a wrong program.
+    The one contract grading depends on: a run lost to the backend is an ``error`` result, never an
+    exception. The remote backend already obeys it; a local one raises instead (no interpreter, missing
+    ``bwrap``, fork exhaustion, ENOSPC writing the working dir). An escaping exception leaves
+    ``submit_solution`` as an ordinary tool error, so the episode scores ``failure_reward`` with the
+    infra-outage guard never firing — a host fault averaged into the GRPO baseline as a wrong program.
     """
     try:
         return sandbox.run(code, **kwargs)
@@ -112,22 +116,63 @@ def _run_in_sandbox(sandbox: SandboxExecutor, code: str, **kwargs) -> SandboxRes
         return SandboxResult(error=f"sandbox backend failure: {type(exc).__name__}: {exc}")
 
 
+@contextmanager
+def _grading_runner(
+    sandbox: SandboxExecutor, code: str, *, language: str, timeout: float
+) -> Iterator[Callable[[str], SandboxResult]]:
+    """A ``run(stdin)`` for one grade: one session for the whole grade, so a compiled submission is
+    built once and its binary reused across the tests, reset to its staged state after every run so no
+    test sees files an earlier one produced. An executor without sessions (``NotImplementedError``)
+    grades test-by-test through one-shot runs; a session that fails to open is an infra fault worth a
+    log line, and the grade falls back the same way, each run then reporting its own fault as an
+    error result."""
+
+    def one_shot(stdin: str) -> SandboxResult:
+        return _run_in_sandbox(sandbox, code, stdin=stdin, timeout=timeout, language=language)
+
+    try:
+        session = sandbox.open_session()
+    except NotImplementedError:
+        yield one_shot
+        return
+    except Exception:
+        logger.warning("Sandbox session failed to open for grading; running each test one-shot", exc_info=True)
+        yield one_shot
+        return
+
+    def in_session(stdin: str) -> SandboxResult:
+        result = _run_in_sandbox(session, code, stdin=stdin, timeout=timeout, language=language)
+        try:
+            session.reset_to_staged()
+        except Exception as exc:  # the next test would inherit this one's files: no credit for either
+            logger.warning(
+                "Sandbox session reset failed during grading; scoring the test as an infra error", exc_info=True
+            )
+            return SandboxResult(error=f"sandbox reset failure: {type(exc).__name__}: {exc}")
+        return result
+
+    try:
+        yield in_session
+    finally:
+        session.close()
+
+
 class CheckerInfraError(RuntimeError):
     """The checker run was lost to a grading-backend failure (transport error, backend down).
 
     Raised by :class:`CheckerVerdict` and consumed by :func:`run_solution_against_tests` into
-    ``infra_errors``. Returning ``False`` instead would score the outage as a wrong answer and hide it
-    from the ``_grading_infra_outage`` guard.
+    ``infra_errors`` — a plain ``False`` would score the outage as a wrong answer, feeding the whole
+    GRPO group ``failure_reward`` as fake signal and hiding it from the ``_grading_infra_outage`` guard.
     """
 
 
 class CheckerVerdict:
-    """Special-judge grader: runs a problem's ``generated_checker`` (always Python) in a sandbox per test.
+    """Special-judge grader: runs a problem's ``generated_checker`` (always Python) through a sandbox per test.
 
     Verdict is ``True`` iff the checker exits cleanly and prints ``1``; a checker crash, timeout, or
-    ``0`` all reject. A sandbox *backend* failure raises :class:`CheckerInfraError` instead, marking
-    the test as lost rather than judged. The timeout bounds trusted problem-setter code and is not the
-    solution's per-test limit.
+    ``0`` all reject. A sandbox *backend* failure raises :class:`CheckerInfraError` instead — the test
+    was lost to infra, not judged. The timeout is an infra bound on trusted problem-setter code, not
+    the solution's per-test limit.
     """
 
     def __init__(
@@ -162,13 +207,13 @@ class CheckerVerdict:
 class GradeResult(NamedTuple):
     """Outcome of grading one solution against a test list.
 
-    ``ran_ok`` = tests whose code ran to completion and produced output; it feeds the "runnable"
-    reward term, so a no-output stub does not score alongside a real attempt. ``infra_errors`` = tests
-    lost to a grading-backend failure; ``infra_errors == total`` means the grade carries no signal.
-    ``graded`` = tests actually judged (below ``total`` once a budget stop or ``stop_on_first_failure``
+    ``ran_ok`` = tests whose code ran to completion AND produced output (powers the "runnable" reward
+    rung, so a no-output stub doesn't tie an honest attempt). ``infra_errors`` = tests lost to a
+    grading-backend failure; ``infra_errors == total`` means the grade carries no signal.
+    ``graded`` = tests actually judged (``< total`` once a budget stop or ``stop_on_first_failure``
     cuts the run short, while ``total`` stays the scoring denominator), and ``budget_hit`` says which
-    of the two it was, since partial grading is otherwise indistinguishable from a wrong solution.
-    ``graded`` has no default, since no value is right for every grade (0 would claim a fully judged
+    of the two it was — partial grading is otherwise indistinguishable from a wrong solution.
+    ``graded`` carries no default: every value is wrong for some grade (0 would claim a fully judged
     run graded nothing), so each construction states what it judged.
     """
 
@@ -203,8 +248,8 @@ def run_solution_against_tests(
     ``max_grading_seconds`` bounds one grade's total wall clock, since tests run sequentially and a
     several-hundred-test problem would otherwise stall the whole rollout round. It is checked between
     tests (hard bound: the budget plus one per-test timeout) and at least one test always runs. A
-    budget stop keeps the full pool as the denominator, so a solution too slow to reach its remaining
-    tests cannot outscore one that ran them all; size the budget to the pool.
+    budget stop keeps the FULL pool as the denominator, so a solution too slow to reach its remaining
+    tests cannot outscore one that ran them all — size the budget to the pool.
     """
     if verdict_detail not in VERDICT_DETAILS:
         raise ValueError(f"verdict_detail must be one of {VERDICT_DETAILS}, got {verdict_detail!r}")
@@ -217,7 +262,7 @@ def run_solution_against_tests(
         verdict_fn = as_verdict(exact_output_match)
 
     passed = 0
-    ran_ok = 0  # clean exit and produced output (PASS or FAIL), not crash/TLE/overflow/backend error
+    ran_ok = 0  # clean exit + produced output (PASS or FAIL), NOT crash/TLE/overflow/backend error
     infra_errors = 0  # tests lost to a backend/transport failure, not the program's fault
     total = len(test_cases)
     details = []
@@ -237,60 +282,71 @@ def run_solution_against_tests(
         else:
             suppressed += 1
 
-    for i, tc in enumerate(test_cases, 1):
-        if deadline is not None and graded and time.monotonic() >= deadline:
-            budget_hit = True
-            break
-        test_input = tc.get("input", "")
-        expected_output = tc.get("output", "")
+    with _grading_runner(sandbox, code, language=language, timeout=timeout_per_test) as run_test:
+        for i, tc in enumerate(test_cases, 1):
+            if deadline is not None and graded and time.monotonic() >= deadline:
+                budget_hit = True
+                break
+            test_input = tc.get("input", "")
+            expected_output = tc.get("output", "")
 
-        result = _run_in_sandbox(sandbox, code, stdin=test_input, timeout=timeout_per_test, language=language)
+            result = run_test(test_input)
 
-        test_passed = False
-        if result.timed_out:
-            add_detail(f"Test {i}: TIME LIMIT EXCEEDED ({timeout_per_test:g}s)")
-        elif result.error:
-            # Backend/transport failure (not the program's stderr); bucketed as ERROR even with partial stdout.
-            infra_errors += 1
-            add_detail(f"Test {i}: ERROR -- {result.error}")
-        elif result.returncode not in (0, None):
-            # A non-zero exit is a runtime error on every judge, even when stdout matches.
-            line = f"Test {i}: RUNTIME ERROR (exit {result.returncode})"
-            if result.stderr:
-                line += f"\n  Stderr: {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
-            add_detail(line)
-        elif len(result.stdout) > max_output_size:
-            # Over-cap output gets its own verdict: truncating before comparison would fail a correct long answer.
-            add_detail(f"Test {i}: OUTPUT LIMIT EXCEEDED ({len(result.stdout)} > {max_output_size} bytes)")
-        else:
-            actual_output = result.stdout
-            try:
-                test_passed = verdict_fn(test_input, expected_output, actual_output)
-            except CheckerInfraError as e:
-                # Verdict lost to infra: no ran_ok/pass credit, keeping an all-infra outage visible.
+            if result.compile_failed:
+                # The source never built, so every test fails the same way: judged once, the whole
+                # pool counted, with the compiler's diagnostics as the verdict.
+                line = "COMPILATION ERROR (every test fails)"
+                if result.stderr:
+                    line += f"\n  {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
+                add_detail(line)
+                graded = total
+                break
+
+            test_passed = False
+            if result.timed_out:
+                add_detail(f"Test {i}: TIME LIMIT EXCEEDED ({timeout_per_test:g}s)")
+            elif result.error:
+                # Backend/transport failure (not the program's stderr); bucket as ERROR even with partial stdout.
                 infra_errors += 1
-                add_detail(f"Test {i}: ERROR -- {e}")
+                add_detail(f"Test {i}: ERROR -- {result.error}")
+            elif result.returncode not in (0, None):
+                # Non-zero exit is a Runtime Error on every judge, never a pass even if stdout matches.
+                line = f"Test {i}: RUNTIME ERROR (exit {result.returncode})"
+                if result.stderr:
+                    line += f"\n  Stderr: {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
+                add_detail(line)
+            elif len(result.stdout) > max_output_size:
+                # Over-cap output is its own verdict: truncate-and-compare would grade a correct-but-long answer wrong.
+                add_detail(f"Test {i}: OUTPUT LIMIT EXCEEDED ({len(result.stdout)} > {max_output_size} bytes)")
             else:
-                if test_passed or actual_output.strip() or not expected_output.strip():
-                    # Requiring output stops a no-output stub from scoring on this term.
-                    ran_ok += 1
-                if test_passed:
-                    passed += 1
+                actual_output = result.stdout
+                try:
+                    test_passed = verdict_fn(test_input, expected_output, actual_output)
+                except CheckerInfraError as e:
+                    # Verdict lost to infra: no ran_ok/pass credit, keeping an all-infra outage visible.
+                    infra_errors += 1
+                    add_detail(f"Test {i}: ERROR -- {e}")
                 else:
-                    line = f"Test {i}: FAIL"
-                    if verdict_detail == VERDICT_DETAIL_FULL:
-                        line += (
-                            f"\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
-                            f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
-                        )
-                    if result.stderr:
-                        line += f"\n  Stderr: {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
-                    add_detail(line)
+                    if test_passed or actual_output.strip() or not expected_output.strip():
+                        # Requiring output stops a no-output stub tying an honest attempt on this rung.
+                        ran_ok += 1
+                    if test_passed:
+                        passed += 1
+                    else:
+                        line = f"Test {i}: FAIL"
+                        if verdict_detail == VERDICT_DETAIL_FULL:
+                            line += (
+                                f"\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
+                                f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
+                            )
+                        if result.stderr:
+                            line += f"\n  Stderr: {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
+                        add_detail(line)
 
-        graded = i
-        if stop_on_first_failure and not test_passed:
-            details.append(f"Stopped after first failing test ({total - i} not run).")
-            break
+            graded = i
+            if stop_on_first_failure and not test_passed:
+                details.append(f"Stopped after first failing test ({total - i} not run).")
+                break
 
     if suppressed:
         details.append(f"...and {suppressed} more non-passing tests (details omitted).")
@@ -304,11 +360,11 @@ def run_solution_against_tests(
 
 
 def select_verdict(checker: str | None, comparison: str, sandbox: SandboxExecutor) -> VerdictFn:
-    """Pick the per-test verdict: a special-judge ``checker`` if given, else ``comparison``
+    """Pick the per-test verdict: a special-judge ``checker`` if given (always wins), else ``comparison``
     (``"tokens"`` = whitespace-token equality, ``"exact"`` = trimmed byte equality).
 
-    The checker runs at the infra default timeout rather than the solution's clamped per-test limit,
-    so a tight C++-tuned limit applies to the solution and not to the judge grading it."""
+    The checker runs at the infra default timeout, never the solution's clamped per-test limit: a
+    tight C++-tuned limit must TLE the solution, not the trusted judge grading it."""
     if checker:
         return CheckerVerdict(checker, sandbox, timeout=SANDBOX_DEFAULT_TIMEOUT)
     if comparison == "tokens":
@@ -320,15 +376,15 @@ def select_verdict(checker: str | None, comparison: str, sandbox: SandboxExecuto
 
 @dataclass(frozen=True)
 class GradingSpec:
-    """The grading settings a run is scored under: everything constant across its problems.
+    """The grading contract a run is scored under: everything that is constant across its problems.
 
-    Built once by the environment and passed to every :func:`grade_solution` call, so the offline
-    re-grader reproduces a run's verdicts from the same object instead of re-threading each knob and
-    defaulting any it misses. The two per-problem facts (``checker``, ``time_limit``) come from the
-    problem payload and stay arguments.
+    Built once by the environment and handed to every :func:`grade_solution` call, so the offline
+    re-grader reproduces a run's verdicts by taking the same object rather than re-threading eight
+    knobs and silently defaulting one it forgot. The two per-problem facts (``checker``,
+    ``time_limit``) come from the problem payload and stay arguments.
 
-    :meth:`to_meta` / :meth:`with_meta` carry these settings across a trajectory dump, derived from
-    the field list so a field added here reaches the re-grade without a second edit.
+    :meth:`to_meta` / :meth:`with_meta` carry that same contract across a trajectory dump, derived
+    from the field list so a field added here reaches the re-grade without a second edit.
     """
 
     sandbox: SandboxExecutor
@@ -341,18 +397,18 @@ class GradingSpec:
     max_grading_seconds: float | None = None
     verdict_detail: str = VERDICT_DETAIL_FULL
 
-    # The live executor: rebuilt from the run's env kwargs offline, not carried through a JSON dump.
+    # The live executor: rebuilt from the run's env kwargs offline, never carried through a JSON dump.
     _META_EXCLUDED = frozenset({"sandbox"})
 
     def to_meta(self) -> dict[str, Any]:
-        """These settings as a JSON-able block for a trajectory meta line."""
+        """This contract as a JSON-able block for a trajectory meta line."""
         return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in self._META_EXCLUDED}
 
     def with_meta(self, meta: dict[str, Any], **overrides: Any) -> "GradingSpec":
-        """These settings with a dumped :meth:`to_meta` block applied over them, then ``overrides``.
+        """This contract with a dumped :meth:`to_meta` block applied over it, then ``overrides``.
 
-        A key naming no field raises rather than being ignored, so a trajectory written under a
-        retired spelling is rejected instead of re-graded under current defaults.
+        Keys no field declares raise rather than being ignored, so a trajectory written under a
+        retired spelling is refused instead of silently re-graded under today's defaults.
         """
         unknown = sorted(set(meta) - set(self.to_meta()))
         if unknown:
@@ -370,18 +426,21 @@ def grade_solution(
     *,
     checker: str | None = None,
     time_limit: float | None = None,
+    language: str | None = None,
 ) -> GradeResult:
-    """Grade ``code`` against ``tests`` -> :class:`GradeResult`; the grading entry point.
+    """Grade ``code`` against ``tests`` -> :class:`GradeResult`; the single grading entry point.
 
     Selects the verdict via :func:`select_verdict` and runs every test at the problem's ``time_limit``
     (clamped to ``spec.max_time_limit``), falling back to ``spec.default_timeout``.
     ``spec.max_grading_seconds`` bounds the total sequential grading cost per submission (see
-    :func:`run_solution_against_tests`).
+    :func:`run_solution_against_tests`). ``language`` is the submission's own language when the run
+    lets the model choose per submission; unset, the contract's ``spec.language`` applies.
     """
+    language = language or spec.language
     limit = time_limit or spec.default_timeout
-    language = resolve_language(spec.language)
-    if language is not None and not language.is_compiled:
-        # Floor an interpreted language's budget so a C++-tuned limit does not TLE a slower CPython solution.
+    resolved = resolve_language(language)
+    if resolved is not None and not resolved.is_compiled:
+        # Floor an interpreted language's budget so a C++-tuned limit doesn't TLE a slower CPython solution.
         limit = max(limit, spec.default_timeout)
     return run_solution_against_tests(
         code,
@@ -389,7 +448,7 @@ def grade_solution(
         timeout_per_test=min(limit, spec.max_time_limit),
         max_output_size=spec.max_output_size,
         sandbox=spec.sandbox,
-        language=spec.language,
+        language=language,
         verdict_fn=select_verdict(checker, spec.comparison, spec.sandbox),
         stop_on_first_failure=spec.stop_on_first_failure,
         max_grading_seconds=spec.max_grading_seconds,

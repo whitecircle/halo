@@ -62,6 +62,7 @@ Same flags minus `--accelerate`. Every tool answers `-- --help`, and
 | `reset-sinks` | disable the attention-sink mechanism in a GPT-OSS checkpoint |
 | `convert-glm5-bf16` | dequantize the fp8 GLM-5.3-Flash release to bf16 — required before training that family |
 | `prepare-dataset` | tokenize, pack, and shard a corpus offline |
+| `compact-code-tests` / `prepare-code-dataset` | build a code-contests pool: cap the test corpus, then compose prompts, pack tests and checker, and publish rating bands |
 | `dataset-deduplication` | deduplicate generated or collected data |
 | `openai-batched-generation` | batched generation against a vLLM / OpenAI endpoint |
 | `rm-scoring` / `rm-rejection-sampling` | score completions / best-of-N with a reward model |

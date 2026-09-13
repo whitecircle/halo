@@ -239,7 +239,9 @@ Keep TP disabled for LoRA.
 
 Start from one of the shipped configs under `examples/grpo/environmental/qwen3_5/vllm/`, or
 from `examples/grpo/environmental/environmental-grpo-template.yaml`. Replace the model
-path with the gathered SFT checkpoint.
+path with the gathered SFT checkpoint. The full-finetune ep1 code-contests recipe is a
+curriculum: run `-stage1-codeforces`, `-stage2-hard` and `-stage3-extra-hard` in order, each
+from the previous stage's checkpoint.
 
 Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
 serves and weight-syncs this family (`rollout_backend: sglang`; ep1 configs under

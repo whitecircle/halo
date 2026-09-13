@@ -58,6 +58,23 @@ logger = logging.getLogger(__name__)
 SOLUTION_HEADROOM_TOKENS = 4096
 
 
+def parse_language_flag(value: str) -> str | list[str]:
+    """``--language`` as the env's ``language``: one name, or the list a comma-separated value names."""
+    languages = [name.strip() for name in value.split(",") if name.strip()]
+    if not languages:
+        raise SystemExit(f"--language names no language: {value!r}")
+    return languages if len(languages) > 1 else languages[0]
+
+
+def refuse_env_kwargs_language(env_kwargs: dict) -> None:
+    """``--language`` names the trajectory path and the re-grader rebuilds the env from it; a language
+    passed through ``--env_kwargs`` would run one set and record another."""
+    if "language" in env_kwargs:
+        raise SystemExit(
+            "set the language with --language, not --env_kwargs: the trajectory metadata records the flag"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate a model on competitive programming (code_contests/codeforces).")
     p.add_argument("--env_type", default="codeforces", choices=["codeforces", "code_contests"], help="Coding env.")
@@ -71,7 +88,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num_examples", type=int, default=50, help="Cap on problems (0 = all).")
     p.add_argument("--num_samples", type=int, default=1, help="Samples per problem (success@k).")
-    p.add_argument("--language", default="python", help="Solution language to prompt for and grade (python/cpp/c).")
+    p.add_argument(
+        "--language",
+        default="python",
+        help="Solution language to prompt for and grade (python/cpp/c). A comma-separated list lets the "
+        "model choose per program and grades each in the language it named.",
+    )
     p.add_argument(
         "--max_turns",
         type=int,
@@ -143,11 +165,13 @@ def main() -> None:
     args = parse_args()
     adapter = CODE_DATASET_ADAPTERS[args.adapter]
     env_kwargs = json.loads(args.env_kwargs)
+    refuse_env_kwargs_language(env_kwargs)
+    language = parse_language_flag(args.language)
     env = resolve_environment(
         args.env_type,
         {
             "max_turns": args.max_turns,
-            "language": args.language,
+            "language": language,
             "reasoning_effort": args.reasoning_effort,
             **env_kwargs,
         },
@@ -195,7 +219,7 @@ def main() -> None:
         num_samples=args.num_samples,
         meta_extra={
             "adapter": args.adapter,
-            "language": args.language,
+            "language": language,
             "reasoning_effort": args.reasoning_effort,
             "env_kwargs": env_kwargs,
             # The run's full grading contract, so an offline re-grade reproduces the same verdicts

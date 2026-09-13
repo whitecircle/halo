@@ -6,7 +6,8 @@ Covers:
 - LocalSubprocessSandbox: stdout capture, stdin plumbing, real imports, non-zero exit,
   wall-clock timeout, address-space limit, unsupported-language rejection, aux-file traversal guard.
   Multi-language (C/C++) compile-and-run and persistent sessions are covered in test_sandbox_multilang.py.
-- RemoteSandbox: SandboxFusion response parsing, endpoint normalization, timeout/transport errors
+- RemoteSandbox: SandboxFusion response parsing (incl. a rejected compile as ``compile_failed`` and a
+  compile time limit as a backend error), endpoint normalization, timeout/transport errors
   (via an injected fake session — no network).
 - resolve_sandbox: env-var backend selection and the remote-url requirement.
 - format_sandbox_repl_output / run_code_via_sandbox: REPL-style rendering.
@@ -31,6 +32,16 @@ from src.environments.sandbox.repl import format_sandbox_repl_output, run_code_v
 from src.environments.sandbox.resolve import resolve_sandbox
 
 # LocalSubprocessSandbox
+
+
+def test_local_output_that_is_not_utf8_is_captured_not_raised():
+    """A program emitting bytes outside UTF-8 must come back as a result the grader can judge (a wrong
+    answer), not as an exception that scores the test as an infra error."""
+    sb = LocalSubprocessSandbox()
+    res = sb.run("import sys\nsys.stdout.buffer.write(b'\\x80\\xffok\\n'); sys.stderr.buffer.write(b'\\x80')")
+    assert res.returncode == 0 and res.error is None
+    assert "ok" in res.stdout and "\ufffd" in res.stdout
+    assert "\ufffd" in res.stderr
 
 
 def test_local_runs_and_captures_stdout():
@@ -289,6 +300,7 @@ def test_remote_parses_success():
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     res = sb.run("print(42)", stdin="ignored", timeout=7)
     assert res.ok
+    assert not res.compile_failed
     assert res.stdout.strip() == "42"
     # Request shape is SandboxFusion-compatible.
     assert sess.last_json["code"] == "print(42)"
@@ -332,6 +344,96 @@ def test_remote_parses_timeout():
     res = sb.run("while True: pass")
     assert res.timed_out
     assert not res.ok
+
+
+def test_remote_compile_failure_is_program_verdict_not_infra_error():
+    """A compile the service's compiler rejected (a finished step, non-zero exit) is the submission's
+    fault: ``compile_failed`` with the diagnostics, ``error`` unset — an ``error`` here would invalidate
+    the whole graded episode."""
+    payload = {
+        "status": "Failed",
+        "message": "",
+        "compile_result": {
+            "status": "Finished",
+            "return_code": 1,
+            "stdout": "",
+            "stderr": "main.cpp:1:12: error: boom",
+        },
+        "run_result": None,
+    }
+    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    res = sb.run("int main(){ boom }", language="cpp")
+    assert res.compile_failed
+    assert res.error is None
+    assert not res.ok
+    assert not res.timed_out
+    assert "error: boom" in res.stderr
+    assert res.returncode == 1
+
+
+@pytest.mark.parametrize(
+    "compile_result",
+    (
+        {"status": "Error", "stdout": "", "stderr": "g++: not found"},
+        {"status": "Finished", "return_code": 127, "stdout": "", "stderr": "sh: g++: not found"},
+        {"status": "", "return_code": None, "stdout": "", "stderr": ""},
+    ),
+    ids=("error-status", "exit-127", "no-status-no-exit"),
+)
+def test_remote_incomplete_compile_step_is_backend_error(compile_result):
+    """A compiler step that did not run to completion — or whose compiler is absent (exit 127) — is
+    the service's fault, never a verdict on the source: ``error`` set, ``compile_failed`` unset."""
+    payload = {"status": "Failed", "compile_result": compile_result}
+    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    res = sb.run("int main(){}", language="cpp")
+    assert res.error is not None
+    assert not res.compile_failed
+    assert not res.ok
+
+
+def test_remote_success_without_a_run_result_is_a_backend_error():
+    """A ``Success`` body with no run block carries no program output; reading it as an empty clean run
+    would pass a test whose expected output is empty."""
+    for payload in (
+        {"status": "Success"},
+        {"status": "Success", "run_result": None},
+        {"status": "Success", "run_result": "x"},
+    ):
+        sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+        res = sb.run("print(1)")
+        assert res.error is not None and not res.ok, payload
+
+
+def test_remote_compile_time_limit_is_backend_error():
+    """A compile that hit the service's compile time limit is a limit failure (``error``), like the
+    local backend's compile timeout — not a verdict on the source and not a run timeout."""
+    payload = {
+        "status": "Failed",
+        "message": "",
+        "compile_result": {"status": "TimeLimitExceeded", "return_code": None, "stdout": "", "stderr": ""},
+        "run_result": None,
+    }
+    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    res = sb.run("int main(){}", language="cpp")
+    assert res.error is not None
+    assert not res.compile_failed
+    assert not res.ok
+
+
+def test_remote_clean_compile_step_reads_run_result():
+    """A compiled-language success carries a finished, zero-exit ``compile_result``: the verdict must
+    come from ``run_result`` exactly as for an interpreted run."""
+    payload = {
+        "status": "Success",
+        "compile_result": {"status": "Finished", "return_code": 0, "stdout": "", "stderr": ""},
+        "run_result": {"status": "Finished", "stdout": "42\n", "stderr": "", "return_code": 3},
+    }
+    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    res = sb.run("int main(){ return 3; }", language="cpp")
+    assert not res.compile_failed
+    assert res.error is None
+    assert res.returncode == 3
+    assert res.stdout.strip() == "42"
 
 
 def test_remote_handles_transport_error():

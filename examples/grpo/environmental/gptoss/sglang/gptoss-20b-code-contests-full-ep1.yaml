@@ -15,6 +15,9 @@
 model_name_or_path: unsloth/gpt-oss-20b-BF16
 attn_implementation: flash_attention_4
 reset_sinks: false
+# Serve with --chat-template on this same file (SGLANG_CHAT_TEMPLATE in the compose file): forced on the
+# trainer alone it leaves the engine on the checkpoint's built-in, which double-encodes tool-call
+# arguments the harmony parser cannot then read.
 chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
 force_chat_template: true
 
@@ -31,7 +34,7 @@ use_peft: false
 # --- Environment (identical ladder to the vLLM configs) ---
 environment_type: codeforces
 max_turns: 12               # high's worst case (3 subs + 6 scratchpad runs) plus room to recover
-                            # from a length-cutoff turn, which costs a turn instead of the episode
+                            # from a length-cutoff turn, which costs a turn, not the episode
 environment_kwargs:
   language: python
   timeout_per_test: 5
@@ -39,23 +42,24 @@ environment_kwargs:
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit — see the
                              # vllm lora-ep1 config for the derivation
   reasoning_effort: random
+  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past two recoveries the episode ends truncated
   # One profile per effort level: CoT budget plus interaction limits. Submission and test-call
   # allowances scale with effort. thinking_tokens is an engine cap on vLLM; on SGLang it reaches the
   # trajectory only (nothing caps CoT below rollout_max_tokens).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 4096, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 8192, max_submissions: 3, max_test_calls: 4}
+    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
+    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
-  # regardless of outcome at every effort level; on this backend the interaction budgets and the effort
-  # level's own conditioning price effort (SGLang enforces no thinking cap).
-  submission_reward: 0.25
+  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
+  submission_reward: 0.1     # bonus for reaching the graded channel; small so a weak submission cannot out-earn a careful one
+  pass_fraction_exponent: 2.0  # convex partial credit: a half-right submission earns a quarter of a solve
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
   resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first; prices probing the judge
   no_tool_use_penalty: 0.1
   multi_turn_reward: 0.05
-  tool_success_reward: 0     # env default; a per-call reward would be inflated by duplicate re-runs
+  tool_success_reward: 0     # env default; any per-call pay is farmable by duplicate re-runs
   turn_overflow_penalty: 0.1
   tool_error_penalty: 0.05
 
@@ -71,30 +75,29 @@ rollout_server_configs:
 - url: "http://localhost:30001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 300.0
+request_timeout: 1200.0       # per HTTP call = one turn: at least twice the 24k-token turn cap over the per-sequence decode
+                              # speed at peak concurrency (agent-docs/training-methods/grpo/environmental-grpo.md#sizing-a-run)
+max_retries: 1                # a timeout re-runs the WHOLE episode; 2 attempts x 1200 s stays under the
+                              # 80%-of-watchdog retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
 episode_timeout: 2700         # whole-episode wall clock; launch with DIST_NCCL_TIMEOUT_MINUTES=60
                               # (the 30-min default watchdog rejects this at training start)
 
 # --- Rollout Generation ---
-rollout_temperature: 1.0     # on-policy: the trainer scores at this temperature and the engine's IS reference must match
+rollout_temperature: 1.0     # on-policy; the trainer scores at this temperature and the engine's IS reference must match
+                            # against early sharpening (the IS geo-band/veto price the extra off-policyness)
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]
-rollout_max_tokens: 22000              # per-turn bound; nothing reserves answer headroom below it on SGLang
+rollout_max_tokens: 24000              # per-turn bound; nothing reserves answer headroom below it on SGLang
 reasoning_compliance_weight: 0   # off: a reward floor on under-band CoT can be met by padding the CoT,
                                  # so length control is the effort level's conditioning instead
 
 # --- Prefetch ---
 enable_prefetch: true
 
-# --- Dataset ---
-# The two pools scripts/environments/preparation/prepare_code_dataset.py writes, listed side by
-# side — the loader concatenates them, so no merged pool has to exist. The held-out split is the
-# codeforces pool's own: deepcoder-taco ships train only (its source has no test split), so it
-# contributes training rows and nothing to the eval set. Placeholder paths: point them at the
-# --output_dir you wrote (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+# HardTests problems with sound checkers, banded by Codeforces rating; `medium` (1500-1999) is the entry band,
+# `hard` and `extra-hard` the later curriculum stages (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
 dataset:
-- /mnt/s3_datasets/codeforces-verifiable-rl
-- /mnt/s3_datasets/deepcoder-taco-rl
+- your-org/code-contests-hardtests-rl:medium
 
 # --- Sequence Lengths ---
 max_prompt_length: null
@@ -122,20 +125,18 @@ num_generations_eval: 1
 scale_rewards: batch
 drop_degenerate_groups: true
 top_entropy_quantile: 1.0
-mask_truncated_completions: false  # `truncated` covers only the max_turns overflow (a length-cut turn is
-                                   # charged and retried in-episode, and its fragment is skipped at
-                                   # tokenization), and exhausting the turn budget is a failure worth
-                                   # its negative advantage
+mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow (a length-cut TURN is
+                                   # priced and retried in-episode, and its fragment is skipped at tokenization),
+                                   # and a turn-budget burn is a real failure worth its negative advantage
 
 # --- Training ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 4      # rows per eval loss-forward chunk
 eval_rollout_batch_size: 50       # the 200-problem eval split in one rollout round across 4 ranks
 gradient_accumulation_steps: 24
-steps_per_generation: 24
-max_steps: 300              # the cosine horizon matches the run's useful length, not the dataset's: a
-                            # full-epoch horizon would decay so slowly that the whole run trains near
-                            # peak LR
+max_steps: 300              # the cosine horizon must match the run's USEFUL length, not the dataset's:
+                            # at a full-epoch (~1.2k-step) horizon the LR is still 97% of peak at step 150
+                            # and the policy drifts until it forgets the harmony tool-call format
 num_train_epochs: 1
 learning_rate: 2.0e-07      # full-FT LR; decays to ~0 over the 300-step horizon (LoRA sibling: 3e-6)
 max_grad_norm: 1.0
@@ -153,7 +154,7 @@ fp32_grad_reduce: true
 # --- Output ---
 output_dir: checkpoints/env-grpo-oss-20b-code-contests-full-ep1-sglang
 save_strategy: steps
-save_steps: 50              # whole-model checkpoints (2 B/param bf16) — coarser cadence, tighter limit than LoRA
+save_steps: 50              # full checkpoints are ~42 GB — coarser cadence, tighter limit than LoRA
 save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size above
 
 # --- Eval ---
