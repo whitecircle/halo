@@ -1,7 +1,8 @@
 """Competitive-programming environment with hidden-test grading (Codeforces, APPS).
 
 Models write a solution, test it with the REPL tool, then submit via ``submit_solution`` which runs it
-against hidden tests through a SandboxExecutor. Reward = fraction of tests passed.
+against hidden tests through a SandboxExecutor. Reward = fraction of tests passed, raised to
+``pass_fraction_exponent``.
 """
 
 import json
@@ -9,6 +10,7 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from math import isfinite
 from typing import Any
 
 from src.environments.base import (
@@ -40,9 +42,10 @@ _ACTIVE_TRAJECTORY: ContextVar = ContextVar("codecontests_active_trajectory", de
 
 
 # Effort level -> profile. ``thinking_tokens`` is the per-turn CoT budget; ``max_submissions``/
-# ``max_test_calls`` are per-episode interaction budgets, so effort also buys iteration.
-# ``token_cost`` prices total generated tokens (reward units per 1k), covering the thinking and
-# visible channels together.
+# ``max_test_calls`` are per-episode interaction budgets, so effort also buys iteration, and
+# ``max_length_cutoff_recoveries`` tightens the env's recovery cap for the level (a cut turn spends a
+# turn but no budget). ``token_cost`` prices total generated tokens (reward units per 1k), covering
+# the thinking and visible channels together.
 REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float]] = {
     "low": {"thinking_tokens": 4096},
     "medium": {"thinking_tokens": 8192},
@@ -55,6 +58,7 @@ _PROFILE_KEY_MINIMA: dict[str, int] = {
     "thinking_tokens": 1,
     "max_submissions": 1,
     "max_test_calls": 0,
+    "max_length_cutoff_recoveries": 0,
     "tested_submission_reward": 0,
     "token_cost": 0,
 }
@@ -65,8 +69,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     """Competitive-programming environment with hidden-test grading (Codeforces, code_contests, APPS).
 
     ``language`` (``python``/``cpp``/``c``) drives both the test tool and grading through the same
-    SandboxExecutor. Reward = (tests_passed / tests_total) * success_reward, credited only on
-    ``submit_solution``; a never-submitted solution scores ``failure_reward``. Grading is data-driven:
+    SandboxExecutor. Reward = (tests_passed / tests_total) ** pass_fraction_exponent * success_reward,
+    credited only on ``submit_solution``; a never-submitted solution scores ``failure_reward``. Grading is data-driven:
     per-problem ``checker`` / ``time_limit`` from the ``answer`` payload (dict or JSON string, carrying
     ``tests``/``test_cases``) override the ``output_comparison`` default, so one env covers exact-match
     and Codeforces sets.
@@ -111,6 +115,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         submission_reward: float = 0.0,
         execution_progress_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
+        pass_fraction_exponent: float = 1.0,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         **kwargs,
@@ -131,7 +136,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             execution_progress_reward=execution_progress_reward,
             resubmission_penalty=resubmission_penalty,
         )
+        if not (isfinite(pass_fraction_exponent) and pass_fraction_exponent > 0):
+            raise ValueError(f"pass_fraction_exponent must be a finite number > 0, got {pass_fraction_exponent}")
         self.language = spec.name
+        # Above 1 the objective is convex in the pass fraction: a half-right submission earns well under
+        # half a solve, so within a GRPO group finishing the problem out-earns submitting a heuristic early.
+        self.pass_fraction_exponent = pass_fraction_exponent
         # Bootstraps a base model that never submits; the term cancels within a GRPO group once all do.
         self.submission_reward = submission_reward
         # Fraction of graded tests that ran: the only within-group signal when every completion fails.
@@ -205,6 +215,14 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             reasoning_effort=reasoning_effort,
             **kwargs,
         )
+        # After the base sets the env's recovery cap: a level may tighten it, never exceed it.
+        env_cap = self.max_length_cutoff_recoveries
+        for level, profile in self.reasoning_effort_profiles.items():
+            if env_cap is not None and profile.get("max_length_cutoff_recoveries", 0) > env_cap:
+                raise ValueError(
+                    f"reasoning_effort_profiles[{level!r}].max_length_cutoff_recoveries "
+                    f"({profile['max_length_cutoff_recoveries']}) exceeds the env's max_length_cutoff_recoveries ({env_cap})"
+                )
 
     def thinking_budget_for_effort(self, effort: str) -> int | None:
         """Bind a resolved effort level to its CoT budget; ``None`` for an unknown level (fall back to global)."""
@@ -375,6 +393,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_tests = profile.get("max_test_calls", self.max_test_calls)
         traj.info["episode_max_submissions"] = max_subs
         traj.info["episode_max_test_calls"] = max_tests
+        if "max_length_cutoff_recoveries" in profile:
+            traj.info["episode_max_length_cutoff_recoveries"] = profile["max_length_cutoff_recoveries"]
         # Deliberately absent from the stated budgets: it acts through the reward, not the prompt.
         traj.info["episode_tested_submission_reward"] = float(profile.get("tested_submission_reward", 0.0))
         # Charged by the trainer against total generated tokens; the env does not see token counts.
@@ -448,7 +468,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         trajectory: Trajectory,
         context: dict[str, Any] | None = None,
     ) -> float:
-        """Reward ladder over the objective (fraction of hidden tests passed by the submitted solution).
+        """Reward ladder over the objective (fraction of hidden tests passed by the submitted solution,
+        raised to ``pass_fraction_exponent``).
 
         ``submit_solution`` is the only graded channel; an unsubmitted solution scores
         ``failure_reward``. The shaping terms (submission_reward, execution_progress, tool-use)
@@ -467,7 +488,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             info[EPISODE_INVALID_KEY] = True
 
         if graded_content:
-            objective = (info.get("tests_passed", 0) / tests_total) * self.success_reward
+            objective = (
+                info.get("tests_passed", 0) / tests_total
+            ) ** self.pass_fraction_exponent * self.success_reward
         else:
             objective = self.failure_reward
 

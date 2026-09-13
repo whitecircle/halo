@@ -191,6 +191,7 @@ class _LifecycleHost:
     """Runs the REAL component-init / generation-start flow with Ray, the manager and the push stubbed."""
 
     _init_async_components = _T._init_async_components
+    _check_eval_round_fits_cap = _T._check_eval_round_fits_cap
     _start_rollout_generation = _T._start_rollout_generation
 
     def __init__(self, weight: torch.Tensor):
@@ -200,6 +201,7 @@ class _LifecycleHost:
             ray_address=None,
             num_rollout_workers=2,
             max_concurrent_rollouts=2,
+            eval_rollout_batch_size=None,
             get_server_urls=lambda: ["http://10.0.0.1:8000"],
             get_rollout_config=lambda stop_token_ids=None: {},
         )

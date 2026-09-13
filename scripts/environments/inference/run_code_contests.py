@@ -3,10 +3,10 @@
 Evaluate a model on competitive-programming problems (`code_contests` / `codeforces` env) against an
 OpenAI-compatible endpoint.
 
-Specific to the coding-contest task: it applies a dataset adapter (`codeforces`, `deepcoder`, `hlce`,
-`icpc` or `livecodebench`) to a raw contest dataset, prompts in a chosen solution `language`, and
-reports `success@1` / `success@k` bucketed by problem rating. The rollout loop and reward aggregation
-are shared with the other eval scripts via :mod:`src.environments.eval_runner`.
+Specific to the coding-contest task: it applies a dataset adapter that scores raw rows (every
+``CODE_DATASET_ADAPTERS`` entry without a ``normalize`` step) to a contest dataset, prompts in a chosen
+solution `language`, and reports `success@1` / `success@k` bucketed by problem rating. The rollout loop
+and reward aggregation are shared with the other eval scripts via :mod:`src.environments.eval_runner`.
 
 The server must serve the model with tool calling enabled (e.g. vLLM
 `--tool-call-parser qwen3_xml --enable-auto-tool-choice`). A solution counts as solved when it passes
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--adapter",
         default="codeforces",
-        choices=sorted(CODE_DATASET_ADAPTERS),
+        choices=sorted(name for name, a in CODE_DATASET_ADAPTERS.items() if a.scores_raw_rows),
         help="Adapter that composes raw contest rows into eval examples. This script always reads a raw "
         "dataset; one already prepared by scripts/environments/preparation/prepare_code_dataset.py is not its input.",
     )
@@ -131,6 +131,10 @@ def build_examples(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> lis
         )
         if args.num_examples and len(examples) >= args.num_examples:
             break
+    if not examples:
+        raise SystemExit(
+            f"{args.dataset} ({args.adapter}) yielded no gradable problem; check the adapter, config and split"
+        )
     logger.info("Loaded %d problems from %s (%s)", len(examples), args.dataset, args.adapter)
     return examples
 

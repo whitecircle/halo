@@ -89,6 +89,10 @@ crashing mid-run. These are the ones that come up:
 | `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` | auto | trainer IP the rollout server dials back for the weight-sync group; set it when the server is on another host and the trainer's default-route NIC is not the one it can reach |
 | `VLLM_ENABLE_R3` | unset | server-side: any non-empty value adds `--enable-return-routed-experts` for `routing_replay: rollout` (`SGLANG_ENABLE_R3` on the SGLang compose file) |
 | `VLLM_USE_V2_MODEL_RUNNER` | unset | server-side: must be `0` for any run setting `rollout_max_thinking_tokens` (V2 rejects thinking budgets with a 400) |
+| `VLLM_PREFIX_CACHING_FLAG` | `--enable-prefix-caching` | server-side: prefix caching, on by default; `--no-enable-prefix-caching` turns it off, which MTP on vLLM 0.26.0 requires |
+| `VLLM_SPECULATIVE_CONFIG` | unset | server-side: `--speculative-config` JSON; `{"method":"mtp","num_speculative_tokens":2}` uses the checkpoint's MTP head |
+| `VLLM_ENFORCE_STRICT_TOOL_CALLING` | `0` | server-side: grammar-constrained tool calling; off keeps the served distribution the policy's |
+| `VLLM_TUNED_CONFIG_FOLDER` | unset | server-side: folder of tuned Triton MoE tile configs, mounted into the container |
 | `NCCL_CUMEM_ENABLE` | `1` (SGLang compose default) | server-side: SGLang turns cuMem off unless this is pre-set, and a mismatch with the trainer fails the first weight-sync import — leave the compose default |
 | `SGLANG_ATTENTION_BACKEND` | unset | server-side: passed through as `--attention-backend`; `triton` for GLM-4 MoE Lite on Blackwell, whose MLA head size has no kernel in the default backend |
 | `SGLANG_TRUST_REMOTE_CODE` | unset | server-side: any non-empty value adds `--trust-remote-code`; the Ling repos need it |

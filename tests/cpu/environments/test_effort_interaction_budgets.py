@@ -316,5 +316,28 @@ def test_invalid_profiles_raise():
         _make_env(reasoning_effort_profiles={"low": {"token_cost": -0.01}})
 
 
+def test_recovery_cap_tightens_per_level_and_never_exceeds_the_env_cap():
+    env = _make_env(
+        max_length_cutoff_recoveries=3,
+        reasoning_effort_profiles={
+            "low": {"max_submissions": 2, "max_test_calls": 2, "max_length_cutoff_recoveries": 1}
+        },
+    )
+    low = _reset(env, {"reasoning_effort": "low", **_TESTS})
+    assert low.info["episode_max_length_cutoff_recoveries"] == 1
+    high = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    assert "episode_max_length_cutoff_recoveries" not in high.info, "a level without the key runs under the env cap"
+    with pytest.raises(
+        ValueError, match=r"max_length_cutoff_recoveries \(4\) exceeds the env's max_length_cutoff_recoveries \(3\)"
+    ):
+        _make_env(
+            max_length_cutoff_recoveries=3, reasoning_effort_profiles={"low": {"max_length_cutoff_recoveries": 4}}
+        )
+    (
+        _make_env(reasoning_effort_profiles={"low": {"max_length_cutoff_recoveries": 4}}),
+        "an unset env cap admits any level cap",
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

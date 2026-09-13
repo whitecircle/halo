@@ -26,10 +26,11 @@ from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
     EPISODE_INVALID_REASON_KEY,
     OBJECTIVE_REWARD_KEY,
+    VALID_REASONING_EFFORTS,
     BaseEnvironment,
     resolve_reasoning_effort,
 )
-from src.environments.episode import RolloutResult, reasoning_calibration_penalty
+from src.environments.episode import RolloutResult, effort_length_penalty, reasoning_calibration_penalty
 from src.models.structure import resolve_tokenizer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, rows_forward_densely
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
@@ -252,10 +253,13 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 f"per rank, so a group cannot straddle ranks."
             )
 
+        self._validate_eval_round()
+
         self.reward_func_names = ["environment_reward"]
 
         self._train_on_sampled_tokens = self.async_config.train_on_sampled_tokens
         self._rollout_backend = self.async_config.rollout_backend
+        self._validate_effort_length_penalty_levels()
         self._warned_capture_missing = False
         self._save_completions = save_completions
         self.drop_degenerate_groups = self.async_config.drop_degenerate_groups
@@ -487,6 +491,30 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         finally:
             self._cleanup_async_components()
 
+    def _eval_loader_batch_size(self) -> int:
+        """One eval batch is one synchronous rollout round (no prefetch), so its wall time is its slowest
+        episode and ``per_device_eval_batch_size``-sized rounds idle the servers between them.
+        ``eval_rollout_batch_size`` sizes the round; the loss forward still chunks by
+        ``per_device_eval_batch_size``."""
+        return self.async_config.eval_rollout_batch_size or super()._eval_loader_batch_size()
+
+    def _validate_eval_round(self) -> None:
+        """The eval round's geometry, checked at construction like the train round's."""
+        rows = self.async_config.eval_rollout_batch_size
+        if rows is None:
+            return
+        if rows % self.num_generations_eval != 0:
+            raise ValueError(
+                f"eval_rollout_batch_size ({rows}) must be divisible by num_generations_eval "
+                f"({self.num_generations_eval}): environmental GRPO groups advantages per rank."
+            )
+        if self.args.dataloader_drop_last:
+            # Accelerate's shard yields a round only once every rank holds a full batch; a round wider
+            # than the split's share leaves fewer batches than ranks and an eval that scores nothing.
+            raise ValueError(
+                "eval_rollout_batch_size needs dataloader_drop_last=false: a dropped tail is the whole eval."
+            )
+
     def _generate_and_score_completions(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
@@ -610,7 +638,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 self._batch_build_error = (
                     f"rollout context count ({len(contexts)}) is not a multiple of the group size "
                     f"({group}); group-level reasoning-effort draws require whole groups per rank. "
-                    f"In eval this means the global eval batch does not divide by num_generations_eval."
+                    f"In eval this means the eval round (eval_rollout_batch_size, else the eval batch) "
+                    f"does not divide by num_generations_eval."
                 )
             return
         for start in range(0, len(contexts), group):
@@ -838,6 +867,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         if compliance_weight > 0:
             self._apply_reasoning_calibration(rewards, rollout_results, compliance_weight, mode)
         self._apply_effort_token_costs(rewards, rollout_results, mode)
+        self._apply_effort_length_penalty(rewards, rollout_results, mode)
         return rewards
 
     def _assemble_rollout_routing(
@@ -1179,6 +1209,52 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             costs.append(-cost)
         if any(costs):
             self._metrics[mode]["reward/token_cost"].append(sum(costs) / len(costs))
+
+    def _validate_effort_length_penalty_levels(self) -> None:
+        """A level the penalty table misses would be priced 0 silently; a level it invents is a typo."""
+        if self.async_config.effort_length_penalty_k0 is None:
+            return
+        levels = set(self.async_config.effort_length_penalty_levels)
+        unknown, missing = levels - set(VALID_REASONING_EFFORTS), set(VALID_REASONING_EFFORTS) - levels
+        if unknown or missing:
+            raise ValueError(
+                f"effort_length_penalty_levels must map exactly the effort levels {sorted(VALID_REASONING_EFFORTS)}; "
+                f"unknown {sorted(unknown)}, missing {sorted(missing)}"
+            )
+
+    def _apply_effort_length_penalty(
+        self, rewards: torch.Tensor, rollout_results: list[RolloutResult], mode: str
+    ) -> None:
+        """Subtract :func:`effort_length_penalty` from every episode with a known effort level; logs the mean
+        under ``reward/effort_length_penalty`` and per level under ``effort/<level>/length_penalty``. Off
+        (a no-op) while ``effort_length_penalty_k0`` is unset."""
+        cfg = self.async_config
+        if cfg.effort_length_penalty_k0 is None:
+            return
+        levels = cfg.effort_length_penalty_levels
+        effort_min = min(levels.values())
+        contributions: list[float] = []
+        per_level: dict[str, list[float]] = {}
+        for i, r in enumerate(rollout_results):
+            level = getattr(r.trajectory, "reasoning_effort", None) if r.trajectory else None
+            if level not in levels:
+                contributions.append(0.0)
+                continue
+            penalty = effort_length_penalty(
+                self._assistant_turn_reasoning_tokens(r.trajectory),
+                levels[level],
+                effort_min,
+                cfg.effort_length_penalty_k0,
+                cfg.effort_length_penalty_tau,
+                cfg.effort_length_penalty_c_max,
+                cfg.effort_length_penalty_l_norm,
+            )
+            rewards[i] += penalty
+            contributions.append(penalty)
+            per_level.setdefault(level, []).append(penalty)
+        self._metrics[mode]["reward/effort_length_penalty"].append(sum(contributions) / len(contributions))
+        for level, values in per_level.items():
+            self._metrics[mode][f"effort/{level}/length_penalty"].append(sum(values) / len(values))
 
     def _apply_reasoning_calibration(
         self, rewards: torch.Tensor, rollout_results: list[RolloutResult], weight: float, mode: str

@@ -6,6 +6,7 @@ graded the same way whichever one collects it.
 
 import asyncio
 import contextvars
+import math
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -89,6 +90,22 @@ def bind_episode_effort(
     else:
         headroom = max_tokens
     return EpisodeEffort(level=level, thinking_budget=budget, max_tokens=min(max_tokens, budget + headroom))
+
+
+def effort_length_penalty(
+    reasoning_tokens: list[int], effort: float, effort_min: float, k0: float, tau: float, c_max: float, l_norm: float
+) -> float:
+    """Capped, effort-conditioned reasoning-length penalty in ``[-c_max, 0]``:
+    ``-min(c_max, k(effort) * sum(reasoning_tokens) / l_norm)`` with ``k(effort) = k0 * exp(-(effort - effort_min) / tau)``.
+
+    The coefficient falls by ``e`` per ``tau`` effort units above the lowest level, so the same trace
+    costs most at the lowest effort; the cap keeps a long trace from outweighing the task reward, which an
+    uncapped per-token price does. Prices reasoning tokens only, summed over the trajectory's turns."""
+    tokens = sum(reasoning_tokens)
+    if tokens <= 0:
+        return 0.0
+    k = k0 * math.exp(-(effort - effort_min) / tau)
+    return -min(c_max, k * tokens / l_norm)
 
 
 def reasoning_calibration_penalty(reasoning_tokens: list[int], budget: int) -> float:

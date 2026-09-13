@@ -66,8 +66,8 @@ staged on the device. The chunk is cut before the budget
 (`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB) is exceeded; a tensor above it is a chunk of its own. The
 forwarding rank's peak during a sync is therefore the assembled EP layer being sent (the largest
 rank-local allocation, ~28 GB for one 397B layer), the staged chunk, the snapshot of the largest
-tensor, and the engine path's buffers (two vLLM packed buffers, one SGLang arena), each grown to
-the largest chunk seen. In multi-server mode (`rollout_server_configs`)
+tensor, and the engine path's buffers: the SGLang arena, grown to the largest chunk seen, or the two
+fixed 1 GiB vLLM packed buffers. In multi-server mode (`rollout_server_configs`)
 one snapshot per parameter is shared across all servers and each chunk goes out to every server on
 concurrent threads, released once they all have it; the threads share the forwarding rank's GPU,
 NICs and process, and the fan-out costs the sum rather than the max — two servers each push at
@@ -315,6 +315,10 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 | `VLLM_MOE_BACKEND` | `triton` | Keep `triton` for MoE RL ([Weight sync](#weight-sync)) |
 | `VLLM_ENABLE_R3` | *(unset)* | Any non-empty value adds `--enable-return-routed-experts` (R3 capture); the `triton` MoE backend is the one the capture hook reaches |
 | `VLLM_ATTENTION_BACKEND` | *(unset = auto)* | `--attention-backend`. GLM-4 MoE Lite (MLA) on Blackwell needs `CUTLASS_MLA`: the auto-selected FlashInfer MLA decode kernel rejects its head config at graph capture ([MLA backend](../reference/checkpoints.md#serving-on-vllm-sglang)) |
+| `VLLM_SPECULATIVE_CONFIG` | *(unset)* | `--speculative-config` JSON, e.g. `{"method":"mtp","num_speculative_tokens":2}` for a checkpoint that ships an MTP head ([Throughput](#throughput)); pair it with `VLLM_PREFIX_CACHING_FLAG=--no-enable-prefix-caching` on 0.26.0 |
+| `VLLM_PREFIX_CACHING_FLAG` | `--enable-prefix-caching` | Set to `--no-enable-prefix-caching` to turn the cache off |
+| `VLLM_ENFORCE_STRICT_TOOL_CALLING` | `0` | vLLM's grammar-constrained tool calling; off so the served distribution is the policy's and the engine core skips per-step grammar work ([Throughput](#throughput)) |
+| `VLLM_TUNED_CONFIG_FOLDER` | *(unset)* | Directory of tuned Triton MoE tile configs, visible inside the container ([Throughput](#throughput)) |
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
 | `VLLM_TOOL_PARSER_PLUGIN` | *(unset)* | `--tool-parser-plugin` path (gpt-oss uses the baked `/opt/gpt_oss_text_tool_parser.py`) |
 | `VLLM_CHAT_TEMPLATE` | *(unset)* | Set to the SAME `.jinja` the trainer's `chat_template:` uses; the file must be visible inside the server container |
@@ -345,7 +349,7 @@ generation exceeds it; the worst-case multi-turn budget only warns, since a roll
 window OOMs the training forward before the fail-on-overflow check.
 
 R3 runs add one flag, `--enable-return-routed-experts` (`routing_replay: rollout`) — without it the
-trainer raises at the first capture. Set `VLLM_ENABLE_R3=1` and the compose `command:` adds it. The FlashInfer
+trainer raises at the first capture. Set `VLLM_ENABLE_R3=1` (any non-empty value) and the compose `command:` adds it. The FlashInfer
 monolithic MoE kernels bypass the capturer and return all-zero expert ids, hence the triton backend.
 
 `VLLM_USE_V2_MODEL_RUNNER=0` is not a serve flag but an env var the compose file already passes
@@ -599,24 +603,71 @@ the server must own a GPU outside `TRAINER_CUDA_DEVICES`.
   re-measure before consolidating. Every rank builds its own actor pool and collects a full batch, so
   per-server request load is `max_concurrent_rollouts × world_size / num_servers`; dispatch is
   round-robin and ignores whether a server is busy.
+- **Prefix caching**: the compose passes `--enable-prefix-caching` because vLLM keeps it opt-in for
+  hybrid families (Qwen3.5/3.6's linear-attention layers; its "Mamba cache mode 'align'" warning is
+  that opt-in). A multi-turn episode re-sends its whole context every turn, and without the cache
+  each turn's prefill takes scheduler steps away from every other request's decode. The pause that
+  brackets every weight update (`/pause?mode=keep`) demotes in-flight requests to waiting and wipes
+  the cache, so no cached prefix serves stale weights. Turn it off together with MTP on vLLM 0.26.0
+  (`VLLM_PREFIX_CACHING_FLAG=--no-enable-prefix-caching`, MTP bullet below): the fix for the
+  align-mode cache poisoning under speculative decoding lands after that release. Measured on
+  Qwen3.6-35B-A3B on a B300 at TP=1, uncached prefill runs near 22k tok/s, so re-prefilling each turn
+  costs far less than MTP returns at RL concurrency.
+- **The decode step is CPU-bound at RL concurrency**: the V1 engine core is one Python thread and
+  sits at 100% of a core from ~48 concurrent sequences (Qwen3.6-35B-A3B on a B300: ~15 ms per step),
+  so a trainer sharing the host — its ranks and the environments' judge sandboxes — slows every
+  step: 22–25 tok/s per sequence in a run against 63–66 for the same server alone. Pin each server
+  container to its own cores (`docker run --cpuset-cpus`, compose `cpuset:`) and the trainer to the
+  rest. Step latency grows with running sequences (about 14 ms + 0.22 ms per sequence here under
+  MTP), so per-sequence speed falls as concurrency rises — 101 tok/s at 48 running, 71 at 96 — while
+  aggregate throughput rises sub-linearly (+44% for that doubling). Kernel-level gains (tuned MoE
+  tiles, another attention backend) do not show at this concurrency; fewer steps per token do.
+  Turning these numbers into batch sizes and timeouts: [Sizing a run](../training-methods/grpo/environmental-grpo.md#sizing-a-run).
+- **Speculative decoding (MTP)**: a checkpoint that ships a multi-token-prediction head (Qwen3.5/3.6,
+  `mtp.*` tensors) drafts with it through `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`
+  (compose slot `VLLM_SPECULATIVE_CONFIG`); the drafter loads from the same checkpoint. Measured on
+  Qwen3.6-35B-A3B on a B300 at 48 concurrent sequences, temperature 1.0: 59–67 → 108–112 tok/s per
+  sequence, 2.4 tokens accepted per step, output statistics unchanged. Sound for RL: rejection
+  sampling applies temperature and top-p to the target logits and keeps the target distribution,
+  `processed_logprobs` come from those same logits, and the thinking budget is enforced on the target
+  under speculation. The drafter's embeddings and `lm_head` are the target's modules, so weight sync
+  updates them; its MTP layer keeps launch weights, which only moves acceptance. Not applied under
+  speculation: `min_p`, `logit_bias`. Never `ngram` or `suffix` on linear-attention families (open
+  output-corruption bug; they also turn async scheduling off).
+  `scripts/profiling/weight_sync_transport.py` passes against an MTP server.
+- **Strict tool calling off** (`VLLM_ENFORCE_STRICT_TOOL_CALLING=0`, the compose default): vLLM
+  otherwise constrains every tool-bearing request with a structural-tag grammar, masking tokens the
+  trainer's log-probabilities never see masked and adding per-step grammar work on the CPU-bound
+  engine core. The tool parser still parses the calls; a malformed call becomes text the environment
+  scores.
+- **Triton MoE tile configs**: the mandatory `--moe-backend triton` reads a per-shape tuned config
+  (`E=<experts>,N=<intermediate>,device_name=<GPU>.json`) from `VLLM_TUNED_CONFIG_FOLDER`, then from
+  vLLM's `fused_moe/configs`, and logs `Using default MoE config. Performance might be sub-optimal!`
+  when neither matches; the image ships none for B300 in bf16. `benchmarks/kernels/benchmark_moe.py
+  --tune` in the vLLM image writes one: it needs `pip install ray`, runs one batch size per visible
+  GPU in parallel (1920 tile configs each, 8–27 minutes), writes the JSON only at the end, and
+  aborts the whole run on a Triton compile failure of a single config unless its `OutOfResources`
+  handler also catches `RuntimeError`. Pass `--tp-size 1` (the default of 2 halves `N`) and
+  `--batch-size` with the decode batch (concurrent sequences × (1 + speculative tokens)) and the
+  prefill chunk. The file is read once per process, so a new one needs a server restart. At RL
+  concurrency the step is CPU-bound (above) and the tuned tiles change nothing measurable; they
+  matter for prefill-heavy phases.
 - **Generation volume is the step-time lever** once prefetch overlaps collection into training
   (`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens`
   caps a turn; on vLLM `rollout_max_thinking_tokens` caps CoT engine-side, on SGLang only the
   environment's per-effort budgets price it.
-- **Memory**: raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 when the server GPUs
+- **Memory**: raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 (0.80 with
+  `isr_engine_reference`, next bullet) when the server GPUs
   are dedicated; more KV cache means more concurrent rollouts per server. Do not pass
   `--enforce-eager` — the in-place weight sync keeps captured CUDA graphs valid, and CUDA-graph
   decode is several-fold faster on long generations. On B200 pin the backend through the compose
-  slot `VLLM_ATTENTION_BACKEND=FLASH_ATTN` (FlashInfer can JIT-fail on SM 10.0).
-- **`isr_engine_reference` headroom (vLLM)**: the re-score is one `prompt_logprobs` prefill per row,
-  and vLLM materializes an fp32 log-softmax over the vocabulary for every prefill chunk of one
-  (`max_num_batched_tokens × vocab × 4 B`, 8 GB at 8192 × 248k) outside its memory profile — at 0.90
-  the engine dies of CUDA OOM under load. Serve at ≤ 0.80, or lower `--max-num-batched-tokens`.
+  slot `VLLM_ATTENTION_BACKEND=FLASH_ATTN` (FlashInfer can JIT-fail on SM 10.0). On head-dim-256
+  families `FLASH_ATTN` resolves to FA2 (FA4 refuses the head size) and measured 30% slower than
+  FlashInfer on a B300 — keep auto unless FlashInfer fails.
+- **`isr_engine_reference` headroom**: the trainer's engine re-score sends `prompt_logprobs` requests, and vLLM materializes an fp32 log-softmax over the vocabulary for every prefill chunk of one (`max_num_batched_tokens × vocab × 4 B`, 8 GB at 8192 × 248k) outside its memory profile — at 0.90 the engine dies of CUDA OOM under load. Serve at `--gpu-memory-utilization` ≤ 0.80 or a smaller `--max-num-batched-tokens` when that knob is on.
 - **Sync cadence**: `sync_weights_every_n_steps: 2–4` for slow environments
   ([Environmental GRPO](../training-methods/grpo/environmental-grpo.md#nccl-weight-synchronization)).
-- **Not available**: speculative decoding — no config knob passes draft-model arguments, and weight
-  sync covers only the target model, so a draft would serve a stale policy from the first update.
-  Weight-quantized serving is excluded by the in-place sync ([Weight sync](#weight-sync)).
+- **Weight-quantized serving is excluded** by the in-place sync ([Weight sync](#weight-sync)).
 
 ## Coverage
 
@@ -670,3 +721,4 @@ experts over the fabric) against vLLM on a third ([Servers on other nodes](#serv
 | `RESTART the … server` in the trainer log; that server stays paused and refuses the next sync | A sync was interrupted after part of the model went out → the engine holds a half-written model on purpose ([Weight sync](#weight-sync)); restart it, do not `/resume` it |
 | `EngineDeadError` on the first request after a restart, `reshape_and_cache_flash … Meta tensors` in the engine log | The reloaded AOT compile cache does not match the attention backend the restarted engine auto-selected (free GPU memory steers that choice, so a co-tenant server changes it) → pin the backend (compose `VLLM_ATTENTION_BACKEND=FLASH_ATTN`, which becomes `--attention-backend`; 0.26.0 reads no such environment variable itself), or clear `/root/.cache/vllm/torch_compile_cache` before restarting. vLLM respawns the engine core, so later requests answer |
 | Rollouts from a stale policy after a server swap | A reconnected server holds launch weights until the next full sync |
+| Per-sequence decode in a run far below the same server benchmarked alone; the engine core at 100% of one CPU | The trainer's ranks and judge sandboxes contend for the engine core's CPU → pin the server containers to their own cores ([Throughput](#throughput)) |

@@ -21,7 +21,7 @@ inside `halo:blackwell` (B200/B300, SM100/SM103, FA2+FA4) and `halo:hopper`
 | Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `src/distributed/parallelism_config.py`, `src/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
 | Data | Dataset loading, sharding, collators | `src/data/`, `src/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
 | Callbacks | Throughput, MoE load, router-bias balancing | `src/callbacks/`, `src/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
-| Diagnostics | Opt-in and off by default: cross-rank consistency checks, py-spy capture, torch-profiler traces, CUDA memory snapshots | `src/diagnostics/` | [Debugging](debugging.md) |
+| Diagnostics | Opt-in and off by default: cross-rank consistency checks, py-spy capture, torch-profiler traces, CUDA memory snapshots, the weight-sync transport preflight | `src/diagnostics/` | [Debugging](debugging.md) |
 | Kernels | Grouped GEMM, Liger, Flash Attention, low-precision quantization | `src/kernels/`, `src/models/patches/attention.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
 | Checkpoints | The per-mode saver ladder, weight resume, per-rank optimizer shards + LR scheduler, PEFT adapters, load-coverage gate — over the sharding-agnostic on-disk layer | `src/distributed/checkpoint/`, `src/checkpoint/`, `src/models/loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
@@ -36,6 +36,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 |---|---|---|
 | `src/data/spans.py` | turn terminators, completion spans, the one completion-mask implementation and the completion-only label builder over it | the collators, the offline label bake and the PP losses — none imports a collator to reach a span helper |
 | `src/models/structure.py` | module-tree introspection: wrapper peeling, PEFT name normalization, decoder-layer discovery, persistent buffers, norm / fp32-pin classification | FSDP2/TP/PP wraps, the attention patches, every checkpoint writer |
+| `src/models/attention_layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
 | `src/checkpoint/format.py` | the on-disk checkpoint spellings, save-dtype casts, config/state-dict read-write — torch + safetensors only, no `torch.distributed` | the parallel save paths and the standalone `scripts/after_training/` tools |
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules | the loader, the preprocessing pipeline and the scripts — without a boto3 import |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected | the S3 dataset cache and the per-shard cache of a sharded pre-processed dataset, so their crash and staleness semantics cannot drift |
@@ -167,13 +168,15 @@ distributed shards back into a standard HuggingFace checkpoint — see
 Online and Environmental GRPO generate completions with vLLM (0.26.0). vLLM pins its own
 torch/transformers stack, so it is never imported into the training environment — it runs as its
 own container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). Environmental GRPO can target SGLang
-instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). Each
+instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`; the sync needs that image, whose
+`docker/sglang/patches/` repair two loaders). Each
 engine's pinned loaders refuse a few families — see
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
 The training process talks to it over two channels: HTTP for generation, and a vendored NCCL client
 (`src/distributed/nccl/`, one client per engine: `VLLMWeightSyncClient` / `SGLangWeightSyncClient`)
-for weight sync, replacing TRL's `VLLMClient` which would pull in the vLLM package.
+for weight sync, replacing TRL's `VLLMClient` which would pull in the vLLM package. A server on
+another node syncs over EFA ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
 
 Before each generation round that follows a weight update (environmental GRPO: every
 `sync_weights_every_n_steps`), the trainer gathers EP expert shards, unfolds FSDP2 DTensors via

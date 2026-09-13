@@ -220,9 +220,18 @@ class BaseEnvironment(ABC):
     # recovery path and does not route cut-off turns there.
     LENGTH_CUTOFF_NUDGE: str | None = None
 
-    def __init__(self, max_turns: int | None = None, max_observation_chars: int = 16384, **kwargs):
+    def __init__(
+        self,
+        max_turns: int | None = None,
+        max_observation_chars: int = 16384,
+        max_length_cutoff_recoveries: int | None = None,
+        **kwargs,
+    ):
         """``max_turns`` caps turns before truncation, defaulting to this class's
         :data:`DEFAULT_MAX_TURNS`; ``max_observation_chars`` caps a tool observation's length.
+        ``max_length_cutoff_recoveries`` caps how many engine-cut turns an episode may recover from
+        (``None`` = every one within ``max_turns``): a cut turn spends a turn but no tool budget, so
+        without a cap an episode whose thoughts overrun their budget re-thinks until ``max_turns``.
         ``reasoning_effort`` (popped from kwargs) steers the chat template's CoT depth:
         ``low``/``medium``/``high``, ``"random"``, or ``None``.
 
@@ -234,6 +243,9 @@ class BaseEnvironment(ABC):
         if max_turns < 1:
             raise ValueError(f"max_turns must be >= 1, got {max_turns}")
         self.max_turns = max_turns
+        if max_length_cutoff_recoveries is not None and max_length_cutoff_recoveries < 0:
+            raise ValueError(f"max_length_cutoff_recoveries must be >= 0 or None, got {max_length_cutoff_recoveries}")
+        self.max_length_cutoff_recoveries = max_length_cutoff_recoveries
         self.max_observation_chars = max_observation_chars
         reasoning_effort = kwargs.pop("reasoning_effort", None)
         if reasoning_effort is not None and reasoning_effort not in (*VALID_REASONING_EFFORTS, "random"):
@@ -356,11 +368,14 @@ class BaseEnvironment(ABC):
         """Handle a turn the engine cut short before it produced anything — at its token cap, or by
         aborting it (:data:`~src.inference.response.ENGINE_CUT_FINISH_REASONS`).
 
-        The turn is nudged and retried within ``max_turns`` rather than graded: the fragment would end
-        the episode on a mid-sentence string that reads as a natural termination. It carries no reward
-        penalty of its own (rationale: ``agent-docs/training-methods/grpo/environmental-grpo.md``).
-        Implemented on the base so ``episode/length_cutoff_turns`` counts the same event for every
-        protocol; the nudge wording is per protocol (:data:`LENGTH_CUTOFF_NUDGE`).
+        Nudged and retried within ``max_turns`` and within the episode's recovery cap
+        (``episode_max_length_cutoff_recoveries`` when an env stamped one, else
+        ``max_length_cutoff_recoveries``), never graded — the fragment would end the episode on a
+        mid-sentence string that reads as a *natural* termination. A cut past the cap ends the episode
+        truncated, priced like a ``max_turns`` overflow. Carries no reward penalty of its own (why:
+        ``agent-docs/training-methods/grpo/environmental-grpo.md``). Owned by the base so
+        ``episode/length_cutoff_turns`` means the same thing for every protocol that can recover; the
+        wording is each protocol's (:data:`LENGTH_CUTOFF_NUDGE`).
         """
         if self.LENGTH_CUTOFF_NUDGE is None:
             raise NotImplementedError(
@@ -369,6 +384,9 @@ class BaseEnvironment(ABC):
                 f"the model what happened."
             )
         trajectory.info["length_cutoff_turns"] = trajectory.info.get("length_cutoff_turns", 0) + 1
+        cap = trajectory.info.get("episode_max_length_cutoff_recoveries", self.max_length_cutoff_recoveries)
+        if cap is not None and trajectory.info["length_cutoff_turns"] > cap:
+            return trajectory, 0.0, True, True, {"length_cutoff": True, "length_cutoff_recoveries_exhausted": True}
         trajectory.add_message(Message.user(self.LENGTH_CUTOFF_NUDGE))
         return trajectory, 0.0, False, False, {"length_cutoff": True}
 

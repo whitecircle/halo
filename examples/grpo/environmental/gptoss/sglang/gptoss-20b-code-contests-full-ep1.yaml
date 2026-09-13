@@ -61,7 +61,7 @@ environment_kwargs:
 
 # --- Ray Workers ---
 num_rollout_workers: 32
-max_concurrent_rollouts: 32
+max_concurrent_rollouts: 50  # = eval_rollout_batch_size: the eval round must fit one wave; training needs fewer
 
 # --- Rollout servers (SGLang) ---
 rollout_backend: sglang
@@ -109,8 +109,8 @@ beta: 0.0
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28
-isr_engine_reference: false  # the engine re-score needs ~12 GB of server headroom (an 8192-token prefill chunk's fp32
-                             #   log-softmax over a 248k vocab) and removes only the trainer<->engine part of the floor
+isr_engine_reference: false  # the engine re-score costs server headroom (an fp32 log-softmax over the vocabulary per
+                             #   prefill chunk; --gpu-memory-utilization <= 0.80) and removes only the trainer<->engine part of the floor
 isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
 isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
 isr_veto_min: 1.0e-4
@@ -129,7 +129,8 @@ mask_truncated_completions: false  # `truncated` covers only the max_turns overf
 
 # --- Training ---
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 4
+per_device_eval_batch_size: 4      # rows per eval loss-forward chunk
+eval_rollout_batch_size: 50       # the 200-problem eval split in one rollout round across 4 ranks
 gradient_accumulation_steps: 24
 steps_per_generation: 24
 max_steps: 300              # the cosine horizon matches the run's useful length, not the dataset's: a

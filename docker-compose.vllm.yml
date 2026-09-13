@@ -28,6 +28,12 @@ services:
       # Unset by default. Thinking budgets need VLLM_USE_V2_MODEL_RUNNER=0 (V2 answers them with
       # 400). 0 or 1 only — vLLM parses it with int(), so an empty value kills the server at startup.
       - VLLM_USE_V2_MODEL_RUNNER
+      # Off for RL: strict mode constrains every tool-bearing request with a structural-tag grammar,
+      # so the served distribution is no longer the policy's, and it costs the engine core CPU per
+      # step. The tool parser still parses the calls.
+      - VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}
+      # Directory of tuned Triton MoE tile configs, visible inside the container; unset stays unset.
+      - VLLM_TUNED_CONFIG_FOLDER
       - NCCL_DEBUG=WARN
       # The no-fabric recipe (InfiniBand off, socket net), spelled the same on every service; the
       # EFA overlay overrides both.
@@ -53,7 +59,10 @@ services:
     # (train_on_sampled_tokens needs the sampled ids), --logprobs-mode processed_logprobs (the IS
     # ratio divides by these logprobs, so they must be the sampling distribution's; the default
     # raw_logprobs are pre-temperature and the trainer refuses them at any rollout_temperature != 1),
-    # and a --tool-call-parser matching the family. See agent-docs/infrastructure/rollout-servers.md.
+    # and a --tool-call-parser matching the family. --enable-prefix-caching is explicit because vLLM
+    # keeps it opt-in for hybrid families (Qwen3.5/3.6's linear-attention layers); the pause around
+    # every weight sync wipes the cache, and it goes off together with MTP speculative decoding on
+    # 0.26.0 (VLLM_PREFIX_CACHING_FLAG, VLLM_SPECULATIVE_CONFIG). See agent-docs/infrastructure/rollout-servers.md.
     command: >
       ${VLLM_MODEL:-Qwen/Qwen3-0.6B}
       --port ${VLLM_PORT:-8000}
@@ -66,6 +75,8 @@ services:
       ${VLLM_ENABLE_R3:+--enable-return-routed-experts}
       --return-tokens-as-token-ids
       --logprobs-mode processed_logprobs
+      ${VLLM_PREFIX_CACHING_FLAG:---enable-prefix-caching}
+      ${VLLM_SPECULATIVE_CONFIG:+--speculative-config '${VLLM_SPECULATIVE_CONFIG}'}
       --enable-auto-tool-choice
       ${VLLM_TOOL_PARSER_PLUGIN:+--tool-parser-plugin ${VLLM_TOOL_PARSER_PLUGIN}}
       --tool-call-parser ${VLLM_TOOL_PARSER:-hermes}

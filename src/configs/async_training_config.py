@@ -79,6 +79,20 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "cluster, all of them locally), clamped to ≥ that share."
         },
     )
+    eval_rollout_batch_size: int | None = field(
+        default=None,
+        metadata={
+            "help": "Rows per rank in one evaluation rollout round (rows, not prompts: the eval sampler has already "
+            "repeated each prompt num_generations_eval times). Eval rounds run without prefetch, so a round's wall "
+            "time is its slowest episode and per_device_eval_batch_size-sized rounds idle the servers between them; "
+            "size it to what the servers sustain: rows × data_parallel_size requests are in flight at once, and a turn "
+            "that decodes slower than request_timeout allows fails the episode; a multiple of num_generations_eval, at "
+            "most max_concurrent_rollouts (a wider round runs in serial waves), and a divisor of the per-rank share "
+            "(eval rows ÷ data_parallel_size) to avoid padded duplicate rows. It bounds the loader's batch, "
+            "not eval peak memory: the loss forward still chunks per_device_eval_batch_size rows, but the round's "
+            "widest completion sets the padded width. None leaves the round at the eval batch."
+        },
+    )
 
     ray_address: str | None = field(default=None, metadata={"help": "Ray cluster address. None for local mode."})
 
@@ -306,6 +320,41 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         },
     )
 
+    effort_length_penalty_k0: float | None = field(
+        default=None,
+        metadata={
+            "help": "Coefficient of the capped effort-conditioned reasoning-length penalty at the lowest effort level "
+            "(None = off). Per trajectory: -min(c_max, k(effort) * reasoning_tokens / l_norm) with "
+            "k(effort) = k0 * exp(-(effort - effort_min) / tau), reasoning tokens summed over the assistant turns. "
+            "Priced per level, so a low level pays most for the same trace; capped, unlike the per-token "
+            "token_cost, so a long trace cannot outweigh the task reward. Logged as reward/effort_length_penalty "
+            "and effort/<level>/length_penalty."
+        },
+    )
+    effort_length_penalty_tau: float = field(
+        default=25.0,
+        metadata={
+            "help": "Effort units over which the penalty coefficient falls by e (see effort_length_penalty_k0)."
+        },
+    )
+    effort_length_penalty_c_max: float = field(
+        default=0.5,
+        metadata={"help": "Cap of the effort-conditioned reasoning-length penalty, in reward units."},
+    )
+    effort_length_penalty_l_norm: float = field(
+        default=8192.0,
+        metadata={
+            "help": "Reasoning tokens per unit of the effort-conditioned length penalty (the trace length k is priced per)."
+        },
+    )
+    effort_length_penalty_levels: dict[str, float] = field(
+        default_factory=lambda: {"low": 25.0, "medium": 50.0, "high": 100.0},
+        metadata={
+            "help": "Scalar effort per categorical level for the length penalty's k(effort); the lowest value is "
+            "effort_min. A level missing here is refused at trainer construction."
+        },
+    )
+
     enable_prefetch: bool = field(
         default=True,
         metadata={
@@ -375,6 +424,23 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             raise ValueError(
                 f"sync_weights_every_n_steps must be >= 1 (1 = every step), got {self.sync_weights_every_n_steps}"
             )
+        if self.effort_length_penalty_k0 is not None:
+            for name in (
+                "effort_length_penalty_k0",
+                "effort_length_penalty_tau",
+                "effort_length_penalty_c_max",
+                "effort_length_penalty_l_norm",
+            ):
+                value = getattr(self, name)
+                if not (isfinite(value) and value > 0):
+                    raise ValueError(f"{name} must be a finite positive number when the penalty is on, got {value}")
+            if not self.effort_length_penalty_levels:
+                raise ValueError("effort_length_penalty_levels must map every effort level to a scalar effort")
+            for level, effort in self.effort_length_penalty_levels.items():
+                if isinstance(effort, bool) or not isinstance(effort, int | float) or not isfinite(effort):
+                    raise ValueError(
+                        f"effort_length_penalty_levels[{level!r}] must be a finite number, got {effort!r}"
+                    )
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit".
         if self.max_retries < 0:
             raise ValueError(f"max_retries must be >= 0 (0 = one attempt, no retry), got {self.max_retries}")
@@ -393,6 +459,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             raise ValueError(
                 f"max_concurrent_rollouts must be >= 1 when set (null = derive from "
                 f"num_rollout_workers), got {self.max_concurrent_rollouts}"
+            )
+        # A non-positive batch raises inside the DataLoader, far from the knob; null is "unset".
+        if self.eval_rollout_batch_size is not None and self.eval_rollout_batch_size < 1:
+            raise ValueError(
+                f"eval_rollout_batch_size must be >= 1 when set (null = one round per eval batch), "
+                f"got {self.eval_rollout_batch_size}"
             )
         # None of these consumers can express a non-positive value, and each swallows one far from
         # the knob: rollout_temperature divides the log-prob sweep (the trainer scores at the

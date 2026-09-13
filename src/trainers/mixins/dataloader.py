@@ -133,6 +133,22 @@ class DataParallelDataLoaderMixin:
         """Rows one train-loader fetch returns. GRPO overrides it to draw a whole generation round."""
         return self._train_batch_size
 
+    def _eval_loader_batch_size(self) -> int:
+        """Rows one eval-loader fetch returns. Env-GRPO overrides it — it draws a whole rollout round."""
+        return self.args.eval_batch_size
+
+    @contextlib.contextmanager
+    def _eval_batch_size_as(self, rows: int):
+        """Present ``rows`` as the per-device eval batch while the base ``Trainer`` builds a loader: its
+        builder reads ``args.eval_batch_size`` and takes no batch-size argument. Every other reader of
+        the field (the eval loss forward's chunk, the metrics) sees the configured value again after."""
+        per_device = self.args.per_device_eval_batch_size
+        self.args.per_device_eval_batch_size = rows
+        try:
+            yield
+        finally:
+            self.args.per_device_eval_batch_size = per_device
+
     def get_train_dataloader(self) -> DataLoader:
         """Create train dataloader with correct DP sharding for TP/CP modes."""
         if not self._needs_custom_dataloader():
@@ -189,7 +205,8 @@ class DataParallelDataLoaderMixin:
     def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:
         """Create eval dataloader with correct DP sharding for TP/CP modes."""
         if not self._needs_custom_dataloader():
-            return super().get_eval_dataloader(eval_dataset=eval_dataset)
+            with self._eval_batch_size_as(self._eval_loader_batch_size()):
+                return super().get_eval_dataloader(eval_dataset=eval_dataset)
         # Whether the caller named a split, decided before the cache resolves it to a dataset.
         caller_supplied = eval_dataset is not None
 
@@ -200,7 +217,7 @@ class DataParallelDataLoaderMixin:
                 if not caller_supplied:
                     self.eval_dataset = dataset
 
-            dataset, params = self._loader_params(dataset, self.args.eval_batch_size, "evaluation")
+            dataset, params = self._loader_params(dataset, self._eval_loader_batch_size(), "evaluation")
 
             if not isinstance(dataset, torch.utils.data.IterableDataset):
                 params["sampler"] = self._get_eval_sampler(dataset)
