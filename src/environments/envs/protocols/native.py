@@ -4,10 +4,13 @@ import asyncio
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from src.environments.base import (
     EPISODE_INVALID_KEY,
+    EPISODE_TOOL_BUDGETS_KEY,
+    TOOL_CALL_COUNTS_KEY,
     AsyncBaseEnvironment,
     BaseEnvironment,
     Trajectory,
@@ -15,15 +18,36 @@ from src.environments.base import (
 )
 from src.environments.rewards import compute_answer_reward
 from src.environments.tools.definitions import (
-    MissingToolArguments,
+    NativeTool,
     NativeToolCall,
     NativeToolRegistry,
     NativeToolResult,
+    ToolArgumentError,
     ToolBudgetExhausted,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 logger = logging.getLogger(__name__)
+
+# The episode whose tool batch is executing, per asyncio Task / thread: one env instance serves
+# concurrent rollouts, so a handler reaching for per-episode state (the tests it grades against, a
+# workspace) reads it from here, never from an instance attribute.
+_ACTIVE_TRAJECTORY: ContextVar[Trajectory | None] = ContextVar("native_tool_use_active_trajectory", default=None)
+
+
+def validate_tool_budgets(budgets: dict[str, int] | None, registry: NativeToolRegistry) -> dict[str, int]:
+    """Per-tool episode caps checked against the registry: every capped tool must exist and a cap is a
+    non-negative int (``0`` disables the tool for the episode)."""
+    validated: dict[str, int] = {}
+    for name, cap in (budgets or {}).items():
+        if registry.get(name) is None:
+            raise ValueError(
+                f"tool_budgets names {name!r}, which is not a registered tool: {sorted(registry.names())}"
+            )
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
+            raise ValueError(f"tool_budgets[{name!r}] must be an int >= 0, got {cap!r}")
+        validated[name] = cap
+    return validated
 
 
 class NativeToolUseEnvironment(BaseEnvironment):
@@ -32,16 +56,17 @@ class NativeToolUseEnvironment(BaseEnvironment):
     With DistributedAsyncEnvironmentalGRPOTrainer, pass ``tools=env.get_tools_schema()`` to the generation config.
     """
 
-    # States the fact and asks for the tool call, not for shorter reasoning: this text is trained on
-    # wherever a recovery succeeds, so any instruction here generalizes beyond the cutoff case.
+    # States the fact and asks for the action — never for shorter reasoning. This text is trained on
+    # wherever a recovery succeeds, so any instruction here becomes a GLOBAL lesson, learned far
+    # outside the situation it was written for.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you made a tool call, so nothing was recorded. Make "
         "your tool call now with the best solution you have."
     )
 
-    # Per-tool-call shaping used when the config sets neither knob. Class attributes, like
-    # :data:`~src.environments.base.BaseEnvironment.DEFAULT_MAX_TURNS`, so a task env that differs
-    # states its value once instead of re-defaulting its constructor.
+    # Per-tool-call shaping a class gets when the config names none, declared like
+    # :data:`~src.environments.base.BaseEnvironment.DEFAULT_MAX_TURNS` so a task env that departs
+    # states its own value once instead of re-defaulting its constructor.
     DEFAULT_TOOL_SUCCESS_REWARD: float = 0.05
     DEFAULT_TOOL_ERROR_PENALTY: float = 0.1
 
@@ -58,8 +83,13 @@ class NativeToolUseEnvironment(BaseEnvironment):
         no_tool_use_penalty: float = 0.0,
         multi_turn_reward: float = 0.0,
         turn_overflow_penalty: float = 0.0,
+        tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
+        """``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``; an unlisted tool is
+        uncapped): a call past its cap is refused as a tool error with the tool's ``budget_message``
+        and never runs. Stamped into every episode at reset; a subclass may tighten the stamp per
+        episode (:meth:`~src.environments.base.BaseEnvironment._apply_effort_profile`)."""
         super().__init__(**kwargs)
         tool_success_reward = self.DEFAULT_TOOL_SUCCESS_REWARD if tool_success_reward is None else tool_success_reward
         tool_error_penalty = self.DEFAULT_TOOL_ERROR_PENALTY if tool_error_penalty is None else tool_error_penalty
@@ -73,6 +103,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         )
 
         self.registry = tool_registry
+        self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
         self.system_prompt = system_prompt
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.success_reward = success_reward
@@ -99,8 +130,16 @@ class NativeToolUseEnvironment(BaseEnvironment):
                 "tool_results": [],
                 "total_tool_calls": 0,
                 "successful_tool_calls": 0,
+                TOOL_CALL_COUNTS_KEY: {},
+                EPISODE_TOOL_BUDGETS_KEY: dict(self.tool_budgets),
             },
         )
+
+    @staticmethod
+    def active_trajectory() -> Trajectory | None:
+        """The episode whose tool call is executing — for a handler that grades or acts on per-episode
+        state — or ``None`` outside an episode binding (a handler called directly)."""
+        return _ACTIVE_TRAJECTORY.get()
 
     @staticmethod
     def _coerce_tool_calls(tool_calls_data: list[Any]) -> list[NativeToolCall]:
@@ -110,8 +149,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
     def _unknown_tool_result(self, tc: NativeToolCall) -> NativeToolResult:
         """Build the error result for a tool call naming a tool not in the registry.
 
-        The ``unknown_tool`` marker is what tokenization reads; the observation text comes from
-        :meth:`NativeToolRegistry.unknown_tool_message`.
+        The ``unknown_tool`` marker is what tokenization reads; the observation text is the
+        registry's one wording (:meth:`NativeToolRegistry.unknown_tool_message`).
         """
         return NativeToolResult(
             tool_call_id=tc.id,
@@ -137,11 +176,15 @@ class NativeToolUseEnvironment(BaseEnvironment):
             success=True,
         )
 
-    def _budget_exhausted_result(self, tc: NativeToolCall, exc: ToolBudgetExhausted) -> NativeToolResult:
-        """Build the result for a call refused as over-budget: a tool error, but expected control flow.
+    def _refused_call_result(
+        self, tc: NativeToolCall, exc: ToolBudgetExhausted | ToolArgumentError
+    ) -> NativeToolResult:
+        """A call the tool refused — over its per-episode budget, or arguments its handler cannot bind:
+        a tool error like any other, but expected control flow.
 
-        Logged without a traceback, since a refusal is routine (a 2-submission cap in a 15-turn
-        episode) and a stack trace per refusal would bury the faults ``_execute_tool_calls`` logs.
+        Logged without a traceback — an env with a 2-submission cap in a 15-turn episode refuses by
+        design, a ``submit_solution`` with no ``code`` is a model slip, and a stack trace per refusal
+        buries the faults that ``_execute_tool_calls`` logs.
         """
         logger.debug("Tool %r refused the call: %s", tc.name, exc)
         return self._result_from_call(tc, exc)
@@ -157,11 +200,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
     def _finalize_text_response(
         self, trajectory: Trajectory, action: str
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
-        """Terminal step for a plain-text (no tool call) model response, shared by sync and async.
+        """Terminal step for a plain-text (no tool call) model response, shared sync/async.
 
-        ``require_tool_use`` only flags a zero-tool-call finish here; the episode-level
-        ``no_tool_use_penalty`` is charged once by :meth:`_tool_use_shaping`, so charging a per-call
-        knob here as well would double-count the same condition.
+        ``require_tool_use`` only FLAGS a zero-tool-call finish here; its price is the episode-level
+        ``no_tool_use_penalty``, charged once by :meth:`_tool_use_shaping` (the single owner). Charging
+        a per-call knob here as well would double-bill the same condition.
         """
         trajectory.info["completed"] = True
         trajectory.info["final_response"] = action
@@ -174,11 +217,30 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
-        """Bind the executing episode for the ``with`` block, so a tool handler reading per-episode
-        state gets that episode's. Stateful subclasses set their ContextVars here; the base has none.
-        Entered around every tool batch, sync and async, and reset on exit, since one env instance
-        serves concurrent rollouts."""
-        yield
+        """Bind the executing episode for the ``with`` block, so a tool handler reaching for per-episode
+        state gets THIS episode's (:meth:`active_trajectory`). Entered around every tool batch, sync
+        and async, and reset on the way out — one env instance serves concurrent rollouts. A subclass
+        binding more (a workspace session) nests its own ContextVar inside ``super()``'s block."""
+        token = _ACTIVE_TRAJECTORY.set(trajectory)
+        try:
+            yield
+        finally:
+            _ACTIVE_TRAJECTORY.reset(token)
+
+    def _admit_call(
+        self, tool: NativeTool, tc: NativeToolCall, trajectory: Trajectory, *, for_async: bool = False
+    ) -> dict[str, Any]:
+        """Admit one call before it runs: bind its arguments (against the handler that will run), then
+        spend one of the episode's calls on the tool. Refuses (:class:`ToolArgumentError`,
+        :class:`ToolBudgetExhausted`) without counting, so a call the handler could never run does not
+        consume the budget; runs synchronously before any await so concurrent calls in one turn cannot
+        both pass a one-call cap."""
+        bound = tool.bind(tc.arguments, for_async=for_async)
+        cap = self._tool_budget_exhausted(trajectory, tc.name)
+        if cap is not None:
+            raise ToolBudgetExhausted(tool.budget_exhausted_message(cap))
+        self._count_tool_call(trajectory, tc.name)
+        return bound
 
     def _execute_tool_calls(
         self,
@@ -196,18 +258,14 @@ class NativeToolUseEnvironment(BaseEnvironment):
                     result = self._unknown_tool_result(tc)
                 else:
                     try:
-                        result = self._result_from_call(tc, tool.execute(**tc.arguments))
-                    except ToolBudgetExhausted as e:
-                        result = self._budget_exhausted_result(tc, e)
-                    except MissingToolArguments as e:  # the model's mistake, observed without a traceback
-                        logger.warning(
-                            "Tool %r called without required argument(s): %s", tc.name, ", ".join(e.missing)
-                        )
-                        result = self._result_from_call(tc, e)
-                    except Exception as e:  # a tool fault becomes an observation, not an episode failure
-                        # Graded tools run here too: a submit handler that dies on a malformed payload
-                        # becomes an ordinary tool error, and the trajectory would then record only
-                        # failure_reward, so the fault is logged.
+                        bound = self._admit_call(tool, tc, trajectory)
+                        result = self._result_from_call(tc, tool.execute(**bound))
+                    except (ToolBudgetExhausted, ToolArgumentError) as e:
+                        result = self._refused_call_result(tc, e)
+                    except Exception as e:  # a tool fault is an observation, not an episode kill
+                        # Logged because the graded tools run here too: a submit handler that dies on a
+                        # malformed payload becomes an ordinary tool error, and without this line the
+                        # episode just scores failure_reward with nothing anywhere saying why.
                         logger.warning("Tool %r raised during execution", tc.name, exc_info=True)
                         result = self._result_from_call(tc, e)
 
@@ -235,10 +293,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
         for result in results:
             trajectory.add_message(result.to_message())
 
-        # Nothing this turn could execute: mark the assistant message so the trainer skips it and a
-        # recovering episode does not reinforce the invented call. The assistant message precedes the
-        # tool results just appended. The check reads ``unknown_tool`` rather than the error text, so
-        # a tool whose backend answers "Tool not found: x" is not misread as a model mistake.
+        # Nothing this turn could execute: mark the assistant message so the trainer skips it (an
+        # episode that recovers must not reinforce the invented call). The assistant message precedes
+        # the tool results just appended. Read off ``unknown_tool``, never the error text — a tool
+        # whose backend answers "Tool not found: x" failed for real, and dropping that turn would hide
+        # a broken tool as a model mistake.
         if results and all(r.unknown_tool for r in results):
             for message in reversed(trajectory.messages):
                 if message.role == "assistant":
@@ -246,7 +305,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
                     break
 
         return {
-            # Executed calls (after the per-turn cap), so this agrees with total_tool_calls.
+            # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
             "step_tool_calls": len(results),
             "step_successful": sum(1 for r in results if r.success),
         }
@@ -277,15 +336,16 @@ class NativeToolUseEnvironment(BaseEnvironment):
     def _tool_use_engaged(self, trajectory: Trajectory) -> bool:
         """Gate for ``multi_turn_reward``: whether >1 tool call counts as genuine engagement.
 
-        Subclasses tighten it (CodeContests requires an actual submission, not repeated test calls).
+        Subclasses tighten it (e.g. CodeContests requires an actual submission, not test-tool spam).
         """
         return True
 
     def _tool_use_shaping(self, trajectory: Trajectory) -> float:
-        """Per-episode tool-use shaping: penalize 0 tool calls, reward >1 (gated by
-        ``_tool_use_engaged``), and charge ``turn_overflow_penalty`` when the episode exhausts
-        ``max_turns`` without terminating (``trajectory.truncated``, set by ``_finalize_step`` before
-        the reward runs). All magnitudes default to 0. Distinct from the per-call knobs."""
+        """Per-episode agentic-loop shaping: penalize 0 tool calls, reward >1 (gated by
+        ``_tool_use_engaged``), and penalize a ``max_turns`` overflow (``trajectory.truncated``, set by
+        ``_finalize_step`` before the reward runs) — an episode that burns the turn budget without
+        terminating pays ``turn_overflow_penalty`` regardless of what it did earn. All magnitudes
+        default to 0 (no-op). Distinct from the per-call knobs."""
         calls = trajectory.info.get("total_tool_calls", 0)
         if calls == 0:
             shaping = -self.no_tool_use_penalty
@@ -300,18 +360,18 @@ class NativeToolUseEnvironment(BaseEnvironment):
     def _shaped_base_reward(self, trajectory: Trajectory) -> float:
         """Accrued per-turn rewards plus the protocol-level tool-use shaping.
 
-        Every ``_compute_reward``, base class and subclass override alike, builds on this; composing
-        from ``trajectory.total_reward`` directly would drop the shaping knobs such as
-        ``turn_overflow_penalty``.
+        The single base every ``_compute_reward`` (base class and subclass overrides alike) builds
+        on — an override composing from ``trajectory.total_reward`` directly would silently drop
+        the shaping knobs (``turn_overflow_penalty`` et al.), the exact drift this seam prevents.
         """
         return trajectory.total_reward + self._tool_use_shaping(trajectory)
 
     def _compute_reward(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> float:
         """Compute final reward for the trajectory (answer validation + generic tool-use shaping).
 
-        The terminal ``success_reward`` applies to episodes with nothing to grade against (no
-        validator, no ``answer`` key), where completing is the objective. A row carrying an ``answer``
-        key holding ``None`` is a data fault and takes the invalid path instead.
+        The terminal ``success_reward`` is for episodes with nothing to grade against (no validator,
+        no ``answer`` key) — completing IS the objective there. A row that carries an ``answer`` key
+        holding ``None`` is a data fault, not such an episode, and takes the invalid path instead.
         """
         base_reward = self._shaped_base_reward(trajectory)
 
@@ -336,10 +396,10 @@ class NativeToolUseEnvironment(BaseEnvironment):
             )
 
         if "answer" in ctx:
-            # The dataset row is answer-graded and its cell is null, so nothing was verified: paying
-            # the completion fallback would give full success_reward to any episode that finished,
-            # and to its whole GRPO group. Drop the row from the baseline instead, as with a
-            # grading-infra outage.
+            # The dataset row is answer-graded and its cell is null: nothing was verified, so paying
+            # the completion fallback would hand full success_reward to ANY episode that finished —
+            # and to its whole GRPO group, since every sibling row completes just as easily. Drop it
+            # from the baseline instead (same contract as a grading-infra outage).
             logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
             trajectory.info[EPISODE_INVALID_KEY] = True
             return base_reward + self.failure_reward
@@ -362,12 +422,10 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
             if not tool:
                 return self._unknown_tool_result(tc)
             try:
-                return self._result_from_call(tc, await tool.execute_async(**tc.arguments))
-            except ToolBudgetExhausted as e:
-                return self._budget_exhausted_result(tc, e)
-            except MissingToolArguments as e:
-                logger.warning("Tool %r called without required argument(s): %s", tc.name, ", ".join(e.missing))
-                return self._result_from_call(tc, e)
+                bound = self._admit_call(tool, tc, trajectory, for_async=True)
+                return self._result_from_call(tc, await tool.execute_async(**bound))
+            except (ToolBudgetExhausted, ToolArgumentError) as e:
+                return self._refused_call_result(tc, e)
             except Exception as e:  # same contract as the sync path above
                 logger.warning("Tool %r raised during async execution", tc.name, exc_info=True)
                 return self._result_from_call(tc, e)

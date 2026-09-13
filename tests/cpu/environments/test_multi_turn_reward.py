@@ -34,7 +34,7 @@ def _traj(*, turns=1, tool_calls=0, submitted=False, passed=0, total=10):
     for _ in range(turns):
         t.add_message(Message.assistant("..."))
     t.info["total_tool_calls"] = tool_calls
-    t.info["submission_count"] = 1 if submitted else 0
+    t.info["tool_call_counts"] = {"submit_solution": 1} if submitted else {}
     if submitted:
         t.info["submission_result"] = "ok"
         t.info["tests_passed"] = passed

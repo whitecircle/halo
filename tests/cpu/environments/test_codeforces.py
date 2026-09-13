@@ -437,7 +437,7 @@ def test_test_tool_capped_per_episode():
         env.step(eids, [""], [{"tool_calls": [_repl_call(f"c{i}", "print('scratch')")]}])
 
     traj = env.get_trajectories(eids)[0]
-    assert traj.info["test_call_count"] == 2
+    assert traj.info["tool_call_counts"]["python_repl"] == 2
     tool_msgs = [m.content for m in traj.messages if m.role == "tool"]
     assert "scratch" in tool_msgs[0] and "scratch" in tool_msgs[1]
     assert "Test limit reached" in tool_msgs[2]
@@ -453,7 +453,7 @@ def test_single_submission_cap_ends_episode():
     env.step(eids, [""], [{"tool_calls": [_submit_call("c1", _CORRECT_ADD)]}])
 
     traj = env.get_trajectories(eids)[0]
-    assert traj.done and traj.info["submission_count"] == 1
+    assert traj.done and traj.info["tool_call_counts"]["submit_solution"] == 1
     assert traj.info["tests_passed"] == 2
     assert traj.total_reward == pytest.approx(1.0)
 
@@ -466,13 +466,13 @@ def test_submission_cap_rejects_extra_and_lifts_with_knob():
     e1, _ = env1.reset(["x"], [ctx])
     env1.step(e1, [""], [{"tool_calls": calls}])
     t1 = env1.get_trajectories(e1)[0]
-    assert t1.info["submission_count"] == 1 and t1.info["tests_passed"] == 0
+    assert t1.info["tool_call_counts"]["submit_solution"] == 1 and t1.info["tests_passed"] == 0
 
     env2 = CodeContestsEnvironment(language="python", output_comparison="tokens", max_submissions=2)
     e2, _ = env2.reset(["x"], [ctx])
     env2.step(e2, [""], [{"tool_calls": calls}])
     t2 = env2.get_trajectories(e2)[0]
-    assert t2.info["submission_count"] == 2 and t2.info["tests_passed"] == 2
+    assert t2.info["tool_call_counts"]["submit_solution"] == 2 and t2.info["tests_passed"] == 2
 
 
 def test_sandbox_fault_during_grading_marks_the_episode_invalid():
@@ -501,7 +501,7 @@ def test_sandbox_fault_during_grading_marks_the_episode_invalid():
     env.step(eids, [""], [{"tool_calls": [_submit_call("c1", _CORRECT_ADD)]}])
 
     traj = env.get_trajectories(eids)[0]
-    assert traj.done and traj.info["submission_count"] == 1
+    assert traj.done and traj.info["tool_call_counts"]["submit_solution"] == 1
     assert traj.info["tests_infra_errors"] == len(_ADD_TESTS)
     assert traj.info["tests_ran_ok"] == 0
     assert traj.episode_invalid is True

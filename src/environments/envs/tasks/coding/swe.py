@@ -1,8 +1,8 @@
 """SWE-agent style environment for software engineering tasks.
 
 Multi-turn and stateful: each episode gets its own persistent :class:`SandboxSession`, so files written
-on one turn are visible on the next. Tools bind to the active episode's session via a ``ContextVar``,
-so one env instance can serve concurrent rollouts.
+on one turn are visible on the next. Tools bind to the active episode's session via a ``ContextVar``, so
+one env instance safely serves concurrent rollouts.
 """
 
 import logging
@@ -31,7 +31,7 @@ class SweEnvironment(NativeToolUseEnvironment):
     per-episode :class:`SandboxSession` so state carries across turns.
     """
 
-    # An edit/run/test loop needs more turns than the protocol's generic budget allows.
+    # An agentic edit-run-test loop needs more turns than the protocol's generic budget.
     DEFAULT_MAX_TURNS = 20
 
     SWE_SYSTEM_PROMPT = """You are a skilled software engineer. You have access to tools for reading, writing, and executing code.
@@ -86,12 +86,14 @@ Tips:
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
-        """Bind the episode's persistent session so file/code tools operate on that workspace."""
-        token = _ACTIVE_SESSION.set(self._session_for(trajectory))
-        try:
-            yield
-        finally:
-            _ACTIVE_SESSION.reset(token)
+        """Bind the episode's persistent session so file/code tools operate on ITS workspace, inside
+        the protocol's own binding of the episode."""
+        with super()._episode_binding(trajectory):
+            token = _ACTIVE_SESSION.set(self._session_for(trajectory))
+            try:
+                yield
+            finally:
+                _ACTIVE_SESSION.reset(token)
 
     def _release_episode(self, episode_id: int) -> None:
         """Close the episode's persistent session, freeing its temp dir."""
@@ -124,10 +126,10 @@ Tips:
                 else:
                     return base_reward + self.failure_reward
             except Exception:
-                # A grader that itself errors scores every solution 0, so log it.
+                # A grader that itself errors scores every solution 0; warn so it's visible, not silent.
                 logger.warning("SWE test_function raised an exception; scoring as failure", exc_info=True)
-                # The forced failure says nothing about the completion, so the row is dropped from the
-                # GRPO group baseline rather than biasing every sibling's advantage.
+                # The forced failure says nothing about the completion, so it must not sit in the GRPO
+                # group baseline and bias every sibling's advantage.
                 trajectory.info[EPISODE_INVALID_KEY] = True
                 return base_reward + self.failure_reward
 
@@ -135,7 +137,7 @@ Tips:
         if ctx.get("validator") or ctx.get("answer") is not None:
             return super()._compute_reward(trajectory, context)
 
-        # Ungraded: a completion with no successful tool call takes the full failure_reward.
+        # Ungraded: a zero-tool-call completion takes the FULL failure_reward — softening it rewards the exploit.
         if trajectory.info.get("successful_tool_calls", 0) > 0:
             return base_reward + self.success_reward
         return base_reward + self.failure_reward

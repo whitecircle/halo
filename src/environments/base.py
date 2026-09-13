@@ -31,6 +31,16 @@ OBJECTIVE_REWARD_KEY = "reward/objective"
 # drops the metric rather than raising.
 SOLVE_RATE_KEY = "outcome/solve_rate"
 
+# Categorical per-episode facts an env stamps into ``info`` (``{"language": "cpp"}``); the trainer
+# slices its rollout metrics by each one as ``<slice>/<value>/*``, the way it slices by effort level.
+EPISODE_SLICES_KEY = "slices"
+
+# Per-tool call caps for one episode (``{tool_name: cap}``), stamped at reset; a tool absent from the
+# mapping is uncapped. The protocols that dispatch registry tools enforce them and count admitted
+# calls per tool under ``TOOL_CALL_COUNTS_KEY``.
+EPISODE_TOOL_BUDGETS_KEY = "episode_tool_budgets"
+TOOL_CALL_COUNTS_KEY = "tool_call_counts"
+
 
 # Message keys a chat template may read assistant CoT from: harmony (gpt-oss) reads ``thinking``,
 # other reasoning families ``reasoning_content``. Templates ignore a spelling they do not know, so
@@ -220,11 +230,28 @@ class BaseEnvironment(ABC):
     # recovery path and does not route cut-off turns there.
     LENGTH_CUTOFF_NUDGE: str | None = None
 
+    # Effort level -> profile defaults. The base binds no budget to any level (the global rollout caps
+    # stand); an env that prices effort declares its own table. ``reasoning_effort_profiles`` merges
+    # per level over it.
+    REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float]] = {level: {} for level in VALID_REASONING_EFFORTS}
+
+    # Profile keys this class admits and the minimum each takes; a subclass declares only the keys it
+    # adds, and the union over the MRO is what a profile may carry. ``thinking_tokens`` is the
+    # per-turn CoT budget, ``max_length_cutoff_recoveries`` tightens the env's recovery cap for the
+    # level, ``token_cost`` prices generated tokens (reward units per 1k, charged by the trainer).
+    # An int minimum declares a count (only ints admitted); a float minimum admits any finite number.
+    EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {
+        "thinking_tokens": 1,
+        "max_length_cutoff_recoveries": 0,
+        "token_cost": 0.0,
+    }
+
     def __init__(
         self,
         max_turns: int | None = None,
         max_observation_chars: int = 16384,
         max_length_cutoff_recoveries: int | None = None,
+        reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         **kwargs,
     ):
         """``max_turns`` caps turns before truncation, defaulting to this class's
@@ -233,7 +260,9 @@ class BaseEnvironment(ABC):
         (``None`` = every one within ``max_turns``): a cut turn spends a turn but no tool budget, so
         without a cap an episode whose thoughts overrun their budget re-thinks until ``max_turns``.
         ``reasoning_effort`` (popped from kwargs) steers the chat template's CoT depth:
-        ``low``/``medium``/``high``, ``"random"``, or ``None``.
+        ``low``/``medium``/``high``, ``"random"``, or ``None``. ``reasoning_effort_profiles`` overrides
+        the class's per-level profiles (:data:`REASONING_EFFORT_PROFILES`), merged per level; the
+        admitted keys are the union of :data:`EFFORT_PROFILE_KEY_MINIMA` over the class hierarchy.
 
         Any remaining keyword raises: the registry factories forward the whole ``env_config``, so a key
         no constructor in the chain binds is a typo or a knob meant for another ``env_type``.
@@ -254,6 +283,7 @@ class BaseEnvironment(ABC):
                 f"got {reasoning_effort!r}"
             )
         self.reasoning_effort = reasoning_effort
+        self.reasoning_effort_profiles = self._merge_effort_profiles(reasoning_effort_profiles)
         if kwargs:
             raise TypeError(
                 f"{type(self).__name__} got unexpected environment option(s) {sorted(kwargs)}. Every "
@@ -263,6 +293,94 @@ class BaseEnvironment(ABC):
 
         self._trajectories: dict[int, Trajectory] = {}
         self._episode_id_generator = itertools.count()
+
+    @classmethod
+    def effort_profile_key_minima(cls) -> dict[str, int | float]:
+        """The profile keys this class admits with their minima: every ``EFFORT_PROFILE_KEY_MINIMA``
+        declared along the MRO, a subclass's entry winning over its bases'."""
+        minima: dict[str, int | float] = {}
+        for klass in reversed(cls.__mro__):
+            minima.update(vars(klass).get("EFFORT_PROFILE_KEY_MINIMA", {}))
+        return minima
+
+    def _merge_effort_profiles(
+        self, overrides: dict[str, dict[str, int | float]] | None
+    ) -> dict[str, dict[str, int | float]]:
+        """Validate ``reasoning_effort_profiles`` overrides and merge them per level over the class defaults.
+
+        A level's recovery cap may tighten the env's ``max_length_cutoff_recoveries``, never exceed it.
+        """
+        minima = self.effort_profile_key_minima()
+        profiles = {level: dict(entry) for level, entry in self.REASONING_EFFORT_PROFILES.items()}
+        for level, entry in (overrides or {}).items():
+            if level not in VALID_REASONING_EFFORTS:
+                raise ValueError(
+                    f"reasoning_effort_profiles level must be one of {VALID_REASONING_EFFORTS}, got {level!r}"
+                )
+            unknown = set(entry) - set(minima)
+            if unknown:
+                raise ValueError(
+                    f"reasoning_effort_profiles[{level!r}] has unknown keys {sorted(unknown)}; "
+                    f"allowed: {sorted(minima)}"
+                )
+            for key, minimum in minima.items():
+                if key not in entry:
+                    continue
+                value = entry[key]
+                # NaN passes a plain minimum check and would poison every reward it enters.
+                if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+                    raise ValueError(f"{key} for effort {level!r} must be a finite number, got {value!r}")
+                if isinstance(minimum, int) and not isinstance(value, int):
+                    raise ValueError(f"{key} for effort {level!r} is a count and must be an int, got {value!r}")
+                if value < minimum:
+                    raise ValueError(f"{key} for effort {level!r} must be >= {minimum}, got {value}")
+            profiles.setdefault(level, {}).update(entry)
+        env_cap = self.max_length_cutoff_recoveries
+        for level, profile in profiles.items():
+            if env_cap is not None and profile.get("max_length_cutoff_recoveries", 0) > env_cap:
+                raise ValueError(
+                    f"reasoning_effort_profiles[{level!r}].max_length_cutoff_recoveries "
+                    f"({profile['max_length_cutoff_recoveries']}) exceeds the env's max_length_cutoff_recoveries ({env_cap})"
+                )
+        return profiles
+
+    def _bind_effort_profile(self, trajectory: Trajectory, context: dict[str, Any] | None) -> None:
+        """Stamp the episode's effort profile once its level is concrete at reset.
+
+        The generic keys land as the ``info`` stamps their consumers read (``_handle_length_cutoff``,
+        the trainer's token-cost charge); task-specific keys go through :meth:`_apply_effort_profile`.
+        An undetermined level (:meth:`reset_effort_level` returns ``None``) binds an empty profile, so
+        the hook still runs and can state the class caps.
+        """
+        level = self.reset_effort_level(context)
+        profile = self.reasoning_effort_profiles.get(level, {}) if level is not None else {}
+        if "max_length_cutoff_recoveries" in profile:
+            trajectory.info["episode_max_length_cutoff_recoveries"] = profile["max_length_cutoff_recoveries"]
+        if "token_cost" in profile:
+            trajectory.info["episode_token_cost"] = float(profile["token_cost"])
+        self._apply_effort_profile(trajectory, level, profile)
+
+    def _apply_effort_profile(  # noqa: B027  optional hook; task envs override
+        self, trajectory: Trajectory, level: str | None, profile: dict[str, int | float]
+    ) -> None:
+        """Bind a task's own profile keys (interaction budgets, bonuses) for one episode. Runs after
+        ``_reset_single`` on every episode, with ``level`` ``None`` and an empty ``profile`` when the
+        effort is undetermined at reset."""
+
+    @staticmethod
+    def _tool_budget_exhausted(trajectory: Trajectory, name: str) -> int | None:
+        """The episode cap another call of tool ``name`` would exceed, or ``None`` while within budget."""
+        cap = trajectory.info.get(EPISODE_TOOL_BUDGETS_KEY, {}).get(name)
+        if cap is not None and trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(name, 0) >= cap:
+            return cap
+        return None
+
+    @staticmethod
+    def _count_tool_call(trajectory: Trajectory, name: str) -> int:
+        """Count one admitted call of tool ``name`` for the episode; returns the new count."""
+        counts = trajectory.info.setdefault(TOOL_CALL_COUNTS_KEY, {})
+        counts[name] = counts.get(name, 0) + 1
+        return counts[name]
 
     def _truncate_observation(self, content: str) -> str:
         """Cap a tool observation's length. An unbounded output bloats the trajectory and makes the
@@ -278,9 +396,9 @@ class BaseEnvironment(ABC):
         return None
 
     def thinking_budget_for_effort(self, effort: str) -> int | None:
-        """Hard per-turn thinking-token budget for a resolved effort level, or ``None`` to use the
-        global rollout budget. Override in envs that bind a level to a token budget."""
-        return None
+        """Hard per-turn thinking-token budget for a resolved effort level (the level's profile
+        ``thinking_tokens``), or ``None`` to use the global rollout budget."""
+        return self.reasoning_effort_profiles.get(effort, {}).get("thinking_tokens")
 
     def reset_effort_level(self, context: dict[str, Any] | None) -> str | None:
         """The episode's effort level when it is already concrete at reset, else ``None``.
@@ -472,6 +590,7 @@ class BaseEnvironment(ABC):
         for prompt, context in zip(prompts, contexts, strict=False):
             episode_id = self._get_next_episode_id()
             trajectory = self._reset_single(prompt, context)
+            self._bind_effort_profile(trajectory, context)
             trajectory.info["episode_id"] = episode_id
 
             self._trajectories[episode_id] = trajectory
@@ -576,6 +695,7 @@ class AsyncBaseEnvironment(BaseEnvironment):
         async def reset_one(prompt, context):
             episode_id = self._get_next_episode_id()
             trajectory = await self._reset_single_async(prompt, context)
+            self._bind_effort_profile(trajectory, context)
             trajectory.info["episode_id"] = episode_id
             self._trajectories[episode_id] = trajectory
 

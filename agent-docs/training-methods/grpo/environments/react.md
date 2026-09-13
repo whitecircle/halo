@@ -32,6 +32,8 @@ Every knob is a **magnitude** (≥ 0) — the minus is applied at the use site, 
 
 ReAct has no episode-level shaping: `no_tool_use_penalty`, `multi_turn_reward`, `turn_overflow_penalty`, and `require_tool_use` belong to the [native](native-tool-use.md) protocol and raise `TypeError` here.
 
+`tool_budgets: {tool_name: cap}` caps calls per tool per episode under the native protocol's [admission rule](native-tool-use.md#per-tool-budgets): validated against the registry, `0` disables a tool, the episode stamped `episode_tool_budgets` and counting admitted calls in `tool_call_counts`; a call past its cap, or one whose arguments the handler cannot bind, is refused as a tool error (`−tool_error_penalty`) without being counted.
+
 **A turn the engine cut short** (`finish_reason` `length` — its token cap — or `abort`) **before it produced an Action or a Final Answer is a failed turn, not a format failure.** The episode appends a ReAct-shaped nudge (`ReActEnvironment.LENGTH_CUTOFF_NUDGE`, asking for the Action or Final Answer — never for shorter reasoning) and retries on its remaining `max_turns`; the count surfaces as `episode/length_cutoff_turns`.
 
 Such a turn is **unpriced in full**: neither `thought_reward` nor `no_thought_penalty` applies to a turn the model never finished. A turn whose text already carries its `Action:` or `Final Answer:` takes the normal path.

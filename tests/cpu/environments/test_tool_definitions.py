@@ -28,6 +28,7 @@ from src.environments.tools.definitions import (
     NativeToolCall,
     NativeToolRegistry,
     NativeToolResult,
+    ToolArgumentError,
     ToolParameter,
 )
 from src.environments.tools.factories import (
@@ -168,6 +169,63 @@ def test_execute_passes_arguments_through_when_the_tool_declares_no_schema():
     tool = NativeTool(name="passthrough", description="d", handler=lambda **kw: seen.update(kw) or "ok")
     tool.execute(anything=1, else_=2)
     assert seen == {"anything": 1, "else_": 2}
+
+
+def test_execute_refuses_a_call_missing_a_required_argument_before_the_handler_runs():
+    """The arguments are model-authored: ``submit_solution`` with no ``code`` is a routine slip, and the
+    handler's own ``TypeError`` would hand the model a Python signature and the protocol a traceback.
+    Every execute path refuses up front, naming the tool and the parameter, and the handler never runs."""
+    calls = []
+
+    def submit(code, timeout=1.0):
+        calls.append(code)
+        return "graded"
+
+    async def asubmit(code):
+        calls.append(code)
+        return "graded"
+
+    parameters = [ToolParameter("code", "string", "code")]
+    tool = NativeTool(
+        name="submit_solution", description="d", parameters=parameters, handler=functools.partial(submit, timeout=1.0)
+    )
+    atool = NativeTool(name="submit_solution", description="d", parameters=parameters, async_handler=asubmit)
+    refusal = r"^submit_solution: missing a required argument: 'code'$"
+    with pytest.raises(ToolArgumentError, match=refusal):
+        tool.execute()
+    with pytest.raises(ToolArgumentError, match=refusal):
+        asyncio.run(tool.execute_async())
+    with pytest.raises(ToolArgumentError, match=refusal):
+        asyncio.run(atool.execute_async())
+    assert calls == [], "a refused call must never reach the handler"
+    assert tool.execute(code="print(1)") == "graded"
+
+
+def test_a_required_schema_parameter_is_enforced_even_when_the_handler_has_a_default():
+    """The schema is what the model was shown; a handler default must not turn an omission into a run."""
+    tool = NativeTool(
+        name="submit_solution",
+        description="d",
+        parameters=[ToolParameter("code", "string", "code")],
+        handler=lambda code="": "graded",
+    )
+    with pytest.raises(ToolArgumentError, match=r"^submit_solution: missing a required argument: 'code'$"):
+        tool.execute()
+
+
+def test_an_async_only_tool_is_refused_by_the_sync_path_at_binding():
+    """Admission binds against the handler that will run; a sync call has none, so it is refused before
+    the protocol counts it rather than after ``execute`` fails."""
+
+    async def run(code: str) -> str:
+        return code
+
+    tool = NativeTool(
+        name="run", description="d", parameters=[ToolParameter("code", "string", "c")], async_handler=run
+    )
+    with pytest.raises(NotImplementedError):
+        tool.bind({"code": "x"}, for_async=False)
+    assert tool.bind({"code": "x"}, for_async=True) == {"code": "x"}
 
 
 def test_python_tool_cannot_have_its_timeout_raised_by_the_model():
