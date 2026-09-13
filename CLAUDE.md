@@ -170,7 +170,9 @@ src/
 │                        #   resolves moe_balancing
 ├── diagnostics/         # opt-in, off by default: debugging.py (hang/skew consistency checks, py-spy capture),
 │                        #   profiling.py (torch-profiler traces, CUDA memory snapshots),
-│                        #   performance_monitor.py (opt-in EP span timing)
+│                        #   performance_monitor.py (opt-in EP span timing),
+│                        #   weight_sync_transport.py (trainer↔rollout-server NCCL transport preflight behind
+│                        #   scripts/profiling/weight_sync_transport.py)
 ├── training/            # entry-script plumbing: parser.py (H4ArgumentParser), environment.py (output dir,
 │                        #   HF caches, seed, resume detection), script_runner.py (the scripts/training/**
 │                        #   backbone), parallelism_args.py (DistributedArguments → ParallelismConfig),
@@ -181,7 +183,7 @@ src/
 │                        #   warn_once; GPU model detection + peak-FLOPs table + host-RAM probe
 └── cli.py args/ configs/  # halo CLI; per-method arg dataclasses; config classes
 ```
-`scripts/` uses pipeline-stage folders: `training/ inference/ before_training/ after_training/ profiling/ environments/` (plus `diagrams/`, the docs-figure generators). Entry scripts share their flag surface per subtree — `scripts/inference/_common.py`, `scripts/inference/reward_model/_common.py`, `scripts/environments/_common.py` — or above them where the tools chain across subtrees (`scripts/_common.py`, the checkpoint tools' flags) — while the driver stays in `src/`. Configs in `examples/` split per method then per model family; environmental GRPO further splits per rollout backend (`vllm/`, plus `sglang/` for gpt-oss, Qwen3.5/3.6 and Gemma 4 — ep1 variants only) with one file per adapter (`-lora-`/`-full-`) × expert distribution (`-ep1`/`-ep4`). Layer map and leaf-module contracts: `agent-docs/reference/architecture.md`; per-topic depth via the doc index below.
+`scripts/` uses pipeline-stage folders: `training/ inference/ before_training/ after_training/ profiling/ environments/` (plus `diagrams/`, the docs-figure generators). Entry scripts share their flag surface per subtree — `scripts/inference/_common.py`, `scripts/inference/reward_model/_common.py`, `scripts/environments/_common.py` — or above them where the tools chain across subtrees (`scripts/_common.py`, the checkpoint tools' flags) — while the driver stays in `src/`. Configs in `examples/` split per method then per model family; environmental GRPO further splits per rollout backend (`vllm/`, plus `sglang/` for gpt-oss, Qwen3.5/3.6 and Gemma 4 — ep1 variants only) with one file per adapter (`-lora-`/`-full-`) × expert distribution (`-ep1`/`-ep4`), plus one per curriculum stage (`-stage1-medium`/`-stage2-hard`/`-stage3-extra-hard`) for the Qwen3.6 vLLM full-ep1 recipe. Layer map and leaf-module contracts: `agent-docs/reference/architecture.md`; per-topic depth via the doc index below.
 
 **Distributed trainers** (all extend `DistributedTrainerMixin`; EP/TP/ETP on all, CP where noted):
 

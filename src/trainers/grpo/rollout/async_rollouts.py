@@ -8,6 +8,7 @@ trained weights are pushed back to the engines over NCCL between steps.
 import asyncio
 import contextlib
 import logging
+import math
 import queue
 import threading
 import time
@@ -154,6 +155,7 @@ class AsyncRolloutMixin:
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        self._check_eval_round_fits_cap(self._rollout_manager.max_concurrent)
         self._loop.run_until_complete(self._rollout_manager.start())
 
         # Main-process only; a bare rank-0 raise would leave peers blocked in the first collective gather.
@@ -199,6 +201,16 @@ class AsyncRolloutMixin:
         self._sync_weights_to_engine_fenced(force=True)
         if self._prefetch_enabled:
             self._start_prefetch_thread()
+
+    def _check_eval_round_fits_cap(self, max_concurrent: int) -> None:
+        """An eval round above the in-flight cap runs in serial waves, so a straggler holds its peers at the
+        post-round collective for several ``episode_timeout``s and the NCCL watchdog fires first."""
+        rows = self.async_config.eval_rollout_batch_size
+        if rows is not None and rows > max_concurrent:
+            raise ValueError(
+                f"eval_rollout_batch_size ({rows}) exceeds max_concurrent_rollouts ({max_concurrent}): the eval "
+                f"round would run in {math.ceil(rows / max_concurrent)} waves. Raise the cap to the round."
+            )
 
     def _sync_weights_to_engine_fenced(self, force: bool = False) -> bool:
         """``_sync_weights_to_engine`` with the rank-0 failure joined to every rank. Collective.

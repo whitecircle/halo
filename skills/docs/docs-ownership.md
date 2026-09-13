@@ -17,6 +17,7 @@ changes.
 |---|---|
 | `src/trainers/mixins/base.py` (DistributedTrainerMixin) | `agent-docs/reference/trainer-architecture.md` + every parallelism page under `agent-docs/parallelism/` |
 | `src/trainers/mixins/` (sub-mixins: checkpointing, dataloader, EP introspection, grad sync/clip, validation, pipeline) | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md` (checkpointing), `agent-docs/parallelism/pipeline-parallelism.md` (pipeline) |
+| `src/trainers/mixins/token_metrics.py` (loss-token accumulation, per-document attention work behind `bind_attention_work_source`) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/trainers/sft.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |
 | `src/trainers/preference/` (DPO, SMPO, KTO) | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/smpo.md`, `agent-docs/training-methods/preference/kto.md` |
 | `src/trainers/grpo/` (online, offline, environmental) | `agent-docs/training-methods/grpo/{online-grpo,offline-grpo,environmental-grpo,grpo-comparison}.md` |

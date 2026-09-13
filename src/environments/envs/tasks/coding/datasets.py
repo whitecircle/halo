@@ -6,8 +6,10 @@ rows the stdin/stdout env cannot grade. Each dataset registers a :class:`CodeDat
 """
 
 import base64
+import io
 import json
 import pickle
+import re
 import zlib
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -20,6 +22,48 @@ from huggingface_hub import hf_hub_download
 _LCB_RELEASE_FILES: dict[str, list[str]] = {
     f"release_v{v}": [f"test{'' if i == 1 else i}.jsonl" for i in range(1, v + 1)] for v in range(1, 7)
 }
+
+# HardTests difficulty on the Codeforces rating scale. A Codeforces rating is used as is; Luogu's
+# seven levels and the coarse AtCoder/TACO labels map to a representative rating, so one rating
+# bound cuts the whole pool. Luogu level 0 is "unknown" and falls through to the other sources.
+_LUOGU_LEVEL_RATING = {1: 800, 2: 1000, 3: 1300, 4: 1600, 5: 2000, 6: 2400, 7: 2900}
+_HARDTESTS_LEVEL_RATING: dict[str, dict[str, int]] = {
+    "atcoder": {"easy": 1000, "medium": 1400, "hard": 1800, "very hard": 2400},
+    "taco": {"easy": 1000, "medium": 1400, "medium_hard": 1700, "hard": 2100, "very_hard": 2500},
+}
+_LIMIT_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# A time limit this large is spelled in milliseconds on the judges that write them as ``N s``.
+_MS_THRESHOLD = 50.0
+_MEMORY_LIMIT = re.compile(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(GI?B|MI?B|KI?B|BYTES?|B)?\b", re.IGNORECASE)
+_MEMORY_UNIT_MB = {
+    "GB": 1024.0,
+    "GIB": 1024.0,
+    "MB": 1.0,
+    "MIB": 1.0,
+    "KB": 1 / 1024,
+    "KIB": 1 / 1024,
+    "BYTE": 1 / 1024**2,
+    "BYTES": 1 / 1024**2,
+    "B": 1 / 1024**2,
+}
+# Outside this range a scraped limit is not a judge's (CodeChef rows carry ``50000 bytes``); the prompt
+# omits it.
+_MIN_MEMORY_LIMIT_MB = 1.0
+_MAX_MEMORY_LIMIT_MB = 8192.0
+# Runs HardTests' judging function under the env's checker contract: three file paths on argv
+# (input, expected, got), a trailing 1/0 on stdout. A judging function that raises rejects.
+_HARDTESTS_CHECKER_DRIVER = """
+
+if __name__ == "__main__":
+    import sys
+
+    _inp, _exp, _got = (open(p, encoding="utf-8", errors="replace").read() for p in sys.argv[1:4])
+    try:
+        _ok = bool(output_judging_function(_inp, _got, _exp))
+    except Exception:
+        _ok = False
+    print(1 if _ok else 0)
+"""
 
 
 def _format_problem_statement(
@@ -39,13 +83,16 @@ def _format_problem_statement(
     ``examples`` carries pre-numbered ``(index, input, output)`` triples so a dataset that skips a
     malformed example keeps the surviving ones' original numbering.
     """
-    parts: list[str] = [f"# {label}. {title}".strip(". ") if (label or title) else "# Problem"]
+    heading = (
+        f"# {label}. {title}" if (label and title) else (f"# {label or title}" if (label or title) else "# Problem")
+    )
+    parts: list[str] = [heading]
 
     limits = []
     if time_limit_s:
         limits.append(f"time limit per test: {time_limit_s:g} s")
     if memory_limit_mb:
-        limits.append(f"memory limit per test: {memory_limit_mb:g} MB")
+        limits.append(f"memory limit per test: {memory_limit_mb:.0f} MB")
     if limits:
         parts.append("\n".join(limits))
 
@@ -82,14 +129,31 @@ def format_codeforces_prompt(row: dict[str, Any]) -> str:
     )
 
 
+def stdin_tests(items: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
+    """``{input, output}`` pairs from test dicts, missing halves as empty strings — the env's test shape."""
+    return [{"input": t.get("input", ""), "output": t.get("output", "")} for t in items]
+
+
+def joined_tests(row: dict[str, Any]) -> list[dict[str, str]]:
+    """Tests the preparation script joined onto the row from a compacted tests table (``joined_tests``,
+    a JSON list of ``{input, output}``); empty when the row had no match."""
+    raw = row.get("joined_tests")
+    if not raw:
+        return []
+    tests = json.loads(raw) if isinstance(raw, str) else raw
+    return stdin_tests(tests)
+
+
 def pack_codeforces_verification(row: dict[str, Any]) -> dict[str, Any]:
     """Extract the grading payload from an ``open-r1/codeforces`` row.
 
-    Prefers ``official_tests``, falls back to ``examples``. ``None`` checker => token grading.
+    ``official_tests`` (only the ones Codeforces shows untruncated) plus the generated tests the
+    preparation script joined onto the row, falling back to ``examples``. ``None`` checker => token
+    grading.
     """
-    tests = list(row.get("official_tests") or [])
+    tests = list(row.get("official_tests") or []) + joined_tests(row)
     if not tests:
-        tests = [{"input": ex.get("input", ""), "output": ex.get("output", "")} for ex in row.get("examples") or []]
+        tests = stdin_tests(row.get("examples") or [])
     return {
         "tests": tests,
         "checker": row.get("generated_checker") or None,
@@ -149,25 +213,35 @@ def keep_deepcoder(row: dict[str, Any]) -> bool:
     return len(_parse_deepcoder_tests(row)) > 0
 
 
-def _decode_lcb_tests(raw: str) -> list[dict[str, Any]]:
-    """Decode a LiveCodeBench ``*_test_cases`` field into ``{input, output, testtype}`` dicts.
+class _StringOnlyUnpickler(pickle.Unpickler):
+    """Unpickler for the encoded test payloads, which hold one JSON string: no class or callable is ever
+    needed, so a payload that references one is refused instead of imported."""
 
-    Public tests are plain JSON; private tests are base64-of-zlib-of-pickle (official-data-only path).
+    def find_class(self, module: str, name: str) -> Any:
+        raise pickle.UnpicklingError(f"test payload references {module}.{name}; only a JSON string is expected")
+
+
+def decode_test_payload(raw: str) -> list[dict[str, Any]]:
+    """Decode a test-case field into ``{input, output, ...}`` dicts.
+
+    Plain JSON, or base64-of-zlib-of-pickle around a JSON string: the encoding LiveCodeBench uses for
+    its private tests and HardTests for its whole suites.
     """
     try:
         return json.loads(raw)
     except ValueError:
-        return json.loads(pickle.loads(zlib.decompress(base64.b64decode(raw.encode("utf-8")))))
+        payload = zlib.decompress(base64.b64decode(raw.encode("utf-8")))
+        return json.loads(_StringOnlyUnpickler(io.BytesIO(payload)).load())
 
 
 def _lcb_stdin_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     """Collect a LiveCodeBench row's stdin/stdout tests; LeetCode ``functional`` problems are skipped."""
-    tests: list[dict[str, str]] = []
-    for field in ("public_test_cases", "private_test_cases"):
-        for t in _decode_lcb_tests(row.get(field) or "[]"):
-            if t.get("testtype") == "stdin":
-                tests.append({"input": t.get("input", ""), "output": t.get("output", "")})
-    return tests
+    return stdin_tests(
+        t
+        for field in ("public_test_cases", "private_test_cases")
+        for t in decode_test_payload(row.get(field) or "[]")
+        if t.get("testtype") == "stdin"
+    )
 
 
 def format_titled_statement(row: dict[str, Any]) -> str:
@@ -192,7 +266,7 @@ def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator
     """Yield raw LiveCodeBench rows from a release's ``test*.jsonl`` files, newest contests first.
 
     ``config`` is the release tag (default ``release_v6``); ``split`` ignored. Bypasses ``load_dataset``,
-    whose loading script datasets 4.x no longer executes.
+    whose loading script datasets 4.x does not execute.
     """
     files = _LCB_RELEASE_FILES.get(config or "release_v6")
     if files is None:
@@ -205,12 +279,17 @@ def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator
                     yield json.loads(line)
 
 
+def _icpc_time_limit_s(row: dict[str, Any]) -> float | None:
+    """ICPC-Eval's ``time_limit_ms`` in seconds; ``None`` when the row carries none."""
+    return (row.get("time_limit_ms") or 0) / 1000 or None
+
+
 def format_icpc_prompt(row: dict[str, Any]) -> str:
     """Compose an ICPC-Eval problem statement from its title, description, I/O spec, and examples."""
     return _format_problem_statement(
         (row.get("problem_label") or "").strip(),
         (row.get("title") or "").strip(),
-        time_limit_s=(row.get("time_limit_ms") or 0) / 1000 or None,
+        time_limit_s=_icpc_time_limit_s(row),
         memory_limit_mb=row.get("memory_limit_mb"),
         description=row.get("description"),
         input_spec=row.get("input"),
@@ -236,8 +315,7 @@ def _icpc_tests(row: dict[str, Any]) -> list[dict[str, str]]:
 
 def pack_icpc_verification(row: dict[str, Any]) -> dict[str, Any]:
     """Pack an ICPC-Eval row's tests into the env payload (no checker, per-problem time limit)."""
-    time_limit = (row.get("time_limit_ms") or 0) / 1000 or None
-    return {"tests": _icpc_tests(row), "checker": None, "time_limit": time_limit}
+    return {"tests": _icpc_tests(row), "checker": None, "time_limit": _icpc_time_limit_s(row)}
 
 
 def keep_icpc(row: dict[str, Any]) -> bool:
@@ -250,16 +328,95 @@ def load_icpc(dataset: str, config: str | None, split: str) -> Iterator[dict[str
     yield from load_dataset(dataset, config, split=split or "test", streaming=True)
 
 
-# Of HLCE only the icpc-world-finals subset is gradable; the sibling ioi set has no hidden tests.
+def hardtests_rating(row: dict[str, Any]) -> int | None:
+    """A HardTests problem's difficulty on the Codeforces rating scale, or ``None`` when no source rates it."""
+    by_source = {r.get("source"): r for r in row.get("difficulty_ratings") or [] if r.get("source")}
+    codeforces = by_source.get("codeforces")
+    if codeforces and codeforces.get("score"):
+        return int(codeforces["score"])
+    luogu = by_source.get("luogu")
+    if luogu and luogu.get("score") and (rating := _LUOGU_LEVEL_RATING.get(int(luogu["score"]))) is not None:
+        return rating
+    for source, levels in _HARDTESTS_LEVEL_RATING.items():
+        rating = by_source.get(source)
+        if rating and rating.get("level") in levels:
+            return levels[rating["level"]]
+    return None
+
+
+def _hardtests_time_limit_s(raw: str | None) -> float | None:
+    """HardTests spells limits as ``N s`` with N in milliseconds on some judges (``2000 s``) and seconds
+    on others (``1 s``); a value of :data:`_MS_THRESHOLD` or more is milliseconds. A range (``1 - 2 s``)
+    keeps its upper bound."""
+    numbers = [float(x) for x in _LIMIT_NUMBER.findall(raw or "")]
+    if not numbers:
+        return None
+    value = max(numbers)
+    return value / 1000 if value >= _MS_THRESHOLD else value
+
+
+def _hardtests_memory_limit_mb(raw: str | None) -> float | None:
+    """The largest ``N <unit>`` in the field in megabytes (a bare number is megabytes); a range keeps its
+    upper bound, a value outside :data:`_MIN_MEMORY_LIMIT_MB`..:data:`_MAX_MEMORY_LIMIT_MB` is dropped."""
+    limits = [
+        float(number.replace(",", "")) * _MEMORY_UNIT_MB[(unit or "MB").upper()]
+        for number, unit in _MEMORY_LIMIT.findall(raw or "")
+    ]
+    value = max(limits, default=None)
+    return value if value is not None and _MIN_MEMORY_LIMIT_MB <= value <= _MAX_MEMORY_LIMIT_MB else None
+
+
+def normalize_hardtests(row: dict[str, Any]) -> dict[str, Any]:
+    """The prepared-row fields HardTests spells differently: ``id`` from ``pid``, ``rating`` on the
+    Codeforces scale, ``tags`` flattened across its rating sources."""
+    tags = sorted({tag for entry in row.get("tags") or [] for tag in (entry.get("content") or []) if tag})
+    return {"id": row.get("pid") or "", "rating": hardtests_rating(row), "tags": tags}
+
+
+def format_hardtests_prompt(row: dict[str, Any]) -> str:
+    """Title, limits and the statement body; the body already carries the I/O spec and the samples.
+    The ``[problemUrl]:`` line names the judge and is dropped."""
+    body = "\n".join(
+        line for line in (row.get("question_content") or "").splitlines() if not line.startswith("[problemUrl]:")
+    )
+    return _format_problem_statement(
+        "",
+        (row.get("question_title") or "").strip(),
+        time_limit_s=_hardtests_time_limit_s(row.get("time_limit")),
+        memory_limit_mb=_hardtests_memory_limit_mb(row.get("memory_limit")),
+        description=body,
+    )
+
+
+def hardtests_checker(judging_function: str | None) -> str | None:
+    """Wrap HardTests' ``output_judging_function(input_str, candidate_output, reference_output) -> bool``
+    into the env's ``checker.py`` contract; ``None`` when the problem has no special judge."""
+    source = (judging_function or "").strip()
+    return source + _HARDTESTS_CHECKER_DRIVER if source else None
+
+
+def pack_hardtests_verification(row: dict[str, Any]) -> dict[str, Any]:
+    """Pack the joined HardTests suite, its judging function as a checker, and the per-problem time limit."""
+    return {
+        "tests": joined_tests(row),
+        "checker": hardtests_checker(row.get("joined_checker")),
+        "time_limit": _hardtests_time_limit_s(row.get("time_limit")),
+    }
+
+
+def keep_hardtests(row: dict[str, Any]) -> bool:
+    """Keep rated stdin/stdout HardTests problems that received a suite; functional problems
+    (``starter_code``) and problems no source rates are dropped."""
+    if row.get("starter_code"):
+        return False
+    if row.get("rating") is None:
+        return False
+    return len(joined_tests(row)) > 0
 
 
 def _hlce_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     """Collect an HLCE row's stdin/stdout ``test_cases`` (a list of ``{input, output}`` dicts)."""
-    return [
-        {"input": t.get("input", ""), "output": t.get("output", "")}
-        for t in (row.get("test_cases") or [])
-        if isinstance(t, dict)
-    ]
+    return stdin_tests(t for t in (row.get("test_cases") or []) if isinstance(t, dict))
 
 
 def pack_hlce_verification(row: dict[str, Any]) -> dict[str, Any]:
@@ -273,7 +430,8 @@ def keep_hlce(row: dict[str, Any]) -> bool:
 
 
 def load_hlce(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
-    """Stream HLCE ICPC World Finals rows. ``split`` is ignored — the dataset is a single ``train`` set."""
+    """Stream HLCE ICPC World Finals rows. ``split`` is ignored — the dataset is a single ``train`` set.
+    Only the icpc-world-finals subset is gradable; the sibling ioi set has no hidden tests."""
     yield from load_dataset(dataset, config, split="train", streaming=True)
 
 
@@ -292,10 +450,22 @@ class CodeDatasetAdapter:
     group_field: str = "rating"
     group_label: str = "rating"
     load: Callable[[str, str | None, str], Iterable[dict[str, Any]]] | None = None
+    # Prepared-row fields a source spells differently (``id``/``rating``/``tags``), added by the
+    # preparation script before its filters run; ``None`` => the raw row already carries them.
+    normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+
+    @property
+    def scores_raw_rows(self) -> bool:
+        """Whether the eval scripts can score the source's raw rows. A source whose prepared fields need
+        ``normalize`` (and a joined tests table) is scored from its prepared pool instead."""
+        return self.normalize is None
 
 
 CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
     "codeforces": CodeDatasetAdapter(format_codeforces_prompt, pack_codeforces_verification, keep_codeforces),
+    "hardtests": CodeDatasetAdapter(
+        format_hardtests_prompt, pack_hardtests_verification, keep_hardtests, normalize=normalize_hardtests
+    ),
     # DeepCoder rows have no rating/difficulty column, so no report bucket (overall metrics only).
     "deepcoder": CodeDatasetAdapter(format_deepcoder_prompt, pack_deepcoder_verification, keep_deepcoder),
     "livecodebench": CodeDatasetAdapter(

@@ -310,6 +310,26 @@ def test_env_reset_parses_payload_and_reward_is_fraction():
     assert reward == pytest.approx(0.5)
 
 
+def test_pass_fraction_exponent_makes_partial_credit_convex():
+    """With the exponent above 1 a half-right submission earns well under half a solve, while a full
+    pass and a zero pass are unchanged — the knob reshapes partial credit only."""
+
+    def graded(env, passed, total):
+        traj = env._reset_single("Print a+b.", {"answer": {"tests": _ADD_TESTS, "checker": None}})
+        traj.info.update(tests_passed=passed, tests_total=total, submission_result="graded", completed=True)
+        return env._compute_reward(traj)
+
+    convex = CodeContestsEnvironment(language="python", pass_fraction_exponent=2.0)
+    linear = CodeContestsEnvironment(language="python")
+    assert graded(convex, 1, 2) == pytest.approx(0.25)
+    assert graded(linear, 1, 2) == pytest.approx(0.5)
+    assert graded(convex, 2, 2) == pytest.approx(graded(linear, 2, 2)) == pytest.approx(1.0)
+    assert graded(convex, 0, 2) == pytest.approx(graded(linear, 0, 2)) == pytest.approx(0.0)
+    for bad in (0.0, -1.0, float("inf")):
+        with pytest.raises(ValueError, match="pass_fraction_exponent"):
+            CodeContestsEnvironment(language="python", pass_fraction_exponent=bad)
+
+
 def test_python_test_tool_runs_complete_program_with_imports():
     """The python_repl test tool runs a complete program through the grading sandbox.
 

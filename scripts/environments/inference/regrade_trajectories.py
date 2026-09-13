@@ -75,8 +75,15 @@ def _load_payloads(adapter_name: str, dataset: str, config: str | None, split: s
     ``build_examples`` produced, so an episode's ``index`` selects its problem. Cached so re-grading a
     whole model x language matrix loads each dataset once."""
     adapter = CODE_DATASET_ADAPTERS[adapter_name]
+    if not adapter.scores_raw_rows:
+        raise SystemExit(
+            f"adapter {adapter_name!r} scores prepared pools only; its raw rows carry no gradable payload"
+        )
     rows = adapter.load(dataset, config, split) if adapter.load else load_hf_split(dataset, config, split)
-    return tuple(adapter.pack_verification(row) for row in rows if adapter.keep(row))
+    payloads = tuple(adapter.pack_verification(row) for row in rows if adapter.keep(row))
+    if not payloads:
+        raise SystemExit(f"{dataset} ({adapter_name}) yielded no gradable problem")
+    return payloads
 
 
 def build_payloads(meta: dict[str, Any]) -> tuple[dict[str, Any], ...]:

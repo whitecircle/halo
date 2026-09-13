@@ -400,5 +400,31 @@ def test_all_turns_excluded_trains_a_zero_weight_row():
     assert trainer._batch_build_error is None
 
 
+def test_recovery_cap_ends_the_episode_truncated_at_the_cut_past_it():
+    env = _make_env(max_length_cutoff_recoveries=1)
+    eid = _reset(env)
+    first = env.step([eid], ["a thought that ran out of room"], [{"finish_reason": "length"}])[0]
+    assert not first.done and first.info["length_cutoff"], "the first cut is recovered as before"
+    traj = env.get_trajectories([eid])[0]
+    assert traj.messages[-1].content == NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE
+    second = env.step([eid], ["another thought that ran out of room"], [{"finish_reason": "length"}])[0]
+    assert second.done and second.truncated, "the cut past the cap ends the episode like a max_turns overflow"
+    assert second.info["length_cutoff_recoveries_exhausted"]
+    traj = env.get_trajectories([eid])[0]
+    assert traj.info["length_cutoff_turns"] == 2
+    assert traj.messages[-1].content != NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE, (
+        "no nudge for a turn that ends the episode"
+    )
+
+
+def test_recovery_cap_of_zero_ends_the_episode_at_the_first_cut_and_negative_is_refused():
+    env = _make_env(max_length_cutoff_recoveries=0)
+    eid = _reset(env)
+    step = env.step([eid], ["a fragment"], [{"finish_reason": "length"}])[0]
+    assert step.done and step.truncated
+    with pytest.raises(ValueError, match="max_length_cutoff_recoveries must be >= 0"):
+        _make_env(max_length_cutoff_recoveries=-1)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

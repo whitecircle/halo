@@ -37,10 +37,12 @@ VERDICT_DETAIL_FULL = "full"
 VERDICT_DETAIL_OUTCOME = "outcome"
 VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
 
+# The checker's argv contract: the test input, the reference output, the candidate output, in this order.
+CHECKER_FILES = ("input.txt", "correct_output.txt", "solution_output.txt")
 # run() cannot pass argv, so a runpy shim supplies the Codeforces checker argv contract.
 _CHECKER_DRIVER = (
     "import runpy, sys\n"
-    'sys.argv = ["checker.py", "input.txt", "correct_output.txt", "solution_output.txt"]\n'
+    f"sys.argv = {['checker.py', *CHECKER_FILES]!r}\n"
     'runpy.run_path("checker.py", run_name="__main__")\n'
 )
 
@@ -146,9 +148,7 @@ class CheckerVerdict:
             timeout=self.timeout,
             files={
                 "checker.py": self.checker_code,
-                "input.txt": test_input,
-                "correct_output.txt": expected,
-                "solution_output.txt": actual,
+                **dict(zip(CHECKER_FILES, (test_input, expected, actual), strict=True)),
             },
         )
         if result.error:

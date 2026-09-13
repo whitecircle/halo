@@ -67,7 +67,7 @@ A sample is a *success* when its reward ≥ `--success_threshold` (default `1.0`
 
 The report logs per-run trajectory telemetry (mean turns, `used_tools` %, mean tool calls, mean completion tokens, `length_capped` %), so token starvation is distinguishable from wrong answers.
 
-**`run_code_contests.py`** — competitive programming; applies a dataset adapter (`codeforces`, `deepcoder`, `livecodebench`, `icpc`, `hlce`), prompts in `--language`, buckets by the adapter's group field. See [Code Contests](code-contests.md).
+**`run_code_contests.py`** — competitive programming; applies a dataset adapter that scores raw rows (`codeforces`, `deepcoder`, `livecodebench`, `icpc`, `hlce`; `hardtests` is scored from its prepared pool), prompts in `--language`, buckets by the adapter's group field. See [Code Contests](code-contests.md).
 
 **`run_env.py`** — generic runner for the other envs (QA, exam, SWE, MCP); reads `--prompt_field` / `--answer_field` columns, extra columns via `--context_fields`, optional `--group_by`. `--dataset` takes a Hub id or a `save_to_disk` directory (a bare `Dataset` or a `DatasetDict`, in which case `--split` selects).
 
