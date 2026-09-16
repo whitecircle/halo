@@ -4,7 +4,7 @@
 
 FA2 is the detector's terminal default, with no availability probe — every shipped image carries it, and a host without it raises at model build. Context Parallelism hard-requires flash-attn and raises `ImportError` when it is missing.
 
-Why tiling attention is the standard fix for the model's most memory-bound op: [GPU Training Theory §6](../reference/gpu-training-theory.md#6-attention-the-canonical-memory-bound-fix).
+Why tiling attention is the standard fix for the model's most memory-bound op: [GPU Training Theory §6](../reference/gpu-training-theory.md#6-attention--the-canonical-memory-bound-fix).
 
 ## Supported backends
 

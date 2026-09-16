@@ -46,8 +46,6 @@ The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teac
 
 ### Loss types
 
-<!-- markdownlint-disable MD056 -- pipes inside a code span are literal to Python-Markdown -->
-
 | `distill_loss` | What it computes |
 |---|---|
 | `kl_divergence` | `KL(teacher ‖ student)` at `distill_temperature` |
@@ -55,11 +53,9 @@ The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teac
 | `soft_cross_entropy` | `-sum(teacher_probs · log student_probs)` at `distill_temperature` |
 | `cosine_similarity` | `1 - cos(teacher_logits, student_logits)`; tolerant of logit-scale differences |
 | `jensen_shannon` | `0.5·KL(P‖M) + 0.5·KL(Q‖M)` with `M` the midpoint — symmetric |
-| `earth_mover_distance` | Per-token 1-Wasserstein `sum_v |CDF_s(v) − CDF_t(v)|` over the vocab axis |
+| `earth_mover_distance` | Per-token 1-Wasserstein `sum_v \|CDF_s(v) − CDF_t(v)\|` over the vocab axis |
 | `alpha_beta_divergence` | Alpha-beta divergence at its fixed `α=1.0`, `β=2.0`; unrelated to `distill_alpha`, and not settable |
 | `slim` | Soft cross-entropy kept at the gold token, scaled by `1 - exp(-teacher_prob/student_prob)` |
-
-<!-- markdownlint-enable MD056 -->
 
 `distill_temperature` reaches `kl_divergence`, `soft_cross_entropy`, `jensen_shannon` and `slim`; the other four take no temperature, so setting it there changes nothing. Every softened divergence is scaled by `distill_temperature²` (Hinton's convention), which holds the distillation term's pull — and its weight against CLM — fixed as the temperature moves.
 

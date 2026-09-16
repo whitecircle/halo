@@ -38,8 +38,8 @@ environment_kwargs:
 | `verdict_detail` | `full` | `full` shows a failed test's expected and produced output; `outcome` the verdict alone |
 | `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |
-| `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit |
-| `max_grading_seconds` | `None` | Wall-clock budget for one grade |
+| `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit; a non-finite or non-positive value raises at construction |
+| `max_grading_seconds` | `None` | Wall-clock budget for one grade; a non-positive value raises at construction |
 | `repl_timeout` | 15 s | Cap on one scratchpad run |
 | `max_output_size` | 1 MB | Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated |
 | `stop_on_first_failure` | `false` | Stop at the first failing test; the pass fraction becomes a lower bound |
@@ -65,7 +65,7 @@ constructor's budgets stand.
 
 ## Tools
 
-- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Past `max_test_calls` a call is refused.
+- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused.
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. Reaching `max_submissions` ends the episode.
 
 A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. With a
@@ -116,6 +116,11 @@ is the anti-sparsity signal: where every completion fails, it separates runnable
 crashes. Components log as `reward/*` and sum exactly to the reward. A `judge` or `reward_model`
 term reads the submitted program as a fenced code block, not the tool-call turn that carried it
 ([Reward Terms](../rewards.md#environment-arm)).
+
+Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls`,
+`episode/tested_before_submission` (over submitting episodes, the rate the tested-submission bonus
+targets), `episode/grading_budget_hit`, and `episode/language_switches` where the model picks the
+language.
 
 ## Dataset
 

@@ -178,7 +178,7 @@ For a 20B MoE budget roughly: weights ~40 GB (shared, read-only), HF cache ~80 G
 scratch ~100 GB (local NVMe).
 
 `HF_DATASETS_CACHE` grows without bound across config sweeps: every distinct
-(function, tokenizer, knobs, dataset, library-version) tuple leaves a permanent `cache-*.arrow` set,
+(function, tokenizer **content**, knobs, dataset, library-version) tuple leaves a permanent `cache-*.arrow` set,
 plus `packed_*.arrow` per packing shape, and `hf cache prune` reclaims only the hub cache, not
 these. Reclaim by deleting the directory — every cache name is deterministic, so the next run
 rebuilds exactly what it needs.

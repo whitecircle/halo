@@ -197,7 +197,7 @@ half is symmetric: `close_communicator()` aborts its own communicator instead of
 halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit.py`.
 
 Checkpoint layout and expert un-fuse rules live in
-[Checkpoints](../reference/checkpoints.md#serving-on-vllm-sglang).
+[Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).
 
 ### Construction gates
 
@@ -381,7 +381,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 | `VLLM_GPU_MEM` | `0.85` | `--gpu-memory-utilization` |
 | `VLLM_MOE_BACKEND` | `triton` | Keep `triton` for MoE RL ([Weight sync](#weight-sync)) |
 | `VLLM_ENABLE_R3` | *(unset)* | Any non-empty value adds `--enable-return-routed-experts` (R3 capture); the `triton` MoE backend is the one the capture hook reaches |
-| `VLLM_ATTENTION_BACKEND` | *(unset = auto)* | `--attention-backend`. GLM-4 MoE Lite (MLA) on Blackwell needs `CUTLASS_MLA`: the auto-selected FlashInfer MLA decode kernel rejects its head config at graph capture ([MLA backend](../reference/checkpoints.md#serving-on-vllm-sglang)) |
+| `VLLM_ATTENTION_BACKEND` | *(unset = auto)* | `--attention-backend`. GLM-4 MoE Lite (MLA) on Blackwell needs `CUTLASS_MLA`: the auto-selected FlashInfer MLA decode kernel rejects its head config at graph capture ([MLA backend](../reference/checkpoints.md#serving-on-vllm--sglang)) |
 | `VLLM_SPECULATIVE_CONFIG` | *(unset)* | `--speculative-config` JSON, e.g. `{"method":"mtp","num_speculative_tokens":2}` for a checkpoint that ships an MTP head ([Throughput](#throughput)); pair it with `VLLM_PREFIX_CACHING_FLAG=--no-enable-prefix-caching` on 0.26.0 |
 | `VLLM_PREFIX_CACHING_FLAG` | `--enable-prefix-caching` | Set to `--no-enable-prefix-caching` to turn the cache off |
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` | `0` | vLLM's grammar-constrained tool calling; off so the served distribution is the policy's and the engine core skips per-step grammar work ([Throughput](#throughput)) |
@@ -407,14 +407,18 @@ Flags the compose file already sets that are load-bearing for RL:
   `rollout_temperature` ≠ 1 every IS weight is π^T / π^1 while `sampling/is_ratio_mean` still reads
   ≈ 1.
 
-    The trainer scores its log-probs at `rollout_temperature` and divides by the reported values.
-    Above 1 the weights tilt toward improbable tokens (entropy climbs step over step); below 1 toward
-    confident ones (entropy collapses). The trainer probes each server at startup (temperature 2
-    must halve the top-1/top-2 gap) and refuses a raw server whenever `rollout_temperature` ≠ 1.
+    The trainer scores its log-probs at the sampling temperature (`rollout_temperature`, or TRL's
+    `temperature` on the online arm) and divides by the reported values. Above 1 the weights tilt
+    toward improbable tokens (entropy climbs step over step); below 1 toward confident ones (entropy
+    collapses). The trainer probes each server at startup (temperature 2 must halve the top-1/top-2
+    gap) and refuses a raw server whenever that temperature ≠ 1.
 
-    Under this mode a top-p < 1 also renormalizes every uncertain position over its nucleus, which
-    the trajectory geometric band reads as drift: set `rollout_top_p: 1.0` whenever
-    `isr_geo_band_min/max` is set (also probed and refused).
+    Under this mode a top-p < 1 also renormalizes every uncertain position over its nucleus, lifting
+    it by the nucleus mass. Whenever the per-token log-ratios are summed per sequence — the env arm's
+    trajectory geometric band (`isr_geo_band_min/max`), or an online `sequence_*`
+    `vllm_importance_sampling_mode` — that pairing is probed and refused: the band reads the sum as
+    drift and a sequence-level IS weight collapses toward 0, stalling the run silently. Fix it with
+    `rollout_top_p: 1.0` / `top_p: 1.0`, a `token_*` IS mode, or by dropping the band.
 
 `--max-model-len` is left unset: the server serves the model's native context window. The trainer's
 startup probe reads it off `/v1/models` and **raises** when `max_prompt_length` plus one turn's
@@ -447,7 +451,7 @@ ReAct envs parse actions from the response text, so a mismatched parser costs th
 | Qwen3 / Qwen3.5 / 3.6 | `qwen3_xml` (hermes does NOT parse their XML calls) |
 | GPT-OSS | bundled plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4 | `glm45` / `glm47` |
-| Gemma 4 | `gemma4` (hermes leaves its `<|tool_call>call:…<tool_call|>` calls as text, so no tool ever runs); with a thinking budget (`rollout_max_thinking_tokens`, or an env's per-effort `thinking_tokens` profile) also `VLLM_REASONING_PARSER=gemma4` and `VLLM_USE_V2_MODEL_RUNNER=0`, else every request 400s |
+| Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text, so no tool ever runs); with a thinking budget (`rollout_max_thinking_tokens`, or an env's per-effort `thinking_tokens` profile) also `VLLM_REASONING_PARSER=gemma4` and `VLLM_USE_V2_MODEL_RUNNER=0`, else every request 400s |
 | most others | `hermes` (`<tool_call>` XML) |
 
 `docker-compose.vllm.yml` defaults **both** containers to the no-fabric recipe (`NCCL_IB_DISABLE=1`
@@ -547,7 +551,8 @@ Engine behavior under RL:
 
 - **`rollout_max_thinking_tokens` is rejected at config time** for every model: SGLang ignores
   unknown request fields, and the trainer wires neither of its budget mechanisms. Steer with the
-  environment's `reasoning_effort`.
+  environment's `reasoning_effort`, which reaches the **chat template** only — a per-level
+  `thinking_tokens` profile reaches no SGLang request field and is warned once, not enforced.
 
     The custom-logit-processor path needs a per-model class; the strict-thinking grammar needs a
     detector exposing `think_excluded_tokens`. For harmony models neither exists server-side.

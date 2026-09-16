@@ -120,7 +120,7 @@ describes a validator or contract, never a launchable topology
   **pure DP or CP**. (EP already shards over the EP group; PP cannot restrict a 2-D mesh
   to a stage's rank block.)
 - **Every PP pairing outside the expert axes** — `PP+TP`, `PP+CP`, `PP+EP+TP`, `PP+EP+CP`,
-  `PP+EP+ETP` (`PP+EP` and pure `PP+ETP` are supported, both together are not). Plus
+  `PP+EP+ETP` (`PP+EP` and pure `PP+ETP` are admitted by the allowlist, both together are not; PP itself is not available in this release). Plus
   these PP-specific config-time raises: `pp_split` length mismatch or an entry < 1 (the
   sum-vs-layer-count check runs later, at model split); a stage that is
   not a whole NVLink domain; a 1-rank stage; `fsdp_shard_ep1_experts=False`; `use_hsdp=True`;

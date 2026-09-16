@@ -7,7 +7,7 @@ DeepEP all-to-all.
 
 Use it when expert layers exceed single-GPU memory. Why the tokens-per-expert count sets the speed of
 every expert GEMM:
-[GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example-why-small-per-expert-m-is-slow).
+[GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
 EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP) — there is no NCCL fallback.
 Non-EP gradients sync via FSDP2 (`fully_shard`, EP modules in `ignored_params`); router and expert

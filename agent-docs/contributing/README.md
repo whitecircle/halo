@@ -261,7 +261,7 @@ with one row per leg, so each gets its own pytest node and verdict (`--mode` on
 
 A leg that changes the model family, the parallelism axis, or the runtime stays an env override:
 registering it as a row would file an EP-on-20B run under the entry's `tp`/dense markers and its
-neighbour's timeout.
+neighbor's timeout.
 
 That is also why the twelve `gpt-oss` SFT scripts under `trainers/sft/` (`test_sft_ep*`,
 `test_sft_oss20b_*`) stay separate entries rather than collapsing into one matrix: `-m "gpu and cp"`

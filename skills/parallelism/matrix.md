@@ -87,7 +87,7 @@ Notes:
 
 From `CLAUDE.md` "Distributed Trainers" table. All extend `DistributedTrainerMixin`.
 
-| Trainer | EP | CP | TP | ETP | PP |
+| Trainer | EP | CP | TP | ETP | PP (declared, inert) |
 |---------|:--:|:--:|:--:|:--:|:--:|
 | `DistributedSFTTrainer` (SFT) | Yes | Yes | Yes | Yes | Yes |
 | `SmoothMarginPOTrainer` (SMPO) | Yes | Yes | Yes | Yes | Yes |

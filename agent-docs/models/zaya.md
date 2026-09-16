@@ -79,7 +79,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when bias_update is active
 - **Grouped GEMM** (`F.grouped_mm`) — default on SM90+; disable with `use_grouped_gemm: false`.
 - **Liger** — upstream has no `zaya` applier; the toolkit covers it from its own spec (`src/kernels/liger/families.py`). It defaults to the fused loss plus Liger RMSNorm; CE is off when the fused loss is on.
 
-    The fused loss skips the `[B*S, 262272]` logits plane (~17 GB at batch 1, `S=32k`), which unlocks `b=1,S=32k` / `b=2,S=16k`. RoPE is not swapped (partial rotary: `rope_parameters` carries `partial_rotary_factor: 0.5` per layer type), and no GLU is swapped (the EP wrapper replaces the whole MoE block).
+    The fused loss skips the `[B*S, 262272]` logits plane (~17 GB at batch 1, `S=32k`), which fits `b=1,S=32k` / `b=2,S=16k`. RoPE is not swapped (partial rotary: `rope_parameters` carries `partial_rotary_factor: 0.5` per layer type), and no GLU is swapped (the EP wrapper replaces the whole MoE block).
 
 - **`torch.compile`** — untested, default off; expect graph breaks at DeepEP dispatch boundaries.
 

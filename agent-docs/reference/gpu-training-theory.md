@@ -502,7 +502,7 @@ Across nodes it rides the fabric: ~53 GB/s over EFA against ~10 GB/s on sockets,
 
 ## 11. Measuring it yourself
 
-### Watch power, not utilization %
+### Watch power, not utilization
 
 A `nvidia-smi` util % of 100 means an SM had a warp scheduled, not that tensor cores did math. A memory- or launch-bound kernel reads near 100% util while the ALUs idle. Power is the honest signal:
 

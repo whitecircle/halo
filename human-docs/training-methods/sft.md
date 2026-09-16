@@ -49,8 +49,8 @@ showing up in the loss curve.
 ## Three data decisions
 
 **Completion-only masking** (`train_on_completions_only`, on by default) trains on assistant turns
-only and masks the prompt. It needs `assistant_message_template`, the exact rendered prefix of an
-assistant turn, which is checked against the chat template at startup.
+only and masks the prompt. It needs `assistant_message_template`; the startup probe raises only when
+*no* message shape renders that marker, so one only a reasoning turn renders masks every row.
 
 **Packing** (`packing: true`) concatenates short rows into fixed `max_length` blocks so no GPU time
 goes into padding. It requires an explicit `max_length`, which becomes both the pack size and the
@@ -68,8 +68,8 @@ the template you will serve under**. A mismatch costs quality and shows up nowhe
 By default the model's own template is used. `chat_template` overrides it with a path to a `.jinja`
 file or an inline template string, and `force_chat_template: true` is required when the tokenizer
 already carries one — without it your template is dropped without a word. Bundled templates live in
-`jinja-templates/<family>/`; the `*-native.jinja` ones are verbatim upstream templates, to pin when the render must
-match a rollout server byte for byte.
+`jinja-templates/<family>/`; pin a verbatim upstream one (`*-native.jinja`, and `gpt-oss-harmony.jinja`
+for GPT-OSS) when the render must match a rollout server byte for byte.
 
 `assistant_message_template` is separate and must byte-match what that template renders for an
 assistant turn — a marker that does not match masks every row and the loss goes flat.

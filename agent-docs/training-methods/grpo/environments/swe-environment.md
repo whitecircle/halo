@@ -6,9 +6,7 @@ and answers when done. It speaks native tool calls, so the server needs a tool-c
 model family ([Rollout Configuration](../async-grpo/rollouts.md#tool-calls)).
 
 No third-party agent scaffold is wired in — not SWE-agent, mini-SWE-agent, OpenHands or opencode.
-The model gets the tool set below over one persistent sandbox workspace, and nothing else. Support
-for richer SWE harnesses is a planned extension; [contributions](../../../contributing/README.md)
-are welcome.
+The model gets the tool set below over one persistent sandbox workspace, and nothing else.
 
 Each episode gets its own sandbox session — a real working directory, closed on cleanup — so one
 instance serves concurrent rollouts. No shipped recipe targets `swe`; start from
@@ -37,7 +35,10 @@ Reward knobs are the native protocol's ([Native Tool-Use](native-tool-use.md)).
 
 - `run_code` — compiles if needed and runs a program in the workspace; stdout is the output.
 - `run_bash_command` — runs one shell command with `bash` in the workspace, under the same
-  `code_timeout`; a non-zero exit is an observation, not a tool error.
+  `code_timeout`. A zero exit returns **stdout only** — stderr is discarded, and empty output
+  comes back as `Code executed successfully (no output)`, so diagnostics need an explicit `2>&1`.
+  A non-zero exit returns stdout plus `Error: <last stderr line>`: an observation, not a tool
+  error. Only a sandbox backend failure is booked as a failed tool call.
 - `write_file` — writes a file later turns and `run_code` see.
 - `read_file` — reads one back; a missing file is a message, not a tool error.
 - `list_files` — lists the workspace, optionally filtered by a path prefix.

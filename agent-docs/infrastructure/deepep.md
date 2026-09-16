@@ -416,9 +416,10 @@ from source.
 **`No device id is provided via init_process_group`.** A warning, not an error — the training launcher binds
 the device eagerly via `device_id=`, so it does not appear in normal runs.
 
-**`DeepEP timeout check failed` → `CUDA error: unspecified launch failure` (~step 2).** Either multi-group
->2-rank single-node pure EP (rejected at config time), or sustained severe host contention tripping the
-100 s GPU barrier — avoid running EP training alongside sustained heavy CPU/IO load (e.g. a large concurrent build) on the same node.
+**`DeepEP timeout check failed` → `CUDA error: unspecified launch failure` (~step 2).** Either single-node
+pure EP split into multiple groups of more than 2 ranks (rejected at config time), or sustained severe host
+contention tripping the 100 s GPU barrier — avoid running EP training alongside sustained heavy CPU/IO load
+(e.g. a large concurrent build) on the same node.
 
 **Memory allocation failures.** The `ElasticBuffer` is sized automatically and grow-only. Reduce per-rank
 tokens (lower batch / `max_length`, or raise `ep_size`) or free GPU memory. Fragmentation OOMs on

@@ -15,7 +15,7 @@ From the trainer table in `CLAUDE.md`. For each cell marked **Yes**, there shoul
 correctness test (loss finite + decreasing over ≥2 steps + cross-rank invariants). For each
 **No / NOT SUPPORTED**, there should be a rejection test (must raise).
 
-| Trainer | EP | CP | TP | ETP | PP |
+| Trainer | EP | CP | TP | ETP | PP (declared, inert) |
 |---|:--:|:--:|:--:|:--:|:--:|
 | `DistributedSFTTrainer` | Yes | Yes | Yes | Yes | Yes |
 | `SmoothMarginPOTrainer` (SMPO) | Yes | Yes | Yes | Yes | Yes |

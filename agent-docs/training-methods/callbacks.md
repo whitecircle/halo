@@ -96,6 +96,7 @@ The contract is checked on the **enabled tree**, not the class declaration: a re
 > **Scale the rate with the injection space**
 >
 > The side-buffer families add the bias to **softmax probabilities** of scale `1/num_experts`: the 1e-3 default is one sign step of ~50% of uniform at 512 experts, and the callback warns past 25%. GPT-OSS's adopted `router.bias` is in **logit space**, where 1e-3 is sub-ULP in bf16 — raise it toward 1e-2 and watch `moe/load_cv`.
+
 **Requires EP patching** — `ep_group_size > 1 or use_grouped_gemm`, so `expert_parallel_size=1` still qualifies with grouped GEMM on. Without those wrappers, and on a dense model, an explicit `bias_update` raises rather than balancing nothing, except on routers with a native buffer (Zaya).
 
 ### VariableSchedulerCallback

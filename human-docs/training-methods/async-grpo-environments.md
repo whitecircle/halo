@@ -98,8 +98,8 @@ Three decisions matter more than the rest.
   recipes do (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). The engine-side cap
   `rollout_max_thinking_tokens` is vLLM-only.
 - **Tool budgets.** An environment pays `tool_success_reward` per successful call, charges `tool_error_penalty` per
-  failure and caps the episode total at `tool_reward_cap`. Keep them small beside the objective, or the model learns
-  to call tools instead of finishing.
+  failure, and caps what successful calls earn across the episode — not the episode reward — at `tool_reward_cap`
+  (default `tool_success_reward × max_turns`). Keep them small beside the objective, or tool-calling beats finishing.
 
 ### One server or several
 

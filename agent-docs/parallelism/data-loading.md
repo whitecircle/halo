@@ -149,6 +149,13 @@ Downstream map/filter caches key on a forced deterministic fingerprint (`load_da
 `src/data/sources/loading.py`) that folds in a content signature of the freshly loaded data, so
 an in-place re-push cannot serve stale mapped rows.
 
+A tokenizer or processor in the map's `fn_kwargs` keys by **content**, not by path: the fast
+backend's serialized state (vocab, merges, normalizer), else the sorted vocab table, plus the
+chat-template hash and the special-token ids; `name_or_path` is the fallback only where no
+content is readable. A resume that repoints the load at the run's own checkpoint therefore
+reuses the map cache instead of re-tokenizing the corpus, and an edited vocab, template or
+special-token id invalidates it.
+
 For pre-sharded loads the key also carries the DP rank/size: each rank holds a disjoint slice, and
 without the DP identity equal-length shards would
 stamp identical keys and non-writer ranks would load rank 0's mapped shard. Replicated (non-sharded)

@@ -71,6 +71,10 @@ The actor's episode loop shares the per-turn step-context stamp (`step_context_f
 `src/environments/eval_runner.py`), but keeps its own aiohttp session, backoff with retryable-4xx
 classification, and engine token/routing capture.
 
+A turn the engine **aborts** (SGLang's sync pause drops every in-flight request) is re-issued for the
+same observation, up to `max_retries` times (default `3`), rather than stepped as a length cut; past
+that the episode errors into a masked row.
+
 Dispatch is round-robin over actors and over server URLs, one asyncio task per prompt, gated by a
 semaphore of `max_concurrent_rollouts` (default 4× the actor count the rank actually built, clamped
 to at least that count; so with `ray_address` set it derives from `num_rollout_workers //
@@ -78,7 +82,7 @@ world_size`, not from `num_rollout_workers`).
 
 Each episode carries an `episode_timeout` deadline that counts engine-serving time only (a
 weight-sync pause is credited back: [Rollout Servers](rollout-servers.md#weight-sync)); on expiry the
-task is cancelled and the episode returns as a masked row.
+task is canceled and the episode returns as a masked row.
 
 The cancel is `ray.cancel(force=False)`, since Ray forbids force-cancel on async-actor tasks, so a
 hard-wedged task is not killable. Any actor failure, `RayActorError` included, also becomes a masked

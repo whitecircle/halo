@@ -10,8 +10,8 @@ This is the one method that is not a causal-LM objective, so a few shared config
 
 ## Data shapes
 
-The collator reads columns **positionally**, not by name: a column called `label`, `labels`, `score`
-or `scores` is the label, and every other column, in dataset order, is one text input. So the
+The collator reads columns **positionally**, not by name: the label is the first of `label`, `labels`,
+`score`, `scores` that exists (in that priority), and every other column, in dataset order, is one text input. So the
 shape of your table picks the losses available to you.
 
 | Text columns | Label | What you are training | Losses |
@@ -20,7 +20,7 @@ shape of your table picks the losses available to you.
 | 3 (+ negative) | none | retrieval with hard negatives | `triplet`, `mnrl` |
 | 2 | float score | similarity regression | `cosent`, `angle`, `cosine_similarity` |
 | 2 | 0/1 label | duplicate detection | `online_contrastive`, `contrastive` |
-| 1 | class id | class-structured embeddings | `batch_hard_triplet`, `batch_all_triplet` |
+| 1 | class id | class-structured embeddings | `batch_hard_triplet`, `batch_all_triplet` (with `batch_sampler: group_by_label`) |
 
 ## Choosing a loss
 
@@ -59,8 +59,8 @@ output_dir: checkpoints/embedding-qwen3-4b-nq
 
 `pooling_mode` decides how token states become one vector, and it has to match the backbone:
 decoder-based embedders like Qwen3-Embedding want `lasttoken`, most encoder checkpoints want `mean`.
-A value differing from the checkpoint's own pooling is applied without stopping the run, so set it
-deliberately.
+On a plain load, a value differing from the checkpoint's own pooling is applied with a warning, not a
+stop, so set it deliberately; under EP/TP the pooling module is built from the config outright.
 `batch_sampler: no_duplicates` keeps two copies of the same text out of one batch, where they would
 become each other's false negatives. `normalize_embeddings` defaults to on; turning it off against a
 checkpoint whose pipeline ends in a `Normalize` module raises rather than silently changing what its
@@ -89,10 +89,11 @@ only and rejected under EP, ETP and TP.
 sentence-transformers owns tokenization here, so `tokenizer_backend` must stay at its default `hf` —
 a `gigatoken` value is refused, not ignored. The same goes for the chat-template and special-token
 knobs (`chat_template`, `force_chat_template`, `pad_token`, `bos_token`, `eos_token`,
-`added_special_tokens`), the layer freeze/unfreeze patterns, `tools_field` and `log_decoded_samples`:
+`added_special_tokens`), `freeze_layers_patterns` / `unfreeze_layers_patterns`, `tools_field` and
+`log_decoded_samples`:
 this path has no rendering or freeze stage to honor them, so it raises at startup instead of
-accepting a flag that would do nothing. Image columns are refused too — embedding training is
-text-only.
+accepting a flag that would do nothing. Image columns (`images`, `image`, `pixel_values`) are refused
+too — embedding training is text-only.
 
 ## What to watch
 

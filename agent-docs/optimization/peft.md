@@ -249,10 +249,12 @@ match the policy's): use LoRA with `ref_model=None`, or `precompute_ref_log_prob
 rejected too, so DPO/KTO there must precompute. SMPO is reference-free.
 
 Where no adapter wraps the model — a full fine-tune, or an expert-only LoRA run, which builds no
-`PeftModel` — TRL builds its own reference model when `beta != 0`: an unparallelized replica per rank.
-`_validate_implicit_reference_model` warns about that under EP, and **raises** whenever the policy carries
-live attention sinks (`reset_sinks: false`), where the two models would compute different log-probs for
-identical tokens. Set `beta: 0`, `use_peft: true`, or precompute.
+`PeftModel` — TRL builds its own reference model whenever none is passed and none of its no-reference
+cases apply (a PEFT-wrapped policy; `precompute_ref_log_probs` on DPO/KTO; `beta == 0` on GRPO): an
+unparallelized fp32 replica per rank. `_validate_implicit_reference_model` warns about that under EP,
+and **raises** whenever the policy carries live attention sinks (`reset_sinks: false`), where the two
+models would compute different log-probs for identical tokens. Set `use_peft: true`,
+`precompute_ref_log_probs: true` (DPO/KTO), or `beta: 0` (GRPO).
 
 ## Online RL — rollout-server weight sync
 

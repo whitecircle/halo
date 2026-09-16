@@ -36,7 +36,7 @@ From Python, construct the trainer exactly as the online one plus the SDPG kwarg
 ```python
 trainer = DistributedSDPGTrainer(
     model=model,
-    reward_funcs=[accuracy_reward],
+    reward_funcs=[accuracy_reward],      # src/rewards/verifiable.py
     args=grpo_config,                      # use_vllm=True, vllm_mode="server"
     train_dataset=train_dataset,           # needs an "answer" column
     processing_class=tokenizer,
@@ -63,4 +63,3 @@ Two keys on top of the online-GRPO metrics: `opd_beta` (the live coefficient, pr
 ## Related pages
 
 - [Online GRPO (RLVR)](../grpo/online-grpo.md) · [Self-Distillation](self-distillation.md) · [Distillation Overview](README.md)
-- [Configuration Reference](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments) — every `sdpg_*` field with its default

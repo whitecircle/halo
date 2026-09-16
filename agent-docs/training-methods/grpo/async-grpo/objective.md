@@ -59,7 +59,7 @@ The code-contests recipes run `asymmetric` with `advantage_neg_scale: 0.7`. `sca
 
 `beta > 0` adds TRL's k3 KL term, whose estimator is unbounded where the policy suppresses a token the reference likes. An unconditional clamp (`clamp_ref_logps`) caps the log-ratio at 5 nats, bounding per-token KL at `exp(5) ≈ 148`. Watch `kl_clamp_frac`: persistently non-zero means the policy sits far from the reference on real tokens.
 
-`top_entropy_quantile < 1.0` trains only the highest-entropy tokens. Structural tokens — role markers, tool delimiters, BOS/EOS — are the lowest-entropy ones, so that alone starves the template until tool calls stop parsing. `ProtectedTokenEntropyMixin` unions the tokenizer's special and added tokens back in. The recipes leave `top_entropy_quantile: 1.0` and lean on a nonzero `tool_error_penalty` (`0.05`) on the reward side.
+`top_entropy_quantile < 1.0` trains only the highest-entropy tokens. Structural tokens — role markers, tool delimiters, BOS/EOS — are the lowest-entropy ones, so that alone starves the template until tool calls stop parsing. `ProtectedTokenEntropyMixin` unions the tokenizer's special and added tokens back in. A mask whose shape does not match the completion ids stashed by the last log-prob forward **raises** rather than silently dropping the protection. The recipes leave `top_entropy_quantile: 1.0` and lean on a nonzero `tool_error_penalty` (`0.05`) on the reward side.
 
 ## Routing replay
 
@@ -77,6 +77,8 @@ TRL's `RepeatSampler` delivers each prompt `num_generations` consecutive times, 
 ![Batch construction at the stage-1 code-contests shape: the sampler gives each of a rank's 3 prompts 8 consecutive rows, one rank's round is 24 rows (per_device_train_batch_size 1 × steps_per_generation 24), and six data-parallel ranks make one optimizer step of 144 rows = 18 prompts × 8; a row is one episode, a group is one prompt's rows and never straddles ranks](../../../assets/diagrams/batch_prompt_expansion.png)
 
 A rollout with no learning signal — a raised episode, an `episode_timeout` cancellation, an invalid one — enters as a zero-masked row, out of its group's baseline (`sampling/invalid_episode_frac`). A step where no episode survived warns once, then **halts the run on the second**.
+
+Rows carry two masks. `completion_mask` is attention-valid — every real completion token, tool results and generation-prompt headers included, since they conditioned the sampling — while `tool_mask` is the loss mask, `1` only on assistant spans. The loss and the DAPO normalizer use their intersection. The batch is never packed.
 
 `per_device_train_batch_size` counts rows, that is completions; unique prompts per step are the rollout total ÷ `num_generations` ([online-GRPO count](../online-grpo.md#data-flow-and-batch-construction)). The sizing knobs:
 

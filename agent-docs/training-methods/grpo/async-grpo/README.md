@@ -31,6 +31,8 @@ One YAML, six dataclasses.
 
 Rename columns with `prompt_field` / `answer_field`, forward extras with `context_fields`. A `context_field`, or an `answer_field` renamed away from `answer`, must name a real column: an unknown one raises at startup rather than yielding answer-less rows.
 
+The trainer forces `remove_unused_columns: false` at construction (warning when a config sets it true): the rollout context **is** the row minus `prompt`, and column pruning would strip `answer` and every `context_fields` column.
+
 A `prompt` given as a message list reduces to its **last `user` turn** — the environment is handed the task as text and builds the conversation itself. A conversation with no `user` turn fails the batch on every rank.
 
 The environment owns the system turn and the tool schema: this surface has no `system_prompt` field, and `tools_field` is rejected. Where an environment accepts an override it is `environment_kwargs.system_prompt` — the ReAct ones hardcode theirs and drop the key.

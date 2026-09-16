@@ -52,7 +52,7 @@ environment_kwargs:
 
 The factory forwards the merged dict whole, so any constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds — a typo, or an option of another `environment_type` — raises `TypeError` at construction. Two keys the factories consume themselves: the ReAct presets drop `system_prompt`, and `mcp` reads `mcp_server`. `rewards` reaches the constructor as `reward_terms`.
 
-The episode reward is the sum of its `reward/*` components, in every environment: `reward/turn_shaping` (the accrued per-turn deltas — tool credit and penalties, ReAct thought credit), `reward/tool_shaping` (the native protocol's episode-level knobs), the environment's own shaping terms by name, `reward/objective` (the environment's grade in `[0, 1]` priced by the `environment` term) and `reward/<name>` per `judge` or `reward_model` term ([Reward Terms](../rewards.md#environment-arm)).
+The episode reward is the environment's grade priced by the `rewards:` terms, plus the environment's own shaping ([Reward Terms](../rewards.md#environment-arm)).
 
 Knobs every environment accepts (the first two are top-level fields):
 

@@ -20,7 +20,7 @@ truncated**: a row over that window is recorded per rank, then raised on every r
 dropped. `max_completion_length` is no knob here: the script overwrites it with `rollout_max_tokens`,
 and TRL reads it only as the `dr_grpo` normalizer.
 
-`max_train_row_tokens` (default `null` = uncapped) is a second, tighter bound on a training row, and
+`max_train_row_tokens` (default `null` = the model's context window) is a second, tighter bound on a training row, and
 must exceed `rollout_max_tokens` (a row is prompt plus completion). A per-turn row over it leaves
 the batch while the episode's other turns train; a whole-trajectory row trains at zero weight.
 Setting it also turns on `sampling/rows_over_cap_frac`, the share of rows left out.
@@ -58,6 +58,11 @@ group**, keeping the conditioning of a group identical.
 and lowers the turn's total to that budget plus the global answer headroom; left `null`, the level
 caps reasoning alone and `rollout_max_tokens` still bounds the turn. A profile may also carry
 `max_length_cutoff_recoveries` and `token_cost`, reward units per 1k generated tokens.
+
+`thinking_tokens` is a **vLLM** request field (`thinking_token_budget`). On `rollout_backend:
+sglang` a level's budget reaches no request field (warned once per process): nothing caps CoT
+below `rollout_max_tokens`, and the budget survives only as the target
+`reasoning_compliance_weight` prices against.
 
 A turn the engine cuts at its token cap is nudged and retried within `max_turns` and the episode's
 `max_length_cutoff_recoveries` (`environment_kwargs`; `null` = every cut within `max_turns`). A
@@ -148,4 +153,8 @@ holds every row since the previous log (one round at `logging_steps: 1`); eval l
 number, take an `_eval` suffix and hold the whole eval set.
 
 The `completion` column renders detokenized message text, unaffected by `train_on_sampled_tokens`
-(raw ids feed the loss only). TRL's `log_completions` controls the console table alone.
+(raw ids feed the loss only). TRL's `log_completions` controls the console table alone, capped by
+`num_completions_to_print`.
+
+The writer rank comes from `fs_aware_save_rank`: global rank 0 on a shared output filesystem, one
+writer per node on a per-node one, so a non-shared output does not lose every node but the first.

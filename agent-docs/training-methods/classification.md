@@ -63,7 +63,7 @@ LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP, EP+TP and PP ([PE
 
 ### Pipeline parallelism
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md); the shipped seams here would serve `compute_metrics`, since the trainer declares `PPLossAdapter.predictions_fn` and the pooled `[B, num_labels]` would cross the chain rather than the full plane. Two construction gates ship with them and raise today — a `config.pad_token_id` unset or disagreeing with the tokenizer's (pooling takes the rightmost non-pad position), and a single-label head with `num_labels < 2`, which transformers treats as regression.
+Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md); the shipped seams here would serve `compute_metrics`, since the trainer declares `PPLossAdapter.predictions_fn` and the pooled `[B, num_labels]` would cross the chain rather than the full plane. Two construction gates ship with them and raise — a `config.pad_token_id` unset or disagreeing with the tokenizer's (pooling takes the rightmost non-pad position), and a single-label head with `num_labels < 2`, which transformers treats as regression.
 
 ## Vision-language
 

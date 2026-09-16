@@ -33,7 +33,7 @@ gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4), grouped vs loop, plus 
 | Qwen3-30B | ep2 | 64 | grouped +243% | — | +112% | — |
 | Qwen3.5-35B | ep2 | 128 | — | — | grouped +137% | — |
 
-Local-expert *count* is the primary lever; batch (per-expert M) sets how far past the crossover you are. **Rule: grouped (default) wins at low EP and at high EP up to moderate batch; reach for `use_grouped_gemm: false` only at high EP with the largest batches.** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example-why-small-per-expert-m-is-slow).
+Local-expert *count* is the primary lever; batch (per-expert M) sets how far past the crossover you are. **Rule: grouped (default) wins at low EP and at high EP up to moderate batch; reach for `use_grouped_gemm: false` only at high EP with the largest batches.** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
 The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime by the same rule, but between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured.
 
@@ -78,7 +78,7 @@ gpt-oss-120b at EP8, same 64-sequence effective batch: bs2 × GA4 measures ~20% 
 
 ## Throughput tuning beyond the kernel
 
-The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, permute, attention, optimizer). The general sequence/batch playbook is in [Throughput Benchmarks](throughput-benchmarks.md#maximizing-throughput-sequence-batch); the kernel-side levers, measured on 8× B300 (SM 10.3, PyTorch 2.11+cu130, FA4, bf16):
+The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, permute, attention, optimizer). The general sequence/batch playbook is in [Throughput Benchmarks](throughput-benchmarks.md#maximizing-throughput-sequence--batch); the kernel-side levers, measured on 8× B300 (SM 10.3, PyTorch 2.11+cu130, FA4, bf16):
 
 1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS — gpt-oss-20b 1,014 TFLOPS (FSDP) vs 218 (EP=8) at seq 4096 — but is memory-heavy (148 GB at b1, near OOM at larger batch). Use EP only when FSDP OOMs.
 2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs. gpt-oss EP2 (DP8) 516 TFLOPS vs EP8 218 at seq 4096.

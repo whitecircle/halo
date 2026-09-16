@@ -57,7 +57,7 @@ learning_rate: 5.0e-06
 | `use_chunked_grpo_logprobs` | `false` | Vocab-chunked log-probs, not full logits |
 | `max_prompt_length` | `512` | Prompt budget, left-truncated; `null` = no cap |
 | `max_completion_length` | `null` | Completion budget, cut from the end; `null` = no cap |
-| `max_length` | `null` | Pipeline-parallel only; rejected at construction off PP — every run today, since [PP is not yet available](../../parallelism/pipeline-parallelism.md) |
+| `max_length` | `null` | Pipeline-parallel only; rejected at construction off PP — on every run, since [PP is not yet available](../../parallelism/pipeline-parallelism.md) |
 
 The shipped recipes run `learning_rate: 5.0e-06`: GRPO refines a tuned policy, so the rate sits below the SFT band. Advantages are group-relative, so a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 

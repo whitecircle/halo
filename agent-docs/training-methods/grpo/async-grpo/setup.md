@@ -64,7 +64,7 @@ rollout_server_configs:
 enable_prefetch: true
 ```
 
-The sync is rolling — N−1 servers stay live — only for a raw model in a single training process, adapter-free and without EP wrappers. Every other shape, shipped recipes included, pauses all servers together for the push.
+The sync is rolling — N−1 servers stay live — only for a raw model in a single training process, adapter-free and without EP wrappers. Every other shape, shipped recipes included, pauses all servers together for the push. Dispatch is server-state-blind either way: `RolloutManager` is plain round-robin, so a paused server still takes its turn.
 
 Prefetch runs **one round deep**: a round pops what the previous one submitted, then submits its own, so `num_prefetch_batches` (default `1`) adds queue headroom only. It, `num_rollout_workers` and an explicit `max_concurrent_rollouts` are all refused below `1`; turn prefetch off with `enable_prefetch: false`.
 

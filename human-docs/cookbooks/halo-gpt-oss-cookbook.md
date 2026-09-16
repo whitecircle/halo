@@ -77,7 +77,7 @@ dataset:
 - HuggingFaceH4/ultrachat_200k@train_sft
 conversation_field: messages
 test_size: 0.01
-chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
+chat_template: jinja-templates/gpt-oss/gpt-oss-multiturn.jinja
 force_chat_template: true
 assistant_message_template: <|start|>assistant<|channel|>final<|message|>
 train_on_completions_only: true
@@ -121,6 +121,13 @@ dataloader_num_workers: 2
 
 use_peft: false
 ```
+
+Two templates ship for GPT-OSS. `gpt-oss-multiturn.jinja` is the SFT and self-distillation choice:
+it renders the `<|channel|>final` marker on every assistant turn and closes each one with
+`<|return|>`, so completion-only masking trains every turn of a multi-turn row. Under
+`gpt-oss-harmony.jinja` a plain assistant turn renders channel-less, the marker above matches
+nothing, and the run trains zero tokens at a loss near zero. Keep harmony for RL, where the
+training render must byte-match the server's. Both need `force_chat_template: true`.
 
 Launch eight processes.
 

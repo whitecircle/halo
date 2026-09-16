@@ -240,7 +240,7 @@ not activations) — that is the case CP exists for.
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `model_loading.py`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `validate_trainer_args_for_cp` |
 | `compute_metrics`, `preprocess_logits_for_metrics` | rejected whatever `eval_strategy` is — eval under CP is loss-only, and `evaluate()`/`predict()` reach the metric path on demand | same |
-| CP's own metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | accumulated locally per micro-batch and reduced once per log, so the metric path adds one collective per log instead of five to six per micro-batch | `sft/trainer.py` (`_drain_cp_metrics`) |
+| CP's own metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | accumulated locally per micro-batch and reduced once per log, so the metric path adds one collective per log instead of five to six per micro-batch | `src/trainers/sft.py` (`_drain_cp_metrics`) |
 | multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/wrapper.py` |
 | `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_validate_fsdp_settings` |
 | `accelerate launch` | rejected — CP requires `torchrun` | `model_loading.py` and `ParallelismValidationMixin` |

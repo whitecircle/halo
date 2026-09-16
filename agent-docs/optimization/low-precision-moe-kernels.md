@@ -117,8 +117,6 @@ That bit-identity holds for any block whose amax is within `2^-16` of the tensor
 
 In the cache-hit steady state both fp4 formats are bounded by the eager activation quant, so their per-microbatch cost is similar; fp8 is cheaper because its activation quant is lighter. DeepGEMM's native recipes (UE8M0 1×128) are coarser still; use the simulated path when you need exact mx/nv numerics.
 
-The literature agrees: published fp8 wins on fine-grained MoE are single-digit-% e2e at our widths (N ≤ 4096), the larger ones landing at N ≥ 8192 or folding in precision-orthogonal communication speedups, and NVFP4 pretraining reports no e2e speedup plus a late-training quality gap needing a bf16 tail.
-
 The literature agrees: published fp8 wins on fine-grained MoE are single-digit-% e2e at these widths (N ≤ 4096), the larger ones landing at N ≥ 8192 or folding in precision-orthogonal communication speedups, and NVFP4 pretraining reports no e2e speedup plus a late-training quality gap needing a bf16 tail.
 
 gpt-oss being "MXFP4" is weight-only inference QAT; its fine-tuning runs in bf16. bf16 with stochastic-rounding master weights is the floor — see [BF16 Optimizer](bf16-optimizer.md).

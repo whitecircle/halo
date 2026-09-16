@@ -7,7 +7,7 @@ Group Relative Policy Optimization scores a prompt's completions against each ot
 | Trainer | `OfflineGRPOTrainer` | `DistributedGRPOTrainer` | `DistributedAsyncEnvironmentalGRPOTrainer` |
 | Script | `offline_grpo.py` | `online_grpo/rlvr.py` | `environmental_grpo.py` |
 | Generation | None, pre-collected | Online, vLLM | Online, vLLM or SGLang, driven by Ray actors |
-| Rewards | Pre-scored in the dataset | Rule-based: strict `\boxed{}` match, format regex | Environment-defined: task success, verified answers, or an LLM judge |
+| Rewards | Pre-scored in the dataset | The config's `rewards:` terms: `accuracy` (strict `\boxed{}` match), `format`, `judge`, `reward_model` | The config's `rewards:` terms: the `environment` grade plus `judge` and `reward_model` |
 | Turns | Single | Single | Multi-turn (single-turn environments exist) |
 | Config | `OfflineGRPOConfig` | TRL `GRPOConfig` | TRL `GRPOConfig` + `EnvironmentConfig` + `AsyncTrainingConfig` |
 | Infrastructure | Training only | Training + one vLLM server | Training + rollout servers + Ray |
@@ -42,7 +42,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
 
 ## Related pages
 
-- [Offline GRPO](offline-grpo.md) · [Online GRPO (RLVR)](online-grpo.md) · [Async GRPO with Environments](async-grpo/README.md)
+- [Offline GRPO](offline-grpo.md) · [Online GRPO (RLVR)](online-grpo.md) · [Async GRPO with Environments](async-grpo/README.md) · [Reward Terms](rewards.md)
 - [Environments](environments/README.md) — the registry, tools, rewards and dataset formats
 - [SMPO](../preference/smpo.md) · [DPO](../preference/dpo.md) — pairwise preference alternatives
 - [Training Methods Overview](../README.md)

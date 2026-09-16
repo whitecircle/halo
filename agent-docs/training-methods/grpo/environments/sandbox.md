@@ -40,10 +40,17 @@ with sandbox.open_session() as session:
     session.write_file("lib.py", "X = 41\n")
     session.run("import lib; print(lib.X + 1)")   # "42"
     session.list_files()                          # ['lib.py', 'main.py']
-    session.read_file("lib.py")                   # None if absent
+    session.read_file("lib.py")                   # None if absent or not a regular file
 ```
 
 `close()` deletes the local working directory and is idempotent; the context manager calls it.
+
+The host never follows a link into the session: every staged or read path must resolve to itself
+under the real working directory, and the open carries `O_NOFOLLOW`, so a name that escapes or is
+a link is refused (`SessionPathError`) — `read_file` returns `None` for anything but a regular
+file, `write_file` raises on an unsafe name. A program that swaps a staged entry for a link is
+booked as its **own** runtime error (`returncode` set, `working directory tampered`), never an
+infra fault it could void its episode with.
 
 Read the result in this order:
 

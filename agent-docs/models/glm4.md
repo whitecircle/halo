@@ -86,7 +86,7 @@ GLM-4.7-Flash (47 layers, 64 routed experts, top-k=4) trains under EP=8 at ~30K 
 
 Gathered EP saves and EP-shard merges (`merge_ep_shards.py`) both write the per-expert hub layout both pinned engines read directly — GLM-4 declares `_PER_EXPERT_UNFUSED_KEYS`, so the merge is the structural inverse of the gather. A checkpoint that bypassed the EP save path entirely (`merge_peft_adapters.py` over a plain `from_pretrained` load of the stock hub checkpoint, say) stays in the transformers-native fused layout and needs `scripts/after_training/unfuse_moe_experts.py` first.
 
-MLA on Blackwell needs vLLM `--attention-backend CUTLASS_MLA` or SGLang `--attention-backend triton`. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm-sglang).
+MLA on Blackwell needs vLLM `--attention-backend CUTLASS_MLA` or SGLang `--attention-backend triton`. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm--sglang).
 
 RL weight sync runs on either engine. Two SGLang facts shape it.
 

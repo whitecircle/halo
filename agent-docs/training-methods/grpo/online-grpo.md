@@ -62,6 +62,8 @@ Five optional objective changes ride on the script arguments, all off by default
 
 The first four recompute on the gathered reward set, so they raise unless `multi_objective_aggregation` is `sum_then_normalize`, and RLRR excludes the other three. `neg_mask_hard` gates on the **total weighted reward**, not the accuracy reward alone.
 
+RLRR's nine tunables (`RLRRConfig`, `src/args/mixins.py`): `rlrr_mode` (`hrr` default, or `prr`), `rlrr_tau` (`0.1`), `rlrr_lambda` (`2048.0` — the config field is `lam`, `lambda` being a keyword), `rlrr_xi_pos` / `rlrr_xi_neg` (the Eq. 5 clip band, `1e-3` / `-1e-3`; `xi_neg > xi_pos` is refused), `rlrr_std_normalize` (`false`), `rlrr_length_rerank` (`true`), `rlrr_correctness_clip` (`true`) and `rlrr_correctness_threshold` (`0.5` — the only correctness signal; no path supplies gold labels). All nine are range-validated whether or not `use_rlrr` is on, and refused at a non-default value with it off. Worked recipe: `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml`.
+
 **Importance-sampling correction** (`vllm_importance_sampling_correction`, TRL default on) weights the loss by `exp(logπ_recompute − logπ_sampling)`; under the default `vllm_importance_sampling_mode: sequence_mask` a sequence whose ratio leaves `[clip_min, clip_max]` (`3.0`) is masked out of the loss, and the `*_truncate` modes clamp it instead. It gates the KL tail clamp, so `beta > 0` with it off warns.
 
 A rank-0 startup probe refuses a server whose logprobs are raw pre-temperature values at `temperature != 1.0` — serve vLLM with `--logprobs-mode processed_logprobs`. It also refuses nucleus-renormalized logprobs under `top_p < 1` while the correction runs a `sequence_*` mode, which stalls the run silently; keep `top_p: 1.0`.
@@ -182,7 +184,7 @@ CPU: `pytest tests/cpu/grpo -m cpu`. GPU: `tests/gpu/trainers/grpo/test_online_g
 
 ## What to watch
 
-Metric names follow TRL's `GRPOTrainer`, plus `kl_clamp_frac` (reference log-ratios hitting the 5-nat clamp, at `beta > 0`) and `sampling/degenerate_group_frac`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 means trainer and engine agree), `completions/clipped_ratio` and `entropy`.
+Metric names follow TRL's `GRPOTrainer`, plus `kl_clamp_frac` (reference log-ratios hitting the 5-nat clamp, at `beta > 0`) and `sampling/degenerate_group_frac`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 means trainer and engine agree), `completions/clipped_ratio`, `entropy`, and `<name>/scored_frac` per externally scored term — the share of calls that returned a usable verdict, so a failing judge shows up as a falling fraction rather than a quiet zero ([Reward Terms](rewards.md#generative-judge)).
 
 `save_completions` (default on) writes `<output_dir>/completions/completions_<step>.parquet` (step zero-padded to five digits); `log_completions` is console-only.
 

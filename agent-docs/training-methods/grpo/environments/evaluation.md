@@ -34,6 +34,11 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 (rewards, `max_turns`, `environment_kwargs`, `environment_type`) become the eval's. An explicit flag
 wins over the YAML, the YAML over the default.
 
+A YAML whose `episode_timeout` exceeds the 30-min NCCL watchdog — the code-contests recipes'
+`2700` — needs `DIST_NCCL_TIMEOUT_MINUTES=60` exported for the eval too: the contract builds the
+run's `RolloutConfig`, and `get_rollout_config` runs the watchdog check even though the eval
+forms no process group.
+
 To compare a checkpoint with its base, serve each in turn under the same `--served-model-name` and
 run one command with `--training_config`, dataset, split and `--num_samples` fixed, so only the
 weights differ.
@@ -45,7 +50,8 @@ low cuts the chain of thought before any answer, scoring 0.
 ## Output files
 
 `--output <path.json>` dumps per-example results: `group`, `id`, and per sample `reward`,
-`success`, `stats` — plus the trajectory when one is recorded.
+`success`, `stats`, `error` on a failed or signal-less grade — plus the trajectory when one is
+recorded.
 
 `--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>` auto-names one
 file per run instead (`<model>__<env_type>__<split>.jsonl`, or
