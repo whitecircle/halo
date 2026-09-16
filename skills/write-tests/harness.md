@@ -8,7 +8,7 @@ below matches the real harness — do not invent fields.
 ```python
 def gpu_test_main(
     *,
-    min_world_size: int = 1,         # fewer GPUs than this = BAD LAUNCH → exit 2 (infra ERROR, not FAIL)
+    min_world_size: int = 1,         # fewer GPUs than this = BAD LAUNCH → exit 2
     exact_world_size: int | None = None,  # if set, world_size must equal it exactly
     prefix: str = "halo_test",       # temp-dir prefix for this test's isolated output/cache dirs
     partial_state: bool = True,      # build accelerate.PartialState() (needed by Trainer tests; off for pure-kernel)
@@ -20,11 +20,12 @@ It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body i
 
 1. `init_distributed()` → `(rank, world_size, local_rank)`, optional `PartialState()`.
 2. **Validate the launch before allocating** — wrong world size emits an `error` result and
-   `sys.exit(2)` (the launcher classifies this as ERROR, not FAIL).
+   `sys.exit(2)`.
 3. `setup_cache_dirs(prefix, rank)` → per-rank isolated `output_dir` / `cache_dir`.
 4. Run the body inside `try`; in `finally`, **guaranteed teardown order**:
-   `ctx._run_finalizers()` (LIFO) → `cleanup_memory()` → `cleanup_dirs(...)`, then — **only when the
-   body did not raise** — `ctx.barrier()` → `teardown_distributed()`. A rank that raised has
+   `ctx._run_finalizers()` (LIFO) → `cleanup_memory()` → `cleanup_dirs(...)`, then — **only on the
+   clean path** (`status != "error"`, so a body that raised *or* returned no checks skips it) —
+   `ctx.barrier()` → `teardown_distributed()`. A rank that raised has
    abandoned a collective its peers are still inside, so it exits immediately instead of blocking
    both on the watchdog and turning one rank's traceback into a job-wide hang.
 5. Rank 0 prints the metrics table + checks, then `emit_result(...)` writes the
@@ -61,12 +62,13 @@ return at least one. `metrics` is optional but should be present on any test tha
 
 ```python
 #!/usr/bin/env python
-"""SFT under <mode>: <behaviour> matches the dense reference.
+"""SFT under <mode>: <behavior> matches the dense reference.
 
 Run: torchrun --nproc_per_node=2 tests/gpu/<area>/test_<name>.py
 """
 import math
 
+from tests.common.distributed import world_any, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.tolerances import TOL
 
@@ -88,10 +90,11 @@ def run(ctx) -> dict:
     trainer.train()
     losses = [h["loss"] for h in trainer.state.log_history if "loss" in h]
 
-    # 3. Assert BEHAVIOUR + cross-rank invariants (verdict computed on ALL ranks).
+    # 3. Assert BEHAVIOR + cross-rank invariants (verdict computed on ALL ranks).
     loss_finite = all(math.isfinite(x) for x in losses)
     loss_decreased = len(losses) >= 2 and losses[-1] < losses[0]
-    rank_loss_consistent = all_ranks_agree(losses[-1], atol=TOL.rank_loss_consistency_abs)
+    mean = world_mean(losses[-1])                            # tests/common/distributed.py
+    rank_loss_consistent = not world_any(abs(losses[-1] - mean) > TOL.rank_loss_consistency_abs)
 
     return {
         "checks": {
@@ -110,6 +113,11 @@ if __name__ == "__main__":
 For a **pure-kernel** test (no Trainer / accelerate) pass `partial_state=False` and assert
 numerical equivalence with `TOL.kernel_atol` / `TOL.kernel_rtol`.
 
+`record_check(checks, name, fn)` (same module) is the sanctioned way to record many independent
+verdicts in one launch without aborting at the first failure — the conventions test names it as the
+replacement for a printed pass/fail summary. Every `fn` must be rank-symmetric and collective-free.
+Cross-rank verdicts come from `tests/common/distributed.py` (`world_mean`, `world_any`, `world_min`).
+
 ## Register in the manifest (`tests/gpu/manifest.py`)
 
 A GPU script is invisible until it has a `TestSpec`. Add one row (path relative to
@@ -127,8 +135,9 @@ MANIFEST: dict[str, TestSpec] = {
 }
 ```
 
-`TestSpec` fields: `nproc` (required), `markers` (must include `'gpu'` + a tier
-`core` or `full` + a `Ngpu` tag + capability/model tags, all in `ALL_MARKERS`),
+`TestSpec` fields: `nproc` (required), `markers` (by convention `'gpu'` + a tier
+`core` or `full` + a `Ngpu` tag + capability/model tags; only membership in `ALL_MARKERS` is
+enforced, by `--strict-markers`),
 `args_matrix` (default `("",)`; a multi-mode script like `('--mode fsdp', '--mode ep')`
 becomes several nodes), `timeout` (default 1200) and `flaky` (default `False`). World-size
 strictness is **not** a manifest field:
@@ -189,14 +198,20 @@ python -m torch.distributed.run --nproc_per_node=<nproc> --master_port=<free> <s
 ```
 
 with the spec `timeout` (the whole process **group** is killed on expiry — NCCL/FA hangs are
-live) and a `TORCHELASTIC_ERROR_FILE`. It then classifies:
+live) and `MASTER_PORT` / `HALO_TEST_LAUNCH_ID` / `TMPDIR` in the env. `TORCHELASTIC_ERROR_FILE` is
+deliberately left unset: one shared path makes the last writer win, and the agent's collateral
+SIGTERMs would overwrite the real cause. It then classifies:
 
-- **PASS** — exit 0 (and `status="pass"` in the parsed result line).
-- **FAIL** — a `__HALO_TEST_RESULT__` line with `status="fail"`, or non-zero exit that did
-  emit checks (a real assertion failure).
-- **ERROR** — non-zero exit with **no** result line → infra / hang / import crash.
-- **SKIP** — fewer GPUs than `nproc` available, or an OOM on the 8-GPU `full` tier (an OOM on
-  a 2-GPU `core` smoke is a real ERROR — that config must fit).
+- **PASS** — exit 0 with `status="pass"` in the parsed result line.
+- **FAIL** — a `__HALO_TEST_RESULT__` line with `status="fail"` **or** `status="error"` (a body
+  that raised is a FAIL, not an ERROR), and the case where rank 0 said pass but the exit was
+  non-zero — some other rank failed.
+- **ERROR** — non-zero exit with **no** result line → infra / hang / import crash. Plus TIMEOUT.
+- **SKIP** — fewer GPUs than `nproc` available; an OOM on the 8-GPU `full` tier (an OOM on
+  a 2-GPU `core` smoke is a real ERROR — that config must fit); an unreachable
+  `vllm_server`/`sglang_server` engine, unless `HALO_TEST_REQUIRE_SERVER` names it (then a
+  `UsageError`); or an exit-0 run that printed a `SKIP:` line. **Zero** visible GPUs is a
+  `UsageError`, never a skip.
 
 All of this runs inside the Docker image; selection is by marker, e.g. `pytest -m "gpu and
 core"` (PR) or `pytest -m gpu` (nightly).

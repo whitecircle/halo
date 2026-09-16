@@ -13,7 +13,7 @@ allowed-tools:
 
 # write-tests
 
-Write a test that follows this repo's shared harness and manifest. **Test behaviour, not
+Write a test that follows this repo's shared harness and manifest. **Test behavior, not
 implementation.** Use deterministic seeded synthetic data, never download on the hot path,
 emit perf+mem on every GPU test, assert cross-rank invariants, and cover the support matrix
 plus the rejection tests.
@@ -59,9 +59,9 @@ Rules:
 - End the file with that `__main__` guard, declare no `pytestmark` (the `cpu` marker is applied
   by path) and no `sys.path` bootstrap — `tests/cpu/conventions/test_test_conventions.py` fails the
   suite over a hand-rolled runner or a printed pass/fail summary.
-- Assert the **behaviour/invariant**, not the internal call sequence. A test that mirrors the
+- Assert the **behavior/invariant**, not the internal call sequence. A test that mirrors the
   implementation breaks on every refactor and catches nothing.
-- **It must fail when the behaviour breaks.** Mentally mutate the function (flip a sign, drop a
+- **It must fail when the behavior breaks.** Mentally mutate the function (flip a sign, drop a
   clause) — a real test goes red. Reject the slop patterns: tautologies (`assert True`, asserting a
   value you just set), smoke-only "didn't raise" checks, vacuous `assert out is not None` /
   `assert len(x) >= 0`, mocking the thing under test, and `try/except: pass` that turns a raise into a
@@ -92,7 +92,7 @@ Rules:
 
 ### What every GPU correctness test must assert
 
-- **Behaviour, not implementation** — loss is finite *and* decreases over ≥2 real steps
+- **Behavior, not implementation** — loss is finite *and* decreases over ≥2 real steps
   (a 1-step run that skips the decrease check is a silent pass — require `len(losses) >= 2`).
 - **Deterministic seeded synthetic data** — generate problems from a fixed seed; use
   `ctx.broadcast_seed()` when every rank must produce the *same* data (e.g. a parallel run
@@ -109,9 +109,11 @@ Rules:
 
 ### Benchmark tests (`benchmark_*`)
 
-`test_*` = correctness (exit 0/1). `benchmark_*` = perf and live in
-`tests/gpu/profiling/`. They MUST `sys.exit(main())` and return non-zero on crash (a crashed
-benchmark that reports PASS is the worst failure mode). Emit the machine-readable line via
+`test_*` = correctness (exit 0/1). A perf script is named `benchmark_*` / `bench_*` and runs via
+shell, not the manifest — `tests/gpu/profiling/` and `tests/gpu/optimizers/` both hold some. The
+manifest's drift guard globs `bench*.py`, so a new one must be listed in `_UNMANIFESTED_BENCHMARKS`
+(`tests/gpu/manifest.py`) or collection fails. They MUST `sys.exit(main())` and return non-zero on
+crash (a crashed benchmark that reports PASS is the worst failure mode). Emit the machine-readable line via
 `emit_benchmark("<key>", efficiency_callback)` and diff the **headline**
 tokens/s/GPU + peak mem against the committed golden in `tests/baselines/<key>.json`. MFU /
 S-MFU / TFLOPS are opt-in diagnostics — never the gated number.
@@ -135,6 +137,8 @@ Inside the image, sanity-check registration and (if a GPU is present) a smoke ru
 ```bash
 python -c "from tests.gpu.manifest import unregistered_scripts, stale_entries; \
     print('unregistered:', unregistered_scripts()); print('stale:', stale_entries())"
+python tests/cpu/conventions/test_test_conventions.py            # the CPU-test conventions
+python tests/cpu/parallelism/test_matrix_correctness_coverage.py # renaming a parallelism test breaks this
 # CPU:  python tests/cpu/<area>/<file>.py   (or: pytest -m cpu)
 # GPU:  torchrun --nproc_per_node=<N> tests/gpu/<path>/<file>.py
 ```

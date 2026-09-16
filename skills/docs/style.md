@@ -46,9 +46,8 @@ code — is padding. Delete it.
   does *now*. Ban dated verification ("verified 2026-06-10", "re-confirmed"),
   change framing ("previously X, now Y", "no longer", "used to", "newly enabled",
   "after the fix"), and anecdote ("turned out to be", "early runs passed"). Rewrite
-  to the current fact. Keep a date only when it *identifies* a thing (an image tag
-  `halo:blackwell`, a version pin, a CVE, a checkpoint version). History
-  lives in git, never in `agent-docs/`.
+  to the current fact. Keep a date only when it *identifies* a thing (a version
+  pin, a CVE, a checkpoint version). History lives in git, never in `agent-docs/`.
 - **One home per fact.** Each fact lives on exactly one authoritative page. A
   second page that needs it gets a one-line link, never a copy that will drift.
 - **No deep-dive sprawl.** Keep the unique technical substance; cut the repetition

@@ -15,8 +15,9 @@ their combinations — produces a gathered checkpoint you can load with
 
 The sharded EP save skips the gather, which speeds up checkpointing for very
 large models; the trade is a `halo run merge-ep-shards` before the checkpoint
-stands alone. Its restrictions (single EP group, a shared output filesystem) are
-checked at startup, so an unsupported combination fails fast. TP needs no
+stands alone. Its restrictions — a single EP group, no context parallelism,
+`expert_tensor_parallel_size: 1`, a shared output filesystem — are checked at
+startup, so an unsupported combination fails fast. TP needs no
 sharded mode — full tensors are reconstructed from the DTensors at save time.
 
 ## Resume
@@ -24,14 +25,14 @@ sharded mode — full tensors are reconstructed from the DTensors at save time.
 Point `resume_from_checkpoint` at a checkpoint directory, or set it to `true` to
 pick up the latest one in `output_dir`.
 
-A distributed run also saves per-rank optimizer shards (single-GPU and DDP keep
-HF's `optimizer.pt`), the schedule, and the step. Resume is **exact**, optimizer
+A torchrun run also saves per-rank optimizer shards (single-GPU, DDP and
+`accelerate` FSDP keep HF's own `optimizer.pt`), the schedule, and the step. Resume is **exact**, optimizer
 state included, as long as the run's topology fingerprint matches. That
-fingerprint covers more than the GPU count: world size, the EP / ETP / CP / TP /
-PP sizes, `ep_scope`, `nvlink_domain_size`, `hsdp`, `use_grouped_gemm`,
-`fsdp_shard_ep1_experts`, `expert_replica_size`, and the optimizer class. The
-last few change slice ownership or expert parameter names while every tensor
-shape stays identical, so without them a restore would report success over
+fingerprint covers more than the GPU count: world size, the EP / ETP / CP / TP
+sizes, `ep_scope`, `nvlink_domain_size`, `hsdp`, `use_grouped_gemm`,
+`fsdp_shard_ep1_experts`, `expert_replica_size`, and the optimizer class — the
+last few change slice ownership or expert parameter names without changing a
+single tensor shape, so a restore that ignored them would report success over
 permuted state.
 
 If any field differs, or the run saved with `save_only_model: true`, you get a
@@ -45,13 +46,13 @@ layouts cannot accept. One consequence: the training scripts must launch the
 resume, since they repoint the model source.
 
 `load_best_model_at_end` is refused at startup for a full fine-tune under CP, on
-a MoE model wrapped for expert compute (which includes plain FSDP2 at the
-default `use_grouped_gemm: true`, not just EP), and under TP with more than
-one data-parallel replica (`tp_size > 1` with `data_parallel_size > 1`). The end-of-run reload would be refused *after* the whole run,
-and the export would quietly carry the last weights — so the check fails fast
-instead. Export the best checkpoint directly. Dense **pure** TP is allowed: its
-shards are plain tensors that reload normally. Adapter-only runs are exempt
-unless `merge_expert_lora_on_save` folds them into a full base checkpoint.
+a MoE model wrapped for expert compute (plain FSDP2 at the default
+`use_grouped_gemm: true` included, not just EP), and under TP with more than one
+data-parallel replica. The end-of-run reload would be refused *after* the whole
+run and the export would quietly carry the last weights, so the check fails fast
+instead — export the best checkpoint yourself. Dense pure TP is allowed, and
+adapter-only runs are exempt unless `merge_expert_lora_on_save` folds them into a
+full base checkpoint.
 
 ## Post-processing tools
 
@@ -73,31 +74,34 @@ place, because writing over the source deletes the shards they don't overwrite.
 has to be asked for). They also reject a per-rank EP-sharded checkpoint — merge
 it first with `merge-ep-shards`, the one tool that takes that layout.
 
-## Serving with vLLM
+## Serving the result
 
-Any gathered checkpoint loads into vLLM directly. Merge sharded saves first, and
-serve a LoRA run either as base-plus-adapter or merged. If vLLM's loader
+Any gathered checkpoint loads into vLLM or SGLang directly. Merge sharded saves
+first, and serve a LoRA run either as base-plus-adapter or merged. If the loader
 complains about fused expert weights, run `unfuse-moe-experts` on the checkpoint.
+Serving *during* training — the rollout server the RL methods generate against —
+is [Rollout Servers](rollout-servers.md).
 Step-3.7 Flash needs no rewrite — its gathered save is already in the hub layout
 vLLM reads, and the tool refuses it accordingly.
 
 ## Uploading to the HuggingFace Hub
 
 Halo wires no Hub upload into the save path. The inherited `push_to_hub` /
-`hub_model_id` `TrainingArguments` fields still parse, but nothing guards or
-tests them against Halo's overridden gathered/EP save, and the end-of-training
-push never fires (no Halo script calls `save_model()`). Upload explicitly
-instead — a gathered checkpoint is a plain HF model directory, so the standard
-Hub CLI works:
+`hub_model_id` `TrainingArguments` fields still parse, and the upload they drive
+is unguarded and untested against Halo's overridden gathered/EP save — including
+for sharded and adapter layouts. Upload explicitly instead: a gathered checkpoint
+is a plain HF model directory, so the standard Hub CLI works:
 
 ```bash
 hf auth login          # once, or set HF_TOKEN
 hf upload my-org/my-model checkpoints/sft-qwen3-4b-ultrachat/checkpoint-1000
 ```
 
-Upload the checkpoint directory itself, not the whole `output_dir` — that also
-holds optimizer shards and logs you don't want public. For a LoRA run, upload
-the adapter directory, or merge first for a standalone model.
+Upload the checkpoint directory itself, not the whole `output_dir`. Unless the run
+set `save_only_model: true`, that directory also holds every rank's optimizer
+shards and the training state (`optimizer_*`, `rng_state_*`, `scheduler.pt`,
+`trainer_state.json`) — exclude them, or they go public with the weights. For a
+LoRA run, upload the adapter directory, or merge first for a standalone model.
 
 Shard layouts, merge flags, and the full resume mechanics:
 [Checkpoints](../agent-docs/reference/checkpoints.md) ↗ ·

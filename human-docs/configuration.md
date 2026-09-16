@@ -1,104 +1,160 @@
-# Configuration
+# Writing a Config
 
-Training is YAML-driven. A config is a flat file of trainer fields: the
-HuggingFace `TrainingArguments` you already know, plus Halo's additions. Any
-field can be overridden on the command line:
+A run is one flat YAML file: the HuggingFace `TrainingArguments` fields you
+already know, plus Halo's own. What you read is what the trainer gets.
+
+## Start from the nearest example
+
+Don't write one from scratch. `examples/` is organised by method, then by model
+family (`examples/sft/qwen3/`, `examples/preference/qwen3_5/`), and the closest
+file is usually within two edits of what you want:
 
 ```bash
-halo launch sft my-config.yaml -- --learning_rate=1e-5 --max_length=32000
+ls examples/sft/                          # families with an SFT recipe
+cp examples/sft/qwen3/qwen3-4b-ultrachat.yaml my-run.yaml
+halo launch sft my-run.yaml -n 8
 ```
 
-The fastest way to write a config is to copy the closest one in `examples/`
-and edit it. Field-by-field reference:
-[Configuration Guide](../agent-docs/getting-started/configuration.md) ↗
-and the full
-[Configuration Reference](../agent-docs/reference/configuration-reference.md) ↗.
+The examples carry comments explaining every non-obvious choice for that family —
+why `sdpa` and not Flash Attention, why `packing` and not `padding_free`, which
+router-balancing mode exports. Keep them when you copy; they are the family's
+constraints, not decoration.
 
-## The blocks every config has
+## The blocks a config has
 
-| Block | Common fields |
+| Block | The keys that matter |
 | --- | --- |
-| Model | `model_name_or_path`, `model_revision`, `attn_implementation`, `trust_remote_code`, `use_liger_kernel` |
-| Data | `dataset`, `max_length`, `packing`, `train_on_completions_only`, `dataset_num_proc`, `tokenizer_backend` |
-| Training | `per_device_train_batch_size`, `gradient_accumulation_steps`, `learning_rate`, `num_train_epochs`, `gradient_checkpointing` |
-| Precision / optimizer | `bf16`, `optim`, `bf16_optimizer`, `fp32_grad_reduce` |
-| Parallelism | `expert_parallel_size`, `context_parallel_size`, `tensor_parallel_size`, `expert_tensor_parallel_size` |
+| Model | `model_name_or_path`, `model_revision`, `attn_implementation`, `trust_remote_code`, `max_concurrent_loading` |
+| Data | `dataset`, `dataset_ratio`, `test_size`, `max_length`, `packing`, `train_on_completions_only` |
+| Training | `per_device_train_batch_size`, `gradient_accumulation_steps`, `learning_rate`, `num_train_epochs`, `lr_scheduler_type`, `gradient_checkpointing` |
+| Precision / optimizer | `bf16`, `optim`, `bf16_optimizer`, `fp32_grad_reduce`, `fp32_non_ep_params` |
+| Parallelism | `expert_parallel_size`, `context_parallel_size`, `tensor_parallel_size`, `expert_tensor_parallel_size`, `ep_scope` |
 | PEFT | `use_peft`, `lora_r`, `lora_alpha`, `lora_target_modules` |
-| Checkpoint / eval | `output_dir`, `save_strategy`, `save_steps`, `eval_strategy`, `eval_steps` |
+| Checkpoint / eval | `output_dir`, `save_strategy`, `save_steps`, `save_only_model`, `eval_strategy`, `eval_steps` |
 | Logging | `report_to`, `project_name`, `run_name`, `logging_steps` |
-| RL / rollout (online GRPO) | `vllm_server_host`, `vllm_server_port`, `num_generations` |
-| RL / rollout (environmental GRPO) | `rollout_server_url`, `environment_type`, `num_generations` |
+| RL / rollout | both: `num_generations`, `vllm_server_host`, `vllm_server_port` · async GRPO with environments only: `rollout_server_url`, `environment_type`, `rewards`, `num_rollout_workers` |
 
-The two RL trainers parse different config classes, so their server fields are
-not interchangeable: `rollout_server_url` and `environment_type` exist only for
-environmental GRPO, and an online-GRPO YAML carrying them fails to parse. The
-online fields keep the `vllm_` prefix because TRL owns them.
+A few notes on the ones that bite:
 
-Each method's page in the
-[reference](../agent-docs/training-methods/sft.md) ↗
-expands its own block into exact fields.
+- `attn_implementation` — leave it unset and Halo picks the backend for your GPU
+  and model (FA4 on Blackwell, FA3 on Hopper, per-family fallbacks where a kernel
+  is known-broken). Most examples pin one anyway; copy the pin with the config.
+- `model_revision` pins a Hub commit, and `max_concurrent_loading` caps how many
+  ranks per node load weights at once — unset it resolves to half the node's GPUs
+  capped at 4, and `1` rescues a CPU-RAM-tight host.
+- The two RL trainers share TRL's GRPO config, so the `vllm_*` fields parse on
+  both. The async-rollout block is async GRPO's alone: `rollout_server_url` in an
+  online-GRPO YAML fails to parse.
 
-## Loading the model
+## Overriding on the command line
 
-`model_name_or_path` takes a Hub ID or a local directory. Useful companions:
+Most fields can be overridden at launch, which is how you sweep without copying files:
 
-- `model_revision` — pin a specific Hub commit when you need reproducibility;
-  the shipped Laguna configs pin one because their remote code moves.
-- `attn_implementation` — leave unset. Halo auto-selects the best backend for
-  your GPU and model (FA4 on Blackwell, FA3 on Hopper, with per-model
-  fallbacks where a kernel is known-broken). Only set it to force something.
-- `max_concurrent_loading` — how many ranks per node load weights at once.
-  Unset, it resolves to half the node's GPUs, capped at 4. Lower it to 1 on a
-  CPU-RAM-tight host; `0` lifts the throttle entirely.
+```bash
+halo launch sft my-run.yaml -n 8 -- --learning_rate=1e-5 --max_length=32000
+```
 
-## Defaults the parser applies
+Everything after `--` goes to the trainer untouched, parallelism flags included
+(`--expert_parallel_size=8`), so one config can serve several shapes. Write each
+override as `--key=value`; a field holding a dict or a list of dicts (`rewards`,
+`gradient_checkpointing_kwargs`) raises and has to be set in the YAML.
 
-Three Halo defaults differ from upstream. Each applies only when your YAML and
-CLI leave the field alone:
+## What the parser does before your config reaches the trainer
 
-- `bf16: true`, which also brings in the memory-lean `AdamWBF16` optimizer on
-  FSDP/EP/TP/CP runs. An explicit `fp16: true` suppresses it; the two cannot
-  both be set.
+Three defaults differ from upstream, each applied only if your YAML and CLI leave
+the field alone:
+
+- `bf16: true` — which also brings in the memory-lean `AdamWBF16` optimizer
+  wherever `optim` is left at a stock AdamW (replicated DDP is the exception). An
+  explicit `fp16: true` suppresses it; the two cannot both be set.
 - `use_liger_kernel: true`.
-- `logging_nan_inf_filter: false`. Upstream's filter reads the loss back to the
-  host on every micro-batch and logs the running average in a NaN's place. A
-  diverged run should be visible in the loss curve at the step it diverged.
+- `logging_nan_inf_filter: false` — upstream's filter logs the running average in
+  a NaN's place, hiding the step a run diverged on.
 
-The parser expands `strftime` codes in `output_dir` (`runs/sft-%m%d-%H%M`), and
-only there. It migrates no spelling: every retired key raises and names the
-field, TRL's old `max_seq_length` (now `max_length`) included, so an
-out-of-date YAML fails loudly instead of being quietly renamed.
+And four things a launch refuses up front rather than deep inside training — the
+first three in the parser:
 
-It also refuses two things outright. YAML 1.1 boolean spellings (`packing: no`,
-`bf16: off`) raise on boolean fields, because YAML 1.2 parses them as truthy
-strings and would silently invert what you wrote — use unquoted `true`/`false`.
-And a value outside a field's declared choices (`advantage_method: banana`)
-fails at parse time instead of deep inside training.
+- An unknown or retired key, named in the message. No spelling is migrated — TRL's
+  old `max_seq_length` (now `max_length`) raises like any other.
+- YAML 1.1 booleans on a boolean field (`packing: no`, `bf16: off`) — YAML 1.2
+  reads those as truthy strings, inverting what you wrote. Use `true` / `false`.
+- A value outside a field's declared choices (`advantage_method: banana`).
+- An invalid parallelism shape, rejected by `ParallelismConfig` after the parser
+  runs and before any weights load ([Parallelism](parallelism.md)).
 
-## Sequence length
+`output_dir` is the one field where `strftime` codes expand (`runs/sft-%m%d-%H%M`); other `%` prose survives.
 
-`max_length` is the single sequence-length knob, and `null` resolves to the
-model's context window at startup. The GRPO trainers are the exception. Online
-and environmental GRPO declare no `max_length` at all, so the key fails to parse
-(`Some keys are not used by the HfArgumentParser`); offline GRPO declares it for
-pipeline-parallel runs only, so the key parses and is then rejected at trainer
-construction in this release.
+## Sequence length, per method
 
-`max_prompt_length` and `max_completion_length` mean different things per
-method:
+`max_length` is the single sequence-length knob; `null` resolves to the model's
+context window. `max_prompt_length` and `max_completion_length` mean different
+things per trainer:
 
 | Method | What the two knobs do |
 | --- | --- |
-| SMPO | shares carved out of `max_length` — an unset prompt takes half, the completion takes the rest |
-| Offline GRPO | independent truncation caps; when both are set, their sum becomes the tokenizer's `model_max_length` |
-| Online / environmental GRPO | `max_prompt_length` is a dataset *filter* (over-long rows are dropped, not truncated); `max_completion_length` is the generation budget |
-| DPO | no training-side prompt cap; `generation_max_prompt_length` (default 512) bounds only the eval-time generation samples |
+| SFT, DPO, KTO, distillation | `max_length` only; DPO's `generation_max_prompt_length` (default 512) bounds eval-time samples, not training |
+| SMPO | shares carved out of `max_length` — an unset prompt takes half, the completion the rest |
+| Offline GRPO | independent truncation caps; set both and their sum becomes the tokenizer's `model_max_length` |
+| Online GRPO, async GRPO with environments | `max_prompt_length` is a dataset *filter* (over-long rows are dropped, not truncated); `max_completion_length` is the generation budget |
 
-## Sanity notes
+The two online trainers declare no `max_length` at all, so the key fails to parse
+there; offline GRPO's parses and is then refused at trainer construction.
 
-- Batch size is per device: effective batch =
-  `per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size`.
-- `gradient_checkpointing: true` trades ~19% throughput for a large activation
-  memory saving — usually the first lever when you're out of memory.
-- Invalid parallelism combinations are rejected at startup, before any GPU time
-  is spent; see [Parallelism](parallelism.md).
+## A complete config
+
+`examples/sft/qwen3/qwen3-4b-ultrachat.yaml` — a full fine-tune of a 4B dense
+model on UltraChat, runnable on 1–8 GPUs:
+
+```yaml
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+attn_implementation: flash_attention_2
+
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+assistant_message_template: "<|im_start|>assistant\n"
+test_size: 0.01
+
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+optim: adamw_torch_fused
+learning_rate: 2.0e-05
+max_grad_norm: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 32
+seed: 42
+
+max_length: 4096
+packing: true
+
+output_dir: checkpoints/sft-qwen3-4b-ultrachat
+save_strategy: steps
+save_steps: 500
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+dataloader_num_workers: 4
+remove_unused_columns: true
+use_peft: false
+```
+
+Batch size is per device: the effective batch is
+`per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size`,
+so the same file trains a different global batch on 1 GPU and on 8.
+`gradient_checkpointing: true` costs 20–30% throughput for a large
+activation-memory saving — usually the first lever when a run doesn't fit.
+
+Per-method keys live on each [training method](training-methods/README.md) page.
+The exhaustive field list, every default and every `HALO_*` knob:
+[Configuration Reference](../agent-docs/reference/configuration-reference.md) ↗.

@@ -96,7 +96,7 @@ gradient_checkpointing: false
 optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
-warmup_ratio: 0.03
+warmup_steps: 0.03
 max_grad_norm: 1.0
 
 save_strategy: steps
@@ -203,7 +203,7 @@ gradient_checkpointing: false
 
 ## No online RL for ZAYA1
 
-Online and environmental GRPO are refused at construction for this family. Both
+Online GRPO and async GRPO with environments are refused at construction for this family. Both
 need weight sync into a rollout server, and both pinned engines list `zaya` as
 unservable: vLLM 0.26.0 ships no native Zaya implementation, so there is no
 served model for the stream to land in, and SGLang 0.5.17's Zaya loader reads

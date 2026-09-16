@@ -26,7 +26,7 @@ their own when relevant. The other six are user-invoked only: name them with
 | `debug` | routes a hang, OOM, NaN, or NCCL/DeepEP fault to the right helper and fix |
 | `checkpoints` | merging shards and adapters, converting, resuming, loading into vLLM |
 | `data` | dataset format per method, and offline tokenize/pack/shard when worth it |
-| `rl-setup` | wires up online / environmental GRPO: vLLM container, NCCL weight sync, environments |
+| `rl-setup` | wires up the online RL methods: rollout container, NCCL weight sync, environments |
 | `add-model` | integrates a new model family (EP wrapper, registries, tests) |
 | `write-tests` | writes CPU/GPU tests that actually fail when behavior breaks |
 | `docs` | maintains both doc trees — `agent-docs/` and this guide — under the style charter |

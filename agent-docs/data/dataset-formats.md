@@ -255,7 +255,8 @@ model_supports_system_role: false   # merge system message into first user messa
 Bundled templates live under `jinja-templates/<family>/`: stripped training templates
 (`*-instruct.jinja` single-turn, `*-multiturn.jinja`/`*-chat.jinja` multi-turn) plus verbatim
 upstream `*-native.jinja` templates (system messages, tools, thinking) for Qwen3, Qwen3.5/3.6,
-GLM, Ling, and GPT-OSS (`gpt-oss-harmony.jinja`). Pin a native template whenever the training
+GLM, Ling, and GPT-OSS (`gpt-oss-harmony.jinja`; `gpt-oss-multiturn.jinja` is the SFT form that
+terminates every assistant turn). Pin a native template whenever the training
 render must match serving byte-for-byte.
 
 ### Special-token ownership

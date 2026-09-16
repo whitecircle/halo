@@ -4,7 +4,7 @@ description: >-
   Assemble and run a Halo training or test job inside the prebuilt
   Docker image. Picks the image (halo:blackwell for B200/B300 vs
   halo:hopper for H100/H200), sets GPU count, mounts ($(pwd)->/workspace,
-  the host's large scratch volume, /root/.aws), passes --env-file .env, runs
+  the host's large scratch volume, ~/.aws), passes --env-file .env, runs
   torchrun/pytest directly inside the container, and detaches the job with logs
   onto that volume.
   Prefers `make` targets (the single source of truth for the docker incantation)
@@ -66,7 +66,8 @@ make build-all                               # all four
 # Rollout-server GPU tiers (the server must already serve on a GPU outside TRAINER_CUDA_DEVICES;
 # both check /health first and, without EFA=1, force the no-fabric NCCL_IB_DISABLE=1 NCCL_NET=Socket
 # both compose bases default to. EFA=1 passes --device=/dev/infiniband plus NCCL_NET=Libfabric
-# NCCL_NET_PLUGIN=ofi NCCL_IB_DISABLE=0 to every DOCKER_RUN instead — start the server with its
+# NCCL_NET_PLUGIN=ofi NCCL_IB_DISABLE=0 (and its own NCCL_SOCKET_IFNAME exclude list) to every
+# DOCKER_RUN instead — start the server with its
 # compose EFA overlay (-f docker-compose.{vllm,sglang}.efa.yml) then. The SGLang server needs
 # NCCL_CUMEM_ENABLE=1 on top, the compose default.)
 # SERVER_TIER=moe runs the MoE half against a MoE-serving server — no one server satisfies both.
@@ -76,15 +77,19 @@ make build-all                               # all four
 make test-gpu-vllm
 make test-gpu-sglang
 
-# Host-only gates (pinned uvx ruff, no image)
+# Publish to Amazon ECR Public (anonymous pull; a moving tag plus an immutable -VERSION pin)
+make ecr-public-login
+make push-public-all                         # or push-public-{blackwell,hopper,vllm,sglang}
+
+# Host-only gates (pinned uvx ruff, no image; `make docs` is the relative-link check)
 make lint
 make format
 make precommit
-
-# Docs link check (plain GitHub markdown; runs on the host)
 make docs
-make diagrams                                # regenerate agent-docs/assets from scripts/diagrams (CI byte-compares)
+
+# In-image
 make install
+make diagrams                                # regenerate agent-docs/assets from scripts/diagrams (CI byte-compares)
 
 make clean                                   # prune wandb/, the ruff and pytest caches, $(HALO_SCRATCH) test scratch (leaves checkpoints/)
 ```
@@ -92,7 +97,7 @@ make clean                                   # prune wandb/, the ruff and pytest
 Notes that come straight from the Makefile recipes:
 
 - `make train` selects the method via `METHOD=` (default `sft`) and dispatches
-  through the `halo` CLI (`python -m src.cli launch METHOD CONFIG`), which resolves
+  through the `halo` CLI (`python -m src.cli launch METHOD CONFIG --nproc NPROC -- EXTRA`), which resolves
   the right `scripts/training/` script and launcher. Method names come from
   `halo launch --list` (e.g. `sft`, `offline-grpo`, `classification`, `embedding`,
   `environmental-grpo`, and nested names like `preference/smpo`). For a raw one-off
@@ -100,8 +105,8 @@ Notes that come straight from the Makefile recipes:
 - Every GPU target already bakes in `--gpus all --network host --ipc=host --ulimit
   memlock=-1 --ulimit stack=67108864 --shm-size=128g`, the `-e HF_HOME /
   HF_DATASETS_CACHE / TMPDIR / HALO_DATA_ROOT / PYTHONPATH /
-  CUDA_DEVICE_MAX_CONNECTIONS=1` env, and the `$(pwd):/workspace`, `$(HALO_SCRATCH):$(HALO_SCRATCH)`,
-  `/root/.aws:/root/.aws` mounts. `--env-file .env` and the `~/.aws` mount are
+  CUDA_DEVICE_MAX_CONNECTIONS=1` env, and the `$(CURDIR):/workspace`, `$(HALO_SCRATCH):$(HALO_SCRATCH)`,
+  `$(AWS_DIR):/root/.aws` (`AWS_DIR ?= ~/.aws`) mounts. `--env-file .env` and the AWS mount are
   conditional on `ENV_FILE`/`AWS_DIR` (CI drops both to run creds-free). Don't
   re-specify those by hand when a target works. `DOCKER_RUN` does **not** add
   `--cap-add=SYS_PTRACE`, so py-spy cannot attach to a `make`-launched job — use §2
@@ -131,7 +136,7 @@ docker run -d --rm --name <job> --gpus all \
   --cap-add=SYS_PTRACE --env-file .env \
   -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
   -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" \
-  -v $(pwd):/workspace -v "$D:$D" -v /root/.aws:/root/.aws -w /workspace \
+  -v $(pwd):/workspace -v "$D:$D" -v ~/.aws:/root/.aws -w /workspace \
   halo:blackwell \
   bash -lc "torchrun --nproc_per_node=<nproc> <script> <config> > \"$D/<job>.log\" 2>&1"
 ```
@@ -151,7 +156,7 @@ Mandatory pieces (do NOT drop them):
 - **`-e HALO_DATA_ROOT="$D"`** — toolkit scratch root: S3 dataset cache →
   `$D/s3_datasets`, profiler artifacts → `$D/profiling` (one knob; defaults to
   `~/.cache/halo` when unset).
-- **`-v /root/.aws:/root/.aws`** — S3 dataset/checkpoint access. Pre-cached S3
+- **`-v ~/.aws:/root/.aws`** — S3 dataset/checkpoint access. Pre-cached S3
   datasets live under `$HALO_DATA_ROOT/s3_datasets` (keyed by `md5("<bucket>/<key>")`)
   and load without live AWS.
 
@@ -217,7 +222,7 @@ swap the image line.
   docker run -d --rm --name jobA --gpus '"device=0,1,2,3"' \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
     --env-file .env -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
-    -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" -v $(pwd):/workspace -v "$D:$D" -v /root/.aws:/root/.aws \
+    -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" -v $(pwd):/workspace -v "$D:$D" -v ~/.aws:/root/.aws \
     -w /workspace halo:blackwell \
     bash -lc "torchrun --nproc_per_node=4 --master_port=29801 <script> <config> > \"$D/jobA.log\" 2>&1"
 
@@ -225,7 +230,7 @@ swap the image line.
   docker run -d --rm --name jobB --gpus '"device=4,5,6,7"' \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
     --env-file .env -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
-    -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" -v $(pwd):/workspace -v "$D:$D" -v /root/.aws:/root/.aws \
+    -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" -v $(pwd):/workspace -v "$D:$D" -v ~/.aws:/root/.aws \
     -w /workspace halo:blackwell \
     bash -lc "torchrun --nproc_per_node=4 --master_port=29802 <script> <config> > \"$D/jobB.log\" 2>&1"
   ```

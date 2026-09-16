@@ -45,8 +45,10 @@ changes.
 | `src/trainers/grpo/rollout/weight_sync_clients.py` (per-server weight-sync client pool, `/v1/models` context preflight) | `agent-docs/training-methods/grpo/async-grpo/setup.md`, `agent-docs/training-methods/grpo/online-grpo.md` |
 | `src/trainers/grpo/rollout/async_rollouts.py` (Ray-actor collection, prefetch thread, engine weight-sync entry points) | `agent-docs/training-methods/grpo/async-grpo/setup.md` |
 | `src/trainers/grpo/rollout/routing_replay.py` (R2/R3 capture, wire decode, engine-layer slicing) | `agent-docs/training-methods/grpo/async-grpo/objective.md`, `agent-docs/infrastructure/rollout-servers.md` |
-| `src/trainers/grpo/rollout/trajectory_tokenize.py` (trajectory → training rows: whole-render spans, per-turn sampled ids) | `agent-docs/training-methods/grpo/async-grpo/rollouts.md` |
-| `src/trainers/grpo/rollout/rollout_metrics.py` (completion logs, per-episode rollout diagnostics) | `agent-docs/training-methods/grpo/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md` |
+| `src/trainers/grpo/rollout/trajectory_tokenize.py`, `trajectory_spans.py` (trajectory → training rows: whole-render spans, per-turn sampled ids) | `agent-docs/training-methods/grpo/async-grpo/rollouts.md` |
+| `src/trainers/grpo/rollout/rollout_metrics.py`, `completions_logging.py` (per-episode rollout diagnostics, completion/trajectory artifacts) | `agent-docs/training-methods/grpo/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md` |
+| `src/trainers/grpo/objective/` (group-relative advantages, truncated log-ratio corrections, RLRR relative rewards) | `agent-docs/training-methods/grpo/async-grpo/objective.md`, `agent-docs/training-methods/grpo/{online-grpo,offline-grpo}.md` |
+| `src/trainers/grpo/mixins/chunked_logprobs.py` (`use_chunked_grpo_logprobs` — the chunked log-prob path past the logits wall) | `agent-docs/training-methods/grpo/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/environments/ray_actors.py` (actor pool, dispatch, Ray init) | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/grpo/async-grpo/setup.md` (trainer-side knobs) |
 | `src/distributed/checkpoint/` (save ladder, weight loader, OptimizerShardStore, PeftAdapterSaver) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/format.py` (on-disk spellings, save-dtype casts, the layout cascade, state-dict IO) | `agent-docs/reference/checkpoints.md` |
@@ -89,6 +91,7 @@ changes.
 | `src/data/` (loading, processing, sharding, VLM) | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
 | `src/data/sources/s3_client.py`, `src/data/sources/dataset_cache.py`, `src/data/sources/paths.py`, `scripts/before_training/s3_datasets.py` (CLI) | `agent-docs/data/s3-utilities.md` |
 | `src/data/pipeline/preprocessing.py` (tokenize/pack/shard bake), `src/data/pipeline/preprocessed_metadata.py` (the `metadata.json` contract), `src/data/shard_index.py` | `agent-docs/data/dataset-preparation.md`, `agent-docs/parallelism/data-loading.md` |
+| `src/data/pipeline/rendered.py` (`tokenize_rendered` — special-token ownership on a rendered template), `src/data/pipeline/tokenizer_backend.py` (`tokenizer_backend`) | `agent-docs/data/dataset-formats.md`, `agent-docs/data/dataset-preparation.md` |
 | `src/data/pipeline/vlm_dataset.py` (raw-VLM map, schema, over-length filter) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `src/data/probe_consensus.py` (cross-rank agreement for the data probes) | `agent-docs/data/filesystem-handling.md` |
 | `src/data/deduplication.py` (embedding + FAISS corpus dedup) | `agent-docs/reference/scripts-reference.md` |

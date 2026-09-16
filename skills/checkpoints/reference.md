@@ -19,26 +19,31 @@ Gathered is the default for every mode; the sharded EP save is an opt-in write-b
 (there is no per-rank TP save). Nothing loads `ep_sharded` directly: `reject_ep_sharded_checkpoint`
 raises world-uniformly at EP load (`src/distributed/expert_parallel/loading.py`) and
 `load_full_state_dict` refuses the marker with the merge instructions
-(`src/checkpoint/format.py`); a shard directory whose index never landed is caught by a `.shard_N`
-header peek.
+(`src/checkpoint/format.py`); a shard directory whose index never landed is caught tool-side by the
+`.shard_N` header peek (`_reject_indexless_ep_shards`, `src/checkpoint/tool_io.py`). `merge_ep_shards`
+additionally needs `ep_size` in the index metadata, not just the marker.
 
 ## Resume — three paths
 
 - **Path A — reload from checkpoint** (TP-only, dense FSDP2/DDP): weights come from the checkpoint.
   TP (`_load_tp`) streams the checkpoint one tensor at a time per rank and `distribute_tensor`s each
   into the live DTensor's placements before `copy_` (hand-sharded non-DTensor params — GptOss sinks —
-  are sliced by `tp_rank`); FSDP2 (`_load_fsdp2`) reads the whole dict on rank 0 via
-  `load_full_state_dict()` and hands it to `set_model_state_dict(broadcast_from_rank0)`. Both gate on
+  are sliced by `tp_rank`); FSDP2 (`_load_fsdp2`) reshards first, then reads the whole dict on rank 0 via
+  `load_full_state_dict()` and hands it to `set_model_state_dict(broadcast_from_rank0)` — skipped
+  outright when the model was already constructed from that checkpoint (re-reading a 100B+ state
+  dict is waste), except for `load_best_model_at_end`. Both gate on
   key coverage across ranks and restore weights + trainer state.
 - **Path B — skip reload** (EP, ETP, EP+TP, EP+CP, CP): model rebuilt by `load_distributed_model()` at
   `__init__`, so **weights are not reloaded**. **Set `model_name_or_path` to the gathered checkpoint
-  dir** or you resume the original base weights.
+  dir** — a checkpoint that ships base weights the live model was not built from makes the loader
+  raise (rank-0 verdict, broadcast), as does `load_best_model_at_end` under EP/CP full fine-tuning.
 - **Path C — PP** (`_load_pp_stage`, dispatched first): stage-local restore. Unreachable while PP is
   unavailable in this release.
 
 All three restore `trainer_state.json`, the LR scheduler from `scheduler.pt` (written even under
-`save_only_model`), LoRA adapters (`restore_adapters`) and wrapper-level trained params
-(`_restore_extra_trained_params`). Optimizer state resumes from the per-rank shards when
+`save_only_model`), LoRA adapters (`restore_adapters`, `src/distributed/checkpoint/peft.py`),
+wrapper-level trained params (`_restore_extra_trained_params`) and the router-balancing biases
+(`_restore_router_balancing_biases`, `src/trainers/mixins/checkpointing.py`). Optimizer state resumes from the per-rank shards when
 `OptimizerStateFingerprint` matches; a mismatch warm-restarts (under PP it raises instead), and
 shards whose `optimizer_meta.pt` carries no fingerprint at all raise — delete every
 `optimizer_shard_*.pt` + `optimizer_meta.pt` to accept a warm restart.
@@ -66,9 +71,10 @@ export dtype. The index metadata is HF's own — there is no `merged_from_*` mar
   `HF_MODEL_TYPES`; the transform itself is that class's `merge_shards_to_hf` (`expert_gather.py`,
   overridden where the layout differs). Save time gates on `_check_ep_merge_family_supported`
   (`saving.py`), which refuses two cases: a `model_type` no EP layer class claims, and a family
-  declaring `_EXPORTS_HUB_NAMESPACE` — Step-3.7 Flash, whose hub spelling comes from transformers'
+  declaring `_EXPORTS_HUB_NAMESPACE` — Step-3.7 Flash, **both spellings** (`step3p7`, `step3p5`) —
+  whose hub layout comes from transformers'
   save-side conversion revert that a key-by-key merge stream cannot apply. Every other shipped
-  family merges, mistral4, gemma4 and Zaya included.
+  family merges, mistral4, gemma4, laguna, glm5_next, cohere2_moe, inkling and Zaya included.
 - GptOss gate/up are de-interleaved for grouped-GEMM training and re-interleaved on merge; the expert
   key set (incl. the 2-D `gate_up_proj_bias`/`down_proj_bias`) is derived from `expert_weight_roots()`
   in `src/distributed/expert_parallel/expert_weights.py`, not hand-listed.
@@ -80,8 +86,12 @@ Load base + adapter, `merge_and_unload()`, save standalone HF checkpoint (base p
 models), `--num_labels`, `--max_shard_size` (`5GB`), `--attn_implementation`, plus the shared
 `--trust_remote_code` / `--quiet`. Uses
 `resolve_auto_model_class`, so **VLM bases load as the full `*ForImageTextToText` wrapper** (avoids
-adapter-key mismatch), and saves via `load_processing_class` so a VLM keeps its image preprocessor +
-chat template (adapter dir first, base model as fallback). Applies `apply_training_sidecars` to the
+adapter-key mismatch). The work happens in the shared `merge_adapter_into_base`
+(`src/checkpoint/adapters.py`), which also refuses a per-rank-sharded adapter or base, an in-place
+output and a native expert-LoRA adapter, and picks the processing class through
+`resolve_peft_processing_class` (`src/models/loading/tokenizer_setup.py`): the adapter dir's when it
+is a full processor, otherwise the **base's** — a VLM adapter dir usually ships only a tokenizer, and
+a tokenizer-only save leaves an unloadable VLM. It applies `apply_training_sidecars` to the
 merged model (see below) — the merge rebuilds the base from the hub, so without it a `bias_update`
 run's routing and a `reset_sinks` run's sinks are lost.
 
@@ -112,8 +122,9 @@ speedup** — bf16 stays optimal at these shapes.
 
 ### `reset_sinks.py`
 Set every `*.sinks` param to dtype-min (neutralize the attention sink), matching the GptOss FA2-finetune
-behavior. Flags: `--input_dir` (local dir or HF repo id), `--output_dir` (**required** unless
-`--in_place`), `--dry_run`, plus the shared `--max_shard_size` / `--trust_remote_code`. Direct
+behavior. Flags: `--input_dir` (required; local dir or HF repo id), `--output_dir` (required unless
+`--in_place`), `--in_place` (rewrites `--input_dir`, no undo — never valid for a repo id),
+`--dry_run`, plus the shared `--max_shard_size` / `--trust_remote_code`. Direct
 safetensors edit when `model.safetensors`
 exists, else `from_pretrained` + `save_pretrained` for sharded checkpoints.
 
@@ -139,10 +150,19 @@ default base or first model, a Hub id is downloaded weights-excluded), `--max_sh
 models. Deliberately copies **no** resume sidecars (`rng_state*`, `scheduler.pt`,
 `router_balancing_biases.pt`) — they describe one run, not the merge.
 
+### `reattach_vision_tower.py`
+Rebuild the multimodal wrapper layout around a `text_only_model` export: text weights re-prefixed to
+`model.language_model.*`, `model.visual.*` / `mtp.*` streamed back from the base, the composite
+config regrafted with the trained text config. Flags: `--input_dir` (the text-only export),
+`--model_id` + `--revision` (the multimodal base — Hub id or local dir), `--output_dir`,
+`--max_shard_size`, `--trust_remote_code` (default **off** — a Hub-capable source). Refuses a
+wrapper-layout input and a base with no vision keys. Needed because vLLM 0.26.0 registers only the
+wrapper class for Qwen3.5/3.6; SGLang 0.5.17 loads a text-only export as-is.
+
 ## Training sidecars — `apply_training_sidecars`
 
 `router_balancing_biases.pt` (trained router-balancing biases, written by
-`_persist_router_balancing_biases` every save) and `training_provenance.json` (the GptOss sink
+`_persist_router_balancing_biases` in `src/trainers/mixins/checkpointing.py` every save) and `training_provenance.json` (the GptOss sink
 policy) hold training state the weights cannot. `apply_training_sidecars(model, source_dir)`
 (`src/checkpoint/tool_io.py`) is the single seam that re-applies both to an assembled model:
 it restores the balancing tensors **at their trained precision** (a bf16 round trip quantizes away
@@ -177,10 +197,14 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   `num_attention_heads` (or non-MLA GQA `num_key_value_heads`) is not divisible by `tp_size`;
   `ColwiseParallel` would otherwise split Q/K/V inside a head and silently corrupt attention. MLA
   (GLM4 latent attn) shards by query head, so the KV-head check is skipped there.
-- **Zaya has no native vLLM path** — vLLM 0.26.0 ships no native Zaya implementation; an export
-  resolves only through vLLM's transformers backend (generation quality unverified here), and RL
-  weight sync is refused at construction for that gap. Its gathered save is the native fused layout
-  (`experts.gate_up_proj` / `down_proj`), which `from_pretrained` reads back directly.
+- **Zaya has no native serving path on either engine** — vLLM 0.26.0 ships no native Zaya class (an
+  export resolves only through vLLM's transformers backend, generation quality unverified here), and
+  SGLang 0.5.17's loader reads the pre-transformers-5.14 per-expert layout, not the native fused one
+  the trainer holds. RL weight sync is refused at construction for both, off the engine client's
+  `UNSERVABLE_MODEL_TYPES` (`src/distributed/nccl/clients/`) — **not** off the layer class, whose
+  `_supports_weight_sync = False` covers glm5_next, inkling and cohere2_moe instead. Zaya's gathered
+  save is the native fused layout (`experts.gate_up_proj` / `down_proj`), which `from_pretrained`
+  reads back directly.
 - **VLM re-save must persist the processor** — `merge_peft_adapters` / `convert_to_bf16` /
   `scripts/before_training/patch_vocab.py`
   load the VLM class correctly and save the full **processor**, not just the tokenizer; saving only a

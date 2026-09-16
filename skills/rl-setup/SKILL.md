@@ -29,9 +29,10 @@ cannot import vLLM (the server image ships its own torch and
 2.11+cu130 + `transformers 5.16`). `Dockerfile.vllm` pins that 5.14 line and
 asserts it at build: vLLM's Gemma 4 code reads the 5.14 config schema that 5.16
 folds into `per_layer_config`, so a 5.16 server makes Gemma 4 unservable
-(`agent-docs/infrastructure/rollout-servers.md`, config-schema parity). Three further
+(`agent-docs/infrastructure/rollout-servers.md`, config-schema parity). Four further
 build gates keep the sync honest — layerwise-reload skip-list coverage, the
-weight-transfer re-init patch, and the gpt-oss parser-plugin verifier — so a green
+weight-transfer re-init patch, the `/pause mode=keep` signature the client pauses with,
+and the gpt-oss parser-plugin verifier — so a green
 build is what proves the server can be synced (`wiring.md` §1).
 Trainer and vLLM communicate over **HTTP** (generation) and **NCCL** (weight
 sync via the vendored client). For concrete commands, field-by-field references,
@@ -84,20 +85,26 @@ and full launch examples see [`wiring.md`](wiring.md).
    `EnvironmentConfig.environment_type` (e.g. `react_math`, `native_coding`, `swe`,
    `mcp`, `qa_search`, `code_contests`, `codeforces`, `exam_qa`).
    Per-env knobs go in `environment_kwargs` (e.g. `search_backend`, `open_book`,
-   `mcp_server`, `timeout_per_test`);
-   reward shaping via `success_reward` / `failure_reward`
-   / `max_turns` (default `None` = the environment class's own). Custom envs: pass `environment_cls`
+   `mcp_server`, `timeout_per_test`, `carry_reasoning`). Reward shaping is the
+   **`rewards:` term list** — each term prices a source's score in `[0, 1]` as
+   `weight × score ^ exponent`, defaulting to `[{source: environment}]`
+   (`agent-docs/training-methods/grpo/rewards.md`); `max_turns` defaults to `None` = the
+   environment class's own. Custom envs: pass `environment_cls`
    (a `BaseEnvironment` subclass) instead. See the table in `wiring.md`.
 
 5. **Key GRPO hyperparameters** (both flavors): `num_generations` (group size),
    `beta` (KL to ref; `0.0` disables the ref model), `epsilon` (clip),
    `scale_rewards`, `temperature`, `loss_type`. Env GRPO adds rollout sampling
-   (`rollout_temperature` / `rollout_top_p` / `rollout_max_tokens`), Ray pool
+   (`rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` /
+   `rollout_chat_template_kwargs`), row and eval sizing (`max_train_row_tokens`,
+   `eval_rollout_batch_size`), Ray pool
    sizing (`num_rollout_workers`, `max_concurrent_rollouts`), prefetch
    (`enable_prefetch`), and `sync_weights_every_n_steps`.
    `rollout_max_thinking_tokens` caps CoT per turn and is enforced **engine-side**
    (vLLM `thinking_token_budget`): it needs a server reasoning parser and
-   `VLLM_USE_V2_MODEL_RUNNER=0`, and is refused under `rollout_backend: sglang`.
+   `VLLM_USE_V2_MODEL_RUNNER=0`, and is refused under `rollout_backend: sglang` — as is
+   `carry_reasoning`. `reasoning_compliance_weight` (default `0.0` = off) prices each turn's
+   CoT against that budget.
 
 ## Parallelism note
 
@@ -117,7 +124,8 @@ during the sync; the rolling sync that keeps (N-1) servers generating exists
 only on the single-process path (no EP wrappers, no PEFT).
 
 ## Sources of truth
-`wiring.md` + `agent-docs/training-methods/grpo/` document the setup. The code is the **ultimate** authority:
+`wiring.md` + `agent-docs/training-methods/grpo/` document the setup (`rewards.md` owns the
+term list, `async-grpo/setup.md` the servers and launch). The code is the **ultimate** authority:
 `src/trainers/grpo/environmental.py`, `src/distributed/nccl/` (the vendored weight-sync client), and
 `Dockerfile.vllm` decide the real handshake — when a doc, this skill, or memory disagrees, or you are
 unsure, read those files before wiring it up. (`CLAUDE.md`: docs-first, the code wins.) Related skills:

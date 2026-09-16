@@ -51,7 +51,7 @@ rewards:
 
 # --- Ray Workers (AsyncTrainingConfig fields) ---
 num_rollout_workers: 16
-max_concurrent_rollouts: null  # default: num_workers * 4
+max_concurrent_rollouts: null  # default: 4 × this rank's share of the rollout workers
 # eval_rollout_batch_size: null  # rows per rank in one evaluation rollout round; null = the eval batch
 ray_address: null  # null = local, or "head-node:6379"
 

@@ -82,7 +82,8 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   experts stay bf16+SR).
 - **Fit on a small/consumer GPU →** **QLoRA**: far less memory than full FT and faster than bf16 LoRA
   (the 4-bit base is bandwidth-bound). With FLCE a Qwen3-8B 32k run fits a 24 GB GPU.
-  EP→attention-only targets, no QLoRA under EP/TP.
+  Under EP, LoRA targets attention **plus** native grouped expert adapters (ETP is the
+  attention-only row); no QLoRA under EP/TP.
 - **Many-rank / multi-node grad precision (not memory) →** `fp32_grad_reduce: true`: a tighter
   grad-reduce at bf16 storage cost, ~2× cost on the reduce collective only.
 
@@ -96,10 +97,11 @@ The honest negatives — cited in full in levers.md. At fine-grained MoE shapes 
   bytes) — not training.
 - **Native DeepGEMM — net-slower than bf16 at every training shape**; opt-in only
   (`HALO_DEEPGEMM_NATIVE=1`), never auto-selected.
-- **torch.compile on EP MoE — reaches Liger's speedup but does NOT stack on top of it.** Compile and
-  Liger target the same compilable spans between DeepEP/FA4 graph breaks, so the two stacked land within
-  noise of Liger alone — and Liger is already on by default with no warmup cost. Reach for
-  `torch_compile: true` only to fuse a span Liger doesn't cover. Not a free extra win.
+- **torch.compile on EP MoE — composes with Liger, but adds little.** Compile and
+  Liger target the same compilable spans between DeepEP/FA4 graph breaks, so compile alone, Liger
+  alone and the two stacked all land within ~2% — and Liger is already on by default with no warmup
+  cost. Reach for `torch_compile: true` when you can absorb the first-step compile latency, not as a
+  free extra win.
 - **Sub-bf16 master weights — dead.** Params, checkpoint and optimizer state never go below bf16; only
   GEMM operands are cast. bf16 + SR is the floor.
 - **FA2 on Blackwell — the slow outlier** (well under half FA4's throughput at 32k). Use FA4 (auto);

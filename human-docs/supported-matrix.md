@@ -1,232 +1,158 @@
 # Supported Matrix
 
-What runs, what doesn't, and what has been validated. The code is the source
-of truth; this is the summary.
+What runs, what doesn't, and what has been validated. The code is the source of
+truth; this is the summary, and it wins over any recipe that disagrees with it.
 
 ## Runtime
 
-| Area | Supported | Notes |
+| Area | Supported |
+| --- | --- |
+| Python | `>=3.12,<3.13`, installed with uv into the image |
+| PyTorch | 2.11.x, `cu130` wheel (CUDA 13.2 toolkit in the image) |
+| Transformers / TRL / Accelerate / PEFT | 5.16.x / 1.6.x / 1.11.x / 0.18.x |
+| vLLM | 0.26.0, separate container — rollouts for both online RL methods |
+| SGLang | 0.5.17, separate container — rollouts for async GRPO with environments |
+
+| Hardware | Image | Status |
 | --- | --- | --- |
-| Python | `>=3.12,<3.13` | |
-| Package manager | uv | `pyproject.toml` + `uv.lock` |
-| Primary runtime | Docker image | required for training and tests |
-| PyTorch | 2.11.x, `cu130` wheel | image ships the CUDA 13.2 toolkit |
-| Transformers | 5.16.x | |
-| TRL | 1.6.x | base trainer stack |
-| Accelerate | 1.11.x | launcher and FSDP integration |
-| PEFT | 0.18.x | LoRA / QLoRA |
-| vLLM | 0.26.0, separate container | generation for online and environmental GRPO |
-| SGLang | 0.5.17, separate container | alternative rollout engine for environmental GRPO |
+| NVIDIA B200 / B300 | `halo:blackwell` | supported, primary Blackwell target |
+| NVIDIA GB200 / GB300 NVL72 | `halo:blackwell` | supported; set `NVLINK_DOMAIN_SIZE=72` |
+| NVIDIA H100 / H200 | `halo:hopper` | supported |
+| NVIDIA A100 / Ampere | custom-arch build | not a release target — the shipped builds emit no sm_80 kernels |
 
-## Hardware
-
-| Hardware | Image | Status | Notes |
-| --- | --- | --- | --- |
-| NVIDIA B200 / B300 | `halo:blackwell` | supported | primary Blackwell target |
-| NVIDIA GB200 / GB300 NVL72 | `halo:blackwell` | supported | NVLink-domain support through config/env |
-| NVIDIA H100 / H200 | `halo:hopper` | supported | Hopper image target |
-| NVIDIA A100 / Ampere | source/local build | partial | FA2 fallback; not a release target |
-
-Pull the prebuilt images from Amazon ECR Public, or build them from source —
-both routes are in [Installation](installation.md).
+Pull the prebuilt images or build them from source: [Installation](installation.md).
 
 ## Attention backends
 
-| Backend | Hardware | Status | Notes |
-| --- | --- | --- | --- |
-| Flash Attention 4 | Blackwell | supported | auto-selected on Blackwell |
-| Flash Attention 3 | Hopper | supported | auto-selected on Hopper |
-| Flash Attention 2 | Ampere / Hopper / Blackwell | supported | fallback when FA3/FA4 is absent |
-| SDPA | broad | fallback | forced where no FA kernel serves the family |
-| eager attention | any | last resort | forced for DeepSeek-V4, the one family SDPA cannot serve either |
+Halo picks the backend: FA4 on Blackwell, FA3 on Hopper, FA2 as the fallback,
+SDPA or eager where no Flash kernel serves the family. Gemma 4 gets no flash path
+at all (FA2 caps head_dim at 256 and FA4 overflows tensor memory at its 512-wide
+global layers); Qwen3.5/3.6 and GLM-4 MoE Lite are demoted off FA4 alone (its
+backward NaNs at their shapes) and keep FA3 on Hopper; GLM-5 Next, Step-3.7
+Flash, Inkling and Bailing/Ling run without one; DeepSeek-V4 needs eager.
 
-Several families are redirected off Flash Attention automatically. Gemma 4's
-head_dim of 512 exceeds every FA kernel. Qwen3.5/3.6 and GLM-4 MoE Lite are
-demoted from FA4 alone, whose backward produces NaNs at their shapes, so they
-keep FA3 on Hopper. GLM-5 Next, Step-3.7 Flash, Inkling and Bailing/Ling declare
-no usable flash support upstream.
-
-Context Parallelism picks its own kernel and ignores the configured label: FA3
-on Hopper, FA4 on Blackwell, FA2 otherwise. It rejects SDPA, except where a
-family's Ulysses wrapper waives the check because its modeling code carries no
-flash label at all (Bailing/Ling). The per-family resolution table is in
+Context parallelism picks its own kernel and ignores the configured label — FA3
+on Hopper, FA4 on Blackwell, FA2 otherwise — and rejects SDPA except where a
+family's wrapper waives the check (Bailing/Ling). Per-family resolution:
 [Flash Attention](../agent-docs/optimization/flash-attention.md) ↗.
-
-## Optimization defaults
-
-| Feature | Status | Default | Notes |
-| --- | --- | --- | --- |
-| AdamWBF16 optimizer | supported | auto-enabled when `bf16: true` on FSDP/EP/TP/CP (not accelerate-managed DDP) | stochastic rounding, no fp32 master weights (6 B/param) |
-| fp32 master weights | supported | opt-in (`fp32_non_ep_params: true`) | 12 B/param on the non-expert params; experts stay bf16. `bf16_optimizer: false` picks the stock optimizer, not a precision, and is rejected on a MoE whose experts are plain tensors unless `fp32_non_ep_params` is set |
-| Liger kernels | supported | on for every method (the parser sets `use_liger_kernel: true`) | fused CE / SwiGLU / RMSNorm paths by model support |
-| Grouped GEMM | supported | `use_grouped_gemm: true` on SM90+ | batches the per-expert matmuls, no-op on older hardware |
-| Flash Attention backend selection | supported | automatic | by GPU architecture and model constraints |
-| FP8 / FP4 MoE training | experimental | off (`lowp_precision: bf16`) | fp8/fp4 can be slower at these MoE shapes |
-| FP8 / FP4 export | experimental | explicit conversion | `halo run quantize-to-lowp` |
 
 ## Training methods
 
-Every trainer supports EP, TP, ETP, and EP+TP. CP is declare-to-enable
-(`_supports_cp`, `False` on the base) and only SFT and SMPO set it: nothing
-inspects a trainer's loss, so CP would fail silently, mis-pooling quantities
-across sequence shards. What keeps the rest off is `logits_to_keep`, global
-log-probability sums, full-sequence pooling, and dual-model / rollout setups.
+Every trainer supports EP, TP, ETP and EP+TP. CP is declare-to-enable and only
+SFT and SMPO set it: nothing inspects a trainer's loss, so CP would silently
+mis-pool across sequence shards. The Notes column says what keeps each of the
+others off.
 
-| Method | Script | EP | CP | TP | ETP | Notes |
-| --- | --- | :---: | :---: | :---: | :---: | --- |
-| SFT | `scripts/training/sft.py` | Yes | Yes | Yes | Yes | also VLM and continued pretraining |
-| SMPO | `scripts/training/preference/smpo.py` | Yes | Yes | Yes | Yes | reference-free preference optimization |
-| DPO | `scripts/training/preference/dpo.py` | Yes | No | Yes | Yes | reference-model log-prob sums block CP |
-| KTO | `scripts/training/preference/kto.py` | Yes | No | Yes | Yes | Kahneman-Tversky optimization |
-| Reward modeling | `scripts/training/preference/rewards.py` | Yes | No | Yes | Yes | full-sequence pooling blocks CP |
-| Classification | `scripts/training/classification.py` | Yes | No | Yes | Yes | full-sequence pooling blocks CP |
-| Offline GRPO | `scripts/training/offline_grpo.py` | Yes | No | Yes | Yes | trains from scored completions |
-| Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | Yes | No | Yes | Yes | needs a vLLM server; `--use_sdpg=true` runs online SDPG |
-| Environmental GRPO | `scripts/training/environmental_grpo.py` | Yes | No | Yes | Yes | needs Ray plus a vLLM or SGLang rollout server |
-| Distillation | `scripts/training/distillation/` | Yes | No | Yes | Yes | teacher and self distillation |
-| Embedding | `scripts/training/embedding.py` | Yes | No | Yes | Yes | SentenceTransformer trainer |
+| Method | Script | CP | Notes |
+| --- | --- | :---: | --- |
+| SFT | `scripts/training/sft.py` | Yes | also VLM and continued pretraining |
+| SMPO | `scripts/training/preference/smpo.py` | Yes | reference-free preference |
+| DPO / KTO | `scripts/training/preference/{dpo,kto}.py` | No | reference log-prob sums block CP |
+| Reward modeling | `scripts/training/preference/rewards.py` | No | full-sequence pooling blocks CP |
+| Classification | `scripts/training/classification.py` | No | full-sequence pooling blocks CP |
+| Offline GRPO | `scripts/training/offline_grpo.py` | No | trains from scored completions |
+| Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | No | needs vLLM; `--use_sdpg=true` runs online SDPG |
+| Async GRPO with environments | `scripts/training/environmental_grpo.py` | No | needs Ray plus a vLLM or SGLang server |
+| Distillation | `scripts/training/distillation/` | No | teacher and self distillation |
+| Embedding | `scripts/training/embedding.py` | No | SentenceTransformer trainer |
 
 ### Rollout engines
 
-Environmental GRPO serves rollouts from vLLM by default; `rollout_backend:
-sglang` switches engines. Both read a family's experts in the hub checkpoint
-layout its gather emits, so the engines differ in which families their pinned
-release can take an online weight update for, and in one request field. SGLang
-refuses two shapes at startup rather than mid-run:
+Async GRPO with environments serves rollouts from vLLM by default;
+`rollout_backend: sglang` switches engines. Both read a family's experts in the
+hub layout its gather emits, so what differs is which families each pinned
+release can take an online weight update for — the trainer names the family and
+the loader reason at construction, rather than failing mid-run.
 
-- `rollout_max_thinking_tokens`, a vLLM-only request field — steer reasoning
-  with the environment's `reasoning_effort` and price it with
-  `reasoning_compliance_weight` instead;
-- the families SGLang 0.5.17 cannot serve or update: Mistral4 and Ling 3.0 (no
-  model class), Ring (its checkpoints declare `BailingMoeLinearV2ForCausalLM`,
-  the engine registers `BailingMoeV2_5ForCausalLM`), Zaya (its loader reads the
-  pre-transformers-5.14 per-expert checkpoint), Laguna and Step-3.7 (their
-  loaders assert full coverage in each `load_weights` call, which a chunked
-  update cannot satisfy), DeepSeek-V4 (per-expert `w1/w3/w2` names against the
-  fused gather). Dense families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE
-  Lite, Gemma 4, Ling 2.0 and LFM-2 sync into it, with expert distribution.
+- **No online RL at all**, whichever engine: Inkling, GLM-5 Next, Cohere2 MoE.
+- **Refused by both engines**: Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's
+  linear checkpoints.
+- **vLLM only**: Laguna and Step-3.7 Flash — SGLang's loaders assert full
+  coverage on every call, which a chunked update cannot satisfy.
+- **Both engines**, expert distribution included: everything else — dense
+  families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0,
+  LFM-2.
 
-vLLM 0.26.0 refuses Zaya, Mistral4, DeepSeek-V4, Ling 3.0 and Ring; Inkling,
-GLM-5 Next and Cohere2 MoE sync into neither. The trainer names the family and
-the loader reason at construction.
-
-`routing_replay: rollout` runs on either engine. SGLang captures it for GPT-OSS,
-Qwen3 MoE, Qwen3.5/3.6 and GLM-4 MoE Lite with `--enable-return-routed-experts
---moe-runner-backend triton`; Gemma 4 and Zaya have no routing replay on either
-engine, and SGLang's R3 capture raises on Bailing at the first rollout.
-Weight sync must be served from this repo's `Dockerfile.sglang` image — the
-upstream one ships a different NCCL, and the patch this one applies is what
-lets an update reach the GLM-4 gate and the Gemma 4 router — with
-`NCCL_CUMEM_ENABLE=1` in its container (the compose default; a mismatch fails
-the first sync, [Troubleshooting](troubleshooting.md)). Engine-by-engine
-detail: [Rollout Servers](../agent-docs/infrastructure/rollout-servers.md) ↗.
+`rollout_max_thinking_tokens` is vLLM-only and refused under SGLang. SGLang must
+be served from this repo's image, not upstream. Engine setup, ports, weight sync
+and `routing_replay`: [Rollout Servers](rollout-servers.md).
 
 ## Parallelism modes
 
-| Mode | Status | Best for | Main limit |
-| --- | --- | --- | --- |
-| FSDP2 / DP | supported | default dense and small MoE runs | memory scales with model shape |
-| HSDP (`use_hsdp: true`) | supported | multi-node DP where 1D FSDP's cross-node shard collectives dominate | pure DP or CP only; no-op on one NVLink domain |
-| EP | supported | MoE expert sharding | MoE families need registered wrappers |
-| CP | supported | long-context SFT / SMPO | blocked by full-sequence logits / pooling |
-| TP | supported | attention and weight sharding | model-family support varies |
-| ETP | supported | expert FFN memory reduction | shards experts only, not attention |
-| EP + CP | supported for selected model/trainer pairs | MoE plus long context | needs both model and trainer support |
-| EP + TP | supported for selected MoE families | MoE plus attention sharding | node / NVLink-domain constraints |
-| EP + ETP | experimental | MoE expert memory pressure | node-local, advanced path |
-| TP + CP · TP + ETP · ETP + CP · EP + TP + ETP | unsupported | — | rejected at config validation; pick EP+TP or EP+ETP |
-| Pipeline parallelism | not yet available | — | nearly implemented; `pipeline_parallel_size > 1` is rejected at config time until it clears extensive testing, then lands for selected models and trainers in an upcoming version |
+| Mode | Status | Best for |
+| --- | --- | --- |
+| FSDP2 / DP | supported | default dense and small MoE runs |
+| HSDP (`use_hsdp: true`) | supported | multi-node DP; pure DP or CP only, no-op on one domain |
+| EP | supported | MoE expert sharding |
+| CP | supported | long-context SFT / SMPO |
+| TP | supported | attention and weight sharding; family support varies |
+| ETP | experimental | expert FFN memory, experts replicated |
+| EP+CP · EP+TP | supported for selected families | MoE plus long context / attention sharding |
+| EP+ETP | experimental | MoE expert memory pressure, node-local |
+| TP+CP · TP+ETP · ETP+CP · EP+TP+ETP | unsupported | rejected at config validation |
+| Pipeline parallelism | not yet available | `pipeline_parallel_size > 1` is rejected at config time |
+
+The layout rules behind these — and the shapes rejected before a run starts —
+are in [Parallelism](parallelism.md).
 
 ## Model families
 
-Any HuggingFace `AutoModelForCausalLM` runs under standard FSDP2. The matrix
-below is about advanced parallelism. Qwen3 MoE, GPT-OSS, GLM-4 MoE Lite and
-Mistral4 carry the broadest coverage; hybrid linear-attention families and MoEs
-without a registered CP wrapper drop CP. Source of truth under
-`src/distributed/`: `MOE_LAYER_MAP` (EP), the CP wrapper registry in
-`context_parallel/layers/` (CP), `TP_SHARDABLE_ATTENTION_CLASSES` (TP).
+Any HuggingFace `AutoModelForCausalLM` runs under FSDP2; this table is about
+advanced parallelism. Qwen3 MoE, GPT-OSS, GLM-4 MoE Lite and Mistral4 carry the
+broadest coverage; hybrid linear-attention families and MoEs without a registered
+CP wrapper drop CP. What each family is for: [Supported Models](models.md).
 
 | Model family | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Notes |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | --- |
 | Qwen3 (dense) | Yes | — | Yes | Yes | — | — | — | Yes | reference dense family |
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | broadest coverage |
 | Qwen3-VL (text) | Yes | — | Yes | No | — | — | — | Yes | keep `tensor_parallel_size=1` — both variants raise at load under TP |
-| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | interleaved linear-attention blocks CP; VL checkpoints train too — the MoE-VL wrapper has EP, the dense 9B-VL runs plain FSDP with `sdpa` |
+| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | interleaved linear attention blocks CP; VL checkpoints train too (the MoE-VL wrapper has EP, the dense 9B-VL runs plain FSDP with `sdpa`) |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | interleaved fused experts; trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | LoRA-style attention compression |
-| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | untested | Yes | untested | VLM checkpoint; NoPE full-attention layers; averaged shared expert. Only EP is validated on the 200B+ checkpoint — CP/TP/ETP pass the tiny-model 8-GPU matrix. No online/environmental GRPO |
-| Laguna S / XS 2.1 | Yes | Yes | No | No | untested | No | No | Yes | sigmoid router and shared expert, native in transformers (released checkpoints still load through remote code at a pinned revision); shipped configs set `attn_implementation: sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
-| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | No | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA on the multimodal checkpoint is refused at PEFT setup — the vision tower's projections share the `q_proj`…`o_proj` names in a `Gemma4ClippableLinear` PEFT cannot wrap (open issue) |
-| Bailing/Ling | Yes | Yes | Yes | No | Yes | untested | No | Yes | EP covers Ling 2.0, Ling 3.0 and the Ring linear-attention siblings; CP on Ling 2.0 only (needs `sdpa`); no DTensor attention plan. Weight sync refused for Ling 3.0 and the linear siblings |
+| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | untested | only EP is validated on the 200B+ checkpoint; the other modes pass the tiny-model matrix. No online RL, on either engine |
+| Laguna S / XS 2.1 | Yes | Yes | No | No | untested | No | No | Yes | native in transformers, released checkpoints still load through remote code at a pinned revision; `sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
+| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | partial | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA on the multimodal checkpoint is refused at PEFT setup (open issue), so target the experts or load `text_only_model: true` |
+| Bailing/Ling | Yes | Yes | Yes | No | Yes | untested | No | Yes | EP covers Ling 2.0, Ling 3.0 and the Ring siblings; CP on Ling 2.0 only; no DTensor attention plan. Ling 3.0 and Ring's linear spellings take no online weight update |
 | LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | short-conv layers block CP |
-| Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | neither pinned engine registers a `mistral4` class, so no online / environmental GRPO |
-| DeepSeek-V4 | Yes | Yes | No | No | untested | No | No | Yes | shared-KV MQA + CSA/HCA compressor block CP/TP; eager-only, so `padding_free` is rejected (packing works but warns — compressors see across document boundaries); no rollout weight sync |
-| Zaya | Yes | Yes | No | No | Yes | No | No | Yes | EP or ETP, always without gradient checkpointing; CCA blocks CP, `num_kv_heads=2` blocks TP; no rollout weight sync |
-| Inkling | Yes | Yes | No | No | Yes | No | No | untested | multimodal MoE (276B total / 12B active); short-conv layers and an additive relative-logits bias block CP, no `tp_plan`; no rollout weight sync |
-| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM (321B total / 18B active); KDA linear-attention blocks CP, no TP shard plan; SDPA only; the fp8 release needs a one-time BF16 conversion (`halo run convert-glm5-bf16`); no rollout weight sync |
-| Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM (198B total / ~11B active); per-layer head counts block TP, no CP wrapper; SDPA only; GRPO on vLLM only (serve with `--trust-remote-code`; SGLang's loader refuses the chunked update); sharded EP saves are refused — use the gathered save |
-| Any other HF causal LM | Yes | — | family-specific | native if `tp_plan` exists | — | — | — | Yes | standard FSDP path; a dense model without a TP plan raises at load instead of sharding |
+| Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | untested | Yes | Yes | neither engine registers a `mistral4` class, so no online RL |
+| DeepSeek-V4 | Yes | Yes | No | No | untested | No | No | Yes | shared-KV MQA and the sparse-attention compressors block CP/TP; eager-only, so `padding_free` is rejected (packing works but warns). No online RL |
+| Zaya | Yes | Yes | No | No | Yes | No | No | Yes | EP or ETP, always without gradient checkpointing; CCA blocks CP, its attention class carries no TP plan. No online RL on either engine |
+| Inkling | Yes | Yes | No | No | Yes | No | No | untested | multimodal MoE; short-conv layers and a relative-logits bias block CP, and its attention class is not TP-shardable. No online RL |
+| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM; KDA linear attention blocks CP and is not TP-shardable, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first. No online RL |
+| Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM; per-layer head counts block TP, no CP wrapper, SDPA only; sharded EP saves refused — use the gathered save; online RL on vLLM only |
+| Any other HF causal LM | Yes | — | family-specific | native if `tp_plan` exists | — | — | — | Yes | a dense model without a TP plan raises at load instead of sharding |
 
-Three rules cut across the table:
+Three rules cut across the table. Every `Yes` in EP+CP carries the same topology
+rule — EP stays node-local and `ep_size × expert_tp_size` equals the NVLink
+domain size. ETP has no per-family opt-in (every EP-capable family shards expert
+FFNs through the same helper, so `untested` means not yet GPU-validated), with
+GPT-OSS the one behavioral exception: its interleaved expert weights cannot be
+de-interleaved once TP-sharded, so grouped GEMM turns off under ETP. And LoRA
+`Yes` covers FSDP/DP, EP, CP and pure ETP — TP and EP+TP reject adapters
+outright, and any `expert_tp_size > 1` additionally rejects adapters on the
+*expert* projections, so keep `lora_target_modules` on attention there.
 
-- Every `Yes` in EP+CP carries the same topology rule — EP stays node-local and
-  `ep_size × expert_tp_size` equals the NVLink domain size
-  ([Parallelism](parallelism.md)).
-- ETP has no per-family opt-in: every EP-capable family shards its expert FFNs
-  through the same base helper, so `untested` means not yet GPU-validated, not
-  unsupported. GPT-OSS is the one behavioral exception — its interleaved expert
-  weights cannot be de-interleaved once TP-sharded, so grouped GEMM turns off
-  under ETP.
-- LoRA `Yes` covers adapters under FSDP/DP, EP, CP, and pure ETP. TP and EP+TP
-  reject LoRA outright (adapters are plain tensors outside the TP DTensor
-  graph). Under any `expert_tp_size > 1`, adapters on the *expert* projections
-  are additionally rejected — the replicated adapter half receives partial
-  gradients and drifts across ranks — so keep `lora_target_modules` on
-  attention there.
+## PEFT, quantization and data
 
-## PEFT and quantization
+| Feature | Status |
+| --- | --- |
+| LoRA | supported, except under TP / EP+TP; expert-projection adapters are also refused once `expert_tensor_parallel_size > 1` |
+| QLoRA | DDP / FSDP / CP only; a MoE model also needs `use_grouped_gemm: false`. Rejected by both online RL methods in every mode |
+| Adapter merge | `halo run merge-peft-adapters` produces a standalone checkpoint |
+| FP8 / FP4 MoE QAT and export | experimental; simulated backend for QAT, `quantize-to-lowp` for export |
+| Muon, FlashAdamW | supported optimizer options |
+| HuggingFace / local / `s3://` datasets | supported; offline tokenize-pack-shard via `halo run prepare-dataset` |
+| VLM packing / padding-free | unsupported — images cannot be packed, VLM inputs use standard padding |
+| Streaming an infinite corpus | unsupported — the loaders materialize a map-style `Dataset`; pre-tokenize and shard offline |
 
-| Feature | Status | Notes |
-| --- | --- | --- |
-| LoRA | supported | except under TP / EP+TP — see above |
-| QLoRA | supported on DDP / FSDP / CP | rejected under EP and TP; a MoE model also needs `use_grouped_gemm: false`. Rejected by online / environmental GRPO in every mode (vLLM weight sync ships raw 4-bit storage) |
-| Adapter-only save / merge | supported | `halo run merge-peft-adapters` produces a standalone checkpoint |
-| FP8 / FP4 MoE QAT / export | experimental | simulated backend for QAT; `quantize-to-lowp` for export |
-| Muon | supported | optimizer option |
-| FlashAdamW | supported | 8-bit quantized optimizer state; opt-in |
-
-## Data
-
-| Data path | Status | Notes |
-| --- | --- | --- |
-| HuggingFace datasets | supported | default quickstart path |
-| local JSON / JSONL | supported | method-specific formats |
-| S3 datasets | supported | optional; bring your own credentials, cache-aware |
-| offline tokenization | supported | `halo run prepare-dataset`; recommended for larger corpora |
-| packed SFT | supported | text-only path |
-| VLM packing / padding-free | unsupported | images cannot be packed; VLM inputs use standard padding |
-| streaming an infinite corpus | unsupported | the loaders always materialize a map-style `Dataset` — pre-tokenize and shard offline instead |
-
-## Checkpointing
-
-What each mode writes and how to load or resume it:
-[Checkpoints & Export](checkpoints.md).
-
-| Mode | Status | Notes |
-| --- | --- | --- |
-| Standard FSDP checkpoint | supported | exact resume path |
-| PEFT adapter checkpoint | supported | adapter-only saves |
-| EP gathered save | supported | large models may need sharding |
-| EP sharded save | opt-in (`save_sharded_ep: true`) | merge before standalone use; refused for Step-3.7 Flash, whose hub-layout export the offline merge cannot reproduce |
-| TP save | supported | full tensors are reconstructed from DTensors at save time; nothing to merge |
-| Exact optimizer resume | all torchrun modes | needs a matching topology fingerprint ([Checkpoints](checkpoints.md#resume)) |
-| Resume with a changed fingerprint | warm restart | weights and schedule restored, optimizer state reinitialized |
+What each mode writes, and which resumes are exact:
+[Checkpoints](checkpoints.md).
 
 ## Limits
 
-- No hosted UI, no hyperparameter search, no built-in Hub upload — the
-  inherited `push_to_hub` fields parse but are unguarded and untested
-  ([Checkpoints](checkpoints.md)).
+- No hosted training UI, no hyperparameter search, no built-in model upload to the Hub
+  (the inherited `push_to_hub` fields parse but are unguarded and untested).
 - Pipeline parallelism is not yet available.
 - Advanced model-family support is explicit, not automatic.
 - vLLM and SGLang run outside the training environment, in their own containers.

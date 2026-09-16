@@ -1,30 +1,46 @@
 # Model Integration Cost
 
-Halo applies distributed behavior as HuggingFace model wrappers, so adding a model takes little code.
+Halo applies distributed behavior as wrappers around the HuggingFace model
+rather than as a fork of it, so adding a family costs little code. What is
+already supported is [Supported Models](models.md).
 
-For plain FSDP with no parallelism flags there is nothing to do: any `AutoModelForCausalLM` trains as is, multimodal models included (loaded through the full vision+text wrapper). Parallelism support is where code gets added.
-
-The advanced-parallelism path for an MoE model reuses the shared base:
+For plain FSDP2 with no parallelism flags there is nothing to do at all: any
+`AutoModelForCausalLM` trains as is, multimodal checkpoints included (loaded
+through the full vision+text wrapper). Parallelism is where code gets added.
 
 ```txt
 HuggingFace model load
   -> thin EP/TP/CP wrapper (subclass a base layer)
-  -> self-registers in MOE_LAYER_MAP (patching.py) via HF_MODULE_NAMES
+  -> self-registers by naming the HF class it claims
   -> existing FSDP / EP / ETP / checkpoint paths
 ```
 
-## Expert-parallel wrapper size
+## What a wrapper costs
 
-Each shipped MoE family adds one wrapper file under `src/distributed/expert_parallel/layers/`, which registers itself by naming the HF MoE class in `HF_MODULE_NAMES` and the config `model_type` in `HF_MODEL_TYPES`. The wrappers subclass `EPMoELayerBase`, so a family whose expert-weight layout matches an existing one subclasses it instead of starting over — Laguna reuses the GLM-4 wrapper in about 40 lines. Most families land between 50 and 145 lines; GPT-OSS (interleaved gate/up weights and attention sinks) is the outlier at about 380.
+Each shipped MoE family adds one file under
+`src/distributed/expert_parallel/layers/`, which registers itself by naming the
+HF MoE class it claims and the config `model_type`. They subclass a shared base,
+so a family whose expert-weight layout matches an existing one subclasses that
+instead of starting over — Laguna reuses GLM-4's in 39 lines. Most land between
+40 and 140 lines. GPT-OSS, with interleaved gate/up weights and attention sinks,
+is the outlier at about 370.
 
-## Adding parallelism to a new model
+Context parallelism is the same shape: one `UlyssesAttentionBase` subclass under
+`context_parallel/layers/` declaring the attention classes it wraps. Tensor
+parallelism usually costs nothing — a model carrying `base_model_tp_plan` shards
+through HuggingFace's own plan.
 
-The full procedure is in the `agent-docs` [Adding a New Model](../agent-docs/models/adding-a-model.md) ↗ guide. In brief:
+There are no accept lists to edit anywhere in this: the registries are derived
+from the subclass tree, so a wrapper that exists is a wrapper that is used.
 
-- **EP** — pick or subclass a wrapper layout under `expert_parallel/layers/`, name the HF MoE class in its `HF_MODULE_NAMES`, and set `_NUM_EXPERTS_ATTR_PATHS` to the family's expert-count attribute. `MOE_LAYER_MAP` is derived from the subclass tree.
-- **CP** — write a `UlyssesAttentionBase` subclass under `context_parallel/layers/` and declare its `HF_MODULE_NAMES`. `WRAPPER_CLASS_MAP` and `CP_SUPPORTED_ATTENTION_CLASSES` are derived from it, so there is no accept list to edit.
-- **TP** — a model with `base_model_tp_plan` needs nothing (`tp_plan="auto"`); selective EP+TP adds the attention classes to `module_types.py` (MoE registers through `HF_MODULE_NAMES` / `MOE_LAYER_MAP`).
+## Vendoring
 
-## Vendoring a model
+A model transformers has not landed yet can be vendored under
+`src/models/<name>/`: its `configuration_*.py` and `modeling_*.py`, registered on
+import, with a CPU test that proves the registration. Remove the copy once
+upstream ships the model. Today nothing is vendored: the only model definitions
+under `src/models/` are the sequence-classification heads transformers does not
+ship, for Gemma 4 and Qwen3.5 MoE.
 
-A model not yet in transformers can be vendored under `src/models/<name>/`: copy its `configuration_*.py` and `modeling_*.py`, register the config and model class on import, and add a CPU registration test. Remove the vendored copy once upstream lands the model. Today `src/models/` carries no vendored modeling code — only the task heads transformers does not ship (sequence-classification wrappers for Gemma 4 and Qwen3.5 MoE).
+The step-by-step procedure, per mode, is
+[Adding a Model](../agent-docs/models/adding-a-model.md) ↗.

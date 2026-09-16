@@ -92,7 +92,7 @@ path) — `tests/cpu/conventions/test_test_conventions.py` fails the suite over 
 `HALO_TEST_*` knobs override the model, parallel axes, attention impl and step counts of a GPU suite
 without editing it (catalogue: `agent-docs/contributing/README.md`).
 
-`tests/cpu/` is grouped by subsystem (`callbacks/ checkpoint/ config/ conventions/ data/ diagnostics/ environments/ grpo/ inference/ kernels/ models/ optimizers/ parallelism/ peft/ trainers/`). `tests/gpu/` splits into `trainers/{sft,preference,grpo,lora,other}/`, `parallelism/{ep,cp,tp,combined}/`, plus `data/ kernels/ optimizers/ profiling/`. Shared helpers in `tests/common/`.
+`tests/cpu/` is grouped by subsystem (`callbacks/ checkpoint/ config/ conventions/ data/ diagnostics/ environments/ grpo/ inference/ kernels/ models/ optimizers/ parallelism/ peft/ rewards/ trainers/`). `tests/gpu/` splits into `trainers/{sft,preference,grpo,lora,other}/`, `parallelism/{ep,cp,tp,combined}/`, plus `data/ kernels/ optimizers/ profiling/`. Shared helpers in `tests/common/`.
 
 ## Architecture
 

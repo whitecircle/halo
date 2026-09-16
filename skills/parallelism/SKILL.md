@@ -119,8 +119,8 @@ describes a validator or contract, never a launchable topology
   refused by `_validate_pipeline_parallel`. HSDP wraps the standard DP path only:
   **pure DP or CP**. (EP already shards over the EP group; PP cannot restrict a 2-D mesh
   to a stage's rank block.)
-- **Every PP pairing outside the expert axes** — `PP+TP`, `PP+CP`, `PP+EP+TP`, `PP+EP+ETP`
-  (`PP+EP` and pure `PP+ETP` are supported, both together are not). Plus
+- **Every PP pairing outside the expert axes** — `PP+TP`, `PP+CP`, `PP+EP+TP`, `PP+EP+CP`,
+  `PP+EP+ETP` (`PP+EP` and pure `PP+ETP` are supported, both together are not). Plus
   these PP-specific config-time raises: `pp_split` length mismatch or an entry < 1 (the
   sum-vs-layer-count check runs later, at model split); a stage that is
   not a whole NVLink domain; a 1-rank stage; `fsdp_shard_ep1_experts=False`; `use_hsdp=True`;
@@ -134,6 +134,8 @@ describes a validator or contract, never a launchable topology
   wherever an expert-distribution group exists** — the gate is `is_ep_mode`
   (`ep_group_size > 1`), so pure ETP (`ep_size=1`, `expert_tp_size>1`) is rejected alongside EP —
   **or with TP at `dp_size>1`**. `_validate_fsdp_settings` raises.
+- **Expert LoRA with ETP** (`expert_tp_size > 1` + `expert_lora`) — `_validate_expert_tp` raises:
+  the replicated adapter half would take a partial, never-synced gradient.
 - **LoRA/PEFT with TP** (`tp_size > 1`) — adapters are plain tensors outside the TP graph, so the
   replicated matrix diverges per rank and the sharded one is corrupted by the TP grad sync.
   `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`) raises at trainer

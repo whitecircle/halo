@@ -29,12 +29,13 @@ selected. Per-method schema detail, the `prepare_dataset.py` flags, and the foot
 |---|---|---|
 | SFT | `prompt` | `List[Dict]` (field name = `conversation_field`) |
 | DPO / SMPO | `prompt`, `chosen`, `rejected` | all `List[Dict]` |
-| Reward | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]`; implicit-prompt sets carry no `prompt` |
+| KTO | `prompt`, `completion`, `label` | `List[Dict]`, `List[Dict]`, `bool` |
+| Reward | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]`; implicit-prompt sets carry no `prompt`. TRL chat-templates and tokenizes them itself — no pre-tokenization pass |
 | Offline GRPO | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` (`len` match) |
-| Async GRPO with environments | `prompt`; `answer` where the env grades against one (`requires_answer`) | `prompt` `str` (NOT ChatML); `answer` as that env grades it |
-| Classification | `prompt`, `label` | `List[Dict]`, `str` / `List[str]` (multi-label; labels sorted, `-1` filtered) |
+| Async GRPO with environments | `prompt`; `answer` where the env grades against one (`requires_answer`) | `prompt` `str` **or** ChatML (a list is reduced to its last `user` turn); `answer` as that env grades it |
+| Classification | `prompt` **or** a raw `text_field` column, plus `label` | `List[Dict]` / `str`, and `str` / `List[str]` (multi-label; labels sorted, `-1` filtered) |
 | Distillation | conversation field | `List[Dict]` (default field `messages`) |
-| Embedding | text columns (+ optional `label`/`score`) | collator auto-detects pairs / triplets / scored / labeled |
+| Embedding | text columns (+ optional `label`/`score`) | read **positionally**: the first `label`/`labels`/`score`/`scores` column is the label, every other column in order is one text input — names carry no meaning; `loss_type` picks the loss |
 
 The default `conversation_field` is **method-dependent** — `"prompt"` (sft.py and
 `prepare_dataset.py --conversation-field`), `"messages"` (distillation). Don't assume one value;
@@ -50,15 +51,15 @@ carries `metadata.json` (`preprocessed: true`); a training config just sets `dat
 **no flag needed**, `load_datasets_auto()` auto-detects and skips tokenization. Sharded output also
 carries `shard_index.json`; the trainer computes `dataset_presharded` so the DataLoader does **not**
 re-shard. Key flags (read the argparse for the rest): `--mode {chat,text}`, `--pack-sequences`
-`--packing-strategy {bfd,bfd_split,wrapped}` (text only), `--num-shards N` (**must be ≥ data_parallel_size**),
+`--packing-strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM), `--num-shards N` (**must be ≥ data_parallel_size**),
 `--vlm`. Non-SFT methods are not supported by this script. Full flag list + the two distinct mechanisms
 (preprocessed vs presharded) in `reference.md`.
 
 ## Loading & collators (selected for you)
 
-- Sources (`src/data/sources/loading.py`): `s3://bucket/key`, `org/name` (HF Hub, `:config`
-  suffix), or a local `load_from_disk` path. Bare strings are local/HF — **not** auto-prefixed to any
-  bucket.
+- Sources (`src/data/sources/loading.py`): `s3://bucket/key`, `org/name[:config][@split]` (HF Hub),
+  a local `load_from_disk` path, or a local `.jsonl/.json/.parquet/.arrow/.csv` file. Bare strings
+  are local/HF — **not** auto-prefixed to any bucket.
 - Multi-node: `ShardedDatasetLoader` gives each DP rank its shards; `fs_aware_main_first(tag)` /
   `DIST_INPUT_SHARED_FILESYSTEM` (falling back to the `DIST_SHARED_FILESYSTEM` umbrella, default
   `"1"`) coordinate shared-NFS vs per-node-local downloads.

@@ -248,7 +248,7 @@ Keep EP enabled for expert sharding. Keep TP disabled for LoRA.
 
 ## Continue with GRPO
 
-Online and environmental GRPO are refused at trainer construction for this
+Online GRPO and async GRPO with environments are refused at trainer construction for this
 family. Both pinned engines list `mistral4` as unservable — neither vLLM 0.26.0
 nor SGLang 0.5.17 registers a Mistral4 class — so there is no served model for
 the weight stream to land in. Offline GRPO trains on pre-generated scored

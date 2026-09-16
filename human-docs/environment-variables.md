@@ -4,8 +4,8 @@ Two things to know before the tables:
 
 **`.env` is never auto-loaded** — not by `docker run`, not by the code. Put
 secrets there and pass them in with `docker run --env-file .env` (or a plain
-`export`). The one exception is the vLLM compose file, whose training service
-reads the repo-root `.env` itself.
+`export`). Compose is the exception: it reads the repo-root `.env` for `${VAR}`
+substitution, and the vLLM file's training service loads it into the container.
 
 **The image already sets the tricky ones** — NCCL tuning, CUDA connection
 limits, the TF32 fix. Don't paste `-e NCCL_*=...` flags in from other clusters;
@@ -59,7 +59,7 @@ elsewhere and every `make` target mounts and caches there.
 | `DIST_STORE_TIMEOUT_HOURS` | `4` | raise when one rank's model download or corpus pack runs longer than four hours while the others wait; this is not the NCCL watchdog |
 | `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when slow dataset prep or 100B-scale checkpoint saves outlast the NCCL watchdog |
 | `NVLINK_DOMAIN_SIZE` | GPUs per node | `72` on GB200/GB300 NVL72 racks |
-| `NCCL_SOCKET_IFNAME` | auto | pin NCCL to the fast NIC on multi-homed nodes |
+| `NCCL_SOCKET_IFNAME` | `^docker,veth` in the `make` targets and compose files | pin NCCL to the fast NIC on multi-homed nodes |
 | `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` | unset | AWS EFA only: the trainer via `make ... EFA=1`, a rollout server via its compose EFA overlay — see [Clusters](clusters.md) |
 
 A side variable inherits the umbrella while unset and overrides it once set.
@@ -86,19 +86,13 @@ crashing mid-run. These are the ones that come up:
 | `HALO_DEEPEP_NUM_QPS` | auto | RDMA queue pairs; helps on EFA |
 | `HALO_DEEPGEMM_NATIVE` | `0` | native DeepGEMM low-precision kernels — net-slower at the MoE shapes benchmarked here |
 | `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` | `local` / unset | code-execution sandbox for RL environments: `local`, `bubblewrap`, or `remote` |
-| `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` | auto | trainer IP the rollout server dials back for the weight-sync group; set it when the server is on another host and the trainer's default-route NIC is not the one it can reach |
-| `VLLM_ENABLE_R3` | unset | server-side: any non-empty value adds `--enable-return-routed-experts` for `routing_replay: rollout` (`SGLANG_ENABLE_R3` on the SGLang compose file) |
-| `VLLM_USE_V2_MODEL_RUNNER` | unset | server-side: must be `0` for any run setting `rollout_max_thinking_tokens` (V2 rejects thinking budgets with a 400) |
-| `VLLM_PREFIX_CACHING_FLAG` | `--enable-prefix-caching` | server-side: prefix caching, on by default; `--no-enable-prefix-caching` turns it off, which MTP on vLLM 0.26.0 requires |
-| `VLLM_SPECULATIVE_CONFIG` | unset | server-side: `--speculative-config` JSON; `{"method":"mtp","num_speculative_tokens":2}` uses the checkpoint's MTP head |
-| `VLLM_ENFORCE_STRICT_TOOL_CALLING` | `0` | server-side: grammar-constrained tool calling; off keeps the served distribution the policy's |
-| `VLLM_TUNED_CONFIG_FOLDER` | unset | server-side: folder of tuned Triton MoE tile configs, mounted into the container |
-| `NCCL_CUMEM_ENABLE` | `1` (SGLang compose default) | server-side: SGLang turns cuMem off unless this is pre-set, and a mismatch with the trainer fails the first weight-sync import — leave the compose default |
-| `SGLANG_ATTENTION_BACKEND` | unset | server-side: passed through as `--attention-backend`; `triton` for GLM-4 MoE Lite on Blackwell, whose MLA head size has no kernel in the default backend |
-| `SGLANG_TRUST_REMOTE_CODE` | unset | server-side: any non-empty value adds `--trust-remote-code`; the Ling repos need it |
-| `SGLANG_EXTRA_ARGS` | unset | server-side: extra launch flags appended last, so a flag repeated there overrides the compose defaults |
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is worth +9.7% on ep8 |
+
+The rollout servers have a set of their own (`VLLM_*` / `SGLANG_*`: R3 capture,
+speculative decoding, attention backend, the address the server dials back for
+the weight-sync group). They are set on the server container, and
+[Rollout Servers](rollout-servers.md) is where they belong.
 
 The rest — DeepEP buffer sizing, gradient-bucket geometry, low-precision cache
 switches, weight-sync timeouts, the EP profiling switches — are catalogued with

@@ -22,6 +22,18 @@ Data-parallel size is what's left over:
 max rather than a product because no two of those three axes may exceed 1 in
 the same run, so they never compound.
 
+![Tokens routed to the ranks owning their experts and returned to the rank they came from](../agent-docs/assets/diagrams/ep_token_routing.png)
+
+Expert parallelism moves tokens, not batches: each token is dispatched to the
+rank holding its expert and combined back to where it started, which is why an
+EP rank is still a data-parallel rank.
+
+![Two EP dispatch groups inside one NVLink domain, with the ranks holding the same expert slice forming DP replicas](../agent-docs/assets/diagrams/ep_group_hierarchy.png)
+
+Ranks split into dispatch groups of `ep_size`; ranks holding the same expert
+slice are DP replicas whose expert gradients are averaged after the backward.
+The rules below are mostly about how those groups may be shaped.
+
 ## Rules that save you a wasted run
 
 Halo validates the layout at startup and rejects invalid shapes with an
@@ -29,13 +41,13 @@ explanation before touching the GPUs. The rules people actually hit:
 
 - **TP+CP, TP+ETP, ETP+CP, and EP+TP+ETP are unsupported.** Attention TP and
   expert TP never combine — pick EP+TP *or* EP+ETP, never both.
-- **Single-node EP must be one dispatch group**: `ep_size` equal to the GPU
-  count, or 2. Something in between (say EP=4 on 8 GPUs) is rejected — that
-  shape deadlocks the MoE routing collectives against FSDP2. For a 4-way expert
-  split on 8 GPUs, `ep4 + etp2` is the validated shape: the gate keys on
-  `ep_size × expert_tp_size`, which is 8 there, so it stays one dispatch group.
-  `ep4 + tp2` is **not** — attention TP leaves that product at 4 and lands back
-  on the same rejection.
+- **Single-node EP must fill the NVLink domain, or be `ep_size=2`.** Something in
+  between (say EP=4 on 8 GPUs) is rejected: the MoE routing collectives race
+  FSDP2's DP-wide ones, and the default buffer backend faults where the legacy
+  one deadlocks. For a 4-way expert split on 8 GPUs, `ep4 + etp2` is the
+  validated shape — the gate compares `ep_size × expert_tp_size` against the
+  domain, and 8 fills it. `ep4 + tp2` is **not**: attention TP leaves that product
+  at 4 and lands back on the same rejection.
 - **TP and node-local EP can't leave the NVLink domain** — the node on a
   typical 8-GPU host, the whole rack on NVL72. EP *can* span domains with
   `--ep_scope=global` on a proper RDMA fabric — see [Clusters](clusters.md).
@@ -46,27 +58,36 @@ explanation before touching the GPUs. The rules people actually hit:
   NVLink domain and replicates across domains, so only the gradient all-reduce
   crosses the fabric ([Clusters](clusters.md)). It is rejected with EP, TP, and
   ETP, and does nothing on a single-domain job.
-- **`ep_size=1` MoE experts are FSDP-sharded by default**
-  (`fsdp_shard_ep1_experts`, default `true`), which makes the reduce-scatter
-  their only gradient sync and frees memory that otherwise grows with the DP
-  size. Turning it off is rejected under TP or CP — those paths shard the
+- **Truly replicated experts are FSDP-sharded by default** — `ep_size` and
+  `expert_tensor_parallel_size` both 1 (`fsdp_shard_ep1_experts`, default
+  `true`), which makes the reduce-scatter their only gradient sync and frees
+  memory that otherwise grows with the DP size. Turning it off is rejected under TP or CP — those paths shard the
   replicated experts unconditionally.
 - **LoRA doesn't combine with TP**, and **QLoRA only runs on DDP/FSDP/CP.** EP
   and TP reject QLoRA outright, and so does the grouped-GEMM MoE path — a MoE
   model rejects it even under plain FSDP unless you set
-  `use_grouped_gemm: false`. Online and environmental GRPO reject it in every
-  mode: vLLM weight sync ships raw parameter storage, and packed 4-bit tensors
+  `use_grouped_gemm: false`. Both online RL methods reject it in every mode:
+  rollout weight sync ships raw parameter storage, and packed 4-bit tensors
   corrupt the served policy.
 - **CP only works for SFT and SMPO.** The other trainers need full-sequence
   quantities that don't survive sequence splitting.
+
+![Ulysses attention: each rank holds a sequence chunk, all-to-all swaps it for a head slice of the full sequence, then swaps back](../agent-docs/assets/diagrams/ulysses_attention_flow.png)
+
+Context parallelism splits the sequence across ranks and swaps to a head split
+for the attention itself, so the result is exact rather than approximate — at the
+cost of three all-to-alls per attention layer (query, the fused key/value, the output). It needs the head counts and the
+sequence length to divide by `cp_size`; the collator pads to make the last one
+true.
 
 Pipeline parallelism is not yet available: the `pipeline_parallel_size` knob
 parses, but any value above 1 is rejected at config time in this release. The
 implementation is nearly complete — after extensive testing it will be enabled
 for selected models and trainers in an upcoming version.
 
-Per-model coverage (which family supports which mode) is the
-[Supported Matrix](supported-matrix.md). The deep dives:
+Sharding costs throughput, so take the least of it that fits — see
+[Performance](performance.md). Per-model coverage (which family supports which
+mode) is the [Supported Matrix](supported-matrix.md). The deep dives:
 [Expert](../agent-docs/parallelism/expert-parallelism.md) ↗ ·
 [Context](../agent-docs/parallelism/context-parallelism.md) ↗ ·
 [Tensor](../agent-docs/parallelism/tensor-parallelism.md) ↗ ·

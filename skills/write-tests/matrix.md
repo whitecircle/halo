@@ -94,10 +94,9 @@ under FSDP (`ep_size=1`) and under EP, and assert step-0 loss matches within
 `TOL.parallel_vs_baseline_loss_abs` and the trend within
 `TOL.parallel_vs_baseline_train_loss_abs`. Existing exemplars to copy:
 
-- `parallelism/ep/test_ep_vs_reference_qwen3_moe.py`
-- `parallelism/ep/test_ep_vs_fsdp_glm4_moe.py`
-- `parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`
-- `parallelism/ep/test_ep_vs_no_ep.py` (gptoss)
+All live in `tests/gpu/parallelism/ep/`, under two spellings — `test_ep_vs_fsdp_*`
+(cohere2_moe, deepseek_v4, glm4_moe, glm5_next, step3p7) and `test_ep_vs_reference_*`
+(bailing_v3, inkling, qwen3_moe) — plus `test_ep_vs_no_ep.py` for gptoss.
 
 Every MoE family on the roster (`agent-docs/models/README.md`) needs one. New family → add the
 `ep_vs_fsdp` test + register it in the manifest with the family marker.
@@ -112,7 +111,8 @@ Every MoE family on the roster (`agent-docs/models/README.md`) needs one. New fa
       composition lives in `agent-docs/contributing/README.md` ("Tests"). Do not add to the drift — when in
       doubt, mark `full`.
 - [ ] A `Ngpu` tag matching `nproc` (`1gpu`/`2gpu`/`4gpu`/`8gpu`).
-- [ ] Capability tags as applicable: `ep cp tp etp pp hsdp vlm lora moe vllm_server sglang_server`.
+- [ ] Capability tags as applicable: `ep cp tp etp hsdp vlm lora moe vllm_server sglang_server`.
+      There is **no `pp` marker** — PP coverage is CPU-side, so nothing in `tests/gpu/` carries one.
 - [ ] A model-family tag — the family half of `ALL_MARKERS` in `tests/gpu/manifest.py`.
 - [ ] World-size strictness goes in the **script**, not the manifest:
       `gpu_test_main(exact_world_size=N)` when the body only makes sense at exactly `N` ranks.

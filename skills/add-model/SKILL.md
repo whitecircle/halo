@@ -37,9 +37,11 @@ file-touch list, the traps and the commands; read it before editing.
    registration — `layers/roster.py` imports every module in the package. Set **both** class attrs: `HF_MODULE_NAMES` (the HF block class name(s) — `build_moe_layer_map()` in
    `patching.py` walks the subclass tree, so there is no map to edit) and
    `HF_MODEL_TYPES` (the checkpoint `model_type`(s) — without it sharded EP save is rejected
-   and the offline merge resolver finds nothing). `__init_subclass__` enforces a paired-override
-   contract: overriding `gather_expert_state_dict` requires also overriding `merge_shards_to_hf`,
-   and declaring `_PER_EXPERT_UNFUSED_KEYS` while overriding the gather is a `TypeError` at import.
+   and the offline merge resolver finds nothing). `EPExpertGatherMixin.__init_subclass__`
+   (`expert_gather.py`) enforces a paired-override contract, each breach a `TypeError` at import:
+   overriding `gather_expert_state_dict` requires also overriding `merge_shards_to_hf`; declaring
+   `_PER_EXPERT_UNFUSED_KEYS` while overriding the gather, or resolving both it and
+   `_HUB_PER_EXPERT_KEYS`, is refused.
    Reuse an existing wrapper if the expert-weight layout matches (layout→wrapper table in the guide).
 3. **Liger coverage.** Add one `LigerFamilySpec` to `LIGER_FAMILY_SPECS` in
    `src/kernels/liger/families.py` — there is no per-family applier module; the builder

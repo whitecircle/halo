@@ -6,7 +6,7 @@ name: qwen35-122b-crossnode-ep-aws
 resources:
   cloud: aws
   region: us-east-1
-  accelerators: H200:8           # p5e.48xlarge
+  accelerators: H200:8
   # image_id: docker:public.ecr.aws/whitecircle/halo:hopper   # H200 = Hopper; the prebuilt image is required
   memory: 512+
   disk_size: 3000

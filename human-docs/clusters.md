@@ -36,13 +36,12 @@ rank — one torchrun per node, not one per GPU.
 disk — RunPod pods, ephemeral NVMe — set it to `0`; each node then saves its own
 copy and resume works without manual copying.
 
-The variable is an umbrella over a read side (`DIST_INPUT_SHARED_FILESYSTEM`:
-downloads, dataset map/pack, HF caches) and a write side
-(`DIST_OUTPUT_SHARED_FILESYSTEM`: checkpoints, `run.log`). They want opposite
-settings on a flaky NFS/EFS mount, where rank 0 writing the HF cache while
-remote ranks read the same inodes surfaces as `Stale file handle`: set the input
-side to `0` and leave the output side shared, so checkpoints stay one
-authoritative copy.
+It is an umbrella over a read side (`DIST_INPUT_SHARED_FILESYSTEM`) and a write
+side (`DIST_OUTPUT_SHARED_FILESYSTEM`), which want opposite settings on a flaky
+NFS/EFS mount: rank 0 writing the HF cache while remote ranks read the same
+inodes surfaces as `Stale file handle`. Set the input side to `0` and leave the
+output shared, so checkpoints stay one authoritative copy
+([Environment Variables](environment-variables.md)).
 
 Either way, one rank going first is a bounded wait —
 `DIST_STORE_TIMEOUT_HOURS`, default 4. Raise it when a 100B-scale download or a
@@ -61,10 +60,11 @@ image. Three situations need extra environment:
 - **Multiple NICs**: point `NCCL_SOCKET_IFNAME` at the fast interface so NCCL's
   bootstrap doesn't wander onto the management network.
 - **Rollout server on another node** (RL): the server container needs the same
-  fabric — start it with the compose EFA overlay (`-f docker-compose.vllm.efa.yml`
-  or `-f docker-compose.sglang.efa.yml`) and the trainer with `make ... EFA=1`.
-  `python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --expect efa` confirms the sync
-  formed on EFA before you train.
+  fabric — start it with the compose EFA overlay after the base file
+  (`-f docker-compose.vllm.yml -f docker-compose.vllm.efa.yml`, or the SGLang
+  pair) and the trainer with `make ... EFA=1`.
+  `halo run weight-sync-transport -- --server-url http://<server>:8000 --expect efa`
+  confirms the sync formed on EFA before you train.
 
 On GB200/GB300 NVL72 racks, set `NVLINK_DOMAIN_SIZE=72` so Halo knows the NVLink
 domain is the rack, not the node.
@@ -72,6 +72,33 @@ domain is the rack, not the node.
 Cross-node expert parallelism needs `--ep_scope=global` and a real RDMA fabric;
 the ready-made template is
 `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
+
+![Two nodes: node-local TP groups over NVLink, one global EP group whose all-to-all crosses RDMA, and DP pairs formed by matching TP positions](../agent-docs/assets/diagrams/ep_multi_node_layout.png)
+
+Above one NVLink domain, EP under TP must be a *single* group spanning the job:
+`ep8 + tp2` on 2×8 forms two EP groups and is rejected at config time, while
+`ep16 + tp2` with `ep_scope=global` is the shape that runs. Pure EP needs none of
+this — node-local `ep8` on 2×8 is two DP replicas and runs as is.
+
+## Rollout servers on other nodes
+
+An RL job places three things: the trainer ranks, the Ray actors that drive the
+environments, and one or more rollout servers. The actors are CPU-only and can
+sit beside the trainer; the servers need their own GPUs, because a trainer rank
+and an engine cannot share one.
+
+![One training node running the trainer and its Ray actors, with a single rollout server on a second node joined by an NCCL weight-sync group and HTTP](../agent-docs/assets/diagrams/multi_node_separate_inference.png)
+
+The common two-node shape: actors stay local (`ray_address: null`), the server
+gets a node to itself, and the trainer's rank 0 binds the weight-sync group the
+server's workers dial back on `vllm_group_port`.
+
+![A training node, a GPU-less actor tier, and two inference nodes each with its own url and group port listed under rollout_server_configs](../agent-docs/assets/diagrams/multi_node_dedicated_rollout.png)
+
+Scaling out, each extra server is another `rollout_server_configs` entry with its
+own port, and the actors round-robin across them; a Ray head lets the actor tier
+live on GPU-less nodes. Both shapes need the server container on the same fabric
+as the trainer — see [Rollout Servers](rollout-servers.md).
 
 ## HSDP: fewer collectives over the fabric
 
@@ -119,10 +146,9 @@ nomad job plan launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl   # dry 
 nomad job run  launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
 ```
 
-One caveat before the two-node job: Nomad has no gang scheduling, so the two
-ranks are placed independently and a job can half-place, rank 0 holding 8 GPUs
-while rank 1 waits. The spec bounds that with a rendezvous timeout and
-`max_run_duration` rather than preventing it. Details:
+One caveat before the two-node job: Nomad has no gang scheduling, so a job can
+half-place, rank 0 holding 8 GPUs while rank 1 waits. The spec bounds that with a
+rendezvous timeout rather than preventing it.
 [Nomad](../agent-docs/infrastructure/nomad.md) ↗.
 
 ## When it hangs

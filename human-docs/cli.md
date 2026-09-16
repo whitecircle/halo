@@ -16,7 +16,7 @@ halo launch <method> <config.yaml> [flags] [-- trainer flags]
 | --- | --- | --- |
 | `--nproc N` | `-n` | processes (GPUs); `N > 1` switches to `torchrun` |
 | `--accelerate <yaml>` | `-a` | use `accelerate launch` with this config (standard FSDP) |
-| `--port P` | `-p` | rendezvous port — set it when running two jobs on one host |
+| `--port P` | `-p` | rendezvous port for a multi-process launch — set it when two jobs share a host |
 | `--list` | | print every indexed method and its script |
 | `--dry-run` | | print the exact command instead of running it |
 
@@ -33,7 +33,8 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 -- \
 ```
 
 A method name is the script's file stem with underscores as hyphens (`sft`,
-`smpo`, `dpo`, `rlvr` for online GRPO, `offline-grpo`, `environmental-grpo`, …),
+`smpo`, `dpo`, `rlvr` for online GRPO, `offline-grpo`, `environmental-grpo` for
+async GRPO with environments, …),
 or its path under `scripts/training/` (`preference/smpo`, `online-grpo/rlvr`,
 `distillation/self-distill`) if a stem is ever ambiguous. Config paths may be
 absolute or relative to the repo root or your current directory; the CLI
@@ -57,7 +58,7 @@ Same flags minus `--accelerate`. Every tool answers `-- --help`, and
 | `merge-ep-shards` | merge a sharded EP save into one checkpoint |
 | `merge-peft-adapters` | fold a LoRA adapter into its base model |
 | `merge-models` | weight-space merge (linear, SLERP, task-arithmetic, TIES) |
-| `convert-to-bf16` / `quantize-to-lowp` | cast to bf16 / quantize to mxfp8 or nvfp4 |
+| `convert-to-bf16` / `quantize-to-lowp` | cast to bf16 / quantize to mxfp8, mxfp4 or nvfp4 |
 | `unfuse-moe-experts` | rewrite fused MoE experts to the per-expert hub layout (refuses a family with no per-expert hub form: GptOss, Inkling, Gemma4, Mistral4, Zaya, Step-3.7 Flash) |
 | `reset-sinks` | disable the attention-sink mechanism in a GPT-OSS checkpoint |
 | `convert-glm5-bf16` | dequantize the fp8 GLM-5.3-Flash release to bf16 — required before training that family |
@@ -68,11 +69,13 @@ Same flags minus `--accelerate`. Every tool answers `-- --help`, and
 | `rm-scoring` / `rm-rejection-sampling` | score completions / best-of-N with a reward model |
 | `run-env` | evaluate an RL environment offline |
 | `nvlink-health` / `py-spy-diag` / `trace-report` | preflight and debugging (see [Troubleshooting](troubleshooting.md)) |
+| `weight-sync-transport` | check which transport a trainer↔rollout-server weight sync formed on |
 
 ```bash
 halo run merge-ep-shards -- --input_dir <ep-checkpoint-dir> --output_dir <merged-dir>
 halo run quantize-to-lowp -- --input_dir <bf16-model-dir> --output_dir <nvfp4-out-dir> --format nvfp4
 ```
 
-The complete script catalog with every flag is in the reference:
-[Scripts Reference](../agent-docs/reference/scripts-reference.md) ↗.
+What goes in the config file the launch names is
+[Writing a Config](configuration.md). The complete script catalog with every
+flag: [Scripts Reference](../agent-docs/reference/scripts-reference.md) ↗.

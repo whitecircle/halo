@@ -43,17 +43,18 @@ metric groups on top:
 
 | Config field | Default | Adds |
 | --- | --- | --- |
-| `enable_efficiency_metrics` | off | step time, tokens/s per GPU and cluster-wide, allocated/peak GPU memory |
-| `report_mfu_diagnostics` | off | logs MFU and achieved TFLOPS (the callback computes them every step either way; needs `enable_efficiency_metrics` on). The S-MFU variants appear only for MoE, where plain MFU misreads sparse models |
-| `enable_moe_metrics` | on | per-layer expert load balance: `moe/load_max`, `moe/load_cv`, `moe/dead_fraction`, … (no-op on dense models) |
+| `enable_efficiency_metrics` | off | step time, tokens/s per GPU and cluster-wide, allocated/peak GPU memory — the numbers [Performance](performance.md) quotes |
+| `report_mfu_diagnostics` | off | logs MFU and achieved TFLOPS; needs `enable_efficiency_metrics` on. The S-MFU variants appear only for MoE, where plain MFU misreads sparse models |
+| `enable_moe_metrics` | on | per-layer expert load balance: `moe/load_max`, `moe/load_cv`, `moe/dead_frac`, … (no-op on dense models) |
 | `generate_eval_examples` | on (off for SFT) | a table of sample generations at each evaluation (skipped under TP/CP) |
 | `save_completions` (GRPO) | on | writes each step's rollouts to `<output_dir>/completions/completions_<step>.parquet` (prompt, completion, reward, advantage) plus a `completions` table on the tracking backend |
 | `log_completions` (GRPO) | off | additionally prints the per-sample table to the console |
 
-For environmental GRPO, give `sampling/logratio_mean` a standing dashboard
-panel: a steady negative drift means the trainer→vLLM weight sync is broken.
-Online GRPO does not emit it; there, watch reward and KL instead. Details on
-every callback: [Callbacks](../agent-docs/training-methods/callbacks.md) ↗.
+For async GRPO with environments, give `sampling/logratio_mean` a standing
+dashboard panel: a steady negative drift means the weight sync to the rollout
+server is broken. Online GRPO does not emit it; there, watch reward and KL
+instead. Details on every callback:
+[Callbacks](../agent-docs/training-methods/callbacks.md) ↗.
 
 ## Profiling
 

@@ -262,7 +262,7 @@ completions and needs no rollout server, so the standard offline configuration a
 unchanged. `packing` is an SFT-only field; the GRPO configs declare none, so a
 `packing:` key there fails to parse.
 
-Online and environmental GRPO are refused at construction for this family:
+Online GRPO and async GRPO with environments are refused at construction for this family:
 `EPCohere2MoELayer` declares `_supports_weight_sync = False`, because no NCCL weight
 sync has been validated against a serving engine for Cohere2 MoE. vLLM 0.26.0 ships the
 architecture — including a fused `experts.gate_up_proj` load path — so the missing

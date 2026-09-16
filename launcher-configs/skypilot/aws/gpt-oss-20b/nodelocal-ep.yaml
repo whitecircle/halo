@@ -7,7 +7,7 @@ name: oss-20b-nodelocal-ep-aws
 resources:
   cloud: aws
   region: us-east-1
-  accelerators: H100:8           # p5.48xlarge
+  accelerators: H100:8
   # image_id: docker:public.ecr.aws/whitecircle/halo:hopper   # H100 = Hopper; the prebuilt image is required
   memory: 256+
   disk_size: 1500

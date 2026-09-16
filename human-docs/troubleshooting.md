@@ -19,47 +19,49 @@ reference.
 
 | Symptom | Cause → fix |
 | --- | --- |
-| CUDA out of memory | Activations dominate. In order: `gradient_checkpointing: true` (~19% slower), then lower `per_device_train_batch_size` / `max_length`, then shard — TP for dense, EP or ETP for MoE, or LoRA/QLoRA. |
+| CUDA out of memory | Activations dominate. In order: `gradient_checkpointing: true` (20–30% slower), then lower `per_device_train_batch_size` / `max_length`, then shard — TP for dense, EP or ETP for MoE, or LoRA/QLoRA. |
 | Config rejected at startup (`must divide`, `not supported`, …) | Working as intended: the validator refuses shapes that would hang or crash mid-run. The message names the rule; valid combinations are in [Parallelism](parallelism.md). |
 | `ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` | The rejected middle ground for single-node EP. Use `ep_size=2`, `ep_size` = the GPU count, or `ep4 + etp2` for a 4-way expert split on 8 GPUs. `ep4 + tp2` hits the same rejection. |
 | Missing dataset column | Each method needs fixed columns ([Datasets](data.md)); combining sources keeps only columns common to all of them. |
 | CPU RAM spike or OOM while loading the model | Default loads half the node's ranks concurrently, capped at 4. Set `max_concurrent_loading: 1`. |
 | Loss degrades only past ~2048 tokens | TF32 rounding corrupting long-context RoPE. The image pins fp32 matmuls to full precision, so you only see this after setting `HALO_FP32_MATMUL_PRECISION=high` — unset it. |
-| Garbage output / index crash right after dataset mapping | A map whose output depends on a closure value the fingerprint can't hash. Grep the log for `Dataset-map cache fingerprint` and thread that value through `cache_key_extras`; clearing `HF_DATASETS_CACHE` is the blunt fallback. |
-| `cuDNN` error in backward on Zaya | Zaya doesn't support gradient checkpointing; set `gradient_checkpointing: false`. |
-| `fp32 training is not supported under Expert Parallelism` at model load | `torch_dtype: float32` with `expert_parallel_size > 1` — DeepEP's dispatch buffer is sized for 2-byte tokens. Train in bf16, or keep fp32 masters via `fp32_non_ep_params` / `fp32_experts`. Dense fp32 and pure ETP are unaffected. |
+| Garbage output / index crash right after dataset mapping | A map whose output depends on a closure value the fingerprint can't hash. Grep the log for `Dataset-map cache fingerprint`; clearing `HF_DATASETS_CACHE` is the fix from outside the code. |
+| Zaya raises as soon as gradient checkpointing is enabled | The family cannot train with it — the recompute faults in cuDNN — so Halo refuses it at load. Set `gradient_checkpointing: false`. |
+| `fp32 training is not supported under Expert Parallelism` at model load | `bf16: false` with no `fp16` either resolves the run to fp32, and DeepEP's dispatch buffer is sized for 2-byte tokens. Train in bf16, or keep fp32 masters via `fp32_non_ep_params` / `fp32_experts`. Dense fp32 and pure ETP are unaffected. |
 | Run dies mid-run with a write error | A cache or output landed on the small root filesystem after all. Recheck the four cache variables. |
 
 ## Multi-node and clusters
 
 | Symptom | Cause → fix |
 | --- | --- |
-| `ProcessGroup not initialized` / nodes never join | The torchrun arguments differ across nodes, a node started late (10-minute rendezvous window), the master address isn't fabric-routable, or a stale process holds the port (`pkill -f torchrun`). |
+| Nodes never join, or the rendezvous times out | The torchrun arguments differ across nodes, a node started late, the master address isn't fabric-routable (the error names `MASTER_ADDR` / `MASTER_PORT`), or a stale process holds the port (`pkill -f torchrun`). |
 | Hang at step 0, watchdog timeout minutes later | A rank never reached a collective. Grab all-rank stacks (below); the rank *not* in a collective is the culprit. |
 | Every GPU at 100% util but idle power draw, no error | A data-dependent backward graph: a row disconnected from the loss on one rank prunes its gradient collective. Keep every row connected to the loss — [Debugging](../agent-docs/reference/debugging.md) ↗. |
 | Timeout during dataset prep or a huge checkpoint save | Legitimate slow work outlasting the watchdog. Raise `DIST_NCCL_TIMEOUT_MINUTES` (default 30). |
 | "Checkpoint not found" on resume, or duplicate per-node saves | The filesystem flag doesn't match reality: `DIST_SHARED_FILESYSTEM` is `1` for a shared FS, `0` for per-node disks. |
-| `OSError: Stale file handle` while loading a model or dataset cache | A cross-node read-after-write on NFS/EFS. Set `DIST_INPUT_SHARED_FILESYSTEM=0` and leave the output side shared — see [Clusters](clusters.md). |
+| `OSError: [Errno 116] Stale file handle` while loading a model or dataset cache | A cross-node read-after-write on NFS/EFS. Set `DIST_INPUT_SHARED_FILESYSTEM=0` and leave the output side shared — see [Clusters](clusters.md). |
 | A rank waits hours then aborts during a download or corpus pack | The rank going first outlasted `DIST_STORE_TIMEOUT_HOURS` (default 4). Raise it. |
 | Slow cross-node traffic on AWS | EFA needs opt-in env (`NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric`, `--device /dev/infiniband`) — see [Clusters](clusters.md). Those same vars degrade an InfiniBand cluster if left set. |
 | `Xid 145` NVLink messages flooding dmesg | Usually benign FEC churn. `halo run nvlink-health` exits non-zero only on real faults — trust it, not dmesg volume. |
 
 ## RL runs (vLLM / SGLang)
 
+Setting the servers up in the first place is [Rollout Servers](rollout-servers.md).
+
 | Symptom | Cause → fix |
 | --- | --- |
-| Weight-sync group never forms ("1/2 clients joined") | Both containers must run `network_mode: host`; the sync rendezvouses on an ephemeral port a bridge network won't publish. Under SGLang, check the server came from this repo's `Dockerfile.sglang` — the upstream image ships a different NCCL. |
-| Trainer exits at start with `Errno 98` on the weight-sync group port | The default ports (`51216`, `51217`) sit in Linux's ephemeral range, so another connection can take one first. Add them to `net.ipv4.ip_local_reserved_ports` (keep the ports already listed) or set `group_port` outside `32768–60999`. |
+| Weight-sync group never forms, the server never joining | Both containers must run `network_mode: host`; a bridge network does not publish the group port the server dials back on. Under SGLang, check the server came from this repo's `Dockerfile.sglang` — the upstream image ships a different NCCL. |
+| Trainer exits at start with `Errno 98` on the weight-sync group port | The default port `51216` (plus one per extra server) sits in Linux's ephemeral range, so another connection can take one first. Add them to `net.ipv4.ip_local_reserved_ports` (keep the ports already listed) or set `group_port` outside `32768–60999`. |
 | Rollouts much slower in a run than on the same server benchmarked alone | The vLLM engine core is one CPU thread, and the trainer and sandboxes compete for it. Give each server its own cores (`--cpuset-cpus`) and run one engine per GPU. |
-| Startup rejection under `rollout_backend: sglang` | Weight-sync support is per family and per engine: the trainer names the family and the SGLang loader fact behind the refusal at construction ([Supported Matrix](supported-matrix.md#rollout-engines)). `rollout_max_thinking_tokens` is vLLM-only and refused here too. Drop the knob it names, or use `rollout_backend: vllm`. |
-| Weight sync hangs at the first collective after the group formed | The two containers run different NCCL transports or different `aws-ofi-nccl` + libfabric builds (an upstream server image on an EFA host, say) — the pair forms the group and then hangs. Serve from Halo's images, run the same fabric recipe on both ends (the compose EFA overlay + `make ... EFA=1`), and check with `python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --expect efa`, which reports the transport and plugin build each side formed on. |
+| Startup rejection under `rollout_backend: sglang` | Weight-sync support is per family and per engine; the trainer names the family and the loader fact behind the refusal at construction ([Supported Matrix](supported-matrix.md#rollout-engines)). `rollout_max_thinking_tokens` is vLLM-only and refused here too. Drop the knob it names, or use `rollout_backend: vllm`. |
+| Weight sync hangs at the first collective after the group formed | The two containers run different NCCL transports or different `aws-ofi-nccl` + libfabric builds (an upstream server image on an EFA host, say) — the pair forms the group and then hangs. Serve from Halo's images, run the same fabric recipe on both ends (the compose EFA overlay + `make ... EFA=1`), and check with `halo run weight-sync-transport -- --server-url http://<server>:8000 --expect efa`. |
 | `ncclP2pImportShareableBuffer ... invalid argument` in the SGLang log on the first update | cuMem differs between the containers: SGLang turns it off unless `NCCL_CUMEM_ENABLE` is pre-set. Keep the compose default `NCCL_CUMEM_ENABLE=1` on the server and restart it — it holds a half-written model. |
-| `routing_replay: rollout` captures nothing on SGLang | The server needs `--enable-return-routed-experts --moe-runner-backend triton`; the fused runners bypass the capture hook. Keep `--enable-torch-compile` off. R3 is per family on SGLang — the server exits at start for Gemma 4 and raises at the first capture for Bailing; serve those without `SGLANG_ENABLE_R3`. |
+| `routing_replay: rollout` captures nothing on SGLang | The server needs `--enable-return-routed-experts --moe-runner-backend triton`; the fused runners bypass the capture hook. Keep `--enable-torch-compile` off. Capture is per family: the trainer refuses it outright for Gemma 4 and Zaya, and Bailing raises at the first capture on SGLang — serve that one without `SGLANG_ENABLE_R3`. |
 | SGLang exits at start with "Unsupported head dimensions" | GLM-4 MoE Lite's MLA head size on Blackwell: set `SGLANG_ATTENTION_BACKEND=triton` on the server. |
-| Qwen3.5 / Qwen3.6 MoE with attention LoRA fails at the first environmental-GRPO step with "mixed torch.Tensor and DTensor" | Open issue in this family's LoRA path under environmental GRPO. Full fine-tuning works; the shipped `qwen3.6-*-lora-*` env-GRPO examples share the failing shape. |
+| Qwen3.5 / Qwen3.6 MoE with attention LoRA fails at the first async-GRPO step with "mixed torch.Tensor and DTensor" | Open issue in this family's LoRA path under async GRPO with environments. Full fine-tuning works; the shipped `qwen3.6-*-lora-*` examples share the failing shape. |
 | Gemma 4 with attention LoRA: "Target module Gemma4ClippableLinear ... is not supported" at PEFT setup | Open issue: the vision tower shares the projection names and PEFT cannot wrap its module. Full fine-tuning works; the shipped `gemma4-*-lora-*` env-GRPO examples hit it. |
 | `GENERATION is wedged` at startup | A previous trainer died attached to the vLLM engine. Restart the vLLM container before relaunching. |
-| Rewards fine, policy silently degrades | Under environmental GRPO, watch `sampling/logratio_mean` — a steady negative drift means broken weight sync. Also serve MoE models with `--moe-backend triton`; the auto-selected backends silently corrupt synced expert weights. |
+| Rewards fine, policy silently degrades | Under async GRPO with environments, watch `sampling/logratio_mean` — a steady negative drift means broken weight sync. Also serve MoE models with `--moe-backend triton`; the auto-selected backends silently corrupt synced expert weights. |
 
 ## Getting eyes on a hung run
 

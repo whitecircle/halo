@@ -14,15 +14,16 @@ points — check the hardware column before launching:
 | Qwen3 QLoRA SFT | `examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml` | 1 GPU (24 GB is enough) |
 | Qwen3 full SFT | `examples/sft/qwen3/qwen3-4b-ultrachat.yaml` | 1–8 GPUs |
 | GPT-OSS EP SFT | `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` | 2 × 8 GPUs as written (MoE, expert parallel) |
-| SMPO | `examples/preference/qwen3_5/smpo-qwen3.5-9b-tulu3-prefmix.yaml` | 1–8 GPUs |
-| DPO | `examples/preference/qwen3_5/dpo-qwen3.5-9b-tulu3-prefmix.yaml` | 1–8 GPUs |
+| SMPO | `examples/preference/qwen3_5/smpo-qwen3.5-9b-tulu3-prefmix.yaml` | 8 GPUs |
+| DPO | `examples/preference/qwen3_5/dpo-qwen3.5-9b-tulu3-prefmix.yaml` | 8 GPUs |
 | Offline GRPO | `examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml` | 8 GPUs |
 | Online GRPO (RLVR) | `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml` | trainer + vLLM server |
-| Environmental GRPO | `examples/grpo/environmental/environmental-grpo-template.yaml` | trainer + vLLM + Ray |
+| Async GRPO with environments | `examples/grpo/environmental/environmental-grpo-template.yaml` | trainer + vLLM + Ray |
 
-Not sure which method you need? [Choosing a Method](choosing-a-method.md) maps
-the data you have to the trainer you want. The online RL recipes need a separate
-vLLM container; start with SFT and set that up later.
+[Choosing a Method](choosing-a-method.md) maps the data you have to the trainer
+you want, and each [training method](training-methods/README.md) page has its own
+data format and keys. The online RL recipes need a separate
+[rollout server](rollout-servers.md); start with SFT and set that up later.
 
 ## 2. Launch it
 
@@ -39,9 +40,10 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml -n 8
 halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8
 ```
 
-Any config field can be overridden on the command line after `--`
-(`--learning_rate=1e-5 --max_length=32000`). `halo launch --list` shows all
-methods; the full CLI story is in [The halo CLI](cli.md).
+Most config fields can be overridden on the command line after `--`
+(`--learning_rate=1e-5 --max_length=32000`; dict-valued fields stay in the YAML),
+and `halo launch --list` shows every method. The full CLI is [The halo CLI](cli.md); what goes in a config file is
+[Writing a Config](configuration.md).
 
 For a long run, detach the container instead of holding a terminal open:
 replace `-it` with `-d --name myrun` in the `docker run` command and give it

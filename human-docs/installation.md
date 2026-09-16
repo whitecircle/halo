@@ -18,7 +18,7 @@ Pick the image that matches your GPUs:
 You still need the repo — configs, scripts, and the `make` targets live there:
 
 ```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
+git clone https://github.com/whitecircle/halo
 cd halo
 ```
 
@@ -42,7 +42,7 @@ Or build from source. No token, no registry login:
 make build-blackwell     # or: make build-hopper
 ```
 
-The first build takes a while: DeepEP (and, on Hopper, Flash Attention)
+The first build takes a while: DeepEP, DeepGEMM and (on Hopper) Flash Attention
 compile from source.
 
 ## 2. Create a `.env` file
@@ -100,12 +100,14 @@ docker run --rm -it --gpus all \
 
 On the flags: `--ipc=host --shm-size=128g` and the ulimits are required, since
 NCCL and the dataloaders break without them. `--cap-add=SYS_PTRACE` is optional,
-but without it you cannot attach py-spy to a hung run later. Drop
-`-v ~/.aws:/root/.aws` unless you want S3 access through your AWS profile. The
-repo mounts at `/workspace`, so host-side edits are live in the container.
+but without it you cannot attach py-spy to a hung run later. Add `--network host`
+for an RL run, so the trainer can reach a rollout server started by compose on the
+same host. Drop `-v ~/.aws:/root/.aws` unless you want S3 access through your AWS
+profile. The repo mounts at `/workspace`, so host-side edits are live in the
+container.
 
-The `make` targets (`make train`, `make test-cpu`, …) wrap this same invocation
-if you'd rather not type it.
+`make train` wraps this invocation if you'd rather not type it, and the test
+targets bring their own.
 
 ## 5. Verify
 
@@ -121,9 +123,10 @@ If any of these fail, see [Troubleshooting](troubleshooting.md) — the usual
 suspects are a missing `--gpus all`, the wrong image for your GPU
 architecture, or the NVIDIA Container Toolkit not being installed.
 
-## Next
+## After the container starts
 
-[Quickstart](quickstart.md) launches your first run. For image internals,
-multi-container RL setup, and registry publishing, see the reference:
+[Quickstart](quickstart.md) launches your first run, and
+[Writing a Config](configuration.md) is what to change in it. For image
+internals, multi-container RL setup, and registry publishing:
 [Docker](../agent-docs/infrastructure/docker.md) ↗ ·
 [Installation](../agent-docs/getting-started/installation.md) ↗.

@@ -28,9 +28,10 @@ to your fork, and open the PR against `whitecircle/halo`.
 ## The one rule
 
 **You must understand and own every line you submit.** Using AI to write code
-is fine — Halo itself is built with AI. Submitting code you can't explain is
-not, and the PR template asks you to disclose the scaffold and models you
-used.
+is fine — Halo itself is built with AI, and the images ship
+[skills](ai-tooling.md) that teach an agent this codebase. Submitting code you
+can't explain is not, and the PR template asks you to disclose the scaffold and
+models you used.
 
 ## The short checklist
 
