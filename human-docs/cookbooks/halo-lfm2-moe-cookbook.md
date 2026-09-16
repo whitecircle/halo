@@ -326,4 +326,4 @@ assumes the whole node.
 - [LFM2.5-8B-A1B model card](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B)
 - [LFM2-24B-A2B model card](https://huggingface.co/LiquidAI/LFM2-24B-A2B)
 - [Halo LFM2 model notes](../../agent-docs/models/lfm2.md) ↗
-- [Environmental GRPO](../../agent-docs/training-methods/grpo/environmental-grpo.md) ↗
+- [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗

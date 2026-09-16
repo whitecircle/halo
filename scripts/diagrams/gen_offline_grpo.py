@@ -1,137 +1,142 @@
-"""Generate Offline GRPO Pipeline diagram."""
+"""Generate the offline GRPO pipeline for training-methods/grpo/offline-grpo.md.
+
+Two bands: what tokenization does once (group → advantages → one row per completion) and what
+every training step does (sampler → per-token loss → normalization). The second band reads
+right-to-left, under the first, so the hand-off is a straight drop.
+"""
 
 import matplotlib.pyplot as plt
-from _flow_style import *
-from matplotlib.patches import FancyBboxPatch
+from _pipeline_style import *
 
-fig, ax = plt.subplots(figsize=(14, 8.6))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, 14)
-ax.set_ylim(2.4, 11)
-ax.set_aspect("equal")
+W, H = 12.2, 5.83
+M = 0.305  # left/right margin, matching `title`'s 2.5% inset
+
+(COL_A, COL_B, COL_C), COL_W = columns(W, 3, M)
+ROW1_Y, ROW1_H = 3.49, 1.44
+ROW2_Y, ROW2_H = 1.17, 1.70
+
+fig, ax = plt.subplots(figsize=(W, H))
+ax.set_xlim(0, W)
+ax.set_ylim(0, H)
 ax.axis("off")
 
-ax.text(7, 10.7, "Offline GRPO Pipeline", ha="center", va="top", fontsize=20, fontweight="bold", color=TEXT)
-ax.text(
-    7,
-    10.15,
-    "Pre-computed rewards  \u00b7  No generation at train time",
-    ha="center",
-    va="top",
-    fontsize=11,
-    color=TEXT_SEC,
-)
+title(ax, "Offline GRPO — pre-scored data", "per-token loss = −(π · A), every row × 1/group_size")
 
+section(ax, M, H - 0.52, "ONCE, AT TOKENIZATION")
 
-draw_card, draw_arrow_h, draw_arrow_v = bind_drawers(ax, CardLayout(line_dy=0.32, line_size=9))
-
-# ── Row 1: Dataset → Advantage Calc → Per-Group Expansion ──
-r1_y = 7.8
-cw1 = 3.0
-ch1 = 1.7
-
-draw_card(
-    0.4,
-    r1_y,
-    cw1,
-    ch1,
-    "Dataset",
+card(
+    ax,
+    COL_A,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "One row = one group",
     [
-        "prompt (messages)",
-        "completions (list)",
-        "rewards (list of floats)",
+        "prompt      list[dict]",
+        "completions list[list[dict]]",
+        "rewards     list[float]",
     ],
-    accent_left=True,
+    color=TEAL,
+    mono_lines=True,
 )
 
-draw_arrow_h(3.4 + 0.15, r1_y + ch1 / 2, 5.3 - 0.15)
-
-draw_card(
-    5.3,
-    r1_y,
-    cw1,
-    ch1,
-    "Advantage Calculation",
+card(
+    ax,
+    COL_B,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "Group advantages",
     [
-        "quantile_norm (default)",
-        "z_norm, minmax, robust",
-        "quantile_uniform",
+        "quantile_norm (default) · z_norm",
+        "minmax · quantile_uniform · robust",
+        "emphasis, then clip to [−10, 10]",
     ],
+    color=AMBER,
 )
 
-draw_arrow_h(8.3 + 0.15, r1_y + ch1 / 2, 10.2 - 0.15)
-
-draw_card(
-    10.2,
-    r1_y,
-    3.4,
-    ch1,
-    "Per-Group Expansion",
+card(
+    ax,
+    COL_C,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "One row per completion",
     [
-        "One example per completion",
-        "Preserves group_id",
-        "Flattened dataset",
+        "carries its advantage + group_size",
+        "group_id = the source row index",
+        "drop_degenerate_groups: ties, n<2",
     ],
+    color=SLATE,
 )
 
-draw_arrow_v(11.9, r1_y, 6.2 + 1.0)
+section(ax, M, ROW2_Y + ROW2_H + 0.30, "EVERY TRAINING STEP")
 
-# ── Row 2: MultiGroupSampler ──
-r2_y = 6.2
-draw_card(
-    8.0,
-    r2_y,
-    5.6,
-    1.0,
+card(
+    ax,
+    COL_C,
+    ROW2_Y,
+    COL_W,
+    ROW2_H,
     "MultiGroupSampler",
     [
-        "Flattens group-by-group, splits by DP rank",
+        "flattens groups in dataset order",
+        "cuts the DP slice positionally",
+        "a group may straddle ranks",
+        "the 1/group_size weight rides",
     ],
-    bg=ACCENT_LIGHT,
-    border=ACCENT,
-    title_size=11,
+    color=SLATE,
 )
 
-draw_arrow_v(10.8, r2_y, 2.7 + 2.6)
+card(
+    ax,
+    COL_B,
+    ROW2_Y,
+    COL_W,
+    ROW2_H,
+    "Per-token loss",
+    [
+        "prob_weighted:  −(π · A)",
+        "reinforce:      −(log π · A)",
+        "min_log_prob −3.0 on A < 0",
+        "kl_beta > 0: + β · k3 KL",
+    ],
+    color=BLUE,
+    mono_lines=True,
+)
 
-# ── Row 3: Training Loop (large card) ──
-tlx, tly = 0.4, 2.7
-tlw, tlh = 13.2, 2.6
-draw_card(tlx, tly, tlw, tlh, "Training Loop", [], bg=CARD, border=CARD_BORDER)
+card(
+    ax,
+    COL_A,
+    ROW2_Y,
+    COL_W,
+    ROW2_H,
+    "Normalize",
+    [
+        "every row × 1/group_size",
+        "bnpo: global weighted mean",
+        "grpo: per-sequence, then groups",
+        "dr_grpo: ÷ (Σ weights × max_len)",
+    ],
+    color=BLUE,
+)
 
-steps_left = [
-    ("1", "Concatenate prompt + completion"),
-    ("2", "Forward pass \u2192 per_token_logps"),
-    ("3", "(Optional) Reference model \u2192 per_token_kl"),
-    ("4", "Compute per_token_loss = \u2212(weight \u00d7 advantage)"),
-]
-steps_right = [
-    ("5", "Apply group weighting: 1/group_size"),
-    ("6", "Aggregate loss (grpo, bnpo, or dr_grpo)"),
-    ("7", "Backward + optimize"),
-]
+row1_mid = ROW1_Y + ROW1_H / 2
+row2_mid = ROW2_Y + ROW2_H / 2
+arrow(ax, COL_A + COL_W, row1_mid, COL_B, row1_mid, "rewards")
+arrow(ax, COL_B + COL_W, row1_mid, COL_C, row1_mid, "advantage")
+arrow(ax, COL_C + 0.5 * COL_W, ROW1_Y, COL_C + 0.5 * COL_W, ROW2_Y + ROW2_H, "expanded dataset", side="right")
+arrow(ax, COL_C, row2_mid, COL_B + COL_W, row2_mid, "micro-batch")
+arrow(ax, COL_B, row2_mid, COL_A + COL_W, row2_mid, "[B, T] loss")
 
-sep_y = tly + tlh - 0.5
-ax.plot([tlx + 0.3, tlx + tlw - 0.3], [sep_y, sep_y], color=BORDER_SOFT, lw=0.6)
-
-for i, (num, text) in enumerate(steps_left):
-    sy = sep_y - 0.42 - i * 0.44
-    badge = FancyBboxPatch(
-        (tlx + 0.35, sy - 0.13), 0.3, 0.26, boxstyle="round,pad=0.03", facecolor=OP_BG, edgecolor="none"
-    )
-    ax.add_patch(badge)
-    ax.text(tlx + 0.5, sy, num, ha="center", va="center", fontsize=8, fontweight="bold", color=OP_TEXT)
-    ax.text(tlx + 0.8, sy, text, ha="left", va="center", fontsize=9.5, color=TEXT_SEC)
-
-for i, (num, text) in enumerate(steps_right):
-    sy = sep_y - 0.42 - i * 0.44
-    badge = FancyBboxPatch(
-        (tlx + 7.0, sy - 0.13), 0.3, 0.26, boxstyle="round,pad=0.03", facecolor=OP_BG, edgecolor="none"
-    )
-    ax.add_patch(badge)
-    ax.text(tlx + 7.15, sy, num, ha="center", va="center", fontsize=8, fontweight="bold", color=OP_TEXT)
-    ax.text(tlx + 7.45, sy, text, ha="left", va="center", fontsize=9.5, color=TEXT_SEC)
+footnote(
+    ax,
+    M,
+    0.22,
+    W - 2 * M,
+    "No generation at train time: the rewards ship with the dataset, and each row carries its group's advantage and weight.",
+)
 
 save(plt.gcf(), "offline_grpo_pipeline")
 plt.close()
-print("\u2713 offline_grpo_pipeline.png")
+print("✓ offline_grpo_pipeline.png")

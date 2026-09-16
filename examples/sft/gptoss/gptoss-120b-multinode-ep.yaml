@@ -16,9 +16,13 @@ dataset:
 - HuggingFaceH4/ultrachat_200k@train_sft
 test_size: 0.01
 conversation_field: messages
-chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
+# The multiturn jinja ends EVERY assistant turn with <|return|>, the completion-span terminator, and
+# renders the <|channel|>final the served model emits; the bundled harmony template closes non-final
+# turns with <|end|>, which is not a terminator, so on multi-turn rows only the last assistant turn
+# would train.
+chat_template: jinja-templates/gpt-oss/gpt-oss-multiturn.jinja
 force_chat_template: true
-assistant_message_template: <|start|>assistant<|message|>
+assistant_message_template: <|start|>assistant<|channel|>final<|message|>
 dataset_num_proc: 32
 
 # --- Parallelism ---
@@ -26,12 +30,12 @@ dataset_num_proc: 32
 expert_parallel_size: 16
 ep_scope: global
 
-save_sharded_ep: false                # gather to an HF-standard checkpoint
+save_sharded_ep: false
 use_grouped_gemm: false               # gpt-oss: per-expert loop beats grouped GEMM at high EP
 max_concurrent_loading: 1             # 120B weights: load one rank at a time per node
 
 # --- Attention & kernels ---
-# attn_implementation left unset: auto-selects FA4 on Blackwell, FA3/FA2 on Hopper
+# attn_implementation unset — auto-selects FA4 on Blackwell, FA3/FA2 on Hopper
 packing: true
 max_length: 8192
 

@@ -19,11 +19,12 @@ uv sync                # creates .venv/ from uv.lock; installs src editable
 
 Python is pinned to 3.12 (`requires-python = ">=3.12,<3.13"`), the image's interpreter. `uv sync`
 resolves `torch 2.11.0+cu130`, `transformers`, `trl`, `accelerate`, `peft`, `datasets`, `ray`, and
-`src` editable — enough for Pylance across the tree. Does **not** resolve `flash_attn` or `deep_ep`
-(both source-built in the `Dockerfile`, not in `[project.dependencies]`); navigation elsewhere is
-unaffected because both are imported behind optional-dependency guards. `vllm` is never imported
-into the training env — it runs in a separate container reached over HTTP plus the vendored NCCL
-client (`src/distributed/nccl/`).
+`src` editable, enough for Pylance across the tree.
+
+It does **not** resolve `flash_attn` or `deep_ep` (both source-built in the `Dockerfile`, not in
+`[project.dependencies]`); navigation elsewhere is unaffected because both are imported behind
+optional-dependency guards. `vllm` is never imported into the training env; it runs in a separate
+container reached over HTTP plus the vendored NCCL client (`src/distributed/nccl/`).
 
 The `.venv` torch is the cu130 wheel: it imports without a GPU, but CUDA operations fail. The
 `.venv` is git-ignored.
@@ -49,12 +50,13 @@ resolves `flash_attn` / `deep_ep` and the integrated terminal runs `torchrun` / 
 `--cap-add=SYS_PTRACE` (py-spy attaches) and `--env-file .env` — so **`cp .env.example .env` before
 first open**, or Docker refuses to start the container.
 
-The host scratch volume mounts at `/scratch`, from `$HALO_SCRATCH` (default `/mnt`); export it in
+The host scratch volume mounts at `/scratch`, from `$HALO_SCRATCH` (default `/mnt`). Export it in
 your local shell to point elsewhere, after confirming with `findmnt` / `df -h` that the target really
-is a large device — it is the same knob `make` and `docker compose` read, so exporting it once points
-the whole toolchain at that volume. `containerEnv` then pins `HF_HOME`, `HF_DATASETS_CACHE`, `TMPDIR` and
-`HALO_DATA_ROOT` under it, so HF caches, temp files, the S3 dataset cache and profiler traces all
-stay off the small in-container root FS.
+is a large device. It is the same knob `make` and `docker compose` read, so exporting it once points
+the whole toolchain at that volume.
+
+`containerEnv` then pins `HF_HOME`, `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` under it, so HF
+caches, temp files, the S3 dataset cache and profiler traces all stay off the small in-container root FS.
 
 The **Dev Containers** extension (`ms-vscode-remote.remote-containers`) is a UI extension — install
 it on your local VS Code, not on an SSH remote (VS Code refuses the remote install), which is why
@@ -71,11 +73,13 @@ The code does not auto-load `.env` — it is passed with `docker run --env-file 
 The CPU targets mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
 read-write, because many CPU tests load a real tokenizer. A test calling `from_pretrained` directly
 hard-fails when the cache is missing and the Hub is unreachable; one going through
-`tests/common/tokenizers.py` skips instead. Secrets live in the repo-root `.env`; cache and path
-redirects are `-e` flags pointed at a **verified** large volume (the root filesystem is small, and a
-path named `/mnt` is not guaranteed to be a separate device — check `findmnt` / `df -h` first). On a
-host whose docker defaults to a runtime that rejects `--gpus`/`--ipc host` (e.g. sysbox-runc), set
-`DOCKER_RUNTIME=nvidia` — every `make` docker invocation then pins `--runtime nvidia` explicitly.
+`tests/common/tokenizers.py` skips instead.
+
+Secrets live in the repo-root `.env`. Cache and path redirects are `-e` flags pointed at a **verified**
+large volume: the root filesystem is small, and a path named `/mnt` is not guaranteed to be a separate
+device, so check `findmnt` / `df -h` first. On a host whose docker defaults to a runtime that rejects
+`--gpus` / `--ipc host` (e.g. sysbox-runc), set `DOCKER_RUNTIME=nvidia` — every `make` docker
+invocation then pins `--runtime nvidia` explicitly.
 
 | Variable | Purpose | Where set | Owner page |
 |---|---|---|---|

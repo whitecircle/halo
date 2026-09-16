@@ -9,6 +9,7 @@ import asyncio
 import logging
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from functools import cached_property
 from typing import Any
@@ -30,11 +31,14 @@ from src.environments.episode import (
     step_context_from_generation,
 )
 from src.environments.registry import create_environment
-from src.inference.response import get_finish_reason, get_reasoning_text
+from src.inference.response import FINISH_REASON_ABORT, get_finish_reason, get_reasoning_text
+from src.log import warn_once
 
 logger = logging.getLogger(__name__)
 
 _RETRYABLE_4XX = {408, 429}
+# Backends already warned that their completions carry no ``usage.completion_tokens`` (once per process).
+_COMPLETION_TOKENS_MISSING_WARNED: set[str] = set()
 
 
 class RolloutHTTPError(RuntimeError):
@@ -86,14 +90,39 @@ def _should_giveup(exc: BaseException) -> bool:
     return _is_client_error(exc) or _is_shutdown_error(exc)
 
 
-async def _await_with_deadline(ref, timeout: float):
-    """Await a Ray ``ObjectRef`` under a wall-clock deadline, raising ``TimeoutError`` on expiry.
-    ``asyncio.wait_for`` needs a coroutine, so wrap the awaitable ``ObjectRef``."""
+async def _resolve_ref(ref):
+    """``asyncio`` task bodies must be coroutines; a Ray ``ObjectRef`` is only awaitable."""
+    return await ref
 
-    async def _await():
-        return await ref
 
-    return await asyncio.wait_for(_await(), timeout=timeout)
+async def _await_with_deadline(ref, timeout: float, paused_clock: Callable[[], float] | None = None):
+    """Await a Ray ``ObjectRef`` under ``timeout`` seconds of engine-serving time, raising ``TimeoutError``.
+
+    ``paused_clock`` reads the manager's count of seconds the engines have spent paused for weight
+    syncs: a paused engine freezes every in-flight generation, so that window is credited back to
+    the episode instead of charged to it. The ref is awaited in one task, shielded across the re-arms
+    a credit forces; on expiry the task is cancelled.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    paused_at_start = paused_clock() if paused_clock is not None else 0.0
+    task = loop.create_task(_resolve_ref(ref))
+    try:
+        while True:
+            credit = paused_clock() - paused_at_start if paused_clock is not None else 0.0
+            remaining = timeout - (loop.time() - started - credit)
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"episode exceeded its {timeout:.0f}s deadline ({credit:.0f}s of engine pause excluded)"
+                )
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), remaining)
+            except TimeoutError:
+                if task.done():
+                    raise  # the episode's own TimeoutError, not the deadline's
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR
@@ -190,7 +219,7 @@ class EnvironmentActor:
                 if step.done:
                     break
 
-                gen = await self._generate(client, server_url, step.observation, ep_config, effort.level)
+                gen = await self._generate_turn(client, server_url, step.observation, ep_config, effort.level)
                 generation_tokens += gen.tokens
                 if gen.token_logprobs:
                     logp_sum += sum(gen.token_logprobs)
@@ -224,16 +253,19 @@ class EnvironmentActor:
             # traceback is what localizes it.
             logger.error(f"Actor {self.actor_id} error: {e}", exc_info=True)
             # Reward stays 0 and the partial trajectory is dropped, unlike the eval driver, which
-            # finalizes the episode as truncated. ``error`` puts this row outside
-            # ``rollout_valid_mask``, so the trainer excludes it from the group baseline and drops its
-            # tokens from the step; accrued reward would only reach the logged reward mean.
+            # finalizes the episode as truncated and keeps what it earned: ``error`` puts this row
+            # outside ``rollout_valid_mask``, so the trainer excludes it from the group baseline and
+            # drops its tokens from the step. Accrued reward could therefore only reach the logged
+            # reward mean, where a half-episode's partial credit is noise. Typed, never ``str(e)``: a
+            # bare ``TimeoutError`` stringifies to "", which the mask reads as no error.
+            reason = _describe_exc(e)
             return RolloutResult(
                 prompt=prompt,
-                trajectory=Trajectory(done=True, info={"error": str(e)}),
+                trajectory=Trajectory(done=True, info={"error": reason}),
                 total_reward=0.0,
                 success=False,
                 latency=time.time() - start,
-                error=str(e),
+                error=reason,
             )
 
         finally:
@@ -243,6 +275,31 @@ class EnvironmentActor:
                     self._env.cleanup([eid])
                 except Exception:  # cleanup must never mask the episode result
                     logger.debug("Actor %s: cleanup failed for episode %s", self.actor_id, eid, exc_info=True)
+
+    async def _generate_turn(
+        self,
+        client: aiohttp.ClientSession,
+        server_url: str,
+        messages: list[dict[str, str]],
+        config: RolloutConfig,
+        reasoning_effort: str | None = None,
+    ) -> TurnGeneration:
+        """One turn's generation, re-issued for the same observation while the engine aborts it.
+
+        An abort is the engine's doing (SGLang's sync pause drops every in-flight request), so the
+        fragment never reaches the env: stepping it would spend the episode's length-cutoff recovery
+        cap on a cut the policy did not make. Bounded by ``config.max_retries`` re-issues per turn;
+        past that the episode errors into a masked row.
+        """
+        for _ in range(config.max_retries + 1):
+            gen = await self._generate(client, server_url, messages, config, reasoning_effort)
+            if gen.finish_reason != FINISH_REASON_ABORT:
+                return gen
+            logger.warning(f"Actor {self.actor_id}: the {config.backend} engine aborted the turn; re-issuing it")
+        raise RuntimeError(
+            f"the {config.backend} engine aborted the same turn {config.max_retries + 1} times in a row "
+            f"(finish_reason={FINISH_REASON_ABORT!r}); the episode is dropped rather than stepped with a fragment"
+        )
 
     async def _generate(
         self,
@@ -296,13 +353,22 @@ class EnvironmentActor:
             text = msg.get("content") or ""
             reasoning = get_reasoning_text(msg) or ""
             tool_calls = msg.get("tool_calls") or []
-            tokens = usage.get("completion_tokens", 0)
-            if tokens == 0 and text:
-                tokens = len(text.split())
             if config.capture_token_ids:
                 token_ids, token_logprobs, prompt_token_ids = capture_generation_tokens(choice, data, config.backend)
             else:
                 token_ids = token_logprobs = prompt_token_ids = None
+            tokens = usage.get("completion_tokens") or 0
+            if not tokens and text:
+                # The captured ids are the only honest length; a word count of the text is not one.
+                tokens = len(token_ids) if token_ids else 0
+                warn_once(
+                    logger,
+                    _COMPLETION_TOKENS_MISSING_WARNED,
+                    config.backend,
+                    "%s returned a completion without usage.completion_tokens; generation-token metrics "
+                    "count the captured token ids instead (0 when none are captured).",
+                    config.backend,
+                )
             routing_mask = capture_routing_mask(choice, data) if config.capture_routed_experts else None
             # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
             routing_prompt_tokens = usage.get("prompt_tokens") if routing_mask else None
@@ -378,11 +444,37 @@ class RolloutManager:
         self._started = False
         self._actor_idx = 0
         self._url_idx = 0
+        # Seconds the engines have spent paused for weight syncs, credited back to every in-flight
+        # episode's deadline. The trainer thread opens and closes each window; the episodes' loop reads it.
+        self._paused_seconds = 0.0
+        self._pause_started_at: float | None = None
 
         logger.info(
             f"RolloutManager: {self.num_workers} workers, "
             f"{len(server_urls)} rollout servers, max_concurrent={self.max_concurrent}"
         )
+
+    def begin_engine_pause(self) -> None:
+        """Mark the engines paused for a weight sync: in-flight episode deadlines stop counting."""
+        self._pause_started_at = time.monotonic()
+
+    def end_engine_pause(self, seconds: float) -> None:
+        """Close the pause window, crediting the ``seconds`` the forwarding rank measured for its push.
+
+        The measured figure replaces this rank's own estimate — the pause is the servers', timed
+        where the push ran. Credited before the window closes, so a deadline read between the two
+        statements never sees less than either.
+        """
+        self._paused_seconds += seconds
+        self._pause_started_at = None
+
+    @property
+    def paused_seconds(self) -> float:
+        """Engine-paused seconds so far, an open window included."""
+        total = self._paused_seconds
+        if self._pause_started_at is not None:
+            total += time.monotonic() - self._pause_started_at
+        return total
 
     def warn_if_servers_unreachable_from_actors(self, multinode: bool) -> None:
         """Warn when a rollout-server URL is loopback on a multi-node job. Call on a single rank.
@@ -482,7 +574,9 @@ class RolloutManager:
                         server_url=self._next_url(),
                         config=self.rollout_config,
                     )
-                    results[idx] = await _await_with_deadline(ref, self.rollout_config.episode_timeout)
+                    results[idx] = await _await_with_deadline(
+                        ref, self.rollout_config.episode_timeout, lambda: self.paused_seconds
+                    )
                 except Exception as e:
                     if isinstance(e, TimeoutError):
                         # Ray forbids force=True on an async-actor task, so it would never cancel.
@@ -503,7 +597,9 @@ class RolloutManager:
         for i in range(len(prompts)):
             r = results[i]
             if r is None:
-                msg = str(errors[i]) if errors[i] else "Unknown error"
+                # Typed, never ``str(e)``: the deadline's bare ``TimeoutError`` stringifies to "", and an
+                # empty ``error`` is a VALID zero-reward group member to ``rollout_valid_mask``.
+                msg = _describe_exc(errors[i]) if errors[i] is not None else "Unknown error"
                 r = RolloutResult(
                     prompt=prompts[i],
                     trajectory=Trajectory(done=True, info={"error": msg}),

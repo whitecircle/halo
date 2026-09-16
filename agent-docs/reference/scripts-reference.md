@@ -2,13 +2,28 @@
 
 Catalog of toolkit scripts by category. For config fields see [Configuration](configuration-reference.md); for parallelism flags see [Expert Parallelism](../parallelism/expert-parallelism.md).
 
-Every entry script here answers `python <script> --help` with its full flag list — the fastest way to see a script's real surface, including the CLI overrides for any YAML field. The `halo` CLI (`src/cli.py`) runs them by name: `halo launch <method> <config>` for `scripts/training/`, `halo run <tool>` for every other `scripts/` subtree except `diagrams/` (`--list` on either enumerates them). The launcher follows the flags, never the config: `accelerate launch` with `--accelerate <cfg>`, `torchrun` when `--nproc/-n > 1`, plain `python` otherwise — so `halo launch sft <ep-config>.yaml` without `-n` runs single-process.
+Every entry script answers `python <script> --help` with its full flag list, including the CLI overrides for any YAML field.
 
-Run scripts from the repo root with the repo root importable: the wheel installs `src` only (`packages = ["src"]`), and `python scripts/a/b.py` puts the *script's* directory on `sys.path`, not the repo root — so every CLI that imports a `scripts.*` helper needs `scripts` importable as well as `src`. Those helpers are the shared flag surfaces: `scripts/_common.py` (the shard cap, the Hub source block and `--trust_remote_code`, taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/`), `scripts/inference/_common.py` (the OpenAI endpoint, resume and Gradio blocks), `scripts/inference/reward_model/_common.py` (the reward-model scoring block, on top of the previous two) and `scripts/environments/_common.py` (the env-eval flags and output writer). Both training images set `PYTHONPATH=/workspace` and the Makefile passes it into every container it starts, so in-image runs need nothing extra; a host run needs `PYTHONPATH=.` from the repo root.
+The `halo` CLI (`src/cli.py`) runs them by name: `halo launch <method> <config>` for `scripts/training/`, `halo run <tool>` for every other `scripts/` subtree except `diagrams/` (`--list` on either enumerates them). The launcher follows the flags, never the config: `accelerate launch` with `--accelerate <cfg>`, `torchrun` when `--nproc/-n > 1`, plain `python` otherwise. So `halo launch sft <ep-config>.yaml` without `-n` runs single-process.
+
+Run scripts from the repo root with the repo root importable. The wheel installs `src` only (`packages = ["src"]`), and `python scripts/a/b.py` puts the *script's* directory on `sys.path`, not the repo root. So every CLI that imports a `scripts.*` helper needs `scripts` importable as well as `src`.
+
+Both training images set `PYTHONPATH=/workspace` and the Makefile passes it into every container it starts. A host run needs `PYTHONPATH=.` from the repo root.
+
+Those helpers are the shared flag surfaces:
+
+| Helper | Flags |
+|---|---|
+| `scripts/_common.py` | The shard cap, the Hub source block and `--trust_remote_code`; taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/` |
+| `scripts/inference/_common.py` | The OpenAI endpoint, resume and Gradio blocks |
+| `scripts/inference/reward_model/_common.py` | The reward-model scoring block, on top of the previous two |
+| `scripts/environments/_common.py` | The env-eval dataset/endpoint/trajectory flags, `--training_config`, and the output writer |
 
 Flag spelling is per script and stable: the Gradio apps, `scripts/profiling/**`, `before_training/prepare_dataset.py` and `before_training/s3_datasets.py` spell their own multi-word flags with dashes (`--api-key`); every other script uses underscores (`--api_key`), matching the YAML field names a training flag overrides. The shared `--trust_remote_code` keeps its one spelling everywhere, `prepare_dataset.py` included.
 
-The checkpoint tools under `after_training/` and `before_training/` take one source/destination pair: `--input_dir` → `--output_dir` for a local checkpoint directory, `--model_id` → `--output_dir` where the source may also be a Hub repo (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`; `reattach_vision_tower.py` takes both — `--input_dir` for the text-only export, `--model_id` for the multimodal base). Three tools keep a differently-shaped source because it is a different thing: `merge_models.py --models` (N inputs), `merge_peft_adapters.py --adapter_dir` (an adapter, not a checkpoint), and `prepare_dataset.py --input`/`--output` (dataset URIs — `s3://`, `hf://` or a local path).
+The checkpoint tools under `after_training/` and `before_training/` take one source/destination pair: `--input_dir` → `--output_dir` for a local checkpoint directory, `--model_id` → `--output_dir` where the source may also be a Hub repo (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`). `reattach_vision_tower.py` takes both: `--input_dir` for the text-only export, `--model_id` for the multimodal base.
+
+Three tools keep a differently-shaped source because it is a different thing: `merge_models.py --models` (N inputs), `merge_peft_adapters.py --adapter_dir` (an adapter, not a checkpoint), and `prepare_dataset.py --input`/`--output` (dataset URIs — `s3://`, `hf://` or a local path).
 
 `merge_peft_adapters.py` selects the head with `--task {causal_lm,classification}`.
 
@@ -66,11 +81,11 @@ torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \
     examples/grpo/offline/gptoss/offline-grpo-gptoss-20b-gsm8k.yaml --expert_parallel_size=8
 ```
 
-### Environmental GRPO (multi-turn RL)
+### Async GRPO with Environments (multi-turn RL)
 
 | Script | Description |
 |--------|-------------|
-| `scripts/training/environmental_grpo.py` | Multi-turn environmental GRPO — resolves the environment from `environment_type` in YAML; EP/TP/ETP via `torchrun`, no CP or PP (register custom environments with `register_environment`) |
+| `scripts/training/environmental_grpo.py` | Multi-turn async GRPO — resolves the environment from `environment_type` in YAML; EP/TP/ETP via `torchrun`, no CP or PP (register custom environments with `register_environment`) |
 
 Benchmark environments available via registry (no dedicated script):
 
@@ -106,9 +121,19 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
 | `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_gen_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished |
 | `scripts/inference/playground/gradio_openai_chatbot.py` | Chatbot UI (Gradio + OpenAI API). `--api-key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder |
 | `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `src/environments/eval_runner.py`), so a turn the engine cut off at its token cap is recovered here exactly as in training. `--vllm-url` prefills the rollout server base URL; `--api-key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
-| `scripts/environments/inference/run_code_contests.py` | Evaluate on competitive programming: dataset adapter (every `CODE_DATASET_ADAPTERS` entry that scores raw rows: `codeforces`, `deepcoder`, `livecodebench`, `icpc`, `hlce`; `hardtests` is scored from its prepared pool) + language (python/cpp/c, or a comma-separated list the model chooses from per program) + success@k bucketed by adapter group field (rating/difficulty/contest), against vLLM or OpenRouter. `--reasoning_effort` (low/medium/high, default medium) sets template effort and, unless `--max_tokens` is given, the generation budget: the effort's thinking budget (4096/8192/16384) plus 4096 tokens of solution headroom → 8192/12288/20480; `--max_turns` default 15; `--env_kwargs` for the env/grading knobs without a flag; `--save_trajectories <path>` / `--trajectory_dir <folder>` record JSONL |
-| `scripts/environments/inference/run_env.py` | Generic eval runner for other envs (QA, exam, SWE, MCP) over an OpenAI endpoint; reads prompt/answer columns, reports reward / success@k; `--save_trajectories` / `--trajectory_dir` record JSONL |
+| `scripts/environments/inference/run_code_contests.py` | Evaluate on competitive programming: dataset adapter (every `CODE_DATASET_ADAPTERS` entry that scores raw rows: `codeforces`, `deepcoder`, `livecodebench`, `icpc`, `hlce`; `hardtests` is scored from its prepared pool) + language (python/cpp/c, or a comma-separated list the model chooses from per program) + success@k bucketed by adapter group field (rating/difficulty/contest), against vLLM or OpenRouter. `--env_type` picks `codeforces` or `code_contests`, falling back to `codeforces`. `--reasoning_effort` (low/medium/high, falls back to `medium`) sets the template effort and, unless `--max_tokens` or `--training_config` is given, the generation budget: the effort's thinking budget (4096/8192/16384) plus 4096 tokens of solution headroom → 8192/12288/20480. `--max_turns` falls back to 15. `--env_kwargs` carries the env/grading knobs without a flag; `--save_trajectories <path>` / `--trajectory_dir <folder>` record JSONL |
+| `scripts/environments/inference/run_env.py` | Generic eval runner for every other env (`--env_type qa_search`, `exam_qa`, `swe`, `mcp`, …) over an OpenAI endpoint; reads `--prompt_field` / `--answer_field` / `--context_fields` columns, reports reward and success@k bucketed by `--group_by`; `--env_kwargs` merges per-env settings; `--save_trajectories` / `--trajectory_dir` record JSONL |
 | `scripts/environments/inference/regrade_trajectories.py` | Offline re-grader: replays saved JSONL (`<jsonl...> --workers --output`) through grading only, decoupled from generation. Needs the code-contest meta `run_code_contests.py` stamps (`adapter`/`language` on top of the generic eval meta); a `run_env.py` trajectory is rejected up front |
+
+Both `run_*.py` runners in `scripts/environments/inference/` share one dataset/endpoint/trajectory flag block
+(`scripts/environments/_common.py`). `--training_config <yaml>` points them at an async-GRPO training
+YAML and evaluates under that run's contract: its `EnvironmentConfig`, and its rollout settings
+(backend, chat-template variables, stop tokens, thinking budget, temperature, top-p, max tokens,
+request timeout).
+
+Precedence is explicit flag → `--training_config` → the script's own default, so an eval matches the
+run it is judging unless a flag says otherwise. A `rollout_stop_tokens` entry that the config's
+tokenizer does not know raises here, where the trainer warns and skips a partially unresolved set.
 
 In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
 `build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (default `my-bucket` — set it to your own
@@ -119,8 +144,9 @@ The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.
 — run under a shared SIGINT/SIGTERM handler
 (`run_async_cli`) that exits `128 + signo`, the shell's own convention for a signalled process.
 Progress is checkpointed, so re-running resumes; the non-zero exit is what stops a wrapper script or
-`&&` chain from consuming a partial output dataset as a finished one. A run that produced no usable
-row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a
+`&&` chain from consuming a partial output dataset as a finished one.
+
+A run that produced no usable row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a
 wrong `--model_name` cannot republish the resumed rows as a finished job. Each CLI's summary line
 names its per-reason drop counts (first-response failures, degenerate skips).
 
@@ -164,31 +190,40 @@ python scripts/after_training/merge_ep_shards.py \
 Every tool here refuses an input it cannot express, rather than writing a plausible-looking result:
 
 - **Per-rank EP-sharded input** (`metadata.format` = `ep_sharded`) is rejected by all of them except
-  `merge_ep_shards.py`, which exists to consume it. Such a save reuses the ordinary index filename
-  while each expert tensor is one rank's partial slice under a `.shard_N` key, so a
-  `from_pretrained`-based tool would see the real expert keys as **missing** — which transformers
-  resolves by randomly initializing them, warning only — and then save that over the source. Merge
-  first, or re-save gathered. The refusal does not need the index: a directory whose shards carry
-  `.shard_N` keys with no index (a save killed before the index write) is caught by a header-only
-  peek. The `scripts/before_training/` bf16 converters refuse it on the same terms, since all of
-  them also accept a local directory. The pipeline-parallel save layout is not one of these: it uses
-  global parameter names under a standard HF index with no `format` marker, so every tool would take
-  it directly.
-- **In-place conversion** — `--output_dir` equal to any input directory — is rejected by every tool
-  that streams from the source while writing, because the write deletes the weight files it does not
-  overwrite and so destroys the source mid-read. That is `merge_ep_shards.py`,
-  `unfuse_moe_experts.py`, `quantize_to_lowp.py`, `merge_models.py`, `merge_peft_adapters.py`,
-  `convert_to_bf16.py`, `reattach_vision_tower.py` (on both of its sources), `convert_deepseek_v4_bf16.py`,
-  `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, and `patch_vocab.py`, whose pre-save
-  sweep would otherwise leave nothing behind on a failed save. A refused conversion creates no output
-  directory. `prepare_dataset.py` is not one of them: it materializes into a temp directory and
-  publishes with a staged swap, so its `--output` is guarded by `--overwrite`, not by this refusal.
+  `merge_ep_shards.py`, which exists to consume it. Merge first, or re-save gathered.
+
+    Such a save reuses the ordinary index filename while each expert tensor is one rank's partial
+    slice under a `.shard_N` key. A `from_pretrained`-based tool would see the real expert keys as
+    **missing**, which transformers resolves by randomly initializing them (warning only), and then
+    save that over the source.
+
+    The refusal does not need the index: a directory whose shards carry `.shard_N` keys with no
+    index (a save killed before the index write) is caught by a header-only peek. The
+    `scripts/before_training/` bf16 converters refuse it on the same terms, since all of them also
+    accept a local directory.
+
+    The pipeline-parallel save layout is not one of these: it uses global parameter names under a
+    standard HF index with no `format` marker, so every tool would take it directly.
+
+- **In-place conversion** (`--output_dir` equal to any input directory) is rejected by every tool
+  that streams from the source while writing: the write deletes the weight files it does not
+  overwrite and so destroys the source mid-read. A refused conversion creates no output directory.
+
+    That is `merge_ep_shards.py`, `unfuse_moe_experts.py`, `quantize_to_lowp.py`, `merge_models.py`,
+    `merge_peft_adapters.py`, `convert_to_bf16.py`, `reattach_vision_tower.py` (on both of its
+    sources), `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, and
+    `patch_vocab.py`, whose pre-save sweep would otherwise leave nothing behind on a failed save.
+
+    `prepare_dataset.py` is not one of them: it materializes into a temp directory and publishes
+    with a staged swap, so its `--output` is guarded by `--overwrite`, not by this refusal.
 
     `reset_sinks.py` is the exception: it holds the whole checkpoint in memory and stages the write,
-    so in-place is safe there — but never implicit. It takes `--in_place`, an `--output_dir` aimed at
-    the input is refused like the rest, and omitting both is an error on a write (a `--dry_run`
-    only reads) rather than a silent rewrite of the only copy. A fresh-dir run sweeps leftovers
-    like the others.
+    so in-place is safe there, but never implicit. It takes `--in_place`; an `--output_dir` aimed at
+    the input is refused like the rest.
+
+    Omitting both is an error on a write (a `--dry_run` only reads) rather than a silent rewrite of
+    the only copy. A fresh-dir run sweeps leftovers like the others.
+
 - **Remote code.** Every checkpoint tool that loads a checkpoint's own modeling/config/tokenizer code
   takes one `--trust_remote_code`, spelled once (`add_trust_remote_code_arg` in
   `scripts/_common.py`): `merge_peft_adapters.py`, `merge_models.py`,
@@ -199,44 +234,57 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     **The default follows the input source.** A local checkpoint or adapter (`--input_dir`,
     `--adapter_dir`, `--models`, `--rm_model_path`, or the tokenizer of the run being prepared) defaults **on**: the
     remote-code families in the roster (Bailing/Ling, Laguna) do not load without it, and the operator
-    already produced that artifact. A Hub-capable `--model_id` source (`patch_vocab.py`,
-    `convert_deepseek_v4_bf16.py`, `reattach_vision_tower.py`) defaults **off**, because a freshly downloaded third-party repo
-    must not execute its own code merely because a tool was pointed at it. Either way the opposite is
-    one flag away (`--trust_remote_code` / `--no-trust_remote_code`).
+    already produced that artifact.
+
+    A Hub-capable `--model_id` source (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`,
+    `reattach_vision_tower.py`) defaults **off**: a freshly downloaded third-party repo must not
+    execute its own code merely because a tool was pointed at it. Either way the opposite is one flag
+    away (`--trust_remote_code` / `--no-trust_remote_code`).
 
     The tools that never enable remote code expose no such flag — `merge_ep_shards.py`,
     `unfuse_moe_experts.py`, `quantize_to_lowp.py`, `convert_mistral4_bf16.py` and
     `convert_glm5_bf16.py` stream safetensors and rewrite `config.json` as JSON, so no checkpoint
     code is ever imported.
-- **Uninitialized buffers.** A tool whose loaded model is handed to a forward — reward scoring, the
-  dedup embeddings, `convert_to_bf16.py --check_inference` — calls `finalize_loaded_model` after
+
+- **Uninitialized buffers.** A tool whose loaded model is handed to a forward (reward scoring, the
+  dedup embeddings, `convert_to_bf16.py --check_inference`) calls `finalize_loaded_model` after
   placement, since transformers 5 re-materializes non-persistent buffers as uninitialized memory
-  ([buffers](../models/adding-a-model.md)). The load-only conversion tools do not: `state_dict` omits
-  those buffers, so an unrepaired one reaches neither a number nor the written checkpoint.
-  `tests/cpu/models/test_load_finalization.py` pins each new `scripts/` loader into one of the two
-  groups.
+  ([buffers](../models/adding-a-model.md)).
+
+    The load-only conversion tools do not: `state_dict` omits those buffers, so an unrepaired one
+    reaches neither a number nor the written checkpoint.
+    `tests/cpu/models/test_load_finalization.py` pins each new `scripts/` loader into one of the two
+    groups.
+
 - **Shard cap and Hub source.** Two more flags are spelled once each, beside
-  `add_trust_remote_code_arg`: `add_max_shard_size_arg` writes `--max_shard_size` (default
-  `DEFAULT_MAX_SHARD_SIZE`, `5GB`) for every tool that re-shards its safetensors output —
-  `quantize_to_lowp.py` mirrors the input's shard layout one-for-one and takes no cap — and `add_hub_source_args`
-  writes `--model_id` plus the `--revision` pin for every tool whose source may be a Hub repo.
-  `patch_vocab.py` takes `--model_id` without `--revision` — it threads none, and an advertised pin a
-  tool ignores would silently convert whatever the Hub's default branch holds that day. Pin such a
-  source by downloading it first and pointing `--model_id` at the directory.
+  `add_trust_remote_code_arg`. `add_max_shard_size_arg` writes `--max_shard_size` (default
+  `DEFAULT_MAX_SHARD_SIZE`, `5GB`) for every tool that re-shards its safetensors output;
+  `quantize_to_lowp.py` mirrors the input's shard layout one-for-one and takes no cap.
+
+    `add_hub_source_args` writes `--model_id` plus the `--revision` pin for every tool whose source
+    may be a Hub repo. `patch_vocab.py` takes `--model_id` without `--revision`: it threads none, and
+    an advertised pin a tool ignores would silently convert whatever the Hub's default branch holds
+    that day. Pin such a source by downloading it first and pointing `--model_id` at the directory.
+
 - **Wrong model family.** `unfuse_moe_experts.py` resolves the family from the checkpoint's
   `model_type` and emits the projection names it declares
-  (LFM-2 reads `w1`/`w3`/`w2`, not GLM-4's `gate_proj`/`up_proj`/`down_proj`); a family whose checkpoint
-  is not per-expert at all is refused rather than written under a guessed triple. Both checks run after
-  the sharded-input refusal and after the already-per-expert copy-through, so those keep their own
-  diagnosis.
+  (LFM-2 reads `w1`/`w3`/`w2`, not GLM-4's `gate_proj`/`up_proj`/`down_proj`). A family whose checkpoint
+  is not per-expert at all is refused rather than written under a guessed triple.
+
+    Both checks run after the sharded-input refusal and after the already-per-expert copy-through,
+    so those keep their own diagnosis.
+
 - **Asymmetric key sets.** `merge_models.py` refuses models whose tensor key sets differ — a key present
   in only one model would otherwise be dropped from the merge (typically one checkpoint saved untied,
   carrying `lm_head.weight`, and another tied).
+
 - **Tokenizer-less source.** `merge_models.py` refuses a `--tokenizer_source` (default: the base model,
-  else the first input) that ships no tokenizer files — every `from_pretrained`-based consumer of the
-  merged checkpoint would fail to build a tokenizer. This one raises *after* the merged weights are
-  written (the source is only read at the aux-file copy), so re-point `--tokenizer_source` at a directory
-  or Hub id that carries one, or pass `--allow_missing_tokenizer` if a tokenizer-less artifact is intended.
+  else the first input) that ships no tokenizer files, since every `from_pretrained`-based consumer of
+  the merged checkpoint would fail to build a tokenizer.
+
+    This one raises *after* the merged weights are written (the source is only read at the aux-file
+    copy). Re-point `--tokenizer_source` at a directory or Hub id that carries one, or pass
+    `--allow_missing_tokenizer` if a tokenizer-less artifact is intended.
 
 ## Preparation scripts
 
@@ -249,7 +297,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 | `scripts/before_training/convert_mistral4_bf16.py` | Dequantize a public FP8 Mistral Small 4 checkpoint to bf16, streaming shard-by-shard (no full-model RAM footprint); `--max_shard_size` caps the output shards (default `5GB`; see [Mistral4](../models/mistral4.md)) |
 | `scripts/before_training/convert_glm5_bf16.py` | Dequantize the fp8 block-quantized GLM-5.3-Flash release to bf16 (block-wise `weight * scale_inv`, unquantized tensors keep their stored dtype), streaming shard-by-shard; `--model_id` may be a Hub repo; `--max_shard_size` caps the output shards (default `5GB`; see [GLM-5 Next](../models/glm5-next.md)) |
 | `scripts/environments/preparation/compact_code_tests.py` | Reduce a bulky test corpus to one capped row per problem for `prepare_code_dataset.py --tests_table`: `--source hardtests` (base64-zlib-pickled suites) or `codeforces_generated` (open-r1's one-row-per-test parquet), `--input_dir` shards → `--output_dir` parquet parts (`key`/`tests`/`checker`), one per source shard, stamped with the caps that built it (a part with the same caps is kept, so an interrupted run resumes; other caps rebuild it). At most `--max_tests` 40 tests within `--max_test_bytes` 262144 bytes each, of which `--max_large_tests` 2 may reach `--max_large_bytes` 4000000; source order preserved; `--num_proc` 16 shard workers; undecodable and emptied suites counted in the final log line |
-| `scripts/environments/preparation/prepare_code_dataset.py` | Prepare a competitive-programming dataset (`--adapter codeforces`/`deepcoder`/`hardtests`) for the coding RL env — composes prompts, packs tests/checker/time-limit. `--tests_table <dir>` joins a compacted suite onto the rows by problem id; `--exclude_keys <file>` drops listed problem ids (a trailing `*` excludes a prefix); `--holdout_per_band N` carves a deterministic `test` split (N rows per rating band plus N below the first band) from a source that ships only `train`; `--push_bands` pushes the `full` config plus one per rating band over the shared `test` split, `--config_name` a single config; `--verify_checkers` (default on, `--no-verify_checkers` off) drops a problem whose special judge rejects its own reference output or accepts garbage on the first test, running the judge in a `SandboxExecutor`. `--min_rating`/`--max_rating` also drop unrated problems (no-op without a `rating` column). `--num_proc` defaults to the toolkit's own dataset-processing default; a `--push_to_hub` repo is created private unless `--no-private`. See [Code Contests](../training-methods/grpo/environments/code-contests.md#preparation) |
+| `scripts/environments/preparation/prepare_code_dataset.py` | Prepare a competitive-programming dataset (`--adapter codeforces`/`deepcoder`/`hardtests`) for the coding RL env — composes prompts, packs tests/checker/time-limit. `--tests_table <dir>` joins a compacted suite onto the rows by problem id; `--exclude_keys <file>` drops listed problem ids (a trailing `*` excludes a prefix); `--holdout_per_band N` carves a deterministic `test` split (N rows per rating band plus N below the first band) from a source that ships only `train`; `--push_bands` pushes the `full` config plus one per rating band over the shared `test` split, `--config_name` a single config; `--verify_checkers` (default on, `--no-verify_checkers` off) drops a problem whose special judge rejects its own reference output or accepts garbage on the first test, running the judge in a `SandboxExecutor`. `--min_rating`/`--max_rating` also drop unrated problems (no-op without a `rating` column). `--num_proc` defaults to the toolkit's own dataset-processing default; a `--push_to_hub` repo is created private unless `--no-private`. See [Code Contests](../training-methods/grpo/environments/code-contests.md#dataset) |
 
 ```bash
 python scripts/before_training/prepare_dataset.py \

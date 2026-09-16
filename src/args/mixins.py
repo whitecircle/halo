@@ -7,8 +7,8 @@ field only to change its default (e.g. ``DistillScriptArguments``' ``conversatio
 """
 
 import math
-from dataclasses import dataclass, field
-from typing import Literal, get_args
+from dataclasses import dataclass, field, fields, make_dataclass
+from typing import ClassVar, Literal, get_args
 
 from src.args.validation import RangeValidatedConfig
 
@@ -19,6 +19,17 @@ AdvantageMode = Literal["mean", "qae", "asymmetric", "neg_mask_hard"]
 # RLRR shaping modes, same arrangement: the annotation gates YAML/CLI and RLRRConfig validates
 # against it.
 RLRRMode = Literal["hrr", "prr"]
+
+# The script-argument spelling of each RLRRConfig field is ``rlrr_<field>``, except λ: ``lambda`` is a
+# keyword, so the config field is ``lam`` while the YAML keeps the full word.
+RLRR_ARG_PREFIX = "rlrr_"
+_RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
+
+
+def rlrr_arg_name(config_field: str) -> str:
+    """The YAML/CLI spelling of one :class:`RLRRConfig` field."""
+    return _RLRR_ARG_SPELLINGS.get(config_field, RLRR_ARG_PREFIX + config_field)
+
 
 # Shared by :class:`SDPGArguments` and the SDPG trainer so both OPD flows steer the teacher alike.
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
@@ -134,40 +145,110 @@ class AdvantageShaping:
             raise ValueError(f"advantage mode must be one of {self._MODES}, got {self.mode!r}")
         if not 0.0 < self.quantile < 1.0:
             raise ValueError(f"quantile must be in (0, 1), got {self.quantile}")
-        if self.pos_scale < 0 or self.neg_scale < 0:
-            raise ValueError(f"pos_scale/neg_scale must be >= 0, got {self.pos_scale}/{self.neg_scale}")
+        # Finite as well as signed: the normalizer's trailing ``nan_to_num`` would turn a NaN/inf scale
+        # into all-zero advantages, silently training nothing.
+        for name in ("pos_scale", "neg_scale"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite value >= 0, got {value}")
 
 
 @dataclass
 class RLRRConfig:
-    """Hyperparameters for RLRR relative-reward shaping (defaults from the paper's Appendix A.1)."""
+    """Hyperparameters for RLRR relative-reward shaping (defaults from the paper's Appendix A.1).
 
-    mode: RLRRMode = "hrr"
-    tau: float = 0.1
-    """HRR rank-correction magnitude ``τ`` (Eq. 3); too high dilutes the rule reward."""
-    lam: float = 2048.0
-    """Length-bin granularity ``λ`` (Eq. 6); correct responses bucketed by ``floor(len / λ)``."""
-    xi_pos: float = 1e-3
-    """Advantage cap ``ξ⁺`` for incorrect responses (Eq. 5)."""
-    xi_neg: float = -1e-3
-    """Advantage floor ``ξ⁻`` for correct responses (Eq. 5)."""
-    std_normalize: bool = False
-    """Divide the centered advantage by the group std (Eq. 1); else ``F_norm = 1`` (Dr.GRPO)."""
-    length_rerank: bool = True
-    """Apply the length-bin tie-break in hierarchical re-ranking (Eq. 6)."""
-    correctness_clip: bool = True
-    """Apply correctness-aware advantage clipping (Eq. 5); disable for pure PRR."""
-    correctness_threshold: float = 0.5
-    """A response is correct iff raw reward ``>= correctness_threshold`` — the only correctness
-    signal; no caller supplies explicit labels."""
+    The single declaration of the tunables: :class:`RLRRArguments` derives its ``rlrr_*`` script
+    fields from these (same type, default and help), so the ``help`` metadata here is the CLI help.
+    Every invariant lives in ``__post_init__``; the script args build the config eagerly at parse
+    time, so a bad value fails before any model is loaded. Messages name the YAML spelling.
+    """
+
+    mode: RLRRMode = field(
+        default="hrr",
+        metadata={"help": "RLRR mode: 'hrr' (hybrid rank correction, Eq. 3) or 'prr' (pure relative, Eq. 4)"},
+    )
+    tau: float = field(
+        default=0.1, metadata={"help": "HRR rank-correction magnitude τ (Eq. 3); too high dilutes the rule reward"}
+    )
+    lam: float = field(
+        default=2048.0,
+        metadata={
+            "help": "Length-bin granularity λ for re-ranking (Eq. 6); correct responses bucketed by floor(len / λ)"
+        },
+    )
+    xi_pos: float = field(default=1e-3, metadata={"help": "Advantage cap ξ⁺ for incorrect responses (Eq. 5 clip)"})
+    xi_neg: float = field(default=-1e-3, metadata={"help": "Advantage floor ξ⁻ for correct responses (Eq. 5 clip)"})
+    std_normalize: bool = field(
+        default=False,
+        metadata={"help": "Divide the centered advantage by the group std (Eq. 1); else F_norm = 1 (Dr.GRPO)"},
+    )
+    length_rerank: bool = field(
+        default=True, metadata={"help": "Apply the length-bin tie-break in hierarchical re-ranking (Eq. 6)"}
+    )
+    correctness_clip: bool = field(
+        default=True,
+        metadata={"help": "Correctness-aware advantage clipping (Eq. 5). Disable for pure PRR with no gold labels."},
+    )
+    correctness_threshold: float = field(
+        default=0.5,
+        metadata={"help": "A response is correct iff raw reward >= this threshold — the only correctness signal"},
+    )
 
     def __post_init__(self) -> None:
         if self.mode not in get_args(RLRRMode):
-            raise ValueError(f"RLRR mode must be one of {get_args(RLRRMode)}, got {self.mode!r}")
-        if self.lam <= 0:
-            raise ValueError(f"RLRR lam (λ) must be > 0, got {self.lam}")
+            raise ValueError(f"{rlrr_arg_name('mode')} must be one of {get_args(RLRRMode)}, got {self.mode!r}")
+        # Both divide inside the shaping (Eq. 3 / Eq. 6): zero is a ZeroDivisionError deep in the advantage
+        # pass, a negative one inverts the ranking, an infinite λ silently disables the length tie-break.
+        for name in ("tau", "lam"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{rlrr_arg_name(name)} must be a finite value > 0, got {value}")
+        # A NaN band or threshold fails silently: NaN clip bounds NaN every advantage, and no reward
+        # ever compares >= NaN, so every response reads as incorrect.
+        for name in ("xi_pos", "xi_neg", "correctness_threshold"):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{rlrr_arg_name(name)} must be finite, got {value}")
         if self.xi_neg > self.xi_pos:
-            raise ValueError(f"RLRR requires xi_neg <= xi_pos, got xi_neg={self.xi_neg}, xi_pos={self.xi_pos}")
+            raise ValueError(
+                f"RLRR requires {rlrr_arg_name('xi_neg')} <= {rlrr_arg_name('xi_pos')}, "
+                f"got {self.xi_neg} > {self.xi_pos}"
+            )
+
+
+# The ``rlrr_*`` script fields, derived from RLRRConfig so a tunable is declared exactly once.
+_RLRRTunables = make_dataclass(
+    "_RLRRTunables",
+    [(rlrr_arg_name(f.name), f.type, field(default=f.default, metadata=dict(f.metadata))) for f in fields(RLRRConfig)],
+    module=__name__,
+)
+
+
+@dataclass
+class RLRRArguments(_RLRRTunables, RangeValidatedConfig):
+    """``use_rlrr`` plus the ``rlrr_*`` tunables of :class:`RLRRConfig` under their YAML spellings.
+
+    Every knob is validated at parse time by building the config eagerly, gate on or off (fail-loud:
+    a mistyped ``rlrr_tau`` must not survive a run just because ``use_rlrr`` is false).
+    """
+
+    TUNABLES: ClassVar[tuple[str, ...]] = tuple(f.name for f in fields(_RLRRTunables))
+
+    use_rlrr: bool = field(
+        default=False,
+        metadata={"help": "Enable RLRR relative-reward advantage shaping (replaces group-normalized advantages)"},
+    )
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        self._rlrr_config()
+
+    def _rlrr_config(self) -> RLRRConfig:
+        return RLRRConfig(**{f.name: getattr(self, rlrr_arg_name(f.name)) for f in fields(RLRRConfig)})
+
+    def build_rlrr_config(self) -> RLRRConfig | None:
+        """Return the :class:`RLRRConfig` these args describe, or ``None`` when RLRR is disabled."""
+        return self._rlrr_config() if self.use_rlrr else None
 
 
 @dataclass
@@ -242,13 +323,14 @@ class AdvantageShapingArguments(RangeValidatedConfig):
     )
 
     def _validate_ranges(self) -> None:
-        """Guard the two knobs :class:`AdvantageShaping` does not check itself.
+        """Run :class:`AdvantageShaping`'s own guards at parse time, plus the two knobs it does not check.
 
         A NaN threshold compares False everywhere, so no group member ever reaches it and every
         group is treated as hard (all negative advantages zeroed); a negative or NaN std floor turns
         ``max(std, floor)`` into a no-op or a NaN that propagates to every advantage in the batch.
         """
         super()._validate_ranges()
+        self.build_advantage_shaping()
         if not math.isfinite(self.advantage_hard_group_threshold):
             raise ValueError(
                 f"advantage_hard_group_threshold must be finite, got {self.advantage_hard_group_threshold}"

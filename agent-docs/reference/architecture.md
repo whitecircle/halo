@@ -1,11 +1,12 @@
 # Architecture
 
 Halo extends HuggingFace — Transformers, Accelerate, TRL — with Expert, Context, Tensor, and
-Expert-Tensor parallelism plus alignment methods TRL does not ship (SMPO, Offline
-GRPO, Environmental GRPO). Every trainer subclasses a TRL, Transformers, or SentenceTransformers
-trainer and adds one mixin. The default save is a standard HuggingFace checkpoint and there is no
-Megatron conversion step; the one opt-in per-rank format (`save_sharded_ep`) needs a merge script
-before reload.
+Expert-Tensor parallelism plus alignment methods TRL does not ship (SMPO, Offline GRPO, Async GRPO
+with Environments). Every trainer subclasses a TRL, Transformers, or SentenceTransformers trainer
+and adds one mixin.
+
+The default save is a standard HuggingFace checkpoint and there is no Megatron conversion step; the
+one opt-in per-rank format (`save_sharded_ep`) needs a merge script before reload.
 
 The runtime is the prebuilt Docker image: PyTorch 2.11+cu130, DeepEP, and Flash Attention live only
 inside `halo:blackwell` (B200/B300, SM100/SM103, FA2+FA4) and `halo:hopper`
@@ -95,9 +96,11 @@ Four subpackages own the mechanics: `expert_parallel/` (DeepEP dispatch/combine,
 wrappers, grouped-GEMM expert compute, gradient-sync hooks, expert gather/export), `context_parallel/`
 (`UlyssesCPModelWrapper`, sequence splitting), `tensor_parallel/` (DTensor weight sharding), and
 `pipeline_parallel/` (layer split, stage module, stage-aware loading, P2P groups, the
-`torch.distributed.pipelining` seam). A fifth, `loading/`, sits above all four: `load_distributed_model`
-picks the per-mode loader off a `ParallelismConfig`, so it is the one place that reaches into every
-implementation — which is why it lives here and not under `src/models/loading/`.
+`torch.distributed.pipelining` seam).
+
+A fifth, `loading/`, sits above all four: `load_distributed_model` picks the per-mode loader off a
+`ParallelismConfig`, so it is the one place that reaches into every implementation. That is why it
+lives here and not under `src/models/loading/`.
 
 The lazy-loading machinery both the EP and PP loaders share — safetensors index resolution,
 checkpoint-key alignment, per-key weight plans, hub-conversion op math, meta-shell instantiation —
@@ -165,9 +168,9 @@ distributed shards back into a standard HuggingFace checkpoint — see
 
 ## RL: the rollout engine as a separate container
 
-Online and Environmental GRPO generate completions with vLLM (0.26.0). vLLM pins its own
+Online and async GRPO generate completions with vLLM (0.26.0). vLLM pins its own
 torch/transformers stack, so it is never imported into the training environment — it runs as its
-own container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). Environmental GRPO can target SGLang
+own container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). Async GRPO can target SGLang
 instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang.yml`; the sync needs that image, whose
 `docker/sglang/patches/` repair two loaders). Each
 engine's pinned loaders refuse a few families — see
@@ -178,11 +181,11 @@ The training process talks to it over two channels: HTTP for generation, and a v
 for weight sync, replacing TRL's `VLLMClient` which would pull in the vLLM package. A server on
 another node syncs over EFA ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
 
-Before each generation round that follows a weight update (environmental GRPO: every
+Before each generation round that follows a weight update (async GRPO: every
 `sync_weights_every_n_steps`), the trainer gathers EP expert shards, unfolds FSDP2 DTensors via
 `full_tensor()`, gathers TP shards, pushes the weights to the rollout server over NCCL, and resets
 the prefix cache. See [Online GRPO](../training-methods/grpo/online-grpo.md) and
-[Environmental GRPO](../training-methods/grpo/environmental-grpo.md).
+[Async GRPO](../training-methods/grpo/async-grpo/README.md).
 
 ## Related pages
 

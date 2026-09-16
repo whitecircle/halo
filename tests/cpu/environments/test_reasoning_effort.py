@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from src.environments.base import VALID_REASONING_EFFORTS, BaseEnvironment, resolve_reasoning_effort
+from src.environments.base import VALID_REASONING_EFFORTS, BaseEnvironment, EpisodeGrade, resolve_reasoning_effort
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import reasoning_calibration_penalty
 
@@ -25,8 +25,8 @@ class _MinimalEnv(BaseEnvironment):
     def _step_single(self, episode_id, action, context):  # pragma: no cover
         raise NotImplementedError
 
-    def _compute_reward(self, trajectory):  # pragma: no cover
-        return 0.0
+    def _grade_episode(self, trajectory, context=None):  # pragma: no cover
+        return EpisodeGrade(0.0)
 
 
 def test_resolve_passthrough_and_none():

@@ -58,11 +58,13 @@ Notes on individual frameworks:
 ## Model compatibility
 
 Any HuggingFace `AutoModelForCausalLM` works with standard FSDP, and any model carrying a `tp_plan`
-gets TP. Advanced parallelism (EP, CP, ETP) requires per-family wrappers — for EP, a wrapper under
-`src/distributed/expert_parallel/layers/` (under 160 lines; GPT-OSS the outlier at 379) subclassing
-`EPMoELayerBase` and declaring its `HF_MODULE_NAMES` / `HF_MODEL_TYPES`, with `MOE_LAYER_MAP` derived
-from the subclass tree so the family self-registers on import. Not a model reimplementation or a
-checkpoint conversion. Fifteen MoE families ship one; the per-family × per-mode matrix is
+gets TP. Advanced parallelism (EP, CP, ETP) requires per-family wrappers, not a model
+reimplementation or a checkpoint conversion.
+
+For EP, that is a wrapper under `src/distributed/expert_parallel/layers/` (under 160 lines; GPT-OSS
+the outlier at 379) subclassing `EPMoELayerBase` and declaring its `HF_MODULE_NAMES` /
+`HF_MODEL_TYPES`, with `MOE_LAYER_MAP` derived from the subclass tree so the family self-registers on
+import. Fifteen MoE families ship one; the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the
 procedure.
 

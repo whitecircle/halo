@@ -6,12 +6,16 @@ Covers the behaviour layered over the python-only backend (see test_sandbox.py f
 python/remote/grading basics):
 
 - Language registry: name/alias resolution, the compiled-vs-interpreted distinction.
+- bash: a command run in the session working directory — it sees the session's files, its own writes
+  stay there, a non-zero exit is its own verdict — on the local backend and in a bwrap jail; on the
+  remote backend the shell tool puts the canonical ``bash`` on the wire.
 - C/C++ compile-and-run: stdout, stdin plumbing, a compile error reported as a *program* fault
   (returncode set, ``error`` unset) so grading buckets it as a failed solution, a runtime timeout,
   and the memory cap on a compiled binary.
 - Missing-compiler handling (a backend error) via a sandbox pointed at a bogus toolchain.
 - Sessions: state persists across runs (write a file, read it next run; cross-language sharing),
-  two sessions are isolated, and concurrent sessions on one shared instance don't cross-contaminate.
+  two sessions are isolated, concurrent sessions on one shared instance don't cross-contaminate, and
+  the host never follows a link the program planted (staging, ``read_file``, ``reset_to_staged``).
 - Session build reuse: a compiled source is built once across runs with different stdin (the grader's
   one-session-per-submission pattern), rebuilt when the source, an auxiliary header, a session-written
   file or an interpreted run changes the working dir, and a rejected compile is cached as
@@ -31,9 +35,10 @@ import pytest
 
 from src.environments.sandbox.base import LANGUAGES, resolve_language, supported_languages
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
-from src.environments.sandbox.local import LocalSubprocessSandbox
+from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.resolve import resolve_sandbox
+from src.environments.tools.factories import create_session_bash_tools
 
 _HAS_GPP = shutil.which("g++") is not None
 _HAS_GCC = shutil.which("gcc") is not None
@@ -82,14 +87,34 @@ def test_language_registry_resolves_aliases():
     assert resolve_language("c++").name == "cpp"
     assert resolve_language("CXX").name == "cpp"  # case-insensitive
     assert resolve_language("c").name == "c"
+    assert resolve_language("sh").name == "bash"
+    assert resolve_language("SHELL").name == "bash"  # case-insensitive
     assert resolve_language("ruby") is None
-    assert set(supported_languages()) == set(LANGUAGES.keys()) == {"python", "cpp", "c"}
+    assert set(supported_languages()) == set(LANGUAGES.keys()) == {"python", "bash", "cpp", "c"}
 
 
 def test_language_compiled_flag():
     assert resolve_language("python").is_compiled is False
+    assert resolve_language("bash").is_compiled is False
     assert resolve_language("cpp").is_compiled is True
     assert resolve_language("c").is_compiled is True
+
+
+def test_bash_runs_in_the_session_working_directory():
+    """The shell sees the session's files and its own writes stay there, so a workspace tool set can
+    mix file tools and shell commands."""
+    with LocalSubprocessSandbox().open_session() as session:
+        session.write_file("notes.txt", "remember me\n")
+        res = session.run("cat notes.txt; echo made > made.txt", language="sh")
+        assert res.ok, f"expected clean exit, got {res}"
+        assert res.stdout.strip() == "remember me"
+        assert session.read_file("made.txt").strip() == "made"
+
+
+def test_bash_nonzero_exit_is_the_command_s_own_verdict():
+    res = LocalSubprocessSandbox().run("exit 3", language="bash")
+    assert res.returncode == 3
+    assert res.error is None and not res.compile_failed and not res.timed_out
 
 
 # C/C++ compile-and-run (local backend)
@@ -296,6 +321,72 @@ def test_session_rejects_unsafe_paths():
         assert raised, "a traversal path must be rejected"
 
 
+def _plant_link(workdir: str, name: str, target: str) -> None:
+    """What a program can do to its own working directory between runs."""
+    path = os.path.join(workdir, name)
+    if os.path.lexists(path):
+        os.remove(path)
+    os.symlink(target, path)
+
+
+def test_staging_never_writes_through_a_link_the_program_planted(tmp_path):
+    """Under bubblewrap the working directory is a plain rw bind: a program can replace the staged
+    ``main.py`` with a symlink to a host file, and the next run's staging — the host process, as
+    root — would write the new source through it. The program is judged for it (a runtime error of
+    its own), never handed an infra error it could void its episode with."""
+    host_file = tmp_path / "credentials"
+    host_file.write_text("SECRET")
+    sb = LocalSubprocessSandbox()
+    with sb.open_session() as session:
+        assert session.run("print(1)").ok
+        _plant_link(session.workdir, "main.py", str(host_file))
+
+        result = session.run("print(2)")
+
+        assert host_file.read_text() == "SECRET"
+        assert result.error is None, "tampering must not read as an infra fault"
+        assert result.returncode == TAMPERED_WORKDIR_RETURNCODE and not result.ok
+        assert "main.py" in result.stderr
+
+
+def test_reset_to_staged_drops_a_staged_entry_whose_type_changed(tmp_path):
+    """The grader resets the session between hidden tests, so a link planted over a staged entry by
+    test 1 must be gone before test 2 is staged — a name-only diff keeps it."""
+    host_file = tmp_path / "credentials"
+    host_file.write_text("SECRET")
+    sb = LocalSubprocessSandbox()
+    with sb.open_session() as session:
+        assert session.run("print(1)").ok
+        _plant_link(session.workdir, "main.py", str(host_file))
+
+        session.reset_to_staged()
+
+        assert not os.path.lexists(os.path.join(session.workdir, "main.py"))
+        second = session.run("print(2)")
+        assert second.ok and second.stdout.strip() == "2"
+        assert host_file.read_text() == "SECRET"
+
+
+def test_read_file_returns_none_for_a_link_and_never_reads_the_host_through_it(tmp_path):
+    host_file = tmp_path / "credentials"
+    host_file.write_text("SECRET")
+    host_dir = tmp_path / "home"
+    host_dir.mkdir()
+    (host_dir / "secret.txt").write_text("SECRET")
+    sb = LocalSubprocessSandbox()
+    with sb.open_session() as session:
+        session.write_file("a.txt", "alpha")
+        _plant_link(session.workdir, "leak", str(host_file))
+        _plant_link(session.workdir, "pkg", str(host_dir))
+
+        assert session.read_file("leak") is None
+        assert session.read_file("pkg/secret.txt") is None
+        assert session.read_file("a.txt") == "alpha"
+        with pytest.raises(ValueError):
+            session.write_file("pkg/planted.txt", "x")
+        assert not (host_dir / "planted.txt").exists()
+
+
 def test_concurrent_sessions_keep_separate_state():
     """One shared sandbox, many sessions stepped from threads: each keeps its own files."""
     sb = LocalSubprocessSandbox()
@@ -464,6 +555,17 @@ def test_remote_session_resends_accumulated_files():
     assert rsession.list_files() == ["util.py", "util2.py"]
 
 
+def test_remote_shell_tool_sends_the_command_as_a_bash_program():
+    """The service, not the registry, runs the program on this backend: the shell tool has to put the
+    canonical ``bash`` on the wire, or a SandboxFusion service runs the command through its Python
+    runner and every call comes back a syntax error."""
+    sess = _CapturingSession()
+    remote_session = RemoteSandbox("http://sandbox:8080", session=sess).open_session()
+    create_session_bash_tools(lambda: remote_session).get("run_bash_command").execute(command="echo hi")
+    assert sess.payloads[0]["language"] == "bash"
+    assert sess.payloads[0]["code"] == "echo hi"
+
+
 # BubblewrapSandbox
 
 
@@ -535,6 +637,15 @@ def test_bubblewrap_hides_host_filesystem():
         return _skip("bubblewrap not usable here")
     res = _BWRAP.run("import os; print('VISIBLE' if os.path.exists('/workspace/src') else 'HIDDEN')")
     assert "HIDDEN" in res.stdout, f"host workspace must be invisible in the jail, got {res.stdout!r}"
+
+
+def test_bubblewrap_runs_bash():
+    """bash is the one registered language resolved off PATH inside the jail (no interpreter
+    placeholder), so it depends on the read-only binds covering the system directories."""
+    if _BWRAP is None:
+        return _skip("bubblewrap not usable here")
+    res = _BWRAP.run("echo 21 | awk '{print $1 * 2}'", language="bash")
+    assert res.ok and res.stdout.strip() == "42", f"bash in jail failed: {res}"
 
 
 def test_bubblewrap_compiles_and_runs_cpp():

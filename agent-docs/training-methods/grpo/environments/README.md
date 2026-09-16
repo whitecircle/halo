@@ -1,81 +1,80 @@
 # Environments
 
-Environments provide the multi-turn interaction loop for [Environmental GRPO](../environmental-grpo.md): the model generates an action, the environment executes it, returns an observation, and repeats until done. Shared interface: `reset(prompts, contexts)`, `step(episode_ids, actions, contexts)`, `get_trajectories(episode_ids)`.
+An environment is the multi-turn task an [Async GRPO with Environments](../async-grpo/README.md) run trains against. `reset(prompts, contexts)` opens one episode per prompt; `step(episode_ids, actions, contexts)` executes a model turn and returns the next observation; the episode ends when the environment reports it done or at `max_turns`. `get_trajectories(episode_ids)` hands back the messages and final reward. Protocol: `src/environments/base.py`.
 
-**Location:** `src/environments/`. `envs/protocols/` holds tool-invocation protocols (native function calling, ReAct, and the MCP transport over native calling); `envs/tasks/` holds the concrete tasks (`coding/` with its grading and dataset adapters, `qa`). Tools in `tools/`, code-execution sandboxes in `sandbox/`.
+## Registry
 
-## Class hierarchy
+`environment_type` resolves through `src/environments/registry.py`; `get_registered_environments()` lists the live set, which `register_environment` extends.
 
-| Class | Base | Description |
-|-------|------|-------------|
-| `BaseEnvironment` | - | Abstract base for all environments |
-| `AsyncBaseEnvironment` | `BaseEnvironment` | Async support for I/O |
-| `ReActEnvironment` | `BaseEnvironment` | Thought/Action/Observation format |
-| `NativeToolUseEnvironment` | `BaseEnvironment` | OpenAI/vLLM function calling |
-| `AsyncNativeToolUseEnvironment` | `AsyncBaseEnvironment`, `NativeToolUseEnvironment` | Async native tool execution |
-| `NativeMCPClientEnvironment` | `AsyncNativeToolUseEnvironment` | MCP server integration |
-| `SweEnvironment` | `NativeToolUseEnvironment` | Stateful SWE-agent over a persistent session |
-| `CodeContestsEnvironment` | `NativeToolUseEnvironment` | Competitive programming, hidden-test grading |
-| `ExamQAEnvironment` | `NativeToolUseEnvironment` | Multiple-choice and open-ended exams |
-
-Factual QA (`qa_search`) is a factory preset over `NativeToolUseEnvironment` (`create_qa_search_environment`), not a dedicated class.
-
-## Registry names
-
-Resolve built-in types by name via `src/environments/registry.py`:
-
-| Registry name | Resolves to | Tools |
-|---------------|-------------|-------|
+| `environment_type` | Class | Tools |
+|---|---|---|
 | `react_math` | `ReActEnvironment` | `calculate`, `python` |
 | `react_search` | `ReActEnvironment` | `web_search` |
 | `native_math` | `NativeToolUseEnvironment` | `calculate`, `python` |
 | `native_coding` | `NativeToolUseEnvironment` | `python_repl` |
-| `native_combined` | `NativeToolUseEnvironment` | math + python + search + file |
-| `swe` | `SweEnvironment` | `run_code` + persistent file ops (accepts `language`) |
-| `mcp` | `NativeMCPClientEnvironment` | MCP server tools |
-| `qa_search` | `NativeToolUseEnvironment` (factory) | `web_search` (+ optional `python`) |
-| `code_contests` | `CodeContestsEnvironment` | test tool + `submit_solution`, exact-match grading (`language`: one name, or a list the model chooses from per call) |
-| `codeforces` | `CodeContestsEnvironment` | same env, token comparison — the only difference between the two presets |
-| `exam_qa` | `ExamQAEnvironment` | none, or `web_search` in open-book mode |
+| `native_combined` | `NativeToolUseEnvironment` | `calculate`, `python`, `web_search`, file ops |
+| `qa_search` | `NativeToolUseEnvironment` (factory) | `web_search` (+ `python` under `include_python_tools`) |
+| `exam_qa` | `ExamQAEnvironment` | none; `web_search` under `open_book` |
+| `swe` | `SweEnvironment` | `run_code`, `run_bash_command`, workspace file ops |
+| `code_contests` | `CodeContestsEnvironment` | scratchpad test tool, `submit_solution` |
+| `codeforces` | `CodeContestsEnvironment` | same, graded by token comparison |
+| `mcp` | `NativeMCPClientEnvironment` | whatever the server advertises |
 
-**Runtime per env** — must exist on every Ray actor node
-([Ray Cluster](../../../infrastructure/ray.md#multi-node)): a sandbox plus a large `TMPDIR` for
-`code_contests` / `codeforces` / `swe`; outbound network plus the backend's key for `react_search` /
-`qa_search` / open-book `exam_qa`; `npx` or `uvx` for `mcp`.
+The ReAct presets parse the action out of the assistant text; the rest use native tool calls, so the server needs the family's `--tool-call-parser` ([Rollout Configuration](../async-grpo/rollouts.md#tool-calls)).
 
-`native_coding` needs neither — its `python_repl` is the in-process restricted REPL (no imports).
-Swapping in a `SandboxExecutor` there is a Python-only path through the tool factory: `native_coding`'s
-chain takes no `sandbox` parameter, so setting it in its `environment_kwargs` raises `TypeError`. The
-sandboxed `swe` / `code_contests` / `codeforces` envs do declare `sandbox=`, but only Python callers
-can pass an executor object — YAML cannot.
+## Actor runtime
 
-## Passing environments to the trainer
+Actors run environments on CPU and inherit the `ray start` daemon's environment — export what they need before `ray start` on each node ([Ray Cluster](../../../infrastructure/ray.md#multi-node)).
 
-`EnvironmentConfig` (`src/configs/environment_config.py`) has four top-level fields — `environment_type` (default `react_math`), `success_reward` (`1.0`), `failure_reward` (`0.0`), `max_turns` (`None`) — plus the nested `environment_kwargs` block that carries every per-env option. There is no `partial_reward`.
+| Environment | Actor nodes need |
+|---|---|
+| `code_contests`, `codeforces`, `swe` | A sandbox backend and a large `TMPDIR`: the local backend runs each program in a temp dir |
+| `react_math`, `native_math`, `native_coding`, closed-book `exam_qa` | Nothing beyond the image: `calculate` and the `python` REPL run in-process with imports blocked |
+| `react_search`, `qa_search`, `native_combined`, open-book `exam_qa` | Outbound network. `SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` picks a keyed search backend; with none, keyless DuckDuckGo |
+| `mcp` | The preset's launcher on `PATH` (`npx`; `uvx` for `fetch`) and its credential. An SSE server needs only network to `server_url` |
 
-`max_turns: None` keeps the environment class's own default (`code_contests` / `codeforces` 15, `swe` 20, `exam_qa` 8, everything else 10); setting it overrides all of them, and it must be `>= 1`.
+The code-executing environments take `sandbox_backend` / `sandbox_url` in `environment_kwargs`, else `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL` — [Code Execution Sandboxes](sandbox.md).
+
+## Configuration
+
+`EnvironmentConfig` (`src/configs/environment_config.py`) has four top-level fields; everything else goes in `environment_kwargs`.
 
 ```yaml
 environment_type: react_math
-success_reward: 1.0
-max_turns: 10
+rewards:
+  - source: environment    # the environment's grade in [0, 1], priced weight × grade ^ exponent
+max_turns: null            # null keeps the class default
 
 environment_kwargs:
-  search_backend: duckduckgo   # qa_search / open-book exam_qa (react_search auto-selects its backend)
-  open_book: true              # exam_qa
-  timeout_per_test: 10         # code_contests / codeforces
-  mcp_server: filesystem       # mcp
+  carry_reasoning: false
+  tool_error_penalty: 0.1
 ```
 
-Registry factories forward the whole config, so any constructor kwarg of the target class can be set from `environment_kwargs`. Two keys the factories consume themselves are the exception: `react_math` / `react_search` drop `system_prompt` (each preset hardcodes its own), so setting it there is silently inert, and the `mcp` factory consumes `mcp_server` to **select the server preset** rather than discarding it.
+The factory forwards the merged dict whole, so any constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds — a typo, or an option of another `environment_type` — raises `TypeError` at construction. Two keys the factories consume themselves: the ReAct presets drop `system_prompt`, and `mcp` reads `mcp_server`. `rewards` reaches the constructor as `reward_terms`.
 
-A key no constructor in the chain binds — a typo, or an option belonging to a different `environment_type` — raises `TypeError` at environment construction rather than being absorbed and ignored.
+The episode reward is the sum of its `reward/*` components, in every environment: `reward/turn_shaping` (the accrued per-turn deltas — tool credit and penalties, ReAct thought credit), `reward/tool_shaping` (the native protocol's episode-level knobs), the environment's own shaping terms by name, `reward/objective` (the environment's grade in `[0, 1]` priced by the `environment` term) and `reward/<name>` per `judge` or `reward_model` term ([Reward Terms](../rewards.md#environment-arm)).
 
-For a custom environment, register a factory (`env_config` dict → `BaseEnvironment`) with `register_environment` and set `environment_type`, or pass `environment_cls` + `environment_kwargs` to the trainer directly. See [Custom Environments](custom-environments.md).
+Knobs every environment accepts (the first two are top-level fields):
 
-## Related pages
+| Knob | Default | Effect |
+|---|---|---|
+| `max_turns` | class default: 10; `exam_qa` 8, code contests 15, `swe` 20 | turns before the episode truncates; ≥ 1 |
+| `rewards` | `[{source: environment}]` | the reward terms: the environment's grade at `weight` / `exponent`, plus external `judge` / `reward_model` terms ([Reward Terms](../rewards.md)) |
+| `tool_success_reward` / `tool_error_penalty` | `0.05` / `0.1` (`mcp` pays `0.1`; code contests `0` / `0`) | paid per successful tool call, charged per failed one |
+| `tool_reward_cap` | `tool_success_reward × max_turns` | episode total payable for successful calls |
+| `max_observation_chars` | `16384` | longer tool observations are truncated at the source |
+| `reasoning_effort` | `None` (code contests `medium`) | `low` / `medium` / `high` / `random` CoT steer |
+| `carry_reasoning` | `false` | sends the last assistant turn's reasoning back to the engine; vLLM only |
+| `requires_answer` | class default: `false`; `true` for code contests, `exam_qa`, `qa_search` and the ReAct presets | the reward grades against the dataset's `answer` column, so a dataset without one is refused at trainer construction |
 
-- [Environmental GRPO Trainer](../environmental-grpo.md) — training architecture and setup
-- [ReAct](react.md) · [Native Tool-Use](native-tool-use.md) · [SWE](swe-environment.md) · [Code Contests](code-contests.md) · [MCP](mcp.md) · [Benchmarks](benchmarks.md)
-- [Code Execution Sandboxes](sandbox.md) — backends, languages, limits, sessions
-- [Custom Environments](custom-environments.md) — custom envs, tools, dataset format
+## Pages
+
+- [ReAct](react.md) — Thought / Action / Observation.
+- [Native Tool-Use](native-tool-use.md) — function calling, tool factories.
+- [SWE](swe-environment.md) — persistent workspace agent.
+- [Code Contests](code-contests.md) — hidden-test grading.
+- [MCP](mcp.md) — tools from an MCP server.
+- [Benchmarks](benchmarks.md) — QA and exams.
+- [Code Execution Sandboxes](sandbox.md) — backends and limits.
+- [Evaluating on an Environment](evaluation.md) — run a model through one.
+- [Custom Environments](custom-environments.md) — write, register, test your own.

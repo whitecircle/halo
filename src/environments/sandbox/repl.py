@@ -42,6 +42,7 @@ def run_code_via_sandbox(
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     language: str = "python",
     session: SandboxSession | None = None,
+    stdin: str = "",
 ) -> str:
     """REPL handler that executes ``code`` through a :class:`SandboxExecutor` (or a live session).
 
@@ -50,9 +51,9 @@ def run_code_via_sandbox(
     Raises :class:`SandboxInfraError` when the backend itself failed (see
     :func:`format_sandbox_repl_output`).
 
-    No stdin: the REPL tool schemas declare none, so a program reading stdin here would block on an
-    input the model has no way to supply. Stdin-fed grading goes through the executor directly.
+    ``stdin`` is what the program reads; a tool whose schema declares no stdin leaves it empty, so a
+    program reading input there sees end-of-file instead of blocking on input nothing can supply.
     """
     runner = session if session is not None else sandbox
-    result = runner.run(code, timeout=timeout, language=language)
+    result = runner.run(code, stdin=stdin, timeout=timeout, language=language)
     return format_sandbox_repl_output(result, timeout)

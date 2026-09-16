@@ -185,12 +185,30 @@ def _template_sig(chat_template: Any) -> str | None:
     return None
 
 
+def _tokenizer_content_sig(val: Any) -> str | None:
+    """Content hash of what a tokenizer does to text: the fast backend's serialized state (vocab,
+    merges, normalizer), else the vocab table. ``None`` when neither is readable."""
+    try:
+        backend = getattr(val, "backend_tokenizer", None)
+        if backend is not None:
+            return hashlib.md5(backend.to_str().encode()).hexdigest()[:16]
+        get_vocab = getattr(val, "get_vocab", None)
+        if callable(get_vocab):
+            return hashlib.md5(json.dumps(sorted(get_vocab().items())).encode()).hexdigest()[:16]
+    except Exception:
+        return None
+    return None
+
+
 def _leaf_tokenizer_identity(val: Any) -> str | None:
     """Cache-key signature for a bare tokenizer, or None if ``val`` isn't one.
 
     The template hash and the special-token ids are the load-bearing terms: ``--force_chat_template``
     and an in-vocab ``--eos-token``/``--bos-token``/``--pad-token`` override both change the ids a map
-    bakes into every row while leaving name_or_path, vocab_size and len identical.
+    bakes into every row while leaving content, vocab_size and len identical. The source term is the
+    tokenizer's CONTENT hash, not its path: a resume repoints the load at the run's own checkpoint,
+    and a path term would miss the cache on every resume leg while the tokenization function is
+    unchanged. ``name_or_path`` is the fallback only where no content is readable.
     """
     name_or_path = getattr(val, "name_or_path", None)
     vocab_size = getattr(val, "vocab_size", None)
@@ -204,7 +222,8 @@ def _leaf_tokenizer_identity(val: Any) -> str | None:
         str(getattr(val, attr, None))
         for attr in ("bos_token_id", "eos_token_id", "pad_token_id", "padding_side", "truncation_side")
     )
-    return f"{type(val).__name__}:{name_or_path}:{vocab_size}:{length}:{_template_sig(getattr(val, 'chat_template', None))}:{specials}"
+    source = _tokenizer_content_sig(val) or name_or_path
+    return f"{type(val).__name__}:{source}:{vocab_size}:{length}:{_template_sig(getattr(val, 'chat_template', None))}:{specials}"
 
 
 def _tokenizer_identity(val: Any) -> str | None:

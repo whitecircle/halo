@@ -1,143 +1,75 @@
-"""Generate EP Token Routing Flow diagram."""
+"""Generate the EP token-routing figure for parallelism/expert-parallelism.md.
+
+Two ranks, two different batches: the router picks top-k experts per token, DeepEP's all-to-all
+dispatch moves each token to the rank that owns its expert, the experts run as one grouped GEMM,
+and the combine all-to-all returns every token to the rank it came from.
+"""
 
 import matplotlib.pyplot as plt
-from _flow_style import *
-from matplotlib.patches import FancyBboxPatch
+from _pipeline_style import *
 
-fig, ax = plt.subplots(figsize=(10, 13))
+W, H = 12.4, 4.9
+
+COL_W, COL_XS = 2.8, (0.3, 4.8, 9.3)
+ROW_H = card_height(2)
+ROW_YS = (2.72, 1.25)
+HEAD_Y = 4.40
+
+LANES = [
+    (
+        "Rank 0 · batch A",
+        ("Experts 0–15", "Rank 0 · batch A"),
+        ["[B·S, hidden] flat rows", "router top-k per token"],
+    ),
+    (
+        "Rank 1 · batch B",
+        ("Experts 16–31", "Rank 1 · batch B"),
+        ["[B·S, hidden] flat rows", "router top-k per token"],
+    ),
+]
+EXPERT_LINES = ["grouped_mm(x, w, offs)", "tokens sorted by expert"]
+BACK_LINES = ["same rows, same order", "weighted by top-k probs"]
+
+fig, ax = plt.subplots(figsize=(W, H))
 fig.patch.set_facecolor(BG)
-ax.set_xlim(0, 10)
-ax.set_ylim(0, 13)
-ax.set_aspect("equal")
+ax.set_xlim(0, W)
+ax.set_ylim(0, H)
 ax.axis("off")
 
-ax.text(5, 12.6, "Expert Parallelism", ha="center", va="top", fontsize=20, fontweight="bold", color=TEXT)
-ax.text(5, 12.0, "Token Routing Flow", ha="center", va="top", fontsize=15, fontweight="normal", color=TEXT_SEC)
-ax.text(
-    5, 11.45, "dispatch  \u2192  local compute  \u2192  combine", ha="center", va="top", fontsize=10, color=TEXT_TERT
-)
+title(ax, "EP token routing", "ep 2 · 32 experts → 16 per rank · dp 2 (EP ⊥ DP)")
 
+for y, (head, (expert_head, back_head), lines) in zip(ROW_YS, LANES, strict=True):
+    card(ax, COL_XS[0], y, COL_W, ROW_H, head, lines, color=SLATE, mono_lines=True)
+    card(ax, COL_XS[1], y, COL_W, ROW_H, expert_head, EXPERT_LINES, color=BLUE, mono_lines=True)
+    card(ax, COL_XS[2], y, COL_W, ROW_H, back_head, BACK_LINES, color=SLATE, mono_lines=True)
 
-def draw_card(x, y, w, h, title, subtitle, bg=CARD, border=CARD_BORDER, accent_left=False):
-    box = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.06", facecolor=bg, edgecolor=border, linewidth=1.0)
-    ax.add_patch(box)
-    if accent_left:
-        bar = FancyBboxPatch((x, y), 0.06, h, boxstyle="round,pad=0", facecolor=ACCENT, edgecolor="none")
-        ax.add_patch(bar)
-    ax.text(x + w / 2, y + h - 0.25, title, ha="center", va="top", fontsize=11, fontweight="bold", color=TEXT)
-    ax.text(x + w / 2, y + 0.3, subtitle, ha="center", va="bottom", fontsize=9, color=TEXT_SEC)
+mids = [y + ROW_H / 2 for y in ROW_YS]
+for left, right in ((COL_XS[0], COL_XS[1]), (COL_XS[1], COL_XS[2])):
+    for src in mids:
+        for dst in mids:
+            arrow(ax, left + COL_W, src, right, dst, color=VIOLET, lw=1.3)
 
-
-def draw_op(x, y, w, h, title, subtitle):
-    box = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.06", facecolor=OP_BG, edgecolor="none")
-    ax.add_patch(box)
+for left, right, name in ((COL_XS[0], COL_XS[1], "dispatch"), (COL_XS[1], COL_XS[2], "combine")):
     ax.text(
-        x + w / 2, y + h / 2 + 0.12, title, ha="center", va="center", fontsize=12, fontweight="bold", color=OP_TEXT
-    )
-    ax.text(x + w / 2, y + h / 2 - 0.2, subtitle, ha="center", va="center", fontsize=8.5, color=TEXT_TERT)
-
-
-def arrow_down(x, y1, y2):
-    ax.annotate(
-        "",
-        xy=(x, y2),
-        xytext=(x, y1),
-        arrowprops={"arrowstyle": "-|>", "color": ACCENT, "lw": 1.8, "shrinkA": 4, "shrinkB": 4},
+        (left + COL_W + right) / 2,
+        HEAD_Y,
+        f"DeepEP {name}\nall-to-all",
+        ha="center",
+        va="top",
+        fontsize=SMALL,
+        color=VIOLET,
+        fontweight="bold",
+        linespacing=1.45,
     )
 
-
-cw, ch = 3.6, 1.3
-lx, rx = 0.6, 5.8
-
-y = 9.8
-draw_card(lx, y, cw, ch, "Rank 0  \u00b7  Experts 0\u20133", "Batch A:  tokens [t\u2080, t\u2081]", accent_left=True)
-draw_card(rx, y, cw, ch, "Rank 1  \u00b7  Experts 4\u20137", "Batch B:  tokens [t\u2082, t\u2083]", accent_left=True)
-
-gap_center_x = (lx + cw + rx) / 2
-badge_y = y + ch / 2
-badge = FancyBboxPatch(
-    (gap_center_x - 0.55, badge_y - 0.22),
-    1.1,
-    0.44,
-    boxstyle="round,pad=0.04",
-    facecolor=ACCENT_MID,
-    edgecolor=ACCENT,
-    linewidth=0.6,
-)
-ax.add_patch(badge)
-ax.text(
-    gap_center_x,
-    badge_y,
-    "different\nbatches",
-    ha="center",
-    va="center",
-    fontsize=7,
-    fontweight="bold",
-    color=ACCENT,
-    linespacing=1.15,
+footnote(
+    ax,
+    0.3,
+    0.3,
+    11.8,
+    "EP is orthogonal to DP: every token returns to the rank it came from, so rank 0 still trains on batch A.",
 )
 
-y_op1 = 7.8
-arrow_down(lx + cw / 2, y, y_op1 + 1.0)
-arrow_down(rx + cw / 2, y, y_op1 + 1.0)
-
-ow, oh = 6.4, 1.0
-ox = (10 - ow) / 2
-draw_op(ox, y_op1, ow, oh, "All-to-All  \u00b7  Dispatch", "route tokens to their assigned experts")
-
-y_proc = 5.9
-arrow_down(lx + cw / 2, y_op1, y_proc + ch)
-arrow_down(rx + cw / 2, y_op1, y_proc + ch)
-
-draw_card(
-    lx,
-    y_proc,
-    cw,
-    ch,
-    "Local Expert Compute",
-    "Experts 0\u20133 process routed tokens",
-    bg=ACCENT_LIGHT,
-    border=ACCENT,
-)
-draw_card(
-    rx,
-    y_proc,
-    cw,
-    ch,
-    "Local Expert Compute",
-    "Experts 4\u20137 process routed tokens",
-    bg=ACCENT_LIGHT,
-    border=ACCENT,
-)
-
-y_op2 = 4.0
-arrow_down(lx + cw / 2, y_proc, y_op2 + oh)
-arrow_down(rx + cw / 2, y_proc, y_op2 + oh)
-
-draw_op(ox, y_op2, ow, oh, "All-to-All  \u00b7  Combine", "return processed tokens to originating rank")
-
-y_out = 2.1
-arrow_down(lx + cw / 2, y_op2, y_out + ch)
-arrow_down(rx + cw / 2, y_op2, y_out + ch)
-
-draw_card(lx, y_out, cw, ch, "Rank 0  \u00b7  Output", "Batch A results (back to origin)", accent_left=True)
-draw_card(rx, y_out, cw, ch, "Rank 1  \u00b7  Output", "Batch B results (back to origin)", accent_left=True)
-
-insight = FancyBboxPatch(
-    (0.8, 0.4), 8.4, 0.9, boxstyle="round,pad=0.06", facecolor=ACCENT_LIGHT, edgecolor=ACCENT, linewidth=0.8
-)
-ax.add_patch(insight)
-ax.text(
-    5,
-    0.85,
-    "Each rank processes different data \u2014 EP just routes tokens to experts and returns them",
-    ha="center",
-    va="center",
-    fontsize=10,
-    color=ACCENT,
-    fontweight="medium",
-)
-
-save(plt.gcf(), "ep_token_routing")
-plt.close()
-print("\u2713 ep_token_routing.png")
+save(fig, "ep_token_routing")
+plt.close(fig)
+print("✓ ep_token_routing.png")

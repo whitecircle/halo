@@ -1,6 +1,6 @@
 # Dataset Formats for Training Scripts
 
-Required columns per method. For Environmental GRPO see [Environmental GRPO](../training-methods/grpo/environmental-grpo.md); for [Distillation](../training-methods/distillation/README.md), teacher and self-distillation use the SFT format (self-distillation adds a privileged-answer field) and online SDPG uses the GRPO prompt/answer format.
+Required columns per method. For Async GRPO with Environments see [Async GRPO with Environments](../training-methods/grpo/async-grpo/README.md) — `prompt` plus an `answer` column only where the environment grades against one; for [Distillation](../training-methods/distillation/README.md), teacher and self-distillation use the SFT format (self-distillation adds a privileged-answer field) and online SDPG uses the GRPO prompt/answer format.
 
 Sources are S3, HuggingFace Hub (including the `:config` and `@split` suffixes), or local paths — see
 [S3 Utilities](s3-utilities.md) for resolution rules and caching.
@@ -9,10 +9,13 @@ Sources are S3, HuggingFace Hub (including the `:config` and `@split` suffixes),
 
 A dataset must have a `train` split; loading raises otherwise (with an `@split` suggestion). With no
 `test` split the toolkit splits off `test_size` from train, or falls back to the first 100 samples.
-Setting `test_size` on an **already-split** dataset re-splits it — train and test are concatenated
+
+Setting `test_size` on an **already-split** dataset re-splits it: train and test are concatenated
 and re-divided, destroying the curated split. Pin the split you want with `@split` to keep
-`test_size` splitting only that one (`openai/gsm8k:main@train`). A sharded or pre-processed dataset
-carries the split decided at preparation time; `test_size` there is ignored with a warning.
+`test_size` splitting only that one (`openai/gsm8k:main@train`).
+
+A sharded or pre-processed dataset carries the split decided at preparation time; `test_size` there
+is ignored with a warning.
 
 Combine multiple datasets by passing lists; `dataset_ratio` is the per-dataset fraction kept:
 
@@ -26,12 +29,15 @@ dataset_ratio:
 ```
 
 The pipeline loads each source, filters rows whose conversation field is `None` or `[]`,
-ratio-subsets, normalizes the schema, and concatenates. A source that ships no `test` split
-contributes training rows only — the corpus test split comes from the sources that ship one, and only
-a corpus where none does falls back to a placeholder cut from its own train rows (set `test_size` to
-carve a held-out split from every source instead). `_normalize_dataset_schema`
-(`src/data/sources/loading.py`) keeps the intersection over train and test together: a column missing
-from any dataset, or whose feature type differs across them, is dropped, with no fixed allowlist.
+ratio-subsets, normalizes the schema, and concatenates.
+
+A source that ships no `test` split contributes training rows only. The corpus test split comes from
+the sources that ship one, and only a corpus where none does falls back to a placeholder cut from its
+own train rows (set `test_size` to carve a held-out split from every source instead).
+
+`_normalize_dataset_schema` (`src/data/sources/loading.py`) keeps the intersection over train and
+test together: a column missing from any dataset, or whose feature type differs across them, is
+dropped, with no fixed allowlist.
 
 The **declared** render columns are the exception. `conversation_field` and `tools_field` are pinned
 through the concatenation, an entry that lacks one getting a null-filled column of the carrying
@@ -150,7 +156,13 @@ Hub shape variants normalize to this contract automatically (`normalize_preferen
 Completions are rendered as `template(prompt + completion)` minus the rendered-prompt prefix, so strict chat templates (Qwen3.5) work and `prompt + chosen` always reconstructs the full conversation exactly.
 
 - **DPO** requires a reference model (PEFT adapters act as the implicit reference; under EP use PEFT or `precompute_ref_log_probs`, under TP only `precompute_ref_log_probs` since PEFT is rejected there — the reference is not parallelized). Supports EP and TP; **CP not supported** (`concatenated_forward` needs full sequences).
-- **SMPO** is reference-model-free. Supports EP and TP for both modalities, CP for text only. VLM mode (any multimodal model — the trainer normalizes rows itself, so hub-shape variants work) takes the same rows plus an optional `images`/`image` column; `DataCollatorForVLMSMPO` processes images at collation, and padding-free is text-only. See [SMPO — Vision-language](../training-methods/preference/smpo.md#vision-language).
+
+- **SMPO** is reference-model-free. Supports EP and TP for both modalities, CP for text only.
+
+    VLM mode (any multimodal model; the trainer normalizes rows itself, so hub-shape variants work)
+    takes the same rows plus an optional `images`/`image` column. `DataCollatorForVLMSMPO` processes
+    images at collation, and padding-free is text-only. See
+    [SMPO — Vision-language](../training-methods/preference/smpo.md#vision-language).
 
 **Vision DPO/KTO.** An `images`/`image` column routes to TRL's vision collators, and the rows must ALREADY be contract-shaped (prompt = message list, chosen/rejected = continuation-only) — the hub-shape normalization above runs only on the text path. Modality routing keys on the **dataset**, so a natively-multimodal model with text-only preference data trains through the normal text pipeline.
 
@@ -214,11 +226,13 @@ means the toolkit default (`DATASET_NUM_PROC`), not one worker, and the count is
 under every parallelism mode.
 
 Trainer-side map/filter callables must be **module-level functions** taking their state through
-`fn_kwargs` — never bound methods. At `num_proc > 1` `datasets` ships the callable to worker
+`fn_kwargs`, never bound methods. At `num_proc > 1` `datasets` ships the callable to worker
 processes through dill, which pickles a bound method's whole `self`: the model, and under EP the
-DeepEP/NCCL process groups (unpicklable — the map dies mid-pass). `reject_self_capturing_fn`
-enforces this at `coordinated_map` / `coordinated_filter`. Passing tunables through `fn_kwargs` also
-puts them in the cache key, which values read off `self` were invisible to.
+DeepEP/NCCL process groups (unpicklable, so the map dies mid-pass).
+
+`reject_self_capturing_fn` enforces this at `coordinated_map` / `coordinated_filter`. Passing
+tunables through `fn_kwargs` also puts them in the cache key, which values read off `self` were
+invisible to.
 
 Those two helpers carry their own rank ordering and must never be nested in a main-first block — see
 [Filesystem Handling](filesystem-handling.md#coordination-primitives).
@@ -264,6 +278,6 @@ This seam covers SFT (runtime and offline), classification, the prompts-reward p
 teacher/self-distillation, and generation-eval prompts. The SMPO and offline-GRPO prompt paths use
 the same probe to prepend BOS only when the post-processor owns it.
 
-`render_generation_prompt` — the prompt stage the online/environmental GRPO scripts share — applies
+`render_generation_prompt` — the prompt stage the online/async GRPO scripts share — applies
 the same rule to the rendered TEXT it returns, and measures `max_prompt_length` with the generation
 tokenization the row will really carry.

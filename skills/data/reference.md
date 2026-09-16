@@ -16,7 +16,10 @@ Authoritative: `agent-docs/data/dataset-formats.md`. Messages are OpenAI ChatML
 - **DPO / SMPO** — `prompt`, `chosen`, `rejected`, all `List[Dict]`.
 - **Offline GRPO** — `prompt: List[Dict]`, `completions: List[List[Dict]]`, `rewards: List[float]`;
   `len(rewards) == len(completions)`, variable group size.
-- **Environmental GRPO** — `prompt: str` (task), `answer: str` (expected). NOT ChatML.
+- **Async GRPO with environments** — `prompt: str` (task), NOT ChatML; `answer: Any` (expected)
+  required only where the environment declares `requires_answer` (code contests take a test
+  payload, `exam_qa` / `qa_search` / `react_*` the expected answer), refused at trainer
+  construction when missing. `native_*`, `swe` and `mcp` need none.
 - **Reward** — `chosen`, `rejected` (`List[Dict]`), optional `prompt` (implicit-prompt sets like
   Skywork-Reward keep the shared turns inside chosen/rejected) and `images` → TRL's Bradley-Terry
   columns `chosen_ids` / `rejected_ids` (+ optional `margin`).

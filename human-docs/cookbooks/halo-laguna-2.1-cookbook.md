@@ -280,7 +280,7 @@ CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo laguna-grpo.yaml -n 2
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
 Size `expert_parallel_size` to the trainer's GPU count, not the node's: the SFT value
 assumes the whole node. Full setup:
-[Environmental GRPO](../../agent-docs/training-methods/grpo/environmental-grpo.md) ↗.
+[Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.
 
 ## Sources
 

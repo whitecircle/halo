@@ -14,10 +14,10 @@ expert_parallel_size: 8
 # so the knob has no fp32 route to take — setting it only logs a per-layer no-op warning.
 
 # --- Dataset ---
-# Wherever the rejection-sampling step above wrote its output — off the small root FS (/tmp),
-# which will not hold a generated GRPO dataset on a training host.
+# Where the rejection-sampling step above wrote its dataset (policy_rejection_sampling.py --output_path, an S3
+# URI; rm_rejection_sampling.py --output_folder) — off the small root FS.
 dataset:
-- /mnt/datasets/gsm8k-gemma4-26b-a4b-offline-grpo
+- path/to/gsm8k-gemma4-26b-a4b-offline-grpo
 test_size: 0.05
 
 # --- Offline GRPO Hyperparameters ---

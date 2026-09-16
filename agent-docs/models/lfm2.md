@@ -6,7 +6,9 @@ Liquid AI's `Lfm2MoeForCausalLM` — a hybrid MoE (interleaved short-convolution
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
 | LFM-2 MoE | Yes | **No** | Yes | Yes | **No** | Yes |
 
-PP is refused at load: `tie_word_embeddings` is `True` — the config-class default, which no released checkpoint overrides — and a tied checkpoint splits stage 0's embedding from the last stage's head with no reconcile, so the tie gate rejects it ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)). Setting the flag `false` is not a way around it: the released weights carry no `lm_head` tensor, so the untied head would train from random init.
+PP is refused at load. `tie_word_embeddings` is `True` (the config-class default, which no released checkpoint overrides), and a tied checkpoint splits stage 0's embedding from the last stage's head with no reconcile, so the tie gate rejects it ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
+
+Setting the flag `false` is not a way around it: the released weights carry no `lm_head` tensor, so the untied head would train from random init.
 
 ## EP wrapper
 
@@ -32,7 +34,9 @@ the cross-document term exactly rather than approximately.
 
 ## Why CP isn't supported
 
-LFM-2 is architecturally hybrid: `Lfm2MoeDecoderLayer` interleaves `full_attention` blocks with `Lfm2MoeShortConv` layers (an `nn.Conv1d` over the sequence axis via `causal_conv1d_fn`), selected per layer by `config.layer_types`. The short-conv layers mix tokens along the sequence axis, so a Ulysses sequence split would sever the convolution receptive field across CP ranks — the same blocker as Qwen3.5/3.6's `Qwen3_5MoeGatedDeltaNet`. No Ulysses wrapper is provided for the hybrid stack, so CP is unavailable on released LFM-2 checkpoints.
+LFM-2 is architecturally hybrid: `Lfm2MoeDecoderLayer` interleaves `full_attention` blocks with `Lfm2MoeShortConv` layers (an `nn.Conv1d` over the sequence axis via `causal_conv1d_fn`), selected per layer by `config.layer_types`.
+
+The short-conv layers mix tokens along the sequence axis, so a Ulysses sequence split would sever the convolution receptive field across CP ranks. That is the same blocker as Qwen3.5/3.6's `Qwen3_5MoeGatedDeltaNet`. No Ulysses wrapper is provided for the hybrid stack, so CP is unavailable on released LFM-2 checkpoints.
 
 ## Configs
 

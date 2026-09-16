@@ -5,15 +5,13 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B
 attn_implementation: sdpa   # classification batches are right-padded, and FA2 unpads them into the
-                            #   M-RoPE varlen path that crashes this family (FA2 is only safe with
-                            #   packing: true — see agent-docs/models/qwen3_5.md)
+                            #   M-RoPE varlen path that crashes this family (FA2 needs packing: true)
 
 # --- Dataset ---
-# MAGE has native `text` + int `label` columns (the pipeline reads the label column by the hardcoded
-# name `label`, so a text/label dataset is required). Alternative: HuggingFaceFW/fineweb-edu-llama3-annotations
-# (6-class edu-quality) — but its label column is `score`, which the pipeline cannot remap, so not usable as-is.
+# The pipeline reads the label column by the hardcoded name `label`, so the dataset must carry
+# `text` + int `label` columns.
 dataset: yaful/MAGE
-text_field: text  # raw text+label rows, not a prompt conversation
+text_field: text
 test_size: 0.1   # the loader folds all provided splits together and re-splits by this ratio
 
 # --- Training ---

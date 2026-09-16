@@ -35,6 +35,8 @@ from typing import Any
 
 from scripts.environments._common import (
     add_endpoint_args,
+    load_training_contract,
+    resolve_setting,
     resolve_trajectory_path,
     rollout_config_from_args,
     write_eval_outputs,
@@ -57,6 +59,14 @@ logger = logging.getLogger(__name__)
 # the tool call carrying it from competing with the chain of thought for tokens.
 SOLUTION_HEADROOM_TOKENS = 4096
 
+# The coding envs this script's adapters, language prompt and rating buckets are written for.
+CODING_ENV_TYPES = ("codeforces", "code_contests")
+# Script defaults, applied where neither a flag nor ``--training_config`` sets the knob.
+DEFAULT_ENV_TYPE = "codeforces"
+DEFAULT_LANGUAGE = "python"
+DEFAULT_MAX_TURNS = 15
+DEFAULT_TEMPERATURE = 0.2
+
 
 def parse_language_flag(value: str) -> str | list[str]:
     """``--language`` as the env's ``language``: one name, or the list a comma-separated value names."""
@@ -77,7 +87,13 @@ def refuse_env_kwargs_language(env_kwargs: dict) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate a model on competitive programming (code_contests/codeforces).")
-    p.add_argument("--env_type", default="codeforces", choices=["codeforces", "code_contests"], help="Coding env.")
+    p.add_argument(
+        "--env_type",
+        default=None,
+        choices=CODING_ENV_TYPES,
+        help=f"Coding env (default: the training config's environment_type under --training_config, else "
+        f"{DEFAULT_ENV_TYPE}).",
+    )
     add_endpoint_args(p)
     p.add_argument(
         "--adapter",
@@ -90,31 +106,41 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_samples", type=int, default=1, help="Samples per problem (success@k).")
     p.add_argument(
         "--language",
-        default="python",
-        help="Solution language to prompt for and grade (python/cpp/c). A comma-separated list lets the "
-        "model choose per program and grades each in the language it named.",
+        default=None,
+        help=f"Solution language to prompt for and grade (python/cpp/c). A comma-separated list lets the "
+        f"model choose per program and grades each in the language it named. Default: the training config's "
+        f"under --training_config, else {DEFAULT_LANGUAGE}.",
     )
     p.add_argument(
         "--max_turns",
         type=int,
-        default=15,
-        help="Max env turns per episode. Agentic models iterate test→fix→submit, so a tight cap "
-        "(e.g. 6) truncates them mid-loop.",
+        default=None,
+        help=f"Max env turns per episode (default: the training config's under --training_config, else "
+        f"{DEFAULT_MAX_TURNS}). Agentic models iterate test→fix→submit, so a tight cap (e.g. 6) truncates "
+        f"them mid-loop.",
     )
     p.add_argument("--success_threshold", type=float, default=1.0, help="Reward at/above which a sample is solved.")
-    p.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature.")
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=f"Sampling temperature (default: the training config's under --training_config, else "
+        f"{DEFAULT_TEMPERATURE}).",
+    )
     p.add_argument(
         "--reasoning_effort",
-        default=DEFAULT_REASONING_EFFORT,
+        default=None,
         choices=sorted(REASONING_EFFORT_PROFILES),
-        help="Solver reasoning effort, passed to the model's chat template (low/medium/high). Sets the "
-        "default --max_tokens unless --max_tokens is given.",
+        help=f"Solver reasoning effort, passed to the model's chat template (low/medium/high). Default: the "
+        f"training config's under --training_config, else {DEFAULT_REASONING_EFFORT}. Sets the default "
+        f"--max_tokens unless --max_tokens or --training_config is given.",
     )
     p.add_argument(
         "--max_tokens",
         type=int,
         default=None,
-        help="Max tokens per generation. Default: the effort profile's thinking budget "
+        help="Max tokens per generation. Default: the training config's rollout_max_tokens under "
+        "--training_config, else the effort profile's thinking budget "
         + ", ".join(f"{level}={p['thinking_tokens']}" for level, p in REASONING_EFFORT_PROFILES.items())
         + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom.",
     )
@@ -163,48 +189,72 @@ def build_examples(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> lis
 
 def main() -> None:
     args = parse_args()
+    contract = load_training_contract(args.training_config)
+    trained_env = contract.env_config_dict() if contract is not None else {}
     adapter = CODE_DATASET_ADAPTERS[args.adapter]
     env_kwargs = json.loads(args.env_kwargs)
     refuse_env_kwargs_language(env_kwargs)
-    language = parse_language_flag(args.language)
+    env_type = resolve_setting(
+        args.env_type, contract.env_config.environment_type if contract else None, DEFAULT_ENV_TYPE
+    )
+    if env_type not in CODING_ENV_TYPES:
+        raise SystemExit(
+            f"{args.training_config} trains environment_type={env_type!r}, not a coding env {CODING_ENV_TYPES}"
+        )
+    language = parse_language_flag(args.language) if args.language else trained_env.get("language", DEFAULT_LANGUAGE)
+    language_label = language if isinstance(language, str) else ",".join(language)
+    reasoning_effort = resolve_setting(
+        args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
+    )
+    max_turns = resolve_setting(args.max_turns, trained_env.get("max_turns"), DEFAULT_MAX_TURNS)
+    # The training run's env config first, the resolved settings and flags over it: an eval under a
+    # contract grades as the run did.
     env = resolve_environment(
-        args.env_type,
+        env_type,
         {
-            "max_turns": args.max_turns,
+            **trained_env,
+            "max_turns": max_turns,
             "language": language,
-            "reasoning_effort": args.reasoning_effort,
+            "reasoning_effort": reasoning_effort,
             **env_kwargs,
         },
     )
+    # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
+    env.verify_backend()
     examples = build_examples(args, adapter)
     client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
-    # The effort level sets the generation budget unless the caller overrode --max_tokens; too small
-    # a budget truncates the chain of thought before any solution and scores the problem 0.
-    max_tokens = (
-        args.max_tokens
-        or REASONING_EFFORT_PROFILES[args.reasoning_effort]["thinking_tokens"] + SOLUTION_HEADROOM_TOKENS
+    # Without a training config the flag's effort level sets the generation budget unless --max_tokens
+    # overrides it: too small a budget truncates the chain of thought before any solution and scores
+    # the problem 0. Under one the YAML's rollout_max_tokens is the default.
+    flag_effort = args.reasoning_effort or DEFAULT_REASONING_EFFORT
+    rollout = rollout_config_from_args(
+        args,
+        contract,
+        default_temperature=DEFAULT_TEMPERATURE,
+        default_max_tokens=REASONING_EFFORT_PROFILES[flag_effort]["thinking_tokens"] + SOLUTION_HEADROOM_TOKENS,
     )
-    logger.info("reasoning_effort=%s, max_tokens=%d", args.reasoning_effort, max_tokens)
+    logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
 
-    traj_path = resolve_trajectory_path(args, args.adapter, args.split, args.language)
+    traj_path = resolve_trajectory_path(args, args.adapter, args.split, language_label)
 
     results = asyncio.run(
         collect_results(
             env,
             examples,
             client,
-            rollout=rollout_config_from_args(args, temperature=args.temperature, max_tokens=max_tokens),
+            rollout=rollout,
             num_samples=args.num_samples,
             success_threshold=args.success_threshold,
             max_workers=args.max_workers,
             collect_trajectories=bool(traj_path),
         )
     )
+    env.close()
     report(
         results,
         num_samples=args.num_samples,
-        title=f"{args.env_type} on {args.dataset} ({args.adapter})",
+        title=f"{env_type} on {args.dataset} ({args.adapter})",
         group_label=adapter.group_label,
     )
     write_eval_outputs(
@@ -212,17 +262,16 @@ def main() -> None:
         results,
         env=env,
         traj_path=traj_path,
-        env_type=args.env_type,
-        max_turns=args.max_turns,
-        max_tokens=max_tokens,
-        temperature=args.temperature,
+        env_type=env_type,
+        max_turns=max_turns,
+        rollout=rollout,
         num_samples=args.num_samples,
         meta_extra={
             "adapter": args.adapter,
             "language": language,
-            "reasoning_effort": args.reasoning_effort,
-            "env_kwargs": env_kwargs,
-            # The run's full grading contract, so an offline re-grade reproduces the same verdicts
+            "reasoning_effort": reasoning_effort,
+            "env_kwargs": {**trained_env, **env_kwargs},
+            # The run's whole grading contract, so an offline re-grade reproduces the same verdicts
             # (per-problem checker/time_limit come from the dataset payload). Derived from the
             # dataclass, so a knob added to GradingSpec cannot be defaulted offline.
             "env_grading": env.grading_spec.to_meta(),

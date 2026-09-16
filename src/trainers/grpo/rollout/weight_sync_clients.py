@@ -101,19 +101,21 @@ def verify_sampler_logprob_reference(
     urls: list[str],
     temperature: float,
     top_p: float,
-    geo_band_active: bool,
+    sequence_ratio_active: bool,
 ) -> None:
     """Refuse a rollout server whose per-token logprobs are not the reference the IS ratio divides by.
 
-    The trainer scores its log-probs at ``rollout_temperature`` and divides by the engine's reported
+    The trainer scores its log-probs at the sampling temperature and divides by the engine's reported
     sampling log-probs, so those must already carry the temperature: against vLLM's default raw
     (pre-temperature) values every weight becomes π^T / π^1, tilted toward improbable tokens on every
     step — entropy inflates at T > 1, collapses at T < 1 — while the ratio still reads ≈ 1. A nucleus-
     renormalized reference (vLLM ``processed_logprobs`` with top-p < 1) lifts every uncertain position
-    by the nucleus mass, which the trajectory geometric band reads as drift, so that pairing is refused
-    with the band on. An unverifiable server warns: a preflight probe never fails the run by itself.
+    by its nucleus mass; a consumer that sums the per-token log-ratios over a sequence
+    (``sequence_ratio_active``: the trajectory geometric band, or a sequence-level IS mode) reads the
+    sum as drift or a collapsing sequence weight, so that pairing is refused. An unverifiable server
+    warns: a preflight probe never fails the run by itself.
     """
-    if temperature == 1.0 and not (top_p < 1.0 and geo_band_active):
+    if temperature == 1.0 and not (top_p < 1.0 and sequence_ratio_active):
         return
     for url in urls:
         semantics = _probe_sampler_logprob_semantics(client_cls, url)
@@ -125,23 +127,28 @@ def verify_sampler_logprob_reference(
                 )
             elif not semantics.temperature_applied:
                 raise ValueError(
-                    f"Rollout server {url} reports RAW (pre-temperature) logprobs while rollout_temperature="
+                    f"Rollout server {url} reports RAW (pre-temperature) logprobs while the sampling temperature is "
                     f"{temperature}: the IS ratio would divide the trainer's temperature-{temperature} log-probs "
                     f"by temperature-1 ones, biasing every token weight. Serve vLLM with "
                     f"`--logprobs-mode processed_logprobs` (the compose recipe sets it), or leave "
-                    f"SGLANG_RETURN_ORIGINAL_LOGPROB unset on SGLang, or sample at rollout_temperature: 1.0."
+                    f"SGLANG_RETURN_ORIGINAL_LOGPROB unset on SGLang, or sample at temperature 1.0."
                 )
-        if top_p < 1.0 and geo_band_active:
+        if top_p < 1.0 and sequence_ratio_active:
             if semantics.nucleus_renormalized is None:
                 logger.warning(
                     f"Rollout server {url}: could not verify whether its logprobs are renormalized over the "
-                    f"top-p nucleus; with rollout_top_p={top_p} a renormalized reference shifts the geometric band."
+                    f"top-p nucleus; with top_p={top_p} a renormalized reference biases every sequence-summed "
+                    f"log-ratio (geometric band, sequence-level IS)."
                 )
             elif semantics.nucleus_renormalized:
                 raise ValueError(
-                    f"Rollout server {url} reports logprobs renormalized over the top-p nucleus while "
-                    f"rollout_top_p={top_p} and the trajectory geometric band is on: every uncertain position "
-                    f"reads as drift by its nucleus mass. Set rollout_top_p: 1.0 or drop isr_geo_band_min/max."
+                    f"Rollout server {url} reports logprobs renormalized over the top-p nucleus while top_p={top_p} "
+                    f"and the per-token log-ratios are summed over each sequence: every uncertain position is "
+                    f"lifted by its nucleus mass, so the trajectory geometric band reads the sum as drift and a "
+                    f"sequence-level vLLM IS ratio collapses toward 0 (sequence_mask only zeroes ratios ABOVE the "
+                    f"cap, so the run stalls silently). Sample at top_p: 1.0 (rollout_top_p: 1.0 on the "
+                    f"environmental arm), or take the ratio per token: a token_* vllm_importance_sampling_mode, "
+                    f"or drop isr_geo_band_min/max."
                 )
 
 
@@ -175,11 +182,13 @@ def verify_context_window_synced(
 
 
 def verify_sampler_logprob_reference_synced(
-    urls: list[str], *, temperature: float, top_p: float, geo_band_active: bool, backend: str
+    urls: list[str], *, temperature: float, top_p: float, sequence_ratio_active: bool, backend: str
 ) -> None:
     """Collective-safe :func:`verify_sampler_logprob_reference`; call on every rank."""
     client_cls = resolve_weight_sync_client(backend)
-    _rank0_preflight(partial(verify_sampler_logprob_reference, client_cls, urls, temperature, top_p, geo_band_active))
+    _rank0_preflight(
+        partial(verify_sampler_logprob_reference, client_cls, urls, temperature, top_p, sequence_ratio_active)
+    )
 
 
 class InferenceClientManager:
@@ -290,8 +299,9 @@ class InferenceClientManager:
         logger.info(f"InferenceClientManager initialized: {len(self._clients)} clients connected")
 
     def update_model_params(self, model: torch.nn.Module):
-        """Sync weights to the rollout servers one at a time, so at least N-1 stay available for
-        generation while a server takes its broadcast."""
+        """Sync every parameter to the rollout servers one server at a time: the raw-model path (a
+        single training process, no adapters, no EP wrappers). Every other shape streams the gather
+        and pauses all servers together."""
         if not self._initialized:
             raise RuntimeError("InferenceClientManager not initialized. Call init_communicators() first.")
 

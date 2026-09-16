@@ -19,7 +19,7 @@ Usage:
 
 import torch
 
-from src.environments.rewards import extract_last_boxed
+from src.rewards.matching import extract_last_boxed
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
 

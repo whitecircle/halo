@@ -150,6 +150,16 @@ def test_sglang_rejects_thinking_budget():
         _sglang_config(rollout_max_thinking_tokens=4096)
 
 
+def test_chat_template_kwargs_refuse_the_effort_key():
+    """The level is per episode and travels top-level; a nested copy would either duplicate it or,
+    on a disagreement, be resolved differently by the two engines."""
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
+    assert AsyncTrainingConfig(
+        rollout_chat_template_kwargs={"preserve_thinking": True}
+    ).get_rollout_config().chat_template_kwargs == {"preserve_thinking": True}
+
+
 def test_sglang_accepts_the_supported_shape():
     """Anti-vacuity: the rejections above must come from the specific knobs, not from
     rollout_backend='sglang' being unusable on its own."""

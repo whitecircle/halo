@@ -1,16 +1,19 @@
 # Parallelism
 
-On top of data parallelism, three strategies address different bottlenecks — model size (TP), sequence
-length (CP), expert distribution (EP) — and they combine within the supported set below. A fourth,
-pipeline parallelism (depth across NVLink domains), is [not yet available in this release](pipeline-parallelism.md). Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and
-single-GPU skip it); `DistributedTrainerMixin` selects the sharding strategy from the active mode.
-See the [Data Parallelism Guide](data-parallelism.md) for launchers and Accelerate configs.
-Each mode is a communication pattern with a price:
+On top of data parallelism, three strategies address different bottlenecks: model size (TP), sequence
+length (CP), expert distribution (EP). They combine within the supported set below. A fourth,
+pipeline parallelism (depth across NVLink domains), is
+[not yet available in this release](pipeline-parallelism.md). Each mode is a communication pattern
+with a price:
 [GPU Training Theory §9](../reference/gpu-training-theory.md#9-distributed-training-the-communication-wall).
+
+Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GPU skip it);
+`DistributedTrainerMixin` selects the sharding strategy from the active mode. See the
+[Data Parallelism Guide](data-parallelism.md) for launchers and Accelerate configs.
 
 ## Parallelism modes
 
-- **Expert parallelism (EP)** — distributes MoE expert layers across GPUs via DeepEP all-to-all (the router stays replicated on every rank). Each GPU holds a subset of experts and routes tokens to the owning GPU. EP is orthogonal to data parallelism (every GPU still processes its own batch). For MoE models; see [Expert Parallelism Guide](expert-parallelism.md).
+- **Expert parallelism (EP)** — distributes MoE expert layers across GPUs via DeepEP all-to-all (the router stays replicated on every rank). Each GPU holds a subset of experts and routes tokens to the owning GPU. For MoE models; see [Expert Parallelism Guide](expert-parallelism.md).
 - **Tensor parallelism (TP)** — shards dense attention and MLP weights across GPUs via DTensor with all-reduce. For large dense models (Llama 70B+, Mistral Large) that exceed single-GPU memory; see [Tensor Parallelism Guide](tensor-parallelism.md).
 - **Context parallelism (CP)** — splits long sequences across GPUs via Ulysses-style attention with all-to-all. For long-context training (32K+ tokens); see [Context Parallelism Guide](context-parallelism.md).
 - **Pipeline parallelism (PP)** — would split decoder layers into stages, one contiguous rank block each, as the only axis meant to cross NVLink domains. **Not yet available in this release**: the config surface and seams ship, the schedule engine does not, and `pipeline_parallel_size > 1` is rejected at config time. See [Pipeline Parallelism](pipeline-parallelism.md) and [the rationale](#when-pipeline-parallelism-is-worth-it).
@@ -53,19 +56,23 @@ Two ways to group ranks, used where each fits:
 
 - **`DeviceMesh` (DTensor)** for the data-parallel and tensor axes, where sharding is *static* and the
   collective follows from the tensor layout: `fully_shard` reduce-scatters FSDP params, TP's
-  `ColwiseParallel` / `RowwiseParallel` all-reduce attention weights. The meshes are built in one
-  place, `src/distributed/mesh.py` — a 1D `(dp,)` mesh, a 2D HSDP `(dp_replicate, dp_shard)` mesh
-  (replicate across NVLink domains, shard within one), and the `(tp,)` / `(dp, tp)` tensor mesh. The
-  trainer reads the resulting groups through one `ParallelDims` view
-  (`src/distributed/mesh.py`).
+  `ColwiseParallel` / `RowwiseParallel` all-reduce attention weights.
+
+    The meshes are built in one place, `src/distributed/mesh.py`: a 1D `(dp,)` mesh, a 2D HSDP
+    `(dp_replicate, dp_shard)` mesh (replicate across NVLink domains, shard within one), and the
+    `(tp,)` / `(dp, tp)` tensor mesh. The trainer reads the resulting groups through one
+    `ParallelDims` view.
+
 - **Hand-built process groups** (`dist.new_group`) for EP and CP, whose communication DTensor cannot
   express: EP routing is *data-dependent* (the router picks each token's experts at runtime), and
   both EP and CP run *custom all-to-all kernels* (DeepEP dispatch/combine, Ulysses sequence↔head
-  swap) rather than a layout-inferred redistribution. DeepEP also needs contiguous rank blocks for
-  its intra-node kernel, which a mesh's row-major order cannot produce.
-  `src/distributed/expert_parallel/config.py` builds the EP dispatch, expert-replica, sub-EP and
-  expert-TP groups; the CP path takes its group directly. All rank math — node-local vs cross-node,
-  which dim divides `world_size` — lives in `src/distributed/group_layout.py` and `ParallelismConfig`.
+  swap) rather than a layout-inferred redistribution.
+
+    DeepEP also needs contiguous rank blocks for its intra-node kernel, which a mesh's row-major
+    order cannot produce. `src/distributed/expert_parallel/config.py` builds the EP dispatch,
+    expert-replica, sub-EP and expert-TP groups; the CP path takes its group directly. All rank math
+    (node-local vs cross-node, which dim divides `world_size`) lives in
+    `src/distributed/group_layout.py` and `ParallelismConfig`.
 
 What crosses the wire:
 
@@ -78,18 +85,22 @@ What crosses the wire:
 | EP | DeepEP all-to-all dispatch → local expert GEMM → all-to-all combine | EP dispatch group |
 | EP+ETP | expert-TP all-reduce in token space, outside the dispatch→combine span | expert-TP group |
 
-Backward mirrors the table — every activation all-to-all / all-reduce has an autograd transpose — but
-the gradient *sync* (FSDP2 reduce-scatter, EP hooks) fires once per optimizer step, on the last
-accumulation micro-step, not per layer. EP gradients sync outside FSDP2: the replicated router
-all-reduces over the world group, and expert grads all-reduce over the expert-replica group only when
-a run holds more than one EP group. `fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
+Backward mirrors the table: every activation all-to-all / all-reduce has an autograd transpose. The
+gradient *sync* (FSDP2 reduce-scatter, EP hooks) fires once per optimizer step, on the last
+accumulation micro-step, not per layer.
+
+EP gradients sync outside FSDP2: the replicated router all-reduces over the world group, and expert
+grads all-reduce over the expert-replica group only when a run holds more than one EP group.
+`fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
 
 The global batch is split along the data-parallel axis only: each of `data_parallel_size` ranks takes
 a disjoint slice, sharded by `data_parallel_rank` in `src/trainers/mixins/dataloader.py`. Ranks
-inside a TP, CP, or ETP group see the **same** batch — they shard weights or the sequence, not the
-data. EP is orthogonal: every rank still draws its own batch, and tokens are all-to-all'd to the
-ranks owning their routed experts, then returned in place after combine. CP splits the **sequence** —
-each rank holds `seq_len / cp_size` tokens of its batch, and the Ulysses all-to-all reconstructs full
+inside a TP, CP, or ETP group see the **same** batch; they shard weights or the sequence, not the
+data.
+
+EP is orthogonal: every rank still draws its own batch, and tokens are all-to-all'd to the ranks
+owning their routed experts, then returned in place after combine. CP splits the **sequence**: each
+rank holds `seq_len / cp_size` tokens of its batch, and the Ulysses all-to-all reconstructs full
 sequences inside attention.
 
 Microbatching is TRL/Accelerate gradient accumulation (`gradient_accumulation_steps`); EP grad hooks
@@ -101,12 +112,15 @@ schedule — is not yet available in this release ([why it will matter](#when-pi
 
 The dimensions nest in a fixed order: EP, CP, TP, and ETP each carve their groups out of `world_size`
 first; whatever remains is the data-parallel dimension, and FSDP2 shards the non-expert params over
-it. HSDP is not a separate layer on top of FSDP2 — it is how that DP dimension is meshed: 1D
-full-shard by default, or a 2D `(dp_replicate, dp_shard)` mesh under `--use_hsdp` that shards within
-one NVLink domain (`dp_shard_size = nvlink_domain_size`) and replicates across domains
-(`dp_replicate_size = num_nvlink_domains`). It composes only with pure DP and CP — TP, EP, ETP and PP
-each reject it for their own reason, and on a single domain it is a no-op
-([HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
+it.
+
+HSDP is not a separate layer on top of FSDP2; it is how that DP dimension is meshed. The default is
+1D full-shard. Under `--use_hsdp` it is a 2D `(dp_replicate, dp_shard)` mesh that shards within one
+NVLink domain (`dp_shard_size = nvlink_domain_size`) and replicates across domains
+(`dp_replicate_size = num_nvlink_domains`).
+
+HSDP composes only with pure DP and CP; TP, EP, ETP and PP each reject it for their own reason. On a
+single domain it is a no-op ([HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
 
 Node-local EP+CP reaches cross-domain depth without HSDP: EP dispatch/combine and CP Ulysses
 all-to-all stay node-local on NVLink, FSDP shards the non-expert params within the EP group, and the
@@ -154,13 +168,21 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 | **VLM** ([Qwen3-VL](../models/qwen3.md#qwen3-vl)) | Standard | CP | CP ⁹ | Yes |
 
 ¹ Qwen3.5/3.6 — CP blocked by interleaved linear-attention layers; see [qwen3_5.md](../models/qwen3_5.md).
+
 ² CP covers Ling 2.0 only. `Ring-mini-linear-2.0` is rejected by name (its file reuses Ling 2.0's full-attention class names over a Lightning-Attention-2 stack) and Ling 3.0 pairs a KDA linear recurrence with unwrapped MLA. EP+CP itself is untested on this family. See [bailing.md](../models/bailing.md#cp-wrapper).
+
 ³ Gemma 4 — TP and CP blocked by KV-shared layers + `attention_k_eq_v`; see [gemma4.md](../models/gemma4.md).
+
 ⁴ Zaya — CCA rules out CP/TP, GC unsupported; see [Zaya — Limitations](../models/zaya.md#limitations).
+
 ⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). See [mistral4.md](../models/mistral4.md).
+
 ⁶ LFM-2 — CP blocked by the sequence-axis short-conv layers in the hybrid stack (no Ulysses wrapper); see [lfm2.md](../models/lfm2.md).
+
 ⁷ Laguna — `LagunaAttention` is in neither the Ulysses nor the TP registry, so CP and TP both raise; ETP is mechanically reachable but unvalidated. See [laguna.md](../models/laguna.md).
+
 ⁸ Inkling — CP blocked by the sequence-axis short convolutions, TP by the RoPE-free relative-logits attention. See [inkling.md](../models/inkling.md).
+
 ⁹ Qwen3-VL — a dense checkpoint ships no `base_model_tp_plan`, so `tp_plan="auto"` shards nothing and the loader raises; see [Supported Models](../models/README.md).
 
 Per-family configs and EP wrapper internals: [Supported Models](../models/README.md).

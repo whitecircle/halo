@@ -49,11 +49,15 @@ HF's auto plan wrongly shards MoE expert biases. Supported attention classes:
 **Not supported:** every family absent from the table above. None of their attention classes is in
 the registry, so a `tp_size > 1` run shards zero layers and raises rather than silently leaving
 every weight replicated. Zaya trips the earlier head-divisibility gate at `tp_size > 2`
-(`num_key_value_heads` is 2). Behind the missing entries: Gemma 4's KV-shared layers plus
-`attention_k_eq_v`, Zaya's CCA/Conv1d front-end, which has no DTensor sharding primitive,
-Step-3.7 Flash's per-layer head counts, which fit no uniform q/k/v plan, and GLM-5 Next's DSA
-indexer plus KDA projections, which have no sound sharding ([glm5-next.md](../models/glm5-next.md#limitations)).
-Use EP for their experts.
+(`num_key_value_heads` is 2). Use EP for their experts.
+
+Behind the missing entries:
+
+- Gemma 4's KV-shared layers plus `attention_k_eq_v`.
+- Zaya's CCA/Conv1d front-end, which has no DTensor sharding primitive.
+- Step-3.7 Flash's per-layer head counts, which fit no uniform q/k/v plan.
+- GLM-5 Next's DSA indexer plus KDA projections, which have no sound sharding
+  ([glm5-next.md](../models/glm5-next.md#limitations)).
 
 ## Load paths
 
@@ -87,20 +91,24 @@ evenly (Qwen3 151936, Qwen3.5 248320); a vocab-patched checkpoint that does not 
 to a divisor.
 
 An architecture planning only **one** end of the pair (a multimodal wrapper class declaring no
-`lm_head` entry; a backbone shipping no `base_model_tp_plan`) cannot do that — the tie would hand the
+`lm_head` entry; a backbone shipping no `base_model_tp_plan`) cannot do that: the tie would hand the
 unplanned end a weight of the other kind and the first forward dies on mixed plain/DTensor operands.
+
 `consistent_tied_tp_plan` (`src/distributed/tensor_parallel/tie_plan.py`) drops that lone entry for
 the load so the pair stays replicated instead, warning that those weights cost a full copy per rank.
 `validate_tied_pair_consistent` then fails the
 load loud if the loaded pair is untied, or if its sharding disagrees with the applied plan.
 
 For a checkpoint carrying **both** tied keys on disk (the Qwen3-0.6B/1.7B export shape) transformers
-compares them before tying, which on two DTensors is an **all-reduce on the default process group** —
-every rank must reach it. `_load_tp_model` therefore does not throttle its ranks with
-`max_concurrent_loading`: a rank-serialized load blocks the loading rank inside that collective while
-its peers wait their turn, and the job hangs until the store timeout. Nothing is lost — transformers
-streams the checkpoint key by key and places each rank's shard straight on its GPU, so host RAM
-never holds the model.
+compares them before tying, which on two DTensors is an **all-reduce on the default process group**:
+every rank must reach it.
+
+`_load_tp_model` therefore does not throttle its ranks with `max_concurrent_loading`. A
+rank-serialized load blocks the loading rank inside that collective while its peers wait their turn,
+and the job hangs until the store timeout.
+
+Nothing is lost: transformers streams the checkpoint key by key and places each rank's shard
+straight on its GPU, so host RAM never holds the model.
 
 ## The selective-TP plan
 
@@ -123,8 +131,9 @@ MLA models skip the KV-head check — they shard by query head and keep the KV c
 
 **Per-head norm gradients.** A norm applied *after* a colwise projection is a replicated
 `(head_dim,)` parameter shared across heads. `ColwiseParallel` defaults `use_local_output=True`, so
-the DTensor graph ends at the projection and each rank's gradient covers only its own heads — the
+the DTensor graph ends at the projection and each rank's gradient covers only its own heads: the
 true gradient is the **SUM** over the TP group, not the average a replica gets.
+
 `apply_tp_to_attention_only` finds those norms structurally (any unplanned attention child with
 trainable parameters, never a name list), records their names on `model._tp_per_head_norm_params`,
 and `_sync_tp_replicated_grads` sums them once per optimizer step. A name missing from that set is
@@ -192,9 +201,10 @@ wrong is silent — the loss stays finite and the objective is just different:
 
 The trap is the plain slice. It is indistinguishable from a replica by tensor type, and once FSDP2
 wraps the run for DP **both** become 1-D `dp` DTensors, so the mesh cannot separate them either.
+
 `_tp_sharded_plain_param_ids()` (`src/trainers/mixins/grad_sync.py`) is the single source of truth:
-it reads the `_tp_sharded_non_dtensor` registry — the `(suffix, shard_dim)` pairs recorded when a
-param is sliced by hand — and both `_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off
+it reads the `_tp_sharded_non_dtensor` registry (the `(suffix, shard_dim)` pairs recorded when a
+param is sliced by hand), and both `_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off
 it. Everything a TP plan shards is a DTensor whose gradient reduces itself, so the plan contributes
 no entries here.
 
@@ -216,11 +226,12 @@ For MoE where only expert memory is the bottleneck, shard the expert FFN with
 
 **Numerics.** EP+TP in bf16 carries a deterministic offset against an unsplit reference: TP reorders
 the attention reductions feeding the router, which flips a handful of near-tied top-k expert picks
-and moves whole-expert mass. Gradient scale and direction still match — this is bf16 reduction
-order, not a sync bug. Measured **0.060** loss offset on gpt-oss-20b (top-4-of-32), so the
-correctness gate uses `TOL.router_pick_flip_loss_abs` (0.1, shared with the EP+ETP gate) instead of
-the generic parallel-vs-baseline bound; the rotated-expert negative control sits at 0.344 with
-gradient cosine 0.16, keeping health and breakage more than 3× apart.
+and moves whole-expert mass. Gradient scale and direction still match; this is bf16 reduction
+order, not a sync bug.
+
+Measured **0.060** loss offset on gpt-oss-20b (top-4-of-32), so the correctness gate uses
+`TOL.router_pick_flip_loss_abs` (0.1, shared with the EP+ETP gate) instead of the generic
+parallel-vs-baseline bound.
 
 ## Limitations
 
@@ -231,16 +242,20 @@ only trainer-level TP gate that fires is the LoRA one below. Matrix:
 
 **Models.** There is no per-family "supports TP" flag. Selective TP shards exactly the attention
 classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`), and
-a `tp_size > 1` run that shards **zero** layers raises, naming the model's attention classes — that
-is how the [unsupported families](#supported-models) are rejected. A run that shards *some* layers
-(hybrid stacks — Qwen3.5/3.6 `GatedDeltaNet`, LFM-2 short-conv) only **warns**: numerics stay
-correct, but the unsharded layers keep a full replica per rank, so per-rank memory falls by far less
-than `1/tp_size`. Head divisibility is checked first — `num_attention_heads % tp_size == 0` always,
+a `tp_size > 1` run that shards **zero** layers raises, naming the model's attention classes; that
+is how the [unsupported families](#supported-models) are rejected.
+
+A run that shards *some* layers (hybrid stacks — Qwen3.5/3.6 `GatedDeltaNet`, LFM-2 short-conv)
+only **warns**: numerics stay correct, but the unsharded layers keep a full replica per rank, so
+per-rank memory falls by far less than `1/tp_size`.
+
+Head divisibility is checked first: `num_attention_heads % tp_size == 0` always,
 `num_key_value_heads % tp_size == 0` for non-MLA GQA. The dense HF-native `tp_plan="auto"` path gets
 the same gate: `ParallelismConfig.validate_against_model_config` runs `validate_tp_head_divisibility`
-on every load path, off `config.json` before any weight is read. Transformers validates no head count
-of its own, so without it the run dies on the first forward's reshape — after the whole checkpoint
-has been pulled and placed on every rank.
+on every load path, off `config.json` before any weight is read.
+
+Transformers validates no head count of its own, so without it the run dies on the first forward's
+reshape, after the whole checkpoint has been pulled and placed on every rank.
 
 **Axis combinations.** TP composes with EP only. TP+CP, TP+ETP, EP+TP+ETP and PP+TP are refused by
 the [allowlist](README.md#supported-combinations); multi-domain multi-group EP+TP is rejected
@@ -298,8 +313,9 @@ hangs.
 On resume every TP shape is Path B: the training scripts repoint `model_name_or_path` at the
 checkpoint, so the weights load at construction and `CheckpointLoader._load_tp` skips the re-read.
 Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the
-checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements. TP+DP is
-the exception: FSDP2 over TP stacks a strided `dp` shard on the `tp` shard, a 2-D placement
+checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements.
+
+TP+DP is the exception: FSDP2 over TP stacks a strided `dp` shard on the `tp` shard, a 2-D placement
 `distribute_tensor` does not invert for packed projections, so it refuses every reload but the
 constructed-from-checkpoint skip. See
 [Checkpoints](../reference/checkpoints.md#resume-by-parallelism-mode).

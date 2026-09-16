@@ -272,4 +272,4 @@ CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo qwen3-moe-grpo.yaml -n 2
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server; they cannot share a
 GPU. Full setup:
-[Environmental GRPO](../../agent-docs/training-methods/grpo/environmental-grpo.md) ↗.
+[Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

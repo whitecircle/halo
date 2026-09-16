@@ -7,6 +7,8 @@ behaviour that makes SWE / code-contest RL work:
 
 - SweEnvironment: a file written on one turn is readable by code run on a LATER turn (persistent
   per-episode workspace), and two concurrent episodes never see each other's files.
+- SweEnvironment's run_bash_command: the shell shares that workspace, and its time limit and exit
+  code are observations while a backend outage is a failed tool call.
 - CodeContestsEnvironment: submit_solution grades against hidden tests through the sandbox, for
   Python and (when g++ is present) C++ — including the language-aware test REPL tool name.
 
@@ -151,6 +153,84 @@ def test_code_env_cleanup_closes_sessions():
     assert eid not in env._sessions
     assert not os.path.exists(workdir), "cleanup must close the session and delete its workdir"
     env.close()
+
+
+# SweEnvironment — run_bash_command
+
+
+def test_bash_tool_shares_the_workspace_with_the_file_tools():
+    """The shell runs in the SAME session working directory: it reads what ``write_file`` wrote, and
+    what it creates is readable through ``read_file`` (local backend)."""
+    env = SweEnvironment(max_turns=10)
+    try:
+        episode_ids, _ = env.reset(["task"])
+        env.step(
+            episode_ids,
+            ["w"],
+            [{"tool_calls": [_tool_call("write_file", path="notes.txt", content="remember me\n")]}],
+        )
+        env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="cat notes.txt")]}])
+        assert _last_tool_result(env.get_trajectories(episode_ids)[0]).strip() == "remember me"
+
+        env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="echo x > made.txt")]}])
+        env.step(episode_ids, ["r"], [{"tool_calls": [_tool_call("read_file", path="made.txt")]}])
+        assert _last_tool_result(env.get_trajectories(episode_ids)[0]).strip() == "x", (
+            "a file the command created must persist in the workspace"
+        )
+    finally:
+        env.close()
+
+
+def test_bash_tool_timeout_is_an_observation_not_an_exception():
+    """A command that outruns ``code_timeout`` is killed and reported like any other time limit: the
+    model reads it and keeps going, and the call is not booked as a failed tool call."""
+    env = SweEnvironment(max_turns=5, code_timeout=0.5)
+    try:
+        episode_ids, _ = env.reset(["task"])
+        env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="sleep 30")]}])
+        result = env.get_trajectories(episode_ids)[0].info["tool_results"][-1]
+        assert "timeout" in result["content"], result["content"]
+        assert result["success"] is True, "a time limit is a verdict on the command, not a broken tool"
+    finally:
+        env.close()
+
+
+def test_bash_tool_nonzero_exit_is_an_observation_and_a_backend_outage_is_not():
+    """The ``run_code`` error split, which decides who pays ``tool_error_penalty``: the command's own
+    non-zero exit is a successful observation, a backend failure is a FAILED call."""
+    from src.environments.sandbox.base import SandboxResult
+
+    env = SweEnvironment(max_turns=5)
+    try:
+        episode_ids, _ = env.reset(["task"])
+        env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="exit 3")]}])
+        exited = env.get_trajectories(episode_ids)[0].info["tool_results"][-1]
+        assert exited["success"] is True and "3" in exited["content"]
+
+        session = env._session_for(env.get_trajectories(episode_ids)[0])
+        session.run = lambda *a, **kw: SandboxResult(error="remote sandbox error: 503")
+        env.step(episode_ids, ["b"], [{"tool_calls": [_tool_call("run_bash_command", command="true")]}])
+        outage = env.get_trajectories(episode_ids)[0].info["tool_results"][-1]
+        assert outage["success"] is False, "a backend outage must not score as a successful tool call"
+    finally:
+        env.close()
+
+
+def test_bash_tool_is_advertised_in_the_openai_schema():
+    """The model only ever sees the schema: the tool has to be in it, with a bindable ``command``."""
+    env = SweEnvironment(max_turns=5)
+    try:
+        schemas = {entry["function"]["name"]: entry for entry in env.get_tools_schema()}
+        assert "run_bash_command" in schemas, sorted(schemas)
+        entry = schemas["run_bash_command"]
+        assert entry["type"] == "function"
+        parameters = entry["function"]["parameters"]
+        assert entry["function"]["description"].strip()
+        assert parameters["type"] == "object"
+        assert parameters["properties"]["command"]["type"] == "string"
+        assert parameters["required"] == ["command"]
+    finally:
+        env.close()
 
 
 # CodeContestsEnvironment — sandbox grading (python + cpp)

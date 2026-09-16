@@ -53,7 +53,9 @@ The *Applies to* column is enforced, not advisory: a knob passed explicitly for 
 
 Merging runs on CPU and streams the inputs **one tensor at a time** — each key is read from every model, merged, then released — so peak host memory is one fp32 copy of the largest tensor per contributing model plus the writer's pending output shard, never the merged model. Peak disk is the merged artifact, one input's size.
 
-The output is a standard HF checkpoint: sharded safetensors plus an index above `--max_shard_size` (5 GB by default), or a single `model.safetensors` with no index when it fits. Every non-weight file in `--tokenizer_source` is copied verbatim — config, tokenizer, the multimodal processor files, and any remote-code modules the config's `auto_map` names — and the saved config's `dtype` is set to the merged dtype. A Hub id resolves to its local snapshot first and is copied the same way.
+The output is a standard HF checkpoint: sharded safetensors plus an index above `--max_shard_size` (5 GB by default), or a single `model.safetensors` with no index when it fits.
+
+Every non-weight file in `--tokenizer_source` is copied verbatim: config, tokenizer, the multimodal processor files, and any remote-code modules the config's `auto_map` names. The saved config's `dtype` is set to the merged dtype. A Hub id resolves to its local snapshot first and is copied the same way.
 
 The resume sidecars are the exception: `scheduler.pt`, `router_balancing_biases.pt` and `rng_state_*` describe one training run, which an N-way merge has none of, so they are dropped. The merged model therefore ships **no** balancing sidecar — a family whose balancing bias lives in a checkpoint slot keeps it through the merged weights, while a `bias_update_transient` run's bias is gone (see [Checkpoints](checkpoints.md#resume-by-parallelism-mode)).
 

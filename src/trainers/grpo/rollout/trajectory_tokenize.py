@@ -12,10 +12,11 @@ from typing import NamedTuple
 
 import torch
 
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, Trajectory
+from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, engine_view
+from src.environments.engine_wire import VLLM_BACKEND
 from src.environments.episode import RolloutResult
 from src.environments.registry import create_environment
+from src.log import warn_once
 from src.models.loading.tokenizer_setup import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
 from src.trainers.grpo.rollout.trajectory_spans import TemplateSpanError, locate_assistant_spans
 
@@ -42,11 +43,13 @@ def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Ten
     return [TurnRow(*tokenized, None, None)]
 
 
-def _effort_template_kwargs(trajectory: Trajectory) -> dict[str, str]:
-    """Chat-template kwargs pinning the ``reasoning_effort`` the rollout used, so the template's
-    effort-dependent preamble matches. Empty when the trajectory carries no effort."""
-    effort = trajectory.reasoning_effort
-    return {"reasoning_effort": effort} if effort is not None else {}
+def rollout_template_kwargs(rollout_kwargs: dict, reasoning_effort: str | None) -> dict:
+    """Chat-template kwargs a rollout's requests carry: the run's ``rollout_chat_template_kwargs``
+    plus the ``reasoning_effort`` the episode ran under, so a trainer-side render reproduces the
+    template's effort-dependent preamble. The effort key is absent when the episode carries none.
+    One owner for every render that stands in for the engine's: the training rows and the startup
+    prompt-overhead probe."""
+    return {**rollout_kwargs, **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {})}
 
 
 class TrajectoryTokenizeMixin:
@@ -66,9 +69,10 @@ class TrajectoryTokenizeMixin:
     ) -> list[int]:
         """Render messages through the serving chat template and tokenize to ids.
 
-        ``include_thinking`` emits assistant reasoning: ``True`` when the render holds the trained
-        completion; ``False`` for a pure context/prompt render (the rollout sent no reasoning to the
-        server, so rendering prior-turn CoT would fabricate context the model never conditioned on).
+        ``include_thinking`` emits whatever reasoning the given messages carry: the trajectory's own
+        messages give the training view (every turn's CoT, the spans the loss covers), an
+        :func:`engine_view` of them gives the context the engine actually rendered. ``False`` emits none,
+        the probe for a template that hides prior-turn CoT.
         """
         text = self.processing_class.apply_chat_template(
             [m.to_dict(include_thinking=include_thinking) for m in msgs],
@@ -81,11 +85,50 @@ class TrajectoryTokenizeMixin:
         return self._tokenizer(text, add_special_tokens=False)["input_ids"]
 
     @cached_property
+    def _rollout_env(self):
+        """A throwaway instance of the run's environment: what the rollout sent the engine (tool schema,
+        carried reasoning) is read off it, so the trainer's renders condition on the engine's context."""
+        return create_environment(self._environment_spec, self._env_config_dict)
+
+    @cached_property
     def _tools_schema(self) -> list[dict] | None:
-        """OpenAI tool schema the rollout passes to vLLM (``tools=``), or ``None``. Rendered into the
-        trainer's prompt so recompute conditions on vLLM's exact context; built from a throwaway env."""
-        env = create_environment(self._environment_spec, self._env_config_dict)
-        return env.get_tools_schema()
+        """OpenAI tool schema the rollout passes to vLLM (``tools=``), or ``None``, rendered into the
+        trainer's prompt so recompute conditions on vLLM's exact context."""
+        return self._rollout_env.get_tools_schema()
+
+    @cached_property
+    def _carry_reasoning(self) -> bool:
+        """Whether the rollout sent prior-turn reasoning to the engine, so a context re-render includes it."""
+        return self._rollout_env.carry_reasoning
+
+    def _warn_if_no_reasoning_captured(self, rollout_results: list[RolloutResult], compliance_weight: float) -> None:
+        """Once per run: a step whose assistant turns carry no reasoning while a knob consumes it.
+
+        Reasoning reaches a turn only through the server's reasoning parser; without one the
+        calibration term scores every turn as maximal under-use and ``carry_reasoning`` carries
+        nothing, and neither says a word on its own. A step with no assistant turn is no evidence.
+        """
+        turns = [m for r in rollout_results if r.trajectory for m in r.trajectory.messages if m.role == "assistant"]
+        if not turns or any(m.thinking for m in turns):
+            return
+        consumers = [
+            name
+            for name, on in (
+                ("reasoning_compliance_weight", compliance_weight > 0),
+                ("carry_reasoning", self._carry_reasoning),
+            )
+            if on
+        ]
+        warn_once(
+            logger,
+            self._warned_once,
+            "no_reasoning_captured",
+            "No assistant turn in this step carried reasoning, but %s consume it: the rollout server is most "
+            "likely running without a reasoning parser (or the model emits none). The calibration term then "
+            "scores every turn as maximal under-use and a carried thought is never sent. Serve with the "
+            "family's reasoning parser, or turn the knob off.",
+            " and ".join(consumers),
+        )
 
     def _context_limit(self) -> int:
         """Model context window bounding every training row.
@@ -130,6 +173,28 @@ class TrajectoryTokenizeMixin:
             result.trajectory.info[EPISODE_INVALID_KEY] = True
             result.trajectory.info[EPISODE_INVALID_REASON_KEY] = reason
 
+    def _tokenize_step_rows(self, rollout_results: list[RolloutResult]) -> list[list[TurnRow]]:
+        """Each rollout's training rows for this step, split per assistant turn under
+        ``train_on_sampled_tokens`` and one re-rendered row otherwise.
+
+        Also the one reader of the row-cap tally: ``sampling/rows_over_cap_frac`` is the rows the cap
+        left out over those plus the rows that train, each row counted once — an over-cap trajectory
+        comes back as a zero-weight placeholder, which is neither.
+        """
+        self._rows_over_cap = 0
+        per_trajectory = [
+            self._tokenize_trajectory_turns(result)
+            if self._train_on_sampled_tokens
+            else single_trajectory_row(self._tokenize_trajectory(result))
+            for result in rollout_results
+        ]
+        if self._max_train_row_tokens is not None:
+            trainable_rows = sum(bool(row.completion_mask.any()) for rows in per_trajectory for row in rows)
+            self._world_metrics.fraction(
+                "sampling/rows_over_cap_frac", self._rows_over_cap, self._rows_over_cap + trainable_rows
+            )
+        return per_trajectory
+
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Tokenize a multi-turn trajectory into prompt, completion, and completion-mask tensors.
 
@@ -156,7 +221,7 @@ class TrajectoryTokenizeMixin:
         if first_assistant_idx is None:
             return self._masked_trajectory_tensors()
 
-        template_kwargs = _effort_template_kwargs(result.trajectory)
+        template_kwargs = rollout_template_kwargs(self._rollout_template_kwargs, result.trajectory.reasoning_effort)
 
         def _render(msgs: Sequence, add_generation_prompt: bool, include_thinking: bool) -> list[int]:
             return self._render_messages_to_ids(msgs, add_generation_prompt, template_kwargs, include_thinking)
@@ -197,6 +262,10 @@ class TrajectoryTokenizeMixin:
                 f"the trainer context, or the prompt length — trajectories are trained in full, never truncated."
             )
 
+        if self._max_train_row_tokens is not None and total_len > self._max_train_row_tokens:
+            self._rows_over_cap += 1
+            return self._masked_trajectory_tensors()
+
         if not any(completion_mask):
             # Nothing trainable survives (an empty completion, or every assistant turn excluded). The
             # one-token masked row keeps the rank-uniform row count without padding the round's batch
@@ -214,8 +283,8 @@ class TrajectoryTokenizeMixin:
 
         * ``prompt_ids`` — the engine's rendered prompt ids for this turn's request
           (``Message.prompt_token_ids``): byte-exact conditioning, no re-render. Falls back to a
-          serving-template render of the history without CoT (what the rollout sent).
-        * ``completion_ids`` — the turn's sampled ids, so the loss reinforces what was emitted.
+          serving-template render of the history as the engine was told it (:func:`engine_view`).
+        * ``completion_ids`` — the turn's actual sampled ids, so the loss reinforces what was emitted.
         * ``completion_mask`` — all ones (the whole turn is model-generated).
         * ``sampling_logps`` — the engine's sampling log-probs, 1:1 with ``completion_ids``: the
           behavior-policy reference for the IS trust region. ``None`` when the turn has no aligned
@@ -231,16 +300,19 @@ class TrajectoryTokenizeMixin:
             return single_trajectory_row(self._tokenize_trajectory(result))
 
         messages = traj.messages
-        assistant_turns = [m for m in messages if m.role == "assistant"]
-        # All-or-nothing: if any turn lacks captured ids, fall back rather than drop turns.
-        if not assistant_turns or any(not m.token_ids for m in assistant_turns):
-            if assistant_turns and not self._warned_capture_missing:
+        if not any(m.role == "assistant" for m in messages):
+            return single_trajectory_row(self._tokenize_trajectory(result))
+        # All-or-nothing over the turns that train: one trainable turn without captured ids falls the
+        # whole trajectory back rather than silently dropping that turn. ``is None`` — an empty
+        # capture is a zero-token turn, not a missing one.
+        if any(m.token_ids is None for m in messages if m.role == "assistant" and not m.untrainable):
+            if not self._warned_capture_missing:
                 self._warned_capture_missing = True
                 # The remedy is engine-specific; naming the wrong one points at a flag the configured
                 # server does not accept.
                 remedy = (
                     "Run the vLLM server with --return-tokens-as-token-ids (docker-compose.vllm.yml passes it)."
-                    if self._rollout_backend == VLLMWeightSyncClient.BACKEND_KEY
+                    if self._rollout_backend == VLLM_BACKEND
                     else "SGLang needs no server flag for this — the ids are requested per call, so a "
                     "rollout that returned none usually means the engine errored or was killed mid-turn."
                 )
@@ -250,7 +322,7 @@ class TrajectoryTokenizeMixin:
                 )
             return single_trajectory_row(self._tokenize_trajectory(result))
 
-        template_kwargs = _effort_template_kwargs(traj)
+        template_kwargs = rollout_template_kwargs(self._rollout_template_kwargs, traj.reasoning_effort)
 
         context_limit = self._context_limit()
         rows: list[TurnRow] = []
@@ -258,7 +330,9 @@ class TrajectoryTokenizeMixin:
         for idx, m in enumerate(messages):
             if m.role != "assistant":
                 continue
-            if m.untrainable:
+            # A zero-token turn has nothing to train either: rendering it would weight the template
+            # scaffolding the engine never emitted.
+            if m.untrainable or not m.token_ids:
                 excluded_unusable = True
                 continue
             # Engine prompt ids take priority: a client re-render drifts on effort steering, tool
@@ -272,7 +346,7 @@ class TrajectoryTokenizeMixin:
                 # below cannot hand the invalidated episode a weighted row.
                 try:
                     prompt_ids = self._render_messages_to_ids(
-                        messages[:idx], True, template_kwargs, include_thinking=False
+                        engine_view(messages[:idx], self._carry_reasoning), True, template_kwargs
                     )
                 except Exception as e:  # never a per-rank raise; the episode is dropped, the run goes on
                     self._invalidate_untrainable_episode(
@@ -282,16 +356,24 @@ class TrajectoryTokenizeMixin:
                     )
                     return single_trajectory_row(self._masked_trajectory_tensors())
             comp = list(m.token_ids)
-            if len(prompt_ids) + len(comp) > context_limit and self._batch_build_error is None:
+            row_len = len(prompt_ids) + len(comp)
+            # The context check comes first, as on the whole-trajectory path: a row the served model
+            # could not have produced is a config error, not a row the memory cap below may absorb.
+            if row_len > context_limit and self._batch_build_error is None:
                 # First error wins, like every sibling write: a later overflow would otherwise
                 # replace the root cause.
                 self._batch_build_error = (
-                    f"Per-turn training row of {len(prompt_ids) + len(comp)} tokens (prompt "
-                    f"{len(prompt_ids)} + sampled completion {len(comp)}) exceeds the model context "
-                    f"window {context_limit}. Rollouts are context-bounded by vLLM, so this points to a "
-                    f"mismatch between the served max_model_len, the trainer context, or a template "
-                    f"re-render drift — trajectories are trained in full, never truncated."
+                    f"Per-turn training row of {row_len} tokens (prompt {len(prompt_ids)} + sampled "
+                    f"completion {len(comp)}) exceeds the model context window {context_limit}. Rollouts "
+                    f"are context-bounded by vLLM, so this points to a mismatch between the served "
+                    f"max_model_len, the trainer context, or a template re-render drift — trajectories "
+                    f"are trained in full, never truncated."
                 )
+            if self._max_train_row_tokens is not None and row_len > self._max_train_row_tokens:
+                # Over the rank's memory bound: this turn leaves the batch, the episode's other turns stay.
+                self._rows_over_cap += 1
+                excluded_unusable = True
+                continue
             lp = m.token_logprobs
             sampling_logps = torch.tensor(lp, dtype=torch.float32) if lp and len(lp) == len(comp) else None
             # Recorded rather than raised: the raise must stay rank-uniform.

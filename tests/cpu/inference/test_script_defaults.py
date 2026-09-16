@@ -238,7 +238,7 @@ def test_the_environment_playground_sends_no_model_until_one_is_typed(monkeypatc
 
     for model_name in ("", "my-model"):
         mod.run_playground_episode(
-            "react_math", "2+2?", "4", "localhost:8000/v1", "EMPTY", model_name, 0.7, 16, 0.95, 1, 1.0
+            "react_math", "2+2?", "4", "localhost:8000/v1", "EMPTY", model_name, 0.7, 16, 0.95, 1
         )
 
     blank_url, blank_body = seen[0]
@@ -261,7 +261,7 @@ def test_the_environment_playground_reports_a_length_cut_turn_as_one(monkeypatch
     mod = _mock_playground_client(monkeypatch, seen, finish_reason="length", content="Thought: I was cut off mid-")
 
     _messages, summary = mod.run_playground_episode(
-        "native_math", "2+2?", "4", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 2, 1.0
+        "native_math", "2+2?", "4", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 2
     )
 
     assert "**Length-capped turns:** 2" in summary, summary

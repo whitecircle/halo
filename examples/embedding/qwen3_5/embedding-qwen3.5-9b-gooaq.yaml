@@ -6,8 +6,7 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B
 attn_implementation: sdpa   # embedding batches are right-padded, and FA2 unpads them into the
-                            #   M-RoPE varlen path that crashes this family (FA2 is only safe with
-                            #   packing: true — see agent-docs/models/qwen3_5.md)
+                            #   M-RoPE varlen path that crashes this family (FA2 needs packing: true)
 
 # --- Dataset ---
 dataset: sentence-transformers/gooaq:pair

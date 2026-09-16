@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""rlvr.py ``accuracy_reward``: the \\boxed{} extraction must survive nested braces.
+"""RLVR ``accuracy_reward``: the \\boxed{} extraction must survive nested braces.
 
 This reward IS the RL signal for RLVR online GRPO, and a truncated extraction scores a CORRECT
 answer 0.0 with no error — a brace-unaware match turns every LaTeX answer carrying a nested group
 (``\\frac{1}{2}``, ``\\text{...}``, ``\\sqrt{...}``) into silent negative reward. Plain-numeric
 datasets (GSM8K) never trip it, so the defect is invisible without these cases.
 
-Extraction is shared with ``src/environments/rewards.extract_last_boxed``; here it is pinned
+Extraction is shared with ``src.rewards.matching.extract_last_boxed``; here it is pinned
 end-to-end through the production reward, including the GSM8K ``####`` ground-truth split and the
 comma/``$`` normalization on both sides.
 
@@ -18,12 +18,12 @@ import time
 
 import pytest
 
-from tests.common.utils import load_script_module
+from src.rewards.verifiable import accuracy_reward as _accuracy_reward
 
 
 @pytest.fixture(scope="module")
 def accuracy_reward():
-    return load_script_module("scripts/training/online_grpo/rlvr.py", "halo_test_rlvr").accuracy_reward
+    return _accuracy_reward
 
 
 # --- Nested braces — the silent-zero case ---

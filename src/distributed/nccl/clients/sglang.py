@@ -31,6 +31,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import distributed_c10d as c10d
 
+from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from src.distributed.nccl.clients.base import (
     _CLEANUP_TIMEOUT_S,
     _GROUP_FORMATION_TIMEOUT_S,
@@ -44,6 +45,7 @@ from src.distributed.nccl.clients.base import (
     _wait_for_calls,
     describe_chunk,
     payload_bytes,
+    unregistered_bailing_model_types,
 )
 from src.distributed.nccl.transport.pynccl import bounded_event_sync, resolve_drain_timeout_s
 from src.distributed.nccl.transport.torch_group import (
@@ -66,7 +68,7 @@ _ARENA_ALIGNMENT = 256
 # Chunks whose sends the host has not settled yet: a chunk's sends are waited for this many chunks
 # later, so a chunk's declaration never waits on the previous chunk's tail (see ``_send_chunk``).
 _INFLIGHT_CHUNKS = 2
-# Both Step-3 spellings resolve to the same SGLang model file.
+# Every Step-3 spelling the trainer knows resolves to the same SGLang model file.
 _STEP3_FULL_COVERAGE = (
     "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so it "
     "refuses the chunked online update"
@@ -87,11 +89,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     # Loader facts of the pinned 0.5.17 server, per ``model_type``.
     UNSERVABLE_MODEL_TYPES = {
         "mistral4": "SGLang 0.5.17 registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
-        "bailing_hybrid": "SGLang 0.5.17 registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
-        "bailing_moe_linear": (
-            "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where SGLang 0.5.17 registers "
-            "BailingMoeV2_5ForCausalLM"
-        ),
+        **unregistered_bailing_model_types("SGLang 0.5.17"),
         "zaya": (
             "SGLang 0.5.17's zaya loader reads the pre-transformers-5.14 per-expert checkpoint "
             "(zaya_block.experts.local_experts.N.linear_fc1), not the native fused layout the trainer holds"
@@ -100,8 +98,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             "SGLang 0.5.17's laguna loader asserts every routed-expert tensor of every sparse layer in each "
             "load_weights call, so it refuses the chunked online update"
         ),
-        "step3p7": _STEP3_FULL_COVERAGE,
-        "step3p5": _STEP3_FULL_COVERAGE,
+        **dict.fromkeys(EPStep3p7MoELayer.HF_MODEL_TYPES, _STEP3_FULL_COVERAGE),
         "deepseek_v4": (
             "SGLang 0.5.17's deepseek_v4 loader maps per-expert w1/w3/w2 names where the gather emits the "
             "fused pair, and no end-to-end sync has been validated for the family"

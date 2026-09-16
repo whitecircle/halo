@@ -1,6 +1,8 @@
 # Padding-Free Flash Attention Collator
 
-Concatenates variable-length sequences into one flattened tensor and emits `cu_seq_lens` so a varlen Flash Attention kernel skips padding compute. These collators are SFT-only — `select_data_collator` (`src/data/collators/factory.py`) picks them when `padding_free: true`. SMPO also supports `padding_free`, but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators. Mutually exclusive with `packing`. Incompatible with Context Parallelism. Padded rows pay full GEMM cost — the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline-arithmetic-intensity-and-the-ridge-point).
+Concatenates variable-length sequences into one flattened tensor and emits `cu_seq_lens` so a varlen Flash Attention kernel skips padding compute. These collators are SFT-only: `select_data_collator` (`src/data/collators/factory.py`) picks them when `padding_free: true`. Mutually exclusive with `packing`. Incompatible with Context Parallelism.
+
+SMPO also supports `padding_free`, but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline-arithmetic-intensity-and-the-ridge-point).
 
 Implementations live in `src/data/collators/packing.py`:
 
@@ -28,23 +30,28 @@ assistant_message_template: "<|im_start|>assistant\n"
 
 `select_data_collator` gates on the model's **resolved** `_attn_implementation`, not on a family list.
 `padding_free` is **rejected** outside `flash_attention_2` / `_3` / `_4`: the `cu_seq_lens` it exists to emit
-go unread there, so it buys nothing at all. That catches every model the loader routes off Flash Attention —
-DeepSeek-V4 (eager-only), Gemma 4 (`head_dim=512`), the families whose upstream class declares no flash
-support (Bailing/Ling, GLM-5 Next, Step-3.7 Flash, Inkling), and Qwen3.5/3.6 and GLM-4 MoE Lite when FA4
-falls them back to SDPA; the full map is in [Flash Attention](flash-attention.md#choosing-a-backend). Use
-packing or padded batches there: packing raises tokens per row on any kernel, so off a varlen backend it
-only **warns**. gpt-oss is the exception — its forward never passes the packed
-`position_ids` into mask construction, so the row would run as one dense causal sequence with documents
-attending across each other, and packing off a varlen backend is **rejected** there.
+go unread there, so it buys nothing at all.
+
+That catches every model the loader routes off Flash Attention: DeepSeek-V4 (eager-only), Gemma 4
+(`head_dim=512`), the families whose upstream class declares no flash support (Bailing/Ling, GLM-5 Next,
+Step-3.7 Flash, Inkling), and Qwen3.5/3.6 and GLM-4 MoE Lite when FA4 falls them back to SDPA. The full map
+is in [Flash Attention](flash-attention.md#choosing-a-backend).
+
+Use packing or padded batches there: packing raises tokens per row on any kernel, so off a varlen backend it
+only **warns**. gpt-oss is the exception. Its forward never passes the packed `position_ids` into mask
+construction, so the row would run as one dense causal sequence with documents attending across each other,
+and packing off a varlen backend is **rejected** there.
 
 Both collators emit `position_ids` that reset per document; whether a family's forward turns those into an
 isolating mask is per-family, and the exceptions are tabulated in
 [Document isolation under packing](../data/collators.md#document-isolation-under-packing). Where it does, the
 only difference is cost: a non-varlen backend materializes a dense `[L, L]` mask instead of consuming
-`cu_seq_lens`. Outside pipeline parallelism **both** collators flatten the mini-batch into a single row —
-padding-free by construction, packing via `flatten_packed_batch` — so `L` is the whole batch's token count
-either way (the summed real tokens for padding-free, up to `per_device_train_batch_size × max_length` for
-packing), and at equal tokens per step the two masks are the same size.
+`cu_seq_lens`.
+
+Outside pipeline parallelism **both** collators flatten the mini-batch into a single row — padding-free by
+construction, packing via `flatten_packed_batch` — so `L` is the whole batch's token count either way (the
+summed real tokens for padding-free, up to `per_device_train_batch_size × max_length` for packing), and at
+equal tokens per step the two masks are the same size.
 
 Packing's mask is bounded by `max_length` only at `per_device_train_batch_size: 1`, so keep the batch at 1
 there and scale with `gradient_accumulation_steps`.

@@ -55,7 +55,7 @@ verdict there rather than keeping a second copy.
 
 **Traps.**
 
-- Both bias modes downgrade to `none` on the weight-sync RL scripts (online / environmental GRPO):
+- Both bias modes downgrade to `none` on the weight-sync RL scripts (online / async GRPO):
   the sync ships parameters and the bias is a buffer (`src/callbacks/wiring.py`), so those
   runs train unbalanced. `aux_loss` is inert under a policy-gradient loss.
 - A construction hook may issue **no collective** and allocate nothing sized by `world_size` —

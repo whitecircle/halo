@@ -17,9 +17,7 @@ from src.environments.tools.definitions import NativeTool, NativeToolCall
 
 
 def _env(cap):
-    return CodeContestsEnvironment(
-        language="python", success_reward=1.0, sandbox_backend="local", max_observation_chars=cap
-    )
+    return CodeContestsEnvironment(language="python", sandbox_backend="local", max_observation_chars=cap)
 
 
 def _traj():

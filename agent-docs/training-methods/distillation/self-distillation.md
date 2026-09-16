@@ -1,102 +1,98 @@
 # Self-Distillation
 
-One model is both student and a privileged teacher. The student sees the prompt only; the teacher additionally sees a hint that reveals the gold answer. Training distills the student toward the teacher's distribution on the shared response tokens, on top of an SFT objective. This is an offline approximation of [SDPG](online-sdpg.md): no generation, no verifier — it scores the fixed dataset response tokens with static confidence weights standing in for SDPG's verifier-gated advantages.
+One model plays both roles: the student sees the prompt, the teacher sees the same prompt plus a hint revealing the gold answer. Training distills the student toward the teacher on the shared response tokens, on top of an SFT objective.
 
-| Aspect | Value |
-|--------|-------|
-| Trainer | `DistributedSelfDistillationTrainer` (extends `DistributedSFTTrainer`) |
-| Script | `scripts/training/distillation/self_distill.py` (text or VLM) |
-| Loss | `L_sft + beta(k) · L_OPD + alpha · L_ref` |
-| Parallelism | EP, TP, ETP, EP+TP, EP+ETP; no CP, no PP |
+Use it when no stronger teacher exists but the dataset carries gold answers. With a separate teacher use [teacher distillation](teacher-distillation.md); with a verifier and a rollout budget use [online SDPG](online-sdpg.md).
 
-## Privileged context
+Trainer `DistributedSelfDistillationTrainer` (extends `DistributedSFTTrainer`), script `scripts/training/distillation/self_distill.py` (text or VLM). EP, TP and ETP apply; CP and PP are rejected — the teacher forward uses a second, longer sequence through the whole model ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
-The privileged hint is appended to the last user turn for the teacher forward only. Default template:
-
-```text
-\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n
-```
-
-`{answer}` and `{solution}` fill from `sdpg_answer_field` (default `answer`) and `privileged_solution_field` (default `solution`). `SelfDistillTextCollator` (`src/data/collators/self_distill.py`) tokenizes the student conversation and the hinted teacher conversation at collation time, so the dataset is the raw SFT conversation plus the privileged field — no offline preprocessing. The assistant response tokens are byte-identical across the two branches, the invariant OPD row alignment relies on.
-
-Neither branch is ever truncated — the teacher is systematically longer, so right-truncation would cut trailing response tokens the student keeps. A sequence over `max_length` raises, naming the branch; size `max_length` with headroom for the hint, or drop over-long rows before training. The teacher forward reuses the same trainable model under `torch.no_grad()`, so no second model is held in memory.
-
-## Loss
-
-- `L_sft` — token-mean SFT cross-entropy on the response tokens. With `confidence_field` set it is per-sample weighted by `confidence**confidence_power`, mean-normalized across the batch to preserve the effective learning rate.
-- `L_OPD` — the on-policy-distillation term: the full-vocabulary student→teacher KL on the shared response tokens, with the teacher detached. The default `sdpg_loss: reverse_kl` is the exact `D_KL(p ‖ SG[q])`; `forward_kl` and `unnormalized_kl` are also available. All three scale by `sdpg_temperature²`, so the OPD gradient magnitude stays comparable across temperatures. With `opd_exclude_eos: true` (default) the EOS/stop tokens are dropped from OPD but not from SFT, so SFT's hard `P(EOS)→1` is not diluted by the softer teacher.
-- `beta(k)` — the SDPG warmup→decay schedule `sdpg_beta_base · min(1, k/T_warm) · min(1, (T-k)/T_decay)`, constant `sdpg_beta_base` when `sdpg_beta_warmup_steps`/`sdpg_beta_decay_steps` are `0` (their default).
-- `L_ref` — optional unnormalized-KL regularization to a frozen reference model, active only when `reference_kl_coef > 0` (the reference defaults to the student's init weights).
-
-Student and teacher sequences differ in length, so the response rows are gathered per sample by their label masks and aligned positionally. Losses and schedule live in `src/trainers/distillation/losses.py`.
-
-## Quick start
-
-```bash
-torchrun --nproc_per_node=8 \
-    scripts/training/distillation/self_distill.py \
-    examples/distillation/qwen3_5/self-distill-qwen3.5-9b.yaml
-```
-
-Qwen3.5-9B is dense, so this runs plain FSDP2 data parallel; a MoE student takes `--expert_parallel_size` (EP applies to the student only).
-
-Core fields of that config:
-
-```yaml
-model_name_or_path: Qwen/Qwen3.5-9B
-
-dataset: open-r1/OpenR1-Math-220k:default  # raw SFT conversations + an answer field
-conversation_field: messages
-sdpg_answer_field: answer
-
-sdpg_beta_base: 1.0
-sdpg_beta_warmup_steps: 50                 # ramp OPD in after SFT settles
-sdpg_beta_decay_steps: 100                 # phase OPD out near the end
-
-train_on_completions_only: true
-assistant_message_template: "<|im_start|>assistant\n"   # required — the marker your model's chat template renders
-
-learning_rate: 1.0e-5
-max_length: 16384                          # R1 traces run long; the collator fails loud on over-length rows
-gradient_checkpointing: true
-```
-
-The config is TRL's `SFTConfig`, so `max_length` defaults to `1024` — set it explicitly. `assistant_message_template` has no default (`src/args/mixins.py`) and is required whenever `train_on_completions_only` is on — the collator refuses the pair at construction, before the first batch — and it must byte-match the model's rendered assistant-turn prefix, since a mismatched marker would mask every row.
-
-## Parallelism
-
-EP, TP, and ETP apply. CP is rejected (both on the trainer and at config-build time in the script) because the privileged teacher uses a separate, longer sequence that sequence-sharded attention cannot reconstruct; PP is rejected because that second forward would give the stage boundary a different activation shape. Use gradient checkpointing for long sequences. Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
-
-## Vision-language support
-
-`self_distill.py` handles both modalities, routing the data path on the run (`is_vlm_run`): a multimodal student distilled on text-only rows takes the text path. On an image-declaring run the script maps raw conversations into `history`/`images` columns through the shared `prepare_vlm_dataset` (keeping the privileged fields) and uses `SelfDistillVLMDataCollator` (`src/data/collators/vlm.py`).
-
-The over-length pre-filter runs on the student text and does not see the hint, so keep `max_length` headroom for it — the teacher branch is never truncated and fails loud past `max_length`. The teacher's text-only hint does not change the image grid, so the student's image features are shared with the teacher forward (cached and replayed for `lfm2_vl` to skip a vision-tower re-encode).
+The loss is `L_sft + beta(k)·L_OPD + alpha·L_ref`. The teacher forward reuses the trainable model in `eval()` under `torch.no_grad()`, so no second model is held.
 
 ## Configuration
 
-`SelfDistillationArguments` (`src/args/self_distill_args.py`) extends `SFTScriptArguments`. Its tracking project defaults to `self-distillation` rather than inheriting SFT's `sft-tuning`, so set `project_name` explicitly to keep a run's history alongside earlier ones. Fields beyond the SFT set:
+The config class is TRL's `SFTConfig`, so `max_length` defaults to `1024` — set it explicitly.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `sdpg_hint_template` | (see above) | Template appended to the last user turn for the teacher forward |
-| `sdpg_answer_field` | `"answer"` | Dataset field with the ground-truth answer |
-| `privileged_solution_field` | `"solution"` | Optional dataset field for `{solution}` |
-| `sdpg_loss` | `"reverse_kl"` | OPD loss: `reverse_kl`, `forward_kl`, `unnormalized_kl` |
-| `sdpg_temperature` | `1.0` | OPD softmax temperature |
-| `sdpg_beta_base` | `1.0` | Base OPD coefficient |
-| `sdpg_beta_warmup_steps` | `0` | Steps to ramp beta 0→`sdpg_beta_base` |
-| `sdpg_beta_decay_steps` | `0` | Final steps over which beta decays to 0 |
-| `reference_kl_coef` | `0.0` | Alpha for KL regularization to a frozen reference; 0 loads no reference |
-| `reference_kl_loss` | `"unnormalized_kl"` | Reference regularizer: `unnormalized_kl`, `reverse_kl`, `forward_kl` |
-| `reference_model_name_or_path` | `None` | Frozen reference; defaults to the student's init weights when `reference_kl_coef > 0` |
-| `confidence_field` | `None` | Per-sample confidence in [0, 1]; weights SFT (and OPD) by `confidence**confidence_power` |
-| `confidence_power` | `4.0` | Exponent `p` in `conf**p` |
-| `confidence_weight_opd` | `True` | Apply the confidence weight to OPD too |
-| `opd_exclude_eos` | `True` | Drop EOS/stop tokens from OPD (not from SFT) |
+```yaml
+model_name_or_path: Qwen/Qwen3.5-9B
+dataset: open-r1/OpenR1-Math-220k:default   # raw SFT conversations + a gold-answer column
+conversation_field: messages
+sdpg_answer_field: answer
+test_size: 0.02
 
-Inherited SFT knobs the script refuses rather than silently ignores: `generate_eval_examples` and
-`num_eval_examples` — the generation callback needs a tokenized `generate` split and self-distillation
-keeps the dataset raw, so **any non-default value** of either raises — plus
-`train_on_last_assistant_only` (the SelfDistill collators mask all assistant turns) and
-`packing` / `padding_free` (both branches are tokenized at collation and always right-padded).
+sdpg_loss: reverse_kl
+sdpg_beta_base: 1.0
+sdpg_beta_warmup_steps: 50                  # ramp OPD in after SFT settles
+sdpg_beta_decay_steps: 100                  # phase OPD out near the end
+opd_exclude_eos: true
+reference_kl_coef: 0.0
+
+train_on_completions_only: true
+assistant_message_template: "<|im_start|>assistant\n"   # required; must byte-match the template
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-05
+max_length: 16384
+gradient_checkpointing: true
+output_dir: checkpoints/self-distill-qwen3.5-9b
+```
+
+| Knob | Default | Effect |
+|---|---|---|
+| `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. ...\n` | Appended to the last user turn, teacher forward only |
+| `sdpg_answer_field` / `privileged_solution_field` | `answer` / `solution` | Columns filling `{answer}` and `{solution}` |
+| `sdpg_loss` | `reverse_kl` | OPD loss; or `forward_kl`, `unnormalized_kl` |
+| `sdpg_temperature` | `1.0` | OPD softmax temperature; all three losses scale by `T²` |
+| `sdpg_beta_base` | `1.0` | Base OPD coefficient; `0` skips the teacher forward entirely |
+| `sdpg_beta_warmup_steps` / `sdpg_beta_decay_steps` | `0` / `0` | `beta(k) = base · min(1, k/T_warm) · min(1, (T−k)/T_decay)` |
+| `opd_exclude_eos` | `True` | Drops EOS/stop tokens from OPD but not from SFT |
+| `reference_kl_coef` | `0.0` | Alpha on a frozen-reference KL anchor; `0` loads no reference |
+| `reference_kl_loss` | `unnormalized_kl` | The anchor's divergence; or `reverse_kl`, `forward_kl` |
+| `reference_model_name_or_path` | `None` | The anchor model; defaults to the student's init weights |
+| `confidence_field` / `confidence_power` | `None` / `4.0` | Per-sample weight `conf**p`, mean-normalized across the batch |
+| `confidence_weight_opd` | `True` | Applies that weight to OPD as well as SFT |
+
+With `reference_kl_coef <= 0`, a non-default `reference_model_name_or_path` or `reference_kl_loss` raises rather than being ignored. `assistant_message_template` has no default and is required whenever `train_on_completions_only` is on — the collator refuses that pair at construction. It is never checked against the template, and a marker that does not byte-match the rendered assistant prefix masks every row.
+
+Neither branch is ever truncated — the teacher is systematically longer, so right-truncation would cut response tokens the student keeps. On the text path a row over `max_length` raises, naming the branch, and a prep-time audit makes that raise world-uniform instead of hanging the peers of one rank. Size `max_length` with headroom for the hint.
+
+The dataset stays raw: the collator tokenizes the student and the hinted teacher branch at collation time. Inherited SFT knobs that cannot reach it are refused, not ignored — `packing`, `padding_free`, `completion_only_loss`, `assistant_only_loss`, `train_on_last_assistant_only`, `generate_eval_examples` and `num_eval_examples`.
+
+## Launch
+
+```bash
+torchrun --nproc_per_node=8 scripts/training/distillation/self_distill.py \
+    examples/distillation/qwen3_5/self-distill-qwen3.5-9b.yaml
+```
+
+`halo launch self-distill <config> --nproc 8` builds the same line. That model is dense, so it runs plain FSDP2 data parallel; the MoE recipes (`gptoss`, `gemma4`) pin `expert_parallel_size: 8` themselves.
+
+## Vision-language
+
+The data path follows the run, so a multimodal student trained on text-only rows takes the text path. An image run maps raw conversations into `history`/`images` through the shared `prepare_vlm_dataset`, keeping the privileged columns, and collates with `SelfDistillVLMDataCollator`.
+
+A VLM run gets no audit: over-length student rows are dropped at prep, and the teacher branch, unseen by that filter, raises at collation. Keep `max_length` headroom for the hint. The hint is text-only and does not change the image grid, so the student's image features are shared with the teacher forward — cached and replayed for `lfm2_vl` to skip a vision-tower re-encode.
+
+## Testing a setup
+
+```bash
+torchrun --nproc_per_node=2 scripts/training/distillation/self_distill.py <config> \
+    --max_steps=5 --save_strategy=no --report_to=none
+```
+
+Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/test_self_distillation_text.py`, `test_self_distillation_vlm.py` and `tests/gpu/trainers/lora/test_lora_self_distill.py`.
+
+## What to watch
+
+| Signal | Reading |
+|---|---|
+| `sft_loss` | The hard-label term; the run's backbone |
+| `opd_loss` | Student-to-teacher divergence; falls as the hint stops changing the distribution |
+| `beta` | The schedule's current coefficient — check it is not pinned at 0 |
+| `reference_kl` | Logged only with `reference_kl_coef > 0`; drift from the anchor |
+
+Failure signatures:
+
+- An over-length raise naming the student or teacher branch — raise `max_length`; the hint needs headroom.
+- A student/teacher response-length mismatch warning — the two branches diverged, usually from truncation upstream.
+- Every row masked, loss flat — `assistant_message_template` does not match the rendered prefix.
+- The gold-answer column missing while `sdpg_beta_base > 0` — the run raises rather than distilling toward a teacher told the answer is nothing.

@@ -77,7 +77,7 @@ _HELD_CONVERTER_BUDGET_BYTES = WEIGHT_SYNC_CHUNK_BYTES
 def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
     """Construction gate for the trainers that push weights to the ``backend`` rollout engine.
 
-    Six failure classes are rejected here rather than at the first sync:
+    Seven failure classes are rejected here rather than at the first sync:
 
     - **Quantized bases (QLoRA)**: ``_send_dense_weights`` forwards raw ``named_parameters`` storage
       under base-weight names, so a bnb-quantized base ships packed non-floating-point tensors
@@ -94,6 +94,9 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
       each class's ``_WEIGHT_SYNC_REFUSAL_REASON`` states the family's gap. Enforced through live EP
       instances when present, else through the registry off ``config.model_type``, since a
       wrapper-less run carries the same contract.
+    - **An EP family with no live EP wrapper** (``ep_size: 1`` with ``use_grouped_gemm: false``): the
+      sync ships experts in the layout the family's ``gather_expert_state_dict`` emits, which only the
+      EP wrapper provides; the plain HF module would stream a layout the engine cannot land.
     - **Model types the pinned ``backend`` cannot serve** (the client's ``UNSERVABLE_MODEL_TYPES``):
       no model class for the spelling, or a loader reading a layout no gather can emit, so the server
       has no base model for the stream to land in.
@@ -137,7 +140,8 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
             f"no served model to land in — {facts}. See {client_cls.__name__}.UNSERVABLE_MODEL_TYPES."
         )
     # isinstance, not an attribute probe: a PEFT wrapper forwards ``__getattr__``, so a probe matches the wrapper.
-    for where, cls in _sync_contract_classes(model):
+    families = _sync_contract_classes(model)
+    for where, cls in families:
         if not cls._supports_weight_sync:
             raise ValueError(
                 f"{cls.__name__} (at {where!r}) does not support weight sync: the sync forwards "
@@ -145,6 +149,20 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
                 f"{cls._WEIGHT_SYNC_REFUSAL_REASON}. Online/environmental GRPO with weight sync "
                 f"is unsupported for this model — see {cls.__name__}._supports_weight_sync."
             )
+    # Every validated expert layout is a gather's: the wrapper's ``gather_expert_state_dict`` spells the
+    # experts as the engine loads them. Without a wrapper the dense walk forwards the stock module
+    # tree's fused expert tensors under module names — a layout no engine loader is validated against
+    # and one the per-expert loaders skip before their "not found" warning.
+    if families and not named_ep_layers(model):
+        raise ValueError(
+            f"{', '.join(sorted({cls.__name__ for _where, cls in families}))} resolves for model_type "
+            f"{sorted(config_model_types(model))}, but the model carries no live EP wrapper (ep_size 1 with "
+            f"use_grouped_gemm: false): weight sync ships experts in the layout the family's "
+            f"gather_expert_state_dict emits, and without a wrapper it would forward the stock module tree's "
+            f"fused expert tensors under module names, which the engine's loader drops with no error — "
+            f"attention, norms and routers would sync while the experts keep serving launch weights. Set "
+            f"use_grouped_gemm: true (the torchrun default), which installs the EP wrappers at ep_size 1 too."
+        )
     # Enabled bias-update state, not the mode string: the shipped scripts downgrade the mode before any
     # state exists, so reaching here with an adopted slot or side-buffer means a hand-built driver
     # enabled balancing itself. These probes do not fire on Zaya's always-present native buffer (never

@@ -10,8 +10,8 @@ chat-templates them itself and auto-selects ``DataCollatorForVLMSMPO`` (image pr
 collation, vision tensors threaded through the chosen/rejected concat). A text run templates the
 pairs here and runs generation-eval examples.
 
-Supported Parallelism Modes: EP, CP, TP, EP+CP, EP+TP (TP+CP unsupported; a VLM run supports
-neither CP nor padding_free).
+Supported Parallelism Modes: EP, CP, TP, ETP, PP and their allowlisted combinations
+(``SUPPORTED_AXIS_SETS``; TP+CP unsupported; a VLM run supports neither CP nor padding_free).
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \\

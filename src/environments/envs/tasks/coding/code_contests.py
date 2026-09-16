@@ -1,24 +1,24 @@
 """Competitive-programming environment with hidden-test grading (Codeforces, APPS).
 
 Models write a solution, test it with the scratchpad tool, then submit via ``submit_solution`` which
-runs it against hidden tests through a SandboxExecutor. Reward = fraction of tests passed, raised to
-``pass_fraction_exponent``. The run fixes one language, or lists several and lets the model pick one
-per program.
+runs it against hidden tests through a SandboxExecutor. The grade is the fraction of tests passed,
+priced by the reward's environment term. The run fixes one language, or lists several and lets the
+model pick one per program.
 """
 
 import json
 import logging
 from collections.abc import Sequence
-from math import isfinite
+from dataclasses import replace
 from typing import Any
 
 from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_SLICES_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
-    OBJECTIVE_REWARD_KEY,
     SOLVE_RATE_KEY,
     TOOL_CALL_COUNTS_KEY,
+    EpisodeGrade,
     Trajectory,
     require_magnitudes,
 )
@@ -35,6 +35,7 @@ from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, LanguageSpec,
 from src.environments.sandbox.repl import run_code_via_sandbox
 from src.environments.sandbox.resolve import resolve_sandbox
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolArgumentError, ToolParameter
+from src.rewards.samples import ScoringSample
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +56,21 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
 
     ``language`` (``python``/``cpp``/``c``, or a list of them) drives both the test tool and grading
     through the same SandboxExecutor; with a list the model names each program's language in the
-    tool call and is graded in it. Reward = (tests_passed / tests_total) ** pass_fraction_exponent *
-    success_reward, credited only on ``submit_solution``; a never-submitted solution scores
-    ``failure_reward``. Grading is data-driven: per-problem ``checker`` / ``time_limit`` from the
+    tool call and is graded in it. The grade is ``tests_passed / tests_total`` of the solution passed
+    to ``submit_solution``, the single graded channel; a never-submitted solution grades 0. Grading is
+    data-driven: per-problem ``checker`` / ``time_limit`` from the
     ``answer`` payload (dict or JSON string, carrying ``tests``/``test_cases``) override the
     ``output_comparison`` default, so one env covers exact-match and Codeforces sets.
     """
 
     # Agentic solvers iterate test→fix→submit, which the protocol's generic budget cuts mid-loop.
     DEFAULT_MAX_TURNS = 15
+
+    SHAPING_COMPONENTS = ("submission", "execution", "tested_submission", "resubmission")
+
+    # The ``answer`` payload IS the hidden test set: without it every episode grades against zero
+    # tests, grading 0 whatever it submitted.
+    requires_answer = True
 
     # Per-tool shaping off so correctness dominates; configs may re-enable small values.
     DEFAULT_TOOL_SUCCESS_REWARD = 0.0
@@ -86,10 +93,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     )
     # Appended when the run lists several languages: the choice is the model's, per program.
     LANGUAGE_CHOICE_PROMPT = " Choose each program's language with the tool's language argument ({names})."
-    # Appended when the set mixes interpreted and compiled languages: the grading contract each runs under.
+    # Appended when the set mixes interpreted and compiled languages: the grading contract each runs under
+    # (``multiplier`` is empty at scale 1, else e.g. ``"2x "``).
     TIME_LIMIT_FLOOR_PROMPT = (
-        " A {interpreted} solution gets at least {floor:g} s per test; a compiled one runs at the problem's stated "
-        "time limit."
+        " A {interpreted} solution gets at least {floor:g} s per test; a compiled one runs at {multiplier}the "
+        "problem's stated time limit."
     )
 
     def __init__(
@@ -106,13 +114,13 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         verdict_detail: str = VERDICT_DETAIL_FULL,
         stop_on_first_failure: bool = False,
         max_time_limit: float = SANDBOX_DEFAULT_TIMEOUT,
+        compiled_time_limit_scale: float = 1.0,
         max_grading_seconds: float | None = None,
         max_submissions: int = 2,
         max_test_calls: int = 5,
         submission_reward: float = 0.0,
         execution_progress_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
-        pass_fraction_exponent: float = 1.0,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         **kwargs,
@@ -128,21 +136,23 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             raise ValueError(f"max_test_calls must be >= 0, got {max_test_calls}")
         if max_grading_seconds is not None and max_grading_seconds <= 0:
             raise ValueError(f"max_grading_seconds must be > 0 or None, got {max_grading_seconds}")
+        if max_time_limit < timeout_per_test:
+            # The prompt promises an interpreted solution at least timeout_per_test per test; a clamp
+            # below it would grade under a contract the model was never told.
+            raise ValueError(
+                f"max_time_limit ({max_time_limit}) must be >= timeout_per_test ({timeout_per_test}), "
+                f"the per-test floor the task contract states"
+            )
         require_magnitudes(
             submission_reward=submission_reward,
             execution_progress_reward=execution_progress_reward,
             resubmission_penalty=resubmission_penalty,
         )
-        if not (isfinite(pass_fraction_exponent) and pass_fraction_exponent > 0):
-            raise ValueError(f"pass_fraction_exponent must be a finite number > 0, got {pass_fraction_exponent}")
         # The canonical names the model may name; ``language`` is the run's default (and the grading
         # contract's), the only one when the run fixes it.
         self.languages = tuple(spec.name for spec in specs)
         self.language = self.languages[0]
         self.chooses_language = len(self.languages) > 1
-        # Above 1 the objective is convex in the pass fraction: a half-right submission earns well under
-        # half a solve, so within a GRPO group finishing the problem out-earns submitting a heuristic early.
-        self.pass_fraction_exponent = pass_fraction_exponent
         # Bootstraps a weak base that never submits; self-neutralizes within a GRPO group once all do.
         self.submission_reward = submission_reward
         # Fraction of graded tests that merely ran: the only within-group signal when all completions fail.
@@ -175,6 +185,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             stop_on_first_failure=stop_on_first_failure,
             default_timeout=timeout_per_test,
             max_time_limit=max_time_limit,
+            compiled_time_limit_scale=compiled_time_limit_scale,
             max_grading_seconds=max_grading_seconds,
         )
 
@@ -219,7 +230,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
 
         super().__init__(
             tool_registry=registry,
-            system_prompt=system_prompt or self._default_system_prompt(specs, timeout_per_test),
+            system_prompt=system_prompt
+            or self._default_system_prompt(specs, timeout_per_test, compiled_time_limit_scale),
             reasoning_effort=reasoning_effort,
             reasoning_effort_profiles=reasoning_effort_profiles,
             **kwargs,
@@ -254,7 +266,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         names = [spec.name for spec in specs]
         return [ToolParameter("language", "string", f"Language of the program: {', '.join(names)}", enum=names)]
 
-    def _default_system_prompt(self, specs: Sequence[LanguageSpec], floor: float) -> str:
+    def _default_system_prompt(self, specs: Sequence[LanguageSpec], floor: float, compiled_scale: float) -> str:
         """The solver's role and task contract, with the language choice and its grading terms when
         the run lists several languages."""
         prompt = self.CODE_SYSTEM_PROMPT.format(language=self._language_phrase(specs))
@@ -263,14 +275,17 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         prompt += self.LANGUAGE_CHOICE_PROMPT.format(names=", ".join(spec.name for spec in specs))
         interpreted = [spec.name for spec in specs if not spec.is_compiled]
         if interpreted and len(interpreted) < len(specs):
-            prompt += self.TIME_LIMIT_FLOOR_PROMPT.format(interpreted=" or ".join(interpreted), floor=floor)
+            multiplier = "" if compiled_scale == 1 else f"{compiled_scale:g}x "
+            prompt += self.TIME_LIMIT_FLOOR_PROMPT.format(
+                interpreted=" or ".join(interpreted), floor=floor, multiplier=multiplier
+            )
         return prompt
 
     def _build_test_tool(self, specs: Sequence[LanguageSpec]) -> NativeTool:
         """Build the code-testing scratchpad tool for the run's language set.
 
         Runs through the same SandboxExecutor that grades ``submit_solution`` (isolated subprocess, not the
-        in-process restricted REPL which blocks imports). Sees no stdin and no graded tests.
+        in-process restricted REPL which blocks imports) on the stdin the call supplies; never the graded tests.
         """
         python_only = len(specs) == 1 and specs[0].name == "python"
         name = "python_repl" if python_only else "run_code"
@@ -285,15 +300,18 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             test_budget = "This tool is disabled for this task."
         description = (
             f"Optional scratchpad — this does NOT submit your solution. {verb} the complete "
-            f"{self._language_phrase(specs)} program you pass and returns its output; the standard library is "
-            "available. It has no access to the graded tests and is given no stdin, so embed any input you want "
-            f"to try directly in the code. {test_budget} Use submit_solution to be graded."
+            f"{self._language_phrase(specs)} program you pass on the stdin you give it and returns its output; "
+            "the standard library is available. It has no access to the graded tests, so feed it the statement's "
+            f"sample input or your own. {test_budget} Use submit_solution to be graded."
         )
         return NativeTool(
             name=name,
             description=description,
             parameters=[
                 ToolParameter("code", "string", f"Complete {self._language_phrase(specs)} program"),
+                ToolParameter(
+                    "stdin", "string", "Input the program reads from standard input (empty by default)", required=False
+                ),
                 *self._language_parameters(specs),
             ],
             handler=self._run_test_in if self.chooses_language else self._run_test,
@@ -332,23 +350,26 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         """Scratchpad calls admitted so far."""
         return trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(self.test_tool_name, 0)
 
-    def _run_test_in(self, code: str, language: str) -> str:
+    def _run_test_in(self, code: str, language: str, stdin: str = "") -> str:
         """The scratchpad handler when the run lets the model choose: ``language`` is required, so a
         call without it fails to bind and is refused unspent."""
-        return self._run_test(code, language)
+        return self._run_test(code, language, stdin)
 
     def _submit_in(self, code: str, language: str) -> str:
         """The submission handler when the run lets the model choose (``language`` required, as above)."""
         return self._submit(code, language)
 
-    def _run_test(self, code: str, language: str | None = None) -> str:
-        """Run a scratchpad test in ``language`` (the run's, or the call's choice). The per-episode cap
-        is the protocol's (``max_test_calls``); a direct call with no active episode runs uncapped."""
+    def _run_test(self, code: str, language: str | None = None, stdin: str = "") -> str:
+        """Run a scratchpad test in ``language`` (the run's, or the call's choice) on ``stdin``. The
+        per-episode cap is the protocol's (``max_test_calls``); a direct call with no active episode
+        runs uncapped."""
         language = self._call_language(language, self.test_tool_name)
         trajectory = self.active_trajectory()
         if trajectory is not None:
             self._note_language(trajectory, language)
-        return run_code_via_sandbox(code, sandbox=self.sandbox, timeout=self.repl_timeout, language=language)
+        return run_code_via_sandbox(
+            code, sandbox=self.sandbox, timeout=self.repl_timeout, language=language, stdin=str(stdin or "")
+        )
 
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade a submission against the active episode's tests in ``language`` (the run's, or the
@@ -372,6 +393,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         trajectory.info["tests_graded"] = grade.graded
         trajectory.info["grading_budget_hit"] = grade.budget_hit
         trajectory.info["submission_result"] = grade.details
+        # The graded artifact an external scorer reads (``_scoring_sample``); private, so it leaves
+        # the record with the grading payload.
+        trajectory.info["_submitted_code"] = code
         return grade.details
 
     def _step_single(
@@ -484,20 +508,14 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             and info.get("tests_passed", 0) == 0
         )
 
-    def _compute_reward(
-        self,
-        trajectory: Trajectory,
-        context: dict[str, Any] | None = None,
-    ) -> float:
-        """Reward ladder over the objective (fraction of hidden tests passed by the SUBMITTED solution,
-        raised to ``pass_fraction_exponent``).
-
-        ``submit_solution`` is the single graded channel; an unsubmitted solution scores ``failure_reward``.
-        Small shaping rungs (submission_reward, execution_progress, tool-use) bootstrap the tool-use loop a
-        weak base can't escape; each is small vs ``success_reward`` and self-neutralizes within a GRPO group.
-        """
+    def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
+        """The objective is the fraction of hidden tests the SUBMITTED solution passed; ``submit_solution``
+        is the single graded channel, so an unsubmitted solution grades 0. The shaping rungs
+        (submission, execution progress, the tested-submission bonus, the resubmission price) bootstrap
+        the tool-use loop a weak base can't escape; each is small next to the objective and
+        self-neutralizes within a GRPO group. No rung pays on a zero-test row or an all-infra-error
+        grade: neither says anything about the code."""
         info = trajectory.info
-        # No rung may pay on a zero-test row or an all-infra-error grade: neither says anything about the code.
         graded = "submission_result" in info
         tests_total = info.get("tests_total", 0)
         infra_outage = graded and tests_total > 0 and self._grading_infra_outage(info)
@@ -507,13 +525,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             # GRPO group baseline. A never-submitted or zero-test episode is NOT marked.
             info[EPISODE_INVALID_KEY] = True
 
-        if graded_content:
-            objective = (
-                info.get("tests_passed", 0) / tests_total
-            ) ** self.pass_fraction_exponent * self.success_reward
-        else:
-            objective = self.failure_reward
-
+        objective = info.get("tests_passed", 0) / tests_total if graded_content else 0.0
         # Gated on graded_content, not submission_count: _submit bumps the count before grading.
         submission = self.submission_reward if graded_content else 0.0
         execution = (
@@ -526,19 +538,27 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             else 0.0
         )
         resubmission = -self.resubmission_penalty * max(0, self._submissions(trajectory) - 1)
-        tool_shaping = self._tool_use_shaping(trajectory)
+        return EpisodeGrade(
+            objective,
+            {
+                "submission": submission,
+                "execution": execution,
+                "tested_submission": tested,
+                "resubmission": resubmission,
+            },
+        )
 
-        # Components must sum exactly to the returned scalar, or the trainer's composition-residue check fires.
-        info["reward_components"] = {
-            OBJECTIVE_REWARD_KEY: objective,
-            "reward/submission": submission,
-            "reward/execution": execution,
-            "reward/tested_submission": tested,
-            "reward/resubmission": resubmission,
-            "reward/tool_shaping": tool_shaping,
-            "reward/turn_shaping": trajectory.total_reward,
-        }
-        return self._shaped_base_reward(trajectory) + objective + submission + execution + tested + resubmission
+    def _scoring_sample(self, trajectory: Trajectory) -> ScoringSample:
+        """An external scorer reads the submitted program, not the tool-call turn that carried it."""
+        sample = super()._scoring_sample(trajectory)
+        code = trajectory.info.get("_submitted_code")
+        if code is None:
+            return sample
+        language = trajectory.info.get("submission_language", self.language)
+        # The hidden tests are the grader's payload, not a reference answer a judge should read.
+        return replace(
+            sample, completion=[{"role": "assistant", "content": f"```{language}\n{code}\n```"}], reference=None
+        )
 
     def rollout_metrics(self, trajectory: Trajectory) -> dict[str, float]:
         """CodeContests diagnostics: task outcome, submission behavior, and the reward decomposition."""
@@ -567,7 +587,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             # denominator: an ungraded remainder reads exactly like a wrong solution.
             metrics["episode/tests_graded_frac"] = info.get("tests_graded", 0) / tests_total
             metrics["episode/grading_budget_hit"] = 1.0 if info.get("grading_budget_hit") else 0.0
-        metrics.update(info.get("reward_components", {}))
         return metrics
 
     def _tool_use_engaged(self, trajectory: Trajectory) -> bool:

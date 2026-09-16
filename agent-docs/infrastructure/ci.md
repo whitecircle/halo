@@ -13,7 +13,11 @@ Hosted jobs are pure lint/link checks (ruff, actionlint, the docs link check) an
 
 `.github/workflows/lint.yml`: `ruff format --check` plus the full pyproject rule set (including `PLC0415`, the no-inline-imports house rule) block the PR, and `actionlint` checks the workflow files themselves. Self-hosted runner labels are declared in `.github/actionlint.yaml` so actionlint does not flag them as unknown.
 
-`.github/workflows/docs.yml`: `scripts/docs/check_links.sh` blocks on any broken relative link across `agent-docs/`, `human-docs/`, `skills/` and the root markdown. A `diagrams` job re-runs `scripts/diagrams/` in a `python:3.12-slim` container at `uv.lock`'s matplotlib pin and byte-compares the result against the committed figures under `agent-docs/assets/`, so a generator edited without re-committing its figure goes red — run `make diagrams` and commit. `diagrams` and `markdownlint` are advisory: blocking is enforced by the `main` ruleset's **required status checks** (`ruff`, `actionlint`, `build`), and a red check outside that set still lets a PR merge.
+`.github/workflows/docs.yml`: `scripts/docs/check_links.sh` blocks on any broken relative link across `agent-docs/`, `human-docs/`, `skills/` and the root markdown. `markdownlint` covers the same doc trees.
+
+A `diagrams` job re-runs `scripts/diagrams/` in a `python:3.12-slim` container at `uv.lock`'s matplotlib pin and byte-compares the result against the committed figures under `agent-docs/assets/`, so a generator edited without re-committing its figure goes red — run `make diagrams` and commit.
+
+`diagrams` and `markdownlint` are advisory: blocking is enforced by the `main` ruleset's **required status checks** (`ruff`, `actionlint`, `build`), and a red check outside that set still lets a PR merge.
 
 `.pre-commit-config.yaml` mirrors these gates on the host at commit time — the same pinned ruff (lint + format), plus `nbstripout`, whitespace fixers and a 1 MB file-size cap. It is optional: `pipx install pre-commit`, then `pre-commit install`.
 
@@ -25,7 +29,9 @@ Hosted jobs are pure lint/link checks (ruff, actionlint, the docs link check) an
 
 The job's `timeout-minutes` is the budget the `core` tier has to fit inside; a new core entry that pushes the tier past it belongs in `full` ([tier composition](../contributing/README.md#tests) owns both numbers).
 
-The full GPU tier (`make test-gpu-full`) and the two inference-server tiers (`make test-gpu-vllm` / `make test-gpu-sglang`, each needing its server already running on a GPU outside `TRAINER_CUDA_DEVICES`) have no workflow — run them by hand. A per-family pass of either server tier serves the family's checkpoint and points the env-GRPO wrapper at it — `HALO_TEST_ENV_GRPO_MODEL` for the vLLM tier, `HALO_TEST_ENV_GRPO_SGLANG_MODEL` for the SGLang tier; the rows move the served policy with an expert-only perturbation as well as a dense one.
+The full GPU tier (`make test-gpu-full`) and the two inference-server tiers (`make test-gpu-vllm` / `make test-gpu-sglang`, each needing its server already running on a GPU outside `TRAINER_CUDA_DEVICES`) have no workflow — run them by hand.
+
+A per-family pass of either server tier serves the family's checkpoint and points the async GRPO wrapper at it: `HALO_TEST_ENV_GRPO_MODEL` for the vLLM tier, `HALO_TEST_ENV_GRPO_SGLANG_MODEL` for the SGLang tier. The rows move the served policy with an expert-only perturbation as well as a dense one.
 
 ### Enabling the test tiers (repo admin)
 
@@ -49,8 +55,14 @@ The allowlist lives on the **`allowlist` branch**, not `main` — GitHub refuses
 
 The self-hosted runner executes contributor code on your hardware, beside training and secrets. The controls:
 
-- **GPU tier is creds-free but mounts the scratch volume.** `make test-gpu-core ENV_FILE= AWS_DIR=` drops the `.env` (WANDB/HF/AWS keys) and `~/.aws` mounts, but the default `MNT_MOUNT` still bind-mounts all of `HALO_SCRATCH` (default `/mnt`) read-write — HF cache, dataset caches, checkpoints. `HALO_SCRATCH` is the one home for that volume: the bind mount and the in-container `HF_HOME` / `HF_DATASETS_CACHE` / `TMPDIR` / `HALO_DATA_ROOT` all derive from it, so pointing the tier at another disk is one override. Narrowing `MNT_MOUNT` alone is not, since those env vars still resolve under `HALO_SCRATCH`. The label gate is the primary control. Inject `HF_TOKEN` from a repo secret only when a gated model is needed.
-- **The CPU tier mounts the HF cache.** `DOCKER_RUN_CPU` bind-mounts `HF_CACHE` (default `$(HALO_SCRATCH)/hf`) read-write and points `HF_HOME` at it, because CPU tests that call `from_pretrained` directly hard-fail when the cache is missing and the Hub is unreachable — a state a self-hosted runner can be in. Tests going through `tests/common/tokenizers.py` skip instead. Override `HF_CACHE=` to run genuinely cache-less and accept those failures.
+- **GPU tier is creds-free but mounts the scratch volume.** `make test-gpu-core ENV_FILE= AWS_DIR=` drops the `.env` (WANDB/HF/AWS keys) and `~/.aws` mounts, but the default `MNT_MOUNT` still bind-mounts all of `HALO_SCRATCH` (default `/mnt`) read-write: HF cache, dataset caches, checkpoints. The label gate is the primary control.
+
+    `HALO_SCRATCH` is the one home for that volume: the bind mount and the in-container `HF_HOME` / `HF_DATASETS_CACHE` / `TMPDIR` / `HALO_DATA_ROOT` all derive from it, so pointing the tier at another disk is one override. Narrowing `MNT_MOUNT` alone is not, since those env vars still resolve under `HALO_SCRATCH`. Inject `HF_TOKEN` from a repo secret only when a gated model is needed.
+
+- **The CPU tier mounts the HF cache.** `DOCKER_RUN_CPU` bind-mounts `HF_CACHE` (default `$(HALO_SCRATCH)/hf`) read-write and points `HF_HOME` at it. CPU tests that call `from_pretrained` directly hard-fail when the cache is missing and the Hub is unreachable — a state a self-hosted runner can be in.
+
+    Tests going through `tests/common/tokenizers.py` skip instead. Override `HF_CACHE=` to run genuinely cache-less and accept those failures.
+
 - **No repository secrets to fork PR code.** The commented-out test triggers are `pull_request`, not `pull_request_target`, so enabling them still keeps repo secrets away from fork PR code (a same-repo branch is a maintainer's, and gets them). Whatever sits on the bind-mounted scratch volume is a separate matter — see the first bullet. `pr-gate.yml` uses `pull_request_target` on purpose and checks out nothing.
 - **Label gate (GPU tier).** A GPU PR run requires a maintainer to add `run-ci-gpu` — a per-PR opt-in, not the boundary: a `pull_request` run executes the PR's own copy of the workflow and the Makefile, and the label survives later pushes, so the fork-approval setting below is what keeps unreviewed code off the box.
 - **Fork approval (both tiers, and the only gate on the CPU tier).** Require approval for **all outside collaborators** (not just first-time) *before* enabling the test triggers — the CPU tier has no label gate, and `pr-gate` closing an unapproved PR does not stop workflows the same `opened` event already started.
@@ -59,4 +71,6 @@ The self-hosted runner executes contributor code on your hardware, beside traini
 
 `.github/workflows/stale.yml` (daily, 01:30 UTC): issues idle for 30 days are marked stale and closed 7 days later. A `keep-open` or `help wanted` label, an assignee, or a milestone exempts them; a closed issue is reopened manually. PRs are left alone — `pr-gate.yml` already curates those.
 
-`.github/workflows/branch-cleanup.yml` (weekly, Monday 02:00 UTC): remote branches older than 90 days with no open PR are deleted. The default branch, `allowlist` (the contribution-gate roster lives there), `gh-pages`, and `release-*` branches are never touched.
+`.github/workflows/branch-cleanup.yml` (weekly, Monday 02:00 UTC): remote branches older than 90 days with no open PR are deleted. The default branch, `allowlist` (the contribution-gate roster lives there), `gh-pages`, and `release-*` branches are never touched; a branch a ruleset shields from deletion fails its delete call and is logged.
+
+Every deleted tip SHA is logged (recoverable by SHA), and `workflow_dispatch` defaults to a dry run that only prints the kill list.

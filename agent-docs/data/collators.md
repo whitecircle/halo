@@ -3,9 +3,11 @@
 Collators turn tokenized samples into batches: padding, sequence packing, completion-only label
 masking, and per-sequence position IDs. They live in `src/data/collators/`. `factory.py` selects
 among the SFT collators of `completions_only.py` and `packing.py`, which share the span resolver in
-`src/data/spans.py`. The per-method leaves — `smpo.py`, `vlm.py`, `self_distill.py`, `classification.py`,
-`offline_grpo.py`, `vlm_preference.py` — are built by their own trainers and scripts,
-and `fixed_shape.py` wraps any of them for a consumer whose buffer shapes freeze on the first batch.
+`src/data/spans.py`.
+
+The per-method leaves (`smpo.py`, `vlm.py`, `self_distill.py`, `classification.py`,
+`offline_grpo.py`, `vlm_preference.py`) are built by their own trainers and scripts.
+`fixed_shape.py` wraps any of them for a consumer whose buffer shapes freeze on the first batch.
 
 | Collator | Packing | Padding-Free | Completion Masking | Position IDs |
 |----------|---------|--------------|-------------------|--------------|
@@ -40,16 +42,21 @@ Constructor notes that matter when you build one directly:
 
 It drops the dense `attention_mask` so Flash Attention builds a per-document block-diagonal `cu_seqlens` from the resetting position IDs, and flattens the packed mini-batch to a single `[1, total_tokens]` row of **real tokens only** — transformers' packed-sequence detection only engages at batch size 1, so a `[B>1, L]` batch would silently fall back to dense-causal attention.
 
-Inter-row padding is dropped in the flatten: a pad carries position 0, so every kept pad would be its own varlen segment, and the FA4 backward pays a fixed per-segment cost (a mostly-empty partial pack co-batched with a full row measured 275× — 6.9 s vs 25 ms per layer). Where pads must survive (pipeline parallelism's fixed shapes, `pad_to_multiple_of`), the tail's position IDs are a ramp restarting every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens, keeping it a handful of no-op segments.
+Inter-row padding is dropped in the flatten. A pad carries position 0, so every kept pad would be its own varlen segment, and the FA4 backward pays a fixed per-segment cost.
 
-Whether the packed documents actually stay isolated is **per family**, not universal — see [Document isolation under packing](#document-isolation-under-packing). Where the attention path is isolated, the remaining difference between backends is cost: the non-varlen path builds a dense `[L, L]` mask over the *flattened* row, so `L` is the whole batch's token count (up to `per_device_train_batch_size × max_length`) and the mask exhausts memory at long context. `select_data_collator` **warns** there, telling you to keep `per_device_train_batch_size` at 1.
+Where pads must survive (pipeline parallelism's fixed shapes, `pad_to_multiple_of`), the tail's position IDs are a ramp restarting every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens, keeping it a handful of no-op segments.
+
+Whether the packed documents actually stay isolated is **per family**, not universal; see [Document isolation under packing](#document-isolation-under-packing).
+
+Where the attention path is isolated, the remaining difference between backends is cost. The non-varlen path builds a dense `[L, L]` mask over the *flattened* row, so `L` is the whole batch's token count (up to `per_device_train_batch_size × max_length`) and the mask exhausts memory at long context. `select_data_collator` **warns** there, telling you to keep `per_device_train_batch_size` at 1.
 
 It detects packed data via the `seq_lengths` field that TRL's `pack_dataset()` emits for the `bfd` and
 `bfd_split` strategies. The `wrapped` strategy emits no `seq_lengths` column at all, so each row
 collates as **one** document and anything concatenated inside it attends across itself; the collator
-warns once per instance when it sees such rows. Online packing (`packing: true` at training time) and
-the offline `prepare_dataset.py` pipeline both accept all three strategies
-(see [Pre-Processing](dataset-preparation.md#parameters)).
+warns once per instance when it sees such rows.
+
+Online packing (`packing: true` at training time) and the offline `prepare_dataset.py` pipeline both
+accept all three strategies (see [Pre-Processing](dataset-preparation.md#parameters)).
 
 **`DataCollatorForCompletionOnlyLMWithPacking`** — packing plus completion masking; masks each packed
 sub-sequence independently, falls back to standard completion masking for non-packed input.
@@ -147,12 +154,14 @@ The GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) carry two more refusals, 
 that would be emitted but not read:
 
 - **Missing kernels.** transformers selects its segment-aware linear-attention kernels at
-  modeling-import time via `is_causal_conv1d_available()` / `is_flash_linear_attention_available()`
-  — which require the package installed, `fla >= 0.2.2`, **and** a CUDA-capable torch. The torch
-  fallbacks it takes otherwise drop `seq_idx` and `cu_seq_lens_q`, so conv and recurrent state cross
-  document boundaries while attention stays isolated — invisible in the loss. `packing` and
-  `padding_free` are both refused unless those same predicates hold, so the refusal cannot disagree
-  with the kernels actually selected (the production images satisfy them).
+  modeling-import time via `is_causal_conv1d_available()` / `is_flash_linear_attention_available()`,
+  which require the package installed, `fla >= 0.2.2`, **and** a CUDA-capable torch.
+
+    The torch fallbacks it takes otherwise drop `seq_idx` and `cu_seq_lens_q`, so conv and recurrent
+    state cross document boundaries while attention stays isolated, invisible in the loss. `packing`
+    and `padding_free` are both refused unless those same predicates hold, so the refusal cannot
+    disagree with the kernels actually selected (the production images satisfy them).
+
 - **Pipeline parallelism** ([not yet available](../parallelism/pipeline-parallelism.md)) — its
   collator seam keeps the packed rows instead of flattening them, and the delta rule's varlen
   `cu_seq_lens` have no per-row convention, so the conv would isolate while the scan crossed
@@ -170,24 +179,32 @@ they score packed rows under the same masks the student does.
 - **`packing` and `padding_free` are mutually exclusive.** Packing pads concatenated sequences to
   `max_length`; padding-free flattens to one variable-length tensor. Pick packing for short
   sequences, padding-free for long/variable ones.
+
 - **Both want a varlen Flash Attention backend.** The gate is the model's **resolved**
   `_attn_implementation` against `VARLEN_ATTN_IMPLEMENTATIONS` (`flash_attention_2/3/4`,
-  `src/models/patches/attention.py`) — not a model-family list. Off it, `padding_free`
-  **raises** (its `cu_seq_lens` kwargs have no consumer) and `packing` **warns** (it pays a dense
-  `[L, L]` mask per layer) — except for a family whose dense path leaks documents, where packing
-  raises too ([Document isolation](#document-isolation-under-packing)). DeepSeek-V4 (eager-only:
-  head_dim 512 exceeds FA's 256 cap) and Gemma 4 land on the warning — use padded batches.
-  See [Padding-Free Collator](../optimization/padding-free-collator.md).
+  `src/models/patches/attention.py`), not a model-family list.
+
+    Off it, `padding_free` **raises** (its `cu_seq_lens` kwargs have no consumer) and `packing`
+    **warns** (it pays a dense `[L, L]` mask per layer). A family whose dense path leaks documents
+    makes packing raise too ([Document isolation](#document-isolation-under-packing)). DeepSeek-V4
+    (eager-only: head_dim 512 exceeds FA's 256 cap) and Gemma 4 land on the warning; use padded
+    batches. See [Padding-Free Collator](../optimization/padding-free-collator.md).
+
 - **Padding-free is incompatible with Context Parallelism**, and **packing is rejected under CP**.
   Under CP use the padded collator, which sets `pad_to_multiple_of=cp_size`.
+
 - **Pipeline parallelism** is [not yet available in this release](../parallelism/pipeline-parallelism.md);
   its shipped collator gates already reject padding-free (a flattened single row cannot split into
-  microbatches) and pin packing at one packed row per microbatch.
+  microbatches) and pin packing at one packed row per microbatch — a microbatch holding more than one
+  leaks attention across documents — padding every batch to `max_length` and raising on an
+  over-length one.
 - **Completion masking requires `assistant_message_template`** matching the tokenizer's exact
-  assistant-header encoding; unmatched sequences are dropped from the loss. A marker the chat
-  template never renders is refused by `select_data_collator` — it would mask every label and the run
-  would train zero tokens at loss ≈ 0. The probe renders both a plain and a `thinking` assistant turn,
-  so a marker gpt-oss harmony emits only under thinking passes it and is caught per batch instead.
+  assistant-header encoding; unmatched sequences are dropped from the loss.
+
+    A marker the chat template never renders is refused by `select_data_collator`: it would mask
+    every label and the run would train zero tokens at loss ≈ 0. The probe renders both a plain and a
+    `thinking` assistant turn, so a marker gpt-oss harmony emits only under thinking passes it and is
+    caught per batch instead.
 
 ## EOS, pad, and the response template
 
@@ -209,11 +226,12 @@ every thinking turn from the loss; the role token marks every assistant turn and
 span for non-thinking turns.
 
 The completion-only collators locate each turn at its role token and unmask through to that turn's
-first terminator, bounded by the next response start — so a truncated turn yields an empty span
-rather than borrowing a later turn's terminator. The packed and padding-free routes add a global
-end-of-sequence fallback, where the last position substitutes only when the sequence has **no**
-terminator at all. The padded route has no fallback: on a padded row the last position is pad, so a
-terminator-less turn is masked out entirely.
+first terminator, bounded by the next response start. A truncated turn therefore yields an empty span
+rather than borrowing a later turn's terminator.
+
+The packed and padding-free routes add a global end-of-sequence fallback, where the last position
+substitutes only when the sequence has **no** terminator at all. The padded route has no fallback: on
+a padded row the last position is pad, so a terminator-less turn is masked out entirely.
 
 **One span resolver, three named policies.** Every completion mask locates its spans with
 `resolve_completion_spans` in `src/data/spans.py`, under one of three declared policies:
@@ -231,9 +249,11 @@ rescue).
 The padded collator, the offline label bake (`prepare_dataset.py`) and the self-distill / VLM label
 builder (`build_completion_only_labels`) share one batch masker on top of it,
 `mask_batch_to_completion_spans`. It additionally takes an optional `attention_mask` confining the
-span search to a row's real tokens, and `extra_ignore_token_ids` (image tokens on the VLM path)
-masked **after** the span refill — the refill copies from `input_ids`, so masking them first hands
-every extra id inside a completion span back as a trainable target.
+span search to a row's real tokens.
+
+It also takes `extra_ignore_token_ids` (image tokens on the VLM path), masked **after** the span
+refill: the refill copies from `input_ids`, so masking them first hands every extra id inside a
+completion span back as a trainable target.
 
 The packed and padding-free collators mask one sequence at a time instead, copying spans out of
 `labels` so a document boundary keeps its own masking. The bake takes its policy from the artifact it

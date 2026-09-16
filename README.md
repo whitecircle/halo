@@ -43,7 +43,7 @@ On 8× B300, Halo delivers up to ~2.8× the training throughput of stock TRL whi
 
 - **Performance optimizations are integrated.** Halo includes DeepEP V2, FlashAttention 4, Liger, Grouped GEMM, padding-free packing, and AdamWBF16, with implementations and fallbacks for Blackwell, Hopper, and older GPUs.
 
-- **RL is asynchronous, with a clean Transformers ↔ vLLM/SGLang split.** Multi-turn environment rollouts run as Ray actors against a vLLM or SGLang server and overlap training through a prefetch queue; the trainer pushes updated weights to the server over native NCCL. There is no Megatron backend and no veRL dependency — the training side stays plain Transformers, with the same parallelism and checkpointing stack. See [Environmental GRPO](agent-docs/training-methods/grpo/environmental-grpo.md).
+- **RL is asynchronous, with a clean Transformers ↔ vLLM/SGLang split.** Multi-turn environment rollouts run as Ray actors against a vLLM or SGLang server and overlap training through a prefetch queue; the trainer pushes updated weights to the server over native NCCL. There is no Megatron backend and no veRL dependency — the training side stays plain Transformers, with the same parallelism and checkpointing stack. See [Environmental GRPO](agent-docs/training-methods/grpo/async-grpo/README.md).
 
 </br>
 

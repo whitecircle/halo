@@ -12,15 +12,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.environments.base import (
+    EPISODE_INVALID_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
+    EpisodeGrade,
     Message,
     Trajectory,
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import validate_tool_budgets
-from src.environments.rewards import compute_answer_reward
 from src.environments.tools.definitions import NativeToolRegistry, ToolArgumentError, ToolBudgetExhausted
 from src.environments.tools.factories import (
     create_native_math_tools,
@@ -28,8 +29,27 @@ from src.environments.tools.factories import (
     create_native_search_tools,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
+from src.rewards.matching import validate_answer
 
 logger = logging.getLogger(__name__)
+
+# The ReAct turn grammar: a Thought, then an Action or a Final Answer (the answer wins when both appear).
+_THOUGHT_RE = re.compile(
+    r"(?:^|\n)\s*(?:Thought|THOUGHT|Think|THINK|Reasoning|REASONING)\s*:\s*(.+?)(?=\n\s*(?:Action|ACTION|Final|FINAL)|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_FINAL_ANSWER_RE = re.compile(
+    r"(?:^|\n)\s*(?:Final Answer|FINAL ANSWER|Answer|ANSWER)\s*:\s*(.+?)$", re.IGNORECASE | re.DOTALL
+)
+_ACTION_RE = re.compile(
+    r"(?:^|\n)\s*(?:Action|ACTION)\s*:\s*(.+?)(?=\n\s*(?:Observation|OBSERVATION)|$)", re.IGNORECASE | re.DOTALL
+)
+# An action's spellings: ``tool_name(arg=...)``, ``tool_name: arg=...``, a bare ``tool_name``.
+_CALL_ACTION_RE = re.compile(r"^(\w+)\s*\((.*)\)$", re.DOTALL)
+_COLON_ACTION_RE = re.compile(r"^(\w+)\s*:\s*(.*)$", re.DOTALL)
+_BARE_ACTION_RE = re.compile(r"^(\w+)$")
+# One ``key=value`` argument: double- or single-quoted, a JSON object or list, or a bare token.
+_ARGUMENT_RE = re.compile(r'(\w+)\s*=\s*(?:"([^"]*?)"|\'([^\']*?)\'|(\{[^}]*\})|(\[[^\]]*\])|([^,\s]+))')
 
 
 @dataclass
@@ -54,27 +74,16 @@ def parse_react_output(text: str) -> ReActStep:
     """Parse ReAct output: a Thought followed by an Action (function-call/JSON/simple) or a Final Answer."""
     step = ReActStep()
 
-    thought_match = re.search(
-        r"(?:^|\n)\s*(?:Thought|THOUGHT|Think|THINK|Reasoning|REASONING)\s*:\s*(.+?)(?=\n\s*(?:Action|ACTION|Final|FINAL)|$)",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
+    thought_match = _THOUGHT_RE.search(text)
     if thought_match:
         step.thought = thought_match.group(1).strip()
 
-    # Final answer wins over an action if both are present.
-    final_match = re.search(
-        r"(?:^|\n)\s*(?:Final Answer|FINAL ANSWER|Answer|ANSWER)\s*:\s*(.+?)$", text, re.IGNORECASE | re.DOTALL
-    )
+    final_match = _FINAL_ANSWER_RE.search(text)
     if final_match:
         step.final_answer = final_match.group(1).strip()
         return step
 
-    action_match = re.search(
-        r"(?:^|\n)\s*(?:Action|ACTION)\s*:\s*(.+?)(?=\n\s*(?:Observation|OBSERVATION)|$)",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
+    action_match = _ACTION_RE.search(text)
     if action_match:
         action_text = action_match.group(1).strip()
         step.action, step.action_args = _parse_action(action_text)
@@ -102,21 +111,21 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
         except json.JSONDecodeError:
             pass
 
-    func_match = re.match(r"^(\w+)\s*\((.*)\)$", action_text, re.DOTALL)
+    func_match = _CALL_ACTION_RE.match(action_text)
     if func_match:
         name = func_match.group(1)
         args_str = func_match.group(2).strip()
         args = _parse_function_args(args_str)
         return name, args
 
-    simple_match = re.match(r"^(\w+)\s*:\s*(.*)$", action_text, re.DOTALL)
+    simple_match = _COLON_ACTION_RE.match(action_text)
     if simple_match:
         name = simple_match.group(1)
         args_str = simple_match.group(2).strip()
         args = _parse_function_args(args_str)
         return name, args
 
-    name_match = re.match(r"^(\w+)$", action_text)
+    name_match = _BARE_ACTION_RE.match(action_text)
     if name_match:
         return name_match.group(1), {}
 
@@ -129,8 +138,7 @@ def _parse_function_args(args_str: str) -> dict[str, Any]:
     if not args_str:
         return args
 
-    pattern = r'(\w+)\s*=\s*(?:"([^"]*?)"|\'([^\']*?)\'|(\{[^}]*\})|(\[[^\]]*\])|([^,\s]+))'
-    for match in re.finditer(pattern, args_str):
+    for match in _ARGUMENT_RE.finditer(args_str):
         key = match.group(1)
         # First MATCHED alternative by ``is not None``: truthiness would turn ``expression=""`` into None.
         value = next((g for g in match.groups()[1:] if g is not None), None)
@@ -154,6 +162,10 @@ class ReActEnvironment(BaseEnvironment):
     text, so no tool schema is advertised to the server and no server-side tool-call parser is
     involved — the tools are named in the system prompt.
     """
+
+    # The default check grades the Final Answer against ``context["answer"]``; an ``answer_validator``
+    # grades in its place and clears this per instance.
+    requires_answer = True
 
     # Asks for the protocol's own next move (an Action or a Final Answer) and never for shorter
     # reasoning: the text is trained on wherever a recovery succeeds, so an instruction here becomes a
@@ -186,10 +198,6 @@ Always think before acting, and provide a Final Answer when you're done."""
         self,
         tool_registry: NativeToolRegistry,
         system_prompt: str | None = None,
-        success_reward: float = 1.0,
-        failure_reward: float = 0.0,
-        tool_success_reward: float = 0.05,
-        tool_error_penalty: float = 0.1,
         thought_reward: float = 0.02,
         no_thought_penalty: float = 0.05,
         require_thought: bool = True,
@@ -197,28 +205,25 @@ Always think before acting, and provide a Final Answer when you're done."""
         tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
-        """Reward = per-step thought/tool deltas + terminal answer reward.
+        """Reward = per-step thought/tool deltas + the graded final answer (the objective term).
 
         Penalty knobs must be magnitudes (>= 0); minus is applied at the use site so a positive config
-        value cannot farm the penalty as a bonus. ``answer_validator`` overrides the default check.
-        ``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``); a call past its cap is
-        refused as a tool error and never runs.
+        value cannot farm the penalty as a bonus. The per-call knobs (``tool_success_reward``,
+        ``tool_error_penalty``, ``tool_reward_cap``) are the base's. ``answer_validator`` overrides the
+        default check. ``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``); a call
+        past its cap is refused as a tool error and never runs.
         """
+        # An answer_validator grades the final answer itself, so only the default check makes the
+        # dataset's answer column load-bearing. An explicit requires_answer wins; ``None`` is unset,
+        # so a YAML ``requires_answer: null`` still lands on the class declaration.
+        if kwargs.get("requires_answer") is None:
+            kwargs["requires_answer"] = not callable(answer_validator)
         super().__init__(**kwargs)
 
-        require_magnitudes(
-            tool_success_reward=tool_success_reward,
-            tool_error_penalty=tool_error_penalty,
-            thought_reward=thought_reward,
-            no_thought_penalty=no_thought_penalty,
-        )
+        require_magnitudes(thought_reward=thought_reward, no_thought_penalty=no_thought_penalty)
 
         self.registry = tool_registry
         self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
-        self.success_reward = success_reward
-        self.failure_reward = failure_reward
-        self.tool_success_reward = tool_success_reward
-        self.tool_error_penalty = tool_error_penalty
         self.thought_reward = thought_reward
         self.no_thought_penalty = no_thought_penalty
         self.require_thought = require_thought
@@ -249,6 +254,10 @@ Always think before acting, and provide a Final Answer when you're done."""
             system_prompt=self.system_prompt,
             extra_info={
                 "expected_answer": context.get("answer"),
+                # Presence, not value: a row whose ``answer`` cell is null is a data fault, an absent
+                # key an ungraded episode, and the reward pays them differently. Read off the RESET
+                # context, the only one that carries the row (a lost episode is graded with none).
+                "_answer_in_context": "answer" in context,
                 "thoughts": [],
                 "actions": [],
                 "observations": [],
@@ -268,16 +277,13 @@ Always think before acting, and provide a Final Answer when you're done."""
         reward = 0.0
         info = {}
 
-        step = parse_react_output(action)
-
-        # A turn the engine cut short before either terminator is a failed turn, not a formatting
-        # failure. Checked after the parse, so a turn that emitted its Action or Final Answer before
-        # the cut takes the normal path; an unfinished turn is neither rewarded nor penalized.
-        if (
-            not (step.has_action or step.has_final_answer)
-            and (context or {}).get("finish_reason") in ENGINE_CUT_FINISH_REASONS
-        ):
+        # A turn the engine cut short is a fragment whatever the parser would salvage from it — the
+        # base flags the message untrainable, so an Action executed or a Final Answer graded here would
+        # earn a reward on a turn the trainer then excludes. Same rule as the native protocol.
+        if (context or {}).get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             return self._handle_length_cutoff(trajectory)
+
+        step = parse_react_output(action)
 
         if step.thought:
             trajectory.info["thoughts"].append(step.thought)
@@ -298,11 +304,13 @@ Always think before acting, and provide a Final Answer when you're done."""
 
         if step.has_action:
             tool = self.registry.get(step.action)
+            success = False
 
             if not tool:
                 observation = self.registry.unknown_tool_message(step.action)
-                reward -= self.tool_error_penalty
                 info["tool_error"] = f"Unknown tool: {step.action}"
+                # The turn accomplished nothing: skipped by the trainer, as under the native protocol.
+                self._flag_calls_rejected(trajectory)
             else:
                 try:
                     # Bind before spending the episode's budget: a call the handler cannot run is
@@ -312,29 +320,25 @@ Always think before acting, and provide a Final Answer when you're done."""
                     if cap is not None:
                         raise ToolBudgetExhausted(tool.budget_exhausted_message(cap))
                     self._count_tool_call(trajectory, step.action)
-                    result = tool.execute(**args)
-                    observation = result
-                    reward += self.tool_success_reward
-                    trajectory.info["successful_tool_calls"] += 1
+                    observation = tool.execute(**args)
+                    success = True
                     info["tool_success"] = True
                 except (ToolBudgetExhausted, ToolArgumentError) as e:
                     # A refusal is expected control flow: charged like any tool error, logged without
                     # the traceback that a tool which actually broke gets below.
                     logger.debug("Tool %r refused the call: %s", step.action, e)
                     observation = f"Error: {e}"
-                    reward -= self.tool_error_penalty
                     info["tool_error"] = str(e)
                 except Exception as e:
-                    # Without this line the episode just scores failure_reward with nothing anywhere
+                    # Without this line the episode just grades 0 with nothing anywhere
                     # saying why: the observation carries the message, but the trajectory is not where
                     # a broken tool gets debugged.
                     logger.warning("Tool %r raised during execution", step.action, exc_info=True)
                     observation = f"Error: {str(e)}"
-                    reward -= self.tool_error_penalty
                     info["tool_error"] = str(e)
 
+            reward += self._credit_tool_call(trajectory, success)
             observation = self._truncate_observation(observation)
-            trajectory.info["total_tool_calls"] += 1
             trajectory.info["actions"].append(
                 {
                     "tool": step.action,
@@ -360,39 +364,42 @@ Always think before acting, and provide a Final Answer when you're done."""
         info["no_action"] = True
         return trajectory, reward, False, False, info
 
-    def _compute_reward(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> float:
-        """Compute final reward based on answer correctness."""
-        base_reward = trajectory.total_reward
-
+    def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
+        """Grade the final answer: 1 when it validates against the expected one, else 0."""
         if not trajectory.info.get("completed"):
-            return base_reward + self.failure_reward
+            return EpisodeGrade(0.0)
 
         final_answer = trajectory.info.get("final_answer")
         expected = trajectory.info.get("expected_answer")
 
-        if expected is None:
-            return base_reward + self.success_reward
-
         if final_answer is None:
-            return base_reward + self.failure_reward
+            return EpisodeGrade(0.0)
 
-        if self.answer_validator:
+        # Consulted before the expected answer is read: the validator is the grader wherever one is
+        # configured, so an answer-less row is ITS verdict to give, not an automatic success.
+        if callable(self.answer_validator):
             try:
-                if self.answer_validator(final_answer, expected):
-                    return base_reward + self.success_reward
-                else:
-                    return base_reward + self.failure_reward
+                validated = self.answer_validator(final_answer, expected)
             except Exception:
                 # Unwarned, an always-raising validator silently re-grades every episode by default.
                 logger.warning("answer_validator raised; falling back to the default check", exc_info=True)
+            else:
+                return EpisodeGrade(1.0 if validated else 0.0)
 
-        answer_reward = compute_answer_reward(
-            predicted=final_answer,
-            expected=expected,
-            success_reward=self.success_reward,
-            failure_reward=self.failure_reward,
-        )
-        return base_reward + answer_reward
+        if expected is None:
+            if trajectory.info.get("_answer_in_context"):
+                # The row IS answer-graded and its cell is null: nothing was verified, so the
+                # completion payout below would hand the full objective to any episode that answered
+                # — and to its whole group, since every sibling answers just as easily. Drop it from
+                # the baseline instead, the same contract the native protocol holds.
+                logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
+                trajectory.info[EPISODE_INVALID_KEY] = True
+                return EpisodeGrade(0.0)
+            # Nothing to grade against: reaching a Final Answer is the objective. ``requires_answer``
+            # keeps an answer-graded run off this path rather than paying it the full objective.
+            return EpisodeGrade(1.0)
+
+        return EpisodeGrade(1.0 if validate_answer(final_answer, expected) else 0.0)
 
 
 def create_react_math_environment(**kwargs) -> ReActEnvironment:

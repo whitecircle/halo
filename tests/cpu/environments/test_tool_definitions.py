@@ -38,6 +38,7 @@ from src.environments.tools.factories import (
     create_native_math_tools,
     create_native_python_tools,
     create_native_search_tools,
+    create_session_bash_tools,
     create_session_code_tools,
     create_session_file_tools,
 )
@@ -413,6 +414,7 @@ def _registries_under_test() -> dict[str, NativeToolRegistry]:
         "python": create_native_python_tools(),
         "search": create_native_search_tools(backend="duckduckgo"),
         "file": create_native_file_tools(),
+        "session_bash": create_session_bash_tools(no_session),
         "session_code": create_session_code_tools(no_session),
         "session_file": create_session_file_tools(no_session),
         "all": create_all_native_tools(),
@@ -478,7 +480,7 @@ def test_code_tool_advertises_no_input_channel_it_cannot_bind():
     """The description is the model's only account of the tool. It once promised stdin while no
     ``stdin`` parameter was declared and none was bound, so the sandbox always ran with empty input
     and the model was told to write programs that read it."""
-    for source in ("code", "python", "session_code"):
+    for source in ("code", "python", "session_code", "session_bash"):
         for tool in _registries_under_test()[source].list_tools():
             declared = {parameter.name for parameter in tool.parameters}
             texts = [tool.description] + [parameter.description for parameter in tool.parameters]

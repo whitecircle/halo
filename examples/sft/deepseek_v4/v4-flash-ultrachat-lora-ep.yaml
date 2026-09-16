@@ -1,9 +1,7 @@
 # DeepSeek-V4-Flash — EP=8 LoRA (attention PEFT + native grouped expert-LoRA) SFT on UltraChat 200K.
 # See agent-docs/models/deepseek-v4.md.
-#
 # Requires a BF16-converted checkpoint (the hub ships FP8 dense + FP4-packed experts):
-#   python scripts/before_training/convert_deepseek_v4_bf16.py \
-#       --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir /mnt/models/DeepSeek-V4-Flash-BF16
+#   python scripts/before_training/convert_deepseek_v4_bf16.py --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir /mnt/models/DeepSeek-V4-Flash-BF16
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
 # --- Model ---
@@ -37,10 +35,9 @@ lora_target_modules:
 - gate_up_proj                        # routed experts (gate+up) — native EP grouped-LoRA
 - down_proj                           # routed experts (down) — native EP grouped-LoRA
 lora_task_type: CAUSAL_LM
-# Set merge_expert_lora_on_save: true for a fully-merged, servable HF checkpoint — it folds both halves
-# (expert deltas in the family gather, attention deltas via merge_adapter). Left off here, the run writes
-# a mixed adapter this toolkit resumes but no merge tool folds: merge_peft_adapters.py refuses it, because
-# a PEFT merge would drop every expert delta.
+# Set merge_expert_lora_on_save: true for a fully-merged, servable HF checkpoint (expert deltas in the
+# family gather, attention deltas via merge_adapter). Left off, the run writes a mixed adapter this
+# toolkit resumes but merge_peft_adapters.py refuses — a PEFT merge would drop every expert delta.
 
 # --- Training ---
 per_device_train_batch_size: 1

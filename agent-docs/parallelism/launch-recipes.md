@@ -84,7 +84,7 @@ export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the 
 # Cross-node EP (ep_scope=global) over EFA additionally needs proxy GIN + GDRCopy:
 # export NCCL_GIN_TYPE=2             # proxy GIN (EFA has no IBGDA)
 # and run the container with `--device /dev/gdrdrv` (host loads the gdrdrv module).
-# A rollout server on another node (online / env-GRPO): the server under its compose EFA overlay,
+# A rollout server on another node (online / async GRPO): the server under its compose EFA overlay,
 # the trainer with `make ... EFA=1` — agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa.
 # export NVLINK_DOMAIN_SIZE=72        # GB200/GB300 NVL72 only; leave unset on ≤8-GPU nodes
 # export NCCL_DEBUG=INFO              # optional; overrides the image's WARN
@@ -101,8 +101,9 @@ rather than the PyTorch watchdog.
 
 Inter-node EP runs the DeepEP V2 NCCL **Gin** (RDMA) backend; intra-node EP runs the non-Gin NVLink
 path. The dispatcher sets `EP_DISABLE_GIN` from the EP topology (honoring an explicit value).
+
 `EP_SUPPRESS_NCCL_CHECK=1` is baked into both images as an `ENV` and must reach the process
-environment — DeepEP latches it at `import deep_ep`, so a Python-level write is too late; the
+environment: DeepEP latches it at `import deep_ep`, so a Python-level write is too late, and the
 dispatcher can only warn. Without it DeepEP's duplicate-NCCL guard flags the image's HPC-X transport
 plugin as a second NCCL runtime.
 

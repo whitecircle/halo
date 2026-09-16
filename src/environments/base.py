@@ -4,13 +4,29 @@ base classes an environment subclasses. ``AsyncBaseEnvironment`` runs its turn b
 
 import asyncio
 import itertools
+import logging
 import math
 import random
+import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
+from src.rewards.composer import RewardComposer
+from src.rewards.samples import ScoringSample
+from src.rewards.scoring import ScoreResult
+from src.rewards.spec import (
+    ENVIRONMENT_REWARD_SOURCES,
+    OBJECTIVE_TERM_NAME,
+    EnvironmentTerm,
+    RewardTerm,
+    component_key,
+    parse_reward_terms,
+)
+
+logger = logging.getLogger(__name__)
 
 # Reasoning-effort levels for the chat template ("Reasoning: <level>"). "random" resolves per episode.
 VALID_REASONING_EFFORTS = ("low", "medium", "high")
@@ -21,11 +37,26 @@ EPISODE_INVALID_KEY = "episode_invalid"
 # Why the trainer dropped an episode as untrainable (a chat-template re-render failure); read by the
 # all-invalid step halt so its message names the cause.
 EPISODE_INVALID_REASON_KEY = "episode_invalid_reason"
+# The cause on an episode its driver lost (a generation that raised), the spelling the Ray actor
+# stamps on the row it hands back for one. A driver stamps it before closing the episode through
+# ``finalize_truncated``, and the turn-overflow price then stays off it: the fault is not the policy's.
+EPISODE_ERROR_KEY = "error"
 
-# The task-outcome component of an env's ``reward_components``, the term advantage shaping gates on.
-# Shaping falls back to the total reward when the component is absent, so a misspelled key shapes on
-# the total instead.
-OBJECTIVE_REWARD_KEY = "reward/objective"
+# The environment's own grade, priced by the reward's environment term, in ``reward_components``: the
+# term advantage shaping gates on (it falls back to the total reward when absent).
+OBJECTIVE_REWARD_KEY = component_key(OBJECTIVE_TERM_NAME)
+# Every term of the episode reward, ``reward/<name>`` → contribution; the values sum to the reward.
+REWARD_COMPONENTS_KEY = "reward_components"
+# Set in ``info`` while an episode's externally scored terms (a judge, a reward model) are still owed;
+# ``settle_async`` clears it. A driver reading the reward before then reads a partial one.
+REWARD_PENDING_KEY = "reward_pending"
+# What the external scorers report per episode: their diagnostics (``judge/<term>/<requirement>``,
+# merged into the rollout metrics), their accounts (a judge's rationale) and their failures, by term.
+REWARD_METRICS_KEY = "reward_metrics"
+REWARD_DETAILS_KEY = "reward_details"
+REWARD_ERRORS_KEY = "reward_errors"
+# The component holding the accrued per-turn deltas; the base owns it, an environment may not reuse it.
+TURN_SHAPING_COMPONENT = "turn_shaping"
 
 # The per-episode solve flag the rollout metrics average into the group solve rate; a misspelled key
 # drops the metric rather than raising.
@@ -40,6 +71,16 @@ EPISODE_SLICES_KEY = "slices"
 # calls per tool under ``TOOL_CALL_COUNTS_KEY``.
 EPISODE_TOOL_BUDGETS_KEY = "episode_tool_budgets"
 TOOL_CALL_COUNTS_KEY = "tool_call_counts"
+# What the episode has been paid for successful tool calls so far, against ``tool_reward_cap``.
+TOOL_REWARD_PAID_KEY = "tool_reward_paid"
+
+# Set by a protocol when the model's final text answer had no visible content: a turn that ended
+# inside its reasoning. Read by ``episode/empty_answer_rate``.
+EMPTY_FINAL_ANSWER_KEY = "empty_final_answer"
+
+# CJK ideographs, kana and hangul: the scripts a Latin-script task's CoT drifts into under RL.
+# ``episode/reasoning_cjk_rate`` counts the episodes whose reasoning carries any of them.
+_CJK_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
 
 # Message keys a chat template may read assistant CoT from: harmony (gpt-oss) reads ``thinking``,
@@ -71,6 +112,31 @@ def require_magnitudes(**knobs: float) -> None:
             raise ValueError(f"{name} must be a finite value >= 0 (a magnitude), got {value}")
 
 
+@dataclass(frozen=True)
+class EpisodeGrade:
+    """What an environment says about a finished episode: ``objective``, its own grade of the task in
+    ``[0, 1]`` (priced by the reward's environment term), and ``shaping``, the environment's own
+    episode-level terms by bare name (``{"submission": 0.25}``), each added as ``reward/<name>``."""
+
+    objective: float
+    shaping: Mapping[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        objective = self.objective
+        if isinstance(objective, bool) or not isinstance(objective, int | float) or not (0.0 <= objective <= 1.0):
+            raise ValueError(f"an episode's objective grade must lie in [0, 1], got {objective!r}")
+        for name, value in self.shaping.items():
+            if (
+                not isinstance(name, str)
+                or not name
+                or "/" in name
+                or name in (OBJECTIVE_TERM_NAME, TURN_SHAPING_COMPONENT)
+            ):
+                raise ValueError(f"shaping term name {name!r} is malformed or reserved")
+            if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+                raise ValueError(f"shaping term {name!r} must be a finite number, got {value!r}")
+
+
 @dataclass(slots=True)
 class Message:
     """A single conversation message (``__slots__`` for memory efficiency at scale)."""
@@ -80,7 +146,8 @@ class Message:
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
-    # Emitted by to_dict only for training (include_thinking) — an unknown field can 400 a vLLM request.
+    # Emitted by to_dict only under include_thinking: the training render, and the engine request when
+    # the env carries reasoning across turns (a template that reads no reasoning key renders nothing).
     thinking: str | None = None
     # Engine-side captures, all dropped by to_dict. ``routing_mask`` stays raw base64: decoding here
     # would pickle a large array through Ray. The prompt ids are the engine's; a re-render can differ.
@@ -96,8 +163,8 @@ class Message:
     calls_rejected: bool = False
 
     def to_dict(self, include_thinking: bool = False) -> dict[str, Any]:
-        """Convert to dict for tokenizer/API. ``include_thinking`` is opt-in (training tokenization
-        only); default keeps assistant CoT out of vLLM generation requests."""
+        """Convert to dict for tokenizer/API. ``include_thinking`` is opt-in: the training render, and the
+        engine request when the env carries reasoning; the default keeps assistant CoT out of it."""
         d = {"role": self.role, "content": self.content}
         if self.name:
             d["name"] = self.name
@@ -148,6 +215,20 @@ class Message:
         return cls(role="tool", content=content, tool_call_id=tool_call_id, name=name)
 
 
+def engine_view(messages: Sequence[Message], carry_reasoning: bool) -> list[Message]:
+    """The conversation as the engine is told it: every message's visible text and, with
+    ``carry_reasoning``, the LAST assistant turn's reasoning — the thought the next turn continues from.
+    Earlier turns' reasoning is withheld, so a request grows by at most one reasoning budget over the
+    visible history. The one owner of what the engine sees: the rollout observation and the trainer's
+    context re-render both come through here, and where a carried thought renders is the chat template's
+    decision, not this function's."""
+    last = max((i for i, m in enumerate(messages) if m.role == "assistant"), default=None)
+    return [
+        m if m.thinking is None or (carry_reasoning and i == last) else replace(m, thinking=None)
+        for i, m in enumerate(messages)
+    ]
+
+
 @dataclass
 class Trajectory:
     """A complete or partial trajectory through the environment (messages + rewards + state)."""
@@ -185,9 +266,10 @@ class Trajectory:
         (see ``EPISODE_INVALID_KEY``); the trainer excludes it from the GRPO group baseline."""
         return bool(self.info.get(EPISODE_INVALID_KEY, False))
 
-    def get_conversation(self) -> list[dict[str, Any]]:
-        """Get conversation as list of dicts for tokenizer."""
-        return [m.to_dict() for m in self.messages]
+    def get_conversation(self, include_thinking: bool = False) -> list[dict[str, Any]]:
+        """The conversation as message dicts for the engine (:func:`engine_view`); ``include_thinking``
+        carries the last assistant turn's reasoning along under :data:`REASONING_KEYS`."""
+        return [m.to_dict(include_thinking=True) for m in engine_view(self.messages, include_thinking)]
 
 
 @dataclass(slots=True)
@@ -210,13 +292,24 @@ class EnvStep:
 class BaseEnvironment(ABC):
     """Abstract base class for multi-turn GRPO environments.
 
-    Subclasses implement ``_reset_single``, ``_step_single``, ``_compute_reward``. Parallel rollout
+    Subclasses implement ``_reset_single``, ``_step_single``, ``_grade_episode``. Parallel rollout
     collection runs one episode per Ray actor instance (see ray_actors.py).
     """
 
     # Turn budget used when the config names none. Per class, since an agentic edit-run-test loop and
     # a one-shot exam need very different budgets.
     DEFAULT_MAX_TURNS: int = 10
+
+    # Per-tool-call shaping a class gets when the config names none; a task env that departs states
+    # its own value once (code-contests turns both off) instead of re-defaulting its constructor.
+    DEFAULT_TOOL_SUCCESS_REWARD: float = 0.05
+    DEFAULT_TOOL_ERROR_PENALTY: float = 0.1
+
+    # Whether this class's reward grades ONLY against ``context["answer"]``: the trainer refuses a
+    # dataset carrying no ``answer`` column when it is set, since nothing would be graded. The
+    # dual-mode classes — the native protocol and its presets — leave it False and grade against the
+    # answer wherever a row carries one, paying for completing the task where no row does.
+    requires_answer: bool = False
 
     # Declared here because ``_add_action_message`` trims stored ``tool_calls`` to it; ``None`` = no cap.
     max_tool_calls_per_turn: int | None = None
@@ -229,6 +322,12 @@ class BaseEnvironment(ABC):
     # since the text must ask for that protocol's next move; ``None`` means the protocol has no
     # recovery path and does not route cut-off turns there.
     LENGTH_CUTOFF_NUDGE: str | None = None
+
+    # Names of the episode-level shaping components this class adds to the reward (``reward/<name>``),
+    # the union over the MRO being what an episode may carry: a protocol declares its own
+    # (``tool_shaping``), a task env its rungs. Declared so a reward term cannot take a shaping
+    # component's name, and an undeclared shaping name fails at the first settled episode.
+    SHAPING_COMPONENTS: tuple[str, ...] = ()
 
     # Effort level -> profile defaults. The base binds no budget to any level (the global rollout caps
     # stand); an env that prices effort declares its own table. ``reasoning_effort_profiles`` merges
@@ -252,13 +351,40 @@ class BaseEnvironment(ABC):
         max_observation_chars: int = 16384,
         max_length_cutoff_recoveries: int | None = None,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
+        carry_reasoning: bool = False,
+        requires_answer: bool | None = None,
+        tool_success_reward: float | None = None,
+        tool_error_penalty: float | None = None,
+        tool_reward_cap: float | None = None,
+        reward_terms: Sequence[RewardTerm | Mapping[str, Any]] | None = None,
         **kwargs,
     ):
         """``max_turns`` caps turns before truncation, defaulting to this class's
         :data:`DEFAULT_MAX_TURNS`; ``max_observation_chars`` caps a tool observation's length.
+        ``tool_success_reward`` / ``tool_error_penalty`` price every executed tool call
+        (:meth:`_credit_tool_call`), defaulting to :data:`DEFAULT_TOOL_SUCCESS_REWARD` /
+        :data:`DEFAULT_TOOL_ERROR_PENALTY`; ``tool_reward_cap`` bounds what one episode earns from
+        successful calls in total, ``None`` resolving to ``tool_success_reward * max_turns`` — at most
+        one paid call per turn of the budget, so per-call pay cannot out-earn the objective through
+        call spam (five paid calls a turn over ten turns would otherwise pay 2.5 against a 1.0 solve).
         ``max_length_cutoff_recoveries`` caps how many engine-cut turns an episode may recover from
         (``None`` = every one within ``max_turns``): a cut turn spends a turn but no tool budget, so
         without a cap an episode whose thoughts overrun their budget re-thinks until ``max_turns``.
+        ``carry_reasoning`` sends the previous assistant turn's reasoning back to the engine with the
+        conversation, so the next turn (a tool round, the retry after a cut) conditions on the thought
+        that produced it instead of restarting; earlier turns stay as visible text, which bounds a
+        request's growth to one reasoning budget. Off, the engine sees only visible text. Where the
+        carried thought renders is the chat template's call (Qwen3.x: turns after the last user
+        message, or all of them under ``preserve_thinking``).
+        ``requires_answer`` overrides the class's :attr:`requires_answer` declaration that its reward
+        grades against ``context["answer"]``, which makes the trainer refuse a dataset carrying no
+        ``answer`` column rather than score the whole run on nothing. ``None`` keeps the declaration,
+        so read the resolved verdict off an INSTANCE: the class attribute is only the default, which a
+        class deriving its own (ReAct, from ``answer_validator``) overrides per instance.
+        ``reward_terms`` are the episode reward's terms (:mod:`src.rewards.spec`, ``source`` in
+        ``environment`` / ``judge`` / ``reward_model``), as typed terms or config mappings; ``None`` is
+        the environment's own grade at weight 1. The accrued per-turn deltas and the protocol's and
+        environment's shaping add on top of them.
         ``reasoning_effort`` (popped from kwargs) steers the chat template's CoT depth:
         ``low``/``medium``/``high``, ``"random"``, or ``None``. ``reasoning_effort_profiles`` overrides
         the class's per-level profiles (:data:`REASONING_EFFORT_PROFILES`), merged per level; the
@@ -276,6 +402,23 @@ class BaseEnvironment(ABC):
             raise ValueError(f"max_length_cutoff_recoveries must be >= 0 or None, got {max_length_cutoff_recoveries}")
         self.max_length_cutoff_recoveries = max_length_cutoff_recoveries
         self.max_observation_chars = max_observation_chars
+        self.carry_reasoning = carry_reasoning
+        if requires_answer is not None:
+            self.requires_answer = requires_answer
+        if tool_success_reward is None:
+            tool_success_reward = self.DEFAULT_TOOL_SUCCESS_REWARD
+        if tool_error_penalty is None:
+            tool_error_penalty = self.DEFAULT_TOOL_ERROR_PENALTY
+        if tool_reward_cap is None:
+            tool_reward_cap = tool_success_reward * max_turns
+        require_magnitudes(
+            tool_success_reward=tool_success_reward,
+            tool_error_penalty=tool_error_penalty,
+            tool_reward_cap=tool_reward_cap,
+        )
+        self.tool_success_reward = tool_success_reward
+        self.tool_error_penalty = tool_error_penalty
+        self.tool_reward_cap = tool_reward_cap
         reasoning_effort = kwargs.pop("reasoning_effort", None)
         if reasoning_effort is not None and reasoning_effort not in (*VALID_REASONING_EFFORTS, "random"):
             raise ValueError(
@@ -284,6 +427,25 @@ class BaseEnvironment(ABC):
             )
         self.reasoning_effort = reasoning_effort
         self.reasoning_effort_profiles = self._merge_effort_profiles(reasoning_effort_profiles)
+        terms = (
+            (EnvironmentTerm(),)
+            if reward_terms is None
+            else parse_reward_terms(reward_terms, ENVIRONMENT_REWARD_SOURCES)
+        )
+        self._rewards = RewardComposer(terms)
+        reserved = {TURN_SHAPING_COMPONENT, *self.shaping_components()}
+        taken = sorted(term.name for term in self._rewards.external_terms if term.name in reserved)
+        if taken:
+            raise ValueError(
+                f"reward term name(s) {taken} are shaping components of {type(self).__name__}; "
+                f"pick another name for the term"
+            )
+        self._background_tasks: set[asyncio.Task] = set()
+        if hasattr(type(self), "_compute_reward"):
+            raise TypeError(
+                f"{type(self).__name__} defines _compute_reward, which nothing calls: an environment grades "
+                f"through _grade_episode, returning an EpisodeGrade."
+            )
         if kwargs:
             raise TypeError(
                 f"{type(self).__name__} got unexpected environment option(s) {sorted(kwargs)}. Every "
@@ -293,6 +455,16 @@ class BaseEnvironment(ABC):
 
         self._trajectories: dict[int, Trajectory] = {}
         self._episode_id_generator = itertools.count()
+
+    @property
+    def reward_terms(self) -> tuple[RewardTerm, ...]:
+        """The episode reward's terms, as configured."""
+        return self._rewards.terms
+
+    @classmethod
+    def shaping_components(cls) -> frozenset[str]:
+        """The shaping component names this class may add: every ``SHAPING_COMPONENTS`` along the MRO."""
+        return frozenset(name for klass in cls.__mro__ for name in getattr(klass, "SHAPING_COMPONENTS", ()))
 
     @classmethod
     def effort_profile_key_minima(cls) -> dict[str, int | float]:
@@ -382,6 +554,29 @@ class BaseEnvironment(ABC):
         counts[name] = counts.get(name, 0) + 1
         return counts[name]
 
+    def _credit_tool_call(self, trajectory: Trajectory, success: bool) -> float:
+        """Book one executed tool call on the episode's counters and return its reward delta:
+        ``-tool_error_penalty`` for a failed call; for a successful one ``tool_success_reward``, less
+        whatever would take the episode's paid total (``TOOL_REWARD_PAID_KEY``) past
+        ``tool_reward_cap``. The one accounting every protocol pays through."""
+        trajectory.info["total_tool_calls"] += 1
+        if not success:
+            return -self.tool_error_penalty
+        trajectory.info["successful_tool_calls"] += 1
+        paid = trajectory.info.get(TOOL_REWARD_PAID_KEY, 0.0)
+        credit = max(0.0, min(self.tool_success_reward, self.tool_reward_cap - paid))
+        trajectory.info[TOOL_REWARD_PAID_KEY] = paid + credit
+        return credit
+
+    @staticmethod
+    def _flag_calls_rejected(trajectory: Trajectory) -> None:
+        """Mark the turn just taken — the last assistant message — as one whose every call named a
+        nonexistent tool (:attr:`Message.calls_rejected`), so no tokenization path weights it."""
+        for message in reversed(trajectory.messages):
+            if message.role == "assistant":
+                message.calls_rejected = True
+                return
+
     def _truncate_observation(self, content: str) -> str:
         """Cap a tool observation's length. An unbounded output bloats the trajectory and makes the
         per-turn re-render slow; capping at the source keeps rollout and recompute identical."""
@@ -412,13 +607,32 @@ class BaseEnvironment(ABC):
 
     def rollout_metrics(self, trajectory: "Trajectory") -> dict[str, float]:
         """Per-episode diagnostic metrics (mean-aggregated by the trainer), keyed by full metric path:
-        ``outcome/*`` (task success), ``episode/*`` (agent behavior), ``reward/*`` (decomposition). Base
-        emits the tool-use signal; task envs override to add outcome + reward-component metrics."""
+        ``outcome/*`` (task success), ``episode/*`` (agent behavior), ``reward/*`` (the reward's
+        components, which sum to it) and the external scorers' own keys. Base emits the tool-use
+        signal and the reward decomposition; task envs override to add outcome metrics."""
+        if REWARD_PENDING_KEY in trajectory.info:
+            raise RuntimeError(
+                "the episode's reward still owes its externally scored terms: the driver must await "
+                "settle_async (EpisodeDispatcher does) before reading the episode"
+            )
         metrics: dict[str, float] = {}
         if "total_tool_calls" in trajectory.info:
             metrics["episode/tool_calls"] = float(trajectory.info["total_tool_calls"])
         # Tracked separately: a termination-rate metric cannot tell a cut-off turn from an answer.
         metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
+        # Nor this: a turn that stopped inside its reasoning ends the episode as a natural, empty answer.
+        metrics["episode/empty_answer_rate"] = 1.0 if trajectory.info.get(EMPTY_FINAL_ANSWER_KEY) else 0.0
+        metrics["episode/reasoning_cjk_rate"] = (
+            1.0
+            if any(
+                m.role == "assistant" and m.thinking and _CJK_SCRIPT.search(m.thinking) for m in trajectory.messages
+            )
+            else 0.0
+        )
+        metrics.update(trajectory.info.get(REWARD_COMPONENTS_KEY, {}))
+        metrics.update(trajectory.info.get(REWARD_METRICS_KEY, {}))
+        if self._rewards.external_terms and REWARD_COMPONENTS_KEY in trajectory.info:
+            metrics["episode/reward_scored"] = 0.0 if trajectory.info.get(REWARD_ERRORS_KEY) else 1.0
         return metrics
 
     def _get_next_episode_id(self) -> int:
@@ -491,7 +705,7 @@ class BaseEnvironment(ABC):
         ``max_length_cutoff_recoveries``), never graded — the fragment would end the episode on a
         mid-sentence string that reads as a *natural* termination. A cut past the cap ends the episode
         truncated, priced like a ``max_turns`` overflow. Carries no reward penalty of its own (why:
-        ``agent-docs/training-methods/grpo/environmental-grpo.md``). Owned by the base so
+        ``agent-docs/training-methods/grpo/async-grpo/README.md``). Owned by the base so
         ``episode/length_cutoff_turns`` means the same thing for every protocol that can recover; the
         wording is each protocol's (:data:`LENGTH_CUTOFF_NUDGE`).
         """
@@ -512,7 +726,7 @@ class BaseEnvironment(ABC):
         """Opening :class:`EnvStep` for a freshly reset episode (sync + async reset paths)."""
         return EnvStep(
             trajectory=trajectory,
-            observation=trajectory.get_conversation(),
+            observation=trajectory.get_conversation(include_thinking=self.carry_reasoning),
             reward=0.0,
             done=False,
             truncated=False,
@@ -523,12 +737,24 @@ class BaseEnvironment(ABC):
         """Terminal :class:`EnvStep` for an episode that is already complete (a no-op step)."""
         return EnvStep(
             trajectory=trajectory,
-            observation=trajectory.get_conversation(),
+            observation=trajectory.get_conversation(include_thinking=self.carry_reasoning),
             reward=0.0,
             done=True,
             truncated=trajectory.truncated,
             info=trajectory.info,
         )
+
+    @staticmethod
+    def _drop_grading_payload(trajectory: Trajectory) -> None:
+        """Strip what a settled episode no longer needs but every hop after it would carry — the Ray
+        object store, the TP broadcast: the env's private ``_``-prefixed stamps (hidden tests, a
+        checker source) and the context's ``answer`` payload. Nothing downstream of the reward reads
+        them; a driver's own stamps land after this runs."""
+        for key in [key for key in trajectory.info if key.startswith("_")]:
+            del trajectory.info[key]
+        context = trajectory.info.get("context")
+        if context and "answer" in context:
+            trajectory.info["context"] = {key: value for key, value in context.items() if key != "answer"}
 
     def _finalize_step(
         self,
@@ -541,7 +767,7 @@ class BaseEnvironment(ABC):
         context: dict[str, Any] | None,
     ) -> EnvStep:
         """Post-``_step_single`` bookkeeping (sync + async paths): enforce ``max_turns`` truncation,
-        record reward/state, compute the final reward on termination, persist, return the step."""
+        record reward/state, price the reward on termination, persist, return the step."""
         if trajectory.num_turns >= self.max_turns and not done:
             truncated = True
             done = True
@@ -552,13 +778,19 @@ class BaseEnvironment(ABC):
         trajectory.info.update(info)
 
         if done:
-            trajectory.total_reward = self._compute_reward(trajectory, context)
+            self._settle_grade(trajectory, context)
+            # An episode its driver lost is graded on what it earned, never sent to a scorer: the
+            # fragment is the driver's fault, and a verdict on it would be paid for and taught.
+            if self._rewards.external_terms and EPISODE_ERROR_KEY not in trajectory.info:
+                trajectory.info[REWARD_PENDING_KEY] = True
+            else:
+                self._drop_grading_payload(trajectory)
 
         self._trajectories[episode_id] = trajectory
 
         return EnvStep(
             trajectory=trajectory,
-            observation=trajectory.get_conversation(),
+            observation=trajectory.get_conversation(include_thinking=self.carry_reasoning),
             reward=reward,
             done=done,
             truncated=truncated,
@@ -576,8 +808,135 @@ class BaseEnvironment(ABC):
         """Process a single action in the environment."""
 
     @abstractmethod
-    def _compute_reward(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> float:
-        """Compute the final reward for a complete trajectory."""
+    def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
+        """Grade a finished episode: the objective in ``[0, 1]`` and the environment's own shaping terms."""
+
+    def _episode_shaping(self, trajectory: Trajectory) -> dict[str, float]:
+        """The protocol's episode-level shaping terms by bare name; the base has none."""
+        return {}
+
+    def _settle_grade(self, trajectory: Trajectory, context: dict[str, Any] | None) -> None:
+        """Price the environment's side of the reward into ``reward_components``: the accrued per-turn
+        deltas (``reward/turn_shaping``), the protocol's and the environment's shaping, and the grade
+        through the reward's environment term. The externally scored terms follow in :meth:`settle_async`."""
+        grade = self._grade_episode(trajectory, context)
+        if not isinstance(grade, EpisodeGrade):
+            raise TypeError(
+                f"{type(self).__name__}._grade_episode must return an EpisodeGrade, got {type(grade).__name__}"
+            )
+        components = {component_key(TURN_SHAPING_COMPONENT): trajectory.total_reward}
+        declared = self.shaping_components()
+        for shaping in (self._episode_shaping(trajectory), grade.shaping):
+            for name, value in shaping.items():
+                if name not in declared:
+                    raise ValueError(
+                        f"{type(self).__name__} produced the shaping component {name!r} without declaring it "
+                        f"in SHAPING_COMPONENTS ({sorted(declared)})"
+                    )
+                key = component_key(name)
+                if key in components:
+                    raise ValueError(f"reward component {key!r} is declared twice")
+                components[key] = float(value)
+        term = self._rewards.environment_term
+        if term is not None:
+            components[term.key] = term.price(grade.objective)
+        # Every external term contributes 0 until it is scored, so the record holds the whole key set.
+        for external in self._rewards.external_terms:
+            components[external.key] = 0.0
+        trajectory.info[REWARD_COMPONENTS_KEY] = components
+        trajectory.total_reward = sum(components.values())
+
+    def _scoring_sample(self, trajectory: Trajectory) -> ScoringSample:
+        """What an external scorer reads of a finished episode: the prompt turns (everything before the
+        first assistant turn), the policy's turns after them, and the row's reference answer. A task
+        environment overrides this to hand the scorer its graded artifact (a submitted program)
+        instead of the last visible message."""
+        messages = [message.to_dict() for message in trajectory.messages]
+        first = next(
+            (i for i, message in enumerate(trajectory.messages) if message.role == "assistant"), len(messages)
+        )
+        context = trajectory.info.get("context") or {}
+        return ScoringSample(prompt=messages[:first], completion=messages[first:], reference=context.get("answer"))
+
+    def _apply_external_scores(self, trajectory: Trajectory, verdict: Mapping[str, ScoreResult]) -> None:
+        """Price the external terms' verdicts into the components, record their diagnostics, and close
+        the episode's reward: the pending mark goes, the grading payload with it."""
+        components = trajectory.info[REWARD_COMPONENTS_KEY]
+        for term in self._rewards.external_terms:
+            result = verdict[term.name]
+            if result.metrics:
+                trajectory.info.setdefault(REWARD_METRICS_KEY, {}).update(result.metrics)
+            if result.detail is not None:
+                trajectory.info.setdefault(REWARD_DETAILS_KEY, {})[term.name] = result.detail
+            if result.score is None:
+                # The scorer, not the policy, failed: the term contributes nothing and the episode
+                # leaves the group baseline rather than teaching a forced verdict. The reason is
+                # stamped where the trainer's all-invalid halt reads it, so a dead judge names itself.
+                error = result.error or "no score"
+                trajectory.info.setdefault(REWARD_ERRORS_KEY, {})[term.name] = error
+                trajectory.info[EPISODE_INVALID_KEY] = True
+                trajectory.info[EPISODE_INVALID_REASON_KEY] = f"reward term {term.name!r} scored nothing: {error}"
+            else:
+                components[term.key] = term.price(result.score)
+        trajectory.total_reward = sum(components.values())
+        del trajectory.info[REWARD_PENDING_KEY]
+        self._drop_grading_payload(trajectory)
+
+    async def settle_async(self, episode_ids: list[int]) -> None:
+        """Score the externally rewarded terms of the named finished episodes and complete their rewards.
+
+        Every term's scorer runs concurrently over the batch. Pure I/O over finished trajectories, so
+        the dispatcher runs it on its loop for sync and async environments alike; an episode without
+        a pending reward is a no-op.
+        """
+        pending = [trajectory for trajectory in self._episodes(episode_ids) if REWARD_PENDING_KEY in trajectory.info]
+        if not pending:
+            return
+        verdicts = await self._rewards.score([self._scoring_sample(trajectory) for trajectory in pending])
+        for trajectory, verdict in zip(pending, verdicts, strict=True):
+            self._apply_external_scores(trajectory, verdict)
+
+    def settle(self, episode_ids: list[int]) -> None:
+        """:meth:`settle_async` for a caller with no event loop running (a sync driver). Each call runs
+        on a loop of its own and releases the scorers' clients with it, so the next call builds fresh
+        ones instead of reusing clients bound to a closed loop."""
+        if not any(REWARD_PENDING_KEY in trajectory.info for trajectory in self._episodes(episode_ids)):
+            return
+
+        async def settle_and_release() -> None:
+            try:
+                await self.settle_async(episode_ids)
+            finally:
+                await self._rewards.aclose()
+
+        asyncio.run(settle_and_release())
+
+    def _episodes(self, episode_ids: list[int]) -> list[Trajectory]:
+        trajectories = []
+        for episode_id in episode_ids:
+            trajectory = self._trajectories.get(episode_id)
+            if trajectory is None:
+                raise ValueError(f"Episode {episode_id} not found")
+            trajectories.append(trajectory)
+        return trajectories
+
+    def _run_or_schedule(self, coroutine) -> None:
+        """Run a teardown coroutine to completion when no loop runs here, else schedule it on the
+        running one (a close hook is called from an actor's loop and from plain teardown alike)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            # Held strongly until done: the loop keeps only weak references to its tasks.
+            task = loop.create_task(coroutine)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            return
+        try:
+            asyncio.run(coroutine)
+        except Exception:
+            logger.debug("%s: the client's owning loop is already gone", type(self).__name__, exc_info=True)
 
     def reset(
         self, prompts: list[str | list[dict[str, str]]], contexts: list[dict[str, Any]] | None = None
@@ -629,9 +988,11 @@ class BaseEnvironment(ABC):
 
         For drivers whose episode ended mid-flight (generation failure, external abort). An empty-text
         step would take the plain-text terminal path and mark the episode ``completed``, paying
-        completion-rewarded envs ``success_reward`` for an episode that never finished. Here
+        completion-graded envs the full objective for an episode that never finished. Here
         ``info["completed"]`` stays False while reward already earned (tool rewards, a graded
-        ``submit_solution``) is preserved by ``_compute_reward``. No-op for already-done episodes.
+        ``submit_solution``) is preserved by the grade. A driver that lost the episode
+        stamps :data:`EPISODE_ERROR_KEY` first, which keeps the turn-overflow price off it. No-op for
+        already-done episodes.
         """
         steps = []
         for episode_id in episode_ids:
@@ -658,16 +1019,21 @@ class BaseEnvironment(ABC):
         """Release one episode's external resources (a sandbox session, a connection) as
         :meth:`cleanup` drops it. A base episode holds none beyond its trajectory."""
 
-    def close(self) -> None:  # noqa: B027  optional no-op lifecycle hook; subclasses override
-        """Clean up resources."""
+    def close(self) -> None:
+        """Clean up resources: the reward scorers' clients here; subclasses extend and call ``super()``."""
+        if self._rewards.external_terms:
+            self._run_or_schedule(self._rewards.aclose())
 
-    def verify_backend(self) -> None:  # noqa: B027  optional no-op lifecycle hook; subclasses override
-        """Reachability check for the environment's external scoring/tool backend; raise to abort.
+    def verify_backend(self) -> None:
+        """Reachability check for the environment's external scoring/tool backends; raise to abort.
 
         The launch script calls this once on global rank 0 before training starts (the verdict is
-        broadcast so all ranks raise together). Environments whose reward depends on an external
-        service (an LLM judge, a remote sandbox) override it, so a misconfigured backend fails the
-        launch instead of invalidating every episode of a running multi-GPU job."""
+        broadcast so all ranks raise together). The base probes every externally scored reward term
+        (a judge, a reward model) once, in the run's exact request shape; an environment with a
+        backend of its own extends this and calls ``super()`` — a misconfigured backend must fail
+        the launch, not invalidate every episode of a running multi-GPU job."""
+        if self._rewards.external_terms:
+            asyncio.run(self._rewards.verify())
 
 
 class AsyncBaseEnvironment(BaseEnvironment):

@@ -29,7 +29,9 @@ SR seeds come from a dedicated, rank-synchronized RNG (`_SR_RNG`, one per optimi
 
 ## Benchmarks
 
-**GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (Blackwell, SM100):** AdamWBF16 (Triton) steps in 51.6 ms vs 62.1 ms for `adamw_torch_fused` (**−17%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype. The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element) and draws both SR noise streams from one `tl.randint4x` Philox call. This compares two bf16-state optimizers; the 6-vs-12 B/param memory win is vs fp32-state AdamW, not visible in this row.
+**GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (Blackwell, SM100):** AdamWBF16 (Triton) steps in 51.6 ms vs 62.1 ms for `adamw_torch_fused` (**−17%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
+
+The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element) and draws both SR noise streams from one `tl.randint4x` Philox call. This row compares two bf16-state optimizers; the 6-vs-12 B/param memory win is against fp32-state AdamW and is not visible here.
 
 **Loss quality (4-layer FFN, 50M params, 200 steps):** AdamWBF16 (SR on weight + `exp_avg_sq`) reaches a gap to fp32-master of ~0.00008 — about 5× tighter than weight-only SR (~0.0004), because the unbiased second moment keeps the effective LR at nominal `lr`. Pure bf16 (fused) lags by 0.27.
 
@@ -55,12 +57,9 @@ optim: adamw_torch  # adamw_torch / adamw_torch_fused both auto-enable AdamWBF16
 resolution: `true` forces AdamWBF16 on where the auto path would decline (a non-AdamW `optim`, replicated
 DDP), `false` forces full fp32 master weights.
 
-`false` is rejected only where the run mixes plain-tensor experts with FSDP2 DTensors — `ep_group_size`
-(`ep_size × expert_tp_size`) above 1, or `ep_group_size == 1` with `fsdp_shard_ep1_experts: false` — and the
-raise lands when the optimizer is built, not at config time. Dense runs and MoE at
-`ep_size == expert_tp_size == 1` with the default `fsdp_shard_ep1_experts: true` are allowed.
-Combining `bf16_optimizer: true` with `optim: muon` or `optim: flash_adamw` **raises**: both select an
-optimizer and the bf16 path would silently win, so pick one.
+`false` is rejected only where the run mixes plain-tensor experts with FSDP2 DTensors: `ep_group_size` (`ep_size × expert_tp_size`) above 1, or `ep_group_size == 1` with `fsdp_shard_ep1_experts: false`. The raise lands when the optimizer is built, not at config time. Dense runs and MoE at `ep_size == expert_tp_size == 1` with the default `fsdp_shard_ep1_experts: true` are allowed.
+
+Combining `bf16_optimizer: true` with `optim: muon` or `optim: flash_adamw` **raises**: both select an optimizer and the bf16 path would silently win, so pick one.
 
 Direct use: `AdamWBF16(model.parameters(), lr=1e-4, betas=(0.9, 0.999), eps=1e-8)`, with the standard HF decay / no-decay param groups. Pass `use_triton=False` for the eager PyTorch fallback (functionally equivalent, slower — multiple memory passes instead of the one fused kernel; it also engages automatically without CUDA). The eager path seeds its SR noise from the same rank-synchronized `_SR_RNG`, so replica bit-identity holds there too.
 
@@ -83,17 +82,23 @@ Full fp32 master (`bf16_optimizer=False`) is supported on dense models and on `e
 
 `fp32_grad_reduce: true` upcasts gradients to fp32 for every cross-rank reduction the mixin owns (FSDP2 `reduce_dtype=fp32` for dense params, the EP router/expert grad-sync hooks, the TP replicated-grad sync, the QLoRA adapter AllReduce), then stores the averaged result bf16. It keeps bf16 master weights (6 B/param) — unlike `fp32_non_ep_params` it changes only the reduction, not storage.
 
-**Under pipeline parallelism** ([not yet available in this release](../parallelism/pipeline-parallelism.md)) it would also change storage: a pipeline schedule turns FSDP gradient sync off for the whole microbatch loop and reduce-scatters once per optimizer step, so each stage would hold a full *unsharded* fp32 gradient (4 B/param) for that loop instead of a bf16 one, on top of the unsharded params `fsdp_reshard_after_forward=False` already pins — `2×P_stage` (params) + `4×P_stage` (grads) per rank, not shrinking with DP width. `ParallelismConfig` warns when the two are combined.
+**Under pipeline parallelism** ([not yet available in this release](../parallelism/pipeline-parallelism.md)) it would also change storage: a pipeline schedule turns FSDP gradient sync off for the whole microbatch loop and reduce-scatters once per optimizer step, so each stage would hold a full *unsharded* fp32 gradient (4 B/param) for that loop instead of a bf16 one, on top of the unsharded params `fsdp_reshard_after_forward=False` already pins.
+
+Budget `2×P_stage` (params) + `4×P_stage` (grads) per rank; it does not shrink with DP width. `ParallelismConfig` warns when the two are combined.
 
 NCCL's bf16 all-reduce accumulates in bf16, so error grows with world size. On 8× B300 with real bf16 gradients, fp32 reduce is ~2.2× tighter (0.17% vs 0.37% of signal), and the gap widens with scale. The cost is ~2× bandwidth on that collective only.
 
-The bucketed sweeps (`reduce_grads_bucketed` — the deferred cross-replica EP sweep, the TP replicated / per-head-norm sweep, the QLoRA sweep) hold **3× `HALO_GRAD_BUCKET_MB` per in-flight bucket** under `fp32_grad_reduce`, not 1×: each chunk keeps its bf16 flat buffer alive for the scatter-back alongside the fp32 upcast it reduces. At the defaults (256 MB, 2 in flight) that is ~1.5 GB allocated post-backward, while every gradient is still live — the worst memory moment of the step, and exactly the multi-node EP path where 100–400B models run. Halve `HALO_GRAD_BUCKET_MB` there if the step OOMs at the sweep.
+The bucketed sweeps (`reduce_grads_bucketed`: the deferred cross-replica EP sweep, the TP replicated / per-head-norm sweep, the QLoRA sweep) hold **3× `HALO_GRAD_BUCKET_MB` per in-flight bucket** under `fp32_grad_reduce`, not 1×. Each chunk keeps its bf16 flat buffer alive for the scatter-back alongside the fp32 upcast it reduces.
+
+At the defaults (256 MB, 2 in flight) that is ~1.5 GB allocated post-backward, while every gradient is still live. That is the worst memory moment of the step, and exactly the multi-node EP path where 100–400B models run. Halve `HALO_GRAD_BUCKET_MB` there if the step OOMs at the sweep.
 
 Default `false`. `fp32_non_ep_params` implies it only for the FSDP2 reduce dtype — the EP router/expert, TP and QLoRA hooks read `fp32_grad_reduce` directly, so set it explicitly to cover them. Enable for many-rank / multi-node runs. It applies only on the mixin-managed (torchrun) path — an `accelerate launch` that manages FSDP/DDP itself takes its reduce dtype from accelerate's plugin, and the trainer warns that the knob is unapplied.
 
 ## Compatibility
 
-Every distributed trainer supports `bf16_optimizer` — resolution lives in `DistributedTrainerMixin._configure_mixed_precision`, which all of them run — and it auto-enables under FSDP, EP, TP, CP and their combinations (rank-local experts and per-rank DTensor shards alike). The one exception is accelerate-managed replicated DDP, where the auto-enable is skipped as a conservative default outside the validated FSDP/EP/TP/HSDP matrix, not a correctness limit: SR is replica-safe (the rank-synchronized RNG rounds shared params identically), so `bf16_optimizer: true` opts in.
+Every distributed trainer supports `bf16_optimizer`; resolution lives in `DistributedTrainerMixin._configure_mixed_precision`, which all of them run. It auto-enables under FSDP, EP, TP, CP and their combinations (rank-local experts and per-rank DTensor shards alike).
+
+The one exception is accelerate-managed replicated DDP, where the auto-enable is skipped as a conservative default outside the validated FSDP/EP/TP/HSDP matrix, not a correctness limit. SR is replica-safe (the rank-synchronized RNG rounds shared params identically), so `bf16_optimizer: true` opts in.
 
 Checkpoints use standard PyTorch `state_dict()` / `load_state_dict()`, round-tripping all state in bf16.
 
@@ -111,7 +116,9 @@ torchrun --nproc_per_node=8 \
 CUDA_VISIBLE_DEVICES=0 python tests/gpu/optimizers/bench_adamw_bf16.py
 ```
 
-`test_adamw_bf16.py` covers the single-GPU claims — SR statistics (weight and `exp_avg_sq`, both paths), mixed dtypes, decay groups, state-dict round-trip, and that every shipped optimizer advances `param._version` across a step (the low-precision weight cache keys on it). `test_bf16_optimizer_ep.py` runs full + LoRA training under EP=8 and asserts the two distributed SR claims: `exp_avg_sq` on a local expert shard tracks an fp32 reference (de-bias), and the SR-rounded weight is bit-identical across the EP replicate group.
+`test_adamw_bf16.py` covers the single-GPU claims: SR statistics (weight and `exp_avg_sq`, both paths), mixed dtypes, decay groups, state-dict round-trip, and that every shipped optimizer advances `param._version` across a step (the low-precision weight cache keys on it).
+
+`test_bf16_optimizer_ep.py` runs full + LoRA training under EP=8 and asserts the two distributed SR claims: `exp_avg_sq` on a local expert shard tracks an fp32 reference (de-bias), and the SR-rounded weight is bit-identical across the EP replicate group.
 
 ## References
 

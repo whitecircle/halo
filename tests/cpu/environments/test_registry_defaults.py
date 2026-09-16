@@ -15,7 +15,9 @@ import pytest
 
 from src.configs.environment_config import EnvironmentConfig
 from src.environments.base import BaseEnvironment
+from src.environments.envs.protocols.react import create_react_math_environment
 from src.environments.registry import get_registered_environments, resolve_environment
+from src.rewards.spec import EnvironmentTerm
 
 # Minimal valid construction kwargs per registered env. ``sandbox_backend`` is declared only by the
 # sandboxed coding envs; passing it to the others raises instead of being absorbed and ignored,
@@ -38,6 +40,12 @@ _ENV_KWARGS = {
 # Written out, not derived: this is the table the user-facing help below is held to, and deriving it
 # from the same classes the help must describe would make that check agree with itself.
 _CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "exam_qa": 8}
+
+# The environments whose reward grades ONLY against ``context["answer"]``; everything absent grades
+# without one (the native protocol and its presets grade against an answer where a row carries one).
+# Written out for the same reason as the table above: it is the roster the docs and the trainer's
+# dataset gate are held to, and deriving it from the classes would make the check agree with itself.
+_REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search"}
 
 
 def _base_default_max_turns() -> int:
@@ -89,6 +97,48 @@ def test_max_turns_help_names_every_environment_that_overrides_the_base_default(
     assert f"every other environment {_base_default_max_turns()}" in help_text
 
 
+@pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
+def test_each_environment_declares_whether_its_reward_needs_an_answer(env_type):
+    """``requires_answer`` is what the trainer refuses an answer-less dataset by, so a class that
+    grades on ``context["answer"]`` and forgets to declare it trains on a constant reward, while one
+    that declares it spuriously refuses a dataset it could have trained on."""
+    env = resolve_environment(env_type, _ENV_KWARGS[env_type])
+    assert env.requires_answer is (env_type in _REQUIRES_ANSWER)
+
+
+def test_the_answer_requirement_table_names_only_registered_environments():
+    """Anti-rot: a renamed or dropped env_type must not leave a verdict here that covers nothing."""
+    assert set(get_registered_environments()) >= _REQUIRES_ANSWER
+
+
+def test_a_react_answer_validator_grades_in_place_of_the_answer_column():
+    """The validator IS the grader once passed — consulted before the expected answer is read — so it
+    clears the requirement; without one an answer-less episode collects the full objective for
+    reaching any Final Answer at all."""
+    assert create_react_math_environment().requires_answer
+
+    seen = []
+
+    def validator(answer, expected):
+        seen.append((answer, expected))
+        return answer == "7"
+
+    env = create_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
+    assert not env.requires_answer
+
+    ids, _ = env.reset(["2 + 5?"])
+    reward = env.step(ids, ["Thought: add\nFinal Answer: 8"], [{}])[0].trajectory.total_reward
+    assert seen == [("8", None)]
+    assert reward == 0.0
+
+
+def test_an_explicit_requires_answer_overrides_the_class_declaration():
+    """The escape hatch for a run that grades some other way: an environment_kwargs entry, like every
+    other constructor knob."""
+    assert not resolve_environment("exam_qa", {"requires_answer": False}).requires_answer
+    assert resolve_environment("native_math", {"requires_answer": True}).requires_answer
+
+
 def test_explicit_max_turns_still_overrides():
     env = resolve_environment("swe", {"sandbox_backend": "local", "max_turns": 7})
     assert env.max_turns == 7
@@ -120,12 +170,14 @@ def test_non_positive_max_turns_is_rejected(max_turns):
         resolve_environment("react_math", {"max_turns": max_turns})
 
 
-def test_reward_defaults_still_ensured():
-    """No ``partial_reward``: ``compute_answer_reward`` grades all-or-nothing, so a partial tier
-    would name a reward the grader never pays."""
+def test_the_reward_defaults_to_the_environment_term_alone():
+    """An env config naming no ``reward_terms`` prices the environment's own all-or-nothing grade at
+    weight 1, exponent 1 — and a per-env reward knob is refused as an unknown option, not absorbed."""
     env = resolve_environment("exam_qa", {})
-    assert (env.success_reward, env.failure_reward) == (1.0, 0.0)
-    assert not hasattr(env, "partial_reward")
+    assert env.reward_terms == (EnvironmentTerm(),)
+    for knob in ("success_reward", "failure_reward", "partial_reward"):
+        with pytest.raises(TypeError, match=knob):
+            resolve_environment("exam_qa", {knob: 0.5})
 
 
 def test_environment_config_yaml_path_defers_to_class_default():

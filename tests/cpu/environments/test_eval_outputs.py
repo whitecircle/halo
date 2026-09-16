@@ -11,10 +11,11 @@ import json
 import pytest
 
 from scripts.environments._common import write_eval_outputs
+from src.configs.rollout_config import RolloutConfig
 
 
 def _write(output: str, results: list[dict]) -> None:
-    args = argparse.Namespace(output=output, model="m", dataset="d", config=None, split="test")
+    args = argparse.Namespace(output=output, model="m", dataset="d", config=None, split="test", training_config=None)
     write_eval_outputs(
         args,
         results,
@@ -22,8 +23,7 @@ def _write(output: str, results: list[dict]) -> None:
         traj_path=None,
         env_type="qa_search",
         max_turns=None,
-        max_tokens=16,
-        temperature=0.0,
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
         num_samples=1,
     )
 

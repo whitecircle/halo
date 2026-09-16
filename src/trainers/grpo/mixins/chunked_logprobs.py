@@ -494,13 +494,9 @@ class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):
     def _get_per_token_logps_and_entropies(
         self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False, **kwargs
     ):
-        # TRL's loss forward passes batch_size=None (OOMs on env-GRPO); rows are independent, so
-        # bounding is exact. Per mode, like TRL's default: eval runs at the eval batch size, so
-        # lowering that for memory reaches the chunked path too instead of keeping the train bound.
-        # The mode is the trainer's, not the passed model's flag: a frozen reference model is in eval
-        # for the whole run, so reading its flag would compute the KL's reference log-probs at the
-        # eval batch size — and, wherever that crosses ``rows_forward_densely``, by the padded batched
-        # path while the policy runs trimmed dense rows, measuring the KL between two computations.
+        # TRL's loss forward passes batch_size=None; rows are independent, so bounding it is exact. The
+        # bound follows the TRAINER's mode, not the passed model's: a frozen reference model is always
+        # in eval, and a different bound there can route the KL's two sides through different paths.
         if batch_size is None:
             batch_size = (
                 self.args.per_device_train_batch_size if self.model.training else self.args.per_device_eval_batch_size

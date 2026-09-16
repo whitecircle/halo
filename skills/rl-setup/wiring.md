@@ -1,13 +1,13 @@
 # rl-setup — wiring reference
 
-Concrete commands, config fields, and launch examples for online / environmental
+Concrete commands, config fields, and launch examples for online / async-environment
 GRPO. Source of truth: `Dockerfile.vllm`, `docker-compose.vllm.yml`,
 `src/distributed/nccl/clients/vllm.py`, `src/trainers/grpo/environmental.py`,
 `src/configs/async_training_config.py`, `src/configs/environment_config.py`,
 `src/environments/registry.py`. Cross-link the docs:
 `agent-docs/infrastructure/rollout-servers.md` (server setup, weight sync, SGLang),
 `agent-docs/training-methods/grpo/online-grpo.md`,
-`agent-docs/training-methods/grpo/environmental-grpo.md`.
+`agent-docs/training-methods/grpo/async-grpo/README.md`.
 
 ## 1. Bring up the vLLM container
 
@@ -96,11 +96,11 @@ docker run --gpus all --network=host --ipc=host \
 
 ## 2. AsyncTrainingConfig fields that matter
 
-(`src/configs/async_training_config.py` — parsed from the env-GRPO YAML)
+(`src/configs/async_training_config.py` — parsed from the async-GRPO YAML)
 
 | Field | Default | Purpose |
 |---|---|---|
-| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (env-GRPO only). SGLang's 0.5.17 loaders refuse a longer family list than vLLM's, quoted at trainer construction; its server needs `NCCL_CUMEM_ENABLE=1` (compose default) and must be the repo's `Dockerfile.sglang` image — `agent-docs/infrastructure/rollout-servers.md#which-families-each-engine-serves` |
+| `rollout_backend` | `vllm` | engine: `vllm` or `sglang` (async GRPO only). SGLang's 0.5.17 loaders refuse a longer family list than vLLM's, quoted at trainer construction; its server needs `NCCL_CUMEM_ENABLE=1` (compose default) and must be the repo's `Dockerfile.sglang` image — `agent-docs/infrastructure/rollout-servers.md#which-families-each-engine-serves` |
 | `rollout_server_url` | `http://localhost:8000` | single-server URL (weight sync + generation) |
 | `rollout_server_configs` | `None` | multi-server: `[{"url": ..., "group_port": ...}]`; overrides `rollout_server_url`, enables prefetch overlap |
 | `rollout_connection_timeout` | `120.0` | wait for `/health` |
@@ -216,7 +216,7 @@ torchrun --nproc_per_node=8 \
 
 (`scripts/training/online_grpo/rlvr.py` — verifiable rewards.)
 
-### Environmental GRPO — multi-turn tool-use
+### Async GRPO with Environments — multi-turn tool-use
 
 Config: `examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml` (template:
 `environmental-grpo-template.yaml`; others: `qwen3.6-35b-a3b-aime-full-ep4.yaml`,
@@ -240,13 +240,13 @@ torchrun --nproc_per_node=8 \
   --expert_parallel_size=8
 ```
 
-`scripts/training/environmental_grpo.py` is the single environmental-GRPO
+`scripts/training/environmental_grpo.py` is the single async-GRPO
 entry point: it resolves the env from `environment_type` in the YAML (`accelerate
 launch` for plain DP, `torchrun` for EP/TP/ETP). For a non-registry environment,
 call `register_environment(name, factory)` at import time and set that name as
 `environment_type`.
 
-Minimal env-GRPO YAML shape (the load-bearing keys):
+Minimal async-GRPO YAML shape (the load-bearing keys):
 
 ```yaml
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507

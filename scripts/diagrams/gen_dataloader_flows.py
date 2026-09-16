@@ -1,118 +1,118 @@
-"""Generate DataLoader Pipelines diagrams — individual images."""
+"""Generate the two dataloader-path figures for parallelism/data-loading.md.
+
+One figure per path, drawn on the same grid so the pair reads as a before/after: the standard
+path shards batches by **global rank** (one distinct batch per rank), the custom path by **DP
+rank** (the ranks of a TP/CP/ETP group, and of a pipeline chain, read the same batch). The worked
+shape is world 16 with `tp_size=2` → `data_parallel_size = 8`.
+"""
 
 import matplotlib.pyplot as plt
-from _flow_style import *
-from matplotlib.patches import FancyBboxPatch
+from _pipeline_style import *
 
-plt.rcParams["font.size"] = 10.5
+W, H = 11.6, 5.7
 
+GATE_Y, GATE_H = 4.40, card_height(1)
+STAGE_Y, STAGE_H = 2.94, card_height(2)
+STAGE_W, STAGE_XS = 2.6, (0.3, 3.15, 6.0, 8.85)
+STRIP_X, STRIP_W = 0.3, 10.9
+RANK_Y, BATCH_Y, ROW_H = 1.80, 1.18, 0.5
+RANKS, CELL_GAP = 16, 0.1
+CELL_W = (STRIP_W - (RANKS - 1) * CELL_GAP) / RANKS
 
-def draw_step(ax, x, y, w, h, text, bg=CARD, border=CARD_BORDER, fs=10.5, bold=False):
-    box = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.06", facecolor=bg, edgecolor=border, linewidth=1.0)
-    ax.add_patch(box)
-    ax.text(
-        x + w / 2,
-        y + h / 2,
-        text,
-        ha="center",
-        va="center",
-        fontsize=fs,
-        fontweight="bold" if bold else "normal",
-        color=TEXT,
-        linespacing=1.3,
-    )
+GATE_FLAGS = "is_tp_mode · is_cp_mode · is_expert_tp_mode · is_pp_mode · _dataset_presharded"
+SAMPLER = ("Sampler (not distributed)", ["_get_train_sampler()", "→ RandomSampler"], TEAL)
 
 
-def draw_arrow(ax, x, y1, y2):
-    ax.annotate(
-        "",
-        xy=(x, y2),
-        xytext=(x, y1),
-        arrowprops={"arrowstyle": "-|>", "color": ACCENT, "lw": 1.8, "shrinkA": 6, "shrinkB": 6},
-    )
+def cell_x(i):
+    """Left edge of rank `i`'s cell — both figures share one strip geometry."""
+    return STRIP_X + i * (CELL_W + CELL_GAP)
 
 
-GAP = 0.6
-sw = 7.2
-sx = 1.4
+def rank_row(ax):
+    """The 16 ranks — identical in both figures."""
+    for r in range(RANKS):
+        chip(ax, cell_x(r), RANK_Y, CELL_W, ROW_H, f"r{r}", color=TEAL, fontsize=TINY, mono=True)
 
 
-def flow_panel(ax, title, subtitle, steps):
-    """Draw a vertical flow of steps with an in-axes title (avoids the fig.text top gap)."""
-    ax.set_xlim(0, 10)
-    ax.set_ylim(0, 12)
-    ax.set_aspect("equal")
+def standard_batches(ax):
+    """16 distinct batches: one batch cell per rank cell."""
+    for r in range(RANKS):
+        chip(ax, cell_x(r), BATCH_Y, CELL_W, ROW_H, f"b{r}", color=SLATE, fontsize=TINY, mono=True)
+
+
+def custom_batches(ax):
+    """8 distinct batches: one batch cell spans the two ranks of a TP group."""
+    for pair in range(RANKS // 2):
+        x0, x1 = cell_x(2 * pair), cell_x(2 * pair + 1) + CELL_W
+        chip(ax, x0, BATCH_Y, x1 - x0, ROW_H, f"b{pair}", color=SLATE, fontsize=TINY, mono=True)
+
+
+def panel(name, head, sub, gate_title, gate_note, stages, batches, strip_caption, foot):
+    """Gate strip → four stage cards → the rank/batch strip → the takeaway."""
+    fig, ax = plt.subplots(figsize=(W, H))
+    fig.patch.set_facecolor(BG)
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
     ax.axis("off")
 
-    ax.text(5, 11.85, title, ha="center", va="top", fontsize=18, fontweight="bold", color=TEXT)
-    ax.text(5, 11.0, subtitle, ha="center", va="top", fontsize=10.5, color=TEXT_SEC)
+    title(ax, head, sub)
 
-    y = 10.2
-    for i, (h, text, kw) in enumerate(steps):
-        block_y = y - h
-        draw_step(ax, sx, block_y, sw, h, text, **kw)
+    card(
+        ax,
+        STRIP_X,
+        GATE_Y,
+        STRIP_W,
+        GATE_H,
+        gate_title,
+        [f"{GATE_FLAGS}   {gate_note}"],
+        color=VIOLET,
+        mono_lines=True,
+    )
+    arrow(ax, STAGE_XS[0] + STAGE_W / 2, GATE_Y, STAGE_XS[0] + STAGE_W / 2, STAGE_Y + STAGE_H)
 
-        if kw.get("bg") == OP_BG:
-            ax.texts[-1].set_color(OP_TEXT)
+    card_row(ax, STAGE_XS, STAGE_Y, STAGE_W, STAGE_H, stages, mono_lines=True)
 
-        if i < len(steps) - 1:
-            draw_arrow(ax, 5, block_y, block_y - GAP)
-            y = block_y - GAP
-        else:
-            y = block_y
+    section(ax, STRIP_X, RANK_Y + ROW_H + 0.32, strip_caption)
+    rank_row(ax)
+    batches(ax)
+    footnote(ax, STRIP_X, 0.3, STRIP_W, foot)
 
-
-# Image 1: Standard DataLoader Flow
-std_steps = [
-    (0.7, "Trainer.get_train_dataloader()", {"fs": 10.5, "bold": True}),
-    (0.8, "_get_train_sampler()\n\u2192 RandomSampler", {"fs": 10}),
-    (0.7, "DataLoader(dataset, sampler=RandomSampler)", {"fs": 10}),
-    (0.7, "accelerator.prepare(dataloader)", {"fs": 10.5, "bold": True}),
-    (
-        1.1,
-        "accelerate.prepare_data_loader()\nnum_processes = world_size (16)\nprocess_index = global rank",
-        {"fs": 10},
-    ),
-    (0.9, "BatchSamplerShard\nbatches[rank :: world_size]", {"bg": OP_BG, "border": OP_BG, "fs": 10.5}),
-    (0.7, "16 ranks \u2192 16 distinct batches/step", {"bg": ACCENT_LIGHT, "border": ACCENT}),
-]
-
-fig, ax = plt.subplots(figsize=(10, 12))
-fig.patch.set_facecolor(BG)
-flow_panel(ax, "Standard DataLoader", "DDP / FSDP / EP-only, dataset not pre-sharded", std_steps)
-
-save(plt.gcf(), "dataloader_standard")
-plt.close()
-print("\u2713 dataloader_standard.png")
+    save(fig, name)
+    plt.close(fig)
+    print(f"✓ {name}.png")
 
 
-# Image 2: Custom DataLoader Flow
-custom_steps = [
-    (0.7, "DistributedTrainer.get_train_dataloader()", {"fs": 10.5, "bold": True}),
-    (
-        1.0,
-        "_needs_custom_dataloader() \u2192 True\n(TP, CP, ETP or PP enabled,\nor dataset pre-sharded)",
-        {"bg": ACCENT_MID, "border": ACCENT, "fs": 10},
-    ),
-    (0.7, "RandomSampler (NOT DistributedSampler)", {"fs": 10}),
-    (0.7, "_prepare_dataloader(dataloader)", {"fs": 10.5, "bold": True}),
-    (1.1, "prepare_data_loader()\ndp_size = world / tp_size (e.g., 16/8 = 2)\ndp_rank = rank // tp_size", {"fs": 10}),
-    (
-        1.1,
-        "BatchSamplerShard\ndp_rank=0 \u2192 batches[0,2,4,...]\ndp_rank=1 \u2192 batches[1,3,5,...]",
-        {"bg": OP_BG, "border": OP_BG, "fs": 10},
-    ),
-    (
-        0.8,
-        "16 ranks \u2192 2 distinct batches/step\n(8 ranks per TP group share batch)",
-        {"bg": ACCENT_LIGHT, "border": ACCENT},
-    ),
-]
+panel(
+    "dataloader_standard",
+    "Standard dataloader path",
+    "world 16 · DDP / FSDP / EP-only · dp = world = 16",
+    "_needs_custom_dataloader() → False",
+    "— none set",
+    [
+        ("Trainer (HF / TRL)", ["get_train_dataloader()", "accelerator.prepare(dl)"], SLATE),
+        SAMPLER,
+        ("Accelerate prepare", ["num_processes = 16", "process_index = rank"], VIOLET),
+        ("Batch sharding", ["BatchSamplerShard", "idx % 16 == rank"], BLUE),
+    ],
+    standard_batches,
+    "What each rank reads — 16 distinct batches per step",
+    "EP stays on this path: DeepEP returns every token to its origin rank, so EP never reduces data_parallel_size.",
+)
 
-fig, ax = plt.subplots(figsize=(10, 12))
-fig.patch.set_facecolor(BG)
-flow_panel(ax, "Custom DataLoader", "TP / CP / ETP / PP / pre-sharded  (batch sharing required)", custom_steps)
-
-save(plt.gcf(), "dataloader_custom")
-plt.close()
-print("\u2713 dataloader_custom.png")
+panel(
+    "dataloader_custom",
+    "Custom dataloader path",
+    "tp 2 · dp = (world / pp) / max(cp, tp, etp) = 16 / 2 = 8",
+    "_needs_custom_dataloader() → True",
+    "— any one set",
+    [
+        ("Trainer (toolkit)", ["get_train_dataloader()", "_prepare_dataloader(dl)"], SLATE),
+        SAMPLER,
+        ("Accelerate prepare", ["num_processes = 8", "process_index = dp_rank"], VIOLET),
+        ("Batch sharding", ["BatchSamplerShard", "idx % 8 == dp_rank"], BLUE),
+    ],
+    custom_batches,
+    "What each rank reads — 8 distinct batches, one per TP group",
+    "dp_rank = stage_local_rank // max(tp, cp), so a pipeline chain shares it too;"
+    " a pre-sharded dataset passes num_processes = 1.",
+)

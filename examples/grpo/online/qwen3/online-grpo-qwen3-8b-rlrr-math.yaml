@@ -1,7 +1,6 @@
 # Online GRPO (RLVR) with RLRR relative-reward shaping — Qwen3-8B (dense FSDP DP=2) on DAPO-Math-17k.
-# RLRR replaces the group mean/std advantage with intra-group rankings, so an all-correct or
-# all-wrong group still carries signal — the case a binary accuracy reward hits constantly on math.
-# See agent-docs/training-methods/grpo/online-grpo.md.
+# RLRR replaces the group mean/std advantage with intra-group rankings, so an all-correct or all-wrong
+# group still carries signal. See agent-docs/training-methods/grpo/online-grpo.md.
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
 #   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
 
@@ -18,8 +17,9 @@ test_size: 0.01
 answer_field: solution
 system_prompt: "Solve the problem step by step and put your final numeric answer in \\boxed{}."
 
-# --- Reward Functions ---
-use_accuracy_reward: true
+# --- Rewards ---
+rewards:
+  - source: accuracy   # the last \boxed{} equals the answer, weight 1.0
 
 # --- GRPO Hyperparameters ---
 beta: 0.0

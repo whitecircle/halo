@@ -1,55 +1,74 @@
 # Supervised Fine-Tuning (SFT)
 
-Cross-entropy on conversation data — the step before preference optimization (DPO, SMPO, GRPO). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. SFT supports every available parallelism axis — EP, CP, TP, ETP.
+Cross-entropy on conversation data — the step before preference optimization ([DPO/SMPO](preference/README.md)) or RL ([GRPO](grpo/README.md)). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. It takes text and vision-language checkpoints and is the only method that accepts `lowp_precision` QAT. Raw-text corpora and random-init runs use the same trainer — see [Pre-training](pretraining.md).
 
-## Dataset format
+## Dataset
 
 Conversations under `conversation_field` (default `prompt`):
 
 ```jsonl
-{"prompt": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Explain gravity."}, {"role": "assistant", "content": "Gravity is a fundamental force..."}]}
+{"prompt": [{"role": "user", "content": "Explain gravity."}, {"role": "assistant", "content": "Gravity is..."}]}
 ```
 
-Sources are S3 (`s3://bucket/path`), the HuggingFace Hub, or a local path. `dataset_ratio` is a per-source keep fraction in [0, 1] — it downsamples only, never upweights. A scalar broadcasts across a list of sources; a list maps 1:1 and must match its length.
+Sources are `s3://`, the HuggingFace Hub, or a local path. `dataset_ratio` is a per-source keep fraction in [0, 1]: a scalar broadcasts across a list of sources, a list maps 1:1. Rows over `max_length` are dropped, not truncated (a conversation cut mid-turn is corrupt), and an emptied train split raises.
 
-## Quick start
+Every row is rendered with `tokenizer.apply_chat_template`, so train under the template the model is served with — a mismatch degrades quality with no signal in the loss. The template knobs are in [Chat templates](../data/dataset-formats.md#chat-templates). `interleaved_thinking: true` keeps `<think>…</think>` in history for GLM-family templates that must byte-match rollouts (text-only; the VLM path raises).
 
-```bash
-torchrun --nproc_per_node=8 scripts/training/sft.py \
-    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml --expert_parallel_size=8
-```
-
-Minimal config:
+## Configuration
 
 ```yaml
-model_name_or_path: Qwen/Qwen3-4B
-dataset: path/to/dataset
-conversation_field: prompt
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
 train_on_completions_only: true
 assistant_message_template: "<|im_start|>assistant\n"
-per_device_train_batch_size: 1
+max_length: 4096
+packing: true
+per_device_train_batch_size: 2
 gradient_accumulation_steps: 8
-learning_rate: 4.0e-06
-num_train_epochs: 1
-max_length: 16000
+learning_rate: 3.5e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
 gradient_checkpointing: true
-output_dir: checkpoints/sft-qwen3
-report_to: wandb
+output_dir: checkpoints/sft-qwen3-4b
 ```
 
-Per-family configs live under `examples/sft/`. `accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml` remains supported for plain data-parallel runs.
+| Knob | Default | Effect |
+|---|---|---|
+| `train_on_completions_only` | `true` | Mask prompt tokens; loss on assistant turns only |
+| `assistant_message_template` | unset | The rendered assistant-turn prefix; required by the flag above and checked against the chat template at startup |
+| `train_on_last_assistant_only` | `false` | Loss on the final assistant turn only; needs completions-only |
+| `packing` / `packing_strategy` | `false` / `bfd` | Pack short rows into fixed `max_length` blocks |
+| `padding_free` | `false` | Flatten the batch into one varlen sequence |
+| `max_length` | `1024` | `null` or non-positive → the model context window |
+| `use_peft` | `false` | LoRA; 5–10× the full-FT rate ([PEFT](../optimization/peft.md#hyperparameters)) |
+| `lowp_precision` | `bf16` | `fp8`/`fp4`/`mxfp4` matmuls over bf16 masters ([QAT](../optimization/low-precision-moe-kernels.md)) |
 
-## Key features
+Refused at startup:
 
-**Train only on completions** — `train_on_completions_only: true` (default) masks prompt tokens so loss lands only on assistant turns. `assistant_message_template` must byte-match the rendered assistant-turn prefix (`<|im_start|>assistant\n` for Qwen/ChatML, `<|start_header_id|>assistant<|end_header_id|>\n\n` for Llama-3); it has no default, and a missing or non-rendering marker raises at startup rather than mis-masking. `train_on_last_assistant_only: true` narrows loss to the final assistant turn and requires `train_on_completions_only: true`. TRL's `completion_only_loss` / `assistant_only_loss` are rejected at startup — they act inside the TRL dataset prep and default collator this script replaces, so they would mask nothing.
+- `packing` together with `padding_free`, and `packing` without an explicit `max_length` (the pack size bounds memory).
+- `padding_free` on a non-varlen attention implementation, under CP, or under PP — the flattened width changes every step while the P2P buffers freeze on the first. Use `packing`, except under CP, which refuses both.
+- TRL's `completion_only_loss` / `assistant_only_loss`: they act inside the dataset prep and collator this script replaces.
 
-**Packing** — `packing: true` concatenates short sequences into fixed `max_length` blocks (`packing_strategy`: `bfd` default, `bfd_split`, `wrapped`). Mutually exclusive with `padding_free`, and requires an explicit `max_length` — it cannot fall back to the model context window. Pre-packed datasets are detected and skip re-packing.
+Per-family configs live under `examples/sft/`; full field list in [Configuration Reference](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
 
-**Padding-free** — `padding_free: true` flattens the batch into one varlen sequence. It needs a varlen Flash Attention kernel (FA2/FA3/FA4) and raises on any other implementation: only those consume the `cu_seq_lens` this collator exists to emit, so elsewhere it buys nothing and still pays a dense mask over the flattened batch's whole token count — use `packing` there. Also rejected under Context Parallelism, and under Pipeline Parallelism (the flattened width varies every step while a pipeline's P2P buffers would freeze on the first).
+## Launch
 
-**PEFT / LoRA** — `use_peft: true` with `lora_r`, `lora_alpha`, `lora_target_modules`. LoRA needs ~10× the full-FT LR (`1e-4` in `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml`). See [PEFT — Hyperparameters](../optimization/peft.md#hyperparameters).
+```bash
+# EP/CP/TP/ETP — axis sizes are CLI flags
+torchrun --nproc_per_node=8 scripts/training/sft.py \
+    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml --expert_parallel_size=8
 
-**Quantization-aware training** — `lowp_precision: fp8|fp4|mxfp4` runs the matmuls in a block-scaled low-precision format over bf16 master weights (parameters and checkpoint stay bf16). SFT is the only method that accepts it: train to confirm the model converges in the target format, then export with `scripts/after_training/quantize_to_lowp.py`. See [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
+# the same through the CLI
+halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
+
+# single GPU / LoRA
+python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
+```
+
+Any YAML field overrides on the command line (`--learning_rate=1e-5`); `accelerate launch` with `accelerate/fsdp2_gradop_config.yaml` stays supported for plain data-parallel. Saves are gathered HF-standard checkpoints by default; per-rank `save_sharded_ep` ones need `scripts/after_training/merge_ep_shards.py` before resume or serving, and that merge drops optimizer state ([Checkpoints](../reference/checkpoints.md)).
 
 ## Learning rate and global batch size
 
@@ -57,37 +76,25 @@ Per-family configs live under `examples/sft/`. `accelerate launch --config_file 
 effective_batch = per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size
 ```
 
-EP is orthogonal to DP, so `data_parallel_size = world_size` under pure EP; TP, CP, ETP and PP reduce it (see [Parallelism](../parallelism/README.md)). `gptoss-20b-multinode-ep.yaml` runs batch 1 × accumulation 4 × DP=16 (2 nodes × 8 GPUs, EP orthogonal to DP) → effective batch 64.
+EP is orthogonal to DP, so `data_parallel_size = world_size` under pure EP; TP, CP, ETP and PP reduce it ([Parallelism](../parallelism/README.md)). `gptoss-20b-multinode-ep.yaml` runs batch 1 × accumulation 4 × DP=16 (2 nodes × 8 GPUs, EP orthogonal to DP) → effective batch 64; production full-FT configs land at **64–128**. Raise `gradient_accumulation_steps` (costs step latency, not memory) when HBM is tight, `per_device_train_batch_size` for throughput.
 
-Production full-FT configs land at effective batch **64–128**. Raise `gradient_accumulation_steps` (costs step latency, not memory) when HBM is tight, `per_device_train_batch_size` for throughput.
-
-A learning rate that is too high erases pretrained capability without showing up in the training loss.
+Too high a learning rate erases pretrained capability without showing up in the training loss.
 
 | Band | Learning rate | Anchor |
 |---|---|---|
-| Conservative floor | `3e-7` – `1e-6` | large MoE — down to `0.5e-6` at 100B+ |
-| Default (full FT) | `2e-6` – `5e-6` | two-stage SFT: `5e-6` then `2.5e-6` |
-| Aggressive | `1e-5` – `1.5e-5` | short runs or smaller models |
+| Conservative floor | `0.5e-6` – `1.5e-6` | 100B+ MoE; also stage 2 of a two-stage run |
+| Default (full FT) | `2.5e-6` – `5e-6` | stage-1 recipes use `3.5e-6` or `5e-6` |
+| Aggressive | `8e-6` – `2e-5` | short runs or small dense models |
 
-A safe default for a new full-FT run is **`2e-6`**; above `~1e-5` risks base-capability regression. Pair with `lr_scheduler_type: cosine` and a warmup of ~3–5% of the run. `warmup_ratio` is not a `TrainingArguments` field: `warmup_steps` carries both spellings — an integer is an exact step count, a float in [0, 1) a ratio of the total (`warmup_steps: 0.03`).
-
-## Chat templates
-
-Every conversation is rendered with `tokenizer.apply_chat_template` before tokenizing. Train under the template the model is served with — a mismatch degrades quality silently with no signal in the loss.
-
-- `chat_template` takes a `.jinja`/`.jinja2`/`.j2` path or a raw string, and falls back to the tokenizer's built-in template. `force_chat_template: true` replaces a template the tokenizer already ships. Register new control tokens with `added_special_tokens` so they tokenize atomically.
-- A modified template is a format the base model has never produced; the further it departs from the native instruct template, the more SFT data it takes.
-- For GLM-family templates that must byte-match rollouts keeping `<think>…</think>` in history, set `interleaved_thinking: true` (text-only — the VLM path raises).
+Pair with `lr_scheduler_type: cosine` and a warmup of ~3–5% of the run. There is no `warmup_ratio`: `warmup_steps` ≥ 1 is an exact step count, below 1 a fraction of the total (`warmup_steps: 0.03`).
 
 ## Vision-language models
 
-The same script handles both modalities, but two verdicts decide it, not one — plus one override.
+Two verdicts decide a vision-language run. The **model class follows the checkpoint**: a multimodal config loads through `AutoModelForImageTextToText` + processor, still via `load_distributed_model`, so a MoE VLM gets the same EP/TP/CP wrapping. `text_only_model: true` overrides that — the checkpoint loads through its text-only CausalLM sibling, the vision tower is dropped, and image columns are refused.
 
-The **model class follows the checkpoint**: a multimodal config loads through `AutoModelForImageTextToText` + processor, still via `load_distributed_model`, so a MoE VLM gets the same EP/TP/CP wrapping as the text path. The **data path follows the run** (`is_vlm_run`, `src/data/vlm.py`): it is the VLM path only when the checkpoint is multimodal **and** the run declares image data. A natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6, Inkling) trained on text-only rows is a text run — packing, padding-free and `train_on_last_assistant_only` stay available on it.
+The **data path follows the run** (`is_vlm_run`, `src/data/vlm.py`): the VLM path only when the checkpoint is multimodal **and** the run declares image data. A natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6, Inkling) on text-only rows is a text run, so packing, padding-free and `train_on_last_assistant_only` stay available.
 
-`text_only_model: true` overrides the first verdict: the multimodal checkpoint loads through its text-only CausalLM sibling, dropping the vision tower, and the run takes the text path whatever the data says (image columns are refused). Every VLM limit below is then moot — including the `init_from_scratch` refusal, which lives inside the branch the flag skips.
-
-Images ride embedded in message content, or in a separate column named by `images_field` — the pipeline injects that column into the first user turn, so hub datasets that keep images outside the conversation (FineVision, the_cauldron, Docmatix) train with just field mappings. Either shape declares the run VLM, as does an `images` / `image` / `pixel_values` column ([declaration rules](../data/dataset-formats.md#sft-vlm)):
+Images ride embedded in message content, or in a column named by `images_field`, pairing with any image placeholders, else the first user turn — so hub datasets that keep images outside the conversation (FineVision, the_cauldron, Docmatix) need only field mappings. Either shape declares the run VLM, as does an `images` / `image` / `pixel_values` column ([rules](../data/dataset-formats.md#sft-vlm)):
 
 ```yaml
 dataset:
@@ -96,58 +103,46 @@ conversation_field: texts
 images_field: images
 ```
 
-See `examples/sft/qwen3_5/qwen3.5-9b-vl-ocr-olmocr.yaml` and `qwen3.5-9b-vl-docvqa.yaml`.
+Shipped configs: `examples/sft/qwen3_5/qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
 
-VLM limits are all fail-loud, and all bind the image-declaring **run** rather than the multimodal checkpoint:
+VLM limits are fail-loud and bind the image-declaring **run**, not the multimodal checkpoint: `packing` / `padding_free` (images cannot be packed), `train_on_last_assistant_only` (all assistant turns train), `interleaved_thinking` (no VLM template renders `clear_thinking`), CP (patch features do not slice by token chunk), PP (no stage holds the vision tower), and `generate_eval_examples` (skipped). `init_from_scratch` is the exception, refused on the **checkpoint** at the model load.
 
-- `packing` / `padding_free` — images cannot be packed.
-- `train_on_last_assistant_only` — all assistant turns train.
-- `interleaved_thinking` — no supported VLM template renders `clear_thinking`.
-- `generate_eval_examples` is skipped: the generation callback needs tokenized `input_ids`.
-- CP is text-only — a batch carrying `pixel_values` raises, since patch features do not slice by token chunk.
-- `init_from_scratch` is the exception: it is refused on the **checkpoint**, at the model load.
-
-The collator never truncates. A batch whose vision plus text tokens exceed `max_length` raises, because cutting expanded image-placeholder tokens would desync them from `pixel_values` — budget `max_length` with headroom for image tokens. Raw VLM data is mapped to `history`/`images` rows under a pinned Arrow schema and pre-filtered on rendered text length; those mapped columns are not forward kwargs, so the script forces `remove_unused_columns=False`.
+The VLM collator never truncates: a batch whose vision plus text tokens exceed `max_length` raises rather than desync placeholders from `pixel_values`.
 
 ## Parallelism
 
-Pass the axis sizes as CLI flags on the `torchrun` line: `--expert_parallel_size` (MoE), `--context_parallel_size` (long sequences), `--tensor_parallel_size` (large dense), `--expert_tensor_parallel_size` (expert-FFN sharding). EP+CP, EP+TP and EP+ETP compose; every other pair is rejected at config time, and `--pipeline_parallel_size > 1` is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`. EP+CP, EP+TP and EP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination, and `--pipeline_parallel_size > 1` is [not yet available in this release](../parallelism/pipeline-parallelism.md). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP.
 
-- Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N`; attention TP and expert TP are mutually exclusive.
-- TP+CP, ETP+CP and EP+TP+ETP are not supported.
-- LoRA is rejected under TP and EP+TP.
-- CP is not compatible with `padding_free`.
-- Under CP, a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`; a tokenizer with no `pad_token_id` raises there instead of padding with vocabulary token 0.
-- Under CP the trainer computes `mean_token_accuracy`, `entropy`, `aux_loss` and `num_attended_tokens_seen` itself, on the local chunk. Each is a sum, so the micro-batches accumulate into one fixed-width on-device row that is reduced **once per log** rather than five to six times per micro-batch. `num_attended_tokens_seen` is unchanged by the batching; the two ratios become token-weighted over the log window, which equals the per-micro-batch average whenever the micro-batches carry equal token counts.
+Under CP a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`, and a tokenizer with no `pad_token_id` raises there rather than padding with vocabulary token 0. The loss normalizes over the CP group's tokens; metrics come off the local chunk, reduced once per log ([details](../reference/trainer-architecture.md#cp-loss-and-metrics-in-sft)).
 
-See [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility) for the trainer matrix, [Supported Models](../models/README.md#compatibility-matrix) for model × mode coverage, and [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
+See [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility) and [Supported Models](../models/README.md#compatibility-matrix).
 
 ## Pre-processed datasets
 
-Tokenize, pack, and shard offline to drop tokenization from the training job and load per-rank shards:
+`scripts/before_training/prepare_dataset.py` tokenizes, packs and shards offline:
 
 ```bash
 python scripts/before_training/prepare_dataset.py \
-    --input "s3://bucket/raw/dataset" \
-    --output "s3://bucket/preprocessed/dataset" \
-    --model-name "Qwen/Qwen3-8B" \
+    --input "s3://bucket/raw/dataset" --output "s3://bucket/preprocessed/dataset" \
+    --model-name "Qwen/Qwen3-8B" --max-length 4096 --test-size 0.01 \
     --num-shards 64 --pack-sequences \
     --assistant-message-template $'<|im_start|>assistant\n'
 ```
 
-The script detects a pre-processed dataset from its `metadata.json` and skips tokenization; `ShardedDatasetLoader` assigns shards by DP rank.
+The training script detects the artifact from its `metadata.json`, skips tokenization, and holds the run to what was baked: `max_length` and `train_on_completions_only` must agree or startup raises, as must any render knob the YAML states. `ShardedDatasetLoader` then assigns shards by DP rank ([Pre-Processing](../data/dataset-preparation.md)).
 
-It also holds the artifact to the run's config: a `max_length` mismatch in either direction, a `train_on_completions_only` mismatch, and any chat-render knob the run states differently from the recorded one all raise. `packing: true` against an unpacked artifact only warns — preprocessed rows are never packed at runtime. See [SFT Dataset Pre-Processing](../data/dataset-preparation.md).
+## Testing a setup
 
-## Configuration reference
+Smoke the config first: cut `max_length`, set `max_steps: 5`, launch on 2 GPUs. `examples/sft/deepseek_v4/v4-tiny-random-smoke-ep.yaml` is a tiny-model EP smoke needing no production checkpoint.
 
-`SFTScriptArguments`, `SFTConfig`, and the parallelism flags are tabulated in [Configuration Reference](../reference/configuration-reference.md#sftscriptarguments). Three toolkit defaults differ from upstream: `use_liger_kernel` and `bf16` are `True`, `logging_nan_inf_filter` is `False`. `attn_implementation` (a `ModelConfig` field, default `None`) auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 — see [Flash Attention](../optimization/flash-attention.md).
+```bash
+pytest tests/cpu/config tests/cpu/data -m cpu    # config gates, collators, render knobs
+torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_ep.py
+```
 
-Gathered saves in HF-standard layout are the default; per-rank `save_sharded_ep` checkpoints must be reassembled with `merge_ep_shards.py`. See [Checkpoints & Resume](../reference/checkpoints.md).
+`tests/gpu/trainers/sft/` holds suites per mode (dense, EP, EP+CP, EP+TP, FSDP2 resume, VLM, sinks) and per model.
 
 ## Related pages
 
-- [Preference Optimization (SMPO, DPO)](preference/README.md) — next step after SFT
-- [Pre-training](pretraining.md) · [SFT Dataset Pre-Processing](../data/dataset-preparation.md) · [Collators](../data/collators.md)
-- [Padding-Free Collator](../optimization/padding-free-collator.md)
-- [Checkpoints & Resume](../reference/checkpoints.md) · [Configuration Reference](../reference/configuration-reference.md)
+- [Preference Optimization (SMPO, DPO)](preference/README.md) · [Pre-training](pretraining.md) · [Pipeline Parallelism](../parallelism/pipeline-parallelism.md)
+- [Collators](../data/collators.md) · [Padding-Free Collator](../optimization/padding-free-collator.md) · [Checkpoints & Resume](../reference/checkpoints.md)

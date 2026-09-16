@@ -13,7 +13,7 @@ expert_parallel_size: 8
 
 # --- Dataset ---
 dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
-test_size: 0.005   # 273k rows — 0.005 keeps each eval pass near ~1.4k pair forwards
+test_size: 0.005
 
 # --- SMPO Hyperparameters ---
 beta: 1.0

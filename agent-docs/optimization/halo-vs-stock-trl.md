@@ -39,16 +39,19 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 | 16k·b1 | 6,513 · 50.6 | **18,304 · 76** | 17,464 · 37.9 | 16,407 · 85 | 9,747 · 49 |
 | 16k·b2 | 7,466 · 55.6 | **20,730 · 107** | 18,742 · 68.4 | 17,219 · 124 | 9,552 · 92 |
 
-- **EP1 and EP2 lead at 2.3–2.8× stock TRL** across every short/mid config; the gap holds under batch
-  scaling (16k b1→b4, tok/s/GPU: EP1 18,304→21,386 z2 / 21,023 z3 at 161 / 122 GB, EP2 16,407→17,449,
-  TRL 6,513→7,796 at 66 GB). EP8 is the one mode that regresses under batch (9,747→7,677): its dispatch
-  cost grows with tokens/rank.
+- **EP1 and EP2 lead at 2.3–2.8× stock TRL** across every short/mid config, and the gap holds under batch
+  scaling. EP8 is the one mode that regresses under batch: its dispatch cost grows with tokens/rank.
+
+    16k b1→b4, tok/s/GPU: EP1 18,304→21,386 z2 / 21,023 z3 at 161 / 122 GB, EP2 16,407→17,449,
+    TRL 6,513→7,796 at 66 GB; EP8 9,747→7,677.
+
 - **EP8 trades throughput for memory** — 1.3–2.1× TRL at ~½ its memory (26 vs 48 GB at 4k·b1).
 - **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP wrapper: both sides shard every
   param 8-way with the same kernel, and EP1 still leads 1.4× (4k·b1) to 2.7× (16k) on throughput *and*
-  memory. TRL is slower because `full_shard` re-gathers all 20.7B params every microstep — a fixed cost a
-  short step cannot hide, which is why EP1 z3 is −38% vs its own z2 at 4k·b1 but only −5% at 16k·b1.
-  **Prefer z2 at short sequence, z3 when memory-tight.**
+  memory. **Prefer z2 at short sequence, z3 when memory-tight.**
+
+    TRL is slower because `full_shard` re-gathers all 20.7B params every microstep, a fixed cost a short
+    step cannot hide. That is why EP1 z3 is −38% vs its own z2 at 4k·b1 but only −5% at 16k·b1.
 
 ## Grouped GEMM — where the expert kernel matters
 
@@ -90,10 +93,12 @@ cross-entropy (logits materialized) and turns FLCE on through `liger_kernel_conf
 | EP8 · 32k | 8,851 · 80.3 | 8,625 · 55.7 |
 
 The memory cut grows with sequence while the throughput cost shrinks (EP1: −20% tok/s for −14 GB at 16k,
-−7% for −30 GB at 32k), so **turn FLCE on past ~16k.** On the dense path it is decisive: EP1 z3 at 128k·b1
-is 183 → **67 GB**, and 256k·b1 goes **OOM → 5,728 · 112 GB** — FLCE is what enables 256k dense at all. Under EP+CP the
-per-rank sequence is already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per-model
-applier defaults: [Liger Kernels](liger-kernels.md).
+−7% for −30 GB at 32k), so **turn FLCE on past ~16k.**
+
+On the dense path it is decisive: EP1 z3 at 128k·b1 is 183 → **67 GB**, and 256k·b1 goes
+**OOM → 5,728 · 112 GB**. FLCE is what enables 256k dense at all. Under EP+CP the per-rank sequence is
+already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per-model applier defaults:
+[Liger Kernels](liger-kernels.md).
 
 ## Gradient checkpointing on vs off
 
@@ -157,10 +162,11 @@ Multi-step EP8 *training* has a practical ceiling around **64k tokens/rank**:
 - **≤64k tok/rank trains** — on the **legacy** CUDA-IPC transport (plain EP8 64k = 6,648 tok/s). Elastic
   forwards any length, but its multi-step training deadlocks at extreme tok/rank (the DeepEP combine
   barrier races FSDP2's reduce-scatter on the shared NVLink fabric).
-- **128k tok/rank crashes on both transports.** `EP8` no-CP at 128k, `EP8+CP2` at 256k, and `EP8+TP8` (TP
-  shards attention, not expert tokens, so the MoE still sees the full per-rank sequence) all reach 128k
-  tokens/rank in the dispatch: legacy times out in `combine`, elastic trips the symmetric-window check.
-  The ceiling is architectural, not a timeout you can raise.
+- **128k tok/rank crashes on both transports.** Legacy times out in `combine`, elastic trips the
+  symmetric-window check. The ceiling is architectural, not a timeout you can raise.
+
+    `EP8` no-CP at 128k, `EP8+CP2` at 256k, and `EP8+TP8` (TP shards attention, not expert tokens, so the
+    MoE still sees the full per-rank sequence) all reach 128k tokens/rank in the dispatch.
 
 For ≥128k sequences, keep per-rank tokens ≤64k by **splitting further with CP** (EP8+CP8 = 16k/rank at
 128k), or **go dense** (EP1 / dense CP-only — neither uses DeepEP). Related kernel-side detail:
@@ -189,12 +195,14 @@ carries only `top_k/num_experts` of the batch per layer instead of a full-tensor
 | 32k | 9,540 · 68 GB | **10,445** · 138 GB (1.09×) | 7,356 · 100 GB |
 | 64k | 7,084 · 73 GB | **7,579** · 190 GB (1.07×) | OOM → EP8+CP4 |
 
-EP2 is the consistent throughput winner (1.07–1.82×), shrinking as the sequence grows. Under batch at 4k
-(b1→b2→b4) EP2 holds the lead — 6,898 → 11,343 → 14,536 vs TRL's 3,787 → 8,252 → 9,746 — while EP8
-(6,348 → 8,382 → 8,904) falls behind TRL by b4. Unlike gpt-oss, TRL's
-ZeRO-3 stays memory-competitive here, so Qwen is an EP *throughput* win, not a memory one. CP needs
-`cp_size` to divide Qwen's 4 KV heads, so 64k splits with EP8+CP4. Dense EP1 z3 at 4k·b1 is
-6,395 · 35 GB — 1.69× TRL at half the memory.
+EP2 is the consistent throughput winner (1.07–1.82×), shrinking as the sequence grows. Unlike gpt-oss,
+TRL's ZeRO-3 stays memory-competitive here, so Qwen is an EP *throughput* win, not a memory one.
+
+Under batch at 4k (b1→b2→b4) EP2 holds the lead: 6,898 → 11,343 → 14,536 vs TRL's 3,787 → 8,252 → 9,746.
+EP8 (6,348 → 8,382 → 8,904) falls behind TRL by b4.
+
+CP needs `cp_size` to divide Qwen's 4 KV heads, so 64k splits with EP8+CP4. Dense EP1 z3 at 4k·b1 is
+6,395 · 35 GB, 1.69× TRL at half the memory.
 
 ## Convergence
 

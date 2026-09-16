@@ -1,244 +1,205 @@
-"""Generate EP Group Tree + Multi-Node EP+TP diagrams — individual images."""
+"""Generate the EP group-hierarchy and multi-node EP+TP figures.
+
+`ep_group_hierarchy` — the world splits into EP dispatch groups; each rank owns
+`num_experts / ep_size` experts and still reads its own batch, and ranks holding the same expert
+slice are DP replicas averaged after the backward.
+
+`ep_multi_node_layout` — the only EP+TP shape `ParallelismConfig` accepts across NVLink domains:
+node-local TP groups under one global EP group spanning the job.
+"""
 
 import matplotlib.pyplot as plt
-from _flow_style import *
+from _pipeline_style import *
+
+# The shapes the two figures depict, replayed through ParallelismConfig by
+# tests/cpu/parallelism/test_shipped_diagram_topology.py so no figure shows a rejected topology.
+TOPOLOGIES = {
+    "ep_group_hierarchy": {"nodes": 1, "gpus": 4, "ep": 2, "tp": 1, "scope": "node", "dp": 4},
+    "ep_multi_node_layout": {"nodes": 2, "gpus": 8, "ep": 16, "tp": 8, "scope": "global", "dp": 2},
+}
 from matplotlib.patches import FancyBboxPatch
 
-plt.rcParams["font.size"] = 10.5
+# ── EP group hierarchy ────────────────────────────────────────────────────────
 
-GROUP_BG = "#f1f5f9"
-GPU_BG = ACCENT_LIGHT
+W, H = 11.6, 5.75
 
+WORLD_Y, WORLD_H = 4.80, 0.55
+GROUP_Y, GROUP_H, GROUP_W, GROUP_XS = 2.30, 2.00, 5.4, (0.3, 5.9)
+GPU_Y, GPU_W, GPU_DXS = 2.65, 2.35, (0.25, 2.80)
+LINK_YS = (1.90, 1.55)
 
-def tree_node(ax, cx, cy, w, h, text, bg=CARD, border=CARD_BORDER, fs=11):
-    box = FancyBboxPatch(
-        (cx - w / 2, cy - h / 2), w, h, boxstyle="round,pad=0.05", facecolor=bg, edgecolor=border, linewidth=1.1
-    )
-    ax.add_patch(box)
-    ax.text(cx, cy, text, ha="center", va="center", fontsize=fs, fontweight="bold", color=TEXT, linespacing=1.3)
-
-
-def tree_edge(ax, x1, y1, x2, y2):
-    mid_y = (y1 + y2) / 2
-    ax.plot([x1, x1], [y1, mid_y], color=BORDER_SOFT, lw=1.3, solid_capstyle="round")
-    ax.plot([x1, x2], [mid_y, mid_y], color=BORDER_SOFT, lw=1.3, solid_capstyle="round")
-    ax.plot([x2, x2], [mid_y, y2], color=BORDER_SOFT, lw=1.3, solid_capstyle="round")
+GROUPS = [
+    ("EP group 0 — ranks 0, 1", [("rank 0", "experts 0–15", "batch b0"), ("rank 1", "experts 16–31", "batch b1")]),
+    ("EP group 1 — ranks 2, 3", [("rank 2", "experts 0–15", "batch b2"), ("rank 3", "experts 16–31", "batch b3")]),
+]
 
 
-# Image 1: EP Group Hierarchy
-fig, ax = plt.subplots(figsize=(11, 11))
+def gpu_center(group_idx, gpu_idx):
+    """Center x of one rank card — the anchor the replica links join."""
+    return GROUP_XS[group_idx] + GPU_DXS[gpu_idx] + GPU_W / 2
+
+
+fig, ax = plt.subplots(figsize=(W, H))
 fig.patch.set_facecolor(BG)
-
-ax.set_xlim(0, 10)
-ax.set_ylim(0, 10)
-ax.set_aspect("equal")
+ax.set_xlim(0, W)
+ax.set_ylim(0, H)
 ax.axis("off")
 
-ax.text(5, 9.7, "EP Group Hierarchy", ha="center", va="top", fontsize=18, fontweight="bold", color=TEXT)
-ax.text(5, 9.0, "4 GPUs  \u00b7  EP = 2  \u00b7  DP = 4", ha="center", va="top", fontsize=12, color=TEXT_SEC)
+T = TOPOLOGIES["ep_group_hierarchy"]
+title(ax, "EP groups", f"world {T['gpus'] * T['nodes']} · ep {T['ep']} · 32 experts → 16 per rank · dp {T['dp']}")
 
-tree_node(ax, 5, 8.0, 5.5, 0.9, "WORLD", bg=OP_BG, border=OP_BG, fs=14)
-ax.texts[-1].set_color(OP_TEXT)
-
-tree_edge(ax, 5, 7.55, 2.7, 6.4)
-tree_edge(ax, 5, 7.55, 7.3, 6.4)
-tree_node(ax, 2.7, 6.0, 3.4, 0.85, "EP Group 0\nranks 0, 1", bg=GROUP_BG, border=CARD_BORDER, fs=10.5)
-tree_node(ax, 7.3, 6.0, 3.4, 0.85, "EP Group 1\nranks 2, 3", bg=GROUP_BG, border=CARD_BORDER, fs=10.5)
-
-# GPUs (width 1.7, spaced so the inner two never collide)
-for gx, parent_cx, label, exp in [
-    (1.4, 2.7, "GPU 0", "exp 0\u201315"),
-    (4.0, 2.7, "GPU 1", "exp 16\u201331"),
-    (6.0, 7.3, "GPU 2", "exp 0\u201315"),
-    (8.6, 7.3, "GPU 3", "exp 16\u201331"),
-]:
-    tree_edge(ax, parent_cx, 5.57, gx, 4.45)
-    tree_node(ax, gx, 4.0, 1.7, 0.8, label, bg=GPU_BG, border=ACCENT, fs=10.5)
-    ax.text(gx, 3.2, exp, ha="center", va="top", fontsize=9.5, color=TEXT_SEC)
-
-for x1, x2, cx_label in [(1.4, 4.0, 2.7), (6.0, 8.6, 7.3)]:
-    ax.annotate(
-        "",
-        xy=(x2 - 0.15, 2.6),
-        xytext=(x1 + 0.15, 2.6),
-        arrowprops={"arrowstyle": "<->", "color": ACCENT, "lw": 1.4},
-        zorder=2,
-    )
-    badge_w = 1.8
-    badge = FancyBboxPatch(
-        (cx_label - badge_w / 2, 1.95),
-        badge_w,
-        0.45,
-        boxstyle="round,pad=0.04",
-        facecolor=OP_BG,
-        edgecolor="none",
-        zorder=4,
-    )
-    ax.add_patch(badge)
-    ax.text(
-        cx_label,
-        2.175,
-        "All-to-All",
-        ha="center",
-        va="center",
-        fontsize=9.5,
-        fontweight="bold",
-        color=OP_TEXT,
-        zorder=5,
-    )
-    ax.text(cx_label, 1.45, "DeepEP within group", ha="center", va="top", fontsize=9, color=TEXT_TERT, style="italic")
-
-save(plt.gcf(), "ep_group_hierarchy")
-plt.close()
-print("\u2713 ep_group_hierarchy.png")
-
-
-# Image 2: Multi-Node EP+TP
-fig, ax = plt.subplots(figsize=(11, 9))
-fig.patch.set_facecolor(BG)
-
-ax.set_xlim(0, 12)
-ax.set_ylim(0, 10)
-ax.set_aspect("equal")
-ax.axis("off")
-
-ax.text(6, 9.8, "Multi-Node EP + TP", ha="center", va="top", fontsize=18, fontweight="bold", color=TEXT)
-# The EP+TP shape ParallelismConfig accepts across NVLink domains: one global EP group spanning the
-# job. Node-local EP groups under TP (ep8/tp8 here) are rejected by ``_validate_tp``.
-ax.text(
-    6,
-    9.25,
-    "2 Nodes  \u00d7  8 GPUs  \u00b7  EP = 16 (global)  \u00b7  TP = 8  \u00b7  DP = 2",
-    ha="center",
-    va="top",
-    fontsize=12,
-    color=TEXT_SEC,
+world = FancyBboxPatch(
+    (0.3, WORLD_Y), 11.0, WORLD_H, boxstyle="round,pad=0.03", facecolor=tint(SLATE), edgecolor=SLATE, lw=1.3
 )
-
-
-def draw_node_panel(ax, x, y, w, h, title, tp_label, batch_label):
-    node = FancyBboxPatch(
-        (x, y), w, h, boxstyle="round,pad=0.06", facecolor=CARD, edgecolor=CARD_BORDER, linewidth=1.2
-    )
-    ax.add_patch(node)
-    ax.text(x + w / 2, y + h + 0.15, title, ha="center", va="bottom", fontsize=12.5, fontweight="bold", color=TEXT)
-
-    inner_pad = 0.25
-    inner_w = w - 2 * inner_pad
-    block_h = 1.6
-
-    tp_y = y + h - inner_pad - block_h
-    tp = FancyBboxPatch(
-        (x + inner_pad, tp_y),
-        inner_w,
-        block_h,
-        boxstyle="round,pad=0.04",
-        facecolor=GROUP_BG,
-        edgecolor=BORDER_SOFT,
-        linewidth=1.0,
-    )
-    ax.add_patch(tp)
-    ax.text(
-        x + w / 2,
-        tp_y + block_h / 2 + 0.2,
-        tp_label,
-        ha="center",
-        va="center",
-        fontsize=11.5,
-        fontweight="bold",
-        color=TEXT,
-    )
-    ax.text(
-        x + w / 2,
-        tp_y + block_h / 2 - 0.25,
-        "Attention sharded via\nDTensor (NVLink)",
-        ha="center",
-        va="center",
-        fontsize=9,
-        color=TEXT_SEC,
-        linespacing=1.3,
-    )
-
-    ax.text(
-        x + w / 2,
-        y + 0.35,
-        batch_label,
-        ha="center",
-        va="center",
-        fontsize=12.5,
-        color=ACCENT,
-        fontweight="bold",
-        style="italic",
-    )
-
-
-nw, nh = 5.2, 3.1
-draw_node_panel(ax, 0.2, 5.3, nw, nh, "Node 0  (ranks 0\u20137)", "TP Group  (all 8)", "Batch A")
-draw_node_panel(ax, 6.6, 5.3, nw, nh, "Node 1  (ranks 8\u201315)", "TP Group  (all 8)", "Batch B")
-
-# One EP group spanning both nodes; two per-node groups is the shape ParallelismConfig rejects.
-ep_x, ep_y, ep_w, ep_h = 0.2, 3.3, 11.6, 1.5
-ep = FancyBboxPatch(
-    (ep_x, ep_y), ep_w, ep_h, boxstyle="round,pad=0.06", facecolor=ACCENT_LIGHT, edgecolor=ACCENT, linewidth=1.2
-)
-ax.add_patch(ep)
+ax.add_patch(world)
 ax.text(
-    6,
-    ep_y + ep_h / 2 + 0.24,
-    "EP Group  (one global group  \u00b7  all 16 ranks)",
+    5.8,
+    WORLD_Y + WORLD_H / 2,
+    "WORLD — 4 ranks, one NVLink domain",
     ha="center",
     va="center",
-    fontsize=12,
+    fontsize=LABEL,
     fontweight="bold",
-    color=TEXT,
+    color=INK,
 )
-ax.text(
-    6,
-    ep_y + ep_h / 2 - 0.3,
-    "Experts distributed via DeepEP all-to-all \u2014 spans both nodes over InfiniBand",
-    ha="center",
-    va="center",
-    fontsize=9.5,
-    color=TEXT_SEC,
-)
-for cx in (2.8, 9.2):
-    ax.annotate(
-        "",
-        xy=(cx, ep_y + ep_h + 0.02),
-        xytext=(cx, 5.28),
-        arrowprops={"arrowstyle": "->", "color": ACCENT, "lw": 1.4},
-        zorder=3,
+
+for gi, (group_head, ranks) in enumerate(GROUPS):
+    gx = GROUP_XS[gi]
+    frame(ax, gx, GROUP_Y, GROUP_W, GROUP_H, color=VIOLET)
+    ax.text(gx + 0.25, GROUP_Y + GROUP_H - 0.12, group_head, ha="left", va="top", fontsize=LABEL, fontweight="bold")
+    ax.text(
+        gx + GROUP_W / 2,
+        GROUP_Y + 0.22,
+        "DeepEP all-to-all inside the group",
+        ha="center",
+        va="center",
+        fontsize=SMALL,
+        color=VIOLET,
     )
+    for ri, (rank_head, experts, batch) in enumerate(ranks):
+        card(
+            ax,
+            gx + GPU_DXS[ri],
+            GPU_Y,
+            GPU_W,
+            card_height(2),
+            rank_head,
+            [experts, batch],
+            color=TEAL,
+            mono_lines=True,
+        )
+    arrow(ax, gx + GROUP_W / 2, WORLD_Y, gx + GROUP_W / 2, GROUP_Y + GROUP_H)
 
-mid_y = 2.4
-ax.plot([0.5, 11.5], [mid_y, mid_y], color=BORDER_SOFT, lw=1.0, ls="--", zorder=1)
-for dx in [0.5, 11.5]:
-    ax.plot(dx, mid_y, "o", color=ACCENT, markersize=4.5, zorder=5)
-
-badge_text = "DP = 2  \u00b7  Gradient Sync"
-badge_w = 3.6
-badge = FancyBboxPatch(
-    (6 - badge_w / 2, mid_y - 0.22),
-    badge_w,
-    0.44,
-    boxstyle="round,pad=0.05",
-    facecolor=OP_BG,
-    edgecolor="none",
-    zorder=4,
-)
-ax.add_patch(badge)
-ax.text(6, mid_y, badge_text, ha="center", va="center", fontsize=10, fontweight="bold", color=OP_TEXT, zorder=5)
+replica_link(ax, gpu_center(0, 0), gpu_center(1, 0), LINK_YS[0])
+replica_link(ax, gpu_center(0, 1), gpu_center(1, 1), LINK_YS[1])
 ax.text(
-    6,
-    mid_y - 0.5,
-    "FSDP2 full-shard via InfiniBand",
+    5.8,
+    LINK_YS[1] - 0.24,
+    "DP replicas — the ranks holding one expert slice; their expert grads are averaged after the backward",
     ha="center",
     va="top",
-    fontsize=9.5,
-    color=TEXT_TERT,
-    style="italic",
+    fontsize=SMALL,
+    color=INK2,
 )
 
-save(plt.gcf(), "ep_multi_node_layout")
-plt.close()
-print("\u2713 ep_multi_node_layout.png")
+footnote(
+    ax,
+    0.3,
+    0.3,
+    11.0,
+    "One dispatch group per NVLink domain: ep_size > 2 with ep_group_size below the domain"
+    " (ep4 on 8) is rejected at config time.",
+)
+
+save(fig, "ep_group_hierarchy")
+plt.close(fig)
+print("✓ ep_group_hierarchy.png")
+
+
+# ── Multi-node EP + TP ────────────────────────────────────────────────────────
+
+MW, MH = 13.0, 6.8
+
+NODE_Y, NODE_H, NODE_W, NODE_XS = 4.35, 2.05, 6.05, (0.3, 6.65)
+CELL_Y, CELL_H, CELL_GAP = NODE_Y + 1.02, 0.5, 0.08
+CELL_W = (NODE_W - 0.5 - 7 * CELL_GAP) / 8
+TP_Y, TP_H = NODE_Y + 0.22, card_height(1, has_title=False)
+EP_Y, EP_H = 2.55, card_height(3)
+DP_Y, DP_H = 1.10, card_height(2)
+BAND_W = 12.4
+
+fig, ax = plt.subplots(figsize=(MW, MH))
+fig.patch.set_facecolor(BG)
+ax.set_xlim(0, MW)
+ax.set_ylim(0, MH)
+ax.axis("off")
+
+M = TOPOLOGIES["ep_multi_node_layout"]
+title(
+    ax,
+    "EP + TP across two nodes",
+    f"{M['nodes']} × {M['gpus']} · tp {M['tp']} node-local · ep {M['ep']} {M['scope']} · dp {M['dp']}",
+)
+
+for ni, (nx, head) in enumerate(zip(NODE_XS, ("Node 0 — ranks 0–7", "Node 1 — ranks 8–15"), strict=True)):
+    frame(ax, nx, NODE_Y, NODE_W, NODE_H, dashed=False)
+    ax.text(nx + 0.25, NODE_Y + NODE_H - 0.12, head, ha="left", va="top", fontsize=LABEL, fontweight="bold")
+    for i in range(8):
+        cx = nx + 0.25 + i * (CELL_W + CELL_GAP)
+        chip(ax, cx, CELL_Y, CELL_W, CELL_H, f"r{8 * ni + i}", color=TEAL, fontsize=TINY, mono=True)
+    card(
+        ax,
+        nx + 0.25,
+        TP_Y,
+        NODE_W - 0.5,
+        TP_H,
+        "",
+        ["TP group, 8 ranks — attention sharded as DTensor over NVLink"],
+        color=BLUE,
+    )
+    arrow(ax, nx + NODE_W / 2, NODE_Y, nx + NODE_W / 2, EP_Y + EP_H, "tokens", side="right")
+
+card(
+    ax,
+    0.3,
+    EP_Y,
+    BAND_W,
+    EP_H,
+    "One global EP group — all 16 ranks (ep_scope='global')",
+    [
+        "128 experts / ep 16 = 8 per rank",
+        "rank r owns experts 8r … 8r+7",
+        "DeepEP all-to-all crosses RDMA between the nodes",
+    ],
+    color=VIOLET,
+    mono_lines=True,
+)
+
+card(
+    ax,
+    0.3,
+    DP_Y,
+    BAND_W,
+    DP_H,
+    "FSDP2 mesh (dp 2, tp 8)",
+    [
+        "ranks sharing a TP position form a DP pair: (0,8) (1,9) … (7,15)",
+        "non-expert params shard over the pair: RDMA all-gather / reduce-scatter",
+    ],
+    color=SLATE,
+    mono_lines=True,
+    dashed=True,
+)
+
+footnote(
+    ax,
+    0.3,
+    0.3,
+    BAND_W,
+    "Above one NVLink domain, EP under TP must be a single group spanning the job —"
+    " ep8/tp2 on 2×8 forms two groups and is rejected at config time.",
+)
+
+save(fig, "ep_multi_node_layout")
+plt.close(fig)
+print("✓ ep_multi_node_layout.png")

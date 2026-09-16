@@ -17,9 +17,11 @@ with parallelism-specific gradient hooks ([How the mixin manages FSDP](#how-the-
 
 `accelerate launch` reads an FSDP config YAML and is for standard multi-GPU without EP/CP/TP. Both
 paths produce equivalent results there. Dense models run under `accelerate launch` (FSDP or DDP) even
-at the default `use_grouped_gemm: true` — the grouped-GEMM expert wrappers only activate for MoE
-models. An **MoE** model with `use_grouped_gemm: true` is rejected at load under any `accelerate
-launch`: the wrappers require the mixin-managed FSDP2 path. Launch with `torchrun`, or set
+at the default `use_grouped_gemm: true`: the grouped-GEMM expert wrappers only activate for MoE
+models.
+
+An **MoE** model with `use_grouped_gemm: true` is rejected at load under any `accelerate launch`:
+the wrappers require the mixin-managed FSDP2 path. Launch with `torchrun`, or set
 `use_grouped_gemm: false` to train the MoE under accelerate.
 
 ## FSDP2 strategy by mode
@@ -45,16 +47,19 @@ raises when comparing EP's fused 3D expert weights against standard 2D weights.
 Two setups **raise** rather than wrap:
 
 - Parameters on multiple devices (e.g. `device_map="auto"` under `torchrun`), on the DP and TP paths
-  alike. The check cannot skip: it is rank-local while the mesh construction after it is collective,
-  so one rank bailing out would hang its peers and train unsharded with no gradient sync at all. Use
-  `device_map=None` (or `load_distributed_model()`).
+  alike. Use `device_map=None` (or `load_distributed_model()`).
+
+    The check cannot skip: it is rank-local while the mesh construction after it is collective, so
+    one rank bailing out would hang its peers and train unsharded with no gradient sync at all.
+
 - A generative decoder whose layer list the backbone probe cannot reach (`DECODER_LAYER_LIST_ATTRS` —
-  `.layers`, `.h`); the message names the class. The alternative is one root shard group all-gathered
-  for the whole forward — the per-rank memory ceiling FSDP2 exists to remove — reported as a
-  successful wrap. Models that carry no such list by construction (a SentenceTransformer, a
-  BERT-family classification backbone) are still wrapped at the
-  root; the fix for a decoder is to add its spelling to `DECODER_LAYER_LIST_ATTRS`
-  (`src/models/structure.py`).
+  `.layers`, `.h`); the message names the class. The fix for a decoder is to add its spelling to
+  `DECODER_LAYER_LIST_ATTRS` (`src/models/structure.py`).
+
+    The alternative is one root shard group all-gathered for the whole forward, the per-rank memory
+    ceiling FSDP2 exists to remove, reported as a successful wrap. Models that carry no such list by
+    construction (a SentenceTransformer, a BERT-family classification backbone) are still wrapped at
+    the root.
 
 ## ZeRO-2 vs ZeRO-3 (`reshard_after_forward`)
 
@@ -65,27 +70,32 @@ modes shard gradients and optimizer states across the DP ranks.
 - **`true` — ZeRO-3 analog (FULL_SHARD):** params reshard after the forward and re-gather in backward. Lower peak memory, one extra all-gather per layer.
 
 Set it with `--fsdp_reshard_after_forward`. **Allowed only where the backward re-gather is a plain
-all-gather** — pure DP, CP, TP at `data_parallel_size==1`, and an `ep_group_size==1` MoE (its no-op
-EP issues no collectives, so the re-gather races nothing). `ParallelismConfig` rejects it
-whenever `is_ep_mode` (`ep_group_size>1`), because the re-gather can race the DeepEP combine (real
-EP) or the Expert-TP reduce (pure ETP); **TP with `data_parallel_size>1` is also rejected** (a plain
-all-gather on TP-sharded DTensor params has no registered sharding strategy); and under PP (the
-schedule pins each stage unsharded). Lower peak memory there with
-[HSDP](#hsdp-hybrid-sharded-data-parallel) or activation checkpointing instead.
+all-gather**: pure DP, CP, TP at `data_parallel_size==1`, and an `ep_group_size==1` MoE (its no-op
+EP issues no collectives, so the re-gather races nothing).
+
+`ParallelismConfig` rejects it whenever `is_ep_mode` (`ep_group_size>1`), because the re-gather can
+race the DeepEP combine (real EP) or the Expert-TP reduce (pure ETP). **TP with
+`data_parallel_size>1` is also rejected** (a plain all-gather on TP-sharded DTensor params has no
+registered sharding strategy), and so is PP (the schedule pins each stage unsharded). Lower peak
+memory there with [HSDP](#hsdp-hybrid-sharded-data-parallel) or activation checkpointing instead.
 
 `fsdp_reshard_after_backward: false` additionally keeps parameters **unsharded across a
 gradient-accumulation window's microsteps** (torch `set_reshard_after_backward`). Even under
 SHARD_GRAD_OP, FSDP2 reshards each module after its backward and re-all-gathers it on the next
-microstep's forward — one full param re-gather per grad-accum microstep for weights that did not
-change in between. Over NVLink that traffic is negligible; with the trainer's NCCL on TCP sockets
-(the no-fabric compose recipe, `NCCL_NET=Socket`) it measures ~15 s per re-gather at gpt-oss-20b
-scale — ~6 minutes of every optimizer step at `gradient_accumulation_steps: 24`.
+microstep's forward: one full param re-gather per grad-accum microstep for weights that did not
+change in between.
+
+Over NVLink that traffic is negligible. With the trainer's NCCL on TCP sockets (the no-fabric compose
+recipe, `NCCL_NET=Socket`) it measures ~15 s per re-gather at gpt-oss-20b scale, ~6 minutes of every
+optimizer step at `gradient_accumulation_steps: 24`.
 
 The window's **last** backward still reshards: the trainer arms the flag per microstep from
 `accelerator.sync_gradients` in `src/trainers/mixins/base.py`. That leaves one re-gather per
 optimizer step instead of one per microstep, so the saving scales with `gradient_accumulation_steps`
-and is nil at 1. The last reshard is also mandatory — FSDP2's `post_backward` clears the unsharded
-parameters' `.grad` before reduce-scattering onto the sharded DTensors, so a module left unsharded
+and is nil at 1.
+
+The last reshard is also mandatory. FSDP2's `post_backward` clears the unsharded parameters' `.grad`
+before reduce-scattering onto the sharded DTensors, so a module left unsharded
 hands `model.parameters()` grad-less tensors the optimizer never captured (grad norm 0, nothing
 clipped) while `unshard()` no-ops on it, hiding the optimizer's update from the next forward.
 
@@ -97,12 +107,16 @@ or PP.
 
 At `ep_group_size==1` (`ep_size==1` AND `expert_tp_size==1`) the MoE experts are replicated and the
 DeepEP dispatch is a no-op. By default (`fsdp_shard_ep1_experts: true`) FSDP shards them, with its
-reduce-scatter as their sole gradient sync — throughput-neutral (the expert all-gather overlaps),
+reduce-scatter as their sole gradient sync: throughput-neutral (the expert all-gather overlaps),
 grad-equivalent, and freeing memory that scales with DP (gpt-oss-20b −19% peak at 2 GPU, −37% at
-8 GPU). Set it `false` to keep a full replicated copy on every DP rank (EP modules become FSDP
-`ignored_params`) — the max-throughput choice when memory is not the bottleneck. No effect when
-`ep_group_size>1`. `false` raises at config time under TP, CP, or PP: those setup paths FSDP-shard
-ep1 experts unconditionally, so the flag is honored only on the pure-DP path.
+8 GPU).
+
+Set it `false` to keep a full replicated copy on every DP rank (EP modules become FSDP
+`ignored_params`), the max-throughput choice when memory is not the bottleneck. No effect when
+`ep_group_size>1`.
+
+`false` raises at config time under TP, CP, or PP: those setup paths FSDP-shard ep1 experts
+unconditionally, so the flag is honored only on the pure-DP path.
 
 The two flags compose into the EP1 sharding matrix (MoE, `ep_group_size==1`):
 
@@ -113,12 +127,13 @@ The two flags compose into the EP1 sharding matrix (MoE, `ep_group_size==1`):
 | `false` | `false` | replicated | ZeRO-2 |
 | `false` | `true` | replicated | ZeRO-3 |
 
-All four cells work for both SFT and online/environmental GRPO. At `ep_group_size==1` the MoE is
+All four cells work for both SFT and online/async GRPO. At `ep_group_size==1` the MoE is
 still EP-wrapped (grouped-GEMM path) while `is_ep_mode` is `False`, so the GRPO vLLM weight-sync
-gather keys the EP expert reshape on the model carrying EP wrappers, not on `is_ep_mode`, and
-materializes the FSDP-sharded experts (`materialize_dtensor`) before reshaping to
-vLLM's checkpoint layout. Without that the experts reach vLLM in the EP-internal layout, the server
-rejects them, and the weight-sync NCCL broadcast hangs.
+gather keys the EP expert reshape on the model carrying EP wrappers, not on `is_ep_mode`.
+
+It materializes the FSDP-sharded experts (`materialize_dtensor`) before reshaping to vLLM's
+checkpoint layout. Without that the experts reach vLLM in the EP-internal layout, the server rejects
+them, and the weight-sync NCCL broadcast hangs.
 
 ## HSDP (Hybrid Sharded Data Parallel)
 
@@ -126,9 +141,10 @@ rejects them, and the weight-sync NCCL broadcast hangs.
 requirement.** The default DP path 1D-full-shards non-expert params across **every** DP rank, so on
 a multi-node job every per-layer all-gather and reduce-scatter crosses the inter-node fabric, an
 order of magnitude below NVLink
-([bandwidth ladder](../reference/gpu-training-theory.md#interconnect-tiers)). HSDP shards within each
-NVLink domain and **replicates** across domains, keeping the bandwidth-heavy collectives on NVLink so
-only one gradient all-reduce crosses RDMA per step.
+([bandwidth ladder](../reference/gpu-training-theory.md#interconnect-tiers)).
+
+HSDP shards within each NVLink domain and **replicates** across domains, keeping the bandwidth-heavy
+collectives on NVLink so only one gradient all-reduce crosses RDMA per step.
 
 Enable with `--use_hsdp`. The layout is derived from topology — no shard-size knob: shard width =
 `nvlink_domain_size`, replica count = `num_nvlink_domains`. `setup_fsdp2_for_dp()` applies FSDP2 over
@@ -136,12 +152,15 @@ the 2D `(dp_replicate, dp_shard)` mesh built by `create_dp_mesh` (`src/distribut
 grad-norm sums shard norms over the `dp_shard` sub-group only.
 
 - **Scope:** pure DP and CP only; every other mode rejects `use_hsdp` at config time
-  (`ParallelismConfig._validate_hsdp`, `_validate_pipeline_parallel`). TP / EP+TP / Expert-TP build
-  their own `(dp, tp)` mesh the 2D HSDP mesh is not wired into; multi-group EP already shards over
-  the EP group, and a single global EP group must keep 1D FSDP so its backward collectives share the
-  DeepEP combine's membership; under PP the 2D mesh is built by `init_device_mesh` over the whole
-  world and cannot be restricted to a stage's rank block, so every rank would silently get the first
-  stage's ranks.
+  (`ParallelismConfig._validate_hsdp`, `_validate_pipeline_parallel`).
+
+    TP / EP+TP / Expert-TP build their own `(dp, tp)` mesh the 2D HSDP mesh is not wired into.
+    Multi-group EP already shards over the EP group, and a single global EP group must keep 1D FSDP
+    so its backward collectives share the DeepEP combine's membership.
+
+    Under PP the 2D mesh is built by `init_device_mesh` over the whole world and cannot be restricted
+    to a stage's rank block, so every rank would silently get the first stage's ranks.
+
 - **Trade-off:** one param replica per domain, so it costs memory vs 1D full-shard. Use it when
   inter-node DP bandwidth, not per-GPU memory, is the bottleneck.
 - **Single domain:** a no-op; `is_hsdp` stays False and the mesh falls back to 1D.
@@ -193,12 +212,13 @@ support matrix in [Supported combinations](README.md#supported-combinations).
 
 Under `torchrun`, `DistributedTrainerMixin` (`src/trainers/mixins/base.py`) owns FSDP2:
 `_setup_distributed_modes()` dispatches to the per-mode setup after `super().__init__()`. HF's own
-FSDP wiring is disabled ahead of it — `apply_distributed_trainer_config`
+FSDP wiring is disabled ahead of it: `apply_distributed_trainer_config`
 (`src/training/script_runner.py`) blanks `fsdp` on every distributed trainer's config.
 Accelerate's DDP wrapping is skipped whenever the mixin syncs gradients
-(`_should_skip_ddp_wrapping()`). `use_grouped_gemm` does not count as custom parallelism; it only
-activates for MoE models during loading, and an MoE under `accelerate launch` is rejected at load
-([Two launchers](#two-launchers)).
+(`_should_skip_ddp_wrapping()`).
+
+`use_grouped_gemm` does not count as custom parallelism; it only activates for MoE models during
+loading, and an MoE under `accelerate launch` is rejected at load ([Two launchers](#two-launchers)).
 
 Mixed precision is auto-detected from training args by `create_mixed_precision_policy_v2`
 (`src/distributed/fsdp.py`). With `fp32_non_ep_params: true`, non-expert params are

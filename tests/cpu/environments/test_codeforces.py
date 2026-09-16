@@ -18,6 +18,7 @@ import sys
 import pytest
 
 from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
+from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT, CodeContestsEnvironment
 from src.environments.envs.tasks.coding.datasets import (
     CODE_DATASET_ADAPTERS,
@@ -306,28 +307,30 @@ def test_env_reset_parses_payload_and_reward_is_fraction():
     traj.info["tests_total"] = total
     traj.info["submission_result"] = "Passed 1/2 test cases."
     traj.info["completed"] = True
-    reward = env._compute_reward(traj)
-    assert reward == pytest.approx(0.5)
+    env._settle_grade(traj, None)
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == pytest.approx(0.5)
+    assert traj.total_reward == pytest.approx(0.5)
 
 
-def test_pass_fraction_exponent_makes_partial_credit_convex():
-    """With the exponent above 1 a half-right submission earns well under half a solve, while a full
-    pass and a zero pass are unchanged — the knob reshapes partial credit only."""
+def test_environment_term_exponent_makes_partial_credit_convex():
+    """With the environment term's exponent above 1 a half-right submission earns well under half a
+    solve, while a full pass and a zero pass are unchanged — the exponent reshapes partial credit only."""
 
     def graded(env, passed, total):
         traj = env._reset_single("Print a+b.", {"answer": {"tests": _ADD_TESTS, "checker": None}})
         traj.info.update(tests_passed=passed, tests_total=total, submission_result="graded", completed=True)
-        return env._compute_reward(traj)
+        env._settle_grade(traj, None)
+        return traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY]
 
-    convex = CodeContestsEnvironment(language="python", pass_fraction_exponent=2.0)
+    convex = CodeContestsEnvironment(language="python", reward_terms=[{"source": "environment", "exponent": 2.0}])
     linear = CodeContestsEnvironment(language="python")
     assert graded(convex, 1, 2) == pytest.approx(0.25)
     assert graded(linear, 1, 2) == pytest.approx(0.5)
     assert graded(convex, 2, 2) == pytest.approx(graded(linear, 2, 2)) == pytest.approx(1.0)
     assert graded(convex, 0, 2) == pytest.approx(graded(linear, 0, 2)) == pytest.approx(0.0)
     for bad in (0.0, -1.0, float("inf")):
-        with pytest.raises(ValueError, match="pass_fraction_exponent"):
-            CodeContestsEnvironment(language="python", pass_fraction_exponent=bad)
+        with pytest.raises(ValueError, match="exponent"):
+            CodeContestsEnvironment(language="python", reward_terms=[{"source": "environment", "exponent": bad}])
 
 
 def test_python_test_tool_runs_complete_program_with_imports():
@@ -343,6 +346,27 @@ def test_python_test_tool_runs_complete_program_with_imports():
     assert tool is not None
     out = tool.execute(code="import sys\nfrom collections import Counter\nprint(sum(Counter([1, 1, 2]).values()))")
     assert out.strip() == "3"
+
+
+def test_scratchpad_feeds_the_programs_stdin():
+    """The scratchpad runs the program on the stdin the call supplies, so a model can try the
+    statement's sample input on the exact program it will submit; an omitted stdin reads as
+    end-of-file rather than blocking, and the schema declares it optional."""
+    env = CodeContestsEnvironment(language="python")
+    tool = env.registry.get("python_repl")
+    program = "import sys\ndata = sys.stdin.read().split()\nprint(sum(int(x) for x in data) if data else 'no input')"
+    assert tool.execute(code=program, stdin="1 2\n3\n").strip() == "6"
+    assert tool.execute(code=program).strip() == "no input"
+    (schema,) = [t for t in env.get_tools_schema() if t["function"]["name"] == "python_repl"]
+    assert "stdin" in schema["function"]["parameters"]["properties"]
+    assert "stdin" not in schema["function"]["parameters"]["required"]
+    assert "stdin" in schema["function"]["description"]
+
+
+def test_run_code_binds_stdin_with_the_language():
+    env = CodeContestsEnvironment(language=["python", "cpp"])
+    tool = env.registry.get("run_code")
+    assert tool.execute(code="print(input()[::-1])", language="python", stdin="abc\n").strip() == "cba"
 
 
 def test_final_code_block_without_submit_is_not_graded():
@@ -368,8 +392,8 @@ def test_completed_without_submitting_scores_zero():
     """A finished episode that never submitted scores 0, not flat partial credit.
 
     ``submit_solution`` is the only graded channel, so a model that ends with prose (or runs out of
-    turns) without submitting earns ``failure_reward`` — ``partial_reward`` would inflate the benchmark
-    and, in training, reward a model for not submitting code.
+    turns) without submitting grades 0 — partial credit there would inflate the benchmark and, in
+    training, reward a model for not submitting code.
     """
     env = CodeContestsEnvironment(language="python", output_comparison="tokens")
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
@@ -481,20 +505,15 @@ def test_sandbox_fault_during_grading_marks_the_episode_invalid():
     The local backend reports such a fault by RAISING (missing interpreter, ``bwrap`` absent, fork
     table exhausted, ENOSPC), where the remote one returns ``SandboxResult(error=...)``. Unconverted,
     the raise escapes ``submit_solution`` as an ordinary tool error: the submission budget is already
-    spent, so the episode completes ungraded and scores ``failure_reward`` — inside the GRPO group
-    baseline, where it biases every sibling's advantage."""
+    spent, so the episode completes ungraded and grades 0 — inside the GRPO group baseline, where it
+    biases every sibling's advantage."""
 
     class _RaisingSandbox:
         def run(self, code, **kwargs):
             raise OSError(28, "No space left on device")
 
     env = CodeContestsEnvironment(
-        language="python",
-        output_comparison="tokens",
-        max_submissions=1,
-        success_reward=1.0,
-        failure_reward=0.0,
-        sandbox=_RaisingSandbox(),
+        language="python", output_comparison="tokens", max_submissions=1, sandbox=_RaisingSandbox()
     )
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
     eids, _ = env.reset(["Read a and b; print a+b."], [ctx])
@@ -506,6 +525,35 @@ def test_sandbox_fault_during_grading_marks_the_episode_invalid():
     assert traj.info["tests_ran_ok"] == 0
     assert traj.episode_invalid is True
     assert traj.total_reward == pytest.approx(0.0)
+
+
+def test_a_finished_episode_carries_no_hidden_tests():
+    """The hidden tests and the context's ``answer`` payload are needed until the submission is
+    graded and nowhere after — every hop past the env (the Ray object store, the TP broadcast) would
+    carry them. The verdict stays."""
+    env = CodeContestsEnvironment(language="python", output_comparison="tokens", max_submissions=1)
+    ctx = {"answer": {"tests": _ADD_TESTS, "checker": None}}
+    eids, _ = env.reset(["Read a and b; print a+b."], [ctx])
+    assert env.get_trajectories(eids)[0].info["_test_cases"] == _ADD_TESTS, "the grader reads them mid-episode"
+
+    env.step(eids, [""], [{"tool_calls": [_submit_call("c1", _CORRECT_ADD)]}])
+
+    traj = env.get_trajectories(eids)[0]
+    assert traj.done and traj.total_reward == pytest.approx(1.0)
+    assert not [key for key in traj.info if key.startswith("_")]
+    assert "answer" not in traj.info["context"]
+    assert (traj.info["tests_passed"], traj.info["tests_total"]) == (2, 2)
+
+
+def test_max_time_limit_below_the_per_test_floor_is_refused():
+    """The task contract promises an interpreted solution at least ``timeout_per_test`` per test; a
+    clamp under it grades below what the model was told."""
+    with pytest.raises(ValueError, match="max_time_limit"):
+        CodeContestsEnvironment(language="python", timeout_per_test=5, max_time_limit=2)
+    assert (
+        CodeContestsEnvironment(language="python", timeout_per_test=5, max_time_limit=5).grading_spec.max_time_limit
+        == 5
+    )
 
 
 def test_registry_codeforces_is_token_comparison_preset():

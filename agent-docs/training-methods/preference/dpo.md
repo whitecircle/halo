@@ -1,110 +1,92 @@
 # Direct Preference Optimization (DPO)
 
-DPO trains on pairwise preference data by deriving the optimal policy directly from the KL-constrained RLHF objective, against a frozen reference model and without a separate reward model.
+DPO fits the policy to pairwise preferences against a frozen reference model, with no reward model. Use it on `prompt` / `chosen` / `rejected` rows when a reference fits the budget; for the same data without one use [SMPO](smpo.md), for unpaired thumbs-up/down rows [KTO](kto.md).
 
-| Aspect | Value |
-|--------|-------|
-| Data format | Pairwise preferences (prompt, chosen, rejected), all `list[dict]` |
-| Reference model | Required (frozen copy, PEFT base without adapter, or precomputed log probs) |
-| Trainer | `DistributedDPOTrainer` |
-| Script | `scripts/training/preference/dpo.py` (text or VLM) |
-| Parallelism | EP, TP, ETP, EP+TP; no CP. Declares `_supports_pp` — [PP](../../parallelism/pipeline-parallelism.md) is not yet available in this release |
+Trainer `DistributedDPOTrainer`, script `scripts/training/preference/dpo.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)). It declares `_supports_pp`, but pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md).
 
-## Dataset format
-
-Same pairwise format as [SMPO](smpo.md) — `prompt`, `chosen`, `rejected`, each a `list[dict]` message list. See [Dataset Formats](../../data/dataset-formats.md).
-
-### Vision-language
-
-Point `dpo.py` at a VLM model to run DPO on image+text pairs. The script auto-detects the modality; routing then keys on the **dataset**. Text-only preference data on a natively-multimodal model (Qwen3.5/3.6, Gemma4) trains through the normal text pipeline, hub-shape normalization included. An `images`/`image` column puts TRL 1.6's `DPOTrainer` in vision mode with its `DataCollatorForVisionPreference`, and those rows must already be contract-shaped (prompt = message list, chosen/rejected = continuation-only), because TRL applies no hub-shape normalization.
-
-A dataset storing its images under another column name declares them with `images_field`, which is renamed to `images` before the dispatch: TRL probes for the `image`/`images` spelling and prunes every other column, so an un-aliased column would train as text on a run the toolkit already calls multimodal. The column must exist in the loaded splits — a mistyped name raises at the dataset load rather than training text on a run the toolkit calls multimodal. Unlike the [SFT field](../sft.md#vision-language-models), it is not injected into a conversation turn; TRL's vision route reads the column itself.
+## Configuration
 
 ```yaml
-images_field: image_bytes   # renamed to `images` for TRL's vision route
+model_name_or_path: Qwen/Qwen3.5-9B
+dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
+test_size: 0.005
+beta: 0.1
+loss_type: sigmoid                 # normalizes to ["sigmoid"]
+max_length: 4096
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-07             # the shipped recipes' value
+gradient_checkpointing: true       # bf16 and Liger are toolkit defaults
+use_peft: false                    # true makes the adapter-free base the reference
+output_dir: checkpoints/dpo-qwen3.5-9b
 ```
 
-TRL rejects `precompute_ref_log_probs` for vision datasets, so the vision reference under EP is standard-PEFT adapters (native EP expert-LoRA needs precomputed ref logps and stays text-only). Under TP, where PEFT and an explicit reference are both rejected, vision DPO has no supported shape.
+| Knob | Default | Effect |
+|---|---|---|
+| `beta` | `0.1` | Scales the implicit-reward gap inside the loss; `0` flattens the objective |
+| `max_length` | `1024` | Truncates prompt + completion, keeping the start |
+| `generation_max_prompt_length` | `512` | Prompt cap for the eval generation split only |
 
-## Quick start
+`loss_type` takes 15 TRL values — `sigmoid`, `hinge`, `ipo`, `sft`, `exo_pair`, `nca_pair`, `robust`, `bco_pair`, `sppo_hard`, `aot`, `aot_unpaired`, `discopop`, `apo_zero`, `apo_down`, `sigmoid_norm` — and a list combines several under `loss_weights` (unset: `1.0` each), so `[sigmoid, sft]` adds an SFT anchor to the preference term.
+
+No training-side prompt cap exists, so an over-long prompt eats its own completion: filter those rows in the dataset ([sequence length](../../reference/configuration-reference.md#sequence-length-caps-vs-generation-budgets)).
+
+## Reference model
+
+Three shapes, decided by `load_reference_model_for_preference` (`src/distributed/loading/frozen_models.py`):
+
+- **PEFT** (`use_peft: true`) — no second model: the script passes a LoRA config, so the reference is the base with the adapter disabled. A trainer built by hand around an already-wrapped `PeftModel` gets a frozen `ref` adapter copy instead.
+- **EP / TP / PP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1; a resume re-derives them from the trained one.
+- **A frozen copy** — every other shape, precompute on plain data parallelism included. It mirrors the policy load (same revision, attention validator, sink policy) and stays resident for the run.
+
+Under EP, TP or PP a frozen copy is rejected outright — the reference is never parallelized — so full fine-tuning there needs precompute. TP rejects PEFT too, leaving precompute as its only shape; native EP expert-LoRA needs it as well, since grouped expert adapters cannot be toggled off.
+
+A policy carrying live attention sinks (`reset_sinks: false`) is refused whenever a reference model reaches the trainer, single GPU included. Only PEFT, or EP/TP/PP with precompute, leaves none.
+
+Pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md); the shipped PP gates (`src/trainers/mixins/pp_gates.py`) already pin its contract for this trainer — `precompute_ref_log_probs: true` with the `ref_chosen_logps` / `ref_rejected_logps` columns already in the train dataset, and in the eval dataset whenever one is passed (`test_size` alone creates one, whatever `eval_strategy` says); `loss_type` ∈ {`sigmoid`, `hinge`, `ipo`} with `f_divergence_type: reverse_kl`; and no `use_weighting`, `ld_alpha` or `compute_metrics`.
+
+## Launch
 
 ```bash
-# Standard (FSDP via accelerate)
-accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml \
-    scripts/training/preference/dpo.py \
+# Plain FSDP2 data parallel
+torchrun --nproc_per_node=8 scripts/training/preference/dpo.py \
     examples/preference/qwen3_5/dpo-qwen3.5-9b-tulu3-prefmix.yaml
 
-# Expert parallelism (MoE)
+# MoE, expert parallel (that recipe is LoRA, so the adapters are the reference)
 torchrun --nproc_per_node=8 scripts/training/preference/dpo.py \
     examples/preference/gptoss/dpo-gptoss-20b-tulu3-prefmix-ep.yaml --expert_parallel_size=8
 ```
 
-Minimal config:
+`halo launch dpo <config> --nproc 8` builds the same line; any field is overridable (`--beta=0.05`). `accelerate launch` serves plain DP only — EP/CP/TP/PP reject it.
 
-```yaml
-model_name_or_path: meta-llama/Llama-3.1-8B-Instruct
-dataset: path/to/preference_dataset
-test_size: 0.05
+## Vision-language
 
-beta: 0.1
-loss_type: sigmoid
-max_length: 2048
+`dpo.py` trains a VLM checkpoint on image+text pairs. The model class follows the checkpoint, the data path follows the **dataset**: text-only pairs on a natively multimodal model take the text pipeline, hub-shape normalization included.
 
-per_device_train_batch_size: 2
-gradient_accumulation_steps: 8
-learning_rate: 5.0e-7
-num_train_epochs: 1
-gradient_checkpointing: true   # bf16 enabled by default
+An `images`/`image` column puts TRL in vision mode with `DataCollatorForVisionPreference`. Those rows must already be contract-shaped — prompt a message list, chosen/rejected continuation-only — since TRL normalizes no hub shapes. `tools_field` is refused: the vision render passes no `tools=`.
 
-# PEFT makes the reference model the adapter-free base (no second copy)
-use_peft: true
-lora_r: 64
-lora_alpha: 128
-lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+Set `images_field: <column>` when the dataset stores images under another name — it is renamed to `images` before the dispatch, the spelling TRL probes for. A name the splits do not carry raises at dataset preparation, after the policy and the reference have loaded.
 
-output_dir: checkpoints/dpo-llama
-report_to: wandb
+TRL rejects `precompute_ref_log_probs` on vision datasets, so under EP the vision reference is standard PEFT adapters. Under TP, where PEFT and an explicit reference are both rejected, vision DPO has no supported shape.
+
+## Testing a setup
+
+```bash
+torchrun --nproc_per_node=2 scripts/training/preference/dpo.py <config> \
+    --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-`unfreeze_layers_patterns` and `freeze_layers_patterns` (freeze applied after unfreeze) take lists of layer-name patterns.
+Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_dpo.py` and `test_dpo_vlm.py`.
 
-## Loss variants
+## What to watch
 
-`loss_type` is a `list[str]`; a YAML string normalizes to a single-element list, and multiple losses combine via `loss_weights`. Valid values: `sigmoid` (default), `hinge` (SLiC-HF), `ipo`, `sft` (NLL on chosen), `exo_pair`, `nca_pair`, `robust`, `bco_pair`, `sppo_hard`, `aot`, `aot_unpaired`, `discopop`, `apo_zero`, `apo_down`, `sigmoid_norm`.
+| Signal | Reading |
+|---|---|
+| `rewards/accuracies` | Share of pairs scoring chosen above rejected (chance is 0.5) |
+| `rewards/margins` | `beta ×` the log-ratio gap; rises as pairs separate |
+| `logps/chosen`, `logps/rejected` | Both falling together is log-prob collapse: lower the LR, raise `beta`, or add `sft` |
 
-RPO adds an NLL term on chosen by including `sft`; its `loss_weights` entry is the RPO alpha coefficient:
+Failure signatures:
 
-```yaml
-loss_type: [sigmoid, sft]
-loss_weights: [1.0, 1.0]
-```
-
-## Reference model
-
-Three shapes, two of which avoid a second full model copy:
-
-- **PEFT/LoRA** (preferred) — `use_peft: true`; the reference is the base model without the adapter.
-- **Precompute** — `precompute_ref_log_probs: true` computes reference log probs once, then drops the reference model.
-- **Accept the overhead** — load a full frozen copy.
-
-The full frozen copy (`load_reference_model_for_preference` in `src/distributed/loading/frozen_models.py`) mirrors the policy load: same `model_revision` (an unpinned reference would silently load hub `main` and shift every logratio), the same attention-implementation validator, and the same GptOss sink reset/freeze driven by `reset_sinks`.
-
-TRL builds a reference of its own whenever `beta != 0` and the model is not PEFT-wrapped, and that one mirrors nothing — the scripts clear `model_init_kwargs` after loading the policy, so it loads fp32, from hub `main`, with the config-default attention.
-
-On a policy carrying **live attention sinks** (`reset_sinks: false`) that implicit reference is refused at construction on **every** parallelism mode, plain FSDP2 DP and single-GPU included: the policy is restricted to sink-carrying attention and the reference is not, so the pair score identical tokens differently and the KL is biased on every token. Use `beta: 0`, `use_peft: true`, or precomputed reference log probs. Without live sinks the same implicit reference only warns, and only under EP, where the un-sharded fp32 dense replica costs the most.
-
-Under EP/TP the reference is never parallelized, so a full frozen copy is not an option: an explicit `ref_model` is rejected at construction, and full fine-tuning requires `precompute_ref_log_probs: true` — the script raises without it. Reference log probs are computed from the still-untrained policy before the first step; a resume re-derives them from the trained weights. Under EP, PEFT also works, and native EP expert-LoRA requires `precompute_ref_log_probs` too (grouped expert adapters cannot be toggled off). Under TP, PEFT is rejected — adapters are not in the TP DTensor graph — leaving `precompute_ref_log_probs` as the only shape.
-
-Pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md); the shipped PP gates (`src/trainers/mixins/pp_gates.py`) already pin its contract for this trainer — precompute-only with the `ref_chosen_logps` / `ref_rejected_logps` columns in the dataset, `loss_type` ∈ {`sigmoid`, `hinge`, `ipo`}, `f_divergence_type: reverse_kl`, and no PEFT / `use_weighting` / `ld_alpha` / `activation_offloading` / `compute_metrics`.
-
-## Parallelism
-
-Attention TP and ETP are mutually exclusive. Flags: `expert_parallel_size`, `tensor_parallel_size`, `expert_tensor_parallel_size` (all default `1`), `ep_scope` (default `auto`). Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
-
-## Configuration
-
-`DPOScriptArguments` adds `generate_eval_examples` (`True`), `num_eval_examples` (`50`), `generation_max_prompt_length` (`512`), and `images_field` (`None`, [vision](#vision-language)). Dataset fields (`dataset`, `dataset_ratio`, `test_size`, the freeze patterns) come from `CommonScriptArguments`.
-
-DPO has no training-side prompt cap — TRL 1.6's `DPOConfig` has no `max_prompt_length`. It truncates the concatenated prompt + completion to `max_length` `keep_start`, so an over-long prompt eats its own completion; filter over-long prompts in the dataset. `generation_max_prompt_length` bounds only the eval-time generation dataset ([Sequence length](../../reference/configuration-reference.md#sequence-length-caps-vs-generation-budgets)).
-
-Key TRL `DPOConfig` defaults: `beta` `0.1`, `loss_type` `["sigmoid"]`, `max_length` `1024`, `precompute_ref_log_probs` `False`, `label_smoothing` `0.0`. Full list: [Configuration Reference](../../reference/configuration-reference.md).
+- A reference-model raise on a live-sinks policy — `use_peft: true`, or precompute under EP/TP/PP. `beta: 0` does not help: it changes the loss, not whether a reference loads.
+- "Cannot hold a separate dense reference" under EP/TP/PP — set `precompute_ref_log_probs: true` or `--use_peft`.

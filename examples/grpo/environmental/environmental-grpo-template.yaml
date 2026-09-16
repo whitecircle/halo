@@ -1,8 +1,6 @@
-# Environmental GRPO training template — see agent-docs/training-methods/grpo/environmental-grpo.md.
+# Async GRPO with Environments training template — see agent-docs/training-methods/grpo/async-grpo/README.md.
 # Launch: start a vLLM server on the GPUs the trainer does not take, then
 #   torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
-#   (torchrun is the repo default and the only launcher for EP/CP/TP; accelerate launch
-#   --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml stays an option for plain data-parallel.)
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
@@ -14,27 +12,60 @@ attn_implementation: flash_attention_2
 environment_type: react_math
 # Available: react_math, react_search, native_math, native_coding, native_combined,
 #            swe, codeforces, mcp, qa_search, code_contests, exam_qa
-success_reward: 1.0
-failure_reward: 0.0
 max_turns: 10
+# --- Rewards (agent-docs/training-methods/grpo/rewards.md) ---
+# A sum of terms, each weight x score^exponent over a score in [0, 1]; the environment's per-turn and
+# shaping terms add on top. Sources: environment (the env's own grade, logged as reward/objective),
+# judge (a generative judge), reward_model (a Bradley-Terry model served by vLLM or SGLang).
+rewards:
+  - source: environment      # weight 1.0, exponent 1.0
+  # - source: judge            # openai/gpt-5.6-luna on OpenRouter at reasoning_effort medium (OPENROUTER_API_KEY)
+  #   name: quality
+  #   weight: 0.3
+  #   requirements:
+  #     - {name: correctness, description: "The final answer is correct and fully justified."}
+  #     - {name: clarity, description: "The answer is easy to follow.", weight: 0.5}
+  # - source: reward_model     # vllm serve <model> --runner pooling, or sglang --is-embedding (backend: sglang)
+  #   name: preference
+  #   weight: 0.5
+  #   url: http://localhost:8100
+  #   model: Skywork/Skywork-Reward-V2-Llama-3.1-8B
 # Env-specific kwargs (uncomment and nest as needed):
 # environment_kwargs:
 #   search_backend: duckduckgo   # For qa_search and open-book exam_qa (auto-detect when omitted)
 #   open_book: false             # For exam_qa (enable search tools)
 #   timeout_per_test: 5          # For code_contests / codeforces (seconds per test case)
+#   compiled_time_limit_scale: 1.0  # For code_contests / codeforces: compiled time limit as a multiple of the stated one
 #   mcp_server: filesystem       # For mcp (MCP server name)
 #   include_python_tools: false  # For qa_search (add Python tools)
+#   # Every environment (defaults from src/environments/base.py):
+#   reasoning_effort: null       # chat-template CoT steer: low / medium / high, random (drawn per episode) or null; code_contests defaults to medium
+#   reasoning_effort_profiles: {}  # per-level overrides merged over the class table, e.g. {high: {thinking_tokens: 16384}}; an unknown key raises
+#   carry_reasoning: false       # send the previous assistant turn's reasoning back to the engine with the conversation (vLLM only)
+#   max_length_cutoff_recoveries: null  # engine-cut turns an episode may recover from; null = every one within max_turns
+#   tool_reward_cap: null        # cap on one episode's summed tool_success_reward; null = tool_success_reward x max_turns
+#   # Native-tool environments (native_*, code_contests / codeforces, swe, exam_qa, mcp; envs/protocols/native.py):
+#   multi_turn_reward: 0.0       # bonus for an episode that made more than one tool call
+#   turn_overflow_penalty: 0.0   # magnitude charged when the episode burns max_turns
+#   no_tool_use_penalty: 0.0     # magnitude charged when the episode ends with 0 tool calls
 
 # --- Ray Workers (AsyncTrainingConfig fields) ---
 num_rollout_workers: 16
 max_concurrent_rollouts: null  # default: num_workers * 4
+# eval_rollout_batch_size: null  # rows per rank in one evaluation rollout round; null = the eval batch
 ray_address: null  # null = local, or "head-node:6379"
 
-# --- vLLM Server - Single Server (AsyncTrainingConfig fields) ---
+# --- vLLM Server - Single Server (AsyncTrainingConfig fields; vllm_group_port is a GRPOConfig field) ---
+# rollout_backend: vllm  # vllm or sglang
 rollout_server_url: "http://localhost:8000"
 vllm_group_port: 51216  # NCCL group port for weight sync
 rollout_connection_timeout: 120.0
 sync_weights_every_n_steps: 1
+# model_name: null         # model name sent in the rollout requests; null = model_name_or_path
+# request_timeout: 120.0   # HTTP timeout per rollout-server request in seconds
+# episode_timeout: 1200.0  # wall-clock deadline for one rollout episode in seconds; must stay below the NCCL watchdog
+# max_retries: 3           # retries after a failed rollout-server request (total attempts = max_retries + 1)
+# retry_base_wait: 1.0     # base wait in seconds for the exponential backoff between retries
 
 # --- vLLM Server - Multi-Server (uncomment to use) ---
 # rollout_server_configs:
@@ -47,13 +78,18 @@ sync_weights_every_n_steps: 1
 rollout_temperature: 0.7
 rollout_top_p: 0.95
 rollout_max_tokens: 8192
+# rollout_max_thinking_tokens: null   # per-turn reasoning-token budget; vLLM only, needs a server-side reasoning parser
+# rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request and applied to the trainer's own renders
+# rollout_stop_tokens: []             # special-token strings that end a turn's generation (e.g. gpt-oss "<|call|>")
+# train_on_sampled_tokens: true       # train on the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
+# max_train_row_tokens: null          # longest training row (prompt + completion tokens) a rank takes; null = the model's context window
+# reasoning_compliance_weight: 0.0    # weight of the reasoning-budget calibration reward (0 = off)
+# reasoning_compliance_under_use_weight: 0.3  # weight of the under-use side of that term, relative to the over-use side's 1.0
 
 # --- Prefetch (AsyncTrainingConfig fields) ---
-enable_prefetch: false    # this config serves from one rollout_server_url, and that
-                          # engine stops serving during weight sync, so there is nothing to overlap
-                          # against — the trainer auto-disables prefetch and warns. Set it back to
-                          # true together with a rollout_server_configs list of 2+ servers.
-num_prefetch_batches: 1   # batches to prefetch ahead, once prefetch is on
+enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the
+                          # trainer auto-disables it (that server stops serving during weight sync)
+num_prefetch_batches: 1
 
 # --- Dataset (EnvironmentalGRPOScriptArguments fields) ---
 dataset:
@@ -73,8 +109,26 @@ num_generations: 4
 beta: 0.01
 num_iterations: 1
 epsilon: 0.2
-scale_rewards: batch     # global batch std — never the per-group std, whose near-zero divisor on a
-                        # uniformly-failed group inflates shaping noise into a full-scale advantage
+scale_rewards: batch     # global batch std; a per-group std divides by ~0 on a uniform group
+# drop_degenerate_groups: true      # mask GRPO groups whose completions all scored the same reward out of the loss
+# use_chunked_grpo_logprobs: false  # vocab-chunked log-probs instead of full [B, T, vocab] logits (large-vocab models on long completions)
+# routing_replay: none              # MoE routing replay: none, recompute (R2), or rollout (R3; needs a capture-capable server)
+# --- Advantage shaping (AdvantageShapingArguments) ---
+# advantage_mode: mean              # group-baseline / negative-side advantage surgery: mean, qae, asymmetric, neg_mask_hard
+# advantage_quantile: 0.4           # QAE baseline quantile for advantage_mode: qae
+# advantage_pos_scale: 1.0          # positive-advantage multiplier for advantage_mode: asymmetric
+# advantage_neg_scale: 0.4          # negative-advantage multiplier for advantage_mode: asymmetric (0 = full negative mask)
+# advantage_hard_group_threshold: 0.5  # neg_mask_hard: a group is HARD when no member's gate reward reaches this
+# scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
+# --- IS trust region (engine<->trainer ratio; a band activates when both of its bounds are set) ---
+# isr_band_min: null                # token band: a corrected token whose raw ratio leaves [min, max] is masked
+# isr_band_max: null
+# isr_geo_band_min: null            # trajectory band: mask a whole trajectory whose exp(mean log-ratio) leaves [min, max]
+# isr_geo_band_max: null
+# isr_veto_min: null                # mask a whole trajectory when any corrected token's raw ratio falls below this
+# isr_opsm_delta: null              # mask negative-advantage trajectories whose |mean log-ratio| exceeds this many nats
+# isr_engine_reference: false       # re-score every training row on the rollout engine under the just-synced weights for the mask stages
+# skip_update_masked_frac: null     # skip the optimizer step when more than this fraction of corrected trajectories or tokens is masked
 
 # --- Training ---
 per_device_train_batch_size: 2
@@ -109,7 +163,7 @@ log_completions: true        # per-sample console table
 save_completions: true       # trajectories → <output_dir>/completions/*.parquet
 num_completions_to_print: 3
 
-# --- Data Loading ---
+# --- Data ---
 dataloader_num_workers: 0
 remove_unused_columns: false
 seed: 42

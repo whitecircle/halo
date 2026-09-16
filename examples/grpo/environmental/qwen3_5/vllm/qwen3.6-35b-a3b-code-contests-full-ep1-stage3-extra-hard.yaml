@@ -1,25 +1,15 @@
 # Environmental GRPO — Qwen3.6-35B-A3B full fine-tune, code-contests curriculum stage 3 of 3: the HardTests
-# `extra-hard` band (rating 2600-3500), no EP, ZeRO-3, KL-free
-# (bands + IS masking as trust region).
-# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton --enable-prefix-caching
-#   (opt-in for this hybrid family; a multi-turn episode re-sends its context every turn), and
-#   VLLM_USE_V2_MODEL_RUNNER=0 in the server env (Model Runner V2 rejects the thinking_token_budget
-#   this config sends with a 400 on every rollout).
-#   (hermes does not parse Qwen3.5/3.6 XML tool calls, so rollouts return no tool_calls).
-# This file targets vLLM; the sibling `../sglang/` config runs the same recipe on SGLang.
-# Launch: start 2 vLLM servers, TP=1 each, on GPUs 6 and 7 with --weight-transfer-config '{"backend":"nccl"}', then
-#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
-#   Six trainer ranks, not four: one ~100k-token trajectory peaks near 200 GB of activations on its rank
-#   (batch 1, per-layer GC), so the 70 GB of ZeRO-3 param/grad/optimizer shards at DP=4 left no margin
-#   at DP=4; DP=6 shards them to ~47 GB.
+# `extra-hard` band (rating 2600-3500), no EP, ZeRO-3, KL-free (IS bands as the trust region).
+# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton --enable-prefix-caching,
+#   plus VLLM_USE_V2_MODEL_RUNNER=0 in the server env (V2 400s the thinking_token_budget this config sends).
+# Launch: start 2 vLLM servers, TP=1 each, on GPUs 6 and 7 with --weight-transfer-config '{"backend":"nccl"}', then CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
 
 # --- Model ---
-model_name_or_path: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage2-hard/checkpoint-150  # the previous stage's eval-best checkpoint, weights only (fresh optimizer)
-model_name: Qwen/Qwen3.6-35B-A3B   # the id the rollout servers serve; unset, the checkpoint path above would be sent as the model id
+model_name_or_path: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage2-hard/checkpoint-150  # weights only: the optimizer starts fresh
+model_name: Qwen/Qwen3.6-35B-A3B   # the id the rollout servers serve; unset, the path above would be sent as the model id
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
-# No output_router_logits: the aux loss is inert under the policy-gradient objective (the trainer warns),
-# and transformers still runs the load-balancing loss whenever the flag is on — its one-hot expansion is
-# layers x tokens x top_k x experts int64, tens of GB on a 100k-token trajectory (moe_balancing: none below).
+# No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag still runs
+# transformers' load-balancing loss — a layers x tokens x top_k x experts int64 one-hot, tens of GB here.
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
 
 # --- Parallelism (6 train GPUs: pure data-parallel, DP=6, ZeRO-3) ---
@@ -31,82 +21,71 @@ use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 12               # high's worst case (3 subs + 6 scratchpad runs) plus room to recover
-                            # from a length-cutoff turn, which costs a turn, not the episode
+max_turns: 16               # the high profile's 3 submissions + 8 test calls, 2 cut-turn recoveries and
+                            # the closing turn; a cut turn costs a turn, not the episode
 environment_kwargs:
-  language: [python, cpp]   # the model names each program's language; a python solution is graded with the
-                              # interpreted-language floor (timeout_per_test), a cpp one at the stated limit
+  language: [python, cpp]   # the model names each program's language; python is graded at timeout_per_test,
+                            # cpp at compiled_time_limit_scale x the stated limit
+  carry_reasoning: true      # each turn sees the reasoning of the turn before it
+  compiled_time_limit_scale: 2.0   # a compiled solution's time limit as a multiple of the stated one
   timeout_per_test: 5
   stop_on_first_failure: false
-  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit — see
-                             # gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml for the derivation
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
-  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past two recoveries the episode ends truncated
-  # max_output_size (grader stdout cap, NOT a generation budget) stays at the env default.
-  # One profile per effort level: CoT budget + interaction. Submissions scale with effort, one repair
-  # everywhere — a single submission strands near-misses; high funds the full verdict->fix loop.
-  # NO behavior bounties: a tested-submission bonus drowns in the group baseline or gets ritual-farmed,
-  # so the interaction ladder is the differentiator and the objective the only large channel.
-  # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + global answer headroom).
+  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past two the episode ends truncated
+  # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
-    # Harder problems need a longer thought at every level: at 4k the low level cannot reach a tool call
-    # on 2000+ problems, so its groups fail as a block and carry no signal. The ladder still spans 2x.
-    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
-    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
-  # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
-  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
-  # Reward ladder: see code_contests.py _compute_reward.
-  submission_reward: 0.1     # bonus for reaching the graded channel; small so a weak submission cannot out-earn a careful one
-  pass_fraction_exponent: 2.0  # convex partial credit: a half-right submission earns a quarter of a solve
+    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 4}
+    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 6}
+    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 8}
+  # Reward ladder: see code_contests.py _grade_episode.
+  submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
-  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
-  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first; prices probing the judge
+  verdict_detail: outcome    # FAIL / pass count only; expected/got would make the judge a free test oracle
+  resubmission_penalty: 0.1  # magnitude, >= 0 — charged per graded submission after the first
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
-  multi_turn_reward: 0.05    # binary, once per episode, gated on a real submission
-  tool_success_reward: 0     # env default; any per-call pay is farmable by duplicate re-runs
+  multi_turn_reward: 0       # off: a bounty for a second call pays a judge probe like a scratchpad run
+  tool_success_reward: 0     # any per-call pay is farmable by duplicate re-runs
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged when the episode burns max_turns
   tool_error_penalty: 0.05   # magnitude, >= 0 — applied as minus per call that fails to parse/execute
+
+# --- Rewards ---
+rewards:
+  - source: environment   # the pass fraction of the submitted solution
+    exponent: 2.0         # convex partial credit: half-right earns a quarter
 
 # --- Ray Workers ---
 num_rollout_workers: 48         # >= the 24 episodes a rank has in flight, with headroom
 max_concurrent_rollouts: 48  # >= the per-rank batch (24) and >= eval_rollout_batch_size (34): both must fit one wave
 
 # --- vLLM Servers ---
-# Two MTP engines, one per serving GPU, each holding 72 of the 144 in-flight episodes: a second
-# engine on the same GPU only time-slices it (agent-docs/infrastructure/rollout-servers.md#throughput).
+# One engine per serving GPU: a second engine on the same GPU only time-slices it.
 rollout_server_configs:
 - url: "http://localhost:8000"
   group_port: 51216
 - url: "http://localhost:8001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 1200.0       # per HTTP call; this family decodes at ~25-50 tok/s per sequence on the 0.26
-                              # triton-MoE path (TP=1, ~40 concurrent), so a 22k-token turn needs up to ~15 min
-                              # (300 s timed out every high-effort turn and re-ran the whole episode)
-max_retries: 1                # a timeout re-runs the WHOLE episode; 2 attempts x 1200 s stays under the
-                              # 80%-of-watchdog retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
+request_timeout: 1200.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence
+                              # decode speed at peak concurrency
+max_retries: 1                # a timeout re-runs the WHOLE episode; attempts x request_timeout must stay
+                              # under the retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 
 # --- Rollout Generation ---
-rollout_temperature: 1.0     # on-policy; the trainer scores at this temperature and the engine's IS reference must match
-                            # against early sharpening (the IS geo-band/veto price the extra off-policyness)
+rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
-rollout_max_tokens: 24000              # per-turn total: thinking budget + a 6k answer headroom (code + call after a forced </think>)
-                                       # (2k left a finished thought too little room to emit its tool call)
+rollout_max_tokens: 24000              # per-turn total: thinking budget + a 6k answer headroom (code + call after </think>)
 rollout_max_thinking_tokens: 18000     # global CoT ceiling >= the profiles' high
-reasoning_compliance_weight: 0   # OFF: the under-band floor is farmable — a padded CoT meets it;
-                                 # length control is engine-side instead (per-effort caps)
+rollout_chat_template_kwargs: {preserve_thinking: true}  # Qwen3.x keeps carried reasoning rendered past the cut-turn nudge, a user message
+reasoning_compliance_weight: 0.15            # a turn that thinks past 0.9x its budget pays up to this, averaged over the episode's turns
+reasoning_compliance_under_use_weight: 0     # no floor: a short repair turn after a verdict is not under-use
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
 
 # --- Dataset ---
-# One stage of the curriculum: the HardTests pool's `extra-hard` config (rating 2600-3500), published by
-# prepare_code_dataset.py --push_bands. Every band config of the repo carries the same 400-problem
-# held-out `test` split (100 per band), so the evals of stages 2 and 3 compare directly (stage 1 scores
-# its Codeforces pool's own split) — leave test_size unset. The Codeforces pool
-# (`your-org/code-contests-codeforces-rl:extra-hard`) has the same shape.
+# Every band config of this repo carries the same held-out `test` split — leave test_size unset.
 dataset:
 - your-org/code-contests-hardtests-rl:extra-hard
 
@@ -114,21 +93,21 @@ dataset:
 max_prompt_length: null
 
 # --- GRPO objective: KL-free, bands as the trust region ---
-num_generations: 8
+num_generations: 12          # 12 prompts x 12: on a frontier pool a problem solved once in twelve still yields a contrast
 use_chunked_grpo_logprobs: true # required for Qwen3.6 (~248k vocab)
+max_train_row_tokens: 50000   # a training rank's memory bound; a longer row leaves the batch
 loss_type: dapo
-advantage_mode: asymmetric   # failures run 3-4x longer than solves, so under the token-level normalizer
-advantage_neg_scale: 0.7     #   their negatives carry the gradient mass and push entropy up; 0.7 nets ~0
-beta: 0.0                   # KL-free; drift observability = sampling/logratio_mean + entropy + eval
+advantage_mode: asymmetric   # failures run far longer than solves, so under a token-level normalizer
+advantage_neg_scale: 0.7     #   their negatives carry the gradient mass
+beta: 0.0                   # KL-free: the IS bands below are the trust region
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
-isr_engine_reference: false  # the engine re-score costs server headroom (an fp32 log-softmax over the vocabulary per
-                             #   prefill chunk; --gpu-memory-utilization <= 0.80) and removes only the trainer<->engine part of the floor
-isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
-isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
+isr_engine_reference: false  # the engine re-score costs server headroom (--gpu-memory-utilization <= 0.80)
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained masking
+isr_geo_band_max: 1.05       #   at low entropy fix the disagreement, never widen the band
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
@@ -137,20 +116,18 @@ num_generations_eval: 1
 scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
 drop_degenerate_groups: true  # all-alike groups would still inflate the DAPO normalizer
 top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
-mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow (a length-cut TURN is
-                                   # priced and retried in-episode, and its fragment is skipped at tokenization),
-                                   # and a turn-budget burn is a real failure worth its negative advantage
+mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow — a real failure worth its
+                                   # negative advantage; a length-cut TURN is priced and retried in-episode
 
 # --- Training ---
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 4      # rows per eval loss-forward chunk
-eval_rollout_batch_size: 34       # the 400-problem eval split in two one-wave rounds across 6 ranks (8 rows padded)
-gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (18 prompts x 8); per-rank value must divide by
-                                # num_generations. One optimizer step per generation round (steps_per_generation defaults to it).
-max_steps: 150              # one stage's horizon: the cosine reaches ~0 where the band's signal thins
-                            # (groups all-solved); the next stage starts from this stage's eval-best checkpoint
+per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
+eval_rollout_batch_size: 34       # rows per rank in one eval rollout round; one wave across 6 ranks
+gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (12 prompts x 12); the per-rank value must
+                                # divide by num_generations
+max_steps: 150
 num_train_epochs: 1
-learning_rate: 2.0e-07      # full-FT LR; decays to ~0 over the 150-step horizon (LoRA sibling: 3e-6)
+learning_rate: 3.0e-07
 max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 10
@@ -160,19 +137,19 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: false      # overridden to True at runtime: the ep1 grouped-GEMM expert layer counts as EP (the trainer warns)
+  use_reentrant: false      # forced to True at runtime: the ep1 grouped-GEMM expert layer counts as EP
 fp32_grad_reduce: true
 
 # --- Output ---
 output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage3-extra-hard
 save_strategy: steps
-save_steps: 50              # full checkpoints are ~70 GB — coarser cadence, tighter limit than LoRA
-save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size above
+save_steps: 50
+save_total_limit: 2
 
-# --- Eval (the pool's held-out split: 400 problems, 100 per band, shared by every stage; pass@1) ---
+# --- Eval (the pool's held-out split: 400 problems, 100 per band; pass@1) ---
 eval_strategy: steps
 eval_steps: 50
-eval_on_start: true         # the previous stage's checkpoint on the shared split: the number this stage is measured against
+eval_on_start: true         # eval the starting checkpoint
 
 # --- Logging ---
 logging_steps: 1

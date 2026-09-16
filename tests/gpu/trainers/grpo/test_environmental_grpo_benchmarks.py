@@ -423,11 +423,7 @@ def test_react_math():
         env_name="react_math",
         dataset=dataset,
         environment_cls=ReActEnvironment,
-        environment_kwargs={
-            "tool_registry": registry,
-            "max_turns": 8,
-            "success_reward": 1.0,
-        },
+        environment_kwargs={"tool_registry": registry, "max_turns": 8},
         rollout_max_tokens=1024,
         max_completion_length=1024,
     )
@@ -446,12 +442,7 @@ def test_search_qa():
         env_name="search_qa",
         dataset=dataset,
         environment_cls="qa_search",  # factory-built env → registry name, not a class
-        environment_kwargs={
-            "max_turns": 5,
-            "search_backend": "mock",
-            "include_python_tools": False,
-            "success_reward": 1.0,
-        },
+        environment_kwargs={"max_turns": 5, "search_backend": "mock", "include_python_tools": False},
         rollout_max_tokens=1024,
         max_completion_length=1024,
     )
@@ -471,11 +462,7 @@ def test_exam_qa():
         env_name="exam_qa",
         dataset=dataset,
         environment_cls=ExamQAEnvironment,
-        environment_kwargs={
-            "max_turns": 3,
-            "open_book": False,
-            "success_reward": 1.0,
-        },
+        environment_kwargs={"max_turns": 3, "open_book": False},
         rollout_max_tokens=512,
         max_completion_length=512,
         num_generations=DEFAULT_NUM_GENERATIONS,
@@ -496,11 +483,7 @@ def test_code_contests():
         env_name="code_contests",
         dataset=dataset,
         environment_cls=CodeContestsEnvironment,
-        environment_kwargs={
-            "max_turns": 4,
-            "timeout_per_test": 5,
-            "success_reward": 1.0,
-        },
+        environment_kwargs={"max_turns": 4, "timeout_per_test": 5},
         num_generations=4,
         batch_size=4,  # must be divisible by num_generations
         grad_accum=1,

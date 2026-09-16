@@ -1,0 +1,17 @@
+{#- --- Multi-turn chat template for GPT-OSS (no reasoning) --- -#}
+{#- Supports any number of user/assistant turns -#}
+{#- Uses <|return|> to end ALL assistant responses for train_on_completions_only compatibility -#}
+{#- --- Main message rendering --- -#}
+{%- for message in messages -%}
+  {%- if message.role == "system" -%}
+<|start|>system<|message|>{{ message.content }}<|end|>
+  {%- elif message.role == "user" -%}
+<|start|>user<|message|>{{ message.content }}<|end|>
+  {%- elif message.role == "assistant" -%}
+<|start|>assistant<|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>{{ message.content }}<|return|>
+  {%- endif -%}
+{%- endfor -%}
+{#- --- Optional generation prompt kick-off --- -#}
+{%- if add_generation_prompt -%}
+<|start|>assistant<|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>
+{%- endif -%}

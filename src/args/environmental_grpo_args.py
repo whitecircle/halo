@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from src.args.common_script_args import CommonScriptArguments
 from src.args.mixins import PromptDatasetArguments
 
+# The column an answer is read from unless the config renames it. The script checks the column exists
+# only for a rename (a rename resolving to nothing is a typo); under this default a dataset without
+# it simply carries no answer, and the environment's ``requires_answer`` decides whether that is fatal.
+DEFAULT_ANSWER_FIELD = "answer"
+
 
 @dataclass
 class EnvironmentalGRPOScriptArguments(PromptDatasetArguments, CommonScriptArguments):
@@ -12,7 +17,11 @@ class EnvironmentalGRPOScriptArguments(PromptDatasetArguments, CommonScriptArgum
     env selection in EnvironmentConfig (both parsed separately)."""
 
     answer_field: str | None = field(
-        default="answer", metadata={"help": "Field in dataset containing the expected answer (optional)"}
+        default=DEFAULT_ANSWER_FIELD,
+        metadata={
+            "help": "Field in dataset containing the expected answer; carried when present. Whether "
+            "an answer is needed at all is the environment's requires_answer declaration."
+        },
     )
 
     context_fields: list[str] | None = field(

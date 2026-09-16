@@ -281,4 +281,4 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gemma4-grpo.yaml -n 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server; they cannot share a GPU.
 Size `expert_parallel_size` to the trainer's GPU count, not the node's: the SFT value
 assumes the whole node. Full setup:
-[Environmental GRPO](../../agent-docs/training-methods/grpo/environmental-grpo.md) ↗.
+[Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

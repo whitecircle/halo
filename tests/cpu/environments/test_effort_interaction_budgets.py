@@ -17,7 +17,7 @@ import logging
 
 import pytest
 
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import _MAX_FAILURE_DETAILS, run_solution_against_tests
 from src.environments.episode import bind_episode_effort
@@ -117,16 +117,16 @@ def test_resubmission_penalty_prices_each_graded_submission_after_the_first():
     traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
     for _ in range(3):
         _call(env, traj, "submit_solution")
-    reward = env._compute_reward(traj)
-    components = traj.info["reward_components"]
+    env._settle_grade(traj, None)
+    components = traj.info[REWARD_COMPONENTS_KEY]
     assert components["reward/resubmission"] == pytest.approx(-0.2)
-    assert reward == pytest.approx(sum(components.values()))
+    assert traj.total_reward == pytest.approx(sum(components.values()))
 
     once = _make_env(reasoning_effort_profiles=profiles, resubmission_penalty=0.1)
     traj_once = _reset(once, {"reasoning_effort": "high", **_TESTS})
     _call(once, traj_once, "submit_solution")
-    once._compute_reward(traj_once)
-    assert traj_once.info["reward_components"]["reward/resubmission"] == 0.0
+    once._settle_grade(traj_once, None)
+    assert traj_once.info[REWARD_COMPONENTS_KEY]["reward/resubmission"] == 0.0
 
     # A sign check alone lets NaN and infinity through, and either poisons the whole reward.
     for bad in (-0.1, float("nan"), float("inf")):
@@ -238,7 +238,8 @@ def test_tested_submission_bonus_pays_only_on_test_then_submit():
         _call(env, traj, "submit_solution")
         if not test_first:
             _call(env, traj, "python_repl")
-        return env._compute_reward(traj), traj.info["reward_components"]
+        env._settle_grade(traj, None)
+        return traj.total_reward, traj.info[REWARD_COMPONENTS_KEY]
 
     tested_reward, tested_parts = run_episode(test_first=True)
     oneshot_reward, oneshot_parts = run_episode(test_first=False)

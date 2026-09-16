@@ -31,7 +31,7 @@ Usage (each config's header carries its own exact launch line):
         scripts/training/environmental_grpo.py \\
         examples/grpo/environmental/gptoss/sglang/gptoss-20b-code-contests-full-ep1.yaml
 
-See agent-docs/training-methods/grpo/environmental-grpo.md for the objective, the environment roster and
+See agent-docs/training-methods/grpo/async-grpo/README.md for the objective, the environment roster and
 the rollout-server contract.
 """
 
@@ -39,19 +39,25 @@ from accelerate.logging import get_logger
 from trl import GRPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
+from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD, EnvironmentalGRPOScriptArguments
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
-from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
+from src.data.pipeline.processing import (
+    missing_render_column_splits,
+    process_dataset_with_map_and_filter,
+    require_render_column,
+)
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.runtime import barrier, broadcast_from_rank0, is_global_main_process
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.environments.base import resolve_reasoning_effort
 from src.environments.registry import create_environment, get_registered_environments
 from src.models.loading.model_preparation import log_model_info
 from src.models.loading.tokenizer_setup import get_model_context_window, setup_model_and_tokenizer
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 from src.trainers.grpo.rollout.weight_sync_clients import (
     verify_context_window_synced,
     verify_sampler_logprob_reference_synced,
@@ -77,21 +83,27 @@ logger = get_logger(__name__, log_level="INFO")
 FALLBACK_ENV_PROMPT_OVERHEAD = 2048
 
 
-def measure_env_prompt_overhead(environment, tokenizer) -> int:
+def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -> int:
     """Token count of the environment's conversation preamble (its system prompt + tool schema).
 
     The dataset prompt filter measures only the templated user prompt, while the rollout prompt is
     built by the environment: its own system prompt plus the tool schema the chat template renders
     into the context. The startup context-window check includes that overhead, or it validates a
-    prompt smaller than any the model will see. Falls back to a conservative margin when the template
-    cannot render the preamble (logged with the assumption).
+    prompt smaller than any the model will see. Rendered under ``template_kwargs`` — the rollout's
+    chat-template variables and effort steer (:func:`rollout_template_kwargs`) — since the template's
+    preamble depends on them. Falls back to a conservative margin when the template cannot render the
+    preamble (logged with the assumption).
     """
     messages = ([{"role": "system", "content": environment.system_prompt}] if environment.system_prompt else []) + [
         {"role": "user", "content": ""}
     ]
     try:
         rendered = tokenizer.apply_chat_template(
-            messages, tools=environment.get_tools_schema(), tokenize=False, add_generation_prompt=True
+            messages,
+            tools=environment.get_tools_schema(),
+            tokenize=False,
+            add_generation_prompt=True,
+            **template_kwargs,
         )
         overhead = len(tokenizer(rendered, add_special_tokens=False)["input_ids"])
         logger.info(f"Environment prompt overhead (system prompt + tool schema): {overhead} tokens (measured)")
@@ -146,15 +158,24 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
         return {"prompt": messages, **carried_columns(row)}
 
     original_columns = list(ds["train"].column_names)
-    # A mistyped answer_field yields answer-less rows: an RL run with no ground truth and all-zero
-    # rewards. prompt_field is not re-checked here; it is this script's conversation_field, so the
-    # loader already ran the same guard over it.
-    for knob, column in [
-        ("answer_field", args.answer_field),
-        *[("context_fields", field) for field in args.context_fields or []],
-    ]:
+    # A renamed answer_field that resolves to no column is a typo, and a typo yields answer-less rows:
+    # a full RL run with no ground truth. The default spelling is not checked — whether an answer is
+    # needed is the environment's requires_answer declaration, which the trainer gates the dataset on.
+    # prompt_field is not re-checked here; it is this script's conversation_field, so the loader
+    # already ran the same guard over it.
+    if args.answer_field:
+        if args.answer_field != DEFAULT_ANSWER_FIELD:
+            require_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+        elif missing_render_column_splits(ds, args.answer_field):
+            logger.warning(
+                f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
+                f"environment that grades against one refuses this dataset at trainer construction; "
+                f"one that grades against an answer only where a row has one pays every episode for "
+                f"completing the task instead."
+            )
+    for column in args.context_fields or []:
         if column:
-            require_render_column(ds, str(args.dataset), knob, column)
+            require_render_column(ds, str(args.dataset), "context_fields", column)
     keep_columns = {"prompt", "answer"} | set(args.context_fields or [])
     columns_to_remove = [col for col in original_columns if col not in keep_columns]
 
@@ -266,7 +287,12 @@ def main():
     # the env class default.
     probe_env = create_environment(env_config.environment_type, env_config.to_env_config())
     max_turns = probe_env.max_turns
-    prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer)
+    # The probe renders as a rollout request would: the run's template variables plus one concrete
+    # effort level (a 'random' env setting draws one, as an episode does).
+    template_kwargs = rollout_template_kwargs(
+        async_config.rollout_chat_template_kwargs, resolve_reasoning_effort(probe_env.reasoning_effort)
+    )
+    prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)
     verify_context_window_synced(
         async_config.get_server_urls(),
         single_turn_tokens=prompt_budget + async_config.rollout_max_tokens,
@@ -278,7 +304,7 @@ def main():
         async_config.get_server_urls(),
         temperature=async_config.rollout_temperature,
         top_p=async_config.rollout_top_p,
-        geo_band_active=async_config.isr_geo_band_min is not None,
+        sequence_ratio_active=async_config.isr_geo_band_min is not None,
         backend=async_config.rollout_backend,
     )
 

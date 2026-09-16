@@ -3,11 +3,11 @@
 import re
 from typing import Any
 
-from src.environments.base import Trajectory
+from src.environments.base import EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.rewards import compute_answer_reward
 from src.environments.tools.definitions import NativeToolRegistry
 from src.environments.tools.factories import create_native_python_tools, create_native_search_tools
+from src.rewards.matching import validate_answer
 
 # The choice letters :func:`multiple_choice_match` scores (MMLU-Pro tops out at 10 options).
 # ``ExamQAEnvironment``'s system prompt is built from this same range, so the instruction the model
@@ -76,8 +76,12 @@ def create_qa_search_environment(
 
     # setdefault, not a keyword argument: the registry forwards the whole env_config, so an explicit
     # ``require_tool_use`` in environment_kwargs must override this rather than raise a
-    # duplicate-keyword TypeError.
+    # duplicate-keyword TypeError. The answer is required because the parent grades against it only
+    # when a row carries one, and otherwise grades merely completing 1. ``None`` counts as unset, so
+    # a YAML ``requires_answer: null`` still gets this preset's answer.
     kwargs.setdefault("require_tool_use", True)
+    if kwargs.get("requires_answer") is None:
+        kwargs["requires_answer"] = True
     return NativeToolUseEnvironment(
         tool_registry=registry,
         system_prompt=system_prompt or QA_SEARCH_SYSTEM_PROMPT,
@@ -93,6 +97,10 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
 
     # An exam answer needs one response plus limited lookup, fewer turns than the generic tool loop.
     DEFAULT_MAX_TURNS = 8
+
+    # Every grading path here scores the final response against the expected answer; without one the
+    # parent's completion fallback grades any episode that answered at all 1.
+    requires_answer = True
 
     # The letter range is interpolated from the grader's constant rather than restated: an
     # instruction narrower than what multiple_choice_match scores would steer the model away from
@@ -141,9 +149,8 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         scores: a letter passes through, a 0-based index into ``choices`` becomes its letter.
 
         MMLU/ARC ship ``answer`` as an int (occasionally a digit string), and the matcher rejects
-        anything that is not a single letter, so an unconverted row would score ``failure_reward`` on
-        every completion and leave its GRPO group with zero variance. Any other shape raises here, at
-        episode start.
+        anything that is not a single letter, so an unconverted row grades 0 on every completion and
+        leaves its GRPO group with zero variance. Any other shape raises here, at episode start.
         """
         # bool is an int subclass, so True would otherwise index choice "B".
         if not isinstance(expected, bool):
@@ -191,33 +198,19 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
 
         return traj
 
-    def _compute_reward(
-        self,
-        trajectory: Trajectory,
-        context: dict[str, Any] | None = None,
-    ) -> float:
-        """Validate answer using MC match or shared validation."""
-        # Delegated first: the parent handles both the incomplete-episode and the no-expected-answer
-        # cases, and rebuilds the same shaped base itself.
+    def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
+        """Grade the answer by multiple-choice letter match or the shared validation chain."""
+        # Delegated first: the parent owns both the incomplete-episode and the no-expected-answer cases.
         expected = trajectory.info.get("expected_answer")
         if expected is None:
-            return super()._compute_reward(trajectory, context)
+            return super()._grade_episode(trajectory, context)
 
-        base_reward = self._shaped_base_reward(trajectory)
         if not trajectory.info.get("completed"):
-            return base_reward + self.failure_reward
+            return EpisodeGrade(0.0)
 
         final_response = trajectory.info.get("final_response", "")
 
         if trajectory.info.get("is_multiple_choice"):
-            if multiple_choice_match(final_response, str(expected)):
-                return base_reward + self.success_reward
-            return base_reward + self.failure_reward
+            return EpisodeGrade(1.0 if multiple_choice_match(final_response, str(expected)) else 0.0)
 
-        answer_reward = compute_answer_reward(
-            predicted=final_response,
-            expected=expected,
-            success_reward=self.success_reward,
-            failure_reward=self.failure_reward,
-        )
-        return base_reward + answer_reward
+        return EpisodeGrade(1.0 if validate_answer(final_response, expected) else 0.0)

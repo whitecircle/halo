@@ -5,9 +5,8 @@
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2  # FA2 carries no sink argument, so reset_sinks (default true)
-                                        #   sets self_attn.sinks = None and the save re-emits dtype.min;
-                                        #   live sinks are rejected under FA2
+attn_implementation: flash_attention_2  # FA2 carries no sink argument; live sinks are rejected
+                                        #   under it, so reset_sinks must stay on (its default)
 model_init_kwargs:
   output_router_logits: true
   router_aux_loss_coef: 0.001
@@ -18,10 +17,10 @@ expert_parallel_size: 8
 fp32_router: true
 
 # --- Dataset ---
-# Wherever the rejection-sampling step above wrote its output — off the small root FS (/tmp),
-# which will not hold a generated GRPO dataset on a training host.
+# Where the rejection-sampling step above wrote its dataset (policy_rejection_sampling.py --output_path, an S3
+# URI; rm_rejection_sampling.py --output_folder) — off the small root FS.
 dataset:
-- /mnt/datasets/gsm8k-gptoss-20b-offline-grpo
+- path/to/gsm8k-gptoss-20b-offline-grpo
 test_size: 0.05
 
 # --- Offline GRPO Hyperparameters ---

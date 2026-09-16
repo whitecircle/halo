@@ -31,7 +31,7 @@ selected. Per-method schema detail, the `prepare_dataset.py` flags, and the foot
 | DPO / SMPO | `prompt`, `chosen`, `rejected` | all `List[Dict]` |
 | Reward | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]`; implicit-prompt sets carry no `prompt` |
 | Offline GRPO | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` (`len` match) |
-| Environmental GRPO | `prompt`, `answer` | both `str` (NOT ChatML) |
+| Async GRPO with environments | `prompt`; `answer` where the env grades against one (`requires_answer`) | `prompt` `str` (NOT ChatML); `answer` as that env grades it |
 | Classification | `prompt`, `label` | `List[Dict]`, `str` / `List[str]` (multi-label; labels sorted, `-1` filtered) |
 | Distillation | conversation field | `List[Dict]` (default field `messages`) |
 | Embedding | text columns (+ optional `label`/`score`) | collator auto-detects pairs / triplets / scored / labeled |

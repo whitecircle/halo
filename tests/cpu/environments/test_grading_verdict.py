@@ -93,7 +93,7 @@ def test_timed_out_checker_rejects():
 
 def test_backend_error_raises_infra_error():
     """A sandbox backend failure is NOT a wrong answer: a plain False verdict would score a grading
-    outage as failure_reward for the whole group (fake signal) and hide it from the
+    outage as a zero grade for the whole group (fake signal) and hide it from the
     ``_grading_infra_outage`` guard. It must raise for the grader to bucket into ``infra_errors``."""
     with pytest.raises(CheckerInfraError, match="backend down"):
         _verdict(SandboxResult(stdout="1", returncode=None, error="backend down"))
@@ -122,7 +122,7 @@ class _RaisingSandbox(SandboxExecutor):
 def test_executor_exception_counts_as_infra_error_not_a_failed_test():
     """A raising executor must bucket as ``infra_errors``, exactly like the remote backend's error
     result. Letting the exception out leaves ``submit_solution`` an ordinary tool error: the episode
-    then scores ``failure_reward`` with the invalid-episode guard never firing, and a host-level fault
+    then grades 0 with the invalid-episode guard never firing, and a host-level fault
     is averaged into the GRPO group baseline as a wrong program."""
     sandbox = _RaisingSandbox(FileNotFoundError(2, "No such file or directory", "/bin/bash"))
     grade = run_solution_against_tests(

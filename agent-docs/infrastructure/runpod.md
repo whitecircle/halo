@@ -132,15 +132,21 @@ Formats, save modes, and resume mechanics are owned by
   safetensors loadable with `from_pretrained()`, and every pod's save rank writes its own copy.
 - **`--save_sharded_ep` raises at trainer construction on a multi-node non-shared FS.** Per-rank shards are
   keyed by global rank and scatter across the pods' local disks (the index and non-expert params land only
-  on the rank-0 pod), so no single pod holds a mergeable checkpoint and
-  `scripts/after_training/merge_ep_shards.py` takes one input dir. Where it does run (single node, or a shared FS) it buys write bandwidth — every rank writes its own
-  slice — at the price of a checkpoint that must be merged before resume or serving, and it saves no host
-  memory.
+  on the rank-0 pod).
+
+    No single pod holds a mergeable checkpoint, and `scripts/after_training/merge_ep_shards.py` takes one
+    input dir. Where it does run (single node, or a shared FS) it buys write bandwidth, since every rank
+    writes its own slice. The price is a checkpoint that must be merged before resume or serving, and it
+    saves no host memory.
+
 - **Resume needs no rsync.** With `DIST_SHARED_FILESYSTEM=0` the mixin forces `save_on_each_node=True`, so
   each pod's local rank 0 writes a complete checkpoint to its own disk; re-run `torchrun` on every pod with
-  `--resume_from_checkpoint=true`. To resume *trained* EP/CP weights (not just trainer state), point
-  `model_name_or_path` at the gathered checkpoint directory —
-  [why](../reference/checkpoints.md#resume-by-parallelism-mode).
+  `--resume_from_checkpoint=true`.
+
+    To resume *trained* EP/CP weights (not just trainer state), point
+    `model_name_or_path` at the gathered checkpoint directory
+    ([why](../reference/checkpoints.md#resume-by-parallelism-mode)).
+
 - `WANDB_RUN_ID` is hashed from `output_dir` + launch timestamp and broadcast from rank 0, so it is
   consistent across a run's ranks but not across re-runs. Export the same `WANDB_RUN_ID` on every pod
   to resume into one WandB run.
@@ -168,12 +174,14 @@ current tag, or rebuild and push your own. An in-container rebuild needs the ful
 `infiniband-diags`; contact RunPod support. Without IB, fall back to node-local EP (`--ep_scope=node`) — only
 gradient sync crosses the network.
 
-**Host OOM during gathered save.** Every gathered save streams — the EP path one MoE layer at a
+**Host OOM during gathered save.** Every gathered save streams: the EP path one MoE layer at a
 time, the dense/CP/TP paths one decoder layer at a time
-([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep)) — so each pod's save rank peaks
+([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep)). Each pod's save rank peaks
 at the replicated non-expert params plus one pending shard (`save_max_shard_size`, default `5GB`),
-not a model's worth. Lower `save_max_shard_size` if that peak is still too high; `--save_sharded_ep`
-does not help — it is MoE-only and holds more host memory per node, not less.
+not a model's worth.
+
+Lower `save_max_shard_size` if that peak is still too high. `--save_sharded_ep`
+does not help; it is MoE-only and holds more host memory per node, not less.
 
 **`ProcessGroup not initialized` / mismatch.** Ensure both pods use identical parallelism args and start
 within the torchrun rendezvous timeout (10 min default). Kill stale processes:

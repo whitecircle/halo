@@ -289,44 +289,53 @@ def test_smpo_invalid_loss_type_value():
 def test_env_config_defaults():
     """EnvironmentConfig should have sensible defaults."""
     from src.configs.environment_config import EnvironmentConfig
+    from src.rewards.spec import EnvironmentTerm
 
     cfg = EnvironmentConfig()
     assert cfg.environment_type == "react_math"
-    assert cfg.success_reward == 1.0
-    assert cfg.failure_reward == 0.0
-    # No partial_reward knob: answer grading is all-or-nothing (success_reward / failure_reward).
-    assert not hasattr(cfg, "partial_reward")
+    # The default reward is the environment's own all-or-nothing grade, at weight 1 and exponent 1.
+    assert cfg.rewards == [{"source": "environment"}]
+    assert cfg.reward_terms == (EnvironmentTerm(),)
     # None defers to the environment class's own default (CodeContests 15, SWE 20, ExamQA 8).
     assert cfg.max_turns is None
     assert "max_turns" not in cfg.to_env_config()
     assert cfg.environment_kwargs == {}
 
 
+def test_env_config_refuses_per_env_reward_knobs():
+    """A reward's magnitude is a term's ``weight``, not a per-environment field: such a knob must
+    fail at construction rather than parse into a config that changes nothing about the run."""
+    from src.configs.environment_config import EnvironmentConfig
+
+    for knob in ("success_reward", "failure_reward", "partial_reward"):
+        with pytest.raises(TypeError, match=knob):
+            EnvironmentConfig(**{knob: 0.5})
+
+
 def test_env_config_to_env_config():
-    """to_env_config() should merge core settings with environment_kwargs."""
+    """to_env_config() should merge the reward terms and turn cap with environment_kwargs."""
     from src.configs.environment_config import EnvironmentConfig
 
     cfg = EnvironmentConfig(
-        success_reward=2.0,
+        rewards=[{"source": "environment", "weight": 2.0}],
         max_turns=20,
         environment_kwargs={"search_backend": "duckduckgo", "open_book": True},
     )
     result = cfg.to_env_config()
-    assert result["success_reward"] == 2.0
+    assert result["reward_terms"] == [{"source": "environment", "weight": 2.0}]
     assert result["max_turns"] == 20
     assert result["search_backend"] == "duckduckgo"
     assert result["open_book"] is True
 
 
 def test_env_config_to_env_config_empty_kwargs():
-    """to_env_config() with empty environment_kwargs should return core settings only."""
+    """to_env_config() with empty environment_kwargs should return the reward terms and turn cap only."""
     from src.configs.environment_config import EnvironmentConfig
 
-    cfg = EnvironmentConfig(success_reward=1.5, max_turns=5)
+    cfg = EnvironmentConfig(rewards=[{"source": "environment", "weight": 1.5}], max_turns=5)
     result = cfg.to_env_config()
-    # to_env_config() emits the reachable core reward/turn settings — failure_reward is wired
-    # alongside success_reward — and empty kwargs add nothing.
-    assert result == {"success_reward": 1.5, "failure_reward": 0.0, "max_turns": 5}
+    # The raw term dicts travel as-is (the environment parses them); empty kwargs add nothing.
+    assert result == {"reward_terms": [{"source": "environment", "weight": 1.5}], "max_turns": 5}
 
 
 def test_env_config_kwargs_override_core_key():

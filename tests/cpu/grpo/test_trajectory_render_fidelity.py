@@ -124,6 +124,10 @@ def _stub(tok):
         _tokenizer=tok,
         _tools_schema=None,
         _batch_build_error=None,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
         _warned_capture_missing=False,
         # Named in the fall-back warning, whose remedy differs per engine.
         _rollout_backend="vllm",

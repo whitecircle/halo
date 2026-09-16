@@ -528,15 +528,15 @@ def test_rlrr_script_args_thread_every_tunable_into_the_shaping_config():
 
 
 def test_rlrr_rejects_an_inverted_clip_band_from_the_script_args():
-    """``xi_neg <= xi_pos`` is RLRRConfig's own invariant, and the script args must carry it there.
+    """``xi_neg <= xi_pos`` is RLRRConfig's own invariant, and the script args build the config eagerly
+    so it fails at parse time — gate on or off — rather than after the model load.
 
     An inverted band floors correct responses above the cap on incorrect ones, inverting the Eq. 5
     clip the config exists to apply — silently, since both values parse.
     """
-    args = RLVROnlineGRPOScriptArguments(use_rlrr=True, rlrr_xi_pos=-1.0, rlrr_xi_neg=1.0)
-
-    with pytest.raises(ValueError, match="xi_neg <= xi_pos"):
-        args.build_rlrr_config()
+    for use_rlrr in (True, False):
+        with pytest.raises(ValueError, match="rlrr_xi_neg <= rlrr_xi_pos"):
+            RLVROnlineGRPOScriptArguments(use_rlrr=use_rlrr, rlrr_xi_pos=-1.0, rlrr_xi_neg=1.0)
 
 
 # SDPG: the shared argument mixin and the two arms that hand it to a trainer

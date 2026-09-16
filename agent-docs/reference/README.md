@@ -3,7 +3,7 @@
 ## Architecture & design
 
 - **[Architecture](architecture.md)** — The layer map — config, trainers, distributed, data, models, callbacks, diagnostics, kernels, checkpoints, optimizers, environments — and how every trainer adds one mixin to a TRL/Transformers base.
-- **[Trainer Architecture](trainer-architecture.md)** — The distributed mixin, EP/TP/CP patching, vLLM weight sync, and saving across all trainers.
+- **[Trainer Architecture](trainer-architecture.md)** — The distributed mixin, EP/TP/CP patching, rollout-engine weight sync, and saving across all trainers.
 - **[Why This Framework](why-this-framework.md)** — How the toolkit compares to HF TRL, Accelerate, Unsloth, Axolotl, MS-SWIFT, veRL, and Megatron-LM, plus model compatibility and key dependencies.
 - **[GPU Training Theory](gpu-training-theory.md)** — The roofline, the four bottlenecks a step can hit, and what every optimization and parallelism lever actually pulls on.
 

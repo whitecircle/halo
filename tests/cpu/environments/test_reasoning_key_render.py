@@ -206,12 +206,12 @@ def test_single_key_emission_loses_reasoning_on_most_of_the_roster():
         assert HARMONY in kept, f"{HARMONY} reads 'thinking'; single-key emission must not lose its CoT"
 
 
-def test_reasoning_keys_stay_out_of_the_vllm_facing_dict():
-    """The generation-request serialization must carry NO reasoning key under any spelling.
+def test_reasoning_keys_stay_out_of_the_default_dict():
+    """``to_dict`` emits NO reasoning key under any spelling unless asked (``include_thinking``).
 
-    ``Trajectory.get_conversation`` (the rollout ``observation`` handed to vLLM) uses the
-    ``include_thinking=False`` default; an unknown field can 400 a request, so widening the training
-    emission must not widen this one.
+    The engine request carries reasoning only where the env opts in: ``carry_reasoning`` renders the
+    last assistant turn's CoT through ``include_thinking=True``, every other message goes out plain.
+    An unknown field can 400 a request, so widening the training emission must not widen the default.
     """
     plain = Message.assistant(ANSWER, thinking=COT).to_dict()
 

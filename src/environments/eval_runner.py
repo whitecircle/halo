@@ -25,7 +25,7 @@ from openai import NOT_GIVEN, AsyncOpenAI
 
 from src.configs.rollout_config import RolloutConfig
 from src.data.sources.paths import parse_dataset_source
-from src.environments.base import BaseEnvironment, Trajectory
+from src.environments.base import EPISODE_ERROR_KEY, EPISODE_INVALID_REASON_KEY, BaseEnvironment, Trajectory
 from src.environments.engine_wire import generation_control_fields
 from src.environments.episode import (
     EpisodeDispatcher,
@@ -181,6 +181,7 @@ async def run_episode(
     try:
         finish_reasons: list[str | None] = []
         completion_tokens = 0
+        generation_error: str | None = None
 
         for _ in range(env.max_turns):
             if step.done:
@@ -197,9 +198,10 @@ async def run_episode(
                     request_timeout=rollout.request_timeout,
                     extra_body=generation_control_fields(episode_rollout, effort.level),
                 )
-            except Exception:
+            except Exception as exc:
                 # Unlogged, this break yields an all-zero eval indistinguishable from a bad endpoint.
                 logger.warning("generation failed, ending episode early", exc_info=True)
+                generation_error = f"{type(exc).__name__}: {exc}"
                 break
 
             finish_reason = get_finish_reason(
@@ -222,8 +224,11 @@ async def run_episode(
         traj = env.get_trajectories([eid])[0]
         # An episode can exit the loop still open (generation raised, or the turn cap hit). Closed by
         # explicit truncation rather than a synthetic empty turn, which would mark it ``completed``
-        # and pay completion-rewarded envs; reward already accrued still counts.
+        # and pay completion-rewarded envs; reward already accrued still counts. A lost generation is
+        # stamped first, so the env prices the truncation as the driver's fault, not a turn overflow.
         if traj is not None and not traj.done:
+            if generation_error is not None:
+                traj.info[EPISODE_ERROR_KEY] = generation_error
             steps = await episode.finalize_truncated([eid])
             traj = steps[0].trajectory
 
@@ -275,6 +280,14 @@ async def collect_results(
                 reward = traj.total_reward if traj and traj.done else 0.0
                 stats = (traj.info.get("_eval_stats") if traj else None) or {}
                 rec: dict[str, Any] = {"reward": reward, "success": reward >= success_threshold, "stats": stats}
+                if traj is not None and traj.episode_invalid:
+                    # A grade with no signal (a grader outage, a dead judge) is an error row, not a
+                    # score: the training baseline drops it, and the eval mean must not count it.
+                    rec.update(
+                        reward=0.0,
+                        success=False,
+                        error=str(traj.info.get(EPISODE_INVALID_REASON_KEY, "episode invalid")),
+                    )
                 if collect_trajectories:
                     rec["trajectory"] = serialize_trajectory(traj)
                 return rec

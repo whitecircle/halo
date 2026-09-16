@@ -25,11 +25,12 @@ put participants of one tag under two different scopes where they never see each
 
 The **output** declaration is additionally checked against the filesystem itself at startup, on
 multi-node runs only (`verify_output_filesystem_sharing`): global rank 0 writes a sentinel under
-`output_dir` and every rank looks for it — waiting up to 60 s when shared is declared, not at all
-when per-node is. Either contradiction raises and names the var to set. Declared shared but invisible
-to some rank means only global rank 0 writes `trainer_state.json`, so the other nodes resume at step
-0; declared per-node but visible everywhere means every node's local rank 0 writes the same
-checkpoint paths concurrently.
+`output_dir` and every rank looks for it, waiting up to 60 s when shared is declared, not at all
+when per-node is. Either contradiction raises and names the var to set.
+
+Declared shared but invisible to some rank means only global rank 0 writes `trainer_state.json`, so
+the other nodes resume at step 0. Declared per-node but visible everywhere means every node's local
+rank 0 writes the same checkpoint paths concurrently.
 
 The split exists because the two sides can want opposite settings on a multi-node run over a slow or
 flaky shared mount (NFS/EFS). Input wants per-node: global rank 0 writing the HF/dataset cache and
@@ -48,60 +49,80 @@ rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
 
 - `fs_aware_main_first(tag, timeout=None)` — context manager that orders the body main-rank-first.
   **Every rank runs the body**: the main rank runs it alone first and populates a cache, then the
-  others run the same code and hit it. Scope follows the **input** flag — shared → the main rank is
-  global rank 0 and all other ranks wait; non-shared → it is each node's local rank 0 and only that
-  node's ranks wait, nodes proceeding in parallel. Wrap any download / cache-writing block in it.
+  others run the same code and hit it.
+
+    Scope follows the **input** flag. Shared: the main rank is global rank 0 and all other ranks
+    wait. Non-shared: it is each node's local rank 0 and only that node's ranks wait, nodes
+    proceeding in parallel. Wrap any download / cache-writing block in it.
 
     Waiters block on a c10d key-value store key rather than in a collective, because the body is
     unbounded single-rank work (a 100B+ `snapshot_download`, whole-corpus packing) that would trip the
     NCCL watchdog (`DIST_NCCL_TIMEOUT_MINUTES`) on peers held in a collective. The wait is bounded by
-    `DIST_STORE_TIMEOUT_HOURS` (default 4 h) instead, and covers the **main rank's** work only: there
-    is no trailing join, so the main rank's own wait for the peers is whatever collective comes next
-    — the watchdog, minutes not hours. That is why a **misdeclared input flag** is expensive rather
-    than merely slow: declare shared over per-node storage and every peer redoes the whole
-    download/pack against the watchdog, not the store bound.
+    `DIST_STORE_TIMEOUT_HOURS` (default 4 h) instead.
+
+    The bound covers the **main rank's** work only: there is no trailing join, so the main rank's own
+    wait for the peers is whatever collective comes next, the watchdog, minutes not hours. That is
+    why a **misdeclared input flag** is expensive rather than merely slow: declare shared over
+    per-node storage and every peer redoes the whole download/pack against the watchdog, not the
+    store bound.
 
     Two rules the caller owns. The body must issue **no collective**, directly or through a helper
-    (`ensure_cache_dir()` and `fs_aware_makedirs()` both barrier) — while the main rank runs it, the
-    peers are on a store key, not in a matching collective, so the main rank would block alone. And
-    every rank must reach a given `tag` the **same number of times, in the same order**: keep one tag
-    per call site and never enter one from a rank-dependent branch.
+    (`ensure_cache_dir()` and `fs_aware_makedirs()` both barrier): while the main rank runs it, the
+    peers are on a store key, not in a matching collective, so the main rank would block alone.
+
+    Every rank must also reach a given `tag` the **same number of times, in the same order**: keep
+    one tag per call site and never enter one from a rank-dependent branch.
+
 - `hub_metadata_main_first(tag, fetch)` — `fs_aware_main_first` around a single hub-metadata read
-  (`config.json`, a processor config), returning `fetch()`'s result. Tags live under `hub_meta/`, and
-  the bound is 30 minutes rather than the hours-scale store default — a metadata fetch that slow is a
-  dead endpoint, not slow work. It resolves the shared-filesystem consensus itself if that has not
-  happened yet, since these reads can precede `init_distributed()` and a split scope would put the
-  tag's participants where they never see each other's keys.
+  (`config.json`, a processor config), returning `fetch()`'s result. Tags live under `hub_meta/`.
+
+    The bound is 30 minutes rather than the hours-scale store default: a metadata fetch that slow is
+    a dead endpoint, not slow work. It resolves the shared-filesystem consensus itself if that has not
+    happened yet, since these reads can precede `init_distributed()` and a split scope would put the
+    tag's participants where they never see each other's keys.
+
 - `sequential_load_within_node(tag, max_concurrent)` — store-coordinated throttle that admits at most
   `max_concurrent` ranks per node at a time; backs `max_concurrent_loading` at model load. Same
   `DIST_STORE_TIMEOUT_HOURS` bound.
+
 - `is_shared_filesystem()` / `is_input_shared_filesystem()` / `is_output_shared_filesystem()` — the
   resolved modes, for picking `is_global_main_process()` vs `is_local_main_process()` directly.
+
 - `fs_aware_load_rank()` — whether this rank performs shared read-side work (downloads, cache fill,
   the coordinated dataset map). Follows the **input** flag.
+
 - `fs_aware_save_rank()` — whether this rank writes shared files. Follows the **output** flag: shared
   → only global rank 0 writes (avoids the NFS write race); non-shared → each node's local rank 0
-  writes its own copy. Every gathered/sharded save, the `run.log` tee, and `fs_aware_makedirs` by
-  default route their writer choice through it.
+  writes its own copy.
+
+    Every gathered/sharded save, the `run.log` tee, and `fs_aware_makedirs` by default route their
+    writer choice through it.
+
 - `fs_aware_makedirs(path, writer_rank=fs_aware_save_rank)` — creates a directory with the correct
   rank, then barriers. Pass `writer_rank=fs_aware_load_rank` for a read-side cache dir (what
   `src/training/environment.py` does for `HF_DATASETS_CACHE`).
+
 - `reject_across_ranks(local_reason, what, exc_type=RuntimeError)` — the collective that joins a
   rank-gated body. Every rank calls it with its own reason or `None`; if **any** is non-`None`, every
-  rank raises the same `exc_type`, naming how many ranks failed and the first one's reason. Pass
-  `exc_type` to keep a caller's own error contract (a config gate documented as `ValueError`). Use it
-  in place of a barrier wherever one rank does work the others wait on, so a failure there aborts the
-  job instead of parking the peers in the barrier until the watchdog.
+  rank raises the same `exc_type`, naming how many ranks failed and the first one's reason.
+
+    Pass `exc_type` to keep a caller's own error contract (a config gate documented as `ValueError`).
+    Use it in place of a barrier wherever one rank does work the others wait on, so a failure there
+    aborts the job instead of parking the peers in the barrier until the watchdog.
+
 - `store_reject_across_ranks(tag, local_reason, what, exc_type=RuntimeError, timeout=None)` — the
   same contract carried over the c10d store instead of a collective, for joins whose preceding work
-  is unbounded single-rank time (a fresh-cache dataset map, a first-run shard download). Peers wait
-  on store keys bounded by `DIST_STORE_TIMEOUT_HOURS` (or the explicit `timeout`), not the NCCL
-  watchdog. World-scoped and collective-equivalent: every rank, same tags, same order. Each rank
-  writes one key and reads the world's in a single `multi_get`, so a join costs O(world) store
-  requests in total rather than O(world) per rank. The coordinated dataset ops and the
-  sharded-dataset loads join through it. The tradeoff: a rank that dies *between* joins parks its
-  peers on the store for the full bound rather than the watchdog minutes — the timeout diagnostic
-  names the tag and the knob, and the launcher's elastic agent usually reaps the group first.
+  is unbounded single-rank time (a fresh-cache dataset map, a first-run shard download).
+
+    Peers wait on store keys bounded by `DIST_STORE_TIMEOUT_HOURS` (or the explicit `timeout`), not
+    the NCCL watchdog. World-scoped and collective-equivalent: every rank, same tags, same order. Each
+    rank writes one key and reads the world's in a single `multi_get`, so a join costs O(world) store
+    requests in total rather than O(world) per rank. The coordinated dataset ops and the
+    sharded-dataset loads join through it.
+
+    The tradeoff: a rank that dies *between* joins parks its peers on the store for the full bound
+    rather than the watchdog minutes. The timeout diagnostic names the tag and the knob, and the
+    launcher's elastic agent usually reaps the group first.
 
 ```python
 from src.distributed.filesystem import fs_aware_main_first
@@ -122,10 +143,11 @@ with fs_aware_main_first("teacher_model"):
 
 Wrapping a call in a main-first block (`local_main_process_first()`, `fs_aware_main_first`) breaks it.
 Those hold peers *outside* the body, so the op's `ensure_cache_dir` barrier and store joins land at a
-different sequence position on the main rank than on its peers: the barrier pairs with the wrong
-collective (or blocks alone against a store-key wait), and the joins go permanently off-by-one on the
-equal-entry invariant. `tests/cpu/data/test_coordinated_op_not_main_first.py` fails if any call site
-nests one.
+different sequence position on the main rank than on its peers.
+
+The barrier then pairs with the wrong collective (or blocks alone against a store-key wait), and the
+joins go permanently off-by-one on the equal-entry invariant.
+`tests/cpu/data/test_coordinated_op_not_main_first.py` fails if any call site nests one.
 
 ## Where it is applied
 

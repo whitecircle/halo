@@ -152,6 +152,33 @@ def test_react_every_engine_cut_reason_takes_the_recovery_path(finish_reason):
     assert "no_action" not in step.info
 
 
+@pytest.mark.parametrize(
+    "text", ['Thought: ready\nAction: echo(text="hi")', "Thought: done\nFinal Answer: 42"], ids=["action", "answer"]
+)
+def test_react_cut_turn_executes_nothing_the_parser_salvaged(text):
+    """The base flags every cut turn untrainable, so an Action executed or a Final Answer graded off
+    a cut turn earns a reward on the one turn the trainer then excludes."""
+    env = _make_react_env()
+    eid = _reset(env)
+    step = env.step([eid], [text], [{"finish_reason": "length"}])[0]
+    assert step.done is False and step.reward == 0.0
+    traj = env.get_trajectories([eid])[0]
+    assert traj.info["total_tool_calls"] == 0 and traj.info["completed"] is False
+    assert traj.info["length_cutoff_turns"] == 1
+    assert traj.messages[-1].content == ReActEnvironment.LENGTH_CUTOFF_NUDGE
+    assert [m.truncated for m in traj.messages if m.role == "assistant"] == [True]
+
+
+def test_react_invented_tool_turn_is_flagged_untrainable():
+    env = _make_react_env()
+    eid = _reset(env)
+    env.step([eid], ['Thought: t\nAction: bogus(text="x")'], [{"finish_reason": "stop"}])
+    env.step([eid], ['Thought: t\nAction: echo(text="x")'], [{"finish_reason": "stop"}])
+    assistant = [m for m in env.get_trajectories([eid])[0].messages if m.role == "assistant"]
+    assert [m.calls_rejected for m in assistant] == [True, False]
+    assert [m.untrainable for m in assistant] == [True, False]
+
+
 @pytest.mark.parametrize("protocol", [NativeToolUseEnvironment, ReActEnvironment])
 def test_the_nudge_never_asks_for_shorter_reasoning(protocol):
     # The nudge is trained on wherever recovery succeeds, so a terseness ask becomes a global lesson.
@@ -269,6 +296,10 @@ def test_trainer_skips_the_cut_off_turn_row():
     trainer._rollout_routing_replay = False
     trainer._batch_build_error = None
     trainer._warned_capture_missing = False
+    trainer._rollout_template_kwargs = {}
+    trainer._carry_reasoning = False
+    trainer._max_train_row_tokens = None
+    trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
 
     traj = Trajectory(
@@ -305,6 +336,10 @@ def _render_trainer():
 
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._batch_build_error = None
+    trainer._rollout_template_kwargs = {}
+    trainer._carry_reasoning = False
+    trainer._max_train_row_tokens = None
+    trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
     trainer._tokenizer = type("T", (), {"name_or_path": "fake"})()
     trainer.eos_token_id = 2
@@ -342,6 +377,16 @@ def test_whole_trajectory_render_does_not_weight_a_cut_turn():
 
     assert ord("a") not in trained  # the cut turn's own tokens carry no loss
     assert trained.count(ord("b")) == 2  # the turn that finished still trains
+
+
+def test_whole_trajectory_row_over_the_train_row_cap_is_one_masked_row():
+    trainer = _render_trainer()
+    trainer._max_train_row_tokens = 5
+    _prompt, completion_ids, mask = trainer._tokenize_trajectory(
+        type("R", (), {"trajectory": _two_turn_trajectory(first_truncated=False)})()
+    )
+    assert mask.tolist() == [0] and completion_ids.numel() == 1
+    assert trainer._rows_over_cap == 1
 
 
 def test_whole_trajectory_render_weights_every_finished_turn():
@@ -382,6 +427,10 @@ def test_all_turns_excluded_trains_a_zero_weight_row():
     trainer._rollout_routing_replay = False
     trainer._batch_build_error = None
     trainer._warned_capture_missing = False
+    trainer._rollout_template_kwargs = {}
+    trainer._carry_reasoning = False
+    trainer._max_train_row_tokens = None
+    trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
     trainer.eos_token_id = 2
     trainer.pad_token_id = 0
@@ -415,6 +464,48 @@ def test_recovery_cap_ends_the_episode_truncated_at_the_cut_past_it():
     assert traj.messages[-1].content != NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE, (
         "no nudge for a turn that ends the episode"
     )
+
+
+def test_carried_reasoning_puts_the_cut_thought_in_the_retry_observation():
+    """With ``carry_reasoning`` the retry conditions on the thought the cap interrupted; without it the
+    engine sees only the fragment's visible text and the retry restarts from nothing."""
+    carrying = _make_env(carry_reasoning=True)
+    eid = _reset(carrying)
+    step = carrying.step([eid], ["visible fragment"], [{"finish_reason": "length", "reasoning": "half a thought"}])[0]
+    fragment = step.observation[-2]
+    assert fragment["role"] == "assistant" and fragment["reasoning_content"] == "half a thought"
+    assert step.observation[-1] == {"role": "user", "content": NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE}
+
+    plain = _make_env()
+    assert plain.carry_reasoning is False
+    eid = _reset(plain)
+    step = plain.step([eid], ["visible fragment"], [{"finish_reason": "length", "reasoning": "half a thought"}])[0]
+    assert step.observation[-2] == {"role": "assistant", "content": "visible fragment"}
+
+
+def test_only_the_previous_turns_reasoning_is_carried():
+    """A request grows by one reasoning budget at most: the turn before the next one carries its thought,
+    the turns before that revert to their visible text."""
+    env = _make_env(carry_reasoning=True)
+    eid = _reset(env)
+    call = {"id": "c0", "function": {"name": "echo", "arguments": '{"text": "hi"}'}}
+    env.step([eid], ["first"], [{"finish_reason": "stop", "tool_calls": [call], "reasoning": "thought one"}])
+    step = env.step([eid], ["second"], [{"finish_reason": "stop", "tool_calls": [call], "reasoning": "thought two"}])[
+        0
+    ]
+    assistants = [m for m in step.observation if m["role"] == "assistant"]
+    assert "reasoning_content" not in assistants[0] and assistants[0]["content"] == "first"
+    assert assistants[1]["reasoning_content"] == "thought two"
+
+
+def test_carried_reasoning_reaches_every_observation_of_a_tool_round():
+    env = _make_env(carry_reasoning=True)
+    eid = _reset(env)
+    call = {"id": "c0", "function": {"name": "echo", "arguments": '{"text": "hi"}'}}
+    step = env.step([eid], ["calling"], [{"finish_reason": "stop", "tool_calls": [call], "reasoning": "why echo"}])[0]
+    assistant = next(m for m in step.observation if m["role"] == "assistant")
+    assert assistant["reasoning_content"] == "why echo" and assistant["tool_calls"]
+    assert step.observation[-1]["role"] == "tool"
 
 
 def test_recovery_cap_of_zero_ends_the_episode_at_the_first_cut_and_negative_is_refused():

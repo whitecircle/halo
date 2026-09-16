@@ -41,19 +41,25 @@ rejected rather than silently ignored; each field declares which modes consume i
 
 Over-length rows are dropped, not truncated in `chat` and `--vlm` mode. `--mode text` instead
 truncates each document to `--max-length` (reserving the last slot for the appended EOS), unless
-`--pack-sequences` is set. If dropping empties a split the script raises and names the
-usual cause — a wrong `--conversation-field`, or an `--assistant-message-template` that does not
-match the rendered assistant turn — rather than `--max-length`. The same two causes are caught again
-after the label bake: a probe of the first and last 64 rows raises when every label is `-100`, rather
-than shipping a dataset that trains zero tokens.
+`--pack-sequences` is set.
+
+If dropping empties a split the script raises and names the usual cause (a wrong
+`--conversation-field`, or an `--assistant-message-template` that does not match the rendered
+assistant turn) rather than `--max-length`. The same two causes are caught again after the label
+bake: a probe of the first and last 64 rows raises when every label is `-100`, rather than shipping a
+dataset that trains zero tokens.
 
 `--tokenizer-backend gigatoken` (optional extra `halo[gigatoken]`) encodes text→ids with the [gigatoken](https://github.com/marcelroed/gigatoken) Rust encoder — ~6× faster tokenization on UltraChat 200K with Qwen3-0.6B — while chat templating and decoding stay on the model's tokenizer (`src/data/pipeline/tokenizer_backend.py`). Token IDs are verified against the HF tokenizer at startup; any divergence raises. VLM mode swaps the processor's inner tokenizer the same way, but image processing dominates there, so the win is small.
 
 The same two values are also a **training** config field, `tokenizer_backend` (default `hf`). It resolves in `setup_model_and_tokenizer`, so every training method that tokenizes rows honors it with no preparation pass; embedding training rejects a non-`hf` value, since SentenceTransformer owns its own tokenization.
 
-With `--train-on-completions-only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start. That is `COLLATOR_SPAN_POLICY` — no end-of-sequence fallback — and `PACKED_SPAN_POLICY` under `--pack-sequences`, where a turn with no terminator anywhere ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
+With `--train-on-completions-only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start.
 
-Baked labels are authoritative at training time. The SFT script disables runtime completion re-masking for preprocessed data — a re-mask would overwrite them, e.g. re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens. So `train_on_completions_only` in the training config cannot change them; it is validated instead, and a value disagreeing with the baked labels raises at startup. The collator only pads the stored labels (VLM uses `PreprocessedVLMDataCollator`).
+That is `COLLATOR_SPAN_POLICY` (no end-of-sequence fallback), and `PACKED_SPAN_POLICY` under `--pack-sequences`, where a turn with no terminator anywhere ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
+
+Baked labels are authoritative at training time. The SFT script disables runtime completion re-masking for preprocessed data: a re-mask would overwrite them, e.g. re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
+
+So `train_on_completions_only` in the training config cannot change them; it is validated instead, and a value disagreeing with the baked labels raises at startup. The collator only pads the stored labels (VLM uses `PreprocessedVLMDataCollator`).
 
 Offline-packed data (`--pack-sequences`) still needs per-document position IDs at collation, so the SFT script selects the packing collator from `metadata.packed` — the collator choice follows the data, not the config flag; TRL-side packing stays off either way.
 
@@ -99,9 +105,10 @@ not reuse stale pixels.
 
 Images may live inside the conversation's content parts or in a **separate column**, the shape hub
 VLM datasets ship (FineVision / the_cauldron / Docmatix). `--images-field <column>` merges that
-column into the messages exactly as the runtime VLM path does — filling the conversation's image
-placeholders in order, else prepending the images to the first user turn — so both routes bake the
-same rows. It requires `--vlm`; the text tokenization merges nothing.
+column into the messages exactly as the runtime VLM path does, so both routes bake the same rows.
+
+The merge fills the conversation's image placeholders in order, else prepends the images to the first
+user turn. It requires `--vlm`; the text tokenization merges nothing.
 
 An image column (`images` / `image` / `pixel_values`) that **no** `--images-field` names is refused.
 Every source column is dropped at tokenization, so it would otherwise be discarded in silence and the
@@ -158,18 +165,21 @@ s3://bucket/preprocessed/dataset/
 ```
 
 `metadata.json` records the preprocessing config and stats; the authoritative field list is the
-`PreprocessedDatasetMetadata` dataclass in `src/data/pipeline/preprocessed_metadata.py`. Its `version`
-stamp is compared on load: a stamp this build does not read raises `IncompatiblePreprocessedDataset`
-naming the version, rather than being swallowed into a silent fall-back to the raw (re-tokenizing)
-path. Unknown fields at a stamp this build *does* read raise the same way (a diverged build), while a
-`metadata.json` carrying no `preprocessed` key is somebody else's file — the dataset is treated as raw
-with a warning.
+`PreprocessedDatasetMetadata` dataclass in `src/data/pipeline/preprocessed_metadata.py`.
+
+Its `version` stamp is compared on load: a stamp this build does not read raises
+`IncompatiblePreprocessedDataset` naming the version, rather than being swallowed into a silent
+fall-back to the raw (re-tokenizing) path. Unknown fields at a stamp this build *does* read raise the
+same way (a diverged build). A `metadata.json` carrying no `preprocessed` key is somebody else's
+file; the dataset is treated as raw with a warning.
 
 Each split's `shard_index.json` (`ShardIndex`, `src/data/shard_index.py`) carries the same
 `version` stamp and is held to it the same way: a stamp this build does not read, or a field it does
 not know, raises the same `IncompatiblePreprocessedDataset` (defined in that leaf, so a loader can
-refuse without importing the writer). The index decides which shards each rank loads, so a diverged
-one read with this build's field meanings hands ranks the wrong rows.
+refuse without importing the writer).
+
+The index decides which shards each rank loads, so a diverged one read with this build's field
+meanings hands ranks the wrong rows.
 
 An index listing zero shards for `train` raises too, instead of handing every rank an empty split;
 the same on a non-train split warns, since a tiny eval split that does not reach every rank is

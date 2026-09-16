@@ -30,6 +30,6 @@ Pretraining runs the `sft` path on raw text. From-scratch adds `--init_from_scra
 
 ## Extra infrastructure
 
-Online GRPO, online SDPG, and environmental GRPO generate with a separate vLLM server. Environmental GRPO also runs Ray rollout actors asynchronously — rollouts overlap training through a prefetch queue — and can serve rollouts from SGLang instead (`rollout_backend: sglang`, with the restrictions in the [Supported Matrix](supported-matrix.md#rollout-engines)). Every other method trains without vLLM or Ray. See the `agent-docs` guides for [Online GRPO](../agent-docs/training-methods/grpo/online-grpo.md) ↗ and [Environmental GRPO](../agent-docs/training-methods/grpo/environmental-grpo.md) ↗.
+Online GRPO, online SDPG, and environmental GRPO generate with a separate vLLM server. Environmental GRPO also runs Ray rollout actors asynchronously — rollouts overlap training through a prefetch queue — and can serve rollouts from SGLang instead (`rollout_backend: sglang`, with the restrictions in the [Supported Matrix](supported-matrix.md#rollout-engines)). Every other method trains without vLLM or Ray. See the `agent-docs` guides for [Online GRPO](../agent-docs/training-methods/grpo/online-grpo.md) ↗ and [Async GRPO with Environments](../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.
 
 The full per-method reference, with every hyperparameter, is in the `agent-docs` [training-methods reference](../agent-docs/training-methods/sft.md) ↗.

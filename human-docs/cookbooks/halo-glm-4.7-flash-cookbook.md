@@ -327,4 +327,4 @@ assumes the whole node.
 - [GLM-4.7-Flash model card](https://huggingface.co/zai-org/GLM-4.7-Flash)
 - [Halo GLM-4 model notes](../../agent-docs/models/glm4.md) ↗
 - Halo GLM-4 SFT configuration: `examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml`
-- [Environmental GRPO](../../agent-docs/training-methods/grpo/environmental-grpo.md) ↗
+- [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗

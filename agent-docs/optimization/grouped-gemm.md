@@ -20,7 +20,9 @@ Grouped collapses those to `P` nodes (Qwen3.6: 256×2=512 → 2), so far fewer s
 
 Some MoE / parallelism / hardware combinations make `use_grouped_gemm: false` competitive or faster.
 
-**1. Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving → grouped wins. Few (high EP) → the loop's per-shape-optimal CUTLASS tile wins, since each expert's GEMM gets a tile fit to its actual per-expert `M = ep_size × tokens_per_rank × top_k / num_experts` (tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`). Per-expert M modulates the trend: `grouped_mm` runs one shared ~128-wide M tile for all groups, so its edge is largest at small M and erodes as M grows.
+**1. Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving → grouped wins. Few (high EP) → the loop's per-shape-optimal CUTLASS tile wins, since each expert's GEMM gets a tile fit to its actual per-expert `M`.
+
+Per-expert `M = ep_size × tokens_per_rank × top_k / num_experts`: tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`. M modulates the trend: `grouped_mm` runs one shared ~128-wide M tile for all groups, so its edge is largest at small M and erodes as M grows.
 
 gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4), grouped vs loop, plus Qwen3-30B (128 experts, ep2 → 64 local/rank) as the high-local-count anchor:
 
@@ -31,7 +33,7 @@ gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4), grouped vs loop, plus 
 | Qwen3-30B | ep2 | 64 | grouped +243% | — | +112% | — |
 | Qwen3.5-35B | ep2 | 128 | — | — | grouped +137% | — |
 
-At seq 8192 grouped wins ep2 at every batch and ep8 only at batch 1; the loop edges ahead from ep8 batch 2 upward. Local-expert *count* is the primary lever; batch (per-expert M) sets how far past the crossover you are. **Rule: grouped (default) wins at low EP and at high EP up to moderate batch; reach for `use_grouped_gemm: false` only at high EP with the largest batches.** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example-why-small-per-expert-m-is-slow).
+Local-expert *count* is the primary lever; batch (per-expert M) sets how far past the crossover you are. **Rule: grouped (default) wins at low EP and at high EP up to moderate batch; reach for `use_grouped_gemm: false` only at high EP with the largest batches.** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example-why-small-per-expert-m-is-slow).
 
 The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime by the same rule, but between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured.
 
@@ -43,17 +45,25 @@ The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the gro
 
 ## The duplicate-index gather trap {#the-duplicate-index-gather-trap}
 
-Around the kernel sit the token permutation and, for expert-bias models (GptOss), the per-expert bias broadcast. Both gather rows by an index with heavy duplication (every token of an expert shares its id). The forward gather (`x[idx]` / `x.index_select(0, idx)`) is cheap; the trap is the backward. PyTorch's default backward for a duplicate-valued gather is `index_add_`, whose bf16 kernel has no native atomic add and emulates one with a CAS loop that serializes under the duplicate-row contention. On a profiled gpt-oss-20b EP step that atomic scatter took ~5,000 ms over 4 warm steps (≈20% of all GPU time) and inflated the DeepEP combine wait.
+Around the kernel sit the token permutation and, for expert-bias models (GptOss), the per-expert bias broadcast. Both gather rows by an index with heavy duplication (every token of an expert shares its id). The forward gather (`x[idx]` / `x.index_select(0, idx)`) is cheap; the trap is the backward.
+
+PyTorch's default backward for a duplicate-valued gather is `index_add_`, whose bf16 kernel has no native atomic add and emulates one with a CAS loop that serializes under the duplicate-row contention. On a profiled gpt-oss-20b EP step that atomic scatter took ≈20% of all GPU time and inflated the DeepEP combine wait.
 
 **Rule: never let a duplicate-valued gather fall back to the default `index_add_` backward in a training forward.** Both gathers route through custom autograd Functions in `src/distributed/expert_parallel/autograd.py` that keep the gather forward and replace the backward.
 
-The bias gather (`MoEExpertBiasGather`, applied in `EPGptOssMoELayer`'s grouped path) computes `grad_bias` as one GEMM (`onehot(eids)ᵀ @ grad_out`, fp32 tensor-core accumulation) — atomic-free and numerically identical (more accurate than the bf16 atomic add). The atomic-free path runs the EP step at ~6,310 vs ~1,256 tok/s/GPU for the default-backward path (≈5×, board power ~34% → ~56% of limit), and ~6,773 vs ~4,100 tok/s for plain FSDP grouped (~1.65×); the loss curve is identical.
+The bias gather (`MoEExpertBiasGather`, applied in `EPGptOssMoELayer`'s grouped path) computes `grad_bias` as one GEMM (`onehot(eids)ᵀ @ grad_out`, fp32 tensor-core accumulation): atomic-free and numerically identical (more accurate than the bf16 atomic add).
+
+The atomic-free path runs the EP step at ~6,310 vs ~1,256 tok/s/GPU for the default-backward path (≈5×, board power ~34% → ~56% of limit), and ~6,773 vs ~4,100 tok/s for plain FSDP grouped (~1.65×); the loss curve is identical.
 
 ### The atomic-free gather-reduce permute
 
-The token permute/unpermute (`MoEGatherPermute`, `MoEScatterUnpermute`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step — 4.3 ms/call vs gpt-oss (top-4, 4 local/rank) 0.38 ms/call (11× gap, pure collision rate). The fix expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded), turning the scatter into gather + reduction (numerically identical to `index_add_`, float64-checked fwd+bwd).
+The token permute/unpermute (`MoEGatherPermute`, `MoEScatterUnpermute`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step: 4.3 ms/call vs gpt-oss (top-4, 4 local/rank) 0.38 ms/call (11× gap, pure collision rate).
 
-It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm` builds `inv_map` via `_build_inv_map`); below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) the plain `index_select` + `index_add_` is kept, since the extra `top_k`× read would cost ~4%. Above the gate the gather is materialized as `[recv_N, top_k, H]` before its sum — `top_k`× the recv buffer per MoE layer as a transient, in the forward unpermute and again in the permute's backward: ~5.6 GB per layer at GLM-5.3-Flash / Step-3.7-Flash shapes (16k tokens/rank at ep8, top-8, `H=4096`), most of it sentinel rows since a recv token averages `top_k / ep_size` local experts.
+The fix expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded), turning the scatter into gather + reduction (numerically identical to `index_add_`, float64-checked fwd+bwd).
+
+It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm` builds `inv_map` via `_build_inv_map`). Below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) the plain `index_select` + `index_add_` is kept, since the extra `top_k`× read would cost ~4%.
+
+Above the gate the gather is materialized as `[recv_N, top_k, H]` before its sum: `top_k`× the recv buffer per MoE layer as a transient, in the forward unpermute and again in the permute's backward. That is ~5.6 GB per layer at GLM-5.3-Flash / Step-3.7-Flash shapes (16k tokens/rank at ep8, top-8, `H=4096`), most of it sentinel rows since a recv token averages `top_k / ep_size` local experts.
 
 | Qwen3.6-35b EP=8 | `index_add_` | atomic-free | win |
 |---|---|---|---|
@@ -62,12 +72,9 @@ It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm`
 
 The win grows with sequence length (larger recv buffers → worse contention).
 
-Per-device batch multiplies the per-call recv buffer exactly like sequence length, so on the
-families the gate leaves on the CAS path (`top_k < ep_size`) batch shape is a real lever:
-gpt-oss-120b at EP8, same 64-sequence effective batch, bs2 × GA4 measures ~20% slower than
-bs1 × GA8 at high router skew (`moe/load_max` ~11), converging to parity once balancing has
-flattened the load (`moe/load_max` ~2). At high router skew scale with GA,
-not per-device batch.
+Per-device batch multiplies the per-call recv buffer exactly like sequence length, so on the families the gate leaves on the CAS path (`top_k < ep_size`) batch shape is a real lever. At high router skew scale with GA, not per-device batch.
+
+gpt-oss-120b at EP8, same 64-sequence effective batch: bs2 × GA4 measures ~20% slower than bs1 × GA8 at high router skew (`moe/load_max` ~11), and parity at a balanced load (~2).
 
 ## Throughput tuning beyond the kernel
 
@@ -93,7 +100,9 @@ SM90+ (Hopper H100/H200, Blackwell B200/B300) and the pinned PyTorch 2.11.x. Dee
 
 `F.grouped_mm` has a backward bug on Blackwell (B200, B300): zero-stride gradients (from `.sum()` or any scalar reduction broadcasting back through `grouped_mm`) are rejected with `"Invalid strides/sizes, got [0, 0, 0]"`, and `torch.cumsum` upcasts int32 offsets to int64, rejected with `"Offsets have to be int32"`.
 
-The bf16 primitive in `src/kernels/grouped_mm_autograd.py`, where `grouped_gemm()` dispatches every EP MoE layer's bf16 path, materializes zero-stride grads and auto-casts offsets to int32. An empty group takes a fresh `torch.empty` instead of `.contiguous()`: at `M == 0` the copy is a no-op that keeps the `[0, 0]` strides the kernel still validates — reachable under EP whenever a rank routes zero tokens. Overhead vs native is <3%; backward on `.sum()`-style losses runs 200–240× faster than the Python loop fallback.
+The bf16 primitive in `src/kernels/grouped_mm_autograd.py`, where `grouped_gemm()` dispatches every EP MoE layer's bf16 path, materializes zero-stride grads and auto-casts offsets to int32. Overhead vs native is <3%; backward on `.sum()`-style losses runs 200–240× faster than the Python loop fallback.
+
+An empty group takes a fresh `torch.empty` instead of `.contiguous()`: at `M == 0` the copy is a no-op that keeps the `[0, 0]` strides the kernel still validates, reachable under EP whenever a rank routes zero tokens.
 
 ### Detection and disabling
 

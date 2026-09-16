@@ -176,10 +176,11 @@ def test_breaker_below_both_fractions_leaves_the_optimizer_skip_unarmed():
     assert not host._breaker_tripped_this_step
 
 
-def test_a_tripped_breaker_drops_the_gradients_once():
+def test_a_tripped_breaker_drops_the_gradients_on_every_optimizer_step_of_the_round():
     """A zeroed loss still hands the optimizer zero gradients, on which Adam steps by momentum; the
-    skip must set every grad to None (what makes an optimizer skip a parameter) and disarm itself,
-    so the following step trains normally."""
+    skip must set every grad to None (what makes an optimizer skip a parameter) on EVERY optimizer
+    step the round feeds — a generation round spans ``num_iterations`` of them, all trained on the
+    zeroed advantages — so the skip must not consume the flag. Only the next round's verdict does."""
     calls = []
     host = types.SimpleNamespace(
         _breaker_tripped_this_step=True,
@@ -187,10 +188,12 @@ def test_a_tripped_breaker_drops_the_gradients_once():
     )
     skip = DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped.__get__(host)
     assert skip() is True
-    assert calls == [True]
-    assert host._breaker_tripped_this_step is False
+    assert skip() is True
+    assert calls == [True, True]
+    assert host._breaker_tripped_this_step is True
+    host._breaker_tripped_this_step = False
     assert skip() is False
-    assert calls == [True]
+    assert calls == [True, True]
 
 
 def test_none_gradients_leave_adam_state_and_weights_untouched():
@@ -282,6 +285,23 @@ def test_build_training_tensors_routes_through_every_phase_helper():
     assert not missing, f"phase helpers no longer called: {missing}"
 
 
+def test_world_metrics_flush_once_after_every_recording_site_with_no_return_between():
+    """The step's rank-local counts fold in ONE collective at the end of ``_build_training_tensors``:
+    a second flush or a return before it strands the peers in the fold, and a site recording after it
+    logs its count a step late."""
+    fn = _build_training_tensors_ast()
+    flush_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "flush")]
+    assert len(flush_at) == 1, f"_build_training_tensors flushes the world metrics {len(flush_at)} times"
+    recorded_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "fraction") or _calls(stmt, "maximum")]
+    logged_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_populate_completion_logs")]
+    assert recorded_at and max(recorded_at) < flush_at[0], "a count recorded after the flush logs a step late"
+    assert max(logged_at) < flush_at[0], "the flush follows the completions record, the last phase every rank runs"
+    between = fn.body[min(recorded_at) : flush_at[0]]
+    assert not any(isinstance(node, ast.Return) for stmt in between for node in ast.walk(stmt)), (
+        "a return between a recording site and the flush skips the collective on that path"
+    )
+
+
 def test_phase_helpers_never_early_return():
     """Each phase helper returns exactly once, as its final statement. Three of them issue collectives
     (the uniform raise, the recompute forward's EP dispatch, the empty-step all_reduce and normalizer
@@ -323,9 +343,10 @@ def test_stamp_group_efforts_preserves_existing_context_keys():
 
 
 def test_stamp_group_efforts_records_a_split_group_rather_than_raising():
-    """A ragged batch reaches a SUBSET of the DP ranks, so a rank-local raise here would strand the
-    peers in the caller's all-reduce. The failure is RECORDED and raised uniformly one call later
-    (the collective half is pinned in ``test_env_ragged_eval_batch_uniform_raise.py``)."""
+    """Every batch-construction failure goes through the rank-uniform fence, so a rank-local raise
+    here would strand the peers in the caller's all-reduce. The failure is RECORDED and raised
+    uniformly one call later (the collective half is pinned in
+    ``test_env_ragged_eval_batch_uniform_raise.py``)."""
     stamp, host = _effort_host(4)
     contexts = [None] * 6
     stamp(contexts)

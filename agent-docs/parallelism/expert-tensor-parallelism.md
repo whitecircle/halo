@@ -12,7 +12,9 @@ NVLink-local groups, cutting per-rank expert memory without touching attention. 
 
 Use ETP when expert weights don't fit per rank after EP distribution and attention fits on one GPU.
 Per-rank expert memory drops ~`expert_tp_size`×; ranks in the same ETP group share a batch, reducing
-DP. `expert_tp_size` is mutually exclusive with attention TP (`tp_size`) and with CP (`cp_size`):
+DP.
+
+`expert_tp_size` is mutually exclusive with attention TP (`tp_size`) and with CP (`cp_size`):
 ETP partners hold shards of one expert and must see the **same** tokens, since `ReduceFromExpertTP`
 sums their outputs element-wise in token space, while CP hands each rank a different sequence chunk.
 
@@ -35,19 +37,24 @@ tokens, routing weights → SumGradAcrossGroup (identity fwd, all-reduce bwd)
 The expert-TP all-reduce sits at the layer boundary (token space), **outside** the DeepEP
 dispatch→combine span (`EPMoELayerBase._dispatch_compute_combine`). This is exact because the
 combine is linear in the expert outputs, so summing per-shard partials in token space equals summing
-them in recv space (`combine(Σ) = Σ combine`). It **must** stay outside: an all-reduce between
-dispatch and combine couples the dispatch groups inside DeepEP's intranode combine barrier, and under
-FSDP2 multi-stream drift they form a circular wait and the barrier times out.
+them in recv space (`combine(Σ) = Σ combine`).
+
+It **must** stay outside: an all-reduce between dispatch and combine couples the dispatch groups
+inside DeepEP's intranode combine barrier, and under FSDP2 multi-stream drift they form a circular
+wait and the barrier times out.
 
 The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter half is the toolkit-wide
 `SumGradAcrossGroup` (`src/distributed/grad_reduce.py`, shared with TP), the gather half
 `ReduceFromExpertTP` (`src/distributed/expert_parallel/autograd.py`):
 
 - **`SumGradAcrossGroup`** — identity forward; `all_reduce(SUM)` backward over `expert_tp_group`. It is
-  applied to **both** the layer input tokens **and** the routing weights: the gate multiply happens
-  on this rank's *partial* expert output, so `d(loss)/d(weights)` here is a partial whose true value
-  is the sum over the group. Without the second application the router — and every upstream tensor
-  reached through it — trains on a gradient scaled by `1/expert_tp_size`, silently.
+  applied to **both** the layer input tokens **and** the routing weights.
+
+    The gate multiply happens on this rank's *partial* expert output, so `d(loss)/d(weights)` here
+    is a partial whose true value is the sum over the group. Without the second application the
+    router, and every upstream tensor reached through it, trains on a gradient scaled by
+    `1/expert_tp_size`, silently.
+
 - **`ReduceFromExpertTP`** — `all_reduce(SUM)` forward on the combined output to sum the partial
   expert outputs; identity backward, correct because `SumGradAcrossGroup` owns the input-gradient
   reduction and each shard's weight gradient is independently correct.
@@ -90,9 +97,11 @@ Enforced in `src/distributed/parallelism_config.py` before model loading:
   `expert_tp_size == EP members per domain` and `ep_size == domains spanned`. A finer split that
   would straddle a domain boundary is rejected — the ETP all-reduce must stay on NVLink.
 - Multi-domain multi-group EP+ETP is rejected — the in-backward cross-replica expert grad sync races
-  the DeepEP combine across domains. This rule, not the one above, is what refuses `ep2+etp4` and
-  `ep4+etp2` on 2×8 (both leave `ep_group_size=8` under a 16-rank world), at either scope;
-  `ep2+etp8` is the working shape.
+  the DeepEP combine across domains.
+
+    This rule, not the one above, is what refuses `ep2+etp4` and `ep4+etp2` on 2×8 (both leave
+    `ep_group_size=8` under a 16-rank world), at either scope; `ep2+etp8` is the working shape.
+
 - The racy-EP gate (`is_racy_single_domain_multigroup_ep`) fires on a **single** NVLink domain with
   `ep_size > 2` **and** `ep_group_size < nvlink_domain_size`, so an ETP shape that leaves
   `ep_group_size` short of the domain is rejected like bare `ep4` — `ep4+etp2` on a 16-GPU NVL
@@ -154,9 +163,11 @@ expert layout (`src/distributed/expert_parallel/base_layer.py` + `layers/`).
   (`gate = [...,::2]`, `up = [...,1::2]`), shard each along dim 2 to `[E, H, M/tp]`; shard
   `down_proj [E, M, H]` dim 1.
 - **Fused-GLU contiguous halves (every family whose block stores a fused `gate_up_proj`, through the
-  base `_init_fused_glu_params`)** — `gate_up_proj [E, H, 2M]` is `[gate(M) | up(M)]`. Slicing the fused tensor along
-  dim 2 would mismatch the gate/up pairing, so ETP splits the halves first and stores separate
-  `gate_proj`/`up_proj`/`down_proj` params.
+  base `_init_fused_glu_params`)** — `gate_up_proj [E, H, 2M]` is `[gate(M) | up(M)]`.
+
+    Slicing the fused tensor along dim 2 would mismatch the gate/up pairing, so ETP splits the halves
+    first and stores separate `gate_proj`/`up_proj`/`down_proj` params.
+
 - **Qwen3 / Bailing (separate GLU projections)** — the base `_store_separate_glu_params` shards `M`
   and stores matmul-convention `gate_proj`/`up_proj [E, H, M/tp]`, `down_proj [E, M/tp, H]` for
   [Grouped GEMM](../optimization/grouped-gemm.md).
@@ -165,11 +176,15 @@ expert layout (`src/distributed/expert_parallel/base_layer.py` + `layers/`).
 
 Save formats, resume paths, and merge scripts: [Checkpoints](../reference/checkpoints.md). The
 ETP-unique step is that a gathered save all-gathers the TP shards within `expert_tp_group` and
-re-assembles full expert weights, keyed on layout: GptOss re-interleaves; contiguous-halves families
-concatenate along dim 2 and transpose back from matmul convention (the base
-`gather_expert_state_dict`); GLM4/LFM2 declare `_PER_EXPERT_UNFUSED_KEYS` and the base splits to
-per-expert names; Qwen3/Bailing write per-expert `experts.{i}.{gate,up,down}_proj.weight`. The
-result is a standard HuggingFace checkpoint; ETP sharding is re-applied automatically at model
+re-assembles full expert weights, keyed on layout:
+
+- GptOss re-interleaves.
+- Contiguous-halves families concatenate along dim 2 and transpose back from matmul convention (the
+  base `gather_expert_state_dict`).
+- GLM4/LFM2 declare `_PER_EXPERT_UNFUSED_KEYS` and the base splits to per-expert names.
+- Qwen3/Bailing write per-expert `experts.{i}.{gate,up,down}_proj.weight`.
+
+The result is a standard HuggingFace checkpoint; ETP sharding is re-applied automatically at model
 patching when `expert_tp_size > 1`. Per-rank sharded EP save is rejected — see below.
 
 ## Limitations
@@ -180,14 +195,17 @@ expert_tp_size`, so it is gated by `_supports_ep`, which every trainer declares 
 
 **Models.** Every EP-capable MoE family
 ([roster](expert-parallelism.md#supported-models)). ETP shards expert FFN
-weights only — the router stays replicated in every family, whether it sits outside the EP wrapper
+weights only: the router stays replicated in every family, whether it sits outside the EP wrapper
 and is FSDP-managed (Gemma 4) or inside it and is synced by the EP router hook (everyone else,
 including Zaya). A dense model raises: pure ETP has `ep_group_size > 1`, so patching zero MoE layers
-is an error. `expert_tp_size` must divide each expert's intermediate size, else the top units of every expert
+is an error.
+
+`expert_tp_size` must divide each expert's intermediate size, else the top units of every expert
 would be dropped silently. `ParallelismConfig.validate_against_model_config` checks it off
-`config.json` at the top of the model load, through `resolve_expert_ffn_shard_width` — the one home
-for "what does ETP actually shard", so the config-time gate and the layer that does the split cannot
-disagree on which config spelling carries the per-expert width.
+`config.json` at the top of the model load, through `resolve_expert_ffn_shard_width`.
+
+That helper is the one home for "what does ETP actually shard", so the config-time gate and the
+layer that does the split cannot disagree on which config spelling carries the per-expert width.
 
 **Axis combinations.** ETP composes with EP. Pure ETP and EP+ETP are supported shapes; TP+ETP,
 ETP+CP and EP+TP+ETP are refused by the [allowlist](README.md#supported-combinations), and PP shapes

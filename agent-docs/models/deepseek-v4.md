@@ -11,8 +11,15 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 - **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `src/distributed/context_parallel/validation.py`.
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.
 - **ETP** — the experts use the shared fused-GLU storage, so `expert_tp_size > 1` mechanically works through `_init_fused_glu_params`; not yet validated on V4.
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md). The shipped `DeepSeekV4PPSpec` split contract carries the `hc_mult`-widened hyper-connection stream as the stage boundary, keeps `hc_head` on the last stage, and gives non-first stages a mirrored mid-chain forward. Every `hash_moe` layer must sit on stage 0 — its router consumes `input_ids`, which only stage 0 receives — and the split gate refuses a partition that strands one; the hub's `num_nextn_predict_layers: 1` is metadata and passes the live-MTP gate.
-- **RL weight sync** — online and environmental GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds trainer parameter names straight into the engine's `model.load_weights`, and neither pinned engine has a loader they land in. vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original release checkpoint, not the HuggingFace module tree the toolkit trains — per-expert vs fused experts, fused vs separate attention projections, bare `embed.weight` vs `model.embed_tokens.weight`; those weights are also fp8/fp4-packed and the o-projection reads a `weight_scale_inv` unconditionally, so the BF16 checkpoint is not servable there either. SGLang 0.5.17 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). No key mapping fixes this from the gather side.
+- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md). The shipped `DeepSeekV4PPSpec` split contract carries the `hc_mult`-widened hyper-connection stream as the stage boundary, keeps `hc_head` on the last stage, and gives non-first stages a mirrored mid-chain forward.
+
+    Every `hash_moe` layer must sit on stage 0, since its router consumes `input_ids`, which only stage 0 receives; the split gate refuses a partition that strands one. The hub's `num_nextn_predict_layers: 1` is metadata and passes the live-MTP gate.
+
+- **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds trainer parameter names straight into the engine's `model.load_weights`, and neither pinned engine has a loader they land in ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+
+    vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original release checkpoint, not the HuggingFace module tree the toolkit trains: per-expert vs fused experts, fused vs separate attention projections, bare `embed.weight` vs `model.embed_tokens.weight`. Those weights are also fp8/fp4-packed and the o-projection reads a `weight_scale_inv` unconditionally, so the BF16 checkpoint is not servable there either.
+
+    SGLang 0.5.17 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side.
 
 ## Attention: eager-only
 
@@ -21,7 +28,10 @@ Every non-eager backend is off (`_supports_flash_attn/_supports_sdpa/_supports_f
 Consequences:
 
 - **No varlen path** — `padding_free` is rejected by the collator factory, which gates on the resolved `_attn_implementation` (only `flash_attention_2/_3/_4` qualify) and so catches DeepSeek-V4's eager attention. `packing` still runs, but materializes a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of consuming `cu_seqlens`.
-- **Packed documents are isolated in the masked-attention layers only.** The mask is synthesized from the per-document `position_ids` whenever no cache is live, which training always is (`use_cache=False`). The CSA and HCA compressor layers pool KV across the whole row and so cross document boundaries by construction — an accepted mixer-class cost, the same one the linear-attention families carry ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+- **Packed documents are isolated in the masked-attention layers only.** The mask is synthesized from the per-document `position_ids` whenever no cache is live, which training always is (`use_cache=False`).
+
+    The CSA and HCA compressor layers pool KV across the whole row and so cross document boundaries by construction. That is an accepted mixer-class cost, the same one the linear-attention families carry ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+
 - The per-rope-type rotary buffers (`{main,compress}_inv_freq`, on the model-level rotary and inside every compressor/indexer) are recomputed in fp32 by the rotary fixer chain `finalize_loaded_model` walks on every load path.
 
 ## EP wrapper
@@ -30,13 +40,18 @@ Consequences:
 
 - **Top-k layers**: fp32 scores via `sqrtsoftplus(logits)`, selection on `scores + e_score_correction_bias` (+ the balancing bias when enabled), weights gathered from the unbiased scores, normalized (`+1e-20`), scaled by `routed_scaling_factor` (1.5).
 - **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the wrapper validates at init and raises).
-- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into the `_glu_combine` seam (one Triton kernel, `fused_clamped_silu_mul`, with the bound as a runtime argument; every base GLU path — fused, grouped-GEMM, ETP separate — routes through it). The fused form hardcodes SiLU, so it is armed by the same behavioral `is_silu_activation` gate as GLM-4 ([Fused SwiGLU](glm4.md#fused-swiglu)); any other `hidden_act` falls back to the generic clamp.
+- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into the `_glu_combine` seam: one Triton kernel, `fused_clamped_silu_mul`, with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
+
+    The fused form hardcodes SiLU, so it is armed by the same behavioral `is_silu_activation` gate as GLM-4 ([Fused SwiGLU](glm4.md#fused-swiglu)); any other `hidden_act` falls back to the generic clamp.
+
 - **Shared expert**: `DeepseekV4MLP` (same clamp), replicated per rank, DP-averaged via the router grad hook, output added after DeepEP combine.
 - Expert storage is the standard fused contiguous-halves layout (`gate_up_proj [E, 2M, H]`), so the base gather/save, the lazy fused-expert loader, native grouped expert-LoRA, and the shard-merge transform (the base `merge_shards_to_hf`, reached by resolving `model_type` through `resolve_ep_merge_layer_class`) all apply unchanged.
 
 ## Router balancing
 
-Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty — the aux-loss path is severed (`_ep_severs_aux_loss`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback)), landing in the gate's own exported `e_score_correction_bias`, so the trained bias ships with every checkpoint; an explicit `aux_loss` warns and stays off. Hash layers refuse the balancing bias (their selection is frozen); only top-k layers receive it.
+Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`_ep_severs_aux_loss`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback)); an explicit `aux_loss` warns and stays off.
+
+The update lands in the gate's own exported `e_score_correction_bias`, so the trained bias ships with every checkpoint. Hash layers refuse the balancing bias (their selection is frozen); only top-k layers receive it.
 
 ## Checkpoint conversion
 

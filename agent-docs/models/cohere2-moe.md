@@ -41,15 +41,19 @@ contract suites (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_cohere2_moe.py`,
 and are never wrapped.
 
 - Routing: `Cohere2MoeTopKRouter` picks top-k on the RAW logits, then activates only the selected
-  scores — softmax over the k scores, or sigmoid with `norm_topk_prob` renorm. The wrapper
-  re-derives exactly that from the router's logits (the router module itself is still called, so
-  the HF `router_logits` recorder keeps firing).
+  scores — softmax over the k scores, or sigmoid with `norm_topk_prob` renorm. The wrapper re-derives
+  exactly that from the router's logits.
+
+    The router module itself is still called, so the HF `router_logits` recorder keeps firing.
+
 - Load balancing: the architecture has **no bias slot** and **no aux-loss wiring** (no
   `router_aux_loss_coef`; the loss never reads `router_logits`), so `moe_balancing: bias_update`
-  **raises**, `aux_loss` cannot work, and `auto` resolves to `none` with a warning. The explicit
-  `bias_update_transient` opts into the trainer-only side-buffer: it steers training-time routing,
-  resumes from `router_balancing_biases.pt`, and never reaches a checkpoint or a served copy
-  (near-tied top-k picks flip between trainer and server).
+  **raises**, `aux_loss` cannot work, and `auto` resolves to `none` with a warning.
+
+    The explicit `bias_update_transient` opts into the trainer-only side-buffer: it steers
+    training-time routing, resumes from `router_balancing_biases.pt`, and never reaches a checkpoint
+    or a served copy (near-tied top-k picks flip between trainer and server).
+
 - Routed experts: `Cohere2MoeExperts`, fused `gate_up_proj [E, 2I, H]` / `down_proj [E, H, I]` —
   the Qwen3.5/GLM-4 layout, so the shared fused-GLU helpers cover compute (grouped GEMM, 2 calls;
   fused SwiGLU Triton combine).
@@ -98,13 +102,16 @@ memory-validated shape.
   has been validated on either pinned engine
   ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 - Liger covers the fused SwiGLU (`Cohere2MoeMLP`, i.e. the dense and shared-expert path), cross-entropy,
-  the norm when the checkpoint sets `rms_norm_eps` (a llama-style `Cohere2MoeRMSNorm`; the `null` default
-  builds `Cohere2MoeLayerNorm`, a mean-subtracting LayerNorm with no bias parameter, which stays eager),
-  and — on a text-only `cohere2_moe` checkpoint — the fused loss, which folds `config.logit_scale` onto the
-  hidden states so the scaled softmax survives the fusion. Command A+ is a `cohere2_vision` wrapper whose
-  own head runs, so the fused loss is forced off there and CE serves instead. RoPE stays eager — GPT-J
-  interleaved, on the sliding and `force_rope` layers
-  ([Liger Kernels](../optimization/liger-kernels.md#supported-models)).
+  the norm when the checkpoint sets `rms_norm_eps`, and, on a text-only `cohere2_moe` checkpoint, the
+  fused loss ([Liger Kernels](../optimization/liger-kernels.md#supported-models)).
+
+    The norm is a llama-style `Cohere2MoeRMSNorm` only when `rms_norm_eps` is set; the `null` default
+    builds `Cohere2MoeLayerNorm`, a mean-subtracting LayerNorm with no bias parameter, which stays eager.
+    The fused loss folds `config.logit_scale` onto the hidden states so the scaled softmax survives the
+    fusion.
+
+    Command A+ is a `cohere2_vision` wrapper whose own head runs, so the fused loss is forced off there
+    and CE serves instead. RoPE stays eager: GPT-J interleaved, on the sliding and `force_rope` layers.
 
 ## Configs
 

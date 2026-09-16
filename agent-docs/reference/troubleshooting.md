@@ -5,6 +5,9 @@ attention-backend mismatches. Run `/debug` to route a live symptom to the exact 
 A step that is slow rather than broken is a bottleneck question: read power, not util %
 ([GPU Training Theory §11](gpu-training-theory.md#watch-power-not-utilization)).
 
+Rollout-server, Ray-actor and environment symptoms have their own table:
+[Async GRPO → Troubleshooting](../training-methods/grpo/async-grpo/monitoring.md#troubleshooting).
+
 ## First things to check
 
 Most "it won't start" reports are environment, not code:
@@ -24,10 +27,10 @@ Most "it won't start" reports are environment, not code:
 | Job **hangs at step 0** or first cross-rank sync, no error, then a watchdog timeout | Collective mismatch — one rank issued a collective another never reached (divergent control flow, a straggler still in the dataloader). | Dump every rank's stack; the rank *not* in a collective is the culprit. See [NCCL hang](#nccl-timeout-hang). | [Debugging §4](debugging.md#4-diagnosing-multi-node-hangs) |
 | Every GPU at **100% utilization but idle power**, all ranks spinning a CPU core, no NCCL error | A per-rank backward graph: a masked or empty row left disconnected from the loss let autograd prune that row's backward on one rank, so its FSDP2/EP collective never fired. | Keep every row connected to the loss (a value masked downstream is fine). Confirm with the NCCL flight recorder — mismatched collectives at one `collective_seq_id`. | [Debugging §4](debugging.md#4-diagnosing-multi-node-hangs) |
 | `ValueError: ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` at startup | Racy single-domain multi-group EP: one NVLink domain, `ep_size > 2`, and `ep_group_size` smaller than the domain (e.g. `ep_size=4` on 8 GPUs → two 4-rank groups). The combine barriers race FSDP2's DP-wide collectives — the `legacy` buffer deadlocks, the `elastic` default faults with `CUDA error: Invalid access of peer GPU memory over nvlink`, both with GC on or off. `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the images) does not cover it. | Use `ep_size=2` or `ep_size = domain` — the validated shapes. `ParallelismConfig` rejects the racy shape at config time. Attention TP leaves `ep_group_size` untouched, so `ep4 + tp2` hits the same rejection; `ep4 + etp2` raises `ep_group_size` to the domain and is accepted, despite forming the same two 4-rank dispatch groups. | [DeepEP](#deepep-build-runtime-faults) |
-| **`EP capacity dedup: a MoE layer dispatched N tokens/rank, over the capacity C cached at forward generation G`** on one rank, its peers stuck in the dispatch | The forward reuses the first MoE layer's all-reduced capacity for every later layer, and a layer outgrew it: either the model's later MoE layers dispatch more tokens than its first, or this forward entered the backbone directly and opened no capacity scope of its own. The raising rank leaves its peers in the dispatch collective until `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, so it reads as a hang plus one traceback. | A caller that peels the backbone off the wrapper calls `bump_forward_generation()` once per forward (TRL's chunked log-prob path does). Otherwise `HALO_EP_CAPACITY_DEDUP=0` sizes every layer with its own all-reduce — at one arena per layer. | [DeepEP](../infrastructure/deepep.md) |
+| **`EP capacity dedup: a MoE layer dispatched N tokens/rank, over the capacity C cached at forward generation G`** on one rank, its peers stuck in the dispatch | The forward reuses the first MoE layer's all-reduced capacity for every later layer, and a layer outgrew it: either the model's later MoE layers dispatch more tokens than its first, or this forward entered the backbone directly and opened no capacity scope of its own. The raising rank leaves its peers in the dispatch collective until `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, so it reads as a hang plus one traceback. | A caller that peels the backbone off the wrapper calls `bump_forward_generation()` once per forward (the chunked log-prob path does). Otherwise `HALO_EP_CAPACITY_DEDUP=0` sizes every layer with its own all-reduce — at one arena per layer. | [DeepEP](../infrastructure/deepep.md) |
 | `ImportError` / `NVSHMEM` / undefined symbol on `import deep_ep` | Wrong NVSHMEM package, or DeepEP used without a GPU / the right image. | On Blackwell + PyTorch 2.11+cu130, NVSHMEM ships with `nvidia-nvshmem-cu13` — do **not** install `nvidia-nvshmem-cu12` (clobbers headers). Run inside the image. | [DeepEP](../infrastructure/deepep.md) |
 | **`FlashAttention-4 produces NaN gradients for this model's head_dim-256 partial-rotary attention`** at load — Qwen3.5 / Qwen3.6 / Qwen3-Next MoE or GLM-4 MoE Lite | FA4's backward goes NaN on head_dim-256 + partial-rotary attention (QK-norm + partial rotary + output gate) and on GLM-4 MoE Lite's MLA (256-wide qk/v, 64-dim rope split). Both families log the same line. | Auto-handled: `resolve_attn_implementation` demotes them to SDPA and says so. The predicate keys on the model alone, so an explicitly forced `attn_implementation: flash_attention_4` is demoted too — nothing to do. | [Qwen3.5](../models/qwen3_5.md), [GLM-4](../models/glm4.md) |
-| **Env-GRPO completions fill with `Error: <tool>: missing a required argument: 'code'`**, episodes loop to `max_turns`, `episode/length_cutoff_turns` stays near zero | The thinking budget cut the turn mid-thought; the model resumed the thought inside its tool call's code argument until `max_tokens`, and vLLM labelled the salvaged call (`{}` arguments) a completed `tool_calls` finish. | Auto-handled: both rollout drivers read the cap off `usage.completion_tokens`, so the turn takes the nudge-and-retry path and its fragment is untrainable. If the count stays high, the level's `thinking_tokens` or the answer headroom (`rollout_max_tokens - rollout_max_thinking_tokens`) is too small for the task. | [Native tool-use](../training-methods/grpo/environments/native-tool-use.md#reward-knobs) |
+| **Async GRPO with Environments: completions fill with `Error: <tool>: missing a required argument: 'code'`**, episodes loop to `max_turns`, `episode/length_cutoff_turns` stays near zero | The thinking budget cut the turn mid-thought; the model resumed the thought inside its tool call's code argument until `max_tokens`, and vLLM labelled the salvaged call (`{}` arguments) a completed `tool_calls` finish. | Auto-handled: both rollout drivers read the cap off `usage.completion_tokens`, so the turn takes the nudge-and-retry path and its fragment is untrainable. If the count stays high, the level's `thinking_tokens` or — on vLLM, which is where `rollout_max_thinking_tokens` applies — the answer headroom (`rollout_max_tokens - rollout_max_thinking_tokens`) is too small for the task. | [Native tool-use](../training-methods/grpo/environments/native-tool-use.md#reward) |
 | **NaN loss**, other models, mid-run | LR too high for bf16, or a precision/grad-reduce mismatch. | AdamWBF16 with stochastic rounding is auto-on under `bf16: true` (FSDP/EP/TP). Lower the LR; set `fp32_grad_reduce: true` for a tighter grad reduce. | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
 | **Per-token loss degrades sharply past ~2048 tokens**, or logprobs differ between the image and a host Python install | The NGC image defaults fp32 matmuls to TF32; TF32's 10-bit mantissa collapses adjacent RoPE token positions past 2048, corrupting the positional encoding on every model. | Auto-handled: `configure_float32_matmul_precision` pins fp32 matmuls to `highest` at model load and the image sets `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`. Opt into TF32 with `HALO_FP32_MATMUL_PRECISION=high`. | [Configuration](configuration-reference.md) |
 | **OOM on Gemma 4 at long sequence**, or FA2 rejects the model | Gemma 4 has `head_dim=512`, above FA2's supported head dim; cuDNN SDPA rejects it too and the math kernel OOMs on the full score matrix. | Auto-routed to memory-efficient SDPA with a manual KV repeat, which is what unlocks seq > 20k. Set `attn_implementation: sdpa` explicitly if needed. | [Gemma 4](../models/gemma4.md) |
@@ -50,9 +53,11 @@ Most "it won't start" reports are environment, not code:
 | **`Output filesystem is declared SHARED but N of M ranks … cannot see a file global rank 0 wrote`**, or the PER-NODE mirror image, at startup | The multi-node startup probe wrote a sentinel under `output_dir` from global rank 0 and the declaration contradicts what the ranks see. Declared shared but invisible: only rank 0 writes `trainer_state.json`, so every other node would resume at step 0. Declared per-node but visible everywhere: every node's local rank 0 would write the same checkpoint paths. | Match the declaration to the mount with `DIST_OUTPUT_SHARED_FILESYSTEM` (or the `DIST_SHARED_FILESYSTEM` umbrella), or move `output_dir` — onto the shared mount, or one per node. | [Filesystem Handling](../data/filesystem-handling.md) |
 | **`Multi-Node NVLink prerequisite check … failed on N of M rank(s)`** at config time | `NVLINK_DOMAIN_SIZE > gpus_per_node` declares node-local groups that span OS nodes over NVLink, and some rank has no IMEX channels at `/dev/nvidia-caps-imex-channels`, reports a fabric registration other than `COMPLETED`, or sees no fabric clique at all. | Bring up NVIDIA Fabric Manager plus the IMEX service with matching channels on every node (NCCL >= 2.25.2), or drop `NVLINK_DOMAIN_SIZE` to `gpus_per_node` and keep the groups within one OS node. | [Multi-Node](../parallelism/multi-node.md) |
 | **Weight sync hangs at the first collective** — the group formed, both ends idle, `/health` unanswered past the one-time init | The two containers drive different NCCL transports (`NCCL_NET` / `NCCL_NET_PLUGIN` differ) or different `aws-ofi-nccl` + libfabric builds (an upstream server image, a host-installed plugin against the image's): the pair is wire-sensitive and forms the group before hanging. | Serve from the Halo images and run the same fabric recipe on both ends — compose EFA overlay + `make ... EFA=1`, or both on the no-fabric defaults; `python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --expect efa` reports the transport and plugin build the group formed on. | [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
+| **`server ... is on a remote host ... but the NCCL weight-sync group address resolved to loopback`** at sync init | The trainer advertised a loopback master address, which the remote engine's workers would dial back to themselves. | Set `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, or the entry's `group_host` in `rollout_server_configs`, to the trainer IP on the subnet the server reaches. | [Rollout Servers](../infrastructure/rollout-servers.md) |
+| **`rollout_backend=... cannot serve model_type [...]`**, or `... does not support weight sync`, at trainer construction | The engine release has no loader for this family, or the family's expert layout has no sync contract. | Train it offline (offline GRPO / SFT), or switch `rollout_backend` — the two engines refuse different families. | [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves) |
+| **`per_device_train_batch_size * steps_per_generation (N) must be divisible by num_generations`** at construction | Async GRPO groups advantages rank-locally, so a generation group cannot straddle ranks. TRL checks only the global generation batch. | Size `per_device_train_batch_size × steps_per_generation` (which defaults to `gradient_accumulation_steps`) to a multiple of `num_generations`. | [Async GRPO](../training-methods/grpo/async-grpo/objective.md#batch-construction) |
 | **`ncclP2pImportShareableBuffer ... invalid argument`** on the first update, `The full weights of the ModelRunner are partially updated` in the SGLang log | cuMem mismatch: SGLang's entry point sets `NCCL_CUMEM_ENABLE=0` process-wide unless it is pre-set, and the trainer's NCCL has cuMem on. | `NCCL_CUMEM_ENABLE=1` in the server container (`docker-compose.sglang.yml` sets it), then restart the server — it holds a half-written model. | [Rollout Servers](../infrastructure/rollout-servers.md#nccl-transport-sglang) |
-| **`aten.embedding.default got mixed torch.Tensor and DTensor`** at the first training step — attention LoRA on Qwen3.5/3.6 MoE under environmental GRPO | Open issue. | Full fine-tune instead — the `-full-` siblings train and sync on either engine. The shipped `examples/grpo/environmental/qwen3_5/{vllm,sglang}/qwen3.6-35b-a3b-code-contests-lora-*.yaml` share the failing shape. | [Qwen3.5/3.6](../models/qwen3_5.md) |
-| **`Target module Gemma4ClippableLinear(...) is not supported`** at PEFT setup — Gemma 4 multimodal checkpoint + attention LoRA | Open issue. The vision tower's projections carry the same `q_proj`…`o_proj` names as the language model's, wrapped in a module PEFT cannot adapt, and adapter injection is not scoped to the text backbone. | Full fine-tuning works; the shipped `examples/grpo/environmental/gemma4/*/gemma4-26b-a4b-code-contests-lora-*.yaml` are refused the same way. | [Gemma 4](../models/gemma4.md) |
+| **`rollout_max_thinking_tokens` or `carry_reasoning` refused** with `rollout_backend: sglang` | Neither is available on SGLang: the thinking budget has no server-side mechanism, and the reasoning carry is refused until SGLang's forwarding of `reasoning_content` is verified. | Drop the knob, or run that recipe against vLLM. | [Async GRPO](../training-methods/grpo/async-grpo/setup.md#rollout-backend) |
 | **`save_sharded_ep=True` rejected at trainer construction** | One of nine shapes, all refused up front so a run cannot train into unmergeable shards: multiple EP groups (`ep_group_size != world_size` — replicas would merge as duplicated experts), `expert_tp_size > 1`, context parallelism, native expert LoRA, `merge_expert_lora_on_save`, a `model_type` no EP layer class claims (no merge transform exists), a family that exports the hub namespace through transformers' save-side revert (Step-3.7 Flash — the merge streams key by key and cannot apply it), a multi-node job whose output filesystem is not shared (per-rank shards scatter across nodes' local disks where `merge_ep_shards.py` never sees a complete set), or a run with no EP layers at all. | Use the gathered save (`save_sharded_ep: false`) — it streams, so it costs no more host memory, and it needs no merge. | [Checkpoints](checkpoints.md#expert-parallelism-ep) |
 | **Exact resume warm-restarted although `world_size` is unchanged** | A fingerprint field other than `world_size` changed — any of `ep_size`, `expert_tp_size`, `cp_size`, `tp_size`, `pp_size`, `fsdp_shard_ep1_experts`, `optimizer_class`, `ep_scope`, `use_grouped_gemm`, `hsdp`, `nvlink_domain_size`, `expert_replica_size`. | The warning names every differing field with `saved=`/`current=` — restore it, or accept the warm restart (weights and LR schedule still resume). | [Checkpoints](checkpoints.md#warm-restart-vs-exact-resume-torchrun) |
 
@@ -63,6 +68,7 @@ Peak memory is dominated by saved activations, not weights. Cut it in this order
 1. **Gradient checkpointing on** — trades recompute for activation memory. Turn it off only when the
    batch already fits; the recompute costs wall-clock.
 2. **Lower `per_device_train_batch_size` or `max_length`** — both scale activations linearly.
+
 3. **Move to a sharded mode.** Dense model that OOMs in FSDP2 → add node-local TP. MoE model that
    OOMs → EP (experts across ranks) or pure ETP (`ep_size=1`, expert FFN sharded).
 
@@ -108,36 +114,50 @@ DeepEP is required for EP — there is no NCCL fallback. Two failure modes domin
 - **`import deep_ep` fails (NVSHMEM / undefined symbol).** On Blackwell + PyTorch 2.11+cu130,
   NVSHMEM ships as `nvidia-nvshmem-cu13`; installing `nvidia-nvshmem-cu12` clobbers the headers. Use
   the prebuilt image.
+
 - **`Assertion exception ... != NCCL_GIN_TYPE_NONE` / "NCCL GIN is unavailable" at buffer init on
-  cross-node EP (EFA).** Proxy GIN could not come up on at least one node. Check, on **every** node:
-  the `gdrdrv` kernel module is loaded (`ls /dev/gdrdrv` — the host must install the gdrcopy
-  driver), the container was started with `--device /dev/gdrdrv`, and `NCCL_GIN_TYPE=2` is exported.
-  One node missing any of the three fails the whole job with this assertion while node-local EP on
-  the same machine runs fine. See [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
+  cross-node EP (EFA).** Proxy GIN could not come up on at least one node. See
+  [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
+
+    Check, on **every** node: the `gdrdrv` kernel module is loaded (`ls /dev/gdrdrv`; the host must
+    install the gdrcopy driver), the container was started with `--device /dev/gdrdrv`, and
+    `NCCL_GIN_TYPE=2` is exported. One node missing any of the three fails the whole job with this
+    assertion while node-local EP on the same machine runs fine.
+
 - **`CUBLAS_STATUS_EXECUTION_FAILED` / DeepEP `combine.hpp` `CUDA_ERROR_LAUNCH_FAILED` + Xid 43 on
   several ranks at once, single-node EP.** Before reading it as a kernel or hardware fault, grep the
-  full log for `OutOfMemoryError` — a rank-local OOM inside a distributed step abandons the DeepEP
-  barrier its peers are waiting in (`DeepEP NVLink barrier timeout` lines), and as its context tears
-  down the peers die on launch failures inside whatever kernel is on-stream. The OOMing rank's
-  traceback is the primary failure and is easily buried under the collateral; the trainer logs a
-  `RANK n: ... THIS RANK IS THE PRIMARY FAILURE` banner for it, and warns after the first optimizer
-  step when a rank's peak sits above ~92% of its device. The failing rank exits without entering
-  distributed teardown (both halves are themselves collectives, and its peers are still inside the
-  step's own), so torchrun reaps the job in seconds rather than at the NCCL watchdog.
-  On MoE the usual cause is routing skew — a
-  cold (unbalanced) router concentrates dispatch buffers and expert activations on hot ranks, and
-  under gradient checkpointing every MoE layer's saved dispatch/combine results scale with it; under
-  `bias_update` the skew (watch `moe/load_max`) falls over the first few hundred steps, so a batch
-  shape that OOMs at cold start can fit when resumed from a balanced checkpoint. Cold-start at the
-  smaller batch, or lower `per_device_train_batch_size` / `max_length`.
+  full log for `OutOfMemoryError`.
+
+    A rank-local OOM inside a distributed step abandons the DeepEP barrier its peers are waiting in
+    (`DeepEP NVLink barrier timeout` lines). As its context tears down, the peers die on launch
+    failures inside whatever kernel is on-stream. The OOMing rank's traceback is the primary failure
+    and is easily buried under the collateral.
+
+    The trainer logs a `RANK n: ... THIS RANK IS THE PRIMARY FAILURE` banner for it, and warns after
+    the first optimizer step when a rank's peak sits above ~92% of its device.
+
+    The failing rank exits without entering distributed teardown (both halves are themselves
+    collectives, and its peers are still inside the step's own), so torchrun reaps the job in
+    seconds rather than at the NCCL watchdog.
+
+    On MoE the usual cause is routing skew. A cold (unbalanced) router concentrates dispatch buffers
+    and expert activations on hot ranks, and under gradient checkpointing every MoE layer's saved
+    dispatch/combine results scale with it.
+
+    Under `bias_update` the skew (watch `moe/load_max`) falls over the first few hundred steps, so a
+    batch shape that OOMs at cold start can fit when resumed from a balanced checkpoint. Cold-start
+    at the smaller batch, or lower `per_device_train_batch_size` / `max_length`.
+
 - **`Dispatch CPU wait ... received count 0`, or Xid 109 `CTX SWITCH TIMEOUT` → Xid 43 /
   `unspecified launch failure`, on cross-node EP (EFA).** The dispatch exceeded the proxy-GIN
-  per-rank payload ceiling and wedged in transit — the Xid 43 / launch-failure form surfaces in
-  whatever kernel is on-stream (often the expert GEMM) and reads like a compute bug, but the
-  trigger is the oversized dispatch. The dispatcher rejects `> 8192` tokens/rank at buffer sizing
-  (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`); if this fires at runtime instead, the guard was
-  disabled or raised. Lower `per_device_train_batch_size`/`max_length`, or use `ep_scope=node`
-  with DP across nodes. See [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
+  per-rank payload ceiling and wedged in transit. See
+  [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
+
+    The Xid 43 / launch-failure form surfaces in whatever kernel is on-stream (often the expert
+    GEMM) and reads like a compute bug, but the trigger is the oversized dispatch. The dispatcher
+    rejects `> 8192` tokens/rank at buffer sizing (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`); if this
+    fires at runtime instead, the guard was disabled or raised. Lower
+    `per_device_train_batch_size`/`max_length`, or use `ep_scope=node` with DP across nodes.
 
 `CUDA_DEVICE_MAX_CONNECTIONS=1` is baked into the images as `ENV` (the driver latches it at the
 `deep_ep` import's `cuInit`, so a Python `os.environ` write is too late). Free default — neutral on
@@ -176,6 +196,8 @@ rejected at config time ([Pipeline Parallelism](../parallelism/pipeline-parallel
 | Resuming expert adapters no EP layer can receive | Rejected in `apply_ep_lora_adapters` | EP off, `use_grouped_gemm: false`, or the expert projections dropped — every saved expert delta would be discarded while the restore reported success. Resume with the run's expert configuration |
 | `PP` + `activation_offloading` | Rejected at trainer construction | TRL applies it by wrapping `training_step`, which the PP schedule-driven step bypasses — it would silently never engage. Drop the flag |
 | LoRA/PEFT + TP (TP-only or EP+TP) | Rejected at construction | The adapter is not in the TP DTensor graph and trains rank-inconsistent. Native EP expert adapters are counted by their own check (`has_ep_lora`), so an **expert-only** EP+TP run is refused too. LoRA works under FSDP/CP/EP/ETP |
+| Attention LoRA on Qwen3.5/3.6 MoE under async GRPO: `aten.embedding.default got mixed torch.Tensor and DTensor` at the first training step | Open issue | Full fine-tuning of the same model trains and syncs on either engine. The shipped `examples/grpo/environmental/qwen3_5/{vllm,sglang}/qwen3.6-35b-a3b-code-contests-lora-*.yaml` carry the failing shape. |
+| Gemma 4 (multimodal checkpoint) + attention LoRA: `Target module Gemma4ClippableLinear(...) is not supported` at PEFT setup | Open issue | The vision tower's projections carry the same `q_proj`…`o_proj` names as the language model's, wrapped in a module PEFT cannot adapt, and adapter injection is not scoped to the text backbone. Full fine-tuning works; the shipped `examples/grpo/environmental/gemma4/*/gemma4-26b-a4b-code-contests-lora-*.yaml` are refused the same way. |
 | QLoRA + EP / TP / PP / grouped-GEMM MoE | Rejected at load | QLoRA on DDP/FSDP, or CP on a dense model; plain LoRA for EP |
 | CP + a trainer using `logits_to_keep` / global log-prob sums / full-sequence pooling / dual models | Rejected at trainer construction (`<TrainerClass> does not support Context Parallelism (CP)`) | The trainer's `_supports_cp` class attribute is the gate, and it defaults off — nothing inspects the loss for CP-safety. Only SFT and SMPO declare it |
 | PP + a trainer needing a live reference model or a second forward | Rejected at construction | DPO/KTO are precompute-only under PP; a `kl_beta > 0` offline-GRPO reference would be scored once before training by a pipeline sweep |

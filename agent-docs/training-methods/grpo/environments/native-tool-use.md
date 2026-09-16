@@ -1,81 +1,84 @@
 # Native Tool-Use Environments
 
-`NativeToolUseEnvironment` uses the OpenAI/vLLM function-calling format. Works with any model whose chat template emits OpenAI-format tool calls (parsed server-side by the rollout engine's `--tool-call-parser`). Three registry presets wrap a tool registry in it:
+`NativeToolUseEnvironment` runs the OpenAI/vLLM function-calling protocol: the environment advertises its tools as schemas, the rollout server's `--tool-call-parser` extracts the model's calls, and each result comes back as a `tool` message the next turn conditions on. Serve the model with the parser its family needs — without one the calls arrive as plain text, which the environment reads as a final answer and every episode ends on its first turn.
 
-| Registry | Factory | Tools |
-|----------|---------|-------|
-| `native_math` | `NativeToolRegistry.combine(create_native_math_tools(), create_native_python_tools())` | `calculate`, `python` |
-| `native_coding` | `create_native_code_tools(language="python", tool_name="python_repl")` | `python_repl` |
-| `native_combined` | `create_all_native_tools()` | math + python + search + file |
+Three registry presets wrap a tool registry directly: `native_math` (`calculate`, `python`), `native_coding` (`python_repl`), `native_combined` (math, python, search, simulated files). `qa_search`, `exam_qa`, `swe`, `code_contests`, `codeforces` and `mcp` are subclasses or factory presets over the same protocol, so everything on this page applies to them.
+
+## Configuration
+
+```yaml
+environment_type: native_math
+
+environment_kwargs:
+  max_tool_calls_per_turn: 5
+  turn_overflow_penalty: 0.1
+```
+
+| Knob | Default | Effect |
+|---|---|---|
+| `max_tool_calls_per_turn` | `5` | calls executed per turn; extras are dropped and trimmed off the stored message, so every advertised call has a result |
+| `require_tool_use` | `false` | flags a zero-tool-call finish in the step info; pays nothing by itself |
+| `no_tool_use_penalty` | `0` | charged once on an episode that made no tool call |
+| `multi_turn_reward` | `0` | paid once on more than one tool call |
+| `turn_overflow_penalty` | `0` | charged once on a truncated episode |
+| `tool_budgets` | `{}` | per-tool episode caps, `{tool: cap}`; `0` disables a tool |
+| `system_prompt` | `None` | prepended as the episode's system turn |
+| `max_length_cutoff_recoveries` | `null` | engine-cut turns one episode may retry; `null` = every one within `max_turns` |
+
+The knobs every environment shares — turn cap, per-call tool pay, observation cap, reasoning steer — are in the [overview](README.md#configuration).
+
+## Tools
+
+- `calculate` — restricted arithmetic and math functions, one `expression`.
+- `python` / `python_repl` — Python REPL; in-process and import-free by default.
+- `web_search` — `query` and optional `max_results` (default 5).
+- `read_file`, `write_file`, `list_files` — a simulated per-episode file store, for tests and closed-world demos.
+
+Registries are built by the factories in `src/environments/tools/factories.py` and composed with `NativeToolRegistry.combine(a, b)`. The `create_native_*` set is stateless; `create_session_*` binds the episode's persistent [sandbox session](sandbox.md) so files survive across turns. Pass `sandbox=` a `SandboxExecutor` to run code in a real isolated interpreter with imports, or `allow_imports=True` to lift the ban inside the in-process REPL — safe only when the whole process is already isolated.
+
+## Reward
+
+Per call: `+tool_success_reward` for a successful call, `-tool_error_penalty` for a failed one, paid up to `tool_reward_cap` per episode (default one paid call per turn of the budget, so call spam cannot out-earn the objective). A call refused over its `tool_budgets` cap, or one whose arguments cannot bind to the handler, books as a tool error without spending the budget.
+
+The grade, in order: an episode that never completed grades 0; a `validator` callable in the row's context decides, 1 or 0; else the row's `answer` is graded all-or-nothing (exact match, then numeric); else completing the episode grades 1. The reward's `environment` term prices the grade as `weight × grade ^ exponent`, logged as `reward/objective` ([Reward Terms](../rewards.md#environment-arm)).
+
+A row whose `answer` key holds null grades 0 and is marked `episode_invalid`, so the trainer drops it from the group baseline instead of grading every completion 1.
+
+Per episode: `no_tool_use_penalty`, `multi_turn_reward` and `turn_overflow_penalty` are charged once each, by their conditions above, and log together as `reward/tool_shaping`; the per-call deltas log as `reward/turn_shaping`. Overflow is charged on any truncated episode, including one killed mid-flight — except one its driver lost, where the fault is not the policy's. Every magnitude must be ≥ 0; the minus is applied at the use site, so a negative value raises instead of paying a penalty as a bonus.
+
+Two kinds of turn earn nothing and carry no loss on either tokenization path ([Rollout Configuration](../async-grpo/rollouts.md#training-on-sampled-tokens)): a turn the engine cut off at its token cap or aborted, and a turn whose every call named a tool that does not exist.
+
+A cut turn is nudged and retried within `max_turns` and `max_length_cutoff_recoveries`; a tool call salvaged from it is never executed. The unknown-tool observation lists the real tools, which stops a drifted policy from burning turns probing for a listing.
+
+## Dataset
+
+`{"prompt": str | list[dict], "answer": Any}`. For the native presets the `answer` column is optional: a row that carries one is graded against it, and without one completing the episode is the objective and every completion grades 1. The subclasses that grade only against it — [code contests](code-contests.md), [`exam_qa` and `qa_search`](benchmarks.md) — require the column (`requires_answer`). Extra columns reach the environment as context only when the training script's `context_fields` names them.
+
+## Evaluation
+
+```bash
+python scripts/environments/inference/run_env.py \
+    --env_type native_math --dataset <hf-id-or-dir> --split test \
+    --prompt_field prompt --answer_field answer \
+    --base_url http://localhost:8000/v1 --model <served-model> --num_examples 20
+```
+
+The endpoint needs tool calling enabled. Flags and the `--training_config` contract:
+[Evaluating on an Environment](evaluation.md).
+
+## From Python
 
 ```python
-from src.environments.tools.factories import create_all_native_tools
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.tools.factories import create_all_native_tools
 
 env = NativeToolUseEnvironment(tool_registry=create_all_native_tools(), max_turns=10)
 ```
 
-## Reward knobs
+`AsyncNativeToolUseEnvironment` is the same protocol with `reset_async` / `step_async` and concurrent tool execution within a turn; use it for I/O-bound tools.
 
-Defaults: `max_turns` 10, `success_reward` 1.0, `failure_reward` 0.0, and at most `max_tool_calls_per_turn` 5 calls executed per turn (extras are dropped).
+## Related pages
 
-The terminal `success_reward` payout for a completed episode is reserved for contexts with **no** `answer` key at all — envs where completing is the objective. A row that carries an `answer` key holding null is a data fault: it scores `failure_reward` and is marked `episode_invalid`, so the trainer drops it from the group baseline instead of paying every completion full reward.
-
-Per-call shaping: `tool_success_reward` (`0.05`) added per successful tool call, `tool_error_penalty` (`0.1`) subtracted per failed one. Per-episode shaping, all defaulting to `0`: `no_tool_use_penalty` (0-tool-call giveup), `multi_turn_reward` (more than one tool call, and the subclass's `_tool_use_engaged` gate passes), `turn_overflow_penalty` (turn count is otherwise free in the reward).
-
-All five are **magnitudes** (≥ 0); the minus is applied at the use site and a negative config value raises at construction, so a sign flip in YAML can never turn a penalty into a farmable bonus.
-
-`turn_overflow_penalty` is charged on any **truncated** episode, not only one that burned `max_turns` — `finalize_truncated` marks an episode killed mid-flight (a generation failure, an external abort) the same way, so it pays too.
-
-**A turn the engine cut short** (`finish_reason` `length` — its token cap — or `abort`) **is a fragment, not an answer, whatever the parser salvaged from it.** The episode appends a nudge naming what happened and retries on its remaining `max_turns` budget; the count surfaces as `episode/length_cutoff_turns`. A salvaged tool call is dropped, never executed: the call was cut before its arguments, and running it would book a malformed call the model never finished.
-
-The cap is read off the token count, not only the label. vLLM reports `tool_calls` whenever its parser extracted a call from the text, so a turn cut inside its call arrives labelled complete, with the call's name and `{}` for arguments; a completion whose `usage.completion_tokens` reached its `max_tokens` is a cut on both rollout drivers (`get_finish_reason`). Under a thinking budget this is the common cut: the forced end of thinking leaves the model mid-thought, and it resumes the thought inside the code argument of its next call until the answer headroom runs out.
-
-The cutoff is **unpriced** — a penalty would be avoidable only by reasoning well short of the budget. Bound the frequency structurally instead, through the per-effort caps and the answer headroom (`rollout_max_tokens - rollout_max_thinking_tokens`), and bound how many an episode may recover from with `max_length_cutoff_recoveries` (`null` = every one within `max_turns`): the cut past the cap ends the episode truncated, priced like a `max_turns` overflow, so a policy whose thoughts overrun their budget cannot spend the whole episode re-thinking.
-
-The cut-off turn is flagged on its `Message` (`truncated`) and the trainer gives it zero loss weight on both tokenization paths — skipped when building per-turn training rows, masked out of its span in the whole-trajectory render: the model still conditions on the fragment in the next turn's prompt, but an unfinished turn is never reinforced by an episode that goes on to succeed. Turns whose every tool call named a nonexistent tool (`calls_rejected`) are excluded the same way.
-
-**A turn whose every tool call named a tool that does not exist** is flagged the same way (`Message.calls_rejected`) and excluded on both tokenization paths (`Message.untrainable`). The rejection travels on the tool result's structured `unknown_tool` field, never on error-text matching: a real tool whose backend answers with its own "Tool not found …" message is a tool failure, not a model-invented call, and keeps its turn in training.
-
-The unknown-tool observation names the real tools (`Error: Unknown tool 'X'. Available tools: ...`) — a policy that drifts off the tool syntax late in training invents plausible names and then burns turns probing for a listing that no tool provides.
-
-`require_tool_use` only flags a zero-tool-call finish in the step info; it gates no reward. `no_tool_use_penalty` is charged once by `_tool_use_shaping` for any episode ending with zero tool calls, flag set or not.
-
-### Per-tool budgets
-
-`tool_budgets: {tool_name: cap}` caps calls per tool per episode — validated against the registry at construction, `0` disables the tool, an unlisted tool is uncapped. Every episode is stamped with `episode_tool_budgets` and counts admitted calls per tool in `tool_call_counts`. A call past its cap is refused with the tool's `budget_message` (a `NativeTool` field with `{cap}` / `{name}` format fields; default `<name> limit reached (<cap>); this call was not executed.`) and is not counted; a call whose arguments cannot bind (`ToolArgumentError` — a required argument missing, a value outside a parameter's `enum`) is refused before the budget is spent and not counted either. Admission runs synchronously before any await, so two concurrent calls in one turn cannot both pass a one-call cap.
-
-Either refusal is a failed call like any other — the model reads `Error: submit_solution: missing a required argument: 'code'`, charged `tool_error_penalty` and never paid `tool_success_reward` — and the protocol logs it without a traceback, which is reserved for a tool that actually broke.
-
-A subclass tightens the stamp per episode through `_apply_effort_profile` ([Custom Environments](custom-environments.md)): code-contests maps `max_submissions` / `max_test_calls` onto `submit_solution` and its test tool. The [ReAct](react.md#reward-structure) protocol takes the same `tool_budgets` with the same admission rule.
-
-## Tool factories
-
-Factories in `src/environments/tools/factories.py` build tool registries. Stateless factories (`create_native_*`) make each call independent; session-backed factories (`create_session_*`) bind to a live [`SandboxSession`](sandbox.md#sessions-persistent-multi-turn-state) whose working directory persists across turns.
-
-| Factory | Tools | Description |
-|---------|-------|-------------|
-| `create_native_math_tools()` | `calculate` | Restricted-builtins math evaluation |
-| `create_native_python_tools()` | `python` | Sandboxed Python REPL |
-| `create_native_code_tools(language=..., tool_name=..., sandbox=...)` | one code tool | Single-language code execution (python / cpp / c) |
-| `create_native_search_tools()` | `web_search` | Pluggable web search (Serper / Brave / Tavily / DuckDuckGo) |
-| `create_native_file_tools()` | `list_files`, `read_file`, `write_file` | Simulated in-memory filesystem (tests / closed-world demos) |
-| `create_all_native_tools()` | math + python + search + file | All stateless tools |
-| `create_session_code_tools(session_getter, language=..., tool_name=...)` | `run_<language>` | Code execution in the episode's persistent workspace |
-| `create_session_file_tools(session_getter)` | `write_file`, `read_file`, `list_files` | Real persistent file ops over the session working dir |
-
-Combine registries with `NativeToolRegistry.combine(a, b)`, or `registry.merge(other)` in place.
-
-By default the `python` tool runs in the in-process restricted sandbox (`run_python_sandboxed`: restricted builtins, no imports). Pass `sandbox=` (a `SandboxExecutor` from `resolve_sandbox()`) to `create_native_python_tools` / `create_native_code_tools` to run the REPL in a real OS-isolated interpreter with imports available; `allow_imports=True` instead lifts the import ban inside the in-process REPL and is only safe when the whole process is already isolated. A non-Python `language` always runs through a `SandboxExecutor`. See [Code Execution Sandboxes](sandbox.md).
-
-## Tool observations
-
-Each tool observation is capped at `max_observation_chars` (default 16384, set in `environment_kwargs`) where the result is built (`BaseEnvironment._truncate_observation`, inherited by every tool-use env). An unbounded output — a `python_repl` that prints megabytes — otherwise bloats the trajectory and makes the per-turn chat-template re-render take minutes; capping at the source keeps the rollout and the trainer's recompute identical.
-
-## Tool-call parsing and async
-
-OpenAI tool-call parsing and serialization live on the data model in `src/environments/tools/definitions.py`; `registry.to_openai_tools()` supplies the schemas vLLM needs at generation time. `NativeTool.bind` (admission) and `execute` / `execute_async` bind the model's argument dict against the tool's declared `parameters` and drop anything else: the handlers carry pre-bound configuration (sandbox `timeout`, `allow_imports`), and a call-time keyword of the same name would otherwise override it — so a tool's own limits stay out of the model's reach. See [Custom Environments](custom-environments.md#registering-custom-tools) for the method-level contract.
-
-Every tool batch runs inside the episode's binding (`_episode_binding`, sync and async), so a handler reads the executing episode through `NativeToolUseEnvironment.active_trajectory()` — `None` outside a binding, as for a handler called directly. For async I/O use `AsyncNativeToolUseEnvironment` (`reset_async` / `step_async`, tool calls within a turn executed concurrently — `gather`'s tasks copy the context, so the binding reaches every handler); `NativeMCPClientEnvironment` extends it, see [MCP](mcp.md).
-
-The Ray rollout path drives sync and async environments alike. `RolloutManager` dispatches episodes to its `EnvironmentActor` pool, and each actor picks `step` / `step_async` from an `isinstance(env, AsyncBaseEnvironment)` check on its own instance, offloading a sync env to a thread so blocking tool work cannot stall the actor's loop.
+- [Environments](README.md) — registry and shared knobs.
+- [Custom Environments](custom-environments.md) — your own tools and environments.
+- [Code Execution Sandboxes](sandbox.md) — backends, languages, sessions.

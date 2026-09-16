@@ -1,12 +1,7 @@
-# Step-3.7-Flash (step3p7, 198B total / ~11B active) — EP=8 LoRA (attention PEFT + native grouped
-# expert-LoRA) SFT on UltraChat 200K, single 8x Blackwell node. See agent-docs/models/step3p7.md.
-#
-# The hub release is plain bf16 — no conversion step; train from the repo id directly.
-#
-# Most of the model is routed expert weight, which ep8 shards over the node; ZeRO-2 keeps the
-# non-expert weights (vision tower included) gathered. LoRA keeps optimizer state adapter-only, where
-# full fine-tuning at ep8 would also hold AdamWBF16 expert state and expert grads per rank (use the
-# 2-node full-FT config instead). Confirm free GPU memory with nvidia-smi first.
+# Step-3.7-Flash (step3p7, 198B total / ~11B active) — EP=8 LoRA (attention PEFT + native grouped expert-LoRA)
+# SFT pilot on UltraChat 200K, single 8x Blackwell node; the hub release is plain bf16, no conversion step.
+# ~190B of the 198B is routed expert weight: ep8 holds ~65 GB static of a 275 GB card because LoRA keeps
+# optimizer state adapter-only; confirm free GPU memory with nvidia-smi. See agent-docs/models/step3p7.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
 # --- Model — hub bf16 release; transformers 5.16 drops the 3 trailing MTP layers at load ---

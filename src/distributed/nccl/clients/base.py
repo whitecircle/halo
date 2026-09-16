@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "0.0.0.0", "::1", "localhost"}
+# Bailing spellings whose checkpoints declare a model class neither pinned engine registers; each
+# client quotes them for its own release through :func:`unregistered_bailing_model_types`.
+_UNREGISTERED_BAILING_CLASSES = (
+    ("bailing_hybrid", "{engine} registers no model class for Ling 3.0's BailingMoeV3ForCausalLM"),
+    (
+        "bailing_moe_linear",
+        "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where {engine} registers BailingMoeV2_5ForCausalLM",
+    ),
+)
 # UDP "connect" target used only to make the kernel pick this host's outbound interface, whose local
 # address is then its routable IP. No packet is sent, so the address only has to be off-link and
 # non-loopback; a missing route falls back to loopback in :func:`_get_ip`.
@@ -81,6 +90,11 @@ def resolve_weight_sync_chunk_bytes() -> int:
 
 
 WEIGHT_SYNC_CHUNK_BYTES = resolve_weight_sync_chunk_bytes()
+
+
+def unregistered_bailing_model_types(engine: str) -> dict[str, str]:
+    """``model_type`` → loader fact for the Bailing spellings ``engine`` (a pinned release) has no class for."""
+    return {model_type: fact.format(engine=engine) for model_type, fact in _UNREGISTERED_BAILING_CLASSES}
 
 
 def payload_bytes(tensor: torch.Tensor) -> int:

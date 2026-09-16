@@ -8,15 +8,17 @@ from contextvars import ContextVar
 from typing import Any
 
 from src.environments.base import (
+    EMPTY_FINAL_ANSWER_KEY,
+    EPISODE_ERROR_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     TOOL_CALL_COUNTS_KEY,
     AsyncBaseEnvironment,
     BaseEnvironment,
+    EpisodeGrade,
     Trajectory,
     require_magnitudes,
 )
-from src.environments.rewards import compute_answer_reward
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
@@ -26,6 +28,7 @@ from src.environments.tools.definitions import (
     ToolBudgetExhausted,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
+from src.rewards.matching import validate_answer
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
     With DistributedAsyncEnvironmentalGRPOTrainer, pass ``tools=env.get_tools_schema()`` to the generation config.
     """
 
+    SHAPING_COMPONENTS = ("tool_shaping",)
+
     # States the fact and asks for the action — never for shorter reasoning. This text is trained on
     # wherever a recovery succeeds, so any instruction here becomes a GLOBAL lesson, learned far
     # outside the situation it was written for.
@@ -64,21 +69,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
         "your tool call now with the best solution you have."
     )
 
-    # Per-tool-call shaping a class gets when the config names none, declared like
-    # :data:`~src.environments.base.BaseEnvironment.DEFAULT_MAX_TURNS` so a task env that departs
-    # states its own value once instead of re-defaulting its constructor.
-    DEFAULT_TOOL_SUCCESS_REWARD: float = 0.05
-    DEFAULT_TOOL_ERROR_PENALTY: float = 0.1
-
     def __init__(
         self,
         tool_registry: NativeToolRegistry,
         system_prompt: str | None = None,
         max_tool_calls_per_turn: int = 5,
-        success_reward: float = 1.0,
-        failure_reward: float = 0.0,
-        tool_success_reward: float | None = None,
-        tool_error_penalty: float | None = None,
         require_tool_use: bool = False,
         no_tool_use_penalty: float = 0.0,
         multi_turn_reward: float = 0.0,
@@ -89,27 +84,20 @@ class NativeToolUseEnvironment(BaseEnvironment):
         """``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``; an unlisted tool is
         uncapped): a call past its cap is refused as a tool error with the tool's ``budget_message``
         and never runs. Stamped into every episode at reset; a subclass may tighten the stamp per
-        episode (:meth:`~src.environments.base.BaseEnvironment._apply_effort_profile`)."""
+        episode (:meth:`~src.environments.base.BaseEnvironment._apply_effort_profile`). The per-call
+        knobs (``tool_success_reward``, ``tool_error_penalty``, ``tool_reward_cap``) are the base's."""
         super().__init__(**kwargs)
-        tool_success_reward = self.DEFAULT_TOOL_SUCCESS_REWARD if tool_success_reward is None else tool_success_reward
-        tool_error_penalty = self.DEFAULT_TOOL_ERROR_PENALTY if tool_error_penalty is None else tool_error_penalty
 
         require_magnitudes(
             no_tool_use_penalty=no_tool_use_penalty,
             multi_turn_reward=multi_turn_reward,
             turn_overflow_penalty=turn_overflow_penalty,
-            tool_success_reward=tool_success_reward,
-            tool_error_penalty=tool_error_penalty,
         )
 
         self.registry = tool_registry
         self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
         self.system_prompt = system_prompt
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
-        self.success_reward = success_reward
-        self.failure_reward = failure_reward
-        self.tool_success_reward = tool_success_reward
-        self.tool_error_penalty = tool_error_penalty
         self.require_tool_use = require_tool_use
         self.no_tool_use_penalty = no_tool_use_penalty
         self.multi_turn_reward = multi_turn_reward
@@ -190,12 +178,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
         return self._result_from_call(tc, exc)
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
-        """Update per-trajectory tool counters for one result and return its reward delta."""
-        trajectory.info["total_tool_calls"] += 1
-        if result.success:
-            trajectory.info["successful_tool_calls"] += 1
-            return self.tool_success_reward
-        return -self.tool_error_penalty
+        """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
+        return self._credit_tool_call(trajectory, result.success)
 
     def _finalize_text_response(
         self, trajectory: Trajectory, action: str
@@ -208,6 +192,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
         """
         trajectory.info["completed"] = True
         trajectory.info["final_response"] = action
+        # A turn that stopped inside its reasoning arrives as a final answer with nothing visible.
+        trajectory.info[EMPTY_FINAL_ANSWER_KEY] = not action.strip()
 
         info: dict[str, Any] = {}
         if self.require_tool_use and trajectory.info["total_tool_calls"] == 0:
@@ -265,7 +251,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
                     except Exception as e:  # a tool fault is an observation, not an episode kill
                         # Logged because the graded tools run here too: a submit handler that dies on a
                         # malformed payload becomes an ordinary tool error, and without this line the
-                        # episode just scores failure_reward with nothing anywhere saying why.
+                        # episode just grades 0 with nothing anywhere saying why.
                         logger.warning("Tool %r raised during execution", tc.name, exc_info=True)
                         result = self._result_from_call(tc, e)
 
@@ -294,15 +280,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
             trajectory.add_message(result.to_message())
 
         # Nothing this turn could execute: mark the assistant message so the trainer skips it (an
-        # episode that recovers must not reinforce the invented call). The assistant message precedes
-        # the tool results just appended. Read off ``unknown_tool``, never the error text — a tool
-        # whose backend answers "Tool not found: x" failed for real, and dropping that turn would hide
-        # a broken tool as a model mistake.
+        # episode that recovers must not reinforce the invented call). Read off ``unknown_tool``,
+        # never the error text — a tool whose backend answers "Tool not found: x" failed for real, and
+        # dropping that turn would hide a broken tool as a model mistake.
         if results and all(r.unknown_tool for r in results):
-            for message in reversed(trajectory.messages):
-                if message.role == "assistant":
-                    message.calls_rejected = True
-                    break
+            self._flag_calls_rejected(trajectory)
 
         return {
             # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
@@ -344,8 +326,9 @@ class NativeToolUseEnvironment(BaseEnvironment):
         """Per-episode agentic-loop shaping: penalize 0 tool calls, reward >1 (gated by
         ``_tool_use_engaged``), and penalize a ``max_turns`` overflow (``trajectory.truncated``, set by
         ``_finalize_step`` before the reward runs) — an episode that burns the turn budget without
-        terminating pays ``turn_overflow_penalty`` regardless of what it did earn. All magnitudes
-        default to 0 (no-op). Distinct from the per-call knobs."""
+        terminating pays ``turn_overflow_penalty`` regardless of what it did earn. An episode its
+        driver lost (:data:`EPISODE_ERROR_KEY`) is truncated too but pays no overflow: the fault is
+        not the policy's. All magnitudes default to 0 (no-op). Distinct from the per-call knobs."""
         calls = trajectory.info.get("total_tool_calls", 0)
         if calls == 0:
             shaping = -self.no_tool_use_penalty
@@ -353,58 +336,44 @@ class NativeToolUseEnvironment(BaseEnvironment):
             shaping = self.multi_turn_reward
         else:
             shaping = 0.0
-        if trajectory.truncated:
+        if trajectory.truncated and EPISODE_ERROR_KEY not in trajectory.info:
             shaping -= self.turn_overflow_penalty
         return shaping
 
-    def _shaped_base_reward(self, trajectory: Trajectory) -> float:
-        """Accrued per-turn rewards plus the protocol-level tool-use shaping.
+    def _episode_shaping(self, trajectory: Trajectory) -> dict[str, float]:
+        """The protocol's episode-level term, :meth:`_tool_use_shaping`, logged as ``reward/tool_shaping``."""
+        return {"tool_shaping": self._tool_use_shaping(trajectory)}
 
-        The single base every ``_compute_reward`` (base class and subclass overrides alike) builds
-        on — an override composing from ``trajectory.total_reward`` directly would silently drop
-        the shaping knobs (``turn_overflow_penalty`` et al.), the exact drift this seam prevents.
+    def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
+        """Grade the final answer: 1 for a completed episode whose answer validates, else 0.
+
+        A completed episode with nothing to grade against (no validator, no ``answer`` key) grades 1 —
+        completing IS the objective there. A row that carries an ``answer`` key holding ``None`` is a
+        data fault, not such an episode, and takes the invalid path instead.
         """
-        return trajectory.total_reward + self._tool_use_shaping(trajectory)
-
-    def _compute_reward(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> float:
-        """Compute final reward for the trajectory (answer validation + generic tool-use shaping).
-
-        The terminal ``success_reward`` is for episodes with nothing to grade against (no validator,
-        no ``answer`` key) — completing IS the objective there. A row that carries an ``answer`` key
-        holding ``None`` is a data fault, not such an episode, and takes the invalid path instead.
-        """
-        base_reward = self._shaped_base_reward(trajectory)
-
         if not trajectory.info.get("completed"):
-            return base_reward + self.failure_reward
+            return EpisodeGrade(0.0)
 
         ctx = context or trajectory.info.get("context") or {}
 
         validator = ctx.get("validator")
         if validator and callable(validator):
-            is_success = validator(trajectory)
-            return base_reward + (self.success_reward if is_success else self.failure_reward)
+            return EpisodeGrade(1.0 if validator(trajectory) else 0.0)
 
         expected = ctx.get("answer")
         if expected is not None:
-            final_response = trajectory.info.get("final_response", "")
-            return base_reward + compute_answer_reward(
-                predicted=final_response,
-                expected=expected,
-                success_reward=self.success_reward,
-                failure_reward=self.failure_reward,
-            )
+            return EpisodeGrade(1.0 if validate_answer(trajectory.info.get("final_response", ""), expected) else 0.0)
 
         if "answer" in ctx:
             # The dataset row is answer-graded and its cell is null: nothing was verified, so paying
-            # the completion fallback would hand full success_reward to ANY episode that finished —
+            # the completion fallback would hand the full objective to ANY episode that finished —
             # and to its whole GRPO group, since every sibling row completes just as easily. Drop it
             # from the baseline instead (same contract as a grading-infra outage).
             logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
             trajectory.info[EPISODE_INVALID_KEY] = True
-            return base_reward + self.failure_reward
+            return EpisodeGrade(0.0)
 
-        return base_reward + self.success_reward
+        return EpisodeGrade(1.0)
 
 
 class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironment):

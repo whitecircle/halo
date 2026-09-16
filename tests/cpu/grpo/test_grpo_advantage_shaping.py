@@ -132,7 +132,7 @@ def test_forced_token_does_not_trip_the_veto():
         recompute, sampling, torch.ones(1, 3, dtype=torch.long), torch.ones(1, dtype=torch.bool), 3.0
     )
     out, stats = apply_is_masks(ratio, diff, corrected, torch.arange(1), ISMaskConfig(veto_min=1e-4))
-    assert stats["sampling/is_veto_masked_frac"] == 0.0
+    assert stats["sampling/is_veto_masked_frac"] == (0, 1)
     assert torch.equal(out, torch.ones(1, 3))
     # The same disagreement on a token the engine actually sampled is exactly what the veto is for.
     ratio, diff, corrected = compute_is_ratio(
@@ -143,7 +143,7 @@ def test_forced_token_does_not_trip_the_veto():
         3.0,
     )
     out, stats = apply_is_masks(ratio, diff, corrected, torch.arange(1), ISMaskConfig(veto_min=1e-4))
-    assert stats["sampling/is_veto_masked_frac"] == 1.0
+    assert stats["sampling/is_veto_masked_frac"] == (1, 1)
 
 
 def test_ismask_defaults_are_inert():
@@ -173,7 +173,7 @@ def test_token_band_masks_out_of_band_tokens():
     out, stats = apply_is_masks(ratio, d, corrected, torch.arange(2), ISMaskConfig(band_min=0.5, band_max=2.0))
     assert out[0, 1] == 0 and out[1, 2] == 0
     assert out[0, 0] == 1 and out[1, 0] == 1
-    assert stats["sampling/is_token_band_masked_frac"] == pytest.approx(2 / 8)
+    assert stats["sampling/is_token_band_masked_frac"] == (2, 8)
 
 
 def test_token_band_uses_raw_ratio_not_truncated():
@@ -196,7 +196,7 @@ def test_geo_band_masks_whole_trajectory_across_turn_rows():
     out, stats = apply_is_masks(ratio, d, corrected, traj_ids, ISMaskConfig(geo_band_min=0.99, geo_band_max=1.01))
     assert (out[0] == 0).all() and (out[1] == 0).all()
     assert (out[2] == 1).all()
-    assert stats["sampling/is_geo_band_masked_frac"] == pytest.approx(0.5)
+    assert stats["sampling/is_geo_band_masked_frac"] == (1, 2)
 
 
 def test_veto_masks_trajectory_with_catastrophic_token():
@@ -206,7 +206,7 @@ def test_veto_masks_trajectory_with_catastrophic_token():
     out, stats = apply_is_masks(ratio, d, corrected, torch.arange(2), ISMaskConfig(veto_min=1e-4))
     assert (out[0] == 0).all()
     assert (out[1] == 1).all()
-    assert stats["sampling/is_veto_masked_frac"] == pytest.approx(0.5)
+    assert stats["sampling/is_veto_masked_frac"] == (1, 2)
 
 
 def test_dummy_rows_never_masked_by_trajectory_stages():
@@ -229,11 +229,11 @@ def test_opsm_masks_only_drifted_negative_trajectories():
     traj_ids = torch.arange(3)
     # traj 0 negative+drifted (masked), 1 positive+drifted, 2 negative+clean — only 0 qualifies.
     advantages = torch.tensor([-1.0, 1.0, -1.0])
-    out, frac = apply_opsm(ratio, d, corrected, traj_ids, advantages, delta=0.2)
+    out, masked = apply_opsm(ratio, d, corrected, traj_ids, advantages, delta=0.2)
     assert (out[0] == 0).all()
     assert (out[1] > 0).all()
     assert (out[2] > 0).all()
-    assert frac == pytest.approx(1 / 3)
+    assert masked.tolist() == [True, False, False]
 
 
 if __name__ == "__main__":

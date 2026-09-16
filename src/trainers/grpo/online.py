@@ -32,6 +32,7 @@ from src.trainers.grpo.objective.application import (
 from src.trainers.grpo.objective.logratio import clamp_ref_logps
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.rollout.completions_logging import log_with_decoupled_completions
+from src.trainers.grpo.rollout.rollout_metrics import gathered_fractions
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, validate_weight_sync_support
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.loss_masks import effective_loss_mask
@@ -76,32 +77,14 @@ class DistributedGRPOTrainer(
 
     def __init__(self, *args, **kwargs):
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
-
-        self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
-
-        # Same recompute-and-reslice hook as RLRR, hence mutually exclusive with it.
-        # ``build_advantage_shaping`` already returns None at the default 'mean' mode.
-        self._advantage_shaping: AdvantageShaping | None = kwargs.pop("advantage_shaping", None)
-        if self._advantage_shaping is not None and self._rlrr_config is not None:
-            raise ValueError("advantage_shaping and rlrr_config both replace the advantages — set only one.")
-        self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
-
-        # Range-validated by RangeValidatedConfig._validate_ranges (finiteness included).
-        self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
-        if self._scale_rewards_std_floor > 0 and self._rlrr_config is not None:
-            raise ValueError(
-                "scale_rewards_std_floor and rlrr_config cannot be combined: RLRR replaces the "
-                "group-normalized advantages wholesale with relative-ranking ones, which never divide "
-                "by a reward std, so the floor would silently do nothing. Set only one."
-            )
+        self._require_vllm_server_mode(training_args)
+        self._resolve_advantage_hooks(kwargs, training_args)
 
         self._last_rewards_per_func: torch.Tensor | None = None
 
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
 
         self._save_completions = kwargs.pop("save_completions", True)
-
-        self._require_vllm_server_mode(training_args)
 
         with self._patch_trl_for_vendored_vllm_client(training_args):
             super().__init__(*args, **kwargs)
@@ -129,6 +112,51 @@ class DistributedGRPOTrainer(
             )
 
         self._finish_on_policy_init()
+
+    def _resolve_advantage_hooks(self, kwargs: dict[str, Any], grpo_args) -> None:
+        """Pop the advantage-hook kwargs and refuse the combinations that cancel or diverge, before
+        TRL's ctor opens the NCCL group to the rollout server.
+
+        ``build_advantage_shaping`` already returns None at the default 'mean' mode; the floor is
+        range-validated (finiteness included) by ``RangeValidatedConfig._validate_ranges``.
+        """
+        self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
+        self._advantage_shaping: AdvantageShaping | None = kwargs.pop("advantage_shaping", None)
+        self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
+        self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
+        if self._rlrr_config is not None:
+            # Same recompute-and-reslice hook as RLRR, hence mutually exclusive with it.
+            if self._advantage_shaping is not None:
+                raise ValueError("advantage_shaping and rlrr_config both replace the advantages — set only one.")
+            if self._scale_rewards_std_floor > 0:
+                raise ValueError(
+                    "scale_rewards_std_floor and rlrr_config cannot be combined: RLRR replaces the "
+                    "group-normalized advantages wholesale with relative-ranking ones, which never divide "
+                    "by a reward std, so the floor would silently do nothing. Set only one."
+                )
+            if self._drop_degenerate_groups:
+                raise ValueError(
+                    "drop_degenerate_groups and rlrr_config cannot be combined: the drop keys on raw-reward "
+                    "equality, so it masks out of the loss every all-correct group RLRR just gave length-ranked "
+                    "advantages — the signal RLRR exists to keep. Set only one."
+                )
+        # Every hook re-derives its values from the gathered rewards summed as TRL's sum_then_normalize
+        # branch does; under any other aggregation the recompute would silently diverge from TRL's.
+        if self._recomputes_from_gathered_rewards and grpo_args.multi_objective_aggregation != "sum_then_normalize":
+            raise ValueError(
+                "advantage_shaping / RLRR / drop_degenerate_groups / scale_rewards_std_floor recompute rewards "
+                "with TRL's sum_then_normalize aggregation; multi_objective_aggregation="
+                f"{grpo_args.multi_objective_aggregation!r} would silently diverge."
+            )
+
+    @staticmethod
+    def sequence_level_importance_sampling(grpo_args) -> bool:
+        """Whether TRL's vLLM IS correction takes ONE ratio per sequence (``sequence_*`` modes), i.e. sums
+        the per-token log-ratios — the consumer the sampler-logprob preflight gates a nucleus-renormalized
+        reference against. Off with the correction off, whatever the mode says."""
+        if not grpo_args.vllm_importance_sampling_correction:
+            return False
+        return grpo_args.vllm_importance_sampling_mode.startswith("sequence")
 
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         """Emit the completions parquet (``save_completions``) decoupled from the console table."""
@@ -229,9 +257,11 @@ class DistributedGRPOTrainer(
         old_logps = result.get("old_per_token_logps")
         ref_logps = result.get("ref_per_token_logps")
         if old_logps is not None and ref_logps is not None:
-            result["ref_per_token_logps"], kl_clamp_frac = clamp_ref_logps(ref_logps, old_logps)
+            result["ref_per_token_logps"], clamped = clamp_ref_logps(ref_logps, old_logps)
             mode = "train" if self.model.training else "eval"
-            self._metrics[mode]["kl_clamp_frac"].append(kl_clamp_frac.item())
+            self._metrics[mode]["kl_clamp_frac"].extend(
+                gathered_fractions([(clamped.sum(), clamped.numel())], self.accelerator.gather)
+            )
 
         return self._broadcast_tensors_from_tp_leader(result)
 
@@ -270,26 +300,18 @@ class DistributedGRPOTrainer(
         """
         if not self.model.training or self._last_rewards_per_func is None:
             return None
-        if self.args.multi_objective_aggregation != "sum_then_normalize":
-            raise ValueError(
-                "advantage_shaping / RLRR / drop_degenerate_groups recompute rewards with TRL's "
-                "sum_then_normalize aggregation; multi_objective_aggregation="
-                f"{self.args.multi_objective_aggregation!r} would silently diverge."
-            )
         rewards_per_func = self._last_rewards_per_func
         weights = self.reward_weights.to(rewards_per_func.device).unsqueeze(0)
         rewards = (rewards_per_func * weights).nansum(dim=1)  # [total], gathered order
         return rewards, torch.isnan(rewards_per_func).all(dim=1)
 
-    def _local_slice(self, full: torch.Tensor, n_local: int, what: str) -> torch.Tensor:
-        """This rank's rows of a gathered per-completion tensor; asserts whole groups per rank."""
-        if n_local % self.num_generations != 0:
-            raise ValueError(
-                f"{what} requires each rank's rollout count ({n_local}) to be a multiple of "
-                f"num_generations ({self.num_generations}); a group is split across ranks. Use the "
-                f"default generation_batch_size derivation or make it divisible by "
-                f"num_processes * num_generations."
-            )
+    def _local_slice(self, full: torch.Tensor, n_local: int) -> torch.Tensor:
+        """This rank's rows of a gathered per-completion tensor — TRL's own world-order process slice.
+
+        Every hook computes on the FULL gathered set, where groups are contiguous whatever the per-rank
+        geometry, so a group spanning two ranks is fine here (TRL only requires whole groups per
+        generation batch; the TP-duplicate case is refused at dataloader construction).
+        """
         start = self.accelerator.process_index * n_local
         return full[start : start + n_local]
 
@@ -334,7 +356,7 @@ class DistributedGRPOTrainer(
         same world order and length TRL appended, so overwriting that tail realigns the record row
         for row.
         """
-        local = self._local_slice(advantages_full, result["advantages"].shape[0], what)
+        local = self._local_slice(advantages_full, result["advantages"].shape[0])
         result["advantages"] = local.to(device=result["advantages"].device, dtype=result["advantages"].dtype)
         logged = self._logs["advantages"]
         replacement = advantages_full.tolist()
@@ -359,7 +381,7 @@ class DistributedGRPOTrainer(
         rewards, unscorable = gathered
         # Scorable members only: an unscorable placeholder's reward must not hide an all-alike group.
         drop_full, degenerate_frac = degenerate_drop_rows(rewards, self.num_generations, valid_mask=~unscorable)
-        drop = self._local_slice(drop_full, result["completion_mask"].shape[0], "drop_degenerate_groups")
+        drop = self._local_slice(drop_full, result["completion_mask"].shape[0])
         self._metrics["train"][DEGENERATE_GROUP_FRAC_KEY].append(degenerate_frac)
         # Narrow every mask TRL composes into its loss mask, else untrained tokens inflate the normalizer.
         present = [name for name in ("completion_mask", "tool_mask") if result.get(name) is not None]

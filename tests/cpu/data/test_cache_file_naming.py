@@ -365,6 +365,29 @@ def test_kwargs_name_or_path_takes_priority():
     assert fp_a != fp_b, "Objects with different name_or_path but same vocab_size collided"
 
 
+def test_kwargs_tokenizer_content_beats_path():
+    """A tokenizer's cache identity is its CONTENT, not its directory: the same vocab reloaded
+    from a resume checkpoint keys the SAME cache (a path term re-tokenized the whole dataset on
+    every resume leg), while a different vocab at the same path keys a different one."""
+
+    class Tok:
+        vocab_size = 4
+
+        def __init__(self, name_or_path, vocab):
+            self.name_or_path = name_or_path
+            self._vocab = vocab
+
+        def get_vocab(self):
+            return self._vocab
+
+    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
+    fp_source = _get_kwargs_fingerprint({"processing_class": Tok("org/base-model", vocab)})
+    fp_resumed = _get_kwargs_fingerprint({"processing_class": Tok("checkpoints/run/checkpoint-750", vocab)})
+    fp_other = _get_kwargs_fingerprint({"processing_class": Tok("org/base-model", {"a": 0, "b": 1, "c": 2, "e": 3})})
+    assert fp_source == fp_resumed, "Same tokenizer content at a checkpoint path missed the cache"
+    assert fp_source != fp_other, "Different vocab content at one path shared a fingerprint"
+
+
 def test_kwargs_scalar_lists_distinct():
     """Scalar lists/tuples serialize by value: two different eos_token_id lists must key
     different caches (collapsing to the type name served one list's cache for every other)."""

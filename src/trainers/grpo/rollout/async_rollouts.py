@@ -104,10 +104,10 @@ class AsyncRolloutMixin:
         self._prefetch_enabled = self.async_config.enable_prefetch
         if self._prefetch_enabled and self._num_rollout_servers < 2:
             logger.warning(
-                "Prefetch auto-disabled: %d rollout server configured. The one engine stops serving "
-                "during weight sync, so there is nothing to overlap against — and the rolling sync "
-                "prefetch selects would leave ZERO servers live instead of N-1. For prefetch "
-                "benefits, configure two or more servers in rollout_server_configs.",
+                "Prefetch auto-disabled: %d rollout server configured. Every weight sync pauses that one "
+                "engine for its whole push, so a prefetched round would only sit frozen (vLLM) or be "
+                "aborted (SGLang) across it; prefetch is enabled with two or more servers in "
+                "rollout_server_configs.",
                 self._num_rollout_servers,
             )
             self._prefetch_enabled = False
@@ -219,14 +219,26 @@ class AsyncRolloutMixin:
         server, trainer and engine on one GPU) would be a rank-0-only raise leaving every peer blocked
         in the next collective until the watchdog fires. Both the train-begin push and the per-step
         sync need this fence.
+
+        The push's duration rides the same broadcast: the servers were paused for it, so every rank
+        credits it to its in-flight episodes' deadlines (:meth:`RolloutManager.end_engine_pause`)
+        instead of charging a frozen generation to the episode.
         """
+        manager = self._rollout_manager
+        if manager is not None:
+            manager.begin_engine_pause()
         local_error: str | None = None
         synced = False
+        started = time.monotonic()
         try:
             synced = self._sync_weights_to_engine(force=force)
         except Exception as e:  # re-raised on all ranks below
             local_error = f"{self._rollout_engine_name} weight sync failed at step {self.state.global_step}: {e!r}"
-        main_error = broadcast_from_rank0(local_error if self.accelerator.is_main_process else None)
+        main_error, paused_seconds = broadcast_from_rank0(
+            (local_error, time.monotonic() - started if synced else 0.0) if self.accelerator.is_main_process else None
+        )
+        if manager is not None:
+            manager.end_engine_pause(paused_seconds)
         if main_error is not None:
             raise RuntimeError(main_error)
         if local_error is not None:
@@ -316,6 +328,12 @@ class AsyncRolloutMixin:
             except Exception as e:  # teardown must not mask the run's own outcome
                 logger.warning(f"Error closing the {self._rollout_engine_name} weight-sync client: {e}")
             self._weight_sync_client = None
+
+        # Score-only clients formed no communicator; their HTTP sessions are what they hold.
+        if self._engine_rescore_clients_list is not None:
+            for client in self._engine_rescore_clients_list:
+                client.session.close()
+            self._engine_rescore_clients_list = None
 
         self._loop = None
         # Re-arm: a second train() rebuilds the components above and needs a fresh push to the
@@ -498,9 +516,10 @@ class AsyncRolloutMixin:
     def _sync_weights_to_engine_single(self, force: bool = False) -> bool:
         """Sync model weights to the rollout engine via NCCL (main process only); ``force`` ignores the step gate.
 
-        Multi-server mode syncs one server at a time, keeping (N-1) available for generation during
-        the sync. Returns whether weights were pushed, so the caller does not record a sync the
-        cadence gate declined.
+        Only the raw-model path below — a single training process, no adapters, no EP wrappers — syncs
+        a multi-server pool one server at a time; every other shape gathers and pauses all servers
+        together for the push. Returns whether weights were pushed, so the caller does not record a
+        sync the cadence gate declined.
         """
         if not self.accelerator.is_main_process:
             return False

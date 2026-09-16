@@ -1,9 +1,8 @@
 # Qwen3.5 122B-A10B — EP SFT example. 122B total / 9.77B active · 256 routed experts (top_k 8).
 # CP unsupported (hybrid linear-attention layers). See agent-docs/models/qwen3_5.md.
 # Single node (Blackwell): torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
-# Cross-node (2 nodes x 8 GPUs): add --expert_parallel_size=16 --ep_scope=global --max_length=8192
-# (see skypilot/). max_length drops because cross-node dispatch rides the EFA proxy GIN, validated
-# to 8192 tokens/rank per MoE forward; the 16384 below is a single-node NVLink shape.
+# Cross-node (Hopper, 2x8): add --expert_parallel_size=16 --ep_scope=global --max_length=8192 — cross-node
+#   dispatch rides the EFA proxy GIN, validated to 8192 tokens/rank per MoE forward (see launcher-configs/skypilot/).
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-122B-A10B

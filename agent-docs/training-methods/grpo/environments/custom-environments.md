@@ -1,129 +1,123 @@
 # Custom Environments
 
-Override three abstract methods on `BaseEnvironment` (`src/environments/base.py`):
+Subclass `BaseEnvironment` (`src/environments/base.py`) and implement three methods, then either register a factory under a name for YAML, or hand the trainer `environment_cls` from Python.
 
 ```python
-from src.environments.base import BaseEnvironment, Trajectory, Message
+from src.environments.base import BaseEnvironment, EpisodeGrade
 
-class CustomEnvironment(BaseEnvironment):
-    def __init__(self, success_reward=1.0, **kwargs):
-        super().__init__(**kwargs)
-        self.success_reward = success_reward
+class GuessEnvironment(BaseEnvironment):
+    DEFAULT_MAX_TURNS = 6
+    requires_answer = True          # the grade reads context["answer"]
 
     def _reset_single(self, prompt, context=None):
-        """Initialize a single episode."""
-        traj = Trajectory()
-        traj.add_message(Message.user(str(prompt)))
-        if context and "answer" in context:
-            traj.info["expected"] = context["answer"]
-        return traj
+        expected = (context or {}).get("answer")
+        return self._init_trajectory(prompt, context, extra_info={"expected": expected})
 
     def _step_single(self, trajectory, action, context=None):
-        """Returns (trajectory, reward, done, truncated, info)."""
         done = "Final Answer:" in action
+        trajectory.info["completed"] = done
         return trajectory, 0.0, done, False, {}
 
-    def _compute_reward(self, trajectory, context=None):
-        expected = trajectory.info.get("expected", "")
-        if expected in str(trajectory.messages[-1].content):
-            return self.success_reward
-        return 0.0
+    def _grade_episode(self, trajectory, context=None):
+        expected = trajectory.info.get("expected")
+        answered = expected is not None and str(expected) in trajectory.messages[-1].content
+        return EpisodeGrade(1.0 if answered else 0.0)
 ```
 
-Register it so a training script can resolve it by name, then set `environment_type` in the YAML and launch `scripts/training/environmental_grpo.py` as usual:
+Rules that bite:
+
+- **Grade, do not price.** `_grade_episode` returns an `EpisodeGrade`: `objective` is the task grade in `[0, 1]`, which the reward's `environment` term prices as `weight × grade ^ exponent` (`reward/objective`); `shaping` is the environment's own episode-level terms by bare name (`{"submission": 0.25}`), each added to the reward and logged as `reward/<name>`. Declare the shaping names on the class, `SHAPING_COMPONENTS = ("submission", ...)` (the union over the class hierarchy is what an episode may carry; an undeclared name fails at the first settled episode, and a reward term may not take a declared name). `objective` and `turn_shaping` are reserved. A class that defines `_compute_reward` is refused at construction. Protocol-level shaping goes in `_episode_shaping(trajectory) -> dict` (the native protocol declares and returns `tool_shaping`). Mark an episode whose grade carries no signal — a grader outage, a null `answer` cell — with `trajectory.info[EPISODE_INVALID_KEY] = True` and grade it 0, so it leaves the group baseline ([Reward Terms](../rewards.md#environment-arm)).
+- **Forward `**kwargs` to `super().__init__`.** The base binds the config's `rewards` list as `reward_terms`, plus `max_turns` and the shared knobs; any keyword no constructor in the chain binds raises `TypeError` at construction — that strictness is what turns a typo'd `environment_kwargs` key into an error instead of a silently ignored setting.
+- **Declare differing defaults on the class** — `DEFAULT_MAX_TURNS`, `DEFAULT_TOOL_SUCCESS_REWARD`, `DEFAULT_TOOL_ERROR_PENALTY`, `requires_answer`, all declared on `BaseEnvironment` — never in the factory, so an explicit YAML `max_turns` still wins.
+- **Build through `self._init_trajectory(...)`** so the system turn, the task and the context land where the base and the metrics expect them.
+- **For I/O-bound steps** subclass `AsyncBaseEnvironment` and override `_reset_single_async` / `_step_single_async`; free per-episode resources in `_release_episode`. The base's `verify_backend` probes every external reward term at launch; an environment with a backend of its own extends it and calls `super()`, so a bad URL fails the launch instead of every episode.
+
+## Register it
 
 ```python
-# my_envs.py (imported before training, e.g. via the registry module or a small launcher)
 from src.environments.registry import register_environment
 
-register_environment("my_env", lambda env_config: CustomEnvironment(**env_config))
+register_environment("guess", lambda env_config: GuessEnvironment(**env_config))
 ```
 
-Forward the whole `env_config`, as the built-in factories do: a factory that ignores it drops every YAML `environment_kwargs` key silently, and the strict-kwargs check below never runs because the keys never reach the constructor. Nothing is defaulted in the factory either — a turn budget that differs from the base 10 is declared on the class (`DEFAULT_MAX_TURNS`, and `DEFAULT_TOOL_SUCCESS_REWARD` / `DEFAULT_TOOL_ERROR_PENALTY` for the native tool protocol), so an explicit `max_turns` in the YAML still wins and the default is stated once. The registry's own `_without` helper exists only for a factory that binds a key itself and would otherwise raise on a duplicate keyword.
+Forward the whole `env_config`: a factory that ignores it drops every `environment_kwargs` key silently. The registry only knows factories that have run, so register from a module the entry script imports. Then set `environment_type: guess` in the YAML. From Python, skip the registry: `DistributedAsyncEnvironmentalGRPOTrainer(..., environment_cls=GuessEnvironment, environment_kwargs={...})`.
 
-For fully programmatic use, `DistributedAsyncEnvironmentalGRPOTrainer` also accepts `environment_cls=CustomEnvironment` + `environment_kwargs=...` directly.
-
-For I/O-bound steps (tool servers, HTTP APIs), subclass `AsyncBaseEnvironment` and override `_step_single_async` / `_reset_single_async` instead. The rollout driver detects an `AsyncBaseEnvironment` instance and drives it through `reset_async`/`step_async`.
-
-Per-episode state has three seams, so a subclass never touches the execution, reset or cleanup paths themselves:
-
-- **`_episode_binding(trajectory)` / `active_trajectory()`** — `NativeToolUseEnvironment` enters the binding around every tool batch, sync and async, and a handler reads the executing episode through `active_trajectory()` (`None` outside a binding — a handler called directly). A subclass binding more (a workspace session) nests its own `ContextVar` inside `super()._episode_binding(trajectory)`, as `SweEnvironment` does.
-- **`_release_episode(episode_id)`** — called by `cleanup()` as it drops the episode; close its session or connection there.
-- **`_apply_effort_profile(trajectory, level, profile)`** — a `BaseEnvironment` hook that runs after `_reset_single` on every episode, once the base has stamped the generic profile keys (`thinking_tokens`, `max_length_cutoff_recoveries`, `token_cost`). Bind a task's own profile keys there — per-tool caps into `episode_tool_budgets`, a bonus into `info` — after declaring them in `EFFORT_PROFILE_KEY_MINIMA` (`{key: minimum}`, unioned over the MRO; an int minimum declares a count and admits only ints) and their defaults in `REASONING_EFFORT_PROFILES`. `level` is `None` and `profile` empty when the effort is undetermined at reset ([Code Contests](code-contests.md#reasoning-effort)).
-
-A sync env with an async-only tool handler does *not* fail at step time: `NativeTool.execute` raises `NotImplementedError`, `_execute_tool_calls` catches it as an ordinary tool error, and every call lands as a failed tool result charged `tool_error_penalty`. The episode completes and the rewards are quietly wrong.
-
-To surface task-specific diagnostics in the training logs, override `rollout_metrics(self, trajectory) -> dict[str, float]`. It runs per episode in the Ray actor (so it may read `trajectory.info`) and returns metrics keyed by their full path — `outcome/*` (task success), `episode/*` (behavior), `reward/*` (reward decomposition); the trainer mean-aggregates them. Stamp a categorical fact under `trajectory.info["slices"]` (`EPISODE_SLICES_KEY`, string values — `{"language": "cpp"}`) and the trainer slices `count`, `reward`, `generation_tokens`, `reasoning_tokens`, `turns`, `truncation_rate`, `solve_rate` and every `episode/*` metric by it as `<slice>/<value>/*` (`language/cpp/solve_rate`), the way it slices by effort level under `effort/<level>/*`.
-
-The base emits `episode/tool_calls` (where the env counts tool calls) and always `episode/length_cutoff_turns`. `CodeContestsEnvironment` adds `outcome/solve_rate`, `outcome/test_pass_frac`, `episode/submission_rate`, `episode/test_calls`, `episode/tested_before_submission`, `episode/grading_infra_outage`, `episode/language_switches` (under a language list), and the reward components. See [Logged metrics](../environmental-grpo.md#logged-metrics).
-
-## Trajectory shape the trainer can tokenize
-
-By default (`train_on_sampled_tokens`, on) the trainer builds **one row per assistant turn** from the engine's own sampled ids, taking the engine's `prompt_token_ids` as each row's prompt.
-
-The re-tokenization fallback — `train_on_sampled_tokens: false`, or a trajectory whose sampled ids were not captured — instead renders the finished trajectory **once** through the serving chat template and locates each assistant turn's span inside that single render, because chat templates are not prefix-monotone and independently rendered per-turn prefixes cannot be diffed ([details](../environmental-grpo.md#the-re-tokenization-fallback-_tokenize_trajectory)). On that path a trajectory the template cannot decompose is recorded and raised on **every** rank, never trained on a guessed span.
-
-Four rules keep an environment decomposable either way:
-
-- **Let the base append assistant turns.** `_add_action_message` is the sole carrier of the engine's sampled ids, logprobs, routing mask and reasoning. Hand-appending an assistant message loses them, and two consecutive assistant messages have no locatable boundary.
-- **Every advertised tool call needs a tool-result message.** Declare `max_tool_calls_per_turn` when the env executes fewer calls than the model may request — the base truncates the turn's `tool_calls` to it so the two counts match. `BaseEnvironment` declares it as a class attribute (default `None`, no truncation); the **native tool-use** envs (`NativeToolUseEnvironment` and its `mcp`/`swe` subclasses, default `5`) additionally take it as a constructor kwarg, so those are the ones an `environment_kwargs` entry can set. The ReAct protocol executes one parsed action per turn and takes no such kwarg — passing it there is refused by the base's unknown-kwarg check.
-- **Return tool output as a message** — `Message.tool(content, tool_call_id, name)`, or a plain user turn (`Observation: …`) for a ReAct-style protocol. The loss mask comes from spans, not roles, so either shape trains correctly.
-- **`tool_calls` reach the template verbatim.** An `arguments` value the template cannot handle (a JSON string where it expects a mapping) fails the render.
-
-Constructor kwargs are strict: every `environment_kwargs` key must be a parameter of the resolved environment class, or construction raises.
-
-## Registering custom tools
-
-Use `NativeToolRegistry` for tools used with `NativeToolUseEnvironment`:
+## A custom tool
 
 ```python
-from src.environments.tools.definitions import NativeToolRegistry, NativeTool, ToolParameter
+from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
-registry = NativeToolRegistry()
-registry.register(NativeTool(
-    name="my_tool",
-    description="Does something useful",
-    parameters=[
-        ToolParameter(name="param1", type="string", description="First parameter"),
-        ToolParameter(name="param2", type="integer", description="Second parameter", required=False),
-    ],
-    handler=my_tool_function,  # called with keyword args: my_tool_function(param1="value", param2=42)
+registry = NativeToolRegistry().register(NativeTool(
+    name="lookup",
+    description="Look up a record by id",
+    parameters=[ToolParameter(name="record_id", type="string", description="Record id")],
+    handler=lookup_record,          # called as lookup_record(record_id="...")
 ))
 ```
 
-Parsing and serialization of OpenAI-format tool calls live on the data model (`src/environments/tools/definitions.py`): `NativeToolCall.from_openai_format(tool_call)` parses one call off the wire, and `NativeToolResult.to_message()` turns a result into the `tool` message the next turn conditions on. One path each — a second parser or serializer drifts from the one the rollout actually uses. The environment supplies tool schemas via `registry.to_openai_tools()`; choosing the server-side `--tool-call-parser` is the inference server's job.
+Arguments are filtered to the declared parameters before the handler runs, so a hallucinated extra never reaches it and a missing required one is refused as a tool error without spending the episode's tool budget. A handler that raises marks the call failed and charges `tool_error_penalty` — raise for an infrastructure fault, return a string for a legitimate negative answer. Pass the registry as `NativeToolUseEnvironment(tool_registry=registry, ...)`.
 
-A handler that raises marks the call failed (the episode pays `tool_error_penalty`), so raise for an infrastructure fault and return a string for a legitimate negative answer.
+## Trainable trajectory shape
 
-## Dataset format
+The trainer builds one row per assistant turn from the engine's sampled ids, or falls back to a single render of the whole trajectory ([training on sampled tokens](../async-grpo/rollouts.md#training-on-sampled-tokens)). Four rules keep an environment decomposable either way:
+
+- **Let `step()` append the assistant turn.** It is the only carrier of the engine's sampled ids, logprobs and reasoning; one hand-appended assistant message drops the whole trajectory onto the re-tokenization fallback and trains text the policy never emitted.
+- **Give every advertised tool call a result message.** Set `max_tool_calls_per_turn` when the environment executes fewer calls than the model may request; the base trims the stored call list to match.
+- **Return tool output as a message** — `Message.tool(content, tool_call_id, name)`, or a plain user turn (`Observation: …`) for a text protocol. The loss mask comes from spans, not roles.
+- **Keep `tool_calls` renderable.** An `arguments` value the chat template cannot handle fails the render, and a trajectory whose turn spans cannot be located is dropped on every rank rather than trained on a guess.
+
+Override `rollout_metrics(trajectory) -> dict[str, float]` to log per-episode diagnostics under their full paths (`outcome/*`, `episode/*`, `reward/*`); a string fact stamped in `trajectory.info["slices"]` slices them as `<slice>/<value>/*` ([metrics](../async-grpo/monitoring.md#logged-metrics)).
+
+## Dataset
 
 ```python
-{
-    "prompt": str | list[dict],  # task prompt or conversation
-    "answer": Any,               # expected answer for reward computation
-    ...                          # extra columns, each declared in context_fields
-}
+{"prompt": str | list[dict], "answer": Any, "difficulty": "hard"}
 ```
 
-`prompt` is either a string (`{"prompt": "What is 25 * 4 + 10?", "answer": 110}`) or a conversation (`[{"role": "system", ...}, {"role": "user", ...}]`).
+`answer` and every column named in the script's `context_fields` reach `reset()` / `step()` in the `context` dict; all other columns are dropped, and a `context_field` — or an `answer_field` renamed away from `answer` — that names no column raises at startup.
 
-`answer` plus every column named in the script's `context_fields` reach the environment as the `context` parameter of `reset()` / `step()`. All other columns are **dropped** during preprocessing, and naming a column that isn't in the dataset raises at startup — to use `difficulty` and `category`, declare them: `context_fields: [difficulty, category]`.
+Set `requires_answer = True` on the class when the reward grades against `context["answer"]`: the trainer then refuses a dataset without that column instead of scoring every episode of the run alike. A per-run override goes in `environment_kwargs` as `requires_answer`, and the default is `False` — completing the task is the objective.
 
-A list-valued `prompt` survives whole only in the eval scripts. The trainer flattens it to the **last user message's content** (`_extract_prompts_and_contexts`), so a system message in the row is dropped — carry it as the environment's `system_prompt` instead.
+A list-valued prompt reaches the environment as its **last `user` message** only, so put framing in the environment's `system_prompt`.
 
-| Environment | `answer` format | Example |
-|-------------|----------------|---------|
-| `react_math`, `native_math` | String or number | `"42"`, `"3.14"` |
-| `qa_search` | Expected answer string | `"Sinclair Lewis"` |
-| `exam_qa` (MC) | Choice letter, or a 0-based index into the `choices` column | `"B"`, `1` |
-| `exam_qa` (open) | Answer string | `"Paris"` |
-| `code_contests` / `codeforces` | JSON with test cases (+ optional `checker`, `time_limit`) | `'{"test_cases": [{"input": "5", "output": "10"}]}'` — see [Code Contests](code-contests.md#dataset-format) |
+## Test it
 
-### Public datasets
+A CPU test, in the shape of `tests/cpu/environments/test_environments.py`:
 
-| Task | Datasets | Schema notes |
-|------|----------|--------------|
-| Math (`react_math`, `native_math`) | `openai/gsm8k`, `lighteval/MATH`, `meta-math/MetaMathQA` | GSM8K answers arrive as `#### N`; MATH uses `\boxed{}` |
-| Factual QA (`qa_search`) | `basicv8vc/SimpleQA`, `trivia_qa` (rc.nocontext), `gaia-benchmark/GAIA` | SimpleQA uses `problem`/`answer`; TriviaQA carries multiple valid answers in `answer.aliases` |
-| Multiple choice (`exam_qa`) | `TIGER-Lab/MMLU-Pro`, `cais/mmlu`, `Idavidrein/gpqa`, `allenai/ai2_arc` (Challenge) | MMLU-Pro has 10 choices (A–J); MMLU's `answer` is an int index, converted to its letter at reset |
-| Competitive programming | see [Code Contests](code-contests.md#dataset-format) | adapters and preparation live there |
+```python
+import pytest
+
+def test_guess_env_grades_a_correct_answer(isolated_registry):
+    from src.configs.environment_config import EnvironmentConfig
+    from src.environments.registry import register_environment, resolve_environment
+
+    register_environment("guess", lambda c: GuessEnvironment(**c))
+    env = resolve_environment("guess", EnvironmentConfig(environment_type="guess").to_env_config())
+
+    ids, _ = env.reset(["What is 2 + 2?"], [{"answer": "4"}])
+    step = env.step(ids, ["Final Answer: 4"], [{}])[0]
+    assert step.done
+    assert step.trajectory.total_reward == 1.0   # reward/objective 1.0 + reward/turn_shaping 0.0
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
+```
+
+The suite's `isolated_registry` fixture drops the registered name again, so later tests resolve real environments. Run it with `pytest tests/cpu/environments -m cpu`. With a `judge` or `reward_model` term the episode dispatcher settles the episode; a test that steps the environment directly calls `env.settle(ids)` before reading the reward.
+
+Then run the environment end to end against a served model on a handful of rows, which exercises the real tool calls and the reward:
+
+```bash
+python scripts/environments/inference/run_env.py \
+    --env_type guess --dataset <hf-id-or-dir> --split test \
+    --base_url http://localhost:8000/v1 --model <served-model> \
+    --num_examples 5 --save_trajectories /tmp/guess.jsonl
+```
+
+The script resolves `--env_type` through the same registry, so run it from a wrapper that imports your module first and then calls its `main()`.
+
+## Related pages
+
+- [Environments](README.md) — registry, shared knobs, actor runtime.
+- [Native Tool-Use](native-tool-use.md) — the protocol most environments extend.
+- [Async GRPO with Environments](../async-grpo/README.md) — the trainer and its dataset surface.

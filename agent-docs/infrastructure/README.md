@@ -12,4 +12,4 @@ Runtime image, cloud deployments, and hardware-specific dependency installation.
 - **[SkyPilot deployment](skypilot.md)** — Cloud deployment on AWS and Nebius — provisioning, storage, and cross-node EP.
 - **[Nomad deployment](nomad.md)** — Batch job specs for an existing Nomad cluster — GPU devices, scratch volume, and multi-node rendezvous.
 - **[Rollout servers](rollout-servers.md)** — The vLLM and SGLang serving containers for RL: weight sync, required flags, throughput, and what each engine refuses.
-- **[Ray cluster](ray.md)** — The rollout actor pool for environmental GRPO: lifecycle, sizing, multi-node setup, CPU budgeting, and monitoring.
+- **[Ray cluster](ray.md)** — The rollout actor pool for async GRPO: lifecycle, sizing, multi-node setup, CPU budgeting, and monitoring.

@@ -7,7 +7,7 @@ attn_implementation: sdpa
 
 # --- Dataset ---
 dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
-test_size: 0.005   # 273k rows — 0.005 keeps each eval pass near ~1.4k pair forwards
+test_size: 0.005
 
 # --- DPO Hyperparameters ---
 beta: 0.1

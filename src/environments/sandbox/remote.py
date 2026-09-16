@@ -88,7 +88,10 @@ class RemoteSandbox(SandboxExecutor):
             resp.raise_for_status()
             data = resp.json()
         except requests.Timeout:
-            return SandboxResult(timed_out=True, error="remote sandbox request timed out")
+            # The service enforces ``run_timeout`` itself and reports it in ``run_result.status``, so the
+            # client deadline fires only when the service does not answer: an infra fault, never the
+            # program's time limit (``timed_out`` stays False).
+            return SandboxResult(error="remote sandbox request timed out")
         except (requests.RequestException, ValueError) as exc:
             return SandboxResult(error=f"remote sandbox error: {exc}")
         return self._parse(data)

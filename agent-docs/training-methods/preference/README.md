@@ -1,45 +1,36 @@
 # Preference Optimization
 
-Two methods train on paired comparison data (chosen vs. rejected): **SMPO** — reference-model-free, with a dynamic-margin objective and an SFT anchor — and **DPO** (reference-model-based). For **unpaired** binary feedback (one labeled completion per prompt) use [KTO](kto.md). [Reward Modeling](reward-modeling.md) trains a Bradley-Terry scalar reward model from the same pairwise format.
+Three methods learn from comparisons and KTO from per-row binary labels. Pick by the shape of the rows you have.
 
-## Methods at a glance
+| Row shape | Method | Why |
+|---|---|---|
+| `prompt` / `chosen` / `rejected` | [SMPO](smpo.md) | No reference model; the margin loss stops once a pair separates |
+| `prompt` / `chosen` / `rejected` | [DPO](dpo.md) | Reference-based; 15 TRL loss types, combinable |
+| `prompt` / `completion` / `label` | [KTO](kto.md) | Unpaired thumbs-up/down feedback |
+| `prompt` / `chosen` / `rejected` → scorer | [Reward modeling](reward-modeling.md) | A Bradley-Terry score head for rejection sampling or RL |
 
-| Aspect | [SMPO](smpo.md) | [DPO](dpo.md) |
-|--------|------|-----|
-| Reference model | Not required | Required (or PEFT, or precomputed log probs) |
-| Objective | Margin: `log p(chosen) - log p(rejected) >= margin` | KL-constrained optimal policy |
-| Loss variants | `sigmoid`, `hinge`, `ipo`, `smooth_lower_bound` | 15 TRL types; `loss_type` is a list, so RPO = a preference loss combined with `sft` |
-| Auxiliary SFT loss | Built-in (weighted chosen/rejected CE) | Only via `loss_type: [..., sft]` |
-| Token-level clipping | Built-in percentile clipping | Not available |
-| Margin scheduling | Curriculum via margin schedule | Not available |
-| Trainer | `SmoothMarginPOTrainer` | `DistributedDPOTrainer` |
-| Script | `scripts/training/preference/smpo.py` | `scripts/training/preference/dpo.py` |
-
-Different shape? Multiple completions with reward scores → [Offline GRPO](../grpo/offline-grpo.md); on-policy generation during training → [Online GRPO](../grpo/online-grpo.md); a single good completion per prompt → [SFT](../sft.md).
+Other shapes: several scored completions per prompt → [Offline GRPO](../grpo/offline-grpo.md); generation during training → [Online GRPO](../grpo/online-grpo.md) or [Async GRPO with Environments](../grpo/async-grpo/README.md); one good completion per prompt → [SFT](../sft.md).
 
 ## Dataset format
 
-Both methods use the same pairwise format with `list[dict]` messages:
+The three pairwise methods share one format, all fields `list[dict]` messages:
 
 ```jsonl
 {"prompt": [{"role": "user", "content": "What is the capital of France?"}], "chosen": [{"role": "assistant", "content": "Paris is the capital of France."}], "rejected": [{"role": "assistant", "content": "France is in Europe."}]}
 ```
 
-`prompt` is the conversation up to divergence; `chosen` and `rejected` are the competing completions.
+`prompt` is the conversation up to divergence; `chosen` and `rejected` are the competing completions. Reward modeling also reads implicit-prompt datasets. KTO's unpaired shape is on its own page. Full contract: [Dataset Formats](../../data/dataset-formats.md#preference-dposmpo).
 
 ## Parallelism
 
-Both support EP, TP, ETP, and EP+TP; both declare `_supports_pp`, but pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md). SMPO also supports CP (and EP+CP); DPO does not — its chosen/rejected forward needs global log-prob sums over full sequences, incompatible with sequence splitting. Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
+All four run EP, TP, ETP and EP+TP. SMPO alone declares CP support: it CP-aggregates its per-sequence log-prob sums, while DPO and KTO run TRL's CP-unaware loss path and the reward head needs the whole sequence to pool. All four also declare `_supports_pp`, but pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md); its shipped gates would take DPO and KTO with precomputed reference log-probs only. Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
 
-## Quick start
+## Launch
 
 ```bash
-# SMPO on an MoE with EP (torchrun for EP/CP/TP)
 torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \
     examples/preference/gptoss/smpo-gptoss-20b-tulu3-prefmix-ep.yaml \
     --expert_parallel_size=8
-
-# DPO
-accelerate launch scripts/training/preference/dpo.py \
-    examples/preference/qwen3_5/dpo-qwen3.5-9b-tulu3-prefmix.yaml
 ```
+
+`halo launch smpo <config> --nproc 8` builds the same line; the other methods are `dpo`, `kto` and `preference/rewards`.

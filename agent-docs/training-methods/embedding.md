@@ -1,126 +1,103 @@
 # Embedding Training
 
-Fine-tune embedding models with [sentence-transformers](https://sbert.net/) losses under distributed parallelism. `EmbeddingTrainer` (`src/trainers/embedding/trainer.py`) layers the ST losses onto `DistributedTrainerMixin`; `EmbeddingConfig` (`src/configs/embedding_config.py`) extends `SentenceTransformerTrainingArguments`, satisfying both the mixin and the ST trainer.
+Fine-tune embedding models with [sentence-transformers](https://sbert.net/) losses under distributed parallelism. `EmbeddingTrainer` (`src/trainers/embedding/trainer.py`) layers the ST losses onto `DistributedTrainerMixin`; `EmbeddingConfig` (`src/configs/embedding_config.py`) extends `SentenceTransformerTrainingArguments`.
 
-## Quick start
-
-```bash
-# Single GPU or FSDP data-parallel
-python scripts/training/embedding.py examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml
-
-# EP (MoE, 8 GPUs)
-torchrun --nproc_per_node=8 scripts/training/embedding.py \
-    examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml --expert_parallel_size=8
-```
-
-Configs ship for Qwen3-Embedding, Qwen3.5, GPT-OSS, and Gemma4 under `examples/embedding/`.
+EP, TP, EP+TP, pure ETP and EP+ETP run, as do DDP and FSDP2. CP and PP raise at config time; CP because pooling needs the whole sequence. Text only: image columns are refused at dataset load.
 
 ## Dataset formats
 
-`SentenceTransformerDataCollator` detects the format by column names: columns named `label`, `labels`, `score`, or `scores` are labels, everything else is a text input. See [Dataset Formats](../data/dataset-formats.md).
+`SentenceTransformerDataCollator` reads the shape **positionally**: the first column named `label`, `labels`, `score` or `scores` is the label, every remaining column in dataset order is one text input. Names carry no meaning.
 
-| Format | Columns | Use case | Compatible losses |
-|--------|---------|----------|-------------------|
-| Positive pairs | 2 text (e.g. `anchor`, `positive`) | Semantic search, retrieval | `mnrl`, `cached_mnrl` |
-| Triplets | 3 text (`anchor`, `positive`, `negative`) | Hard-negative training | `triplet`, `mnrl` |
-| Scored pairs | 2 text + `score` (float) | Semantic textual similarity | `cosent`, `angle`, `cosine_similarity` |
-| Binary pairs | 2 text + `label` (0 or 1) | Duplicate detection | `contrastive`, `online_contrastive` |
-| Labeled texts | 1 text + `label` (class int) | Classification-based embedding | `batch_all_triplet`, `batch_hard_triplet` |
-
-```json
-{"anchor": "What is the capital of France?", "positive": "Paris is the capital of France."}
-```
+| Text columns | Label | Use case | Losses |
+|---|---|---|---|
+| 2 (`anchor`, `positive`) | — | Semantic search, retrieval | `mnrl`, `cached_mnrl` |
+| 3 (+ `negative`) | — | Hard-negative training | `triplet`, `mnrl` |
+| 2 | float `score` | Semantic textual similarity | `cosent`, `angle`, `cosine_similarity` |
+| 2 | `label` 0/1 | Duplicate detection | `online_contrastive`, `contrastive` |
+| 1 | class int | Classification-based embedding | `batch_hard_triplet`, `batch_all_triplet` |
 
 ## Loss functions
 
-`loss_type` selects one of ten ST losses: `mnrl` (MultipleNegativesRankingLoss, the default), `cached_mnrl`, `cosent`, `angle`, `cosine_similarity`, `triplet`, `contrastive`, `online_contrastive`, `batch_all_triplet`, `batch_hard_triplet`. `loss_scale` (default 20.0) is the scale / inverse temperature for `mnrl`, `cached_mnrl`, `cosent`, and `angle`.
+`loss_type` selects one of ten ST losses: `mnrl` (the default), `cached_mnrl`, `cosent`, `angle`, `cosine_similarity`, `triplet`, `contrastive`, `online_contrastive`, `batch_all_triplet`, `batch_hard_triplet`. `loss_scale` reaches only `mnrl`, `cached_mnrl`, `cosent` and `angle`; it is inert for the rest.
 
-Choosing: retrieval and search → `mnrl`; STS → `cosent` or `angle`; offline-mined hard negatives → `triplet`; duplicate detection → `online_contrastive` (auto-selects hard examples, beats plain `contrastive`); classification-based → `batch_hard_triplet` with `batch_sampler: group_by_label`, which the batch-triplet losses require.
+`mnrl` is InfoNCE: each anchor's negatives are the other `batch_size - 1` positives in the same micro-batch, so batch size is the dominant hyperparameter. `gradient_accumulation_steps` does **not** grow the pool, and neither do extra GPUs — the loss is built without ST's `gather_across_devices`. Raise `per_device_train_batch_size`, or switch to `cached_mnrl` when that OOMs: it caches embeddings across sub-forwards of `cached_mnrl_mini_batch_size` rows.
 
-### Batch size for contrastive losses
-
-`mnrl` is InfoNCE: each anchor's negatives are the other `batch_size - 1` positives in the same micro-batch, so batch size is the dominant hyperparameter. `gradient_accumulation_steps` does **not** grow the negative pool, and neither do extra GPUs — the loss is built without ST's `gather_across_devices`, so the pool stays per-device.
-
-To scale negatives, raise `per_device_train_batch_size`, or switch to `cached_mnrl` when `mnrl` OOMs — it caches embeddings across sub-forwards of `cached_mnrl_mini_batch_size` rows (default 32), decoupling the negative pool from activation memory without changing the loss. Rough targets: 256–512 for semantic search, 128 for duplicate detection, 64 for STS.
-
-### Matryoshka embeddings
-
-Wrap any loss for truncatable embeddings:
+Matryoshka wraps any loss for truncatable embeddings:
 
 ```yaml
 loss_type: mnrl
 matryoshka_dimensions: [256, 128, 64, 32]
-# matryoshka_weights: [1.0, 1.0, 1.0, 1.0]  # optional; must match the dimensions length
+# matryoshka_weights: [1.0, 1.0, 1.0, 1.0]   # optional; same length as the dimensions
 ```
 
-`matryoshka_weights` without `matryoshka_dimensions` raises at config time: the weights reach only
-`MatryoshkaLoss`, which is built from the dimensions, so the run would train the plain loss with the
-weights dropped. A length mismatch between the two raises as well.
-
-## Training metrics
-
-On logging steps the trainer runs a separate `torch.no_grad()` encoding pass (compatible with the cached losses), capped at 256 samples per text group, and logs alongside `loss` / `learning_rate` / `grad_norm`. Evaluation runs the same pass on every batch and reports the batch means under the `eval_` prefix.
-
-Always emitted: `embed/norm` (mean L2 norm of anchor embeddings, ~1.0 when normalized) and `embed/std` (mean per-dim std). Two or more text groups add `embed/cos_sim` (anchor-positive, should rise), `embed/mrr` and `embed/recall@{1,3,10}` (the k must fit the candidate count). Three groups add `embed/neg_cos_sim` (should fall) and `embed/triplet_margin`. In-batch ranking treats `positive[i]` as the correct candidate for `anchor[i]`, mirroring MNRL.
-
-Reading them: `embed/std` → 0 is representational collapse (lower the LR or regularize); high `embed/cos_sim` with low `embed/recall@1` is also collapse; `embed/mrr` saturating at 1.0 early means the batch is too small.
+`matryoshka_weights` without `matryoshka_dimensions` raises — the weights reach only `MatryoshkaLoss`, so the run would train the plain loss with them dropped. A length mismatch raises too.
 
 ## Configuration
 
 | Parameter | Default | Description |
-|-----------|---------|-------------|
+|---|---|---|
 | `loss_type` | `mnrl` | Loss function |
 | `loss_scale` | `20.0` | Scale / inverse temperature |
-| `cached_mnrl_mini_batch_size` | `32` | Rows per gradient-cached sub-forward (`cached_mnrl` only) |
+| `cached_mnrl_mini_batch_size` | `32` | Rows per gradient-cached sub-forward (`cached_mnrl`) |
 | `matryoshka_dimensions` | `None` | Matryoshka truncation dims |
-| `matryoshka_weights` | `None` | Per-dimension weights; requires `matryoshka_dimensions` of the same length |
+| `matryoshka_weights` | `None` | Per-dimension weights; same length as the dimensions |
 | `pooling_mode` | `mean` | `mean`, `cls`, `max`, `lasttoken`, `weightedmean`, `mean_sqrt_len_tokens` |
 | `normalize_embeddings` | `true` | L2-normalize output embeddings |
-| `max_length` | `512` | Truncation length; `null` → the backbone's context window |
-| `disable_dropout` | `false` | Disable dropout during training |
-| `batch_sampler` | `batch_sampler` | `batch_sampler` (random), `no_duplicates` / `no_duplicates_hashed` (MNRL — avoids in-batch duplicate false negatives), `group_by_label` (batch-triplet losses) |
+| `max_length` | `512` | Truncation length; `null` or non-positive → the backbone's context window |
+| `disable_dropout` | `false` | Disable dropout while training |
+| `batch_sampler` | `batch_sampler` | `no_duplicates` / `no_duplicates_hashed` (MNRL — avoids in-batch false negatives), `group_by_label` (batch-triplet losses) |
 
-`pooling_mode`, `normalize_embeddings` and `max_length` describe the pipeline the run trains on both loading paths: the EP/TP path builds the `SentenceTransformer` modules from them, and the standard data-parallel path (which loads the checkpoint's own `modules.json`) is aligned to them after loading, with `max_length` installed as ST's `max_seq_length` over whatever the checkpoint ships.
+`pooling_mode`, `normalize_embeddings` and `max_length` describe the pipeline both loading paths train: the EP/TP path builds the `SentenceTransformer` modules from them, the standard path aligns the checkpoint's `modules.json` to them.
 
-A `pooling_mode` differing from the checkpoint's is applied and logged, so set it to the checkpoint's own strategy unless you intend to change it. `normalize_embeddings: false` against a checkpoint whose pipeline carries a `Normalize` module raises rather than silently redefining its similarity scale.
+A `pooling_mode` differing from the checkpoint's is applied and logged — set it deliberately. `normalize_embeddings: false` against a checkpoint ending in `Normalize` raises rather than silently redefining its similarity scale; a pipeline with no `Pooling` module raises too.
+
+## Launch
+
+```bash
+# single GPU or FSDP2 data parallel
+python scripts/training/embedding.py examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml
+
+# EP (MoE, 8 GPUs)
+torchrun --nproc_per_node=8 scripts/training/embedding.py \
+    examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml
+```
+
+`halo launch embedding <config> --nproc 8` builds the same line. Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/embedding/`; all four run `loss_type: mnrl`, `pooling_mode: lasttoken`, `max_length: 512`, `batch_sampler: no_duplicates`.
+
+Qwen3-Embedding-4B is a decoder-based embedder: use `pooling_mode: lasttoken`, not `mean`. It is long-context, so keep `max_length` small unless you embed long documents.
+
+Under EP or TP the backbone loads through `PreloadedTransformer` (`src/trainers/embedding/sentence_transformers_compat.py`): the built-in ST `Transformer` reloads from a path and would discard the EP/TP patches. An MoE backbone under neither EP nor ETP takes the plain ST loader, with no EP wrappers.
 
 ## PEFT / LoRA
 
-`use_peft: true` injects LoRA into the backbone in place (`inject_adapter_in_model`), so `lora_task_type` is not consulted on this path. It runs on the **plain data-parallel / FSDP2 path only**: the trainer rejects it under any EP or ETP mode (the EP save path gathers the expert layout with no adapter-merge step, so the checkpoint would reload adapter keys as random base weights), and the mixin's LoRA gate rejects it under TP.
+`use_peft: true` injects LoRA into the backbone in place (`inject_adapter_in_model`), on the plain data-parallel / FSDP2 path only — EP, ETP and TP are rejected at construction ([PEFT](../optimization/peft.md#embedding-models)). Quantization, `lora_modules_to_save` and `train_sinks: true` raise at startup; a DoRA merge raises at first save.
 
-Three more raises, each on something that would otherwise be silent: quantization (the ST loader never applies a `quantization_config`, so `--load_in_4bit` / `--load_in_8bit` would be ignored); merging a DoRA adapter on save (`NotImplementedError` — its magnitude reparam is not a linear merge); and `lora_modules_to_save` (adapters are injected in place, so the trainable copies are re-frozen by the adapter-only freeze and the wrapper renames the base tensor to `<mod>.original_module.*`, leaving the saved module without the plain `<mod>.weight` it reloads from). See [PEFT (LoRA)](../optimization/peft.md#embedding-models).
+## Saving
 
-## Parallelism
+Saves route through the shared `save_checkpoint` ladder ([Checkpoints](../reference/checkpoints.md)); all ranks run the gather collective and only the writer retains the state dict, with in-place LoRA folded in (`<m>.weight = base + scaling · B @ A`) first. The ST pipeline config (`modules.json`, `sentence_bert_config.json`, the per-module directories) is written alongside, so the output loads with `SentenceTransformer(path)`.
 
-EP, TP, EP+TP, pure ETP (`ep_size=1`), and EP+ETP are supported. **CP is not** (pooling needs the full sequence), and neither is PP. See [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+## What to watch
 
-In EP/TP mode the backbone loads via `load_script_model(model_class=AutoModel)` wrapped in `PreloadedTransformer` (`src/trainers/embedding/sentence_transformers_compat.py`), which implements the ST `Transformer` interface — the built-in ST `Transformer` reloads from a string path and would discard the EP/TP patches. The resulting `PreloadedTransformer → Pooling → Normalize` pipeline works with every ST loss.
+Metrics come from a separate `torch.no_grad()` encoding pass on logging steps, capped at 256 samples per padded text group; evaluation runs it every batch under an `eval_` prefix (`eval_embed/norm`, …).
 
-### Saving
+| Metric | When | Reading |
+|---|---|---|
+| `embed/norm`, `embed/std` | always | Mean L2 norm (~1.0 when normalized) and per-dim std; std → 0 is collapse |
+| `embed/cos_sim`, `embed/mrr`, `embed/recall@{1,3,10}` | ≥ 2 text groups | Anchor-positive similarity and in-batch ranking; should rise |
+| `embed/neg_cos_sim`, `embed/triplet_margin` | ≥ 3 text groups | Negative similarity should fall |
 
-Under EP, TP, or mixin-managed FSDP2 the trainer saves through the shared `save_checkpoint` ladder ([Checkpoints](../reference/checkpoints.md)), with the checkpoint context re-pointed from the `SentenceTransformer` `nn.Sequential` at the `auto_model` backbone. Embedding exports therefore get the same treatment as every other trainer: the configured `save_max_shard_size`, the module-tree-derived save-dtype cast (`save_dtype_caster`), hub expert layouts for MoE backbones, and the `.bin` fallback when safetensors sharding fails.
+High `embed/cos_sim` with low `embed/recall@1` is also collapse; `embed/mrr` saturating at 1.0 early means the batch is too small.
 
-All ranks run the gather collective; only the writer rank retains the gathered state dict. The ST pipeline config (`modules.json` and the per-module configs) is written alongside it, so the output loads with `SentenceTransformer(path)`.
-
-In-place-injected LoRA is the one case that bypasses the ladder: the model is not a `PeftModel`, so the adapters are folded into the gathered state dict (`<m>.weight = base + scaling · B @ A`) before it goes to the same shared writer.
-
-### Vision-language
-
-Not supported. Standard sentence-transformers mode is the only feasible path; EP/TP would need a multimodal `PreloadedTransformer`, which is not implemented.
-
-## Decoder-based embedding models
-
-Qwen3-Embedding-4B is a decoder-based embedding model on the Qwen3 architecture (`examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml`). It differs from encoder models (BERT, BGE) in one load-bearing way: use `pooling_mode: lasttoken`, not `mean`. It is also instruction-aware (task prefixes via ST `prompts`) and long-context, so keep `max_length` small unless you really embed long documents.
-
-## Tests
+## Testing a setup
 
 ```bash
+pytest tests/cpu/trainers tests/cpu/config/test_embedding_pipeline_alignment.py -m cpu
 torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_embedding.py
 ```
 
-Covers import/alias, CP rejection, MNRL on positive pairs, CoSENT on scored pairs, LoRA training, the FSDP2 gathered-save roundtrip, and the LoRA merge-on-save roundtrip, on `sentence-transformers/paraphrase-MiniLM-L3-v2`.
+The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save and the LoRA merge on `sentence-transformers/paraphrase-MiniLM-L3-v2`.
 
 ## Related pages
 
 - [Expert Parallelism](../parallelism/expert-parallelism.md) · [Tensor Parallelism](../parallelism/tensor-parallelism.md)
-- [Dataset Formats](../data/dataset-formats.md) · [Scripts Reference](../reference/scripts-reference.md)
+- [Dataset Formats](../data/dataset-formats.md) · [PEFT](../optimization/peft.md#embedding-models) · [Scripts Reference](../reference/scripts-reference.md)

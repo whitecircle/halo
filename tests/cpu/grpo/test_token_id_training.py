@@ -38,7 +38,8 @@ def test_extract_token_ids_rejects_missing_or_malformed():
     # No logprobs at all → None (caller falls back to re-tokenization).
     assert _extract_token_ids({}) is None
     assert _extract_token_ids({"logprobs": None}) is None
-    assert _extract_token_ids({"logprobs": {"content": []}}) is None
+    # An empty content list is a zero-token completion the capture DID return, not a missing capture.
+    assert _extract_token_ids({"logprobs": {"content": []}}) == []
     # A plain-text token (server not run with --return-tokens-as-token-ids) → None, not a guess.
     assert _extract_token_ids(_choice(["token_id:1", "hello"])) is None
     assert _extract_token_ids(_choice(["token_id:notanint"])) is None
@@ -54,7 +55,7 @@ def test_extract_token_logprobs_parses_values():
 def test_extract_token_logprobs_rejects_missing_or_malformed():
     assert _extract_token_logprobs({}) is None
     assert _extract_token_logprobs({"logprobs": None}) is None
-    assert _extract_token_logprobs({"logprobs": {"content": []}}) is None
+    assert _extract_token_logprobs({"logprobs": {"content": []}}) == []
     # An entry with no numeric logprob → None (don't fabricate a confidence value).
     assert _extract_token_logprobs({"logprobs": {"content": [{"token": "token_id:1"}]}}) is None
     assert _extract_token_logprobs(_choice_lp([("token_id:1", "nan")])) is None
@@ -69,7 +70,14 @@ def _make_trainer_stub(tok):
     from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 
     stub = types.SimpleNamespace(
-        processing_class=tok, _tokenizer=tok, _tools_schema=None, _rollout_routing_replay=False
+        processing_class=tok,
+        _tokenizer=tok,
+        _tools_schema=None,
+        _rollout_routing_replay=False,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
     )
     # gpt-oss ships model_max_length as the unset sentinel, so _context_limit falls back to the config.
     stub.model = types.SimpleNamespace(config=types.SimpleNamespace(max_position_embeddings=131072))
@@ -100,7 +108,14 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
 
     fake_tok = types.SimpleNamespace(model_max_length=int(1e30))
     stub = types.SimpleNamespace(
-        processing_class=fake_tok, _tokenizer=fake_tok, _tools_schema=None, _rollout_routing_replay=False
+        processing_class=fake_tok,
+        _tokenizer=fake_tok,
+        _tools_schema=None,
+        _rollout_routing_replay=False,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
     )
     stub.model = types.SimpleNamespace(config=types.SimpleNamespace(max_position_embeddings=131072))
 
@@ -208,6 +223,70 @@ def test_prompt_render_includes_tool_schema():
     assert len(ids_with) > len(ids_without), "rendering tools must add the tool-definition block"
 
 
+def test_fallback_context_render_is_the_engine_view():
+    """A turn without engine prompt ids re-renders its history exactly as the engine was told it:
+    with carried reasoning only the previous assistant turn keeps its thought, without it none does."""
+    from src.environments.base import Message, Trajectory
+    from src.environments.episode import RolloutResult
+
+    def _episode():
+        traj = Trajectory()
+        traj.add_message(Message.user("q"))
+        traj.add_message(Message.assistant("first", thinking="one", token_ids=[5], prompt_token_ids=[1]))
+        traj.add_message(Message.tool("out", "c0", "echo"))
+        traj.add_message(Message.assistant("second", thinking="two", token_ids=[6], prompt_token_ids=[1, 2]))
+        traj.add_message(Message.assistant("third", thinking="three", token_ids=[7]))  # no engine prompt ids
+        return RolloutResult(prompt="q", trajectory=traj)
+
+    for carry, expected in ((True, [None, "two"]), (False, [None, None])):
+        seen = []
+
+        def render(msgs, add_generation_prompt, _kwargs, include_thinking=True):
+            seen.append([m.thinking for m in msgs if m.role == "assistant"])
+            return [1, 2, 3]
+
+        stub = _render_stub(render)
+        stub._carry_reasoning = carry
+        stub._tokenize_trajectory_turns(_episode())
+        assert seen == [expected], carry
+
+
+def test_a_per_turn_row_over_the_train_row_cap_leaves_the_batch():
+    """The cap is the rank's memory bound: the oversized turn is left out, its episode's other turns stay,
+    and the trainer's counter records it. Without a cap the same row trains."""
+    from src.environments.base import Message, Trajectory
+    from src.environments.episode import RolloutResult
+
+    traj = Trajectory()
+    traj.add_message(Message.user("q"))
+    traj.add_message(Message.assistant("short", token_ids=[5, 6], prompt_token_ids=[1, 2]))
+    traj.add_message(Message.assistant("long", token_ids=[7, 8, 9, 10], prompt_token_ids=[1, 2, 3, 4]))
+    stub = _turns_stub()
+    stub._max_train_row_tokens = 6
+    rows = stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
+    assert [row.completion_ids.tolist() for row in rows] == [[5, 6]]
+    assert stub._rows_over_cap == 1
+    assert len(_turns_stub()._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))) == 2
+
+
+def test_every_turn_over_the_cap_trains_as_one_masked_row():
+    from src.environments.base import Message, Trajectory
+    from src.environments.episode import RolloutResult
+    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+
+    traj = Trajectory()
+    traj.add_message(Message.user("q"))
+    traj.add_message(Message.assistant("long", token_ids=[7, 8, 9, 10], prompt_token_ids=[1, 2, 3, 4]))
+    stub = _turns_stub()
+    stub._max_train_row_tokens = 6
+    stub.eos_token_id = 2
+    stub.pad_token_id = 0
+    stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
+    rows = stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
+    assert len(rows) == 1 and rows[0].completion_mask.tolist() == [0]
+    assert stub._rows_over_cap == 1
+
+
 def _turns_stub():
     """A stub exposing only _tokenize_trajectory_turns + its render dep, no tokenizer needed for the
     old-logps rows (fallback path is not exercised)."""
@@ -215,7 +294,14 @@ def _turns_stub():
 
     from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 
-    stub = types.SimpleNamespace(_warned_capture_missing=False, _rollout_routing_replay=False)
+    stub = types.SimpleNamespace(
+        _warned_capture_missing=False,
+        _rollout_routing_replay=False,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
+    )
     stub._render_messages_to_ids = lambda *a, **k: [1, 2, 3]
     stub._context_limit = lambda: 10**9  # no overflow in this test's tiny rows
     stub._tokenize_trajectory = lambda result: (__import__("torch").tensor([0]),) * 3
@@ -274,6 +360,10 @@ def test_turns_path_records_context_overflow():
     stub = _turns_stub()
     stub._context_limit = lambda: 4  # render=3 prompt tokens + 5 completion ids = 8 > 4
     stub._batch_build_error = None
+    stub._rollout_template_kwargs = {}
+    stub._carry_reasoning = False
+    stub._max_train_row_tokens = None
+    stub._rows_over_cap = 0
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("a", token_ids=[1, 2, 3, 4, 5], token_logprobs=[-0.1] * 5))
@@ -292,6 +382,10 @@ def _render_stub(render):
         _rollout_routing_replay=False,
         _rollout_backend="vllm",
         _batch_build_error=None,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
         eos_token_id=2,
         pad_token_id=0,
         _tokenizer=types.SimpleNamespace(name_or_path="stub-model"),

@@ -4,9 +4,8 @@
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
-                                         #   true) sets self_attn.sinks = None and the save re-emits
-                                         #   dtype.min; live sinks are rejected under FA2
+attn_implementation: flash_attention_2   # FA2 carries no sink argument; live sinks are rejected
+                                         #   under it, so reset_sinks must stay on (its default)
 model_init_kwargs:
   output_router_logits: true
   router_aux_loss_coef: 0.001
@@ -16,7 +15,7 @@ expert_parallel_size: 8
 
 # --- Dataset ---
 dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
-test_size: 0.005   # 273k rows — 0.005 keeps each eval pass near ~1.4k pair forwards
+test_size: 0.005
 
 # --- SMPO Hyperparameters ---
 beta: 1.0

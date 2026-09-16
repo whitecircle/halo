@@ -20,10 +20,11 @@ The `Makefile` wraps the `docker run` incantation once:
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8 EXTRA="--expert_parallel_size=8"
 ```
 
-The Makefile's `DOCKER_RUN` is not identical to a hand-rolled launch: it runs in the foreground, adds
+The Makefile's `DOCKER_RUN` is not identical to a hand-rolled launch. It runs in the foreground and adds
 `--network host` (the vLLM e2e GPU tests reach the compose server at `localhost:8000`; bridge
-networking would silently fail them) plus `-e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1`,
-and makes `--env-file` and the `~/.aws` mount conditional on `ENV_FILE`/`AWS_DIR` so CI can run
+networking would silently fail them) plus `-e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1`.
+
+It makes `--env-file` and the `~/.aws` mount conditional on `ENV_FILE`/`AWS_DIR` so CI can run
 creds-free. It also **omits `--cap-add=SYS_PTRACE`**, so py-spy cannot attach to a job started through
 a `make` target.
 
@@ -54,13 +55,14 @@ Load-bearing flags:
 - `--ipc=host --shm-size=128g` and the `ulimit` settings — required for NCCL and the DataLoader.
 - `--cap-add=SYS_PTRACE` — lets py-spy attach for hang triage (`scripts/profiling/py_spy_diag.py`).
 
-None of those four paths is a code default — each falls back to its own default when unset
+None of those four paths is a code default. Each falls back to its own default when unset
 (`~/.cache/huggingface`, `~/.cache/halo`, the system `/tmp`), so the redirect is a convention you
-supply. The Makefile defaults them to `/mnt` via `HALO_SCRATCH ?= /mnt` — the same variable the
-vLLM compose file and the devcontainer read, so exporting `HALO_SCRATCH` once points the whole
-toolchain at the host's large volume. `/mnt` is
-**not a guaranteed large volume**: on some hosts it shares the small root device. Confirm with
-`findmnt` / `df -h` before any multi-GB write.
+supply.
+
+The Makefile defaults them to `/mnt` via `HALO_SCRATCH ?= /mnt`, the same variable the vLLM compose
+file and the devcontainer read, so exporting `HALO_SCRATCH` once points the whole toolchain at the
+host's large volume. `/mnt` is **not a guaranteed large volume**: on some hosts it shares the small root
+device. Confirm with `findmnt` / `df -h` before any multi-GB write.
 
 ## Image matrix
 
@@ -82,11 +84,13 @@ toolchain at the host's large volume. `/mnt` is
 | Gigatoken tokenizer backend (`gigatoken` 0.9.x, `tokenizer_backend: gigatoken`) | Yes | Yes |
 | uv 0.10.x, AWS CLI v2 (Claude Code via `INSTALL_CLAUDE_CODE=1`, off by default) | Yes | Yes |
 
-`TARGET_GPU` writes the build's CUDA arch list to `/etc/cuda_arch` — `9.0` for Hopper, `10.0+PTX` for
-Blackwell (one image serves SM100 and SM103) — which each source-build step exports as
-`TORCH_CUDA_ARCH_LIST`. It is not an image `ENV`; only the login shell re-exports it (`.bashrc`), so a
-`docker run ... python` sees it unset. The DeepEP build overrides it — see [DeepEP](deepep.md) for why
-that arch list does not bound the kernels the toolkit actually runs.
+`TARGET_GPU` writes the build's CUDA arch list to `/etc/cuda_arch`: `9.0` for Hopper, `10.0+PTX` for
+Blackwell (one image serves SM100 and SM103). Each source-build step exports it as
+`TORCH_CUDA_ARCH_LIST`.
+
+It is not an image `ENV`; only the login shell re-exports it (`.bashrc`), so a `docker run ... python`
+sees it unset. The DeepEP build overrides it; see [DeepEP](deepep.md) for why that arch list does not
+bound the kernels the toolkit actually runs.
 
 `transformer_engine` is uninstalled at the end of the build.
 
@@ -113,33 +117,42 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
 ```
 
 - **Credential-free.** Every dependency is public — no build secret or token is required.
-- **Built with uv, not Poetry.** Deps install into the system interpreter via
-  `uv export --locked` into a requirements file, then `uv pip install --system --no-deps -r` it (hatchling
-  backend, no venv). `--no-deps` is load-bearing: without it the resolver reinstalls torch, Flash Attention
-  and DeepEP over the source builds earlier layers compiled.
+- **Built with uv, not Poetry.** Deps install into the system interpreter via `uv export --locked` into a
+  requirements file, then `uv pip install --system --no-deps -r` it (hatchling backend, no venv).
+
+    `--no-deps` is load-bearing: without it the resolver reinstalls torch, Flash Attention and DeepEP over
+    the source builds earlier layers compiled.
+
 - **`SOURCE_REVISION`** busts the source-COPY cache; `make build-*` stamps it with the short git SHA, so a
-  code-only change reruns only the COPY + editable reinstall while every heavy dep layer stays cached. It
-  guards against BuildKit occasionally serving a stale `src/` snapshot. The same value is stamped as
-  `org.opencontainers.image.revision`, so
-  `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' halo:blackwell`
-  reports which commit an image carries. Pass it explicitly on a raw `docker build`.
+  code-only change reruns only the COPY + editable reinstall while every heavy dep layer stays cached.
+  Pass it explicitly on a raw `docker build`.
+
+    It guards against BuildKit occasionally serving a stale `src/` snapshot. The same value is stamped as
+    `org.opencontainers.image.revision`, so
+    `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' halo:blackwell`
+    reports which commit an image carries.
+
 - **`BASE_IMAGE`** defaults to `nvcr.io/nvidia/pytorch:26.03-py3`.
 - **License.** The image is labeled `org.opencontainers.image.licenses=LicenseRef-Halo` and carries
   `LICENSE` + `APACHE-2.0.txt` in `/workspace`.
-- **Every upstream clone is pinned to a commit or tag.** DeepEP `af9a040`; Hopper's FA2
-  `v2.8.3.post1` and its FA3 a `main` commit (`c46b8144`) — no FA release supports CUDA 13;
-  `aws-ofi-nccl` at the commit `docker/efa/install_efa_userspace.sh` pins (one script for all three
-  images) and `gdrcopy` at the `GDRCOPY_COMMIT` build arg, so a rebuild reproduces the shipped images. Blackwell never builds FA2 — it inherits it from `BASE_IMAGE`, which is
-  the pin, and the build asserts the base still delivers it rather than depending on it silently.
-  `aws-ofi-nccl` is configured `--disable-tests` because its functional tests need `mpi.h`, which the
-  image does not carry.
+- **Every upstream clone is pinned to a commit or tag**, so a rebuild reproduces the shipped images.
+
+    - DeepEP `af9a040`.
+    - Hopper's FA2 `v2.8.3.post1` and its FA3 a `main` commit (`c46b8144`); no FA release supports CUDA 13.
+      Blackwell never builds FA2: it inherits it from `BASE_IMAGE`, which is the pin, and the build asserts
+      the base still delivers it.
+    - `aws-ofi-nccl` at the commit `docker/efa/install_efa_userspace.sh` pins (one script for all three
+      images). It is configured `--disable-tests` because its functional tests need `mpi.h`, which the
+      image does not carry.
+    - `gdrcopy` at the `GDRCOPY_COMMIT` build arg.
+
 - **Hopper FA2 split-K stub.** CUDA 13.2 ptxas hangs on the 24 sm_90 split-K kernels, so the build swaps
   them for throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`) and sets
-  `FLASH_ATTN_CUDA_ARCHS=90`. Split-K is unreachable from the varlen forward and the whole backward, but the
-  **non-varlen** forward sets `num_splits=0` and can select it by occupancy heuristic at small
-  batch/head/seq — so a non-varlen caller must prefer FA3 on sm_90, which
-  `src/distributed/context_parallel/base_layer.py` does. Blackwell installs the prebuilt FA4 wheel and skips
-  this.
+  `FLASH_ATTN_CUDA_ARCHS=90`. Blackwell installs the prebuilt FA4 wheel and skips this.
+
+    Split-K is unreachable from the varlen forward and the whole backward, but the **non-varlen** forward
+    sets `num_splits=0` and can select it by occupancy heuristic at small batch/head/seq. A non-varlen
+    caller must therefore prefer FA3 on sm_90, which `src/distributed/context_parallel/base_layer.py` does.
 
 Rebuild when `pyproject.toml`/`uv.lock` change (run `uv lock` first), or when Flash Attention / DeepEP / the
 base NGC image need updating.
@@ -159,40 +172,49 @@ base NGC image need updating.
 | `HF_XET_HIGH_PERFORMANCE` | `1` | HF Xet high-throughput hub transfers (supersedes the deprecated `HF_HUB_ENABLE_HF_TRANSFER`). Already baked — SkyPilot configs need not re-set it. |
 | `TRANSFORMERS_NO_ADVISORY_WARNINGS` | `1` | Silences Transformers' advisory warnings (e.g. the per-call sequence-length notice). |
 
-`FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` and `TRITON_CACHE_DIR` are not baked — the FA4 cache and the Triton
+`FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` and `TRITON_CACHE_DIR` are not baked. The FA4 cache and the Triton
 kernel/autotune cache both derive their directories from `HF_HOME` (or the temp dir) at runtime, so one
-mounted volume carries every kernel cache across `--rm` containers. Triton matters more than it looks:
-fla's autotuners persist measured configs there (`FLA_CACHE_RESULTS` defaults on), and some of their keys
-are shape-derived, so an ephemeral cache re-benchmarks kernels per fresh sequence length on every run.
+mounted volume carries every kernel cache across `--rm` containers.
 
-The runtime NCCL is the pip wheel `nvidia-nccl-cu13`, pinned in `uv.lock` — read the version there,
-not from here; the NGC `NCCL_VERSION` env is the base-image system label and does not reflect it. All three images read the version out of `uv.lock` through one helper
-(`docker/nccl_pin.py`), which also owns the DeepEP-V2 floor: the post-install guard runs
-`nccl_pin.py --verify`, which fails the build if a later pip step re-resolved the wheel — or if the
-`libnccl.so.2` a process resolves once torch has preloaded is not that wheel's, which is how the
-base image's own older system copy would otherwise reach the weight-sync communicator unnoticed.
+Triton matters more than it looks: fla's autotuners persist measured configs there (`FLA_CACHE_RESULTS`
+defaults on), and some of their keys are shape-derived, so an ephemeral cache re-benchmarks kernels per
+fresh sequence length on every run.
+
+The runtime NCCL is the pip wheel `nvidia-nccl-cu13`, pinned in `uv.lock`; read the version there, not
+from here. The NGC `NCCL_VERSION` env is the base-image system label and does not reflect it.
+
+All three images read the version out of `uv.lock` through one helper (`docker/nccl_pin.py`), which
+also owns the DeepEP-V2 floor.
+
+The post-install guard runs `nccl_pin.py --verify`. It fails the build if a later pip step re-resolved
+the wheel, or if the `libnccl.so.2` a process resolves once torch has preloaded is not that wheel's;
+that is how the base image's own older system copy would otherwise reach the weight-sync communicator
+unnoticed.
 
 ## RDMA networking (InfiniBand and EFA)
 
-Both training images are EFA-ready as built, and so are the vLLM and SGLang server images:
+Both training images are EFA-ready as built, and so are the vLLM and SGLang server images.
 `docker/efa/install_efa_userspace.sh` installs the EFA installer 1.46.0's rdma-core (60) and AWS
-libfabric 2.3.1amzn4.0 — replacing the NGC base's MOFED rdma-core in the training images and the
-distro rdma-core of the server bases — and builds `aws-ofi-nccl` at one pinned commit against the
-`uv.lock` NCCL, in all three. One build everywhere is the point, rdma-core included; why both ends of
-a weight-sync group must match down to it:
-[Rollout Servers → Servers on other nodes](rollout-servers.md#servers-on-other-nodes-efa). IB works
-on the baked defaults; **EFA is a per-job opt-in** (its env vars degrade IB clusters, so they are not
-baked). The image matrix keys on GPU arch only — no separate `-efa` tag.
+libfabric 2.3.1amzn4.0, replacing the NGC base's MOFED rdma-core in the training images and the
+distro rdma-core of the server bases, and builds `aws-ofi-nccl` at one pinned commit against the
+`uv.lock` NCCL, in all three.
+
+One build everywhere is the point, rdma-core included; why both ends of a weight-sync group must match
+down to it: [Rollout Servers → Servers on other nodes](rollout-servers.md#servers-on-other-nodes-efa).
+
+IB works on the baked defaults; **EFA is a per-job opt-in** (its env vars degrade IB clusters, so they
+are not baked). The image matrix keys on GPU arch only: no separate `-efa` tag.
 
 - **InfiniBand / RoCE** (no extra env) — NCCL's built-in IB transport. The OFI plugin also sits under
   NCCL's default plugin name, so it is tried on every host and yields to the built-in transports
   where libfabric finds no provider.
 - **AWS EFA** (opt-in) — libfabric (`/opt/amazon/efa`) + a GIN-capable `aws-ofi-nccl` built at the pinned
   commit (exporting `ncclGinPlugin_v13`; the NGC-bundled 1.17.3 exports no `ncclGin`) exposed as
-  `libnccl-gin.so`, plus GDRCopy `libgdrapi`. Select it per job with `NCCL_NET_PLUGIN=ofi
-  NCCL_NET=Libfabric` ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)), and
-  for DeepEP cross-node EP add `NCCL_GIN_TYPE=2` (proxy GIN; EFA has no IBGDA)
-  and `--device /dev/gdrdrv` (host `gdrdrv` module).
+  `libnccl-gin.so`, plus GDRCopy `libgdrapi`.
+
+    Select it per job with `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric`
+    ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)). For DeepEP cross-node EP add
+    `NCCL_GIN_TYPE=2` (proxy GIN; EFA has no IBGDA) and `--device /dev/gdrdrv` (host `gdrdrv` module).
 
 Prerequisites and measured EFA ceilings: [DeepEP → EFA](deepep.md#expert-parallelism-over-aws-efa);
 per-fabric launch env: [Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics). A
@@ -211,12 +233,12 @@ communicator sees an identical NCCL runtime on both ends. Build asserts check th
 the lock, the resolved `libnccl.so.2`, and the `ncclUniqueId` ABI identity between the two stacks.
 
 The image bakes the RL serving contract: native weight transfer (`VLLM_SERVER_DEV_MODE=1`; the
-trainer's client drives the phased update protocol the server exposes), R3
-routed-experts capture, and two `sitecustomize`-applied patches — layerwise reload and
-weight-transfer re-init — whose targets are asserted against the live vLLM at build, so an upstream
-refactor fails the image build. What the patches do, the
-`--moe-backend triton` rule, serving flags, networking, GPU assignment, and troubleshooting:
-[Rollout Servers](rollout-servers.md).
+trainer's client drives the phased update protocol the server exposes), R3 routed-experts capture, and
+two `sitecustomize`-applied patches, layerwise reload and weight-transfer re-init. The patch targets are
+asserted against the live vLLM at build, so an upstream refactor fails the image build.
+
+What the patches do, the `--moe-backend triton` rule, serving flags, networking, GPU assignment, and
+troubleshooting: [Rollout Servers](rollout-servers.md).
 
 Which families this image can serve for RL, and why a family is refused, is stated once in
 [Rollout Servers → Weight sync](rollout-servers.md#weight-sync). Image-side quirk: vLLM loads the

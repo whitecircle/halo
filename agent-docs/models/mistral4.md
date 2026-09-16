@@ -21,7 +21,10 @@ Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per
 `EPMistral4MoELayer` (`src/distributed/expert_parallel/layers/mistral4.py`) replaces `Mistral4MoE`.
 
 - Routing: the wrapper calls `Mistral4TopkRouter` and keeps only its logits (the router also returns weights and indices, which balancing and routing replay have to recompute); `route_tokens_to_experts` then does softmax + group-topk inline, mirroring the router's own arithmetic. No `e_score_correction_bias` (unlike GLM-4); `norm_topk_prob` and `routed_scaling_factor` are honored.
-- Load balancing: Mistral4 has **no bias slot** (a plain softmax router, no correction-bias tensor), so `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the opt-in — the bias steers training-time routing, resumes from `router_balancing_biases.pt`, and never reaches a checkpoint or a served copy (near-tied top-k picks flip between trainer and server). `Mistral4ForCausalLM.forward` declares no `output_router_logits` parameter either, so `aux_loss` cannot work and `auto` resolves to `none` with a warning naming the transient opt-in. See [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+- Load balancing: Mistral4 has **no bias slot** (a plain softmax router, no correction-bias tensor), so `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the opt-in. `Mistral4ForCausalLM.forward` declares no `output_router_logits` parameter either, so `aux_loss` cannot work and `auto` resolves to `none` with a warning naming the transient opt-in.
+
+    The transient bias steers training-time routing, resumes from `router_balancing_biases.pt`, and never reaches a checkpoint or a served copy (near-tied top-k picks flip between trainer and server). See [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+
 - Routed experts: `Mistral4Experts`, fused `gate_up_proj [E, 2M, H]` (F.linear convention; matmul-internal form `[E, H, 2M]`) and `down_proj [E, H, M]`. Same layout as Qwen3.5 / GLM-4, so the shared `EPMoELayerBase` fused-GLU helpers cover compute (Grouped GEMM on SM90+).
 - Shared expert: `Mistral4MLP`, replicated per rank, summed after DeepEP combine. Intermediate size = `moe_intermediate_size * n_shared_experts`.
 - Checkpoints: weights stored in matmul convention internally; `gather_expert_state_dict` transposes back to F.linear convention at save so `from_pretrained` reloads as-is. The public `mistralai/Mistral-Small-4-119B-*` checkpoint ships FP8 expert weights — dequantize once with `scripts/before_training/convert_mistral4_bf16.py` (streams shard-by-shard, handles scalar and per-expert `_scale_inv` layouts) before training.
@@ -44,7 +47,9 @@ Three MLA-specific bits the wrapper handles:
 
 - **Mismatched head dims** — `qk_head_dim` (nope + rope) and `v_head_dim` can differ. Flash-attn's native GQA wants one head_dim, so V is padded to `qk_head_dim` before the kernel and the output cropped back.
 - **Shared rope head** — `kv_a_proj_with_mqa` produces one rotary K vector broadcast to all heads. The broadcast is materialized *before* the Ulysses all-to-all so the head-dim scatter has a contiguous tensor.
-- **Llama-4 position scale** — transformers' own `get_llama_4_attn_scale` multiplies Q after RoPE. The legacy path applies it after the all-to-all, where Q spans the whole sequence, so `UlyssesCPModelWrapper` publishes the full `position_ids` on every patched layer once per forward (no per-layer gather). A `rope_parameters` without `llama_4_scaling_beta` / `original_max_position_embeddings` is refused at construction rather than trained unscaled.
+- **Llama-4 position scale** — transformers' own `get_llama_4_attn_scale` multiplies Q after RoPE. The legacy path applies it after the all-to-all, where Q spans the whole sequence, so `UlyssesCPModelWrapper` publishes the full `position_ids` on every patched layer once per forward (no per-layer gather).
+
+    A `rope_parameters` without `llama_4_scaling_beta` / `original_max_position_embeddings` is refused at construction rather than trained unscaled.
 
 RoPE follows `config.rope_interleave`: rotate-half (`apply_rotary_pos_emb`) or interleaved pairs (`apply_rotary_pos_emb_interleave`).
 
@@ -60,11 +65,17 @@ MoE blocks (`Mistral4MoE`, `Mistral4Experts`, `Mistral4MLP`) are skipped — the
 
 ## ETP
 
-Mistral4's expert layout matches GLM-4 / LFM-2 (contiguous halves `[gate(M) | up(M)]` in matmul-convention `gate_up_proj [E, H, 2M]`), so ETP works automatically via `EPMoELayerBase._init_fused_glu_params`: with `expert_tp_size > 1` the helper splits halves before sharding and stores `gate_proj` / `up_proj` / `down_proj` separately on each ETP rank (intermediate slice `[rank*M/tp : (rank+1)*M/tp]`). On save, gate/up shards are all-gathered, concatenated back into contiguous halves, transposed to F.linear convention. The shared expert (`Mistral4MLP`) stays replicated. See [Expert Tensor Parallelism → Compatibility](../parallelism/expert-tensor-parallelism.md#limitations).
+Mistral4's expert layout matches GLM-4 / LFM-2 (contiguous halves `[gate(M) | up(M)]` in matmul-convention `gate_up_proj [E, H, 2M]`), so ETP works automatically via `EPMoELayerBase._init_fused_glu_params`: with `expert_tp_size > 1` the helper splits halves before sharding and stores `gate_proj` / `up_proj` / `down_proj` separately on each ETP rank (intermediate slice `[rank*M/tp : (rank+1)*M/tp]`).
+
+On save, gate/up shards are all-gathered, concatenated back into contiguous halves, transposed to F.linear convention. The shared expert (`Mistral4MLP`) stays replicated. See [Expert Tensor Parallelism → Compatibility](../parallelism/expert-tensor-parallelism.md#limitations).
 
 ## Liger kernel
 
-Liger upstream ships no `mistral4` applier; the toolkit covers `mistral4` from its own spec in `src/kernels/liger/families.py`, and a `mistral3` checkpoint resolves through its text tower — this spec for a `mistral4` tower, upstream's `mistral` applier for a Mistral Small 3.x one. With `use_liger_kernel: true` it swaps `Mistral4RMSNorm` for Liger's fused RMSNorm, `Mistral4MLP` for the toolkit's fused SwiGLU (the shared expert's `(config, intermediate_size=None)` constructor is inherited, not restated), routes cross-entropy through Liger, and offers the fused loss on `Mistral4ForCausalLM` for text-only checkpoints (off by default). `mistral3` checkpoints load as `Mistral3ForConditionalGeneration`, whose own head runs, so the orchestrator forces the fused loss off for them and keeps CE ([Liger Kernels](../optimization/liger-kernels.md#fused-loss-under-a-multimodal-wrapper)).
+Liger upstream ships no `mistral4` applier; the toolkit covers `mistral4` from its own spec in `src/kernels/liger/families.py`. A `mistral3` checkpoint resolves through its text tower: this spec for a `mistral4` tower, upstream's `mistral` applier for a Mistral Small 3.x one.
+
+With `use_liger_kernel: true` it swaps `Mistral4RMSNorm` for Liger's fused RMSNorm, `Mistral4MLP` for the toolkit's fused SwiGLU (the shared expert's `(config, intermediate_size=None)` constructor is inherited, not restated), routes cross-entropy through Liger, and offers the fused loss on `Mistral4ForCausalLM` for text-only checkpoints (off by default).
+
+`mistral3` checkpoints load as `Mistral3ForConditionalGeneration`, whose own head runs, so the orchestrator forces the fused loss off for them and keeps CE ([Liger Kernels](../optimization/liger-kernels.md#fused-loss-under-a-multimodal-wrapper)).
 
 RoPE stays unfused — Mistral4 combines YARN with the llama-4 logarithmic scale, which Liger's `liger_rotary_pos_emb` doesn't model. The spec declares `rope=False`, and the orchestrator honors an applier's own `rope` default over its generic default-on, so `rope` stays off unless the user explicitly pins `rope: true` in `liger_kernel_config` — which the applier then refuses with `NotImplementedError`.
 
@@ -87,6 +98,10 @@ Mistral-Small-4-119B (`mistralai/Mistral-Small-4-119B-2603`) trains under EP at 
 
 ## Serving
 
-vLLM 0.26.0 knows nothing of this family: `mistral4` appears in neither its architecture registry nor any `model_type` mapping. The composite `Mistral3ForConditionalGeneration` **is** registered, but it builds its text tower through `init_vllm_registered_model` off `text_config`, whose `mistral4` spelling resolves to no class. The public `mistralai/Mistral-Small-4-*` repo serves only because vLLM detects its Mistral-native `params.json` layout and routes the whole model to `PixtralForConditionalGeneration`; a toolkit export is plain HF-format and has no such path. vLLM's generic transformers backend (`--model-impl transformers`) is the one remaining route, neither pinned nor verified here.
+vLLM 0.26.0 knows nothing of this family: `mistral4` appears in neither its architecture registry nor any `model_type` mapping. The composite `Mistral3ForConditionalGeneration` **is** registered, but it builds its text tower through `init_vllm_registered_model` off `text_config`, whose `mistral4` spelling resolves to no class.
 
-**RL weight sync is refused at construction** on both engines, off each client's `UNSERVABLE_MODEL_TYPES`: the sync forwards hub-spelled tensors into the server's own loader, and neither vLLM 0.26.0 nor SGLang 0.5.17 registers a class for this family. Online and environmental GRPO on Mistral4 raise at trainer build rather than sync into a server that cannot hold the model ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SFT, preference and offline methods are unaffected — they never touch a rollout engine.
+The public `mistralai/Mistral-Small-4-*` repo serves only because vLLM detects its Mistral-native `params.json` layout and routes the whole model to `PixtralForConditionalGeneration`; a toolkit export is plain HF-format and has no such path. vLLM's generic transformers backend (`--model-impl transformers`) is the one remaining route, neither pinned nor verified here.
+
+**RL weight sync is refused at construction** on both engines, off each client's `UNSERVABLE_MODEL_TYPES`: the sync forwards hub-spelled tensors into the server's own loader, and neither vLLM 0.26.0 nor SGLang 0.5.17 registers a class for this family.
+
+Online and async GRPO on Mistral4 raise at trainer build rather than sync into a server that cannot hold the model ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SFT, preference and offline methods are unaffected; they never touch a rollout engine.

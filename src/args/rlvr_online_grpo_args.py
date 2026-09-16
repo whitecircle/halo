@@ -1,16 +1,21 @@
 """Script arguments for RLVR online GRPO (verifiable rule-based rewards)."""
 
 from dataclasses import dataclass, field, fields
-from typing import Literal
+from typing import Any, ClassVar, Literal
 
 from src.args.common_script_args import CommonScriptArguments
 from src.args.mixins import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     PromptDatasetArguments,
-    RLRRConfig,
+    RLRRArguments,
     SDPGArguments,
 )
+from src.rewards.spec import JudgeTerm, RewardModelTerm, RewardTerm, parse_reward_terms, sources_of
+from src.rewards.verifiable import AccuracyTerm, FormatTerm
+
+# The reward sources the RLVR arm admits: its two graders plus the externally scored terms.
+RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm)
 
 
 @dataclass
@@ -18,14 +23,24 @@ class RLVROnlineGRPOScriptArguments(
     PromptDatasetArguments,
     ChunkedLogprobsArguments,
     AdvantageShapingArguments,
+    RLRRArguments,
     SDPGArguments,
     CommonScriptArguments,
 ):
     """Arguments for RLVR (Reinforcement Learning with Verifiable Rewards) Online GRPO.
 
-    RLVR uses rule-based reward functions (math accuracy, format checking) instead of
-    external API scoring — for tasks with verifiable outcomes (math, coding, etc.).
+    The reward is the ``rewards`` list of terms (:mod:`src.rewards.spec`): the ``accuracy`` and
+    ``format`` graders, a generative ``judge``, a served ``reward_model`` — each ``weight * score ** exponent``.
+
+    RLRR (arXiv:2601.23058, :class:`RLRRArguments`) replaces the group-normalized advantages with
+    relative-ranking ones and is mutually exclusive with the AdvantageShapingArguments surgery.
     """
+
+    # The tunables ``use_sdpg`` gates: the shared block plus the RLVR-only advantage gate.
+    SDPG_TUNABLES: ClassVar[tuple[str, ...]] = (
+        *(f.name for f in fields(SDPGArguments)),
+        "opd_positive_advantage_only",
+    )
 
     answer_field: str = field(
         default="answer",
@@ -49,54 +64,14 @@ class RLVROnlineGRPOScriptArguments(
         },
     )
 
-    use_accuracy_reward: bool = field(
-        default=True,
-        metadata={"help": r"Enable accuracy reward: checks if \boxed{} content matches ground truth"},
-    )
-    use_format_reward: bool = field(
-        default=False,
-        metadata={"help": "Enable format reward: checks if completion matches expected format pattern"},
-    )
-    format_pattern: str = field(
-        default=r"<think>.*?</think>\s*<answer>.*?</answer>",
-        metadata={"help": "Regex pattern for format reward (used when use_format_reward=True)"},
-    )
-
-    accuracy_reward_weight: float = field(
-        default=1.0,
-        metadata={"help": "Weight for accuracy reward function"},
-    )
-    format_reward_weight: float = field(
-        default=0.5,
-        metadata={"help": "Weight for format reward function"},
-    )
-
-    # RLRR (arXiv:2601.23058) replaces group-normalized advantages with relative-ranking ones;
-    # mutually exclusive with AdvantageShapingArguments' negative-side surgery (advantage_mode).
-    use_rlrr: bool = field(
-        default=False,
-        metadata={"help": "Enable RLRR relative-reward advantage shaping (replaces group-normalized advantages)"},
-    )
-    rlrr_mode: Literal["hrr", "prr"] = field(
-        default="hrr", metadata={"help": "RLRR mode: 'hrr' (hybrid) or 'prr' (pure relative)"}
-    )
-    rlrr_tau: float = field(default=0.1, metadata={"help": "HRR temperature τ (Eq. 3)"})
-    rlrr_lambda: float = field(default=2048.0, metadata={"help": "Length-bin granularity λ for re-ranking (Eq. 6)"})
-    rlrr_std_normalize: bool = field(default=False, metadata={"help": "Std-normalize advantages within each group"})
-    rlrr_length_rerank: bool = field(default=True, metadata={"help": "Enable hierarchical length re-ranking (Eq. 6)"})
-    rlrr_correctness_clip: bool = field(
-        default=True,
-        metadata={"help": "Correctness-aware advantage clipping (Eq. 5). Disable for pure PRR with no gold labels."},
-    )
-    rlrr_correctness_threshold: float = field(
-        default=0.5,
-        metadata={"help": "Reward >= threshold counts as correct — the only correctness signal"},
-    )
-    rlrr_xi_pos: float = field(
-        default=1e-3, metadata={"help": "Advantage cap ξ⁺ for incorrect responses (Eq. 5 clip)"}
-    )
-    rlrr_xi_neg: float = field(
-        default=-1e-3, metadata={"help": "Advantage floor ξ⁻ for correct responses (Eq. 5 clip)"}
+    rewards: list[dict[str, Any]] = field(
+        default_factory=lambda: [{"source": "accuracy"}],
+        metadata={
+            "help": "Reward terms, each {source, name?, weight?, exponent?, ...}: sources 'accuracy' "
+            "(last \\boxed{} equals the answer), 'format' (pattern), 'judge' (model, requirements, "
+            "reasoning_effort, ...) and 'reward_model' (url, model, backend, ...). Each term is one "
+            "TRL reward function named after it, weighted by its weight; see agent-docs/training-methods/grpo/rewards.md."
+        },
     )
 
     # SDPG (arXiv:2606.04036): privileged-teacher reverse-KL OPD term on positive-advantage
@@ -130,30 +105,16 @@ class RLVROnlineGRPOScriptArguments(
             "opd_positive_advantage_only": self.opd_positive_advantage_only,
         }
 
-    def build_rlrr_config(self) -> RLRRConfig | None:
-        """Return an :class:`RLRRConfig` from these args, or ``None`` when RLRR is disabled."""
-        if not self.use_rlrr:
-            return None
-        return RLRRConfig(
-            mode=self.rlrr_mode,
-            tau=self.rlrr_tau,
-            lam=self.rlrr_lambda,
-            std_normalize=self.rlrr_std_normalize,
-            length_rerank=self.rlrr_length_rerank,
-            correctness_clip=self.rlrr_correctness_clip,
-            correctness_threshold=self.rlrr_correctness_threshold,
-            xi_pos=self.rlrr_xi_pos,
-            xi_neg=self.rlrr_xi_neg,
-        )
+    @property
+    def reward_terms(self) -> tuple[RewardTerm, ...]:
+        """The typed reward terms of ``rewards``, parsed and validated (also at parse time)."""
+        return parse_reward_terms(self.rewards, RLVR_REWARD_SOURCES)
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
-        # Both divide inside the RLRR shaping (Eq. 3 / Eq. 6): zero raises ZeroDivisionError in the
-        # advantage pass, a negative value inverts the ranking it is meant to correct.
-        if self.rlrr_tau <= 0:
-            raise ValueError(f"rlrr_tau must be > 0, got {self.rlrr_tau}")
-        if self.rlrr_lambda <= 0:
-            raise ValueError(f"rlrr_lambda must be > 0, got {self.rlrr_lambda}")
+        if not self.rewards:
+            raise ValueError("rewards must list at least one reward term")
+        self.reward_terms  # noqa: B018  parse at config time so a bad term fails before any server is touched
 
     def __post_init__(self):
         self._apply_default_project_name("rlvr-online-grpo")

@@ -72,9 +72,11 @@ carries: [Docker → Image matrix](../infrastructure/docker.md#image-matrix).
 
 `make test-gpu-vllm` is the `vllm_server` slice of the full tier and needs the `docker-compose.vllm.yml`
 server already serving on a GPU outside `TRAINER_CUDA_DEVICES` (default `0,1,2,3,4,5,6`, which the target
-pins as the trainer's `CUDA_VISIBLE_DEVICES`) — weight sync is an NCCL broadcast, and a rank cannot
-broadcast to itself. Without `EFA=1` it forces the no-fabric recipe both compose bases default to
-(`NCCL_IB_DISABLE=1 NCCL_NET=Socket`; why: [Rollout Servers → vLLM](../infrastructure/rollout-servers.md#vllm));
+pins as the trainer's `CUDA_VISIBLE_DEVICES`). Weight sync is an NCCL broadcast, and a rank cannot
+broadcast to itself.
+
+Without `EFA=1` it forces the no-fabric recipe both compose bases default to
+(`NCCL_IB_DISABLE=1 NCCL_NET=Socket`; why: [Rollout Servers → vLLM](../infrastructure/rollout-servers.md#vllm)).
 `EFA=1` passes `/dev/infiniband` and the fabric variables instead, matching a server started with
 its compose EFA overlay ([Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
 
@@ -134,44 +136,60 @@ manifest.
 - **Test behavior, not implementation.** Assert on loss finiteness, loss decrease, output shapes,
   and rejection of unsupported configs — never on private internals.
 - **A CPU test file is a plain pytest module.** It ends in
-  `if __name__ == "__main__": raise SystemExit(pytest.main([__file__, "-v"]))` — the conventions test
-  requires a `pytest.main([__file__, …])` entry in every CPU test file — so a standalone
-  `python tests/cpu/<file>.py` runs exactly what `pytest` collects. A hand-listed runner silently
-  drops any test missing from its list, and a printed pass/fail summary hides a FAIL from pytest;
-  both are rejected by `tests/cpu/conventions/test_test_conventions.py`.
+  `if __name__ == "__main__": raise SystemExit(pytest.main([__file__, "-v"]))`, so a standalone
+  `python tests/cpu/<file>.py` runs exactly what `pytest` collects. The conventions test requires a
+  `pytest.main([__file__, …])` entry in every CPU test file.
+
+    A hand-listed runner silently drops any test missing from its list, and a printed pass/fail summary
+    hides a FAIL from pytest; both are rejected by `tests/cpu/conventions/test_test_conventions.py`.
+
 - **The `cpu` marker is applied by path, once.** `tests/conftest.py` marks every item under
   `tests/cpu/` in `pytest_collection_modifyitems`, so `-m cpu` selects the tier without a per-file
   `pytestmark`; adding one duplicates a marker the collector already applied.
 - **Imports resolve from the image, not from `sys.path` surgery.** `PYTHONPATH=/workspace` is baked
   into the training images (and `tests/conftest.py` puts the repo root on the path for a pytest
   run), so `from src...` / `from tests.common...` work in both `pytest` and a standalone
-  `torchrun tests/gpu/<script>.py`. A per-file `sys.path.insert` is dead weight that only masks
-  running outside the image. A `scripts/` entry point — not an importable package — is loaded with
-  `tests.common.utils.load_script_module`.
+  `torchrun tests/gpu/<script>.py`.
+
+    A per-file `sys.path.insert` is dead weight that only masks running outside the image. A `scripts/`
+    entry point (not an importable package) is loaded with `tests.common.utils.load_script_module`.
+
 - **Deterministic, seeded data.** GPU tests generate synthetic problems from a fixed seed; only
-  rank 0 prints. A seed alone does not fix a chat-templated batch: `strftime_now` is a jinja global
-  transformers injects into every template, and gpt-oss's harmony prompt stamps the live date into
-  its system message. The shared `tests.common.ep_reference.fixed_chat_batch` shadows that global
-  with `CHAT_TEMPLATE_NOW`, so the correctness thresholds measured against its batch (EP/TP loss
-  bounds, the rotated-expert control floor) do not drift with the calendar — build a fixed batch
-  through it instead of re-rolling one per file.
+  rank 0 prints.
+
+    A seed alone does not fix a chat-templated batch: `strftime_now` is a jinja global transformers
+    injects into every template, and gpt-oss's harmony prompt stamps the live date into its system
+    message.
+
+    The shared `tests.common.ep_reference.fixed_chat_batch` shadows that global with
+    `CHAT_TEMPLATE_NOW`, so the correctness thresholds measured against its batch (EP/TP loss bounds,
+    the rotated-expert control floor) do not drift with the calendar. Build a fixed batch through it
+    instead of re-rolling one per file.
+
 - **GPU tests register in the manifest.** Drop the script under `tests/gpu/`, add one `TestSpec`
   line to `tests/gpu/manifest.py` (`nproc`, `markers`, `args_matrix`, `timeout`, `flaky`). A script
-  missing from the manifest fails collection, so coverage cannot silently rot; a `bench*.py` that is
-  in neither the manifest nor `_UNMANIFESTED_BENCHMARKS` fails the same way. World-size strictness is
-  not a manifest field — the script declares it itself via `gpu_test_main(exact_world_size=N)`.
+  missing from the manifest fails collection, so coverage cannot silently rot.
+
+    A `bench*.py` that is in neither the manifest nor `_UNMANIFESTED_BENCHMARKS` fails the same way.
+    World-size strictness is not a manifest field; the script declares it itself via
+    `gpu_test_main(exact_world_size=N)`.
+
 - **Run GPU tests through pytest**, not by hand: `make test-gpu-core`, or a narrower marker
-  expression over the two entrypoints — `pytest -m "gpu and ep" tests/gpu/test_suite.py
-  tests/gpu/test_launcher_contract.py`. Name the entrypoints: pointed at `tests/gpu/` instead, pytest
-  collects the manifest scripts as modules and executes their top-level torchrun code. The launcher
-  allocates a free `--master_port` per node and points `TMPDIR` at a
-  per-run dir under pytest's basetemp — never hardcode either. A script run standalone under
-  `torchrun --nproc_per_node=N <script>` lets torchrun pick the port.
+  expression over the two entrypoints (`pytest -m "gpu and ep" tests/gpu/test_suite.py
+  tests/gpu/test_launcher_contract.py`). Name the entrypoints: pointed at `tests/gpu/` instead, pytest
+  collects the manifest scripts as modules and executes their top-level torchrun code.
+
+    The launcher allocates a free `--master_port` per node and points `TMPDIR` at a per-run dir under
+    pytest's basetemp; never hardcode either. A script run standalone under
+    `torchrun --nproc_per_node=N <script>` lets torchrun pick the port.
+
 - **Scratch goes through the launcher's `TMPDIR`.** `setup_cache_dirs` for per-rank output/cache
   dirs, `shared_scratch_dir` (`tests/common/distributed.py`) for a synthetic checkpoint rank 0
-  writes and the peers read. A literal `/mnt/...` in a test escapes basetemp, is never reclaimed,
-  and assumes a volume layout this host may not have; checkpoint locations belong in
-  `tests/common/models.py`.
+  writes and the peers read.
+
+    A literal `/mnt/...` in a test escapes basetemp, is never reclaimed, and assumes a volume layout
+    this host may not have; checkpoint locations belong in `tests/common/models.py`.
+
 - **Use the `gpu_test_main` harness** (`tests/common/harness.py`). It owns the lifecycle
   (`init_distributed` → setup → body → teardown → `sys.exit`); the body is *load → train → assert*
   and returns `{"checks": {name: bool}, "metrics": {...}}`, exiting `0` pass / `1` fail / `2` bad
@@ -181,10 +199,11 @@ manifest.
   committed throughput baselines are compared against.
 - **Cover the matrix and the rejections.** Markers select the tier (`core` or `full`), the world size
   every entry declares (`1gpu 2gpu 4gpu 8gpu`) and capabilities (`ep cp tp etp hsdp vlm lora moe` +
-  model family). `vllm_server`/`sglang_server` mark a test
-  needing the live vLLM/SGLang container; those are always `full`. A new parallelism mode needs a
-  correctness test per supported combination *and* a test asserting the unsupported ones are
-  rejected.
+  model family).
+
+    `vllm_server`/`sglang_server` mark a test needing the live vLLM/SGLang container; those are always
+    `full`. A new parallelism mode needs a correctness test per supported combination *and* a test
+    asserting the unsupported ones are rejected.
 
 The GPU launcher (`tests/gpu/conftest.py`) reads its knobs with raw `os.environ` — importing
 `src/env.py` would pull torch and transformers into the launcher process — so each one is matched as
@@ -236,22 +255,26 @@ entry and the script name them, and the non-obvious ones are:
 **Env knob or `args_matrix` row?** `nproc`, `markers`, `timeout` and the tier are per-`TestSpec`, not
 per-row, so every row of a matrix runs at the same size, under the same marker set, in the same tier.
 
-A leg that only changes *which phase runs* — same model, same axis, same cost — becomes a CLI flag
+A leg that only changes *which phase runs* (same model, same axis, same cost) becomes a CLI flag
 with one row per leg, so each gets its own pytest node and verdict (`--mode` on
-`trainers/grpo/test_online_grpo_vllm_e2e.py`, `--mode` on `trainers/sft/test_sft_qwen3_dense.py`). A
-leg that changes the model family, the parallelism axis, or the runtime stays an env override:
-registering it as a row would file an EP-on-20B run under the entry's `tp`/dense markers and its
-neighbour's timeout. That is also why the twelve `gpt-oss` SFT scripts under `trainers/sft/`
-(`test_sft_ep*`, `test_sft_oss20b_*`) stay separate entries rather than collapsing into one matrix —
-`-m "gpu and cp"` must select their two CP legs and nothing else.
+`trainers/grpo/test_online_grpo_vllm_e2e.py`, `--mode` on `trainers/sft/test_sft_qwen3_dense.py`).
 
-`core` is the pre-merge gate, and small-and-fast is its *intent* — ≤2 GPUs, tiny model. Size the host
-from the manifest, not from that intent: over half of `tests/gpu/manifest.py` carries `core`
-(120 of 196 entries, more pytest nodes once the `args_matrix` rows expand), and within that tier some
-entries need 4 GPUs, 18 declare a timeout ≥1500 s (three at 2400 s), and a large minority load a real
-multi-billion-parameter checkpoint (gpt-oss-20b, GLM-4.7-Flash, ZAYA1-8B, Qwen3-30B-A3B, Qwen3.5-2B,
-Qwen3-VL-2B and three Ling/Ring checkpoints), so summed worst-case timeouts run to tens of hours.
-This page owns tier composition; the manifest is the only place exact counts live.
+A leg that changes the model family, the parallelism axis, or the runtime stays an env override:
+registering it as a row would file an EP-on-20B run under the entry's `tp`/dense markers and its
+neighbour's timeout.
+
+That is also why the twelve `gpt-oss` SFT scripts under `trainers/sft/` (`test_sft_ep*`,
+`test_sft_oss20b_*`) stay separate entries rather than collapsing into one matrix: `-m "gpu and cp"`
+must select their two CP legs and nothing else.
+
+`core` is the pre-merge gate, and small-and-fast is its *intent*: ≤2 GPUs, tiny model. Size the host
+from the manifest, not from that intent. Over half of `tests/gpu/manifest.py` carries `core`
+(120 of 196 entries, 145 pytest nodes once the `args_matrix` rows expand).
+
+Within that tier four entries need 4 GPUs, 18 declare a timeout ≥1500 s (three at 2400 s), and a large
+minority load a real multi-billion-parameter checkpoint (gpt-oss-20b, GLM-4.7-Flash, ZAYA1-8B,
+Qwen3-30B-A3B, Qwen3.5-2B, Qwen3-VL-2B and three Ling/Ring checkpoints), so summed worst-case timeouts
+run to tens of hours. This page owns tier composition; the manifest is the only place exact counts live.
 
 Where a big-checkpoint entry stays `core`, it is because it is a *correctness gate* — a comparison
 against an independent reference that catches a silently wrong result, like

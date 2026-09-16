@@ -14,12 +14,19 @@ Transformers ships `transformers.models.inkling` natively (the image pins 5.16.1
 
 ## EP wrapper
 
-`EPInklingMoELayer` (`src/distributed/expert_parallel/layers/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged — including ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/combined/test_ep_etp_inkling.py` (pure ETP on 2 GPUs, EP+ETP on 4; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone wrapper rather than a GLM-4 subclass:
+`EPInklingMoELayer` (`src/distributed/expert_parallel/layers/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged.
 
-- **Joint routed+shared normalization.** `InklingTopkRouter` emits `n_routed_experts + n_shared_experts` logits from one projection and normalizes the routed top-k and the shared experts **jointly** (`logsumexp` over `top_k + n_shared` logits), so the shared experts compete for probability mass. The shared FFN is scaled by its resulting share (`gammas`) — an extra argument `EPSharedExpertsMoELayerBase`'s shared-expert call cannot pass, so the wrapper runs the shared leg itself.
-- **Selection vs gating split.** Selection runs on `sigmoid(routed_logits) + e_score_correction_bias` (a learned routing bias the family ships); `moe_balancing: bias_update` adds its balancing bias on top for selection only, while the returned weights stay derived from the unbiased logits. The causal-LM loss never reads `router_logits`, so there is no aux-loss path and `moe_balancing: auto` resolves to `bias_update`.
+That includes ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/combined/test_ep_etp_inkling.py` (pure ETP on 2 GPUs, EP+ETP on 4; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone wrapper rather than a GLM-4 subclass:
 
-One contract fails closed: `_supports_weight_sync = False` refuses online/environmental GRPO — an inference server loading hub names would silently skip every module-spelled tensor the sync sends.
+- **Joint routed+shared normalization.** `InklingTopkRouter` emits `n_routed_experts + n_shared_experts` logits from one projection and normalizes the routed top-k and the shared experts **jointly** (`logsumexp` over `top_k + n_shared` logits), so the shared experts compete for probability mass.
+
+    The shared FFN is scaled by its resulting share (`gammas`), an extra argument `EPSharedExpertsMoELayerBase`'s shared-expert call cannot pass, so the wrapper runs the shared leg itself.
+
+- **Selection vs gating split.** Selection runs on `sigmoid(routed_logits) + e_score_correction_bias` (a learned routing bias the family ships); `moe_balancing: bias_update` adds its balancing bias on top for selection only, while the returned weights stay derived from the unbiased logits.
+
+    The causal-LM loss never reads `router_logits`, so there is no aux-loss path and `moe_balancing: auto` resolves to `bias_update`.
+
+One contract fails closed: `_supports_weight_sync = False` refuses online/async GRPO — an inference server loading hub names would silently skip every module-spelled tensor the sync sends.
 
 ## Loading
 
@@ -27,36 +34,47 @@ The hub checkpoint stores the expert width as `intermediate_size: 2048`, but tra
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).
 
-The lazy loaders read the same declarative entries through the family's `_HUB_CONVERSION_KEYS` declaration, replayed by `src/distributed/expert_parallel/hub_conversion.py`: renames plus a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`. The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank — 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
+The lazy loaders read the same declarative entries through the family's `_HUB_CONVERSION_KEYS` declaration, replayed by `src/distributed/expert_parallel/hub_conversion.py`: renames plus a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`.
+
+The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank: 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
 
 `from_pretrained` honors the family's fp32 pin, which covers the **short convolutions** (`_keep_in_fp32_modules_strict`: `k_sconv`/`v_sconv`/`attn_sconv`/`mlp_sconv`); `load_ep_model` then re-casts parameters to the run dtype, since FSDP2 rejects mixed-dtype parameters in one shard group — the sconvs train in bf16 here, a deliberate trade validated by the multi-node runs below.
 
 ## Why CP and TP are out
 
 - **Packing** — the attention layers isolate packed documents, but the four depthwise convolutions per layer cross boundaries: the modeling reads `seq_idx` yet its conv call sites never forward kwargs, so no collator emission can reach them ([Document isolation](../data/collators.md#document-isolation-under-packing)).
-- **CP** — `InklingShortConvolution` runs over the sequence axis (a CP shard severs its receptive field at every chunk boundary — the LFM-2/Zaya blocker), and the additive relative-logits bias cannot pass through `flash_attn_func`, which the Ulysses path is built on (`_supports_flash_attn = False` upstream). Validation rejects the conv class with a precise error.
+- **CP** — `InklingShortConvolution` runs over the sequence axis (a CP shard severs its receptive field at every chunk boundary, the LFM-2/Zaya blocker), and the additive relative-logits bias cannot pass through `flash_attn_func`, which the Ulysses path is built on (`_supports_flash_attn = False` upstream).
+
+    Validation rejects the conv class with a precise error.
+
 - **TP** — the selective-TP planner shards q/k/v/o structurally; Inkling's attention carries per-layer head geometry (`swa_*` on sliding layers), sequence convolutions on the projected K/V, and a per-head `rel_logits_proj`, none of which the planner can shard. The zero-shard raise names the class.
 
 ## Pipeline parallelism
 
 Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
-The shipped seams target the **text decoder** (`InklingForCausalLM`): given a text-only
-`config.json` (`InklingTextConfig` fields, `architectures: ["InklingForCausalLM"]`) beside the hub
-weights, the stage loader reads the TM-namespace safetensors through the conversion entry and drops
-the tower/MTP keys. The generic VLM gate refuses only a run that feeds images, so the composite
-class is admitted text-only as well. Layer types repeat with period 6 on Inkling-Small (42 layers),
-so the split contract binds stage boundaries to multiples of 6, and EP must fit inside one stage.
+The shipped seams target the **text decoder** (`InklingForCausalLM`): put a text-only `config.json`
+(`InklingTextConfig` fields, `architectures: ["InklingForCausalLM"]`) beside the hub weights and
+point `model_name_or_path` at that directory.
+
+The stage loader reads the TM-namespace safetensors through the conversion entry, drops the
+tower/MTP keys, and composes with EP inside each stage. The generic VLM gate refuses only a run that
+feeds images, so the composite class is admitted text-only as well, but the text-only config is the
+route the seams target.
+
+Layer types repeat with period 6 on Inkling-Small (42 layers), so the split contract binds stage
+boundaries to multiples of 6; EP must fit inside one stage, which puts `pp2` + EP16 at ≥ 4 nodes.
 
 ## Multimodal training
 
 The composite class trains under EP: patching finds `InklingMoE` under `model.language_model`, the
-vision/audio towers survive as replicated (FSDP-managed) modules, and an image-carrying batch —
-pixel features masked-scattered at `image_token_id` placeholders — backpropagates into the vision
-tower alongside the expert shards (`tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, EP=2 vs the
-undistributed composite reference). Image-text SFT rides the VLM data path (`VLMDataCollator` +
-`processing_inkling`); text-only data through the same class is what the multi-node runs below
-validated. CP rejects the class outright and PP refuses any image-carrying run — multimodal is
-EP/ETP-only.
+vision/audio towers survive as replicated (FSDP-managed) modules, and an image-carrying batch (pixel
+features masked-scattered at `image_token_id` placeholders) backpropagates into the vision tower
+alongside the expert shards (`tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, EP=2 vs the
+undistributed composite reference).
+
+Image-text SFT rides the VLM data path (`VLMDataCollator` + `processing_inkling`); text-only data
+through the same class is what the multi-node runs below validated. CP rejects the class outright and
+PP refuses any image-carrying run, so multimodal is EP/ETP-only.
 
 ## Multi-node EP
 
@@ -68,7 +86,12 @@ EP/ETP-only.
 
 ## Configs
 
-`examples/sft/inkling/inkling-small-multinode-ep16.yaml` (EP=16 across 2 nodes, 256 experts → 16/rank). Load-bearing settings beyond the loading overrides above: `attn_implementation: sdpa` (no Inkling FA dispatch; the Blackwell auto-select would fall back per-rank), and `pad_token: "<|unused|>"` (the tokenizer ships no pad token; id 199998 is a dedicated special that never appears in text). Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP and head stay eager — `InklingMLP` scales its output by a trained `global_scale`, and the head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` before the loss. There is no rotary to fuse: position enters as a learned relative-logit bias.
+`examples/sft/inkling/inkling-small-multinode-ep16.yaml` (EP=16 across 2 nodes, 256 experts → 16/rank). Two settings are load-bearing beyond the loading overrides above:
+
+- `attn_implementation: sdpa` — no Inkling FA dispatch; the Blackwell auto-select would fall back per-rank.
+- `pad_token: "<|unused|>"` — the tokenizer ships no pad token; id 199998 is a dedicated special that never appears in text.
+
+Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP and head stay eager: `InklingMLP` scales its output by a trained `global_scale`, and the head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` before the loss. There is no rotary to fuse: position enters as a learned relative-logit bias.
 
 Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
 

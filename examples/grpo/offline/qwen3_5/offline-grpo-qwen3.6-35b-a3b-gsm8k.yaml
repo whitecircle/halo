@@ -16,10 +16,10 @@ expert_parallel_size: 8
 fp32_router: true
 
 # --- Dataset ---
-# Wherever the rejection-sampling step above wrote its output — off the small root FS (/tmp),
-# which will not hold a generated GRPO dataset on a training host.
+# Where the rejection-sampling step above wrote its dataset (policy_rejection_sampling.py --output_path, an S3
+# URI; rm_rejection_sampling.py --output_folder) — off the small root FS.
 dataset:
-- /mnt/datasets/gsm8k-qwen3.6-35b-a3b-offline-grpo
+- path/to/gsm8k-qwen3.6-35b-a3b-offline-grpo
 test_size: 0.05
 
 # --- Offline GRPO Hyperparameters ---

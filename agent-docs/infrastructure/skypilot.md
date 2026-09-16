@@ -75,10 +75,12 @@ single-node AWS tasks (`gpt-oss-120b/nodelocal-ep`, `qwen3.5-122b-a10b/nodelocal
 env at all — intra-node NVLink only.
 
 The three multi-node AWS (EFA) tasks set `NCCL_NET_PLUGIN: ofi` explicitly, because the NGC base's
-`shinit_v2` sets it only for a shell that sources it, and `NCCL_NET: Libfabric` so a missing plugin
-fails the launch instead of falling back to sockets — silently for `gpt-oss-20b/nodelocal-ep`'s
-cross-node DP gradient sync, and as "NCCL GIN is unavailable" for the cross-node EP tasks once the
-cluster is already up. `NCCL_PROTO` is left to the plugin's own probe
+`shinit_v2` sets it only for a shell that sources it. They also set `NCCL_NET: Libfabric` so a missing
+plugin fails the launch instead of falling back to sockets. That fallback is silent for
+`gpt-oss-20b/nodelocal-ep`'s cross-node DP gradient sync, and surfaces as "NCCL GIN is unavailable" for
+the cross-node EP tasks once the cluster is already up.
+
+`NCCL_PROTO` is left to the plugin's own probe
 ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)).
 
 ```yaml
@@ -129,22 +131,25 @@ Pre-upload large models (>10GB) to S3 once and mount them `MOUNT_CACHED`, keepin
 aws s3 sync models/qwen3.5-122b-a10b s3://my-bucket/models/qwen3.5-122b-a10b/
 ```
 
-Then point the run at that mount with `--env MODEL=/data/models/...` — the shipped tasks default
+Then point the run at that mount with `--env MODEL=/data/models/...`; the shipped tasks default
 `MODEL` to a Hub id and keep only their writes under `/data` (`OUTPUT_DIR: /data/checkpoints/...`).
 Alternatively download from HF at runtime with `HF_HOME` on a
-`MOUNT_CACHED` bucket so the cache survives restarts. In multi-node training a `MOUNT` checkpoint bucket is
-shared across all nodes — any node can save and reload after preemption. Pull results with `aws s3 sync`,
+`MOUNT_CACHED` bucket so the cache survives restarts.
+
+In multi-node training a `MOUNT` checkpoint bucket is shared across all nodes; any node can save and
+reload after preemption. Pull results with `aws s3 sync`,
 `rsync -Pavz oss-120b:/data/checkpoints/ ./`, or SSH; manage buckets with `sky storage ls` / `delete`.
 
 ## Docker image
 
 `resources.image_id` is **not set in the shipped YAMLs — you must uncomment it.** Each carries it as a
 commented line under `resources` naming the prebuilt image for that shape, which pulls anonymously (no
-AWS account, no registry login). Each task's `setup:` block fails fast when `flash_attn` / `deep_ep` are
-not importable, so a from-source build on a bare node is not a fallback; the prebuilt image is required.
-The `hopper` image serves H100/H200 (Nebius and AWS p5/p5e) and `blackwell` the B200 single-node tasks.
-To run your own build instead, push it to a registry the nodes can reach and point `image_id` there
-([Docker](docker.md)).
+AWS account, no registry login).
+
+Each task's `setup:` block fails fast when `flash_attn` / `deep_ep` are not importable, so a from-source
+build on a bare node is not a fallback; the prebuilt image is required. The `hopper` image serves
+H100/H200 (Nebius and AWS p5/p5e) and `blackwell` the B200 single-node tasks. To run your own build
+instead, push it to a registry the nodes can reach and point `image_id` there ([Docker](docker.md)).
 
 ```yaml
 resources:

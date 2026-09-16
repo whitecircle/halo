@@ -2,8 +2,8 @@
 """Adversarial / edge-case tests for rule-based rewards and RLRR advantage shaping.
 
 Covers three modules:
-  * src/environments/rewards.py — numeric matching against crafted distractor inputs, and the
-    empty-answer reward floor.
+  * src/rewards/matching.py — numeric matching against crafted distractor inputs, and the
+    empty-answer floor of the validation chain.
   * src/environments/envs/tasks/qa.py — multiple-choice letter extraction, which lives with the
     only environment that grades by letter.
   * src/trainers/grpo/objective/relative_rewards.py — RLRR degenerate-group handling
@@ -25,11 +25,11 @@ from src.environments.envs.tasks.qa import (
     ExamQAEnvironment,
     multiple_choice_match,
 )
-from src.environments.rewards import (
-    compute_answer_reward,
+from src.rewards.matching import (
     extract_last_boxed,
     normalize_text,
     numeric_match,
+    validate_answer,
 )
 from src.trainers.grpo.objective.relative_rewards import relative_advantages
 
@@ -167,17 +167,16 @@ def test_exam_prompt_states_the_full_graded_letter_range():
     assert named <= set(MULTIPLE_CHOICE_LETTERS), sorted(named - set(MULTIPLE_CHOICE_LETTERS))
 
 
-# compute_answer_reward — an empty answer must not grade as a match
+# validate_answer — an empty answer must not grade as a match
 
 
-def test_empty_prediction_gets_failure_reward():
-    """An empty prediction matches nothing in the default chain, so it earns the failure reward."""
-    r = compute_answer_reward("", "the expected answer", success_reward=1.0, failure_reward=0.0)
-    assert r == 0.0
+def test_empty_prediction_does_not_validate():
+    """An empty prediction matches nothing in the default chain, so the objective grades 0."""
+    assert validate_answer("", "the expected answer") is False
 
 
-def test_exact_match_gets_success_reward():
-    assert compute_answer_reward("42", "42", success_reward=2.0, failure_reward=-1.0) == 2.0
+def test_exact_match_validates():
+    assert validate_answer("42", "42") is True
 
 
 # RLRR — degenerate groups must yield finite, sensible advantages

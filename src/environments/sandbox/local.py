@@ -6,10 +6,12 @@ that use :class:`~src.environments.sandbox.bubblewrap.BubblewrapSandbox` or the 
 """
 
 import contextlib
+import errno
 import math
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,13 +41,56 @@ KILL_DRAIN_TIMEOUT = 10.0
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
 
+# The exit code a run is booked with when the program replaced a staged entry with a link: its own
+# runtime error, never an infra fault that would void the episode it belongs to.
+TAMPERED_WORKDIR_RETURNCODE = 1
+
 # What a session's staged build was made from: language, source text, auxiliary file contents.
 _BuildKey = tuple[str, str, tuple[tuple[str, str], ...]]
+# Directory entries by name and file type (``lstat``, so a link is a link, not its target).
+_EntryKinds = set[tuple[str, int]]
+
+
+class SessionPathError(ValueError):
+    """A session path the host must not touch: an entry the program replaced with a link, or one
+    whose resolution leaves the working directory."""
 
 
 def _safe_member_name(name: str) -> bool:
     """Reject auxiliary-file names that would escape the sandbox working directory."""
     return name not in ("", ".", "..") and not name.startswith(("/", "\\")) and ".." not in name.split("/")
+
+
+def _open_member(workdir: str, name: str, flags: int) -> int:
+    """Open ``<workdir>/<name>`` for the host process without following a link at any component.
+
+    The program owns the working directory between runs and can replace any entry with a symlink
+    (``main.py -> /root/.aws/credentials``); the host — staging the next run's source, reading a file
+    for the model — would otherwise write or read through it. Refused (:class:`SessionPathError`) when
+    the path does not resolve to itself under the real working directory; ``O_NOFOLLOW`` closes the
+    window on the final component between that check and the open.
+    """
+    dest = os.path.normpath(os.path.join(os.path.realpath(workdir), name))
+    if os.path.realpath(dest) != dest:
+        raise SessionPathError(f"session path {name!r} is a link or resolves outside the working directory")
+    if flags & os.O_CREAT:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        return os.open(dest, flags | os.O_NOFOLLOW, 0o644)
+    except OSError as exc:
+        # ELOOP: a link raced in at the final component; EISDIR: a write met a directory in its place.
+        if exc.errno in (errno.ELOOP, errno.EISDIR):
+            raise SessionPathError(f"session path {name!r} is not a regular file") from exc
+        raise
+
+
+def _entry_kinds(workdir: str) -> _EntryKinds:
+    """The working directory's top-level entries with their file types."""
+    kinds: _EntryKinds = set()
+    for name in os.listdir(workdir):
+        with contextlib.suppress(FileNotFoundError):
+            kinds.add((name, stat.S_IFMT(os.lstat(os.path.join(workdir, name)).st_mode)))
+    return kinds
 
 
 def _build_key(spec: LanguageSpec, code: str, files: dict[str, str] | None) -> _BuildKey:
@@ -161,14 +206,19 @@ class LocalSubprocessSandbox(SandboxExecutor):
     def _stage_sources(
         self, workdir: str, spec: LanguageSpec, code: str, files: dict[str, str] | None
     ) -> SandboxResult | None:
-        """Write ``files`` and the source into ``workdir``. Returns None, or an error result for an unsafe path."""
+        """Write ``files`` and the source into ``workdir``. Returns None, an error result for an unsafe
+        path (the caller's fault), or a runtime-error verdict when the program replaced a staged entry
+        with a link (its own fault, so never an infra error it could void its episode with)."""
         files = files or {}
         for name in files:
             if not _safe_member_name(name):
                 return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
-        for name, content in files.items():
-            self._write_member(workdir, name, content)
-        self._write_member(workdir, spec.source_name, code)
+        try:
+            for name, content in files.items():
+                self._write_member(workdir, name, content)
+            self._write_member(workdir, spec.source_name, code)
+        except SessionPathError as exc:
+            return SandboxResult(stderr=f"working directory tampered: {exc}", returncode=TAMPERED_WORKDIR_RETURNCODE)
         return None
 
     def _compile(self, workdir: str, spec: LanguageSpec, *, allow_network: bool) -> SandboxResult | None:
@@ -229,9 +279,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
 
     @staticmethod
     def _write_member(workdir: str, name: str, content: str) -> None:
-        dest = os.path.join(workdir, name)
-        os.makedirs(os.path.dirname(dest) or workdir, exist_ok=True)
-        with open(dest, "w") as fh:
+        with os.fdopen(_open_member(workdir, name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC), "w") as fh:
             fh.write(content)
 
 
@@ -248,9 +296,9 @@ class LocalSession(SandboxSession):
         self._allow_network = allow_network
         # The compiled program staged in ``workdir`` and its compile verdict (None = built, runnable).
         self._build: tuple[_BuildKey, SandboxResult | None] | None = None
-        # Directory entries present once the program was staged and built: what a run may not remove
-        # and what :meth:`reset_to_staged` keeps.
-        self._staged_entries: set[str] | None = None
+        # Directory entries (name and file type) present once the program was staged and built: what
+        # :meth:`reset_to_staged` keeps. Typed so an entry the program swapped for a link is dropped.
+        self._staged_entries: _EntryKinds | None = None
 
     def run(
         self,
@@ -293,15 +341,15 @@ class LocalSession(SandboxSession):
             self._build = (key, failure)
         else:
             failure = None
-        self._staged_entries = set(os.listdir(self.workdir))
+        self._staged_entries = _entry_kinds(self.workdir)
         return failure
 
     def reset_to_staged(self) -> None:
         if self._staged_entries is None:
             return
-        for entry in set(os.listdir(self.workdir)) - self._staged_entries:
-            path = os.path.join(self.workdir, entry)
-            if os.path.isdir(path) and not os.path.islink(path):
+        for name, kind in _entry_kinds(self.workdir) - self._staged_entries:
+            path = os.path.join(self.workdir, name)
+            if kind == stat.S_IFDIR:
                 shutil.rmtree(path, ignore_errors=True)
             else:
                 with contextlib.suppress(FileNotFoundError):
@@ -315,12 +363,18 @@ class LocalSession(SandboxSession):
         LocalSubprocessSandbox._write_member(self.workdir, path, content)
 
     def read_file(self, path: str) -> str | None:
+        """The file's text, or ``None`` when there is no regular file at ``path`` — a link the program
+        planted included, so a host file never reaches the trajectory through it."""
         if not _safe_member_name(path):
             raise ValueError(f"unsafe session file path: {path!r}")
-        full = os.path.join(self.workdir, path)
-        if not os.path.isfile(full):
+        try:
+            fd = _open_member(self.workdir, path, os.O_RDONLY)
+        except (SessionPathError, FileNotFoundError, NotADirectoryError):
             return None
-        with open(full) as fh:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        with os.fdopen(fd) as fh:
             return fh.read()
 
     def list_files(self) -> list[str]:

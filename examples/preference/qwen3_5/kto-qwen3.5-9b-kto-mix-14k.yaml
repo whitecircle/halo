@@ -23,7 +23,7 @@ loss_type: kto
 per_device_train_batch_size: 2
 per_device_eval_batch_size: 2
 num_train_epochs: 1
-gradient_accumulation_steps: 4   # batch 2 × accum 4 = 8 sequences/device/step
+gradient_accumulation_steps: 4   # 2 x 4 = 8 sequences/device/step
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false

@@ -1,52 +1,66 @@
 # Online SDPG
 
-Self-Distilled Policy Gradient ([arXiv:2606.04036](https://arxiv.org/abs/2606.04036)) in its faithful on-policy form: online GRPO plus a privileged-teacher distillation term. `DistributedSDPGTrainer` subclasses `DistributedGRPOTrainer`, so it inherits vLLM server-mode rollouts, NCCL weight sync, and EP/TP from [online GRPO](../grpo/online-grpo.md). Run it through the online-GRPO script with a flag:
+Self-Distilled Policy Gradient ([arXiv:2606.04036](https://arxiv.org/abs/2606.04036)) is [Online GRPO (RLVR)](../grpo/online-grpo.md) plus a privileged-teacher distillation term. Each step, the same policy is re-run under `no_grad` in eval mode with a hint revealing the gold answer, and the student is distilled toward that teacher's next-token distribution: `L = L_GRPO + beta(k)·L_OPD`. `DistributedSDPGTrainer` (`src/trainers/distillation/sdpg.py`) subclasses the online trainer, so vLLM server rollouts, NCCL weight sync, EP/TP/ETP and the LoRA rules carry over unchanged.
 
-```bash
-torchrun --nproc_per_node=4 \
-    scripts/training/online_grpo/rlvr.py \
-    examples/grpo/online/rlvr-online-grpo-template.yaml \
-    --use_sdpg=true
-```
-
-| Aspect | Value |
-|--------|-------|
-| Trainer | `DistributedSDPGTrainer` (`src/trainers/distillation/sdpg.py`) |
-| Script | `scripts/training/online_grpo/rlvr.py --use_sdpg=true` |
-| Loss | `L_GRPO + beta(k) · L_OPD` |
-| Policy | On-policy (vLLM rollouts) |
-| Parallelism | EP, TP, ETP, EP+TP, EP+ETP; no CP, no PP. Adapters under FSDP2 DP, EP and pure ETP; refused under TP |
-| Modality | Text only |
-
-## How it works
-
-Each step the student samples a group of completions from the vLLM server and the verifier scores them into group-normalized advantages — the standard online-GRPO loop. The same model is then run as a privileged teacher that additionally sees a hint revealing the gold answer, and the student is distilled toward the teacher's full-vocabulary next-token distribution on the sampled completion tokens via reverse KL `D_KL(p ‖ SG[q])`.
-
-The OPD term is gated to positive-advantage (verifier-preferred) rollouts — a zero advantage means the group tied or the row was unscorable, so it carries no privileged supervision. The total loss is `L = L_GRPO + beta(k) · L_OPD`; reference-KL regularization is GRPO's built-in KL coefficient, not a separate term. `beta(k)` follows the SDPG warmup→decay schedule (constant `sdpg_beta_base` when `sdpg_beta_warmup_steps`/`sdpg_beta_decay_steps` are 0).
-
-The teacher is the same policy run under `torch.no_grad()` and `eval()` (so train-mode dropout does not perturb the target), and the OPD stop-gradients it — no second model is held. Loss and schedule come from `src/trainers/distillation/losses.py`.
-
-The OPD term costs two extra full-vocabulary forwards per microbatch (student with grad, teacher under no-grad) on top of the GRPO one, neither passing `logits_to_keep`: both materialize `[B, prompt+completion, V]` logits and the KL upcasts them to fp32. `use_chunked_grpo_logprobs` bounds the GRPO log-probs only — it does not protect OPD, so size `per_device_train_batch_size` and `max_completion_length` against that peak.
-
-`use_liger_kernel` is forced off on every online/environmental GRPO run (`disable_trl_liger_grpo_loss`, `src/trainers/mixins/validation.py`); SDPG adds one more reason — TRL's fused GRPO-Liger loss bypasses the `_compute_loss` path and would silently drop the OPD term. Model-level Liger kernels still apply at load time.
-
-## Dataset and generation
-
-The dataset is the online-GRPO format `{"prompt": [...], "answer": "..."}` — the answer feeds both the reward function and the privileged hint. Generation is server-only: the training image ships without vLLM, so completions come from the separate vLLM container with NCCL weight sync. See [online GRPO](../grpo/online-grpo.md) for the vLLM setup, server flags, and parallelism rules — SDPG inherits them unchanged. With `sdpg_beta_base: 0` it reduces to plain online GRPO.
+Use it when a verifiable answer exists and the policy solves too few prompts for GRPO's group signal alone. At `sdpg_beta_base: 0` the trainer is plain online GRPO. For a fixed dataset instead of live rollouts use [self-distillation](self-distillation.md).
 
 ## Configuration
 
-SDPG fields live on the RLVR script args (`src/args/rlvr_online_grpo_args.py`) and are active only with `--use_sdpg=true`. No shipped example YAML sets `use_sdpg`, so enable it on the CLI over an online-GRPO config. The remaining online-GRPO/vLLM fields are documented in [online GRPO](../grpo/online-grpo.md).
+Every knob lives on the RLVR script arguments and is read only with `use_sdpg: true`; setting one away from its default with the gate off is refused before the model loads. No shipped YAML enables it — start from `examples/grpo/online/rlvr-online-grpo-template.yaml`, which carries the block commented out.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `use_sdpg` | `False` | Swap in `DistributedSDPGTrainer` (GRPO + privileged-teacher OPD) |
-| `sdpg_hint_template` | `PRIVILEGED_HINT_TEMPLATE` — `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Hint appended to the prompt for the teacher forward (`{answer}` placeholder) |
-| `sdpg_loss` | `"reverse_kl"` | OPD loss: `reverse_kl` (SDPG), `forward_kl`, or `unnormalized_kl` |
-| `sdpg_temperature` | `1.0` | OPD softmax temperature |
-| `sdpg_beta_base` | `1.0` | Base OPD coefficient |
-| `sdpg_beta_warmup_steps` | `0` | Steps to ramp beta 0→`sdpg_beta_base` |
+| Knob | Default | Effect |
+|---|---|---|
+| `use_sdpg` | `false` | Swap in `DistributedSDPGTrainer` |
+| `sdpg_beta_base` | `1.0` | Base OPD coefficient; `0` drops the term |
+| `sdpg_beta_warmup_steps` | `0` | Steps to ramp beta from 0 to `sdpg_beta_base` |
 | `sdpg_beta_decay_steps` | `0` | Final steps over which beta decays to 0 |
-| `opd_positive_advantage_only` | `True` | Restrict the OPD term to positive-advantage tokens (SDPG as published); `false` distills every completion token |
+| `sdpg_loss` | `reverse_kl` | OPD loss: `reverse_kl`, `forward_kl` or `unnormalized_kl` |
+| `sdpg_temperature` | `1.0` | OPD softmax temperature |
+| `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Appended to the prompt for the teacher forward only |
+| `opd_positive_advantage_only` | `true` | Restrict OPD to rows with a positive advantage; `false` distills every completion row |
 
-The hint reads the trainer's hard-pinned `answer` column: `process_for_rlvr` normalizes the dataset column named by `answer_field` into it, so `answer_field` picks the content, not the column the trainer reads.
+The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero.
+
+## Launch
+
+```bash
+# vLLM on GPU 7 and the trainer on 0-6, the compose defaults (server setup: Online GRPO)
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
+    scripts/training/online_grpo/rlvr.py \
+    examples/grpo/online/rlvr-online-grpo-template.yaml \
+    --use_sdpg=true --sdpg_beta_base=1.0
+```
+
+From Python, construct the trainer exactly as the online one plus the SDPG kwargs:
+
+```python
+trainer = DistributedSDPGTrainer(
+    model=model,
+    reward_funcs=[accuracy_reward],
+    args=grpo_config,                      # use_vllm=True, vllm_mode="server"
+    train_dataset=train_dataset,           # needs an "answer" column
+    processing_class=tokenizer,
+    parallelism_config=parallelism_config,
+    sdpg_loss="reverse_kl",
+    sdpg_beta_base=1.0,
+)
+```
+
+## Testing a setup
+
+Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_shared_losses.py -m cpu` and, end to end, by `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --mode sdpg` plus the `--trainer sdpg` rows of the MoE and dense suites.
+
+## What to watch
+
+Two keys on top of the online-GRPO metrics: `opd_beta` (the live coefficient, prefixed `eval_` under evaluation) and `opd_loss`. Treat a finite `opd_loss` with a non-zero `opd_beta` as healthy.
+
+- **`opd_loss` is exactly 0** — under `opd_positive_advantage_only: true`, no rollout in the batch earned a positive advantage, so the gate masked every token. Expected on easy or fully-failed batches; persistent zeros mean the verifier never separates a group.
+- **OOM the online trainer did not hit** — OPD adds two full-vocabulary forwards per micro-batch, neither trimmed with `logits_to_keep`, both logit planes upcast to fp32, and the teacher pass runs the longer prompt+hint+completion sequence. `use_chunked_grpo_logprobs` bounds the GRPO half only; size the batch against the OPD peak.
+- **Missing-answer warning** — a row whose answer is blank gets no hint, so it distills toward an unprivileged teacher. Fix the `answer_field` mapping.
+
+`use_liger_kernel` is cleared with a warning (`disable_trl_liger`): TRL's fused GRPO-Liger loss replaces the trainer's own and would silently drop the OPD term. Model-level Liger kernels still apply at load.
+
+## Related pages
+
+- [Online GRPO (RLVR)](../grpo/online-grpo.md) · [Self-Distillation](self-distillation.md) · [Distillation Overview](README.md)
+- [Configuration Reference](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments) — every `sdpg_*` field with its default

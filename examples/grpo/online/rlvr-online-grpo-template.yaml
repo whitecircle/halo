@@ -1,35 +1,86 @@
 # RLVR Online GRPO template — rule-based rewards (math accuracy, format), DistributedGRPOTrainer.
 # Dataset rows: {"prompt": ..., "answer": ...}. See agent-docs/training-methods/grpo/online-grpo.md.
 # Usage: start a vLLM server with --weight-transfer-config '{"backend": "nccl"}', then
-#   torchrun --nproc_per_node=4 scripts/training/online_grpo/rlvr.py <this config>
-#   (add --expert_parallel_size/--tensor_parallel_size here; accelerate launch --config_file
-#   launcher-configs/accelerate/fsdp2_gradop_config.yaml stays an option for plain data-parallel.)
+#   torchrun --nproc_per_node=4 scripts/training/online_grpo/rlvr.py <this config> — add
+#   --expert_parallel_size/--tensor_parallel_size here; accelerate launch stays an option for plain DP.
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
 attn_implementation: sdpa
+# moe_balancing: auto        # MoE router balancing method; auto resolves per model (the aux loss is inert under a policy-gradient loss, so the MoE recipes set none)
+
+# --- Parallelism ---
+# expert_parallel_size: 1    # expert distribution size: how many distinct expert subsets to create (ep_group_size must divide the NVLink domain)
 
 # --- Dataset ---
 dataset: trl-lib/DeepMath-103K
 test_size: 0.01
 prompt_field: prompt      # DeepMath ships chat-form prompts (role/content list) — consumed natively
 answer_field: solution    # DeepMath's ground-truth column is `solution` (there is no `answer` column)
+# system_prompt: null       # system prompt prepended to every conversation
+# reasoning_effort: null    # chat-template reasoning-effort steer (low/medium/high), random (sampled per prompt), or null; needs a template that reads it
 
-# --- Reward Functions ---
-use_accuracy_reward: true
-use_format_reward: false
-accuracy_reward_weight: 1.0
-format_reward_weight: 0.5
-# format_pattern: "<think>.*?</think>\\s*<answer>.*?</answer>"
+# --- Rewards ---
+# The reward is a sum of terms, each weight x score^exponent over a score in [0, 1]. Sources: accuracy
+# (the last \boxed{} equals the answer), format (a regex), judge (a generative judge), reward_model (a
+# Bradley-Terry model served by vLLM or SGLang). One TRL reward function per term, named after it.
+rewards:
+  - source: accuracy         # name: accuracy, weight 1.0
+  # - source: format
+  #   weight: 0.5
+  #   pattern: "<think>.*?</think>\\s*<answer>.*?</answer>"
+  # - source: judge            # openai/gpt-5.6-luna on OpenRouter at reasoning_effort medium (OPENROUTER_API_KEY)
+  #   name: quality
+  #   weight: 0.3
+  #   requirements:
+  #     - {name: correctness, description: "The final answer is correct and fully justified."}
+  #     - {name: clarity, description: "The solution is easy to follow and free of padding.", weight: 0.5}
+  # - source: reward_model     # vllm serve <model> --runner pooling, or sglang --is-embedding (backend: sglang)
+  #   name: preference
+  #   weight: 0.5
+  #   url: http://localhost:8100
+  #   model: Skywork/Skywork-Reward-V2-Llama-3.1-8B
 
 # --- GRPO Hyperparameters ---
 beta: 0.0
 num_iterations: 1
 epsilon: 0.15
-scale_rewards: true
+scale_rewards: group
 num_generations: 8
 temperature: 1.0
 loss_type: grpo
+# use_chunked_grpo_logprobs: false  # vocab-chunked log-probs instead of full [B, T, vocab] logits (large-vocab models on long completions)
+
+# --- Advantage shaping (AdvantageShapingArguments; exclusive with use_rlrr) ---
+# advantage_mode: mean              # group-baseline / negative-side advantage surgery: mean, qae, asymmetric, neg_mask_hard
+# advantage_quantile: 0.4           # QAE baseline quantile for advantage_mode: qae
+# advantage_pos_scale: 1.0          # positive-advantage multiplier for advantage_mode: asymmetric
+# advantage_neg_scale: 0.4          # negative-advantage multiplier for advantage_mode: asymmetric (0 = full negative mask)
+# advantage_hard_group_threshold: 0.5  # neg_mask_hard: a group is HARD when no member's gate reward reaches this
+# scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
+# drop_degenerate_groups: false     # mask GRPO groups whose completions all scored the same reward out of the loss
+
+# --- RLRR (arXiv:2601.23058; ranking advantages replace the group-normalized ones, so scale_rewards and the shaping knobs stay unset with it) ---
+# use_rlrr: false
+# rlrr_mode: hrr                    # hrr (hybrid) or prr (pure relative)
+# rlrr_tau: 0.1                     # HRR rank-correction magnitude (Eq. 3)
+# rlrr_lambda: 2048.0               # length-bin granularity for re-ranking (Eq. 6)
+# rlrr_std_normalize: false         # std-normalize advantages within each group
+# rlrr_length_rerank: true          # hierarchical length re-ranking (Eq. 6)
+# rlrr_correctness_clip: true       # correctness-aware advantage clipping (Eq. 5)
+# rlrr_correctness_threshold: 0.5   # reward >= threshold counts as correct
+# rlrr_xi_pos: 1.0e-03              # advantage cap for incorrect responses (Eq. 5)
+# rlrr_xi_neg: -1.0e-03             # advantage floor for correct responses (Eq. 5)
+
+# --- SDPG (arXiv:2606.04036; privileged-teacher reverse-KL OPD term on top of the GRPO loss) ---
+# use_sdpg: false
+# opd_positive_advantage_only: true  # apply the OPD term only to positive-advantage tokens
+# sdpg_hint_template: "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"  # appended to the last user turn for the TEACHER forward only
+# sdpg_loss: reverse_kl             # reverse_kl, forward_kl or unnormalized_kl
+# sdpg_temperature: 1.0             # softmax temperature for the OPD loss
+# sdpg_beta_base: 1.0               # base distillation coefficient
+# sdpg_beta_warmup_steps: 0         # steps to ramp beta from 0 to sdpg_beta_base
+# sdpg_beta_decay_steps: 0          # final steps over which beta decays back to 0
 
 # --- Training ---
 per_device_train_batch_size: 2
@@ -53,10 +104,9 @@ max_completion_length: 2048
 # --- vLLM Generation ---
 use_vllm: true
 vllm_mode: server
-vllm_server_host: 0.0.0.0   # the address the trainer dials (not a bind address); TRL's own default,
-                            # which Linux connects to loopback, so on a single host it is the same
-                            # endpoint the 127.0.0.1 smoke siblings name. A server on another host
-                            # needs its real address here, or vllm_server_base_url instead.
+vllm_server_host: 0.0.0.0   # the address the TRAINER DIALS, not a bind address (Linux connects
+                            # 0.0.0.0 to loopback); a server on another host needs its real
+                            # address here, or vllm_server_base_url instead
 vllm_server_port: 8000
 
 # --- Output ---

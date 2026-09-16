@@ -14,7 +14,9 @@ solution language and rating-bucketed reporting, keeping that logic out of this 
 
 Per-env settings go through `--env_kwargs` (a JSON dict merged into the env config), e.g.
 `--env_kwargs '{"search_backend": "duckduckgo"}'` or `'{"open_book": true}'`. Tool-using envs need a
-server with tool calling enabled.
+server with tool calling enabled. `--training_config <yaml>` evaluates a trained policy under its own
+run's contract — the YAML's environment config and rollout settings (chat-template variables, stop
+tokens, thinking budget, sampling) — with any flag passed explicitly laid over them.
 
 Examples:
     # Factual QA over SimpleQA against a local vLLM server
@@ -45,10 +47,13 @@ from typing import Any
 
 from scripts.environments._common import (
     add_endpoint_args,
+    load_training_contract,
+    resolve_setting,
     resolve_trajectory_path,
     rollout_config_from_args,
     write_eval_outputs,
 )
+from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS, DEFAULT_ROLLOUT_TEMPERATURE
 from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
@@ -67,7 +72,10 @@ def parse_args() -> argparse.Namespace:
         description="Evaluate a model on a registered environment via an OpenAI-compatible endpoint."
     )
     p.add_argument(
-        "--env_type", required=True, help="Registered environment name (qa_search, exam_qa, swe, mcp, ...)."
+        "--env_type",
+        default=None,
+        help="Registered environment name (qa_search, exam_qa, swe, mcp, ...). Required unless "
+        "--training_config names one (environment_type).",
     )
     add_endpoint_args(p)
     p.add_argument("--prompt_field", default="prompt", help="Row field holding the prompt.")
@@ -83,9 +91,19 @@ def parse_args() -> argparse.Namespace:
     # No default: each env class carries its own, and passing one unconditionally would cap every env
     # at a number none of them chose.
     p.add_argument("--max_turns", type=int, default=None, help="Max env turns per episode (default: the env's own).")
-    p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature.")
     p.add_argument(
-        "--max_tokens", type=int, default=32768, help="Max tokens per generation (reasoning models need a lot)."
+        "--temperature",
+        type=float,
+        default=None,
+        help=f"Sampling temperature (default: the training config's under --training_config, else "
+        f"{DEFAULT_ROLLOUT_TEMPERATURE}).",
+    )
+    p.add_argument(
+        "--max_tokens",
+        type=int,
+        default=None,
+        help=f"Max tokens per generation (default: the training config's under --training_config, else "
+        f"{DEFAULT_ROLLOUT_MAX_TOKENS}; reasoning models need a lot).",
     )
     p.add_argument("--max_workers", type=int, default=32, help="Concurrent episodes.")
     return p.parse_args()
@@ -121,40 +139,49 @@ def build_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def main() -> None:
     args = parse_args()
+    contract = load_training_contract(args.training_config)
+    trained_env = contract.env_config_dict() if contract is not None else {}
+    env_type = resolve_setting(args.env_type, contract.env_config.environment_type if contract else None, None)
+    if env_type is None:
+        raise SystemExit("--env_type is required unless --training_config names an environment_type")
     env_kwargs = json.loads(args.env_kwargs)
     turns_override = {"max_turns": args.max_turns} if args.max_turns is not None else {}
-    env = resolve_environment(args.env_type, {**turns_override, **env_kwargs})
+    # The training run's env config first, the flags over it: an eval under a contract grades as the run did.
+    env = resolve_environment(env_type, {**trained_env, **turns_override, **env_kwargs})
+    # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
+    env.verify_backend()
     examples = build_examples(args)
     client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
+    rollout = rollout_config_from_args(
+        args, contract, default_temperature=DEFAULT_ROLLOUT_TEMPERATURE, default_max_tokens=DEFAULT_ROLLOUT_MAX_TOKENS
+    )
 
-    traj_path = resolve_trajectory_path(args, args.env_type, args.split)
+    traj_path = resolve_trajectory_path(args, env_type, args.split)
 
     results = asyncio.run(
         collect_results(
             env,
             examples,
             client,
-            rollout=rollout_config_from_args(args, temperature=args.temperature, max_tokens=args.max_tokens),
+            rollout=rollout,
             num_samples=args.num_samples,
             success_threshold=args.success_threshold,
             max_workers=args.max_workers,
             collect_trajectories=bool(traj_path),
         )
     )
-    report(
-        results, num_samples=args.num_samples, title=f"{args.env_type} on {args.dataset}", group_label=args.group_by
-    )
+    env.close()
+    report(results, num_samples=args.num_samples, title=f"{env_type} on {args.dataset}", group_label=args.group_by)
     write_eval_outputs(
         args,
         results,
         env=env,
         traj_path=traj_path,
-        env_type=args.env_type,
+        env_type=env_type,
         max_turns=args.max_turns,
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
+        rollout=rollout,
         num_samples=args.num_samples,
-        meta_extra={"env_kwargs": env_kwargs},
+        meta_extra={"env_kwargs": {**trained_env, **env_kwargs}},
     )
 
 

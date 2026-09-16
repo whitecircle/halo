@@ -21,6 +21,7 @@ from src.distributed.nccl.clients.base import (
     _AsyncCall,
     _wait_for_calls,
     describe_chunk,
+    unregistered_bailing_model_types,
 )
 from src.distributed.nccl.transport.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -85,11 +86,7 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
         "deepseek_v4": (
             "vLLM 0.26.0's DeepSeek-V4 loader targets the fp8/fp4-packed release layout, which no gather can emit"
         ),
-        "bailing_hybrid": "vLLM 0.26.0 registers no model class for Ling 3.0's BailingMoeV3ForCausalLM",
-        "bailing_moe_linear": (
-            "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where vLLM 0.26.0 registers "
-            "BailingMoeV2_5ForCausalLM"
-        ),
+        **unregistered_bailing_model_types("vLLM 0.26.0"),
     }
     # The layerwise reload processes a layer once all its tensors arrived; one whose tensors straddled
     # the interrupted chunk boundary is materialized from uninitialized storage while it waits for the

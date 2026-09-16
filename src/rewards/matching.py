@@ -1,4 +1,4 @@
-"""Shared rule-based answer validation and reward utilities. Composable via validate_answer()."""
+"""Rule-based answer normalization and matching, composable via :func:`validate_answer`."""
 
 import logging
 import re
@@ -33,14 +33,15 @@ _PERCENT_RE = re.compile(r"([-+]?\d*\.?\d+)\s*%")
 def extract_last_boxed(text: str) -> str | None:
     """Content of the last balanced ``\\boxed{...}`` in ``text``, or ``None`` when none closes.
 
-    Braces are matched by depth so nested groups survive: matching the first ``}`` would truncate
-    ``\\boxed{\\frac{1}{2}}`` to ``\\frac{1`` and score a correct LaTeX answer as wrong. A backslash
-    escapes the next character, so ``\\{``/``\\}`` do not shift the depth, while a doubled backslash
-    still introduces the token (models emit escaped LaTeX). An unterminated ``\\boxed{`` and an empty
-    ``\\boxed{}`` are both skipped: one would yield a truncated answer, the other no answer at all.
+    Braces are matched by depth so nested groups survive: a first-``}`` match truncates
+    ``\\boxed{\\frac{1}{2}}`` to ``\\frac{1`` and silently scores a correct LaTeX answer as wrong. A
+    backslash escapes the next character, so ``\\{``/``\\}`` never shift the depth, while a doubled
+    backslash still introduces the token (models emit escaped LaTeX). Neither an unterminated
+    ``\\boxed{`` nor an empty ``\\boxed{}`` is a candidate — one would yield a truncated answer, the
+    other no answer at all.
 
-    Single left-to-right pass: degenerate rollouts repeat ``\\boxed{`` thousands of times, and
-    rescanning per candidate would be quadratic in the completion length.
+    One left-to-right pass: degenerate rollouts repeat ``\\boxed{`` thousands of times, and rescanning
+    per candidate would be quadratic in the completion length.
     """
     open_braces: list[int | None] = []  # content start per open brace; None for a brace that opens no box
     best_start = -1
@@ -62,7 +63,7 @@ def extract_last_boxed(text: str) -> str | None:
             open_braces.append(None)
         elif char == "}" and open_braces:
             start = open_braces.pop()
-            # The rightmost opening is preferred, so a box nested inside another reads as the inner one.
+            # Rightmost opening wins, so a box nested inside another reads as the inner one.
             if start is not None and start > best_start and text[start:index].strip():
                 best_start, best = start, text[start:index]
         index += 1
@@ -141,18 +142,18 @@ DEFAULT_METHODS: list[Callable[[str, str], bool]] = [
 ]
 
 # Validation methods already reported as raising. A broken matcher raises on every sample it grades, so
-# the warning is emitted once per method instead of once per call.
+# warning per call would bury the run's logs in one repeated line — warn once per method instead.
 _VALIDATION_FAILURE_WARNED: set[str] = set()
 
 
 def _warn_validation_failure(method: Callable[[str, str], bool]) -> None:
     """Report a validation method that raised, once per method per process.
 
-    A method that raises grades its answer as wrong, so the failure needs to be visible, but a broken
-    method fails on every sample.
+    A method that raises grades its answer as wrong, and a broken one does so for every sample — so
+    the failure must be visible, but only once.
     """
-    # Qualified name so two matchers sharing a bare name stay distinct; a partial or callable object
-    # has neither and falls back to its repr.
+    # Qualified so two matchers sharing a bare name stay distinct; a partial or callable object has
+    # neither name and falls back to its repr.
     name = getattr(method, "__qualname__", None) or repr(method)
     warn_once(
         logger,
@@ -173,8 +174,8 @@ def validate_answer(
     """True as soon as one method of the chain accepts the answer. ``methods`` default to
     ``DEFAULT_METHODS`` (exact + numeric); a method that raises grades as no match.
 
-    Grading is all-or-nothing: a near-miss scores zero rather than partial credit, since a similarity
-    threshold would accept a wrong answer that merely resembles the right one
+    Grading is all-or-nothing: a near-miss scores zero rather than partial credit, because a
+    similarity threshold rewards a wrong answer that merely reads like the right one
     ("Washington" vs "Washington DC")."""
     predicted_str = str(predicted)
     expected_str = str(expected)
@@ -187,15 +188,3 @@ def validate_answer(
             _warn_validation_failure(method)
 
     return False
-
-
-def compute_answer_reward(
-    predicted: Any,
-    expected: Any,
-    success_reward: float = 1.0,
-    failure_reward: float = 0.0,
-    methods: list[Callable[[str, str], bool]] | None = None,
-) -> float:
-    """:func:`validate_answer` wrapper for ``_compute_reward``: ``success_reward`` on a match,
-    ``failure_reward`` otherwise."""
-    return success_reward if validate_answer(predicted, expected, methods=methods) else failure_reward

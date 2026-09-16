@@ -11,12 +11,16 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from src.environments.base import EPISODE_INVALID_KEY, Trajectory
+from src.environments.base import EPISODE_INVALID_KEY, EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
 from src.environments.sandbox.resolve import resolve_sandbox
 from src.environments.tools.definitions import NativeToolRegistry
-from src.environments.tools.factories import create_session_code_tools, create_session_file_tools
+from src.environments.tools.factories import (
+    create_session_bash_tools,
+    create_session_code_tools,
+    create_session_file_tools,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +31,14 @@ _ACTIVE_SESSION: ContextVar = ContextVar("swe_env_active_session", default=None)
 class SweEnvironment(NativeToolUseEnvironment):
     """Code-execution / software-engineering environment.
 
-    Persistent workspace tools (read/write/list files) and a code-execution tool, all backed by a
-    per-episode :class:`SandboxSession` so state carries across turns.
+    Persistent workspace tools (read/write/list files), a code-execution tool and a shell tool, all
+    backed by a per-episode :class:`SandboxSession` so state carries across turns.
     """
 
     # An agentic edit-run-test loop needs more turns than the protocol's generic budget.
     DEFAULT_MAX_TURNS = 20
 
-    SWE_SYSTEM_PROMPT = """You are a skilled software engineer. You have access to tools for reading, writing, and executing code.
+    SWE_SYSTEM_PROMPT = """You are a skilled software engineer. You have access to tools for reading, writing, and executing code, plus a bash shell in the same workspace.
 
 Use the available tools to solve the task. When you're done, provide your final answer.
 
@@ -64,6 +68,7 @@ Tips:
             create_session_code_tools(
                 _ACTIVE_SESSION.get, language=language, timeout=code_timeout, tool_name="run_code"
             ),
+            create_session_bash_tools(_ACTIVE_SESSION.get, timeout=code_timeout),
         )
         if extra_tools:
             registry.merge(extra_tools)
@@ -108,36 +113,26 @@ Tips:
         self._sessions.clear()
         super().close()
 
-    def _compute_reward(
-        self,
-        trajectory: Trajectory,
-        context: dict[str, Any] | None = None,
-    ) -> float:
-        """Compute reward with optional test function validation."""
-        base_reward = self._shaped_base_reward(trajectory)
-
+    def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
+        """Grade by the test function when one is configured, else by the protocol's answer path,
+        else by completion with at least one successful tool call."""
         if not trajectory.info.get("completed"):
-            return base_reward + self.failure_reward
+            return EpisodeGrade(0.0)
 
         if self.test_function:
             try:
-                if self.test_function(trajectory):
-                    return base_reward + self.success_reward
-                else:
-                    return base_reward + self.failure_reward
+                return EpisodeGrade(1.0 if self.test_function(trajectory) else 0.0)
             except Exception:
                 # A grader that itself errors scores every solution 0; warn so it's visible, not silent.
                 logger.warning("SWE test_function raised an exception; scoring as failure", exc_info=True)
                 # The forced failure says nothing about the completion, so it must not sit in the GRPO
                 # group baseline and bias every sibling's advantage.
                 trajectory.info[EPISODE_INVALID_KEY] = True
-                return base_reward + self.failure_reward
+                return EpisodeGrade(0.0)
 
         ctx = context or trajectory.info.get("context") or {}
         if ctx.get("validator") or ctx.get("answer") is not None:
-            return super()._compute_reward(trajectory, context)
+            return super()._grade_episode(trajectory, context)
 
-        # Ungraded: a zero-tool-call completion takes the FULL failure_reward — softening it rewards the exploit.
-        if trajectory.info.get("successful_tool_calls", 0) > 0:
-            return base_reward + self.success_reward
-        return base_reward + self.failure_reward
+        # Ungraded: a zero-tool-call completion grades the FULL failure — softening it rewards the exploit.
+        return EpisodeGrade(1.0 if trajectory.info.get("successful_tool_calls", 0) > 0 else 0.0)

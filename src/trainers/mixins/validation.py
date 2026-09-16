@@ -200,7 +200,8 @@ class ParallelismValidationMixin:
         """Guard the reference model TRL builds for itself when it cannot match the policy.
 
         :meth:`_validate_reference_model` covers an explicit ``ref_model``. TRL also builds one
-        implicitly when ``beta != 0`` and the model is not PEFT-wrapped, and the scripts clear
+        implicitly when none is passed and its no-reference cases do not apply (a PEFT-wrapped model;
+        ``precompute_ref_log_probs`` for DPO/KTO; ``beta == 0`` for GRPO), and the scripts clear
         ``model_init_kwargs`` after loading the policy, so it loads fp32, from the hub's default
         revision, with the config-default attention, as a dense replica no parallelism touches.
 
@@ -210,27 +211,28 @@ class ParallelismValidationMixin:
         than the sharding, so it raises unconditionally. The un-sharded fp32 replica is only
         wasteful, worst under EP, so that stays a warning.
         """
-        # TRL nulls ref_model for the two cases needing no second model (beta == 0, PEFT), so a live one is implicit.
+        # TRL nulls ref_model in its no-reference cases (PEFT; precompute for DPO/KTO; beta == 0 for
+        # GRPO), so a live one is implicit.
         if getattr(self, "ref_model", None) is None:
             return
         model = getattr(self, "model", None)
         if model is not None and has_live_attention_sinks(model):
             raise ValueError(
-                "beta != 0 without PEFT makes TRL build its own reference model, and this policy "
-                "carries LIVE attention sinks (reset_sinks: false). The policy is restricted to "
+                "A reference model reaches this trainer (explicit, or the one TRL builds when none is "
+                "passed) and this policy carries LIVE attention sinks (reset_sinks: false). The policy is restricted to "
                 "sink-carrying attention while the reference is not, so their log-probs differ for "
-                "identical tokens and the KL term is biased on every token. Use beta: 0 (the "
-                "bands/clip are the trust region), or use_peft: true (the adapter is disabled to "
-                "get the reference), or precompute the reference log-probs."
+                "identical tokens and the KL term is biased on every token. Use use_peft: true (the "
+                "adapter is disabled to get the reference), precompute_ref_log_probs: true (DPO/KTO), "
+                "or beta: 0 (GRPO; the bands/clip are the trust region)."
             )
         if not self.parallelism_config.is_ep_mode:
             return
         logger.warning(
-            "beta != 0 without PEFT under EP: TRL built its own reference model from the model path "
+            "Implicit reference under EP: TRL built its own reference model from the model path "
             "with no dtype, revision or attn_implementation — an fp32 DENSE replica per rank "
             "(experts included, un-sharded) loaded from the hub's default revision. Budget for it, "
-            "and do not expect a pinned model_revision to reach it. beta: 0 or use_peft: true "
-            "avoids the second model entirely."
+            "and do not expect a pinned model_revision to reach it. use_peft: true, "
+            "precompute_ref_log_probs: true (DPO/KTO) or beta: 0 (GRPO) avoids the second model entirely."
         )
 
     def _validate_lora_ep_compatibility(self):

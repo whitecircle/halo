@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import defaultdict, deque
+from collections.abc import Mapping
 
 import pandas as pd
 import wandb
@@ -40,17 +42,53 @@ def log_with_decoupled_completions(trainer, logs, start_time, super_log, *, save
     emit_completion_artifacts(trainer, console=trl_log_completions, save=save_completions)
 
 
-def emit_completion_artifacts(trainer, *, console: bool, save: bool) -> None:
-    """Write the completions parquet + backend table and/or print the console sample table.
+def unbounded_completion_logs() -> dict:
+    """TRL's ``_logs`` layout without its cap of one generation batch per slot.
+
+    TRL sizes each deque to ``generation_batch_size`` because it refills them every generation and
+    prints only the last batch. The async trainer fills them per rollout round, and an eval round is
+    the whole eval set, which the cap would cut to its tail. :func:`emit_completion_artifacts` empties
+    the slots after every log instead, so each holds exactly the rows since the last one.
+    """
+    return {
+        "images": deque(),
+        "prompt": deque(),
+        "completion": deque(),
+        "rewards": defaultdict(deque),
+        "advantages": deque(),
+        "extra": defaultdict(deque),
+    }
+
+
+def _clear_completion_logs(logs: Mapping) -> None:
+    for slot in logs.values():
+        for buffer in slot.values() if isinstance(slot, Mapping) else (slot,):
+            buffer.clear()
+
+
+def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str | None = None) -> None:
+    """Write the completions parquet + backend table and/or print the console sample table, then
+    empty ``trainer._logs`` on every rank.
 
     Writer rank only; reads ``trainer._logs``. ``console`` prints the per-sample table; ``save`` writes
     the parquet under ``<output_dir>/completions/`` and logs a ``completions`` table to each backend.
+    ``mode`` names the rows' mode when it is not the model's current one (train rows written as an
+    eval round begins); by default the model's mode picks the file.
 
     The writer is elected with ``fs_aware_save_rank`` like every other output artifact: with a shared
     output filesystem that is global rank 0, otherwise each node's local rank 0 writes its own copy.
+    The buffers are emptied on writers and non-writers alike: they are unbounded on the async trainer,
+    and a rank that never wrote would otherwise hold the run's whole record.
     """
-    if not fs_aware_save_rank():
-        return
+    mode = mode or ("train" if trainer.model.training else "eval")
+    try:
+        if fs_aware_save_rank():
+            _emit_completion_artifacts(trainer, console=console, save=save, mode=mode)
+    finally:
+        _clear_completion_logs(trainer._logs)
+
+
+def _emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str) -> None:
     logs = trainer._logs
     prompts = list(logs["prompt"])
     if not prompts:
@@ -82,7 +120,7 @@ def emit_completion_artifacts(trainer, *, console: bool, save: bool) -> None:
     )
 
     # Eval logs arrive at an unchanged global_step; the suffix keeps them off the train parquet.
-    mode_suffix = "" if trainer.model.training else "_eval"
+    mode_suffix = "" if mode == "train" else "_eval"
     completions_dir = os.path.join(trainer.args.output_dir, "completions")
     try:
         os.makedirs(completions_dir, exist_ok=True)

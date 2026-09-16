@@ -58,30 +58,34 @@ Single global group (ep_group_size == 16): [0 .. 15]
 
 A group that cannot split into equal contiguous per-domain blocks is rejected at config time. The
 reachable widths follow from that rule: `ep_group_size = num_domains × d`, where `d` (the members
-per domain) divides `nvlink_domain_size` — on 4 domains of 8 that admits 4, 8, 16 and 32 only, and
-with many small domains the narrowest cross-node group is `num_domains` wide. When
-`ep_group_size < stage_world_size` the EP groups are data-parallel replicas (`num_ep_groups > 1`);
-that case — and node-local EP across domains — routes through the deferred sync below. The **single
-global group** (`ep_group_size == stage_world_size`) needs no cross-replica deferral: every
-collective already spans the same ranks.
+per domain) divides `nvlink_domain_size`. On 4 domains of 8 that admits 4, 8, 16 and 32 only, and
+with many small domains the narrowest cross-node group is `num_domains` wide.
+
+When `ep_group_size < stage_world_size` the EP groups are data-parallel replicas
+(`num_ep_groups > 1`); that case, and node-local EP across domains, routes through the deferred sync
+below. The **single global group** (`ep_group_size == stage_world_size`) needs no cross-replica
+deferral: every collective already spans the same ranks.
 
 ### Deferred cross-replica sync
 
 **Every multi-EP-group topology defers**, single-node ones included. `EPConfig.defer_grad_sync` is
-`num_ep_groups > 1` — or more than one PP rank block — minus the FSDP-managed-expert case
-(`fsdp_shard_ep1_experts` at `ep_group_size == 1`, where FSDP2's reduce-scatter over the DTensor
-experts is already the sole sync and deferring on top would double-sync it). It carries no
-node-count term: single-domain `ep2` (four groups on 8 GPUs) and `ep2+tp2` defer exactly as
-node-local `ep8×2` does. Under a deferred topology **no in-backward EP grad hook registers at all** —
-expert and router alike — and every average runs in one post-backward sweep
+`num_ep_groups > 1` (or more than one PP rank block) minus the FSDP-managed-expert case:
+`fsdp_shard_ep1_experts` at `ep_group_size == 1`, where FSDP2's reduce-scatter over the DTensor
+experts is already the sole sync and deferring on top would double-sync it.
+
+It carries no node-count term: single-domain `ep2` (four groups on 8 GPUs) and `ep2+tp2` defer
+exactly as node-local `ep8×2` does. Under a deferred topology **no in-backward EP grad hook registers
+at all**, expert and router alike, and every average runs in one post-backward sweep
 (`DistributedTrainerMixin._sync_deferred_expert_grads`).
 
 Two things keep the hooks out of it. A post-accumulate hook fires only where a grad accumulated, so a
 rank whose dispatch delivered no tokens for a layer never enters the collective its replicas are
 already waiting in. And an in-backward all-reduce of different membership races each group's
-intra-group DeepEP combine — rank-inconsistent collective order deadlocks. The sweep contributes
-every param structurally instead (a missing grad is zero-filled). The hook that survives on a
-single-group EP run carries no collective: it only divides by `world_size / expert_tp_size`.
+intra-group DeepEP combine: rank-inconsistent collective order deadlocks.
+
+The sweep contributes every param structurally instead (a missing grad is zero-filled). The hook
+that survives on a single-group EP run carries no collective: it only divides by
+`world_size / expert_tp_size`.
 
 `EPConfig.is_deferred_dp` sits on top and is still **multi-node** — `num_ep_groups > 1`,
 `ep_group_size > 1`, more than one NVLink domain, no expert-TP. (Attention TP needs no term of its
@@ -93,12 +97,15 @@ The sweep lands every grad at the `/world_size` DP average over its rank block �
 the stage's block under PP:
 
 - expert shards: `all_reduce(SUM)` over the `expert_replica_group`, then
-  `/(world_size / expert_tp_size)`. The ETP factor drops out because expert-TP partners hold slices
-  of one expert and consume the same batch, so they are not DP replicas; at `expert_tp_size == 1`
-  the divisor is just `world_size`. With one EP group per rank block (a PP stage) there is no replica
-  group and only the divide runs;
+  `/(world_size / expert_tp_size)`. With one EP group per rank block (a PP stage) there is no replica
+  group and only the divide runs.
+
+    The ETP factor drops out because expert-TP partners hold slices of one expert and consume the
+    same batch, so they are not DP replicas; at `expert_tp_size == 1` the divisor is just
+    `world_size`.
+
 - router, replicated EP submodules and plain non-EP params: `all_reduce(AVG)` over the DP scope —
-  the world, or the stage's rank block under PP;
+  the world, or the stage's rank block under PP.
 - non-expert FSDP shards, **`is_deferred_dp` only**: `all_reduce(AVG)` over the replica group, since
   the reduce-scatter averaged them within the EP group alone. Everywhere else it already spanned the
   full DP scope, so they are left untouched.
@@ -140,18 +147,23 @@ Every `PP > 1` column value is rejected at config time — pipeline parallelism 
 Three shapes are narrower than they look; all are rejected at config time, not at runtime:
 
 - **EP+TP across domains must be a SINGLE global EP group** (`ep_size == stage_world_size`,
-  `ep_scope=global`). Cross-domain multi-group EP needs FSDP to shard non-expert params over the EP
-  group (`is_deferred_dp`), while EP+TP shards them over the `(dp, tp)` mesh — the two contracts
-  cannot both hold. `ep8+tp2` on 16 GPUs is rejected; `ep16+tp2` is the working shape.
+  `ep_scope=global`). `ep8+tp2` on 16 GPUs is rejected; `ep16+tp2` is the working shape.
+
+    Cross-domain multi-group EP needs FSDP to shard non-expert params over the EP group
+    (`is_deferred_dp`), while EP+TP shards them over the `(dp, tp)` mesh; the two contracts cannot
+    both hold.
+
 - **EP+CP requires `ep_group_size == nvlink_domain_size`** — on 8-GPU nodes, `ep_size=8` exactly.
   `ep2+cp2` and `ep4+cp2` are rejected, as is cross-domain EP under CP (`ep_scope=global`).
+
 - **EP+ETP across domains** needs a single dispatch group covering the job *and* exactly one ETP
   group per domain: `expert_tp_size == nvlink_domain_size` and `ep_size == domain count`, which
-  keeps the ETP all-reduce on NVLink. On 2×8 that leaves `ep2+etp8`. Anything narrower — `ep2+etp4`,
-  `ep4+etp2` — has `ep_group_size` below the world and is refused one rule earlier, by the
-  multi-dispatch-group check (`world_size // ep_group_size > 1`): expert-TP keeps `is_deferred_dp`
-  off, so FSDP2's DP-wide reduce-scatter would race the narrower DeepEP combine across domains. Both
-  raise at either `ep_scope`.
+  keeps the ETP all-reduce on NVLink. On 2×8 that leaves `ep2+etp8`.
+
+    Anything narrower (`ep2+etp4`, `ep4+etp2`) has `ep_group_size` below the world and is refused
+    one rule earlier, by the multi-dispatch-group check (`world_size // ep_group_size > 1`):
+    expert-TP keeps `is_deferred_dp` off, so FSDP2's DP-wide reduce-scatter would race the narrower
+    DeepEP combine across domains. Both raise at either `ep_scope`.
 
 > [!WARNING]
 > **Single-domain pure EP needs a single dispatch group**
@@ -198,7 +210,7 @@ syncs DP across domains. Rules (`_validate_tp`): `tp_size <= nvlink_domain_size`
 spanning the job; DP = `stage_world_size / tp_size`. Mechanism and load path:
 [tensor-parallelism.md](tensor-parallelism.md#eptp-mode).
 
-![Multi-node EP+TP: each node runs a node-local TP group (attention via DTensor over NVLink) while the experts form a single global EP group spanning both nodes (DeepEP all-to-all over InfiniBand); FSDP2 full-shard syncs the DP=2 non-expert gradients across nodes over InfiniBand](../assets/diagrams/ep_multi_node_layout.png){ .diagram-narrow }
+![EP + TP on two nodes: each node runs a node-local TP group over NVLink while all 16 ranks form one global EP group whose DeepEP all-to-all crosses RDMA, and FSDP2 shards the non-expert parameters over the dp-2 per-TP-position pairs](../assets/diagrams/ep_multi_node_layout.png)
 
 Valid shapes: single node — `ep8/tp8` (DP 1) or `ep8/tp4` (DP 2, one 8-rank EP group spanning two TP
 groups); 2×8 — `ep16` global with `tp8` (DP 2) or `tp4` (DP 4). At DP=1 there is no inter-node FSDP
@@ -243,14 +255,17 @@ unless you need maximum expert distribution — cross-node EP buys per-GPU memor
 ## RDMA fabrics
 
 Cross-node EP and inter-node FSDP gradient sync ride the node's RDMA NIC. The toolkit sets **no**
-fabric env vars in code — NCCL (and libfabric, on EFA) read them from the process environment, so
-they belong in the launcher. Every Halo image carries the `aws-ofi-nccl` plugin under NCCL's default
-plugin name, so it is tried on every host and yields to NCCL's built-in transports (IB, sockets)
-where libfabric finds no provider. The NGC base's `/etc/shinit_v2` sets `NCCL_NET_PLUGIN=ofi` when it
-detects EFA hardware, but only for a shell that sources it, so an EFA job sets the variable itself,
-and `NCCL_NET=Libfabric` with it so a missing plugin fails instead of falling back — that is what
-every multi-node `launcher-configs/skypilot/aws/**` task does. The image also bakes
-`NCCL_IB_HCA=mlx5`.
+fabric env vars in code: NCCL (and libfabric, on EFA) read them from the process environment, so
+they belong in the launcher.
+
+Every Halo image carries the `aws-ofi-nccl` plugin under NCCL's default plugin name, so it is tried
+on every host and yields to NCCL's built-in transports (IB, sockets) where libfabric finds no
+provider. The image also bakes `NCCL_IB_HCA=mlx5`.
+
+The NGC base's `/etc/shinit_v2` sets `NCCL_NET_PLUGIN=ofi` when it detects EFA hardware, but only
+for a shell that sources it. An EFA job therefore sets the variable itself, and `NCCL_NET=Libfabric`
+with it so a missing plugin fails instead of falling back; that is what every multi-node
+`launcher-configs/skypilot/aws/**` task does.
 
 | Fabric | Verify (on the host) | Launch env (beyond image defaults) |
 |--------|--------|------------------------------------|
@@ -260,21 +275,27 @@ every multi-node `launcher-configs/skypilot/aws/**` task does. The image also ba
 - **InfiniBand and RoCE** share the NCCL IB path and run on the baked defaults.
 - **AWS EFA is libfabric, not Mellanox.** The base bundles `aws-ofi-nccl` 1.17.3, which exports no
   `ncclGin`; every Halo image builds a GIN-capable plugin from one pinned commit
-  (`docker/efa/install_efa_userspace.sh`) and exposes it as `libnccl-gin.so` — the vLLM and SGLang
-  server images carry the same build. `NCCL_PROTO=simple` is optional; if set, set it on every rank
-  of a communicator, a rollout server joining a weight-sync group included
-  ([why](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)). The **host** supplies
-  the EFA kernel driver and `/dev/infiniband`; pass them into the container (`--device`, not a bind
-  mount).
+  (`docker/efa/install_efa_userspace.sh`) and exposes it as `libnccl-gin.so`. The vLLM and SGLang
+  server images carry the same build.
+
+    `NCCL_PROTO=simple` is optional; if set, set it on every rank of a communicator, a rollout
+    server joining a weight-sync group included
+    ([why](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)). The **host** supplies
+    the EFA kernel driver and `/dev/infiniband`; pass them into the container (`--device`, not a
+    bind mount).
+
 - **Rollout server on another node** — the server container takes the same fabric env through its
   compose EFA overlay (`docker-compose.vllm.efa.yml` / `docker-compose.sglang.efa.yml`), the trainer
   through `make ... EFA=1`; recipe, preflight and measured rates:
   [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa).
-- **Cross-node EP over EFA** additionally needs proxy GIN — `NCCL_GIN_TYPE=2` plus
+
+- **Cross-node EP over EFA** additionally needs proxy GIN: `NCCL_GIN_TYPE=2` plus
   `--device /dev/gdrdrv`. It is bound by proxy-GIN per-operation latency, not bandwidth, so a
   narrower dispatch group beats a wider one; use it for MoE too large for one node.
-  Measured EFA collective ceilings and the full GIN prerequisites:
-  [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
+
+    Measured EFA collective ceilings and the full GIN prerequisites:
+    [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
+
 - **Multi-homed nodes** — set `NCCL_SOCKET_IFNAME` to the fast NIC (the ENA interface on AWS, `ib0`
   on IB clusters) when the default route is the management network.
 
@@ -292,7 +313,7 @@ over NVLink) — which proves the rank math and the gradient algebra, not the fa
 | **Wider layouts** (4-node, 8-node, the 512-GPU layouts in [Large-Scale Scenarios](large-scale-scenarios.md)) | ❌ | rank math only — `ParallelismConfig` is exercised at world 8/16/32, no recorded run |
 | **NVL72 / MNNVL rack-wide domains** | ❌ | simulated domain sizes only; see the warning below and [Scale & Limits](../reference/scale-and-limitations.md) |
 | **InfiniBand/RoCE as a multi-node fabric** | ❌ | the recorded multi-node runs used EFA; the IB path is config guidance, not a measurement |
-| Multi-node weight sync for online / environmental GRPO — trainer node → rollout-server node over EFA, both engines, plus a two-node trainer syncing to a server on a third node | ✅ | [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
+| Multi-node weight sync for online / async GRPO — trainer node → rollout-server node over EFA, both engines, plus a two-node trainer syncing to a server on a third node | ✅ | [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
 | **Cross-node gathered EP save** on a shared filesystem | ❌ | hand-run recipe in `tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py`; not exercised multi-node |
 
 ## GB200/GB300 NVL72 (multi-node NVLink)
@@ -316,23 +337,31 @@ The toolkit then builds node-local EP/CP groups as contiguous blocks across the 
 
 **The domain is the tiling unit, so every node-local width must divide it.** `tp_size`, `cp_size`,
 `expert_tp_size` and a node-scope `ep_group_size` are each required to divide `nvlink_domain_size`
-exactly (`_validate_tp`, `_validate_cp_locality`, `_validate_expert_tp`, `_validate_ep_group`) — groups are
-contiguous rank blocks, and a non-dividing width straddles a domain boundary while `requires_rdma`
-still reports False. At `NVLINK_DOMAIN_SIZE=72` the legal widths are the divisors of 72
+exactly (`_validate_tp`, `_validate_cp_locality`, `_validate_expert_tp`, `_validate_ep_group`). Groups
+are contiguous rank blocks, and a non-dividing width straddles a domain boundary while
+`requires_rdma` still reports False.
+
+At `NVLINK_DOMAIN_SIZE=72` the legal widths are the divisors of 72
 (1, 2, 3, 4, 6, 8, 9, 12, 18, 24, 36, 72); 16, 32 and 64 are rejected at config time. Pure EP is
 narrower still: on a single 72-GPU domain the racy-topology gate leaves only `ep_size=2` and
-`ep_size=72` ([Recommended cell](large-scale-scenarios.md#recommended-cell)). On a rack whose
-GPU count is not a power of two, declare the largest power-of-two divisor your model can use —
-`NVLINK_DOMAIN_SIZE=64` over 16 of the rack's 18 compute trays — and leave the remainder idle.
+`ep_size=72` ([Recommended cell](large-scale-scenarios.md#recommended-cell)).
+
+On a rack whose GPU count is not a power of two, declare the largest power-of-two divisor your model
+can use (`NVLINK_DOMAIN_SIZE=64` over 16 of the rack's 18 compute trays) and leave the remainder
+idle.
 
 Ranks disagreeing on `NVLINK_DOMAIN_SIZE` (a per-node drift builds different groups on different
 ranks) are rejected by `ParallelismConfig` itself, before any fabric read.
 `validate_nvlink_domain_against_fabric` (`src/distributed/nvlink.py`) then cross-checks
-the declaration against hardware at config time. Both verdicts are per **domain**, taken from the
-gathered clique ids and node widths so every rank reaches the same one: a domain block spanning more
-than one fabric clique **raises**, and so does a block whose ranks all report no fabric while the
-declared domain exceeds their node — the case no clique comparison can see, since every fabric-less
-GPU reports the same sentinel (a mixed job, an NVL72 rack beside plain NVL8 trays, has both kinds).
+the declaration against hardware at config time.
+
+Both verdicts are per **domain**, taken from the gathered clique ids and node widths so every rank
+reaches the same one. A domain block spanning more than one fabric clique **raises**.
+
+So does a block whose ranks all report no fabric while the declared domain exceeds their node: the
+case no clique comparison can see, since every fabric-less GPU reports the same sentinel (a mixed
+job, an NVL72 rack beside plain NVL8 trays, has both kinds).
+
 A clique wider than the declared domain **warns**: node-local parallelism is capped below the
 available NVLink width. If any rank cannot read its clique the check no-ops, keeping it rank-uniform.
 
@@ -355,6 +384,7 @@ The first two are **enforced, not advisory**. Whenever `nvlink_domain_size > gpu
 rank of a live multi-rank job runs `check_mnnvl_prerequisites`, and the job raises (`ValueError`,
 naming the first failing rank) if any rank has no IMEX channels, reports an NVLink fabric
 registration other than `COMPLETED` (`nvidia-smi` "Fabric State"), or sees no fabric clique at all.
+
 Without them the declaration promises cross-OS-node NVLink P2P that fails deep inside the first
 collective instead. At or below the threshold nothing is checked; outside a live job the same
 verdict only logs.

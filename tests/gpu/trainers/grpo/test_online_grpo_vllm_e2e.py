@@ -45,7 +45,7 @@ import torch
 from datasets import Dataset
 
 from src.env import env_str
-from src.environments.rewards import extract_last_boxed
+from src.rewards.matching import extract_last_boxed
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.on_policy_e2e import probe_top_logprobs
@@ -415,11 +415,7 @@ def test_environmental_grpo_e2e():
         for tool in create_native_python_tools().list_tools():
             registry.register(tool)
 
-        environment_kwargs = {
-            "tool_registry": registry,
-            "max_turns": 3,
-            "success_reward": 1.0,
-        }
+        environment_kwargs = {"tool_registry": registry, "max_turns": 3}
 
         dataset = Dataset.from_list(
             [
@@ -618,7 +614,7 @@ def test_environmental_grpo_lora_e2e():
             processing_class=tokenizer,
             async_config=async_config,
             environment_cls=ReActEnvironment,
-            environment_kwargs={"tool_registry": registry, "max_turns": 3, "success_reward": 1.0},
+            environment_kwargs={"tool_registry": registry, "max_turns": 3},
             parallelism_config=ParallelismConfig(),
             peft_config=LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj", "v_proj"], task_type="CAUSAL_LM"),
         )

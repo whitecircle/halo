@@ -22,7 +22,13 @@ from openai import NOT_GIVEN
 
 import src.environments.eval_runner as eval_runner
 from src.configs.rollout_config import RolloutConfig
-from src.environments.base import Message, Trajectory
+from src.environments.base import (
+    EPISODE_ERROR_KEY,
+    OBJECTIVE_REWARD_KEY,
+    REWARD_COMPONENTS_KEY,
+    Message,
+    Trajectory,
+)
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.eval_runner import (
     collect_results,
@@ -119,8 +125,6 @@ def test_write_trajectories_jsonl_meta_then_episodes(tmp_path):
 def _tooled_env(**kw) -> NativeToolUseEnvironment:
     registry = NativeToolRegistry()
     registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: "ok"))
-    kw.setdefault("success_reward", 1.0)
-    kw.setdefault("failure_reward", 0.0)
     kw.setdefault("tool_success_reward", 0.05)
     return NativeToolUseEnvironment(tool_registry=registry, **kw)
 
@@ -158,12 +162,13 @@ async def _run_scripted_episode(env, script, monkeypatch):
 
 async def test_generation_failure_is_truncation_not_completion(monkeypatch):
     """An episode that dies on a generation error must NOT take the plain-text terminal path: that
-    marks it ``completed`` and pays completion-rewarded envs full ``success_reward`` for an HTTP error."""
+    marks it ``completed`` and pays completion-graded envs the full objective for an HTTP error."""
     env = _tooled_env()
     traj = await _run_scripted_episode(env, [RuntimeError("http boom")], monkeypatch)
     assert traj.done and traj.truncated
     assert traj.info["completed"] is False
-    assert traj.total_reward == pytest.approx(env.failure_reward)
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 0.0
+    assert traj.total_reward == pytest.approx(0.0)
 
 
 async def test_generation_failure_keeps_earned_tool_reward(monkeypatch):
@@ -176,8 +181,28 @@ async def test_generation_failure_keeps_earned_tool_reward(monkeypatch):
     assert traj.total_reward == pytest.approx(0.05)
 
 
+async def test_generation_failure_is_not_priced_as_a_turn_overflow(monkeypatch):
+    """A lost generation is the driver's fault: the episode is truncated with the error stamped under
+    ``EPISODE_ERROR_KEY`` (the Ray actor's spelling for its errored rows), and pays no
+    ``turn_overflow_penalty`` — the price of a policy that burned its turn budget."""
+    env = _tooled_env(turn_overflow_penalty=0.3)
+    traj = await _run_scripted_episode(env, [_tool_call_response(), RuntimeError("http boom")], monkeypatch)
+    assert traj.done and traj.truncated
+    assert traj.info[EPISODE_ERROR_KEY] == "RuntimeError: http boom"
+    assert traj.total_reward == pytest.approx(0.05)
+    assert traj.info["_eval_stats"]["tool_calls"] == 1, "the driver's stamp lands after the env's payload drop"
+
+
+async def test_a_real_turn_cap_overflow_still_pays(monkeypatch):
+    env = _tooled_env(max_turns=1, turn_overflow_penalty=0.3)
+    traj = await _run_scripted_episode(env, [_tool_call_response()], monkeypatch)
+    assert traj.done and traj.truncated and EPISODE_ERROR_KEY not in traj.info
+    assert traj.total_reward == pytest.approx(0.05 - 0.3)
+
+
 async def test_completed_episode_still_pays_success(monkeypatch):
-    """The happy path is untouched: a real final text answer completes and earns success_reward."""
+    """The happy path is untouched: a real final text answer completes and earns the objective term's
+    full weight."""
     env = _tooled_env()
     final = types.SimpleNamespace(
         answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None

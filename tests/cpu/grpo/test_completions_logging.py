@@ -53,6 +53,17 @@ class _Model:
         self.training = training
 
 
+def _fresh_logs() -> dict:
+    return {
+        "prompt": ["p1", "p2"],
+        "completion": ["c1", "c2"],
+        "rewards": {"environment_reward": [1.0, 0.5]},
+        "advantages": [0.4, -0.4],
+        "extra": {},
+        "images": [],
+    }
+
+
 class _Trainer:
     """Minimal stand-in exposing exactly what emit_completion_artifacts reads."""
 
@@ -63,14 +74,7 @@ class _Trainer:
         self.model = _Model()
         self.num_completions_to_print = 2
         self.log_unique_prompts = False
-        self._logs = {
-            "prompt": ["p1", "p2"],
-            "completion": ["c1", "c2"],
-            "rewards": {"environment_reward": [1.0, 0.5]},
-            "advantages": [0.4, -0.4],
-            "extra": {},
-            "images": [],
-        }
+        self._logs = _fresh_logs()
 
 
 def _parquet_path(output_dir, step=7):
@@ -159,6 +163,7 @@ def test_eval_mode_writes_suffixed_parquet(tmp_path, monkeypatch) -> None:
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
     trainer.model.training = False
+    trainer._logs = _fresh_logs()
     trainer._logs["completion"] = ["e1", "e2"]
     emit_completion_artifacts(trainer, console=False, save=True)
 
@@ -167,6 +172,50 @@ def test_eval_mode_writes_suffixed_parquet(tmp_path, monkeypatch) -> None:
     eval_path = os.path.join(str(tmp_path), "completions", "completions_00007_eval.parquet")
     assert os.path.exists(eval_path), "eval-mode write must land in the _eval-suffixed parquet"
     assert list(pd.read_parquet(eval_path)["completion"]) == ["e1", "e2"]
+
+
+def _buffer_lengths(logs) -> set[int]:
+    return {len(v) for slot in logs.values() for v in (slot.values() if isinstance(slot, dict) else (slot,))}
+
+
+def test_emit_empties_the_buffer_so_the_next_log_writes_only_its_own_rows(tmp_path, monkeypatch) -> None:
+    """The async trainer's buffers are unbounded (an eval round is the whole eval set), so a write
+    must consume them: rows would otherwise repeat in every later parquet and grow for the run."""
+    monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
+    trainer = _Trainer(str(tmp_path))
+    emit_completion_artifacts(trainer, console=False, save=True)
+    assert _buffer_lengths(trainer._logs) == {0}, "every slot, rewards and extras included, is emptied"
+
+    trainer.state.global_step = 8
+    emit_completion_artifacts(trainer, console=False, save=True)
+    assert not os.path.exists(_parquet_path(str(tmp_path), step=8)), "an emptied buffer writes no second file"
+
+
+def test_a_non_writer_rank_empties_its_buffer_too(tmp_path, monkeypatch) -> None:
+    """Non-writers hold nothing useful after the step; left alone, their unbounded slots would keep
+    every row the online trainer's generation path appends on every process."""
+    monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
+    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.delenv("DIST_SHARED_FILESYSTEM", raising=False)
+    monkeypatch.delenv("DIST_OUTPUT_SHARED_FILESYSTEM", raising=False)
+    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+
+    trainer = _Trainer(str(tmp_path))
+    emit_completion_artifacts(trainer, console=False, save=True)
+    assert not os.path.exists(_parquet_path(str(tmp_path)))
+    assert _buffer_lengths(trainer._logs) == {0}
+
+
+def test_unbounded_completion_logs_hold_a_round_larger_than_one_generation_batch() -> None:
+    """TRL caps each slot at ``generation_batch_size``, which keeps only the tail of an eval round
+    larger than one generation batch; the async trainer's buffers take the whole round."""
+    logs = cl.unbounded_completion_logs()
+    logs["prompt"].extend(f"p{i}" for i in range(432))
+    logs["rewards"]["environment_reward"].extend(range(432))
+    assert len(logs["prompt"]) == 432 and len(logs["rewards"]["environment_reward"]) == 432
+    assert all(slot.maxlen is None for slot in (logs["prompt"], logs["completion"], logs["advantages"]))
+    assert set(logs) == {"images", "prompt", "completion", "rewards", "advantages", "extra"}, "TRL's slot layout"
 
 
 def test_empty_logs_is_noop(tmp_path) -> None:
@@ -243,7 +292,7 @@ def test_shared_fs_completion_logs_reach_the_writer_only(monkeypatch) -> None:
     calls = _fake_world(monkeypatch, world=4, rank=0, shared_fs=True)
     host = _MetricsHost()
 
-    host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]))
+    host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
     assert calls["all_gather"] == 0, "the full-text payload must not be all-gathered to every rank"
     assert calls["gather_dst"] == 4, "all four gathers must still run on every rank (lock-step)"
@@ -261,7 +310,7 @@ def test_shared_fs_non_writer_still_runs_every_gather(monkeypatch) -> None:
     calls = _fake_world(monkeypatch, world=4, rank=2, shared_fs=True)
     host = _MetricsHost()
 
-    host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]))
+    host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
     assert calls["gather_dst"] == 4, "a non-writer must enter every gather its peers enter"
     assert host._logs["prompt"] == [] and host._logs["completion"] == []
@@ -273,10 +322,28 @@ def test_non_shared_fs_keeps_the_all_gather_every_node_writer_needs(monkeypatch)
     calls = _fake_world(monkeypatch, world=4, rank=2, shared_fs=False)
     host = _MetricsHost()
 
-    host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]))
+    host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
     assert calls["gather_dst"] == 0 and calls["all_gather"] == 4
     assert host._logs["prompt"] == ["peer0", "peer1", "p2", "peer3"]
+
+
+def test_a_mode_switch_writes_the_pending_rows_under_their_own_mode(tmp_path, monkeypatch) -> None:
+    """With ``logging_steps > 1`` an eval round can begin before the train rows since the last log were
+    written; they must reach the train parquet, not the eval one, and never disappear."""
+    monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
+    host = _MetricsHost()
+    host.args, host.state, host.model = _Args(str(tmp_path)), _State(step=9), _Model(training=False)
+    host.num_completions_to_print, host.log_unique_prompts = 2, False
+    host._logs = cl.unbounded_completion_logs()
+
+    host._populate_completion_logs(_rollouts("train-row"), torch.tensor([1.0]), torch.tensor([0.0]), "train")
+    host._populate_completion_logs(_rollouts("eval-row"), torch.tensor([0.0]), torch.tensor([0.0]), "eval")
+
+    train_df = pd.read_parquet(_parquet_path(str(tmp_path), step=9))
+    assert list(train_df["prompt"]) == ["train-row"], "the pending train rows land in the train file"
+    assert not os.path.exists(os.path.join(str(tmp_path), "completions", "completions_00009_eval.parquet"))
+    assert list(host._logs["prompt"]) == ["eval-row"], "the eval round's own rows wait for the eval log"
 
 
 def test_completion_logs_skipped_entirely_when_no_artifact_is_wanted(monkeypatch) -> None:
@@ -284,7 +351,7 @@ def test_completion_logs_skipped_entirely_when_no_artifact_is_wanted(monkeypatch
     calls = _fake_world(monkeypatch, world=4, rank=0, shared_fs=True)
     host = _MetricsHost(save=False, console=False)
 
-    host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]))
+    host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
     assert calls == {"all_gather": 0, "gather_dst": 0}
 

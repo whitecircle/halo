@@ -23,15 +23,24 @@ Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAtt
 
 `EPMoELayerBase._glu_combine` replaces the activation and the multiply with one Triton kernel on every base compute path including the ETP-sharded one. It is a **roster-wide** seam, not a GLM-4 one: `_resolve_activation` latches whatever `resolve_fused_glu_mul` (`src/kernels/fused_glu.py`) returns for the resolved activation — `fused_silu_mul` for a SiLU gate (GLM-4 Lite, Laguna, Qwen3, Qwen3.5/3.6, Bailing, LFM-2, Mistral4, Cohere2 MoE, Inkling, Zaya, and Step-3.7's unclamped layers), `fused_gelu_tanh_mul` for a tanh-GELU one (Gemma 4), `None` otherwise.
 
-A family opts in by *having* a gate the kernels implement, not by setting a flag. A family whose combine is a variant rebinds the same seam: DeepSeek-V4 (clamp before the activation) and Step-3.7 (its two clamped layers clamp after it) arm their kernels off the same SiLU probe, while GLM-5 Next binds its pre-activation clamp unconditionally — its experts hardcode that gate. GPT-OSS owns its interleaved-bias compute paths and never reaches the seam.
+A family opts in by *having* a gate the kernels implement, not by setting a flag. A family whose combine is a variant rebinds the same seam: DeepSeek-V4 (clamp before the activation) and Step-3.7 (its two clamped layers clamp after it) arm their kernels off the same SiLU probe.
 
-Each kernel hardcodes its activation (`x * sigmoid(x)`; the tanh-GELU approximation), so the probe arms one only when the block's resolved activation computes that function exactly — exact (erf) GELU does not arm the tanh-GeGLU kernel. The probe is **behavioral**: it evaluates the activation on a fixed fp32 vector and demands bitwise equality. A type test would not do — `ACT2FN["silu"]` is a `SiLUActivation` module that is neither `nn.SiLU` nor `F.silu`, so an `isinstance`/identity check disarms the kernel on every real block, costing throughput with no numerical trace. The probe fails closed: an activation it cannot vouch for runs eager rather than getting substituted.
+GLM-5 Next binds its pre-activation clamp unconditionally, since its experts hardcode that gate. GPT-OSS owns its interleaved-bias compute paths and never reaches the seam.
+
+Each kernel hardcodes its activation (`x * sigmoid(x)`; the tanh-GELU approximation), so the probe arms one only when the block's resolved activation computes that function exactly. Exact (erf) GELU does not arm the tanh-GeGLU kernel.
+
+The probe is **behavioral**: it evaluates the activation on a fixed fp32 vector and demands bitwise equality. A type test would not do: `ACT2FN["silu"]` is a `SiLUActivation` module that is neither `nn.SiLU` nor `F.silu`, so an `isinstance`/identity check disarms the kernel on every real block, costing throughput with no numerical trace.
+
+The probe fails closed: an activation it cannot vouch for runs eager rather than getting substituted.
 
 ## CP wrapper
 
 `Glm4MoeLiteAttention` → `Glm4MoeLiteUlyssesAttention` (`src/distributed/context_parallel/layers/glm4.py`), which declares only its HF class name. Everything below lives on the shared `MLAUlyssesAttentionBase`, which runs the DeepSeek-V3 MLA geometry on the `[B, H, S, D]` path (`_optimize_attention = False`: flash-attn's optimized GQA path assumes plain per-head QKV of one head dim, which MLA's compressed projections and nope/rope split are not). Two MLA-specific bits:
 
-- **Head dims** — `kv_b_proj` expands the compressed KV into `qk_nope_head_dim + v_head_dim`. Where `v_head_dim` is narrower than `qk_head_dim` the base pads V for the flash kernel and crops the output back; on GLM-4.7-Flash the two match at 256 (192 nope + 64 rope), so the pad and crop are no-ops.
+- **Head dims** — `kv_b_proj` expands the compressed KV into `qk_nope_head_dim + v_head_dim`. Where `v_head_dim` is narrower than `qk_head_dim` the base pads V for the flash kernel and crops the output back.
+
+    On GLM-4.7-Flash the two match at 256 (192 nope + 64 rope), so the pad and crop are no-ops.
+
 - **Shared rope head** — `kv_a_proj_with_mqa` emits `[kv_lora_rank + qk_rope_head_dim]`; the trailing slots are one rotary K vector broadcast to all KV heads *before* the Ulysses all-to-all, so the head-dim scatter gets a contiguous tensor.
 
 GLM-4 has no llama-4 position scaling, so the base forward is unchanged. RoPE follows `config.rope_interleave` and applies only to the rope half.
@@ -79,4 +88,10 @@ Gathered EP saves and EP-shard merges (`merge_ep_shards.py`) both write the per-
 
 MLA on Blackwell needs vLLM `--attention-backend CUTLASS_MLA` or SGLang `--attention-backend triton`. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm-sglang).
 
-RL weight sync runs on either engine. Two SGLang facts shape it: the gate caches an fp32 copy of its weight on the first forward and never re-reads the parameter, so a synced router weight would land in the parameter while routing keeps the launch values — `Dockerfile.sglang` patches it (`docker/sglang/patches/`), and weight sync needs that image. And SGLang's MLA loader fuses `q_a_proj` with `kv_a_proj_with_mqa` from a cache local to one request, dropping a half that arrives alone, so the client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps both halves in one chunk ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). Serve it with `SGLANG_ATTENTION_BACKEND=triton` (the engine's default backend has no kernel for its head size and exits at start) and `SGLANG_EXTRA_ARGS=--enable-deterministic-inference`: under the triton backend its greedy logits differ between a prefill and a prefix-cache hit of the same prompt, which the server tier's zero-noise baseline probe refuses (training tolerates it as sampling noise; the flag is optional there).
+RL weight sync runs on either engine. Two SGLang facts shape it.
+
+The gate caches an fp32 copy of its weight on the first forward and never re-reads the parameter, so a synced router weight would land in the parameter while routing keeps the launch values. `Dockerfile.sglang` patches it (`docker/sglang/patches/`), and weight sync needs that image.
+
+SGLang's MLA loader fuses `q_a_proj` with `kv_a_proj_with_mqa` from a cache local to one request, dropping a half that arrives alone. The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps both halves in one chunk ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+
+Serve it with `SGLANG_ATTENTION_BACKEND=triton` (the engine's default backend has no kernel for its head size and exits at start) and `SGLANG_EXTRA_ARGS=--enable-deterministic-inference`. Under the triton backend its greedy logits differ between a prefill and a prefix-cache hit of the same prompt, which the server tier's zero-noise baseline probe refuses (training tolerates it as sampling noise; the flag is optional there).

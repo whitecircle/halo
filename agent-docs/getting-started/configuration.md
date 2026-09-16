@@ -10,7 +10,10 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 
 `H4ArgumentParser` (`src/training/parser.py`) extends `HfArgumentParser` with:
 
-- **Toolkit defaults**, applied unless explicitly set in the YAML or on the CLI: `use_liger_kernel: true`, `bf16: true`, `logging_nan_inf_filter: false`. The `bf16` default yields to an explicitly-enabled `fp16`, and `mixed_precision` is re-derived after defaults and CLI overrides so it always matches the final flags. Upstream's `logging_nan_inf_filter: true` reads a device scalar back to the host per micro-batch and logs the running average in place of a NaN loss — a per-step sync plus a hidden divergence.
+- **Toolkit defaults**, applied unless explicitly set in the YAML or on the CLI: `use_liger_kernel: true`, `bf16: true`, `logging_nan_inf_filter: false`. The `bf16` default yields to an explicitly-enabled `fp16`, and `mixed_precision` is re-derived after defaults and CLI overrides so it always matches the final flags.
+
+    Upstream's `logging_nan_inf_filter: true` reads a device scalar back to the host per micro-batch and logs the running average in place of a NaN loss: a per-step sync plus a hidden divergence.
+
 - **Literal validation** — fields annotated `Literal[...]` (e.g. `advantage_method`) reject out-of-set values at parse time, in YAML and `--key=value` alike. Mixed unions (`float | Literal["auto"]`) are not validated.
 - **Boolean spellings** — YAML 1.2 booleans are unquoted `true`/`false`; the 1.1 spellings `yes`/`no`/`on`/`off` parse as (truthy) strings, so a string value on a bool field is rejected at parse time instead of silently inverting `packing: no`.
 - **No field renames.** Nothing is migrated and nothing is stripped: every key no config declares raises and names the field, retired knobs and retired ecosystem spellings (TRL's own `max_seq_length`, now `max_length`) alike.
@@ -20,12 +23,14 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 ## CLI overrides
 
 Any YAML field can be overridden as `--param=value` (dashed spellings normalize to the underscore
-field name); CLI wins. The `=` is required — a space-separated `--key value` raises "CLI overrides
-must be in --key=value form". An override matching no field on any of the script's config
-dataclasses fails loudly, as does an unknown YAML key. `--field=None`, `--field=null` and
-`--field=none` all clear any Optional field instead of setting the literal string — including
-container unions like `report_to: None | str | list[str]`, the standard way to silence logging on
-a smoke run. Two carve-outs: a `Literal` whose choices include the string `"none"` gets the string
+field name); CLI wins. The `=` is required: a space-separated `--key value` raises "CLI overrides
+must be in --key=value form".
+
+An override matching no field on any of the script's config dataclasses fails loudly, as does an
+unknown YAML key. `--field=None`, `--field=null` and `--field=none` all clear any Optional field
+instead of setting the literal string — including container unions like
+`report_to: None | str | list[str]`, the standard way to silence logging on a smoke run. Two
+carve-outs: a `Literal` whose choices include the string `"none"` gets the string
 (`--moe_balancing=none`), and an optional bool refuses the spelling outright (`--bf16=none` raises —
 clearing a precision flag silently is exactly the failure the parser exists to prevent).
 
@@ -46,7 +51,12 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 
 `use_liger_kernel: true` (default) enables fused Triton kernels (cross-entropy, RMSNorm, SwiGLU, RoPE). Three safety filters (`liger_parallelism_overrides`, `src/kernels/liger/orchestrator.py`) override the defaults:
 
-- **Wrapped MoE experts** — `swiglu`/`geglu` fusion off, because the EP or grouped-GEMM wrapper replaces the expert FFN Liger would swap. The trigger is `liger_ep_disables_fused_glu` (`src/kernels/liger/orchestrator.py`): the run needs EP wrappers (`ep_size > 1`, `expert_tensor_parallel_size > 1` — pure ETP included — or `use_grouped_gemm`), the model has experts, the family has a registered EP layer class, **and** the applier that owns the GLU swap is the one the wrapper replaces. So four cases keep fused SwiGLU: dense runs, MoE at `ep_size: 1` with `use_grouped_gemm: false`, a MoE family with no EP layer class, and a family whose toolkit Liger spec patches the dense and shared-expert MLPs the wrappers adopt unchanged.
+- **Wrapped MoE experts** — `swiglu`/`geglu` fusion off, because the EP or grouped-GEMM wrapper replaces the expert FFN Liger would swap.
+
+    The trigger is `liger_ep_disables_fused_glu` (`src/kernels/liger/orchestrator.py`): the run needs EP wrappers (`ep_size > 1`, `expert_tensor_parallel_size > 1` including pure ETP, or `use_grouped_gemm`), the model has experts, the family has a registered EP layer class, **and** the applier that owns the GLU swap is the one the wrapper replaces.
+
+    Four cases keep fused SwiGLU: dense runs, MoE at `ep_size: 1` with `use_grouped_gemm: false`, a MoE family with no EP layer class, and a family whose toolkit Liger spec patches the dense and shared-expert MLPs the wrappers adopt unchanged.
+
 - **TP** (`tp_size > 1`) — `cross_entropy` and `fused_linear_cross_entropy` off; the `lm_head` logits are DTensor-sharded across the vocab dim, so a fused softmax would see a partial vocab.
 - **CP or PP** (`cp_size > 1` or `pp_size > 1`) — same two off: the CP wrapper (and, when PP lands, the last pipeline stage) computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.
 
@@ -71,11 +81,12 @@ so concurrent launches do not collide (it raises on a single-process launch). A 
 fails before any process starts.
 
 A launch runs **from the repository root**, so relative paths in the config (and in CLI overrides)
-resolve there, not against the caller's directory. `halo run <tool>` indexes the top-level `scripts/`
-subtrees other than `training/` and `diagrams/` — post-training, data prep, inference, environments,
-profiling — and launches any script there carrying a `__main__` guard, except that a tool keeps the
-**caller's** working directory: its relative path flags mean what they would had the script been run
-directly.
+resolve there, not against the caller's directory.
+
+`halo run <tool>` indexes the top-level `scripts/` subtrees other than `training/` and `diagrams/`
+(post-training, data prep, inference, environments, profiling) and launches any script there carrying
+a `__main__` guard. A tool keeps the **caller's** working directory: its relative path flags mean what
+they would had the script been run directly.
 
 EP/CP/TP/ETP/PP under `accelerate launch` **raise** at startup for any `distributed_type` (pure ETP folds into the EP check, which keys on `ep_group_size > 1`). The guard (`is_accelerate_launch`, `src/env.py`) keys on `ACCELERATE_MIXED_PRECISION` — set by the launcher for every config — or `ACCELERATE_USE_FSDP`. Use `torchrun`.
 
@@ -98,7 +109,9 @@ FSDP2 (`fully_shard`) is applied automatically for all `torchrun` modes: gradien
 Two resharding knobs, both `torchrun`-only:
 
 - `fsdp_reshard_after_forward` (default `false` = SHARD_GRAD_OP: parameters stay unsharded between forward and backward). `true` is FULL_SHARD/ZeRO-3 and is rejected wherever an expert-distribution group exists (`ep_group_size > 1`, pure ETP included — the backward all-gather races the DeepEP combine), under TP with `data_parallel_size > 1`, and under PP.
-- `fsdp_reshard_after_backward` (default `true`). `false` keeps parameters unsharded across a gradient-accumulation window's microsteps — its last backward still reshards — at the cost of one unsharded bf16 param copy per GPU for the run. The saving is the per-microstep re-gather — negligible over NVLink, large when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
+- `fsdp_reshard_after_backward` (default `true`). `false` keeps parameters unsharded across a gradient-accumulation window's microsteps (its last backward still reshards) at the cost of one unsharded bf16 param copy per GPU for the run.
+
+    The saving is the per-microstep re-gather: negligible over NVLink, large when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
 
 ## Example SFT config
 
@@ -155,7 +168,9 @@ Method-specific fields (`beta`, `loss_type`, `advantage_method`, `environment_ty
 
 ## Config file locations
 
-Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`. Environmental GRPO adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` files for gpt-oss, Qwen3.5/3.6 and Gemma 4. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
+Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`.
+
+Async GRPO with Environments adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` files for gpt-oss, Qwen3.5/3.6 and Gemma 4. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
 
 A family directory is the snake_case hub family (`qwen3_5`, `deepseek_v4`, `ling_mini_2`), and file names lead with the same family token (`gptoss-20b-…`, `gemma4-26b-a4b-…`). One deviation: `qwen3_5/` also holds the `qwen3.6-*` configs, since Qwen3.6 ships under the Qwen3.5 model types.
 

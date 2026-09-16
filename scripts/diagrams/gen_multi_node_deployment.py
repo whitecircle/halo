@@ -1,286 +1,264 @@
-"""Generate Multi-Node Deployment diagrams.
+"""Generate the two multi-node topologies for training-methods/grpo/async-grpo/setup.md.
 
-Split into two individual images:
-- multi_node_separate_inference.png — Scenario 1: Separate Inference Node
-- multi_node_dedicated_rollout.png — Scenario 2: Dedicated Rollout Nodes
+`multi_node_separate_inference.png` — trainer and Ray actors on one node, the engine on another,
+with the ports and env knobs the cross-node paths need.
+`multi_node_dedicated_rollout.png` — one training node, one inference node per
+`rollout_server_configs` entry, a GPU-less actor tier, and the config that wires them together.
 """
 
 import matplotlib.pyplot as plt
-from _flow_style import *
-from matplotlib.patches import FancyBboxPatch
+from _pipeline_style import *
 
-plt.rcParams["font.size"] = 12
+# ── Scenario 1: one training node, one inference node ────────────────────────────────────────
+STRIP_Y, STRIP_H = 0.28, 1.70
+FRAME_Y = STRIP_Y + STRIP_H + 0.54
+FRAME_H = 4.35
+FRAME_TOP = FRAME_Y + FRAME_H
+W1, H1 = 13.2, FRAME_TOP + 0.95
+M1 = 0.33
 
-PURPLE_M = "#a78bfa"  # NCCL
-ORANGE_M = "#fb923c"  # HTTP
-GREEN_M = "#86efac"  # Ray
+N1_X, N1_W = M1, 6.2
+N2_X = N1_X + N1_W + 1.3
+N2_W = W1 - M1 - N2_X
+N2_H = FRAME_LABEL + 2.22 + FRAME_PAD
+N2_Y = FRAME_Y + (FRAME_H - N2_H) / 2
+CARD_X, CARD_W = N1_X + FRAME_PAD, N1_W - 2 * FRAME_PAD
+ENGINE_X, ENGINE_W = N2_X + FRAME_PAD, N2_W - 2 * FRAME_PAD
 
-NODE_TRAIN = "#d1fae5"
-NODE_INF = "#dbeafe"
-NODE_ROLL = "#ffedd5"
-
-
-def draw_box(ax, x, y, w, h, title="", lines=None, bg=CARD, border=CARD_BORDER, title_size=14):
-    box = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.06", facecolor=bg, edgecolor=border, linewidth=1.0)
-    ax.add_patch(box)
-    if title:
-        ax.text(
-            x + w / 2,
-            y + h - 0.22,
-            title,
-            ha="center",
-            va="top",
-            fontsize=title_size,
-            fontweight="bold",
-            color=TEXT,
-        )
-    if lines:
-        sep_y = y + h - 0.58
-        ax.plot([x + 0.18, x + w - 0.18], [sep_y, sep_y], color=BORDER_SOFT, lw=0.7, zorder=2)
-        for i, line in enumerate(lines):
-            ly = y + h - 0.90 - i * 0.44
-            ax.plot(x + 0.25, ly, "o", color=ACCENT, markersize=3, zorder=3)
-            ax.text(x + 0.42, ly, line, ha="left", va="center", fontsize=11, color=TEXT_SEC, zorder=3)
-
-
-def draw_arrow(ax, x1, y1, x2, y2, color=BORDER_SOFT, lw=1.2, style="-|>"):
-    ax.annotate(
-        "",
-        xy=(x2, y2),
-        xytext=(x1, y1),
-        arrowprops={"arrowstyle": style, "color": color, "lw": lw, "shrinkA": 4, "shrinkB": 4},
-        zorder=3,
-    )
-
-
-def arrow_label(ax, x, y, text, color=TEXT_SEC, size=10, rotation=0):
-    """Inline label near an arrow, with no background box."""
-    ax.text(x, y, text, ha="center", va="center", fontsize=size, color=color, rotation=rotation, zorder=4)
-
-
-# Image 1 — Scenario 1: Separate Inference Node
-fig, ax = plt.subplots(figsize=(13, 11.5))
-fig.patch.set_facecolor(BG)
-
-ax.set_xlim(0, 12)
-ax.set_ylim(0, 11.5)
-ax.set_aspect("equal")
+fig, ax = plt.subplots(figsize=(W1, H1))
+ax.set_xlim(0, W1)
+ax.set_ylim(0, H1)
 ax.axis("off")
 
-ax.text(
-    6, 11.3, "Scenario 1: Separate Inference Node", ha="center", va="top", fontsize=18, fontweight="bold", color=TEXT
-)
-ax.text(
-    6,
-    10.75,
-    "Training + rollout actors on Node 1  \u00b7  vLLM on Node 2",
-    ha="center",
-    va="top",
-    fontsize=12,
-    color=TEXT_TERT,
-)
+title(ax, "Separate inference node", "one server · one NCCL group · actors beside the trainer")
 
-draw_box(ax, 0.3, 3.8, 5.2, 6.5, bg=NODE_TRAIN, border=BORDER_SOFT)
-ax.text(2.9, 10.05, "Node 1  (Training)", ha="center", va="top", fontsize=15, fontweight="bold", color=TEXT)
+frame(ax, N1_X, FRAME_Y, N1_W, FRAME_H, "NODE 1 — training + actors")
+frame(ax, N2_X, N2_Y, N2_W, N2_H, "NODE 2 — inference")
 
-draw_box(
+trainer_y = FRAME_TOP - FRAME_LABEL - 1.70
+card(
     ax,
-    0.6,
-    7.1,
-    4.6,
-    2.6,
-    "Trainer (GPU 0)",
+    CARD_X,
+    trainer_y,
+    CARD_W,
+    1.70,
+    "Trainer — torchrun ranks",
     [
-        "Model + Optimizer",
-        "VLLMClient",
-        "RolloutManager",
+        "model + optimizer, FSDP2 / EP / TP",
+        "InferenceClientManager on the main process",
+        "rank 0 binds the sync store, one per server",
+        "a push pauses the server, then resumes it",
     ],
-    bg=CARD,
-    border=CARD_BORDER,
-    title_size=13,
+    color=BLUE,
 )
 
-draw_box(ax, 0.6, 4.1, 4.6, 2.6, "Ray Actors (CPU)", [], bg=CARD, border=CARD_BORDER, title_size=13)
-for i in range(4):
-    ax_x = 1.0 + i * 1.05
-    actor = FancyBboxPatch(
-        (ax_x, 4.35), 0.8, 1.5, boxstyle="round,pad=0.04", facecolor=ACCENT_LIGHT, edgecolor=CARD_BORDER, linewidth=0.5
-    )
-    ax.add_patch(actor)
-    ax.text(ax_x + 0.4, 5.4, f"A{i}", ha="center", va="center", fontsize=10, fontweight="bold", color=TEXT)
-    ax.text(ax_x + 0.4, 4.9, "Env", ha="center", va="center", fontsize=10, color=TEXT_SEC)
-
-draw_box(ax, 6.5, 3.8, 5.2, 6.5, bg=NODE_INF, border=BORDER_SOFT)
-ax.text(9.1, 10.05, "Node 2  (Inference)", ha="center", va="top", fontsize=15, fontweight="bold", color=TEXT)
-
-draw_box(
+actors_y = trainer_y - 0.30 - 1.70
+card(
     ax,
-    6.8,
-    5.6,
-    4.6,
-    3.5,
-    "vLLM Server (GPU 0)",
+    CARD_X,
+    actors_y,
+    CARD_W,
+    1.70,
+    "Ray actors — same node, CPU",
     [
-        "Model (inference)",
-        ":8000 HTTP generation",
-        ":51216 NCCL group port",
-        "Weight sync receiver",
+        "num_rollout_workers actors per training rank",
+        "each holds the environment: tools, sandbox, grader",
+        "no tokenizer — the engine renders the template",
+        "max_concurrent_rollouts bounds in-flight episodes",
     ],
-    bg=CARD,
-    border=CARD_BORDER,
-    title_size=13,
+    color=SLATE,
 )
 
-draw_arrow(ax, 5.2, 8.4, 6.8, 8.4, PURPLE_M, lw=1.4)
-arrow_label(ax, 6.0, 8.7, "NCCL :51216", color="#7c3aed", size=10)
+engine_y = N2_Y + FRAME_PAD
+card(
+    ax,
+    ENGINE_X,
+    engine_y,
+    ENGINE_W,
+    2.22,
+    "Rollout server",
+    [
+        "vLLM :8000 · SGLang :30000",
+        "rollout_backend picks the client",
+        "its workers join the sync group",
+        "and dial the trainer's store",
+        "--moe-backend triton (vLLM)",
+        "GPUs no trainer rank uses",
+    ],
+    color=BLUE,
+)
 
-draw_arrow(ax, 5.2, 5.3, 6.8, 6.6, ORANGE_M, lw=1.2)
-arrow_label(ax, 6.0, 5.55, "HTTP :8000", color="#c2410c", size=10)
+arrow(ax, N1_X + N1_W, trainer_y + 0.85, N2_X, engine_y + 1.64, "NCCL :51216", color=VIOLET)
+arrow(ax, N1_X + N1_W, actors_y + 0.85, N2_X, engine_y + 0.49, "HTTP :8000", color=TEAL)
+arrow(
+    ax,
+    CARD_X + 0.5 * CARD_W,
+    trainer_y,
+    CARD_X + 0.5 * CARD_W,
+    actors_y + 1.70,
+    "Ray — local, ray_address null",
+    color=SLATE,
+    side="right",
+)
 
-draw_box(ax, 0.5, 0.3, 11.0, 3.0, bg=CARD, border=CARD_BORDER)
-ax.text(6.0, 3.05, "Network Requirements", ha="center", va="top", fontsize=14, fontweight="bold", color=TEXT)
-ax.plot([0.7, 11.3], [2.55, 2.55], color=BORDER_SOFT, lw=0.7)
+section(ax, M1, FRAME_Y - 0.18, "NETWORK")
 
-reqs = [
-    ("HTTP :8000", "Actors \u2192 vLLM", "#c2410c", 2.0),
-    ("NCCL :51216", "Trainer \u2192 vLLM", "#7c3aed", 4.6),
-    ("Ray :6379+", "All nodes \u2192 Head", "#16a34a", 7.6),
-    ("Low latency", "Same VPC/DC", TEXT_SEC, 10.2),
+STRIP = [
+    (
+        "HTTP",
+        [
+            "vLLM :8000 · SGLang :30000",
+            "actors → engine, per turn",
+            "round-robin over the pool",
+            "resolves from every node",
+        ],
+    ),
+    (
+        "NCCL group",
+        ["vllm_group_port 51216", "bound on the trainer host", "+1 per extra server", "VLLM_GROUP_HOST, multi-homed"],
+    ),
+    (
+        "Ray",
+        [
+            "ray_address: null — local",
+            "each rank's ray.init starts Ray",
+            "dashboard off — no port 8265",
+            "actors inherit the trainer's env",
+        ],
+    ),
+    (
+        "EFA",
+        [
+            "docker-compose.vllm.efa.yml",
+            "+ make EFA=1 on the trainer",
+            "else the sync runs on sockets",
+            "weight_sync_transport.py",
+        ],
+    ),
 ]
-for label, desc, color, sx in reqs:
-    ax.plot(sx, 1.95, "s", color=color, markersize=7, zorder=4)
-    ax.text(sx, 1.5, label, ha="center", va="center", fontsize=11, fontweight="bold", color=color)
-    ax.text(sx, 1.0, desc, ha="center", va="center", fontsize=10.5, color=TEXT_SEC)
+CELL_GAP = 0.15
+cell_w = (W1 - 2 * M1 - (len(STRIP) - 1) * CELL_GAP) / len(STRIP)
+for i, (name, lines) in enumerate(STRIP):
+    card(ax, M1 + i * (cell_w + CELL_GAP), STRIP_Y, cell_w, STRIP_H, name, lines, color=SLATE)
 
 save(plt.gcf(), "multi_node_separate_inference")
 plt.close()
-print("\u2713 multi_node_separate_inference.png")
+print("✓ multi_node_separate_inference.png")
 
 
-# Image 2 — Scenario 2: Dedicated Rollout Nodes
-fig, ax = plt.subplots(figsize=(14, 11))
-fig.patch.set_facecolor(BG)
+# ── Scenario 2: dedicated rollout nodes ──────────────────────────────────────────────────────
+W2, H2 = 13.0, 7.07
+M2 = 0.325
 
-ax.set_xlim(0, 14)
-ax.set_ylim(0, 11)
-ax.set_aspect("equal")
+L_X, L_W = M2, 5.6
+R_X = L_X + L_W + 1.3
+R_W = W2 - M2 - R_X
+TOP2 = H2 - 0.95
+L_CARD_X, L_CARD_W = L_X + FRAME_PAD, L_W - 2 * FRAME_PAD
+R_CARD_X, R_CARD_W = R_X + FRAME_PAD, R_W - 2 * FRAME_PAD
+
+fig, ax = plt.subplots(figsize=(W2, H2))
+ax.set_xlim(0, W2)
+ax.set_ylim(0, H2)
 ax.axis("off")
 
-ax.text(
-    7, 10.8, "Scenario 2: Dedicated Rollout Nodes", ha="center", va="top", fontsize=18, fontweight="bold", color=TEXT
-)
-ax.text(
-    7, 10.25, "Separate training, rollout, and inference nodes", ha="center", va="top", fontsize=12, color=TEXT_TERT
-)
+title(ax, "Dedicated rollout nodes", "rollout_server_configs: one entry per inference node")
 
-draw_box(ax, 0.3, 6.2, 4.4, 3.6, bg=NODE_TRAIN, border=BORDER_SOFT)
-ax.text(2.5, 9.55, "Training Node", ha="center", va="top", fontsize=14, fontweight="bold", color=TEXT)
+frame(ax, L_X, TOP2 - 2.61, L_W, 2.61, "TRAINING NODE")
+frame(ax, R_X, TOP2 - 3.31, R_W, 3.31, "INFERENCE NODES")
+frame(ax, L_X, TOP2 - 5.82, L_W, 2.61, "ACTOR TIER — GPU-less CPU nodes")
 
-draw_box(
+card(
     ax,
-    0.55,
-    6.45,
-    3.9,
-    2.7,
-    "Trainer (GPU)",
+    L_CARD_X,
+    TOP2 - 2.41,
+    L_CARD_W,
+    1.96,
+    "Trainer — torchrun ranks",
     [
-        "Model + Optimizer",
-        "InferenceClientManager",
-        "Weight sync sender",
+        "model + optimizer, FSDP2 / EP / TP",
+        "InferenceClientManager on the main process",
+        "one NCCL group per server, trainer is rank 0",
+        "each group port is bound on this host",
+        "a push pauses every server, then resumes",
     ],
-    bg=CARD,
-    border=CARD_BORDER,
-    title_size=12,
+    color=BLUE,
 )
 
-draw_box(ax, 8.8, 6.2, 4.9, 3.6, bg=NODE_INF, border=BORDER_SOFT)
-ax.text(11.25, 9.55, "Inference Nodes", ha="center", va="top", fontsize=14, fontweight="bold", color=TEXT)
-
-draw_box(
+card(
     ax,
-    9.05,
-    8.0,
-    4.4,
-    1.5,
-    "vLLM #1 (GPU 0)",
-    [
-        ":8000  \u00b7  :51216",
-    ],
-    bg=CARD,
-    border=CARD_BORDER,
-    title_size=12,
+    R_CARD_X,
+    TOP2 - 1.63,
+    R_CARD_W,
+    1.18,
+    "Inference node 1 — vLLM or SGLang",
+    ["url        http://inf1:8000", "group_port 51216"],
+    color=BLUE,
+    mono_lines=True,
 )
 
-draw_box(
+card(
     ax,
-    9.05,
-    6.35,
-    4.4,
-    1.5,
-    "vLLM #2 (GPU 0)",
-    [
-        ":8001  \u00b7  :51217",
-    ],
-    bg=CARD,
-    border=CARD_BORDER,
-    title_size=12,
+    R_CARD_X,
+    TOP2 - 3.11,
+    R_CARD_W,
+    1.18,
+    "Inference node 2 — vLLM or SGLang",
+    ["url        http://inf2:8000", "group_port 51217"],
+    color=BLUE,
+    mono_lines=True,
 )
 
-draw_box(ax, 0.3, 2.9, 13.4, 2.7, bg=NODE_ROLL, border=BORDER_SOFT)
-ax.text(7.0, 5.35, "Rollout Nodes", ha="center", va="top", fontsize=14, fontweight="bold", color=TEXT)
+card(
+    ax,
+    L_CARD_X,
+    TOP2 - 5.62,
+    L_CARD_W,
+    1.96,
+    "Ray actors — no GPU needed",
+    [
+        "num_rollout_workers ÷ world_size per rank",
+        "soft-pinned to the rank's node, then spills",
+        "each holds the environment and its tools",
+        "POST /v1/chat/completions, round-robin",
+        "inherit the ray start env, not the trainer's",
+    ],
+    color=SLATE,
+)
 
-node_w, node_h = 4.0, 1.6
-for node_idx, (nx, name) in enumerate([(0.55, "Node 2"), (5.0, "Node 3"), (9.45, "Node 4")]):
-    draw_box(ax, nx, 3.05, node_w, node_h, name + " (CPU)", [], bg=CARD, border=CARD_BORDER, title_size=11)
-    for i in range(4):
-        ax_x = nx + 0.3 + i * 0.9
-        actor = FancyBboxPatch(
-            (ax_x, 3.15),
-            0.7,
-            0.85,
-            boxstyle="round,pad=0.04",
-            facecolor=ACCENT_LIGHT,
-            edgecolor=CARD_BORDER,
-            linewidth=0.5,
-        )
-        ax.add_patch(actor)
-        ax.text(
-            ax_x + 0.35,
-            3.6,
-            f"A{node_idx * 4 + i}",
-            ha="center",
-            va="center",
-            fontsize=9,
-            fontweight="bold",
-            color=TEXT,
-        )
+card(
+    ax,
+    R_X,
+    TOP2 - 5.82,
+    R_W,
+    2.22,
+    "Config",
+    [
+        'ray_address: "ray-head:6379"',
+        "num_rollout_workers: 64",
+        "rollout_server_configs:",
+        '  - {url: "http://inf1:8000", group_port: 51216}',
+        '  - {url: "http://inf2:8000", group_port: 51217}',
+        "enable_prefetch: true",
+    ],
+    color=SLATE,
+    mono_lines=True,
+)
 
-draw_arrow(ax, 4.7, 8.8, 9.05, 8.8, PURPLE_M, lw=1.3)
-arrow_label(ax, 6.85, 9.1, "NCCL :51216", color="#7c3aed", size=9.5)
-
-draw_arrow(ax, 4.7, 7.2, 9.05, 7.2, PURPLE_M, lw=1.3)
-arrow_label(ax, 6.85, 7.5, "NCCL :51217", color="#7c3aed", size=9.5)
-
-draw_arrow(ax, 2.5, 6.2, 2.5, 5.6, GREEN_M, lw=1.0)
-arrow_label(ax, 3.1, 5.9, "Ray", color="#16a34a", size=9.5)
-
-draw_arrow(ax, 11.45, 5.6, 11.45, 6.35, ORANGE_M, lw=1.1)
-arrow_label(ax, 12.5, 5.95, "HTTP round-robin", color="#c2410c", size=9)
-
-draw_box(ax, 0.4, 0.3, 13.2, 2.3, bg=CARD, border=CARD_BORDER)
-ax.text(7.0, 2.35, "Configuration", ha="center", va="top", fontsize=13, fontweight="bold", color=TEXT)
-ax.plot([0.6, 13.4], [1.95, 1.95], color=BORDER_SOFT, lw=0.7)
-
-config_lines = [
-    'ray_address: "ray-head:6379"',
-    "num_rollout_workers: 128",
-    "rollout_server_configs:",
-    '  - url: "http://inf-1:8000"    # group_port: 51216',
-    '  - url: "http://inf-2:8001"    # group_port: 51217',
-]
-for i, line in enumerate(config_lines):
-    ax.text(0.9, 1.6 - i * 0.28, line, ha="left", va="center", fontsize=10, color=TEXT_SEC, family="monospace")
+arrow(ax, L_X + L_W, TOP2 - 1.15, R_X, TOP2 - 1.04, "NCCL 51216", color=VIOLET)
+arrow(ax, L_X + L_W, TOP2 - 2.30, R_X, TOP2 - 2.52, "NCCL 51217", color=VIOLET)
+arrow(
+    ax,
+    L_X + 0.5 * L_W,
+    TOP2 - 2.61,
+    L_X + 0.5 * L_W,
+    TOP2 - 3.21,
+    "Ray · ray_address: ray-head:6379",
+    color=SLATE,
+    side="right",
+)
+arrow(ax, L_X + L_W, TOP2 - 3.26, R_X, TOP2 - 3.26, "HTTP per turn", color=TEAL)
 
 save(plt.gcf(), "multi_node_dedicated_rollout")
 plt.close()
-print("\u2713 multi_node_dedicated_rollout.png")
+print("✓ multi_node_dedicated_rollout.png")

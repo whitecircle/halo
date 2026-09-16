@@ -107,7 +107,6 @@ def run_playground_episode(
     max_tokens: int,
     top_p: float,
     max_turns: int,
-    success_reward: float,
 ) -> tuple[list[dict[str, str]], str]:
     """Run one episode through the shared eval driver and render it for the UI.
 
@@ -115,7 +114,7 @@ def run_playground_episode(
     length-cut turn is recovered here as in training rather than graded as a final answer), binds the
     episode's reasoning-effort level and token budget, and finalizes a truncated episode.
     """
-    env = resolve_environment(env_type, {"max_turns": int(max_turns), "success_reward": success_reward})
+    env = resolve_environment(env_type, {"max_turns": int(max_turns)})
     # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
     # full one, so the scheme is restored rather than refused.
     url = server_url if server_url.startswith("http") else f"http://{server_url}"
@@ -156,7 +155,6 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
         max_tokens,
         top_p,
         max_turns,
-        success_reward,
     ):
         if not prompt.strip():
             return [], "Please enter a prompt."
@@ -172,7 +170,6 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
                 max_tokens,
                 top_p,
                 int(max_turns),
-                success_reward,
             )
         except Exception as e:
             return [], f"**Error:** {e}"
@@ -207,7 +204,6 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
 
                 gr.Markdown("### Environment")
                 max_turns = gr.Slider(1, 30, step=1, value=10, label="Max Turns")
-                success_reward = gr.Slider(0, 5, step=0.1, value=1.0, label="Success Reward")
 
                 run_btn = gr.Button("Run Episode", variant="primary")
 
@@ -228,7 +224,6 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
                 max_tokens,
                 top_p,
                 max_turns,
-                success_reward,
             ],
             outputs=[chatbot, summary],
         )

@@ -54,7 +54,7 @@ Same YAML shape, different script and a few method fields. `halo launch <method>
 | DPO / KTO | `scripts/training/preference/{dpo,kto}.py` | [DPO](../training-methods/preference/dpo.md) · [KTO](../training-methods/preference/kto.md) |
 | Offline GRPO (pre-scored) | `scripts/training/offline_grpo.py` | [Offline GRPO](../training-methods/grpo/offline-grpo.md) |
 | Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | [Online GRPO](../training-methods/grpo/online-grpo.md) |
-| Environmental GRPO (multi-turn) | `scripts/training/environmental_grpo.py` | [Environmental GRPO](../training-methods/grpo/environmental-grpo.md) |
+| Async GRPO with Environments (multi-turn) | `scripts/training/environmental_grpo.py` | [Async GRPO](../training-methods/grpo/async-grpo/README.md) |
 | Reward modeling / classification | `scripts/training/preference/rewards.py`, `scripts/training/classification.py` | [Reward](../training-methods/preference/reward-modeling.md) · [Classification](../training-methods/classification.md) |
 | Distillation | `scripts/training/distillation/{teacher_distill,self_distill}.py` | [Distillation](../training-methods/distillation/README.md) |
 | Embedding | `scripts/training/embedding.py` | [Embedding](../training-methods/embedding.md) |
@@ -79,7 +79,8 @@ Use a 5–10× higher learning rate than full fine-tuning (`5e-5` vs `5e-6`).
 > **Parallelism limits**
 >
 > - Attention LoRA works under FSDP/DDP, CP, EP and ETP; it **raises** at construction under TP, EP+TP and PP.
-> - On any MoE model, expert names (`gate_up_proj`, `gate_proj`, `up_proj`, `down_proj`, the `gate_proj_gmm` / `up_proj_gmm` grouped spellings, and the `experts` / `mlp.experts` containers) are peeled out of `lora_target_modules` into native grouped adapters — with a warning, since plain `nn.Linear` MLPs sharing those names (dense prefix layers, shared experts) are then adapted by neither half. `use_dora` and `lora_target_parameters` are rejected on that path, and `expert_tp_size > 1` rejects expert LoRA.
+> - On any MoE model, expert names (`gate_up_proj`, `gate_proj`, `up_proj`, `down_proj`, the `gate_proj_gmm` / `up_proj_gmm` grouped spellings, and the `experts` / `mlp.experts` containers) are peeled out of `lora_target_modules` into native grouped adapters.
+> - That peel warns: plain `nn.Linear` MLPs sharing those names (dense prefix layers, shared experts) are adapted by neither half. `use_dora` and `lora_target_parameters` are rejected on that path, and `expert_tp_size > 1` rejects expert LoRA.
 > - A `use_peft: true` that would build no adapter raises rather than silently full-finetuning.
 > - QLoRA **raises** under EP/TP/PP/grouped-GEMM-MoE loaders — use it with plain DDP/FSDP, or CP on a **dense** model.
 > - Full matrix: [PEFT](../optimization/peft.md).
@@ -115,7 +116,10 @@ One flag per axis, combinable where the allowlist allows it — the per-mode com
 
 Before you burn a run:
 
-- **Single-node EP** must form one dispatch group per NVLink domain: `ep_size × expert_tp_size` = GPUs in the domain, or `ep_size` = 2. Anything narrower with `ep_size > 2` (ep4 on 8) is rejected at config time — its DeepEP combine barriers race FSDP2's collectives and hang. For 4-way expert sharding on 8 GPUs use `ep4 + expert_tp2`; attention TP does not widen the dispatch group.
+- **Single-node EP** must form one dispatch group per NVLink domain: `ep_size × expert_tp_size` = GPUs in the domain, or `ep_size` = 2. Anything narrower with `ep_size > 2` (ep4 on 8) is rejected at config time; its DeepEP combine barriers race FSDP2's collectives and hang.
+
+    For 4-way expert sharding on 8 GPUs use `ep4 + expert_tp2`; attention TP does not widen the dispatch group.
+
 - **CP** needs a real Flash Attention impl, `seq_len` and both head counts divisible by `cp_size`, and stays node-local.
 - **Combinations are an allowlist.** Each axis alone, plus EP+TP, EP+CP, and EP+ETP. Everything else — TP+CP, ETP+CP, TP+ETP, EP+TP+ETP — is rejected by `ParallelismConfig` before any model loads, with the mechanism; `pipeline_parallel_size > 1` ([not yet available](../parallelism/pipeline-parallelism.md)) is rejected one step earlier, where the CLI arguments are turned into that config. See [Parallelism](../parallelism/README.md).
 

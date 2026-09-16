@@ -1,18 +1,8 @@
-# Environmental GRPO — gpt-oss-20b on Codeforces, LoRA (r=64, all linears), EP=4, ZeRO-2, KL-free
-# (bands + IS masking as trust region).
-# Servers: vLLM 0.26.0 with --moe-backend triton and VLLM_USE_V2_MODEL_RUNNER=0 (Model Runner V2
-#   rejects the thinking_token_budget this config sends with a 400 on every rollout); the image must
-#   carry the layerwise-reload patch
-#   (docker/vllm/patches/vllm_layerwise_reload_patch.py).
-#   Parsers (harmony is disabled on this path, so both are needed and neither is the vLLM default):
-#     --enable-auto-tool-choice --tool-parser-plugin /opt/gpt_oss_text_tool_parser.py
-#     --tool-call-parser gpt_oss_text — code_contests is a NATIVE-TOOL env; with no parser the server
-#     400s every rollout, and with a stock one (openai/seed_oss cannot read gpt-oss text calls) the call
-#     stays text and every episode scores 0.
-#     --reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss —
-#     without it the rollout_max_thinking_tokens budget below is refused with a 400.
-# Launch: 4 train GPUs + 2 vLLM servers TP=2 on the other 4;
-#   CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+# Environmental GRPO — gpt-oss-20b on Codeforces, LoRA (r=64, all linears), EP=4, ZeRO-2, KL-free (IS bands as the trust region).
+# Serve on the patched vllm-server image (agent-docs/infrastructure/rollout-servers.md#vllm): --moe-backend triton,
+#   VLLM_USE_V2_MODEL_RUNNER=0, --enable-auto-tool-choice --tool-parser-plugin /opt/gpt_oss_text_tool_parser.py
+#   --tool-call-parser gpt_oss_text, --reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss.
+# Launch: 4 train GPUs + 2 vLLM servers TP=2 on the other 4; CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
@@ -20,8 +10,7 @@ model_name_or_path: unsloth/gpt-oss-20b-BF16
 attn_implementation: flash_attention_4
 reset_sinks: false
 # Serve with --chat-template on this same file (VLLM_CHAT_TEMPLATE in the compose file): forced on the
-# trainer alone it leaves the engine on the checkpoint's built-in, which double-encodes tool-call
-# arguments the harmony parser cannot then read.
+# trainer alone, the engine stays on the checkpoint's built-in and double-encodes tool-call arguments.
 chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
 force_chat_template: true
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
@@ -45,49 +34,45 @@ lora_target_modules:               # expert projs peel to native EP grouped-LoRA
 - o_proj
 - gate_up_proj
 - down_proj
-lora_modules_to_save:              # full-trained, not LoRA; router deliberately stays frozen
+lora_modules_to_save:              # full-trained, not LoRA; the router stays frozen
 - embed_tokens
 - lm_head
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 12               # high's worst case (3 subs + 6 scratchpad runs) plus room to recover
-                            # from a length-cutoff turn, which costs a turn, not the episode
+max_turns: 14
 environment_kwargs:
   language: python
   timeout_per_test: 5
   stop_on_first_failure: false
-  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit — see the
-                             # ep1 sibling for the derivation. Budget stop scores the graded prefix.
+  max_grading_seconds: 150   # seconds of wall clock per submission grade; a budget stop scores the graded prefix
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
-  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past two recoveries the episode ends truncated
-  # max_output_size (grader stdout cap, NOT a generation budget) stays at the env default.
-  # One profile per effort level: CoT budget + interaction. Submissions scale with effort, one repair
-  # everywhere — a single submission strands near-misses; high funds the full verdict->fix loop.
-  # NO behavior bounties: a tested-submission bonus drowns in the group baseline or gets ritual-farmed,
-  # so the interaction ladder is the differentiator and the objective the only large channel.
-  # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + global answer headroom).
+  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past this the episode ends truncated
+  # One profile per effort level: CoT budget + interaction budgets. thinking_tokens is an ENGINE cap
+  # that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
     low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
     medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
-  # No token_cost: a per-token price is paid within the group, so the sibling that reasons less wins it
-  # regardless of outcome at every effort level; the thinking caps and interaction budgets price effort.
-  # Reward ladder: see code_contests.py _compute_reward.
-  submission_reward: 0.1     # bonus for reaching the graded channel; small so a weak submission cannot out-earn a careful one
-  pass_fraction_exponent: 2.0  # convex partial credit: a half-right submission earns a quarter of a solve
+  # Reward ladder: see code_contests.py _grade_episode.
+  submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
-  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract): shown expected/got made the judge a free test oracle
-  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first; prices probing the judge
+  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract)
+  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
-  multi_turn_reward: 0.05    # binary, once per episode, gated on a real submission
-  tool_success_reward: 0     # env default; any per-call pay is farmable by duplicate re-runs
+  multi_turn_reward: 0
+  tool_success_reward: 0
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged when the episode burns max_turns
-  tool_error_penalty: 0.05   # magnitude, >= 0 — applied as minus per call that fails to parse/execute
+  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
+
+# --- Rewards ---
+rewards:
+  - source: environment   # the pass fraction of the submitted solution
+    exponent: 2.0         # convex partial credit: half-right earns a quarter
 
 # --- Ray Workers ---
 num_rollout_workers: 32
-max_concurrent_rollouts: 50  # = eval_rollout_batch_size: the eval round must fit one wave; training needs fewer
+max_concurrent_rollouts: 50  # = eval_rollout_batch_size: the eval round must fit one wave
 
 # --- vLLM Servers ---
 rollout_server_configs:
@@ -96,28 +81,27 @@ rollout_server_configs:
 - url: "http://localhost:8001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 1200.0       # per HTTP call = one turn: at least twice the 24k-token turn cap over the per-sequence decode
-                              # speed at peak concurrency (agent-docs/training-methods/grpo/environmental-grpo.md#sizing-a-run)
-max_retries: 1                # a timeout re-runs the WHOLE episode; 2 attempts x 1200 s stays under the
-                              # 80%-of-watchdog retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
+request_timeout: 1200.0       # seconds per HTTP call = one turn
+                              # (agent-docs/training-methods/grpo/async-grpo/performance.md#sizing-a-run)
+max_retries: 1                # a timeout re-runs the WHOLE episode; attempts x request_timeout must stay
+                              # under the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy; the trainer scores at this temperature and the engine's IS reference must match
-                            # against early sharpening (the IS geo-band/veto price the extra off-policyness)
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]      # end each turn at the harmony tool-call terminator
-rollout_max_tokens: 24000              # per-turn total: thinking budget + a 6k answer headroom
-                                       # (2k left a finished thought too little room to emit its tool call)
+rollout_max_tokens: 24000              # per-turn total: thinking budget + answer headroom
 rollout_max_thinking_tokens: 18000     # global CoT ceiling >= the profiles' high
-reasoning_compliance_weight: 0   # OFF: the under-band floor is farmable — a padded CoT meets it;
-                                 # length control is engine-side instead (per-effort caps)
+reasoning_compliance_weight: 0.15            # a turn that thinks past 0.9x its budget pays up to this, averaged over the episode's turns
+reasoning_compliance_under_use_weight: 0     # no under-use floor
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
 
-# HardTests problems with sound checkers, banded by Codeforces rating; `medium` (1500-1999) is the entry band,
-# `hard` and `extra-hard` the later curriculum stages (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+# --- Dataset ---
+# HardTests problems with sound checkers, banded by Codeforces rating; `medium` = 1500-1999
+# (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
 dataset:
 - your-org/code-contests-hardtests-rl:medium
 
@@ -128,40 +112,36 @@ max_prompt_length: null
 num_generations: 8
 use_chunked_grpo_logprobs: true # required for gpt-oss (~201k vocab)
 loss_type: dapo
-advantage_mode: asymmetric   # failures run 3-4x longer than solves, so under the token-level normalizer
-advantage_neg_scale: 0.7     #   their negatives carry the gradient mass and push entropy up; 0.7 nets ~0
+advantage_mode: asymmetric   # scales negative advantages, which dominate the token-level normalizer
+advantage_neg_scale: 0.7
 beta: 0.0                   # KL-free; drift observability = sampling/logratio_mean + entropy + eval
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
-isr_engine_reference: false  # the engine re-score costs server headroom (an fp32 log-softmax over the vocabulary per
-                             #   prefill chunk; --gpu-memory-utilization <= 0.80) and removes only the trainer<->engine part of the floor
-isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor (~0.003/token at sampling entropy
-isr_geo_band_max: 1.05       #   0.4, ~0.04 at 1.0); on sustained masking at LOW entropy fix the disagreement, never widen
+isr_engine_reference: false  # an engine re-score costs server headroom (--gpu-memory-utilization <= 0.80)
+isr_geo_band_min: 0.95       # geometric-mean ratio band; on sustained masking fix the disagreement,
+isr_geo_band_max: 1.05       #   never widen
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
 scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
-# routing_replay: rollout — R3 is validated on the ep1 topology; verify replay under EP dispatch
-#   (routing/replay_flip_rate small and stable) before enabling here.
+# routing_replay: rollout — verify replay under EP dispatch (routing/replay_flip_rate small and stable)
+#   before enabling.
 num_generations_eval: 1
-scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
+scale_rewards: batch        # global batch std — never per-group
 drop_degenerate_groups: true  # all-alike groups would still inflate the DAPO normalizer
-top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
-mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow (a length-cut TURN is
-                                   # priced and retried in-episode, and its fragment is skipped at tokenization),
-                                   # and a turn-budget burn is a real failure worth its negative advantage
+top_entropy_quantile: 1.0   # train ALL tokens
+mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow; a length-cut TURN is
+                                   # priced and retried in-episode
 
 # --- Training ---
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 4      # rows per eval loss-forward chunk
-eval_rollout_batch_size: 50       # the 200-problem eval split in one rollout round across 4 ranks
+per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
+eval_rollout_batch_size: 50
 gradient_accumulation_steps: 24 # dp 4 x 24 = 96 episodes/step; per-rank value must divide by num_generations. One optimizer step per generation round (steps_per_generation defaults to it).
-max_steps: 300              # the cosine horizon must match the run's USEFUL length, not the dataset's:
-                            # at a full-epoch (~1.2k-step) horizon the LR is still 97% of peak at step 150
-                            # and the policy drifts until it forgets the harmony tool-call format
+max_steps: 300              # the cosine horizon must match the run's useful length, not the dataset's
 num_train_epochs: 1
 learning_rate: 3.0e-06
 max_grad_norm: 1.0
@@ -180,12 +160,12 @@ fp32_grad_reduce: true
 output_dir: checkpoints/env-grpo-oss-20b-code-contests-lora-ep4
 save_strategy: steps
 save_steps: 15
-save_total_limit: 6        # bounds checkpoint disk; archive the eval-peak checkpoint before it rotates out
+save_total_limit: 6        # archive the eval-peak checkpoint before it rotates out
 
-# --- Eval (held-out test split, 200 problems, pass@1) ---
+# --- Eval (held-out test split, 400 problems, pass@1) ---
 eval_strategy: steps
 eval_steps: 50
-eval_on_start: true         # base-policy reference before the first update
+eval_on_start: true         # eval the starting checkpoint
 
 # --- Logging ---
 logging_steps: 1

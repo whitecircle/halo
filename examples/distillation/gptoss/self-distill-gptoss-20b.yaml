@@ -3,9 +3,8 @@
 # Launch: torchrun --nproc_per_node=8 scripts/training/distillation/self_distill.py <this config>
 
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
-                                         #   true) sets self_attn.sinks = None and the save re-emits
-                                         #   dtype.min; live sinks are rejected under FA2
+attn_implementation: flash_attention_2   # FA2 carries no sink argument; live sinks are rejected
+                                         #   under it, so reset_sinks must stay on (its default)
 model_init_kwargs:
   output_router_logits: true
   router_aux_loss_coef: 0.001
@@ -28,9 +27,9 @@ opd_exclude_eos: true                   # keeps SFT's hard P(EOS)->1 undiluted b
 # --- Optional reference-policy KL anchor (0 disables; no ref model loaded) ---
 reference_kl_coef: 0.0
 
-chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja   # upstream harmony template; plain turns render channel-less — the marker below must match that form
+chat_template: jinja-templates/gpt-oss/gpt-oss-multiturn.jinja   # bundled template renders assistant turns WITHOUT <|channel|>final — the marker below would never match
 force_chat_template: true
-assistant_message_template: <|start|>assistant<|message|>
+assistant_message_template: <|start|>assistant<|channel|>final<|message|>
 
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 16

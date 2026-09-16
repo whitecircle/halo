@@ -180,6 +180,17 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "whole trajectory back to a single re-tokenized row. Default on."
         },
     )
+    max_train_row_tokens: int | None = field(
+        default=None,
+        metadata={
+            "help": "Longest training row (prompt + completion tokens) a training rank takes; None = the model's "
+            "context window. A per-turn row over it is left out of the batch (the episode's other turns still "
+            "train); a whole-trajectory row over it trains as a zero-weight row. Logged as "
+            "sampling/rows_over_cap_frac: rows left out over rows left out plus rows that train. A memory bound "
+            "for the training ranks — must be above rollout_max_tokens — below the context check, which rejects "
+            "rows the served model could not have produced."
+        },
+    )
 
     isr_band_min: float | None = field(
         default=None,
@@ -308,50 +319,37 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         },
     )
 
+    rollout_chat_template_kwargs: dict[str, Any] = field(
+        default_factory=dict,
+        metadata={
+            "help": "Chat-template variables sent with every rollout request as `chat_template_kwargs` and applied "
+            "to the trainer's own renders, so both sides see one template state. Qwen3.x reads "
+            "`preserve_thinking`: with the env's `carry_reasoning`, every prior turn's reasoning stays rendered "
+            "even after a user message (the cut-turn nudge). `reasoning_effort` is refused here: the level is "
+            "per episode and travels as the request's top-level field."
+        },
+    )
+
     reasoning_compliance_weight: float = field(
         default=0.0,
         metadata={
             "help": "Weight of the reasoning-budget calibration reward (0 = off). When > 0 and an "
             "episode has a CoT budget (reasoning_effort set), the trainer adds an ASYMMETRIC per-turn "
             "calibration term (reasoning_calibration_penalty): no penalty in [0.3,0.9]x the budget, a "
-            "mild penalty below (under-use), a strong penalty above / on truncation (over-use, up to "
-            "-weight). Trains the model to match the requested effort. ~0.15 shapes without dominating "
-            "the verifier reward."
+            "mild penalty below (under-use, scaled by reasoning_compliance_under_use_weight), a strong "
+            "penalty above / on truncation (over-use, up to -weight). Trains the model to match the "
+            "requested effort. ~0.15 shapes without dominating the verifier reward."
         },
     )
 
-    effort_length_penalty_k0: float | None = field(
-        default=None,
+    reasoning_compliance_under_use_weight: float = field(
+        default=0.3,
         metadata={
-            "help": "Coefficient of the capped effort-conditioned reasoning-length penalty at the lowest effort level "
-            "(None = off). Per trajectory: -min(c_max, k(effort) * reasoning_tokens / l_norm) with "
-            "k(effort) = k0 * exp(-(effort - effort_min) / tau), reasoning tokens summed over the assistant turns. "
-            "Priced per level, so a low level pays most for the same trace; capped, unlike the per-token "
-            "token_cost, so a long trace cannot outweigh the task reward. Logged as reward/effort_length_penalty "
-            "and effort/<level>/length_penalty."
-        },
-    )
-    effort_length_penalty_tau: float = field(
-        default=25.0,
-        metadata={
-            "help": "Effort units over which the penalty coefficient falls by e (see effort_length_penalty_k0)."
-        },
-    )
-    effort_length_penalty_c_max: float = field(
-        default=0.5,
-        metadata={"help": "Cap of the effort-conditioned reasoning-length penalty, in reward units."},
-    )
-    effort_length_penalty_l_norm: float = field(
-        default=8192.0,
-        metadata={
-            "help": "Reasoning tokens per unit of the effort-conditioned length penalty (the trace length k is priced per)."
-        },
-    )
-    effort_length_penalty_levels: dict[str, float] = field(
-        default_factory=lambda: {"low": 25.0, "medium": 50.0, "high": 100.0},
-        metadata={
-            "help": "Scalar effort per categorical level for the length penalty's k(effort); the lowest value is "
-            "effort_min. A level missing here is refused at trainer construction."
+            "help": "Weight of the below-band (under-use) side of the calibration term, relative to the "
+            "over-use side's 1.0: a turn with r reasoning tokens under 0.3x the budget B pays "
+            "-under_use_weight * (0.3B - r) / 0.3B before reasoning_compliance_weight scales it. 0 turns "
+            "that side off, so a short repair turn after a verdict is not penalized and only the above-band "
+            "side prices thinking that runs to the budget. Finite and >= 0."
         },
     )
 
@@ -424,24 +422,16 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             raise ValueError(
                 f"sync_weights_every_n_steps must be >= 1 (1 = every step), got {self.sync_weights_every_n_steps}"
             )
-        if self.effort_length_penalty_k0 is not None:
-            for name in (
-                "effort_length_penalty_k0",
-                "effort_length_penalty_tau",
-                "effort_length_penalty_c_max",
-                "effort_length_penalty_l_norm",
-            ):
-                value = getattr(self, name)
-                if not (isfinite(value) and value > 0):
-                    raise ValueError(f"{name} must be a finite positive number when the penalty is on, got {value}")
-            if not self.effort_length_penalty_levels:
-                raise ValueError("effort_length_penalty_levels must map every effort level to a scalar effort")
-            for level, effort in self.effort_length_penalty_levels.items():
-                if isinstance(effort, bool) or not isinstance(effort, int | float) or not isfinite(effort):
-                    raise ValueError(
-                        f"effort_length_penalty_levels[{level!r}] must be a finite number, got {effort!r}"
-                    )
-        # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit".
+        # Scales a shortfall in [0, 1]: a negative weight would reward skipping the CoT, and a NaN passes
+        # every ordered comparison.
+        under_use_weight = self.reasoning_compliance_under_use_weight
+        if not isfinite(under_use_weight) or under_use_weight < 0:
+            raise ValueError(
+                f"reasoning_compliance_under_use_weight must be a finite number >= 0 (0 = no under-use "
+                f"penalty), got {under_use_weight}"
+            )
+        # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
+        # server is then retried until the NCCL watchdog kills the job.
         if self.max_retries < 0:
             raise ValueError(f"max_retries must be >= 0 (0 = one attempt, no retry), got {self.max_retries}")
         # queue.Queue treats maxsize <= 0 as unbounded, so `num_prefetch_batches: 0` would buffer
@@ -502,6 +492,27 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
                 f"rollout_max_thinking_tokens ({self.rollout_max_thinking_tokens}) must be below "
                 f"rollout_max_tokens ({self.rollout_max_tokens}), which bounds the WHOLE turn: at or "
                 f"above it the turn has no answer headroom left and is cut mid-reasoning every time."
+            )
+        if self.max_train_row_tokens is not None and (
+            isinstance(self.max_train_row_tokens, bool) or self.max_train_row_tokens < 1
+        ):
+            raise ValueError(f"max_train_row_tokens must be a positive int or null, got {self.max_train_row_tokens!r}")
+        # A row is a turn's prompt plus its completion, and the completion alone may run to
+        # rollout_max_tokens: a cap at or below it leaves out every turn that used its budget — a
+        # length bias against long turns, not the memory bound the knob is.
+        if self.max_train_row_tokens is not None and self.max_train_row_tokens <= self.rollout_max_tokens:
+            raise ValueError(
+                f"max_train_row_tokens ({self.max_train_row_tokens}) must be above rollout_max_tokens "
+                f"({self.rollout_max_tokens}): a row is prompt + completion, so a cap at or below the per-turn "
+                f"generation budget drops every turn that runs to it."
+            )
+        # A fraction of the step's corrected trajectories/tokens; 0 would trip on every step, >1 never.
+        if self.skip_update_masked_frac is not None and not 0.0 < self.skip_update_masked_frac <= 1.0:
+            raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self.skip_update_masked_frac}")
+        if "reasoning_effort" in self.rollout_chat_template_kwargs:
+            raise ValueError(
+                "rollout_chat_template_kwargs must not carry reasoning_effort: the level is per episode and "
+                "travels as the request's top-level field, which the engine resolves over the nested form."
             )
         self._validate_backend_capabilities()
 

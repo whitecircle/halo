@@ -1,10 +1,14 @@
 # torch.compile
 
-On EP MoE, `torch.compile` (inductor) reaches roughly the same speedup as [Liger kernels](liger-kernels.md) (~+30% throughput, −9 GB) and **composes with them**: compile on top of Liger holds the gain. DeepEP all-to-all and Flash Attention break the compiled graph at every MoE/attention boundary, but inductor compiles the spans between breaks (norms, projections) well enough to pay off. Liger is the default (no per-shape warmup cost); add `torch_compile` when you can absorb the first-step compile latency. What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
+On EP MoE, `torch.compile` (inductor) reaches roughly the same speedup as [Liger kernels](liger-kernels.md) (~+30% throughput, −9 GB) and **composes with them**: compile on top of Liger holds the gain. DeepEP all-to-all and Flash Attention break the compiled graph at every MoE/attention boundary, but inductor compiles the spans between breaks (norms, projections) well enough to pay off.
+
+Liger is the default (no per-shape warmup cost); add `torch_compile` when you can absorb the first-step compile latency. What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
 
 ## Expert activations are not compiled
 
-**No expert activation is wrapped in `torch.compile`.** Every GLU combine on the roster is a Triton kernel taking its shape-dependent and numeric arguments at runtime (`src/kernels/fused_glu.py`): the plain SwiGLU / tanh-GELU pair, DeepSeek-V4 and GLM-5 Next's clamped SwiGLU (`fused_clamped_silu_mul`), Step-3.7 Flash's post-activation clamp (`fused_silu_then_clamp_mul`), and GptOss's `fused_gptoss_glu` on the loop, grouped-GEMM and ETP paths alike. A `torch.compile`d combine taking a bound (or `alpha`) as a Python float is re-traced as a symbolic input once the token count goes dynamic, and the inductor C++ backend then serves **every later value from the first graph** — a silently wrong clamp on every layer after the first.
+**No expert activation is wrapped in `torch.compile`.** Every GLU combine on the roster is a Triton kernel taking its shape-dependent and numeric arguments at runtime (`src/kernels/fused_glu.py`): the plain SwiGLU / tanh-GELU pair, DeepSeek-V4 and GLM-5 Next's clamped SwiGLU (`fused_clamped_silu_mul`), Step-3.7 Flash's post-activation clamp (`fused_silu_then_clamp_mul`), and GptOss's `fused_gptoss_glu` on the loop, grouped-GEMM and ETP paths alike.
+
+A `torch.compile`d combine taking a bound (or `alpha`) as a Python float is re-traced as a symbolic input once the token count goes dynamic, and the inductor C++ backend then serves **every later value from the first graph**: a silently wrong clamp on every layer after the first.
 
 The clamped combines latch into the shared `_glu_combine` seam. DeepSeek-V4 arms its combine only when the block's activation probes as exactly SiLU and falls back to the family's eager clamped GLU otherwise; Step-3.7 takes the same probe but only on a layer whose `swiglu_limit` is finite — its unclamped layers keep the plain fused SiLU combine. GLM-5 Next's experts hardcode clamp-then-SiLU structurally, so its combine runs unconditionally.
 

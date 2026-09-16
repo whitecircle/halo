@@ -128,6 +128,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         run_argv=(INTERPRETER_PLACEHOLDER, "-s", "-E", "main.py"),
         aliases=("py", "python3"),
     ),
+    "bash": LanguageSpec(
+        name="bash",
+        source_name="main.sh",
+        # Run by name off the child's PATH: unlike Python there is no toolkit interpreter to pin to.
+        run_argv=("bash", "main.sh"),
+        aliases=("sh", "shell"),
+    ),
     "cpp": LanguageSpec(
         name="cpp",
         source_name="main.cpp",

@@ -20,7 +20,8 @@ changes.
 | `src/trainers/mixins/token_metrics.py` (loss-token accumulation, per-document attention work behind `bind_attention_work_source`) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/trainers/sft.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |
 | `src/trainers/preference/` (DPO, SMPO, KTO) | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/smpo.md`, `agent-docs/training-methods/preference/kto.md` |
-| `src/trainers/grpo/` (online, offline, environmental) | `agent-docs/training-methods/grpo/{online-grpo,offline-grpo,environmental-grpo,grpo-comparison}.md` |
+| `src/trainers/grpo/` (online, offline, environmental) | `agent-docs/training-methods/grpo/{README,online-grpo,offline-grpo}.md`, `agent-docs/training-methods/grpo/async-grpo/*.md` |
+| `src/rewards/` (reward terms, judge, served reward model, composer, TRL adapters, RLVR graders, answer matching) | `agent-docs/training-methods/grpo/rewards.md`, `agent-docs/training-methods/grpo/online-grpo.md`, `agent-docs/training-methods/grpo/environments/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/trainers/reward/` | `agent-docs/training-methods/preference/reward-modeling.md`, `agent-docs/training-methods/classification.md` |
 | `src/trainers/distillation/` | `agent-docs/training-methods/distillation/{README,teacher-distillation,self-distillation,online-sdpg}.md` |
 | `src/trainers/embedding/` (SBERT trainer, `sentence_transformers_compat.py` patches + preloaded-model shim) | `agent-docs/training-methods/embedding.md` |
@@ -40,14 +41,13 @@ changes.
 | `src/distributed/module_registry.py` (HF-class → wrapper registries) | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/grad_reduce.py` (bucketed gradient all-reduce — EP cross-replica, TP replicated, QLoRA sweeps) | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/configuration-reference.md` (`HALO_GRAD_BUCKET_MB`) |
 | `src/distributed/nccl/` (weight sync clients + transport) | `agent-docs/infrastructure/rollout-servers.md` (weight sync, NCCL transport), `agent-docs/training-methods/grpo/online-grpo.md` |
-| `src/trainers/grpo/rollout/weight_sync.py` (gather/gates/memory bracket) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/reference/debugging.md` (memory bracket) |
-| `src/trainers/grpo/rollout/weight_sync_clients.py` (per-server weight-sync client pool, `/v1/models` context preflight) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/training-methods/grpo/online-grpo.md` |
-| `src/trainers/grpo/rollout/async_rollouts.py` (Ray-actor collection, prefetch thread, engine weight-sync entry points) | `agent-docs/training-methods/grpo/environmental-grpo.md` |
-| `src/trainers/grpo/rollout/routing_replay.py` (R2/R3 capture, wire decode, engine-layer slicing) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/infrastructure/rollout-servers.md` |
-| `src/trainers/grpo/rollout/trajectory_tokenize.py` (trajectory → training rows: whole-render spans, per-turn sampled ids) | `agent-docs/training-methods/grpo/environmental-grpo.md` |
-| `src/trainers/grpo/rollout/rollout_metrics.py` (completion logs, per-episode rollout diagnostics) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/training-methods/callbacks.md` |
-| `src/trainers/grpo/objective/logratio.py` (truncated IS ratio, the k3 KL clamp, the band/veto/OPSM mask stages, the engine-referenced mask log-ratio) | `agent-docs/training-methods/grpo/environmental-grpo.md`, `agent-docs/reference/configuration-reference.md` |
-| `src/environments/ray_actors.py` (actor pool, dispatch, Ray init) | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/grpo/environmental-grpo.md` (trainer-side knobs) |
+| `src/trainers/grpo/rollout/weight_sync.py` (gather/gates/memory bracket) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/async-grpo/setup.md`, `agent-docs/reference/debugging.md` (memory bracket) |
+| `src/trainers/grpo/rollout/weight_sync_clients.py` (per-server weight-sync client pool, `/v1/models` context preflight) | `agent-docs/training-methods/grpo/async-grpo/setup.md`, `agent-docs/training-methods/grpo/online-grpo.md` |
+| `src/trainers/grpo/rollout/async_rollouts.py` (Ray-actor collection, prefetch thread, engine weight-sync entry points) | `agent-docs/training-methods/grpo/async-grpo/setup.md` |
+| `src/trainers/grpo/rollout/routing_replay.py` (R2/R3 capture, wire decode, engine-layer slicing) | `agent-docs/training-methods/grpo/async-grpo/objective.md`, `agent-docs/infrastructure/rollout-servers.md` |
+| `src/trainers/grpo/rollout/trajectory_tokenize.py` (trajectory → training rows: whole-render spans, per-turn sampled ids) | `agent-docs/training-methods/grpo/async-grpo/rollouts.md` |
+| `src/trainers/grpo/rollout/rollout_metrics.py` (completion logs, per-episode rollout diagnostics) | `agent-docs/training-methods/grpo/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md` |
+| `src/environments/ray_actors.py` (actor pool, dispatch, Ray init) | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/grpo/async-grpo/setup.md` (trainer-side knobs) |
 | `src/distributed/checkpoint/` (save ladder, weight loader, OptimizerShardStore, PeftAdapterSaver) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/format.py` (on-disk spellings, save-dtype casts, the layout cascade, state-dict IO) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/config_export.py` (what an exported `config.json` must contain: model_type restore, flat legacy keys, source schema) | `agent-docs/reference/checkpoints.md`, `agent-docs/models/README.md` |
@@ -116,18 +116,17 @@ changes.
 | `src/models/moe_balancing.py` (`resolve_balancing_mode`, the router field registries) and `src/distributed/expert_parallel/balancing_strategy.py` (`apply_balancing_strategy`, the export contract) | `agent-docs/training-methods/callbacks.md` (MoE balancing modes), `agent-docs/models/README.md` |
 | `src/hardware.py` (architecture predicates, GPU model detection, peak-FLOPS registry, host-RAM probe) | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/optimization/flash-attention.md` |
 
-## Environments (Environmental GRPO)
+## Environments (Async GRPO with Environments)
 
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/environments/base.py`, `episode.py`, `registry.py` | `agent-docs/training-methods/grpo/environments/README.md`, `custom-environments.md` |
 | `src/environments/envs/protocols/` (native, react, mcp) | `agent-docs/training-methods/grpo/environments/{native-tool-use,react}.md` |
 | `src/environments/envs/tasks/coding/` (swe, code_contests, grading, datasets), `tasks/qa.py` | `agent-docs/training-methods/grpo/environments/{swe-environment,code-contests,mcp,benchmarks}.md` |
-| `src/environments/rewards.py` (shared grader: answer extraction + match chain, also used by `scripts/training/online_grpo/rlvr.py`) | `agent-docs/training-methods/grpo/environments/benchmarks.md`, `agent-docs/training-methods/grpo/online-grpo.md` |
 | `src/environments/sandbox/` (in-process + remote code execution) | `agent-docs/training-methods/grpo/environments/sandbox.md` |
 | `src/environments/tools/` | `agent-docs/training-methods/grpo/environments/{native-tool-use,swe-environment}.md` |
-| `src/environments/engine_wire.py` (the rollout request wire format: stop tokens, `thinking_token_budget`, reasoning effort) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/environmental-grpo.md` |
-| `src/environments/eval_runner.py` (offline episode driver + eval report/trajectory outputs) | `agent-docs/training-methods/grpo/environments/benchmarks.md`, `agent-docs/reference/scripts-reference.md` |
+| `src/environments/engine_wire.py` (the rollout request wire format: stop tokens, `thinking_token_budget`, reasoning effort) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/async-grpo/rollouts.md` |
+| `src/environments/eval_runner.py` (offline episode driver + eval report/trajectory outputs) | `agent-docs/training-methods/grpo/environments/evaluation.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/environments/tools/web_search.py` (pluggable search backends) | `agent-docs/training-methods/grpo/environments/benchmarks.md`, `agent-docs/reference/configuration-reference.md` |
 
 ## Config & args
@@ -156,7 +155,7 @@ changes.
 |---|---|
 | `scripts/training/**`, `scripts/inference/**`, `scripts/before_training/**`, `scripts/after_training/**` | `agent-docs/reference/scripts-reference.md` + the relevant method/data page |
 | `scripts/profiling/**` | `agent-docs/reference/debugging.md`, `agent-docs/reference/scripts-reference.md` |
-| `scripts/environments/**` (env eval runners, their shared `_common.py` flags/output writer, trajectory re-grading, coding-dataset prep) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/environments/benchmarks.md` |
+| `scripts/environments/**` (env eval runners, their shared `_common.py` flags/output writer, trajectory re-grading, coding-dataset prep) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/environments/evaluation.md` |
 | `scripts/_common.py` (the checkpoint tools' shared flags: shard cap, Hub source block, `--trust_remote_code`) | `agent-docs/reference/scripts-reference.md` |
 | `scripts/after_training/merge_ep_shards.py` | `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/{quantize_to_lowp,convert_to_bf16}.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |

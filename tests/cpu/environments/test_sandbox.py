@@ -446,14 +446,20 @@ def test_remote_handles_transport_error():
     assert "remote sandbox error" in res.error
 
 
-def test_remote_handles_request_timeout():
+def test_remote_client_timeout_is_an_infra_error_not_the_programs_tle():
+    """The service enforces ``run_timeout`` itself and reports it in ``run_result.status``, so the
+    client deadline fires only when the service does not answer. Booked as ``timed_out`` it would
+    grade as TIME LIMIT EXCEEDED — a wrong program, outside the infra-outage invalidation — and the
+    REPL would render a timeout string instead of raising ``SandboxInfraError``."""
     import requests
 
     sess = _FakeSession(exc=requests.Timeout("slow"))
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     res = sb.run("print(1)")
-    assert res.timed_out
-    assert res.error is not None
+    assert res.timed_out is False
+    assert res.error is not None and "timed out" in res.error
+    with pytest.raises(SandboxInfraError):
+        format_sandbox_repl_output(res, timeout=5.0)
 
 
 # resolve_sandbox

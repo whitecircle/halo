@@ -36,12 +36,9 @@ save_sharded_ep: false                # gather to an HF-standard checkpoint on s
 max_concurrent_loading: 4             # 532 GB checkpoint: 4 ranks at a time (~2.1 TB peak CPU RAM)
 
 # --- Kernels / attention ---
-# Packing is reachable: text rows on a multimodal checkpoint take the text data path (is_vlm_run),
-# and still off: packed full rows push attention cost and peak memory past what this topology has
-# left. Inkling's four depthwise convs per layer cross packed documents regardless (the modeling
-# never forwards seq_idx to them).
-# mbs × max_length must stay within the cross-node Gin dispatch cap of 8192 tokens/rank
-# (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK); 2 × 4096 sits exactly at it.
+# Packing stays off: Inkling's four depthwise convs per layer cross packed documents (the modeling
+# never forwards seq_idx to them). mbs × max_length must stay within the cross-node Gin dispatch cap
+# of 8192 tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK); 2 × 4096 sits exactly at it.
 packing: false
 max_length: 4096
 

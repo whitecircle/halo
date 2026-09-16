@@ -181,5 +181,51 @@ def test_grade_solution_floors_only_interpreted_languages_per_call():
     assert sandbox.runs == [("python", 5.0), ("cpp", 1.0), ("cpp", 9.0)]
 
 
+def test_compiled_time_limit_scale_multiplies_only_the_compiled_limit():
+    """The scale pays a compiled solution for shared grading cores; the interpreted floor is unscaled
+    and the ``max_time_limit`` clamp still applies after it."""
+    sandbox = _RecordingSandbox()
+    spec = GradingSpec(sandbox=sandbox, default_timeout=5.0, max_time_limit=15.0, compiled_time_limit_scale=2.0)
+    tests = [{"input": "2 3\n", "output": "5\n"}]
+    grade_solution("x", tests, spec, time_limit=1.0, language="cpp")
+    grade_solution("x", tests, spec, language="cpp")
+    grade_solution("x", tests, spec, time_limit=1.0, language="python")
+    grade_solution("x", tests, spec, time_limit=6.0, language="python")
+    grade_solution("x", tests, spec, time_limit=9.0, language="cpp")
+    # cpp 1 s x 2; cpp with no stated limit: the 5 s default x 2; python floored at 5 s, then 6 s unscaled;
+    # cpp 9 s x 2 clamped to the 15 s cap.
+    assert sandbox.runs == [("cpp", 2.0), ("cpp", 10.0), ("python", 5.0), ("python", 6.0), ("cpp", 15.0)]
+
+
+def test_the_environment_grades_compiled_submissions_at_the_scaled_limit_and_dumps_the_scale():
+    sandbox = _RecordingSandbox()
+    env = _env(sandbox=sandbox, timeout_per_test=5, compiled_time_limit_scale=2.0)
+    ids, _ = env.reset(["a+b", "a+b"], [_ADD, _ADD])
+    py, cpp = [ids[0]], [ids[1]]
+    env.step(py, [""], [{"tool_calls": [_call("p", "submit_solution", code=_PY_ADD, language="python")]}])
+    env.step(cpp, [""], [{"tool_calls": [_call("c", "submit_solution", code=_CPP_ADD, language="cpp")]}])
+    assert sandbox.runs == [("python", 5.0), ("cpp", 2.0)]
+    # The re-grader takes the scale back off the trajectory meta, so it reproduces the run's contract.
+    meta = env.grading_spec.to_meta()
+    assert meta["compiled_time_limit_scale"] == 2.0
+    unscaled = _env(sandbox=_RecordingSandbox()).grading_spec
+    assert unscaled.compiled_time_limit_scale == 1.0
+    assert unscaled.with_meta(meta).compiled_time_limit_scale == 2.0
+
+
+def test_the_prompt_states_the_compiled_multiplier_only_when_it_is_not_one():
+    scaled = _env(sandbox=_RecordingSandbox(), timeout_per_test=5, compiled_time_limit_scale=2.5)
+    assert "a compiled one runs at 2.5x the problem's stated time limit." in scaled.system_prompt
+    plain = _env(sandbox=_RecordingSandbox(), timeout_per_test=5)
+    assert "a compiled one runs at the problem's stated time limit." in plain.system_prompt
+    assert "x the problem's" not in plain.system_prompt
+
+
+@pytest.mark.parametrize("scale", [0, -1.0, float("inf"), float("nan")])
+def test_a_non_positive_or_non_finite_compiled_time_limit_scale_is_refused(scale):
+    with pytest.raises(ValueError, match="compiled_time_limit_scale"):
+        _env(sandbox=_RecordingSandbox(), compiled_time_limit_scale=scale)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

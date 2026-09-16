@@ -13,16 +13,15 @@ test_size: 0.01
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8
-moe_balancing: bias_update            # sign-updates land in the gate's native expert_bias (noaux_tc);
-                                      #   the gate trains — balancing replaces the old frozen-gate mitigation
+moe_balancing: bias_update            # sign-updates land in the gate's native expert_bias (noaux_tc),
+                                      #   which exports with the checkpoint; the gate trains unfrozen
 fp32_router: true
 fp32_experts: true
 fp32_non_ep_params: true
 
 # --- Attention & kernels ---
 attn_implementation: sdpa             # the remote code carries no transformers-v5 flash flag, so every
-                                      #   flash label is refused at build; the EP loader retries SDPA
-                                      #   anyway — this states what actually runs
+                                      #   flash label is refused at build and the loader falls back to SDPA
 packing: true
 max_length: 24000
 

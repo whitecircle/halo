@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
+from math import isfinite
 from typing import Any, NamedTuple
 
 from src.environments.sandbox.base import (
@@ -85,7 +86,7 @@ def compare_tokens(expected: str, actual: str) -> bool:
 
 def exact_output_match(expected: str, actual: str) -> bool:
     """Exact comparison of a program's OUTPUT after stripping leading/trailing whitespace from both
-    sides (legacy CodeContests). Distinct from :func:`src.environments.rewards.exact_match`, which
+    sides (legacy CodeContests). Distinct from :func:`src.rewards.matching.exact_match`, which
     normalizes a free-text answer."""
     return expected.strip() == actual.strip()
 
@@ -106,8 +107,8 @@ def _run_in_sandbox(sandbox: SandboxExecutor | SandboxSession, code: str, **kwar
     The one contract grading depends on: a run lost to the backend is an ``error`` result, never an
     exception. The remote backend already obeys it; a local one raises instead (no interpreter, missing
     ``bwrap``, fork exhaustion, ENOSPC writing the working dir). An escaping exception leaves
-    ``submit_solution`` as an ordinary tool error, so the episode scores ``failure_reward`` with the
-    infra-outage guard never firing — a host fault averaged into the GRPO baseline as a wrong program.
+    ``submit_solution`` as an ordinary tool error, so the episode grades 0 with the infra-outage
+    guard never firing — a host fault averaged into the GRPO baseline as a wrong program.
     """
     try:
         return sandbox.run(code, **kwargs)
@@ -162,7 +163,7 @@ class CheckerInfraError(RuntimeError):
 
     Raised by :class:`CheckerVerdict` and consumed by :func:`run_solution_against_tests` into
     ``infra_errors`` — a plain ``False`` would score the outage as a wrong answer, feeding the whole
-    GRPO group ``failure_reward`` as fake signal and hiding it from the ``_grading_infra_outage`` guard.
+    GRPO group a zero grade as fake signal and hiding it from the ``_grading_infra_outage`` guard.
     """
 
 
@@ -379,8 +380,8 @@ class GradingSpec:
     """The grading contract a run is scored under: everything that is constant across its problems.
 
     Built once by the environment and handed to every :func:`grade_solution` call, so the offline
-    re-grader reproduces a run's verdicts by taking the same object rather than re-threading eight
-    knobs and silently defaulting one it forgot. The two per-problem facts (``checker``,
+    re-grader reproduces a run's verdicts by taking the same object rather than re-threading each
+    knob and silently defaulting one it forgot. The two per-problem facts (``checker``,
     ``time_limit``) come from the problem payload and stay arguments.
 
     :meth:`to_meta` / :meth:`with_meta` carry that same contract across a trajectory dump, derived
@@ -394,11 +395,20 @@ class GradingSpec:
     stop_on_first_failure: bool = False
     default_timeout: float = SANDBOX_DEFAULT_TIMEOUT
     max_time_limit: float = SANDBOX_DEFAULT_TIMEOUT
+    # Multiplies a compiled language's per-test limit; the interpreted floor and the clamp stay unscaled.
+    compiled_time_limit_scale: float = 1.0
     max_grading_seconds: float | None = None
     verdict_detail: str = VERDICT_DETAIL_FULL
 
     # The live executor: rebuilt from the run's env kwargs offline, never carried through a JSON dump.
     _META_EXCLUDED = frozenset({"sandbox"})
+
+    def __post_init__(self) -> None:
+        # ``replace`` re-runs this, so a restored meta block is held to the same contract.
+        if not (isfinite(self.compiled_time_limit_scale) and self.compiled_time_limit_scale > 0):
+            raise ValueError(
+                f"compiled_time_limit_scale must be a finite number > 0, got {self.compiled_time_limit_scale}"
+            )
 
     def to_meta(self) -> dict[str, Any]:
         """This contract as a JSON-able block for a trajectory meta line."""
@@ -430,11 +440,12 @@ def grade_solution(
 ) -> GradeResult:
     """Grade ``code`` against ``tests`` -> :class:`GradeResult`; the single grading entry point.
 
-    Selects the verdict via :func:`select_verdict` and runs every test at the problem's ``time_limit``
-    (clamped to ``spec.max_time_limit``), falling back to ``spec.default_timeout``.
-    ``spec.max_grading_seconds`` bounds the total sequential grading cost per submission (see
-    :func:`run_solution_against_tests`). ``language`` is the submission's own language when the run
-    lets the model choose per submission; unset, the contract's ``spec.language`` applies.
+    Selects the verdict via :func:`select_verdict` and runs every test at the problem's ``time_limit``,
+    falling back to ``spec.default_timeout``: an interpreted language is floored at that default, a
+    compiled one is multiplied by ``spec.compiled_time_limit_scale``, and either is then clamped to
+    ``spec.max_time_limit``. ``spec.max_grading_seconds`` bounds the total sequential grading cost per
+    submission (see :func:`run_solution_against_tests`). ``language`` is the submission's own language
+    when the run lets the model choose per submission; unset, the contract's ``spec.language`` applies.
     """
     language = language or spec.language
     limit = time_limit or spec.default_timeout
@@ -442,6 +453,9 @@ def grade_solution(
     if resolved is not None and not resolved.is_compiled:
         # Floor an interpreted language's budget so a C++-tuned limit doesn't TLE a slower CPython solution.
         limit = max(limit, spec.default_timeout)
+    else:
+        # Statement limits are calibrated for C++ on a dedicated judge; the scale pays for shared grading cores.
+        limit *= spec.compiled_time_limit_scale
     return run_solution_against_tests(
         code,
         tests,

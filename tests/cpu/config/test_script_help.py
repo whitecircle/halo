@@ -34,7 +34,10 @@ _SCRIPTS_DIR = _REPO_ROOT / "scripts"
 _SCRIPTS = sorted(
     path
     for path in _SCRIPTS_DIR.rglob("*.py")
-    if "H4ArgumentParser" in path.read_text(encoding="utf-8") and path.name != "__init__.py"
+    if "H4ArgumentParser" in path.read_text(encoding="utf-8")
+    and path.name != "__init__.py"
+    # A subtree's shared flag surface (``_common.py``) parses nothing on its own.
+    and not path.name.startswith("_")
 )
 # The `halo run` tools: runnable, but built on argparse, so the sweep above never reaches them.
 # `diagrams/` is excluded — its generators import a sibling style module off their own directory.

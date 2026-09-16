@@ -38,6 +38,10 @@ def _stub(tokenizer):
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
         _tools_schema=None,  # resolved None → cached_property short-circuits, no env built
         _batch_build_error=None,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
     )
     stub._tokenizer = tokenizer  # mirror __init__: processing_class may be a Processor
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
@@ -182,6 +186,10 @@ def _tokenize_with(tok, reasoning_effort):
         pad_token_id=0,
         _tools_schema=None,
         _batch_build_error=None,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
     )
     stub._tokenizer = tok
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)

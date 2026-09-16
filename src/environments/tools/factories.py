@@ -95,7 +95,7 @@ def create_native_code_tools(
     """Create a single-language code-execution tool.
 
     Args:
-        language: ``"python"``, ``"cpp"``/``"c++"``, or ``"c"`` (see the sandbox language registry).
+        language: any name or alias in the sandbox language registry (``LANGUAGES``).
         timeout: wall-clock cap (seconds) per execution.
         allow_imports: permit ``import`` in the in-process Python sandbox only (no effect with a real
             ``sandbox`` or compiled language). Only safe in an externally isolated context.
@@ -110,12 +110,16 @@ def create_native_code_tools(
             f"Execute a complete {spec.name} program (compiled, then run). It is given no stdin and "
             "writes to stdout. Include a main() and any needed includes."
         )
-    else:
+    elif spec.name == "python" and sandbox is None:
+        # The math names are the in-process REPL's injected builtins; in a real interpreter they are
+        # not bare names, so this wording belongs to that handler, not to the language.
         description = (
             "Execute Python code. Can perform calculations, define variables, use loops, and "
             "print results. Common math functions are available: sqrt, sin, cos, log, exp, "
             "floor, ceil, factorial, pi, e."
         )
+    else:
+        description = f"Execute a complete {spec.name} script. It is given no stdin and writes to stdout."
 
     registry = NativeToolRegistry()
     registry.register(
@@ -328,6 +332,38 @@ def create_session_code_tools(
                 "across turns. Use print()/stdout for output."
             ),
             parameters=[ToolParameter("code", "string", "Source code to execute in the workspace")],
+            handler=_run,
+        )
+    )
+    return registry
+
+
+def create_session_bash_tools(
+    session_getter: Callable[[], SandboxSession],
+    timeout: float = SANDBOX_DEFAULT_TIMEOUT,
+) -> NativeToolRegistry:
+    """Create a shell tool (``run_bash_command``) bound to the current episode's persistent session.
+
+    The command runs through the same backend, working directory and limits as
+    :func:`create_session_code_tools`, so it sees the files earlier turns wrote. A non-zero exit is an
+    ordinary observation; only a backend failure raises, as a failed tool call.
+    """
+    spec = require_language("bash")
+
+    def _run(command: str) -> str:
+        session = _require_session(session_getter)
+        return run_code_via_sandbox(command, sandbox=None, timeout=timeout, language=spec.name, session=session)
+
+    registry = NativeToolRegistry()
+    registry.register(
+        NativeTool(
+            name="run_bash_command",
+            description=(
+                "Run a shell command with bash in the persistent workspace directory, where the file "
+                "tools write. It is given no stdin. The observation is the command's stdout plus a "
+                "non-zero exit code, so redirect with 2>&1 when you need its error output."
+            ),
+            parameters=[ToolParameter("command", "string", "Shell command to run in the workspace")],
             handler=_run,
         )
     )

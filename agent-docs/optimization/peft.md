@@ -63,7 +63,7 @@ matched against full module paths), so an attention-only single target needs `al
 |---|---|---|
 | SFT | `2e-6` – `2e-5` | `1e-4` |
 | SMPO / DPO | `5e-7` – `5e-6` | `5e-5` |
-| GRPO | `1e-6` – `5e-6` | `1e-5` – `5e-5` |
+| GRPO | `1e-6` – `5e-6` | `3e-6` (every shipped LoRA async GRPO recipe under `examples/grpo/environmental/`) |
 
 The effective-batch formula is unchanged by LoRA — see
 [SFT](../training-methods/sft.md#learning-rate-and-global-batch-size).
@@ -88,10 +88,11 @@ routes them to native grouped-LoRA built inside each EP layer (`_init_expert_lor
 | `experts` / `mlp.experts` | all three expert projections |
 
 Requests are **logical**; what gets built follows the family's storage. One adapter is created per stored
-3-D expert tensor that any requested projection touches. On a family that stores the fused
-`gate_up_proj` — every family except Qwen3 and Bailing — asking for `gate_proj` alone adapts the whole
-`[E, H, 2M]` tensor: gate and up share one rank-`r` subspace. On the two separate-storage families it
-adapts gate alone, with its own rank `r`.
+3-D expert tensor that any requested projection touches.
+
+On a family that stores the fused `gate_up_proj` — every family except Qwen3 and Bailing — asking for
+`gate_proj` alone adapts the whole `[E, H, 2M]` tensor: gate and up share one rank-`r` subspace. On the two
+separate-storage families it adapts gate alone, with its own rank `r`.
 
 GptOss picks its layout at runtime: with grouped-GEMM (SM90+, the default) it stores
 `gate_proj_gmm`/`up_proj_gmm` separately, without it a fused interleaved tensor. The same YAML therefore
@@ -119,10 +120,12 @@ rather than leaving those modules silently frozen — add an attention target, o
 
 The router/gate is absorbed into the EP module for every family but Gemma4, whose router is a sibling module
 the wrapper never owns. EP modules are FSDP-ignored, so their gradients are DP-averaged by a hook the EP
-layer registers at construction on the *original* router param — one that never sees the trainable copy
-`modules_to_save` creates. `EPMoELayerBase.reattach_router_grad_sync` re-attaches it to the live copy
-automatically, so `router` in `lora_modules_to_save` stays DP-consistent in every EP mode; the ep1
-FSDP-sharded path (`fsdp_shard_ep1_experts`) and the multi-node deferred sweep already cover it.
+layer registers at construction on the *original* router param, one that never sees the trainable copy
+`modules_to_save` creates.
+
+`EPMoELayerBase.reattach_router_grad_sync` re-attaches it to the live copy automatically, so `router` in
+`lora_modules_to_save` stays DP-consistent in every EP mode; the ep1 FSDP-sharded path
+(`fsdp_shard_ep1_experts`) and the multi-node deferred sweep already cover it.
 
 `modules_to_save` on any **other** EP-internal submodule is unsupported:
 `_validate_ep_peft_trainable_params_synced` raises naming any trainable param left inside an EP module with
@@ -200,9 +203,10 @@ Dense — 1× B300 (SM103), `DistributedSFTTrainer`, AdamWBF16, Liger, FA4, Qwen
 
 Attention-only nearly matches full-FT throughput; all-linear is ~32% slower, since adapter matmuls run on
 every MLP layer. Throughput is **rank-invariant** within a variant (attn-only ~16.8k, all-linear ~11.9k
-across r=16/64/128) — the frozen base forward/backward dominates the step, and only memory grows with rank.
+across r=16/64/128): the frozen base forward/backward dominates the step, and only memory grows with rank.
+
 QLoRA saves ~10 GB more than bf16 all-linear LoRA and is ~33% faster, because the 4-bit base cuts weight
-bandwidth on the bandwidth-bound MLP matmuls; it is the path onto consumer GPUs, since plain LoRA needs
+bandwidth on the bandwidth-bound MLP matmuls. It is the path onto consumer GPUs, since plain LoRA needs
 ~34 GB even at the minimum rank.
 
 MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at EP=2, seq 4096, r=64:
@@ -216,25 +220,29 @@ MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at EP=2, seq
 
 **LoRA under EP is faster *and* leaner than full fine-tuning.** The frozen base experts carry no optimizer
 state and skip the EP gradient all-to-all, so attention-only and experts-only both run ~1.25× full-FT
-throughput at ~⅓ the memory — experts-only ties attention-only because the grouped expert adapters fold into
-the grouped-GEMM compute. Attn + experts is slower than either alone, on par with full FT. On
-`qwen3-30b-a3b` (128 experts) experts-only r=64 is 9.39% trainable at 5,034 tok/s/GPU and 46.8 GB. At batch 1
-the step is communication-bound, so tok/s/GPU varies ±10% run-to-run.
+throughput at ~⅓ the memory. Experts-only ties attention-only because the grouped expert adapters fold into
+the grouped-GEMM compute. Attn + experts is slower than either alone, on par with full FT.
+
+On `qwen3-30b-a3b` (128 experts) experts-only r=64 is 9.39% trainable at 5,034 tok/s/GPU and 46.8 GB. At
+batch 1 the step is communication-bound, so tok/s/GPU varies ±10% run-to-run.
 
 ## Reference model handling
 
-Offline GRPO and Environmental GRPO disable the adapter (`disable_adapter()`) to compute reference log-probs
+Offline GRPO and Async GRPO with Environments disable the adapter (`disable_adapter()`) to compute reference log-probs
 from the frozen base instead of a second model copy. Under EP the mixin patches that context
 (`make_disable_adapter_ep_aware`) so it reverts the native EP expert adapters too, giving a true frozen-base
 reference for both adapter halves; the patch also covers TRL's `use_adapter(None)` for online GRPO / DPO / KTO.
 
-A reference pass must open that context **after** some other forward has unsharded the FSDP2 parameters —
-both trainers do, behind the policy forward and behind the no-grad log-prob recompute respectively. peft
-clears `requires_grad` on the adapter tensors a module holds at entry and restores it on the ones it holds at
-exit; the forward in between swaps them, and this toolkit's `reshard_after_forward=False` keeps the transient
-unsharded copies registered afterwards. Open the context first and the restore lands on those copies, leaving
-every sharded adapter frozen — measured: the next training step then raises, with no `grad_fn` on the loss or,
-under gradient checkpointing, a recompute-metadata mismatch.
+A reference pass must open that context **after** some other forward has unsharded the FSDP2 parameters;
+both trainers do, behind the policy forward and behind the no-grad log-prob recompute respectively.
+
+peft clears `requires_grad` on the adapter tensors a module holds at entry and restores it on the ones it
+holds at exit. The forward in between swaps them, and this toolkit's `reshard_after_forward=False` keeps the
+transient unsharded copies registered afterwards.
+
+Open the context first and the restore lands on those copies, leaving every sharded adapter frozen; the next
+training step then raises, with no `grad_fn` on the loss or, under gradient checkpointing, a
+recompute-metadata mismatch.
 
 An **explicit** `ref_model` is rejected under EP and TP (it is never parallelized, so its log-probs would not
 match the policy's): use LoRA with `ref_model=None`, or `precompute_ref_log_probs=True`. Under TP, LoRA is
@@ -248,22 +256,27 @@ identical tokens. Set `beta: 0`, `use_peft: true`, or precompute.
 
 ## Online RL — rollout-server weight sync
 
-Online and Environmental GRPO generate rollouts from a separate rollout server — vLLM or SGLang
+Online and Async GRPO with Environments generate rollouts from a separate rollout server — vLLM or SGLang
 ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which serves the **plain base
-model** with no adapter. Before each NCCL weight sync the trainer merges the adapter into the base, forwards
-the merged weights under base-model param names (PEFT prefixes stripped, `lora_*` params skipped), then
-unmerges to keep training. Without the merge, the server would generate from the un-adapted base. Both
-trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_sync.py`), which
-also folds in the EP / FSDP2 / TP gathers; the merge is a collective on all ranks under FSDP2.
+model** with no adapter.
+
+Before each NCCL weight sync the trainer merges the adapter into the base, forwards the merged weights under
+base-model param names (PEFT prefixes stripped, `lora_*` params skipped), then unmerges to keep training.
+Without the merge, the server would generate from the un-adapted base.
+
+Both trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_sync.py`),
+which also folds in the EP / FSDP2 / TP gathers; the merge is a collective on all ranks under FSDP2.
 
 ## Embedding models
 
 The embedding trainer is SentenceTransformer-based. `use_peft: true` injects LoRA into the underlying
 transformer via `peft.inject_adapter_in_model` (not `SentenceTransformer.add_adapter`) and freezes every
-non-adapter param. Plain LoRA only — 4-bit QLoRA is rejected on the ST loader. Runs under standard / FSDP2
-data parallelism only; EP and TP are rejected at trainer construction (the EP save path has no adapter-merge
-step, so the checkpoint would carry adapter keys that reload as random base weights). In-place
-injection never reads `lora_task_type`.
+non-adapter param. Plain LoRA only: 4-bit QLoRA is rejected on the ST loader. In-place injection never reads
+`lora_task_type`.
+
+Runs under standard / FSDP2 data parallelism only; EP and TP are rejected at trainer construction (the EP
+save path has no adapter-merge step, so the checkpoint would carry adapter keys that reload as random base
+weights).
 
 ## Quantized training (QLoRA)
 
@@ -279,7 +292,7 @@ The 4-bit **compute** dtype follows the run's own precision (`bf16`/`fp16` on th
 TRL's `ModelConfig.dtype` — whose `"float32"` default nothing else here reads, and which would otherwise
 dequantize and compute every 4-bit matmul in fp32.
 
-QLoRA is SFT/offline territory: the online and environmental GRPO trainers reject a quantized base at
+QLoRA is SFT/offline territory: the online and async GRPO trainers reject a quantized base at
 construction (`validate_weight_sync_support`). The NCCL weight sync forwards raw parameter storage under
 base-weight names, so a bnb-packed 4-bit base would ship non-floating-point tensors that corrupt the served
 policy, and a per-sync merge/unmerge round-trip through 4-bit weights is lossy. Plain LoRA is the supported
@@ -287,11 +300,12 @@ RL adapter path — see [Online GRPO](../training-methods/grpo/online-grpo.md#lo
 
 Under `torchrun` data parallelism the 4-bit base cannot be FSDP2-sharded (`fully_shard` rejects the non-float
 `Params4bit`), so the trainer skips FSDP2 and all-reduces the (small) adapter gradients across ranks, with
-the frozen base replicated per rank. Nothing wraps the model, so the FSDP2 sharding knobs cannot take
-effect: a non-default `use_hsdp`, `fsdp_reshard_after_forward` or `fsdp_reshard_after_backward` is rejected
-at trainer construction rather than silently ignored, naming the offending flags — QLoRA under CP takes the
-same gate. Under `accelerate launch`, the other supported QLoRA launcher, accelerate owns the wrap and those
-knobs only warn.
+the frozen base replicated per rank.
+
+Nothing wraps the model, so the FSDP2 sharding knobs cannot take effect: a non-default `use_hsdp`,
+`fsdp_reshard_after_forward` or `fsdp_reshard_after_backward` is rejected at trainer construction rather than
+silently ignored, naming the offending flags. QLoRA under CP takes the same gate. Under `accelerate launch`,
+the other supported QLoRA launcher, accelerate owns the wrap and those knobs only warn.
 
 Pass a `BitsAndBytesConfig` through `load_distributed_model(..., quantization_config=bnb_config)`, or pass a
 pre-loaded quantized model plus `peft_config` to the trainer. For 8-bit optimizer states without a 4-bit
@@ -312,11 +326,13 @@ Trainer's save owns the sharded layout, and `merge_expert_lora_on_save`, which g
 save instead. Per mode:
 
 - **EP:** attention adapters are replicated (rank 0 saves); native expert adapters are rank-local and
-  gathered across the EP group into the same adapter file. An **expert-only** run has no PEFT model at
-  all — `save_ep_checkpoint` writes the adapter with a synthesized config instead: `peft_type:
-  EXPERT_LORA`, the base model path, and every field the delta depends on (`r`, `lora_alpha`,
-  `lora_dropout`, `use_rslora`, `expert_projections`). (Pure ETP carries attention adapters only —
-  expert LoRA raises at `expert_tp_size > 1`.)
+  gathered across the EP group into the same adapter file. Pure ETP carries attention adapters only;
+  expert LoRA raises at `expert_tp_size > 1`.
+
+    An **expert-only** run has no PEFT model at all, so `save_ep_checkpoint` writes the adapter with a
+    synthesized config instead: `peft_type: EXPERT_LORA`, the base model path, and every field the delta
+    depends on (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
+
 - **CP:** adapter keys normalized to strip CP wrapper paths (`.original_attention.`, extra `.model.`) so they
   load onto non-CP models; DTensor reconstruction also applied.
 - **FSDP2:** DTensor adapter params reconstructed via `full_tensor()` (a collective) before save; global rank
@@ -324,16 +340,21 @@ save instead. Per mode:
 - **EP+CP:** combines EP rank selection with CP key normalization.
 
 **Reloading elsewhere.** Attention adapters carry standard PEFT keys and load onto a stock
-`PeftModel.from_pretrained`. Native expert adapters do not — grouped `[E, K, r]` tensors have no PEFT
+`PeftModel.from_pretrained`. Native expert adapters do not: grouped `[E, K, r]` tensors have no PEFT
 representation, and PEFT drops unrecognized adapter keys without a warning (`load_adapter` filters
-`missing_keys` and never reads `unexpected_keys`). Every directory carrying them is therefore labeled with a
-`peft_type` PEFT does not know, so an external load raises on the label rather than returning a half-adapted
-model: `EXPERT_LORA` for an expert-only save, `LORA_WITH_EP_EXPERT_LORA` for a mixed attention+expert one.
+`missing_keys` and never reads `unexpected_keys`).
+
+Every directory carrying them is therefore labeled with a `peft_type` PEFT does not know, so an external load
+raises on the label rather than returning a half-adapted model: `EXPERT_LORA` for an expert-only save,
+`LORA_WITH_EP_EXPERT_LORA` for a mixed attention+expert one.
+
 The mixed label keeps every `LoraConfig` field beside it, plus an `ep_expert_lora` block recording the expert
 half's `r`/`lora_alpha`/`lora_dropout`/`use_rslora`/`expert_projections`; resume reads the tensors directly
-and never parses the file. The repo's merge and convert scripts check those markers
-(`assert_no_expert_lora_adapter`) and fall through to a tensor-key scan when the config is absent or carries
-a stock `peft_type`, so an unmarked directory holding `.experts.<attr>.lora_{A,B}` keys is refused too.
+and never parses the file.
+
+The repo's merge and convert scripts check those markers (`assert_no_expert_lora_adapter`) and fall through
+to a tensor-key scan when the config is absent or carries a stock `peft_type`, so an unmarked directory
+holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 
 **Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
 from the checkpoint's `adapter_model.safetensors` (not from the base reload) by
@@ -371,13 +392,16 @@ The script **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LO
 namespace is refused.
 
 `merge_expert_lora_on_save: true` produces the merged servable checkpoint at training time instead, for
-expert-only **and** mixed runs alike — without it a mixed adapter is resumable by this toolkit but foldable
-by no tool, since saving the adapters and merging afterwards hits exactly the refusal above. It needs native
-grouped expert adapters to exist: `lora_target_modules` must name at least one expert projection, or
-`_validate_merge_expert_lora_save` raises. Both halves are folded — expert deltas inside each family's
-`gather_expert_state_dict`, attention deltas via a `merge_adapter` held across the write and unmerged after,
-so training continues unchanged. The fold happens in the gathered EP save under mixin-managed FSDP2
-(torchrun); it is rejected under accelerate-managed FSDP and with `save_sharded_ep: true`.
+expert-only **and** mixed runs alike. Without it a mixed adapter is resumable by this toolkit but foldable by
+no tool, since saving the adapters and merging afterwards hits exactly the refusal above.
+
+It needs native grouped expert adapters to exist: `lora_target_modules` must name at least one expert
+projection, or `_validate_merge_expert_lora_save` raises.
+
+Both halves are folded: expert deltas inside each family's `gather_expert_state_dict`, attention deltas via a
+`merge_adapter` held across the write and unmerged after, so training continues unchanged. The fold happens
+in the gathered EP save under mixin-managed FSDP2 (torchrun); it is rejected under accelerate-managed FSDP
+and with `save_sharded_ep: true`.
 
 ## Tests and benchmarks
 

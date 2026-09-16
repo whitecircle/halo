@@ -135,9 +135,10 @@ per rank without a code change.
 **Fine-grained op timing** — `get_performance_monitor().time_operation(name)`
 (`src/diagnostics/performance_monitor.py`) times a span on CUDA events where available, else the
 wall clock, and accumulates it into the monitor's `.stats` map: one `TimingStats` (`count`,
-`total_time`, `.avg_time`) per operation name. The EP layers wrap their
-dispatch/expert-compute/combine phases with it when `HALO_EP_PERF_PROFILE=1`; the per-phase syncs
-serialize the timing, so use it on a diagnostic run only.
+`total_time`, `.avg_time`) per operation name.
+
+The EP layers wrap their dispatch/expert-compute/combine phases with it when
+`HALO_EP_PERF_PROFILE=1`; the per-phase syncs serialize the timing, so use it on a diagnostic run only.
 `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` reads those stats and prints the
 dispatch / expert-compute / combine split.
 
@@ -168,11 +169,13 @@ OOM source or a leak. For quick textual checks, `log_cuda_memory("after forward"
 already reports peak memory per step.
 
 `HALO_WEIGHT_SYNC_MEM_LOG=1` brackets every collective weight sync with per-rank
-`[mem rankNN] weight-sync pre/post` lines (allocated / reserved / peaks, GiB). It is off by default,
-and env-GRPO's single-process path emits nothing either way. *post − pre* isolates the sync, and the
-per-rank spread exposes forwarding-rank asymmetry. Nothing resets the peak counters at a sync, so the
-*pre* peaks run since process start — or since the current step began under
-`enable_efficiency_metrics: true`, which resets them every step. `reserved` far above `peak_alloc` on
+`[mem rankNN] weight-sync pre/post` lines (allocated / reserved / peaks, GiB) — Online GRPO and
+Async GRPO with Environments share the same sync path, so both emit them. *post − pre* isolates the
+sync, and the per-rank spread exposes forwarding-rank asymmetry.
+
+Nothing resets the peak counters at a sync, so the *pre* peaks run since process start, or since the
+current step began under `enable_efficiency_metrics: true`, which resets them every step.
+`reserved` far above `peak_alloc` on
 one rank means allocator pools are stranding blocks (e.g. allocations on short-lived CUDA streams),
 not live tensors.
 
@@ -188,11 +191,13 @@ full CPU core, and no NCCL error is raised until the watchdog fires. The NCCL fl
 it exactly: at the same `collective_seq_id` one rank issues a *different* collective than its peers
 (e.g. `_reduce_scatter_base` on one rank, `_all_gather_base` on the others).
 
-Root cause is a **per-rank backward graph** — every rank must run the same FSDP2 / EP grad
-collectives in the same order, so any rank that skips a module's backward deadlocks the rest. The
-usual trigger is a masked or empty row (variable-row RL padding, a fully-masked turn) whose loss
-contribution is zero: if its forward output is left disconnected from the loss, autograd prunes that
-row's backbone backward and its reduce-scatter never fires — on the rank that padded more such rows.
+Root cause is a **per-rank backward graph**: every rank must run the same FSDP2 / EP grad
+collectives in the same order, so any rank that skips a module's backward deadlocks the rest.
+
+The usual trigger is a masked or empty row (variable-row RL padding, a fully-masked turn) whose loss
+contribution is zero. If its forward output is left disconnected from the loss, autograd prunes that
+row's backbone backward and its reduce-scatter never fires, on the rank that padded more such rows.
+
 Keep every row connected to the loss (a value masked downstream is fine) so the backward is
 identical on all ranks. This is *not* a `CUDA_DEVICE_MAX_CONNECTIONS` issue; CDMC only shifts the
 timing that decides which step the mismatch lands on.

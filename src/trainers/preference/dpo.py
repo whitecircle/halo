@@ -128,7 +128,8 @@ class DistributedDPOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsi
         kwargs = self._init_distributed_config(kwargs, ctor_args=args)
         self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)
-        # Post-super: TRL builds its own reference inside __init__ when beta != 0 without PEFT.
+        # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
+        # PEFT-wrapped and precompute_ref_log_probs is off.
         self._validate_implicit_reference_model()
         self._setup_distributed_modes()
 

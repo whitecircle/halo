@@ -6,7 +6,6 @@ graded the same way whichever one collects it.
 
 import asyncio
 import contextvars
-import math
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -21,8 +20,8 @@ from src.environments.base import (
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 # Reasoning-budget calibration band, as fractions of the episode's applied CoT budget, and the two
-# penalty weights outside it (over-use weighs more than under-use). See
-# :func:`reasoning_calibration_penalty`.
+# penalty weights outside it (over-use weighs more than under-use; the under-use weight is the default
+# of a run knob). See :func:`reasoning_calibration_penalty`.
 _CALIBRATION_BAND_LO = 0.3
 _CALIBRATION_BAND_HI = 0.9
 _UNDER_USE_WEIGHT = 0.3
@@ -92,30 +91,18 @@ def bind_episode_effort(
     return EpisodeEffort(level=level, thinking_budget=budget, max_tokens=min(max_tokens, budget + headroom))
 
 
-def effort_length_penalty(
-    reasoning_tokens: list[int], effort: float, effort_min: float, k0: float, tau: float, c_max: float, l_norm: float
+def reasoning_calibration_penalty(
+    reasoning_tokens: list[int], budget: int, under_use_weight: float = _UNDER_USE_WEIGHT
 ) -> float:
-    """Capped, effort-conditioned reasoning-length penalty in ``[-c_max, 0]``:
-    ``-min(c_max, k(effort) * sum(reasoning_tokens) / l_norm)`` with ``k(effort) = k0 * exp(-(effort - effort_min) / tau)``.
+    """Asymmetric reasoning-budget calibration penalty (0 = compliant), averaged over turns. Per turn,
+    given reasoning tokens ``r`` and budget ``B``: inside the compliant band → 0; below →
+    ``-under_use_weight`` scaled by the shortfall (``-under_use_weight`` at ``r = 0``); above → strong
+    penalty, ``-1`` once ``r >= B``. Over-use is punished harder than under-use.
 
-    The coefficient falls by ``e`` per ``tau`` effort units above the lowest level, so the same trace
-    costs most at the lowest effort; the cap keeps a long trace from outweighing the task reward, which an
-    uncapped per-token price does. Prices reasoning tokens only, summed over the trajectory's turns."""
-    tokens = sum(reasoning_tokens)
-    if tokens <= 0:
-        return 0.0
-    k = k0 * math.exp(-(effort - effort_min) / tau)
-    return -min(c_max, k * tokens / l_norm)
-
-
-def reasoning_calibration_penalty(reasoning_tokens: list[int], budget: int) -> float:
-    """Asymmetric reasoning-budget calibration penalty in ``[-1, 0]`` (0 = compliant), averaged over
-    turns. Per turn, given reasoning tokens ``r`` and budget ``B``: inside the compliant band → 0;
-    below → mild penalty; above → strong penalty. Over-use is punished harder than under-use.
-
-    The band and the two weights are part of the term's definition rather than run knobs; the only
-    per-run dial is ``reasoning_compliance_weight``, which scales the whole term. Both are stated in
-    the config help and ``agent-docs/training-methods/grpo/environmental-grpo.md``.
+    The band and the over-use weight are the term's definition, not run knobs — the config help and
+    ``agent-docs/training-methods/grpo/async-grpo/README.md`` state them. ``under_use_weight`` is the
+    run knob ``reasoning_compliance_under_use_weight`` (0 disables the below-band side), and
+    ``reasoning_compliance_weight`` scales the whole term.
     """
     if not reasoning_tokens or budget <= 0:
         return 0.0
@@ -123,7 +110,7 @@ def reasoning_calibration_penalty(reasoning_tokens: list[int], budget: int) -> f
     penalties = []
     for r in reasoning_tokens:
         if r < lo:
-            penalties.append(-_UNDER_USE_WEIGHT * (lo - r) / lo if lo > 0 else 0.0)
+            penalties.append(-under_use_weight * (lo - r) / lo if lo > 0 else 0.0)
         elif r > hi:
             over = (r - hi) / max(budget - hi, 1.0)
             penalties.append(-_OVER_USE_WEIGHT * min(over, 1.0))
@@ -191,16 +178,19 @@ def step_context_from_generation(context: dict[str, Any] | None, gen: TurnGenera
         step_ctx["tool_calls"] = gen.tool_calls
     if gen.reasoning:
         step_ctx["reasoning"] = gen.reasoning
-    if gen.token_ids:
+    # ``is None``, not truthiness: an empty capture is a zero-token turn the engine did return ids
+    # for, and it must reach the trainer as one rather than as a capture failure.
+    captured = gen.token_ids is not None
+    if captured:
         step_ctx["token_ids"] = gen.token_ids
     # Behavior-policy logprobs for the IS trust region; keep only when id-aligned.
-    if gen.token_logprobs and gen.token_ids and len(gen.token_logprobs) == len(gen.token_ids):
+    if captured and gen.token_logprobs is not None and len(gen.token_logprobs) == len(gen.token_ids):
         step_ctx["token_logprobs"] = gen.token_logprobs
     # Engine routing for R3 replay; only meaningful beside the ids it aligns with.
-    if gen.routing_mask and gen.token_ids:
+    if captured and gen.routing_mask:
         step_ctx["routing_mask"] = gen.routing_mask
         step_ctx["routing_prompt_tokens"] = gen.routing_prompt_tokens
-    if gen.prompt_token_ids and gen.token_ids:
+    if captured and gen.prompt_token_ids:
         step_ctx["prompt_token_ids"] = gen.prompt_token_ids
     return step_ctx
 
@@ -238,11 +228,24 @@ class EpisodeDispatcher:
         self, episode_ids: list[int], actions: list[str], contexts: list[dict[str, Any] | None]
     ) -> list[EnvStep]:
         if self._is_async:
-            return await self.env.step_async(episode_ids, actions, contexts)
-        return await self._offload(self.env.step, episode_ids, actions, contexts)
+            steps = await self.env.step_async(episode_ids, actions, contexts)
+        else:
+            steps = await self._offload(self.env.step, episode_ids, actions, contexts)
+        return await self._settled(episode_ids, steps)
 
     async def finalize_truncated(self, episode_ids: list[int]) -> list[EnvStep]:
         """Close still-open episodes as truncated, keeping the reward they already earned."""
         if self._is_async:
-            return self.env.finalize_truncated(episode_ids)
-        return await self._offload(self.env.finalize_truncated, episode_ids)
+            steps = self.env.finalize_truncated(episode_ids)
+        else:
+            steps = await self._offload(self.env.finalize_truncated, episode_ids)
+        return await self._settled(episode_ids, steps)
+
+    async def _settled(self, episode_ids: list[int], steps: list[EnvStep]) -> list[EnvStep]:
+        """Score the externally rewarded terms of every episode these steps closed. Pure I/O over the
+        finished trajectory, so it runs on the loop for sync and async envs alike; an episode whose
+        reward has no external term is already settled and costs nothing here."""
+        done = [eid for eid, step in zip(episode_ids, steps, strict=True) if step.done]
+        if done:
+            await self.env.settle_async(done)
+        return steps

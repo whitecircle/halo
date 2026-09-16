@@ -31,17 +31,25 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 
 **Pipeline parallelism** is not a column above because it is [not yet available in this release](../parallelism/pipeline-parallelism.md) — the config surface and the per-family seams ship (specs, split gates, stage adapters), the schedule engine does not.
 
-Those shipped seams: Zaya and Gemma 4 opt out by declaring `SUPPORTS_PP = False` on their `PPModelSpec`; DeepSeek-V4 and GLM-5 Next split through a family spec that carries their widened hyper-connection stream as the boundary; LFM-2 and Cohere2 MoE are refused by generic gates instead — tied embeddings for both, and for Cohere2 the stage loader's lazy-loading requirement, which its EP layer declares off; Step-3.7 Flash and GLM-5 Next ship only their composite class, which the multimodal gate admits for a run that feeds no images (the vision tower and projector are held by no stage, stashed for the save) and refuses for image data; Ling-3.0-flash is blocked by a config value its checkpoint ships (a live MTP tail layer), which `model_init_kwargs` turns off. Trainer × parallelism support is tracked in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+Those shipped seams:
+
+- Zaya and Gemma 4 opt out by declaring `SUPPORTS_PP = False` on their `PPModelSpec`.
+- DeepSeek-V4 and GLM-5 Next split through a family spec that carries their widened hyper-connection stream as the boundary.
+- LFM-2 and Cohere2 MoE are refused by generic gates instead: tied embeddings for both, and for Cohere2 the stage loader's lazy-loading requirement, which its EP layer declares off.
+- Step-3.7 Flash and GLM-5 Next ship only their composite class, which the multimodal gate admits for a run that feeds no images (the vision tower and projector are held by no stage, stashed for the save) and refuses for image data.
+- Ling-3.0-flash is blocked by a config value its checkpoint ships (a live MTP tail layer), which `model_init_kwargs` turns off.
+
+Trainer × parallelism support is tracked in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 ¹ Qwen3.5/3.6 ship a working CP wrapper for the full-attention block, but every released checkpoint also carries `Qwen3_5MoeGatedDeltaNet` linear-attention layers whose sequence-axis Conv1d and recurrent scan are not CP-shardable. Validation rejects hybrid `layer_types`. See [qwen3_5.md](qwen3_5.md#why-cp-is-blocked-on-real-checkpoints).
 
 ² GLM-4 has LoRA-style attention compression; only the expansion projections shard — see [glm4.md](glm4.md#tp).
 
-³ CP covers **Ling 2.0** (standard softmax GQA). `Ring-mini-linear-2.0` is rejected by name — its file reuses the same full-attention class names — and Ling 3.0 (`bailing_hybrid`) pairs KDA linear attention with MLA, so it has no CP path either and additionally needs `attn_implementation: sdpa` and `fp32_non_ep_params: true` (with `fsdp_shard_ep1_experts: false` at `ep_size: 1`); see [bailing.md](bailing.md#ling-30). TP remains unavailable for all of them: a missing DTensor plan, not an architectural blocker.
+³ CP covers **Ling 2.0** (standard softmax GQA). `Ring-mini-linear-2.0` is rejected by name (its file reuses the same full-attention class names). Ling 3.0 (`bailing_hybrid`) pairs KDA linear attention with MLA, so it has no CP path either; it also needs `attn_implementation: sdpa` and `fp32_non_ep_params: true` (with `fsdp_shard_ep1_experts: false` at `ep_size: 1`), see [bailing.md](bailing.md#ling-30). TP is unavailable for all of them: a missing DTensor plan, not an architectural blocker.
 
 ⁴ Zaya supports **EP without gradient checkpointing**, **EP+ETP without GC**, *or* **plain FSDP2 without GC**. CCA's sequence-axis `Conv1d` rules out CP; no Zaya attention class is in the selective-TP accept-list and upstream ships no `base_model_tp_plan`, so `tensor_parallel_size > 1` raises. See [zaya.md](zaya.md#limitations).
 
-⁵ A dense Qwen3-VL takes the HF-native TP route (`tp_plan="auto"`), and the architecture ships no `base_model_tp_plan` — the plan resolves empty, sharding nothing, so the loader **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. `Qwen3VLTextAttention` stays in the CP and selective-TP accept-lists, which govern CP and the attention-only path the loader takes for MoE and EP+TP shapes. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither registry.
+⁵ A dense Qwen3-VL takes the HF-native TP route (`tp_plan="auto"`) and ships no `base_model_tp_plan`: the plan resolves empty, so the loader **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. `Qwen3VLTextAttention` stays in the CP and selective-TP accept-lists, which govern CP and the attention-only path the loader takes for MoE and EP+TP shapes. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither registry.
 
 ⁶ EP+CP is gated the same way for every family: `_validate_ep_cp` requires node-local EP with `ep_group_size == nvlink_domain_size` and rejects both a smaller `ep` within the domain and cross-domain EP (`ep_scope='global'`). On an 8-GPU node that pins `ep_size` to 8; `cp_size` only has to divide the domain, and the fully orthogonal shape is `cp_size == ep_group_size == nvlink_domain_size`.
 
@@ -63,7 +71,17 @@ Every MoE family shares three settings:
 - **Expert compute** — [Grouped GEMM](../optimization/grouped-gemm.md) (`use_grouped_gemm`, default on at SM90+) batches the per-expert matmuls.
 - **Load balancing** — `moe_balancing`: `auto` (default), `aux_loss`, `bias_update` (DeepSeek-V3 auxiliary-loss-free bias, step size `router_balancing_rate`), `bias_update_transient`, or `none`.
 
-`auto` resolves to `bias_update` for Zaya (native balancing-bias buffer), for DeepSeek-V4, Inkling and Bailing/Ling (their EP wrappers sever the aux-loss path), and for GLM-4 MoE Lite, LFM-2 and — under its EP wrapper — Step-3.7 Flash (no honored `output_router_logits` path, and the bias lands in a checkpoint-persistent tensor). Mistral-4, Cohere2 MoE and the multimodal Qwen3.5/3.6 have no exportable slot at all, so `auto` gives `none` with a warning; the explicit `bias_update_transient` opts into trainer-only balancing there, and exported checkpoints serve without the bias. Gemma 4 also gives `none`: its forward never takes the flag and its EP wrapper accepts no bias, so no mode can balance it. `auto` reaches that same `none` on any tree carrying neither an aux-loss path nor an EP wrapper — the `ep_size=1` + `use_grouped_gemm: false` window for GLM-4 MoE Lite, LFM-2 and Step-3.7 Flash. Everything else resolves to `aux_loss` — including Laguna and GLM-5 Next, whose forwards honor the flag; their exported `e_score_correction_bias` slot still makes explicit `bias_update` legal.
+`auto` resolves per family:
+
+| `auto` verdict | Families | Why |
+|---|---|---|
+| `bias_update` | Zaya | native balancing-bias buffer |
+| `bias_update` | DeepSeek-V4, Inkling, Bailing/Ling | their EP wrappers sever the aux-loss path |
+| `bias_update` | GLM-4 MoE Lite, LFM-2, Step-3.7 Flash (under its EP wrapper) | no honored `output_router_logits` path, and the bias lands in a checkpoint-persistent tensor |
+| `none` + warning | Mistral-4, Cohere2 MoE, multimodal Qwen3.5/3.6 | no exportable slot; the explicit `bias_update_transient` opts into trainer-only balancing, and exported checkpoints serve without the bias |
+| `none` + warning | Gemma 4 | its forward never takes the flag and its EP wrapper accepts no bias, so no mode can balance it |
+| `none` + warning | GLM-4 MoE Lite, LFM-2, Step-3.7 Flash at `ep_size=1` + `use_grouped_gemm: false` | a tree carrying neither an aux-loss path nor an EP wrapper |
+| `aux_loss` | everything else, Laguna and GLM-5 Next included | their forwards honor the flag; the exported `e_score_correction_bias` slot of Laguna and GLM-5 Next still makes explicit `bias_update` legal |
 
 GPT-OSS takes an explicit `bias_update`, adopting its hub `router.bias`, which exports and serves; Qwen3 MoE and text-only Qwen3.5/3.6 take `bias_update_transient`. See [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
 

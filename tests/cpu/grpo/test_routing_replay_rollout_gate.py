@@ -25,6 +25,7 @@ from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 from tests.common.routing import BareEPLayer, raw_routing_payload
 
 PartialState()  # the gate logs through accelerate, which refuses to log without it
@@ -71,12 +72,17 @@ def _host():
             layer_indices=EP_LAYER_INDICES,
         ),
         _batch_build_error=None,
+        _rollout_template_kwargs={},
+        _carry_reasoning=False,
+        _max_train_row_tokens=None,
+        _rows_over_cap=0,
         _warned_capture_missing=False,
         _tokenizer=types.SimpleNamespace(model_max_length=4096),
         pad_token_id=0,
         eos_token_id=1,
         _metrics=defaultdict(lambda: defaultdict(list)),
     )
+    attach_world_metrics(host)
     for name in ("_tokenize_trajectory_turns", "_masked_trajectory_tensors", "_context_limit"):
         setattr(host, name, types.MethodType(getattr(Trainer, name), host))
     host._assemble_rollout_routing = types.MethodType(Trainer._assemble_rollout_routing, host)
@@ -145,7 +151,7 @@ def test_gate_assembles_the_engine_mask_for_a_trainable_row():
     assert tuple(masks.shape) == (1, len(ENGINE_PROMPT) + len(SAMPLED), len(EP_LAYER_INDICES), TOP_K)
     # Every position of the covered row carries an engine id, not the -1 natural-routing sentinel.
     assert int(masks.min()) == 0
-    assert host._metrics["train"]["routing/rollout_full_frac"] == [1.0]
+    assert flushed_metrics(host)["routing/rollout_full_frac"] == [1.0]
 
 
 if __name__ == "__main__":

@@ -1,13 +1,14 @@
-"""Rollout diagnostics for environmental GRPO: completion logs and per-episode metric aggregation.
+"""Rollout diagnostics for environmental GRPO: completion logs, per-episode metric aggregation and the
+world-level fold of a step's rank-local counts.
 
-Every metric here is computed over the GATHERED-GLOBAL episode population, so a DP rank's own
-rollouts never set the logged mean on their own.
+Every number here is computed over the GATHERED-GLOBAL population — episodes for the rollout means,
+per-rank counts for the fractions — so a DP rank's own rows never set a logged value on their own.
 """
 
 import logging
 import math
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 
 import torch
 import torch.distributed as dist
@@ -20,8 +21,94 @@ from src.distributed.runtime import (
 )
 from src.environments.base import EPISODE_SLICES_KEY, SOLVE_RATE_KEY, Trajectory
 from src.environments.episode import RolloutResult
+from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 
 logger = logging.getLogger(__name__)
+
+# Wire kinds of a WorldMetrics entry: a (numerator, denominator) pair folded as Σn / Σd, or a maximum.
+_FRACTION = "fraction"
+_MAXIMUM = "max"
+
+Count = torch.Tensor | float | int
+
+
+def gathered_fractions(
+    pairs: Sequence[tuple[Count, Count]], gather_fn: Callable[[torch.Tensor], torch.Tensor]
+) -> list[float]:
+    """World-level ``numerator / denominator`` of each pair from per-rank counts in ONE collective.
+
+    Call on every rank. Per-rank fractions cannot be averaged — their denominators differ, and TRL's
+    ``log`` would report the main process's alone. A world denominator of 0 reads 0.
+    """
+    device = next((v.device for pair in pairs for v in pair if isinstance(v, torch.Tensor)), None)
+    local = torch.stack([torch.as_tensor(v, device=device).double() for pair in pairs for v in pair])
+    counts = gather_fn(local).view(-1, 2 * len(pairs)).sum(dim=0)
+    return (counts[0::2] / counts[1::2].clamp(min=1)).tolist()
+
+
+class WorldMetrics:
+    """Per-step accumulator for batch-level fractions, means and maxima.
+
+    TRL's ``GRPOTrainer.log`` averages each process's own ``_metrics`` list and only the main process
+    reports, so a value computed over one rank's rows is logged as if it were the batch's. Sites
+    record the local ``(numerator, denominator)`` counts or maximum here instead, and :meth:`flush`
+    folds every rank's entries in ONE collective. Recording issues no collective and no host sync, so
+    a site behind a data-dependent gate is safe: a rank that never reaches it contributes nothing to
+    that key. A step that raises between a record and its flush ends the run — every such raise in
+    the trainer is rank-uniform and fatal — so no entry survives into the next step.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, tuple[str, Count, Count]] = {}
+
+    def fraction(self, key: str, numerator: Count, denominator: Count) -> None:
+        """World ``numerator / denominator``; a sum over a count is the batch mean."""
+        self._record(key, _FRACTION, numerator, denominator)
+
+    def maximum(self, key: str, value: Count) -> None:
+        self._record(key, _MAXIMUM, value, 0.0)
+
+    def _record(self, key: str, kind: str, first: Count, second: Count) -> None:
+        if key in self._pending:
+            raise ValueError(f"{key} was already recorded this step; a key folds one entry per rank")
+        self._pending[key] = (kind, first, second)
+
+    def flush(
+        self, target: MutableMapping[str, list[float]], gather_fn: Callable[[list], list] = gather_object
+    ) -> None:
+        """Fold the pending entries across ranks into ``target`` (one TRL ``_metrics[mode]`` dict).
+
+        COLLECTIVE — every rank calls it once per step at the same point. The key set is the union
+        of what any rank recorded; a fraction whose world denominator is 0 reads 0.
+        """
+        pending, self._pending = self._materialized(), {}
+        merged: dict[str, list[tuple[str, float, float]]] = defaultdict(list)
+        for rank_entries in gather_fn([pending]):
+            for key, entry in rank_entries.items():
+                merged[key].append(entry)
+        for key in sorted(merged):
+            entries = merged[key]
+            kinds = {kind for kind, _, _ in entries}
+            if len(kinds) != 1:
+                raise ValueError(f"{key} was recorded as {sorted(kinds)} on different ranks")
+            if kinds == {_MAXIMUM}:
+                value = max(first for _, first, _ in entries)
+            else:
+                denominator = sum(second for _, _, second in entries)
+                value = sum(first for _, first, _ in entries) / denominator if denominator else 0.0
+            target.setdefault(key, []).append(value)
+
+    def _materialized(self) -> dict[str, tuple[str, float, float]]:
+        """The pending entries as floats, every recorded tensor read in one host sync."""
+        tensors = [v for _, a, b in self._pending.values() for v in (a, b) if isinstance(v, torch.Tensor)]
+        values = iter(
+            torch.stack([t.detach().to(tensors[0].device).double() for t in tensors]).tolist() if tensors else ()
+        )
+
+        def as_float(value: Count) -> float:
+            return next(values) if isinstance(value, torch.Tensor) else float(value)
+
+        return {key: (kind, as_float(a), as_float(b)) for key, (kind, a, b) in self._pending.items()}
 
 
 def _gather_to_completion_writers(values: list) -> list | None:
@@ -89,6 +176,8 @@ class RolloutMetricsMixin:
     _total_rollouts = 0
     _total_rollout_latency = 0.0
     _total_generation_tokens = 0
+    # The mode whose rows ``self._logs`` holds; rebinds per instance like the counters above.
+    _completion_logs_mode: str | None = None
 
     def cumulative_rollout_metrics(self) -> dict[str, float]:
         """The ``async/*`` totals since train start, as the trainer logs them."""
@@ -103,14 +192,22 @@ class RolloutMetricsMixin:
         rollout_results: list[RolloutResult],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
+        mode: str,
     ) -> None:
         """Fill TRL's ``self._logs`` from this step's rollouts (TRL's base does so in its own generation
         path, which this trainer overrides). Gathered across ranks in lock-step when parquet/table is wanted.
 
         All four gathers run on every rank before any of them is consumed, so the writer's early
-        return cannot skip a collective."""
+        return cannot skip a collective. Rows of the other mode still waiting for their log (an eval
+        round on a step ``logging_steps`` skipped) are written under their own mode first, never into
+        this round's file."""
         if not (self._save_completions or self.log_completions):
             return
+        if self._completion_logs_mode not in (None, mode) and self._logs["prompt"]:
+            emit_completion_artifacts(
+                self, console=False, save=self._save_completions, mode=self._completion_logs_mode
+            )
+        self._completion_logs_mode = mode
         prompts_text = [r.prompt for r in rollout_results]
         completions_text = [self._render_trajectory_for_log(r.trajectory) for r in rollout_results]
         prompts, completions, reward_values, advantage_values = [

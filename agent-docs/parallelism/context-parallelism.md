@@ -17,11 +17,9 @@ the attention kernel: each GPU holds `S/cp_size` tokens but all heads, an all-to
 the full `S` tokens but `H/cp_size` heads for the attention compute, and a second all-to-all swaps
 back. Multi-head attention is independent across heads, which is what makes this exact.
 
-<div class="diagram-row" markdown>
-![Ulysses Attention Data Flow: each GPU holds S/cp_size tokens with all heads, an all-to-all redistributes to full S tokens with H/cp_size heads for the attention compute, and a second all-to-all swaps back](../assets/diagrams/ulysses_attention_flow.png)
+![Ulysses attention: RoPE runs on the local chunk, an all-to-all scatters heads and gathers the sequence so each rank attends over the full sequence with 16 of 64 heads, and a second all-to-all restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
 
-![CP training step: the wrapper splits the full batch to each CP rank's sequence shard, then every transformer layer runs Ulysses attention (all-to-all) alongside DeepEP MoE routing, ending in a boundary-aware globally-normalized loss](../assets/diagrams/cp_training_step.png)
-</div>
+![A training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the logits stay sharded, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
 
 ## Implementation
 
@@ -66,7 +64,7 @@ through `model_init_kwargs`, or turn the aux loss off for that family with `moe_
 ## Requirements
 
 **NVLink-local topology** — `cp_size` must divide the NVLink domain (`gpus_per_node` on a standard
-node, the rack on NVL72) and cannot exceed it; Ulysses' two all-to-alls per attention layer must stay
+node, the rack on NVL72) and cannot exceed it; Ulysses' all-to-alls per attention layer must stay
 on NVLink. `cp_size=3` on an 8-GPU domain is rejected at config time, before the model loads
 (`_validate_cp_locality`).
 
@@ -97,11 +95,13 @@ construction. A ragged batch that reaches SFT's `compute_loss` anyway is right-p
 the tokenizer's `pad_token_id`: a `processing_class` without one raises rather than padding with
 vocabulary token 0.
 
-**Right padding only.** The Ulysses path ignores `attention_mask` — it calls dense flash attention
-with `causal=` and has no varlen path — so it tolerates only padding a causal mask already ignores.
-A left-padded batch is rejected on every forward: every real token would attend the leading pads
-and the loss would silently differ from the same batch without CP. SMPO's collator left-pads
-prompts, so under CP run SMPO with `per_device_train_batch_size=1`, where no padding is emitted.
+**Right padding only.** The Ulysses path ignores `attention_mask`: it calls dense flash attention
+with `causal=` and has no varlen path, so it tolerates only padding a causal mask already ignores.
+A left-padded batch is rejected on every forward. Every real token would attend the leading pads
+and the loss would silently differ from the same batch without CP.
+
+SMPO's collator left-pads prompts, so under CP run SMPO with `per_device_train_batch_size=1`, where
+no padding is emitted.
 
 ### Supported model architectures
 
@@ -190,11 +190,13 @@ their dense MLP weights.
 On resume CP is a **Path B** mode: the trainer skips the checkpoint weight-reload (the CP wrapper
 changes the module tree). The training scripts repoint `model_name_or_path` at the checkpoint so
 `load_distributed_model` loads the trained weights at construction; a model not constructed from
-the checkpoint raises rather than silently continuing on its current weights. Trainer state is
-restored, and so are LoRA adapters — the saved CP-normalized keys are remapped back onto the live
-wrapped names, and a wholesale key miss raises. `load_best_model_at_end` is refused at construction
-for CP full fine-tunes (base weights only load at construction, so the best checkpoint cannot be
-reloaded in place). See
+the checkpoint raises rather than silently continuing on its current weights.
+
+Trainer state is restored, and so are LoRA adapters: the saved CP-normalized keys are remapped back
+onto the live wrapped names, and a wholesale key miss raises.
+
+`load_best_model_at_end` is refused at construction for CP full fine-tunes (base weights only load
+at construction, so the best checkpoint cannot be reloaded in place). See
 [Checkpoints & Resume](../reference/checkpoints.md).
 
 ## Optimizations
@@ -202,8 +204,10 @@ reloaded in place). See
 The optimized path's native GQA (no `repeat_kv`) saves on the order of 6 GB per forward on a
 20B-class GQA model, and the `[B, S, H, D]` layout drops the transposes. Both paths use native
 BFloat16 all-to-all and fuse K/V into one all-to-all; the legacy path fuses cos/sin into one
-`all_gather_into_tensor`. `torch.compile` gives no benefit — the all-to-all breaks the graph at
-every attention layer (±0.0% on Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
+`all_gather_into_tensor`.
+
+`torch.compile` gives no benefit: the all-to-all breaks the graph at every attention layer (±0.0% on
+Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
 
 ## Limitations
 
@@ -252,9 +256,11 @@ not activations) — that is the case CP exists for.
 
 1. Subclass `UlyssesAttentionBase` under `layers/`. Implement `_project_qkv` (returns `[B, S, H, D]`
    Q/K/V); the rotary defaults to rotate-half (`_apply_partial_rotary`), so override
-   `_apply_rotary_core` only for a different one (GptOss split-concat, Cohere2 interleaved). For an
-   MLA family subclass `MLAUlyssesAttentionBase` instead: it owns the geometry, the legacy path flag
-   and `_apply_rotary_pos_emb`.
+   `_apply_rotary_core` only for a different one (GptOss split-concat, Cohere2 interleaved).
+
+    For an MLA family subclass `MLAUlyssesAttentionBase` instead: it owns the geometry, the legacy
+    path flag and `_apply_rotary_pos_emb`.
+
 2. Declare the HF attention class name in the wrapper's `HF_MODULE_NAMES`. `layers/registry.py`
    imports every module in the package, so the file's existence is the whole registration; both the
    map and the accept tuple are derived from the subclass tree.

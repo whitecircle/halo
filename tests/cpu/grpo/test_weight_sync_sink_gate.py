@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
+from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
 
 NUM_HEADS = 4
@@ -29,8 +30,17 @@ class _Attention(nn.Module):
         self.sinks = nn.Parameter(sinks) if sinks is not None else None
 
 
+def _ep_wrapped_moe() -> nn.Module:
+    """A live GptOss EP wrapper (the ``nn.Module`` half; the base ``__init__`` needs a process group):
+    the RL shape the gate admits, since a wrapper-less MoE is refused before the sink verdict matters."""
+    layer = object.__new__(EPGptOssMoELayer)
+    nn.Module.__init__(layer)
+    return layer
+
+
 class _GptOssStub(nn.Module):
-    """Minimal GptOss-shaped tree: real family config + one decoder layer with a sinks slot."""
+    """Minimal GptOss-shaped tree: real family config + one decoder layer with a sinks slot and an
+    EP-wrapped MoE block."""
 
     def __init__(self, sinks: torch.Tensor | None):
         super().__init__()
@@ -39,6 +49,7 @@ class _GptOssStub(nn.Module):
         )
         layer = nn.Module()
         layer.self_attn = _Attention(sinks)
+        layer.mlp = _ep_wrapped_moe()
         backbone = nn.Module()
         backbone.layers = nn.ModuleList([layer])
         self.model = backbone

@@ -1,16 +1,16 @@
 ---
 name: rl-setup
 description: >-
-  Wire up online GRPO (RLVR) or environmental (multi-turn tool-use) GRPO for
+  Wire up online GRPO (RLVR) or async GRPO with environments (multi-turn tool-use) for
   Halo: bring up the separate rollout container — vLLM 0.26.0 (cu13), or
-  SGLang 0.5.17 for environmental GRPO (rollout_backend: sglang, the families
+  SGLang 0.5.17 for async GRPO with environments (rollout_backend: sglang, the families
   its loaders can take an update for)
   — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
   NCCL weight sync through the vendored client in src/distributed/nccl/
   (parallelism-aware gather — EP/TP/ETP and multi-rank FSDP2 all participate),
   select the RL environment by registry name, and set the key GRPO
   hyperparameters. USER-INVOKED ONLY — invoke when the user explicitly asks to set
-  up / configure / wire online or environmental GRPO, the vLLM or SGLang rollout
+  up / configure / wire online or async GRPO, the vLLM or SGLang rollout
   server, Ray rollout actors, or NCCL weight sync.
 disable-model-invocation: true
 allowed-tools:
@@ -22,7 +22,7 @@ allowed-tools:
 
 # rl-setup
 
-Wire up online GRPO (RLVR) or environmental (multi-turn tool-use) GRPO. The
+Wire up online GRPO (RLVR) or async GRPO with environments (multi-turn tool-use). The
 generation engine (vLLM) runs in a **separate container** — the training env
 cannot import vLLM (the server image ships its own torch and
 `transformers 5.14.1`, ABI-incompatible with the training image's PyTorch
@@ -121,4 +121,5 @@ only on the single-process path (no EP wrappers, no PEFT).
 `src/trainers/grpo/environmental.py`, `src/distributed/nccl/` (the vendored weight-sync client), and
 `Dockerfile.vllm` decide the real handshake — when a doc, this skill, or memory disagrees, or you are
 unsure, read those files before wiring it up. (`CLAUDE.md`: docs-first, the code wins.) Related skills:
-`data` (the `{prompt, answer}` env-GRPO format), `checkpoints` (merge the trained policy for serving/eval).
+`data` (the async-GRPO format: `prompt`, plus `answer` where the environment's `requires_answer` is
+set), `checkpoints` (merge the trained policy for serving/eval).

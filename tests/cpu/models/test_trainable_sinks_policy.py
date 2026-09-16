@@ -19,6 +19,7 @@ from transformers import GptOssConfig, GptOssForCausalLM
 
 PartialState()  # the sinks policy logs through accelerate's logger, which requires live state
 
+from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.models.patches.gpt_oss_sinks import (
     SinksPolicy,
@@ -132,9 +133,13 @@ def test_weight_sync_refuses_trainable_sinks():
     apply_sinks_policy(model, config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
     with pytest.raises(ValueError, match="SFT-only"):
         validate_weight_sync_support(model, "vllm")
-    # The frozen live policy — the shipped RL shape — passes the same gate.
+    # The frozen live policy on an EP-wrapped MoE — the shipped RL shape — passes the same gate
+    # (a wrapper-less MoE is refused before the sink verdict matters).
     model, config = _tiny_gpt_oss()
     apply_sinks_policy(model, config, policy=SinksPolicy.LIVE, attn_implementation="eager")
+    layer = object.__new__(EPGptOssMoELayer)
+    torch.nn.Module.__init__(layer)
+    model.model.layers[0].mlp = layer
     validate_weight_sync_support(model, "vllm")
 
 

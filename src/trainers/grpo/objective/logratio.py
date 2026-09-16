@@ -22,6 +22,10 @@ import torch
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""
 
+SAMPLER_CERTAIN_LOGPROB = 0.0
+"""A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits processor
+forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it."""
+
 
 def clamp_ref_logps(ref_logps: torch.Tensor, policy_logps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Bound the tail of TRL's k3 KL estimator by capping the log-ratio at :data:`KL_LOGRATIO_CLAMP`
@@ -29,15 +33,11 @@ def clamp_ref_logps(ref_logps: torch.Tensor, policy_logps: torch.Tensor) -> tupl
 
     ``per_token_kl = exp(ref − logp) − (ref − logp) − 1`` is unbounded where the policy suppresses a
     token the reference gives high probability; capping ``ref`` at ``policy + KL_LOGRATIO_CLAMP``
-    truncates that tail. Returns ``(clamped_ref, fraction_clamped)``.
+    truncates that tail. Returns ``(clamped_ref, clamped)``, the second the bool mask of the positions
+    the cap bit.
     """
     ceiling = policy_logps + KL_LOGRATIO_CLAMP
-    return torch.minimum(ref_logps, ceiling), (ref_logps > ceiling).float().mean()
-
-
-# A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits
-# processor forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it.
-SAMPLER_CERTAIN_LOGPROB = 0.0
+    return torch.minimum(ref_logps, ceiling), ref_logps > ceiling
 
 
 def compute_is_ratio(
@@ -69,22 +69,22 @@ def select_mask_logratio(
     engine_logps: torch.Tensor,
     corrected_mask: torch.Tensor,
     row_has_engine: torch.Tensor,
-) -> tuple[torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, dict[str, tuple[float, float]]]:
     """The log-ratio the mask stages read when the engine re-scored the rows under the trainer's
     current weights: ``logπ_engine_now − logπ_sampling`` on rows that carry a re-score — pure policy
     staleness, since the two engine passes share their numerics — and the trainer diff elsewhere.
-    Returns it with the step's diagnostics over the re-scored tokens: the staleness mean, the
-    numerics mean ``logπ_recompute − logπ_engine_now`` (the floor the bands would otherwise read) and
-    the coverage of the re-score over the corrected tokens.
+    Returns it with the step's diagnostics as ``(numerator, denominator)`` pairs over the re-scored
+    tokens: the staleness mean, the numerics mean ``logπ_recompute − logπ_engine_now`` (the floor the
+    bands would otherwise read) and the coverage of the re-score over the corrected tokens.
     """
     use_engine = corrected_mask & row_has_engine.unsqueeze(1)
     engine_diff = (engine_logps - sampling_logps) * use_engine
     mask_diff = torch.where(use_engine, engine_diff, logps_diff)
-    n = use_engine.sum().clamp(min=1)
+    n = use_engine.sum().item()
     stats = {
-        "sampling/engine_logratio_mean": (engine_diff.sum() / n).item(),
-        "sampling/numerics_logratio_mean": (((recompute_logps - engine_logps) * use_engine).sum() / n).item(),
-        "sampling/engine_rescore_coverage": (use_engine.sum() / corrected_mask.sum().clamp(min=1)).item(),
+        "sampling/engine_logratio_mean": (engine_diff.sum().item(), n),
+        "sampling/numerics_logratio_mean": (((recompute_logps - engine_logps) * use_engine).sum().item(), n),
+        "sampling/engine_rescore_coverage": (n, corrected_mask.sum().item()),
     }
     return mask_diff, stats
 
@@ -113,9 +113,9 @@ class ISMaskConfig:
             (self.geo_band_min, self.geo_band_max, "geo_band"),
         ):
             if (lo is None) != (hi is None):
-                raise ValueError(f"is_{name}_min and is_{name}_max must be set together")
+                raise ValueError(f"isr_{name}_min and isr_{name}_max must be set together")
             if lo is not None and not 0 < lo < 1 < hi:
-                raise ValueError(f"is_{name} bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
+                raise ValueError(f"isr_{name} bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
         if self.veto_min is not None and not 0 < self.veto_min < 1:
             raise ValueError(f"isr_veto_min must be in (0, 1), got {self.veto_min}")
         if self.opsm_delta is not None and self.opsm_delta <= 0:
@@ -150,25 +150,27 @@ def apply_is_masks(
     corrected_mask: torch.Tensor,
     traj_ids: torch.Tensor,
     config: ISMaskConfig,
-) -> tuple[torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, dict[str, tuple[int, int]]]:
     """Apply the token-band / geometric-band / veto stages to the truncated ratio.
 
     ``traj_ids`` maps each row to its trajectory (−1 for dummy rows). The band tests use the raw
     (pre-truncation) ratio ``exp(logps_diff)`` so the clip cannot hide an out-of-band token.
-    Returns the masked ratio and diagnostic fractions.
+    Returns the masked ratio and the diagnostic ``(masked, total)`` counts of each active stage.
     """
     if not config.any_mask_active:
         return ratio, {}
     raw_ratio = torch.exp(logps_diff)
     keep = torch.ones_like(ratio, dtype=torch.bool)
-    stats: dict[str, float] = {}
-    corrected = corrected_mask.sum().clamp(min=1)
+    stats: dict[str, tuple[int, int]] = {}
     num_trajs = int(traj_ids.max().item()) + 1 if traj_ids.numel() else 0
 
     if config.band_min is not None:
         in_band = (raw_ratio >= config.band_min) & (raw_ratio <= config.band_max)
         token_keep = in_band | ~corrected_mask
-        stats["sampling/is_token_band_masked_frac"] = ((~token_keep) & corrected_mask).sum().item() / corrected.item()
+        stats["sampling/is_token_band_masked_frac"] = (
+            int(((~token_keep) & corrected_mask).sum()),
+            int(corrected_mask.sum()),
+        )
         keep &= token_keep
 
     traj_keep = None
@@ -177,7 +179,7 @@ def apply_is_masks(
         if config.geo_band_min is not None:
             geo = torch.exp(_traj_mean_logratio(logps_diff, corrected_mask, traj_ids, num_trajs))
             in_geo = (geo >= config.geo_band_min) & (geo <= config.geo_band_max)
-            stats["sampling/is_geo_band_masked_frac"] = (~in_geo).float().mean().item()
+            stats["sampling/is_geo_band_masked_frac"] = (int((~in_geo).sum()), num_trajs)
             traj_keep &= in_geo
         if config.veto_min is not None:
             # uncorrected tokens read as 1.0 so they never trip the veto.
@@ -186,7 +188,7 @@ def apply_is_masks(
             # An id with no rows keeps the 0 scatter init, which reads as vetoed; restrict to contributing ids.
             present = _traj_scatter(torch.ones_like(row_min), traj_ids, num_trajs, "sum") > 0
             vetoed = (traj_min < config.veto_min) & present
-            stats["sampling/is_veto_masked_frac"] = vetoed.float().mean().item()
+            stats["sampling/is_veto_masked_frac"] = (int(vetoed.sum()), num_trajs)
             traj_keep &= ~vetoed
     if traj_keep is not None:
         row_keep = torch.where(
@@ -204,17 +206,17 @@ def apply_opsm(
     traj_ids: torch.Tensor,
     row_advantages: torch.Tensor,
     delta: float,
-) -> tuple[torch.Tensor, float]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Off-Policy Sequence Masking (DeepSeek-V3.2): zero the ratio of negative-advantage trajectories
     whose mean log-ratio magnitude exceeds ``delta`` nats. Positive-advantage trajectories are never
-    masked. Returns the masked ratio and the masked-trajectory fraction.
+    masked. Returns the masked ratio and the per-trajectory bool mask of what it masked.
     """
     num_trajs = int(traj_ids.max().item()) + 1 if traj_ids.numel() else 0
     if num_trajs == 0:
-        return ratio, 0.0
+        return ratio, torch.zeros(0, dtype=torch.bool, device=ratio.device)
     traj_mean = _traj_mean_logratio(logps_diff, corrected_mask, traj_ids, num_trajs)
     traj_negative = _traj_scatter(row_advantages, traj_ids, num_trajs, "amin") < 0
     masked = traj_negative & (traj_mean.abs() > delta)
     row_masked = torch.where(traj_ids >= 0, masked.gather(0, traj_ids.clamp(min=0)), torch.zeros_like(traj_ids).bool())
     out = torch.where(row_masked.unsqueeze(1), torch.zeros_like(ratio), ratio)
-    return out, masked.float().mean().item()
+    return out, masked

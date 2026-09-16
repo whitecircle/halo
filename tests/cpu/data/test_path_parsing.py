@@ -14,8 +14,10 @@ import sys
 import pytest
 
 from src.data.sources.paths import (
+    hub_repo_id,
     parse_dataset_destination,
     parse_dataset_source,
+    parse_hub_spec,
     parse_s3_uri,
 )
 
@@ -153,6 +155,17 @@ def test_parse_dataset_destination_explicit_schemes():
         parse_dataset_destination("hf://only-org")
     with pytest.raises(ValueError, match="hf://org/name"):
         parse_dataset_destination("hf://org/name/extra")
+
+
+def test_parse_hub_spec_config_then_split():
+    """``org/name[:config][@split]``: ``@`` selects the split and ``:`` the config, in that order —
+    a parser that split on ``:`` first would read ``name:cfg@train`` as config ``cfg@train``."""
+    assert parse_hub_spec("org/name") == ("org/name", None, None)
+    assert parse_hub_spec("org/name@train") == ("org/name", None, "train")
+    assert parse_hub_spec("org/name:cfg") == ("org/name", "cfg", None)
+    assert parse_hub_spec("org/name:cfg@train") == ("org/name", "cfg", "train")
+    assert parse_hub_spec("org/name:a:b@train[:10%]") == ("org/name:a", "b", "train[:10%]")
+    assert hub_repo_id("org/name:cfg@train") == "org/name"
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """RLVR (Reinforcement Learning with Verifiable Rewards) online GRPO training.
 
-Online GRPO against a vLLM server, scored by rule-based reward functions instead of a reward model:
-``accuracy_reward`` (strict `\\boxed{}` exact-match) and the optional ``format_reward`` (regex).
+Online GRPO against a vLLM server, scored by the ``rewards`` terms of the config: the strict
+``\\boxed{}`` accuracy grader, the regex format grader, a generative judge, a served reward model.
 
 Supported Parallelism Modes: EP, TP, ETP (CP is not supported by ``DistributedGRPOTrainer``; the
 rollout server takes its own GPUs, so size the launch to the remaining ones).
@@ -12,11 +12,12 @@ Usage:
         examples/grpo/online/rlvr-online-grpo-template.yaml --expert_parallel_size=8
 """
 
-import re
+import asyncio
 
 from trl import GRPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
+from src.args.mixins import RLRRArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.data.pipeline.conversation import maybe_parse_json
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
@@ -24,10 +25,11 @@ from src.data.pipeline.rendered import render_generation_prompt
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.distributed.runtime import barrier
+from src.distributed.runtime import barrier, broadcast_from_rank0, is_global_main_process
 from src.environments.base import resolve_reasoning_effort
-from src.environments.rewards import extract_last_boxed
 from src.models.loading.model_preparation import log_model_info
+from src.rewards.functions import ScorerRewardFunction, reward_functions
+from src.rewards.verifiable import RLVR_GRADERS
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.weight_sync_clients import (
@@ -46,74 +48,10 @@ from src.training.script_runner import (
     load_script_model,
     log_script_dataset_examples,
     padded_workload_attn_implementation,
+    reject_non_default_args,
     reject_unsupported_args,
     run_trainer,
 )
-
-
-def _completion_content(completion) -> str:
-    """Last assistant message content for a conversational completion, or the string itself."""
-    if isinstance(completion, list):
-        return completion[-1]["content"] if completion else ""
-    return completion
-
-
-def accuracy_reward(completions, answer, **kwargs):
-    """Reward based on whether the completion's \\boxed{} answer matches ground truth.
-
-    Strict boxed exact-match, not the environments' validated-answer chain (``compute_answer_reward``,
-    ``DEFAULT_METHODS = exact + numeric``). The two are not interchangeable: this one strips a GSM8K
-    ``####`` rationale prefix and ``,``/``$`` from both sides and then requires string equality, while
-    the environment chain normalizes case, re-extracts a box from the ground truth as well, and
-    accepts a numeric match within ``rtol=0.01``. Swapping in the chain would re-grade every shipped
-    RLVR recipe (``0.5`` vs ``.5``, ``7 \\boxed{42}`` vs ``42``), so the difference is pinned by
-    ``tests/cpu/grpo/test_rlvr_accuracy_reward.py``.
-
-    Args:
-        completions: List of completion strings.
-        answer: List of ground truth answer strings.
-
-    Returns:
-        List of float rewards (1.0 or 0.0).
-    """
-    # strict: a short answer column would otherwise truncate and return fewer rewards than
-    # completions, grading a different set of rows than was generated.
-    rewards = []
-    for completion, gt in zip(completions, answer, strict=True):
-        content = _completion_content(completion)
-
-        extracted = (extract_last_boxed(content) or "").strip()
-
-        # Normalize ground truth. GSM8K stores the rationale plus "#### <final>";
-        # keep only the final answer so the boxed comparison is meaningful.
-        gt_normalized = str(gt)
-        if "####" in gt_normalized:
-            gt_normalized = gt_normalized.rsplit("####", 1)[-1]
-        gt_normalized = gt_normalized.strip().replace(",", "").replace("$", "")
-        extracted = extracted.replace(",", "").replace("$", "")
-        # An empty extraction is never correct, even against a blank ground truth: a missing answer
-        # column would otherwise pay full reward for every box-less completion.
-        rewards.append(1.0 if extracted and extracted == gt_normalized else 0.0)
-
-    return rewards
-
-
-def format_reward(completions, pattern, **kwargs):
-    """Reward based on whether the completion matches a regex format pattern.
-
-    Args:
-        completions: List of completion strings.
-        pattern: Compiled regex pattern (the caller compiles the configured pattern once).
-
-    Returns:
-        List of float rewards (1.0 or 0.0).
-    """
-    rewards = []
-    for completion in completions:
-        content = _completion_content(completion)
-        rewards.append(1.0 if pattern.search(content) else 0.0)
-
-    return rewards
 
 
 def main():
@@ -124,6 +62,12 @@ def main():
     # spells its decoder model.layers.* where the multimodal checkpoint the server loads spells
     # model.language_model.layers.*, so every dense tensor would miss its slot on the first sync.
     reject_unsupported_args("RLVR Online GRPO", text_only_model=dist_args.text_only_model)
+    # Each block's tunables reach the trainer only through its gate, so a value set beside a closed
+    # gate is inert (its defaults are truthy, hence the default-comparing form).
+    if not args.use_rlrr:
+        reject_non_default_args("RLVR Online GRPO with use_rlrr off", args, *RLRRArguments.TUNABLES)
+    if not args.use_sdpg:
+        reject_non_default_args("RLVR Online GRPO with use_sdpg off", args, *args.SDPG_TUNABLES)
 
     runtime = init_training_script(
         args,
@@ -243,27 +187,23 @@ def main():
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, grpo_config)
 
-    reward_funcs = []
-    reward_weights = []
-
-    if args.use_accuracy_reward:
-        reward_funcs.append(accuracy_reward)
-        reward_weights.append(args.accuracy_reward_weight)
-
-    if args.use_format_reward:
-        compiled_pattern = re.compile(args.format_pattern, re.DOTALL)
-
-        def _format_reward(completions, **kwargs):
-            return format_reward(completions, pattern=compiled_pattern, **kwargs)
-
-        _format_reward.__name__ = "format_reward"
-        reward_funcs.append(_format_reward)
-        reward_weights.append(args.format_reward_weight)
-
-    if not reward_funcs:
-        raise ValueError(
-            "At least one reward function must be enabled. Set use_accuracy_reward=True or use_format_reward=True."
-        )
+    # One TRL reward function per configured term, weighted by the term; process_for_rlvr renders the
+    # ground truth into the "answer" column, which is what a judge term reads as the reference.
+    reward_funcs, reward_weights = reward_functions(args.reward_terms, RLVR_GRADERS, reference_column="answer")
+    # A judge or reward-model term is probed once before the trainer exists: a bad URL, key or model
+    # would otherwise score every row None and train on nothing. Rank 0 probes, all ranks raise together.
+    probe_error: str | None = None
+    if is_global_main_process():
+        for function in reward_funcs:
+            if isinstance(function, ScorerRewardFunction):
+                try:
+                    asyncio.run(function.scorer.verify())
+                except Exception as e:
+                    probe_error = f"reward term {function.term.name!r} probe failed: {e}"
+                    break
+    probe_error = broadcast_from_rank0(probe_error)
+    if probe_error is not None:
+        raise RuntimeError(probe_error)
 
     # Same base-URL precedence as TRL's generation client: vllm_server_base_url wins over host:port,
     # so the probe hits the server the trainer will actually generate against.
@@ -275,12 +215,14 @@ def main():
         single_turn_tokens=(args.max_prompt_length or 0) + grpo_config.max_completion_length,
         backend=VLLMWeightSyncClient.BACKEND_KEY,
     )
-    # TRL's IS correction divides by the engine's logprobs too: they must carry the sampling temperature.
+    # TRL's IS correction divides by the engine's logprobs too: they must carry the sampling temperature,
+    # and a sequence-level IS mode sums the per-token log-ratios, which a nucleus-renormalized reference
+    # drives toward a zero sequence weight.
     verify_sampler_logprob_reference_synced(
         [vllm_base_url],
         temperature=grpo_config.temperature,
         top_p=grpo_config.top_p,
-        geo_band_active=False,
+        sequence_ratio_active=DistributedGRPOTrainer.sequence_level_importance_sampling(grpo_config),
         backend=VLLMWeightSyncClient.BACKEND_KEY,
     )
 

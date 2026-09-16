@@ -15,6 +15,7 @@ from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import select_mask_logratio
 from src.trainers.grpo.rollout import async_rollouts
+from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 PartialState()  # the re-score reports through accelerate's logger, which refuses to log without it
 
@@ -30,10 +31,10 @@ def test_mask_logratio_reads_the_engine_diff_only_on_rescored_rows():
     )
     assert torch.allclose(mask_diff[0], torch.tensor([0.01, -0.01, 0.0]))
     assert torch.allclose(mask_diff[1], trainer_diff[1]), "a row without a re-score keeps the trainer diff"
-    assert stats["sampling/engine_logratio_mean"] == pytest.approx(0.0)
-    # recompute − engine over the two re-scored tokens: (−0.06 + −0.04) / 2
-    assert stats["sampling/numerics_logratio_mean"] == pytest.approx(-0.05)
-    assert stats["sampling/engine_rescore_coverage"] == pytest.approx(2 / 5)
+    assert stats["sampling/engine_logratio_mean"] == (pytest.approx(0.0), 2)
+    # recompute − engine summed over the two re-scored tokens: −0.06 + −0.04
+    assert stats["sampling/numerics_logratio_mean"] == (pytest.approx(-0.10), 2)
+    assert stats["sampling/engine_rescore_coverage"] == (2, 5)
 
 
 def test_numerics_mean_is_recompute_minus_engine_over_rescored_tokens():
@@ -44,8 +45,8 @@ def test_numerics_mean_is_recompute_minus_engine_over_rescored_tokens():
     _, stats = select_mask_logratio(
         recompute - sampling, recompute, sampling, engine_now, corrected, torch.tensor([True])
     )
-    assert stats["sampling/numerics_logratio_mean"] == pytest.approx(-0.04)
-    assert stats["sampling/engine_logratio_mean"] == pytest.approx(0.01)
+    assert stats["sampling/numerics_logratio_mean"] == (pytest.approx(-0.16), 4)
+    assert stats["sampling/engine_logratio_mean"] == (pytest.approx(0.04), 4)
 
 
 class _FakeClient:
@@ -66,6 +67,7 @@ def _rescore_host(clients):
         _weight_sync_client=None,  # every rank but the main one holds no sync client
         _metrics={"train": defaultdict(list)},
     )
+    attach_world_metrics(host)
     host._engine_rescore_clients = DistributedAsyncEnvironmentalGRPOTrainer._engine_rescore_clients.__get__(host)
     return DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine.__get__(host), host
 
@@ -120,27 +122,27 @@ def test_rescore_routes_a_trajectory_to_one_server_and_skips_rows_without_sampli
     rescore, host = _rescore_host(clients)
     prompts, completions = _rows()
     # trajectory 0 has two turns (rows 0, 1), trajectories 1 and 2 one each; row 3 has no sampling logps
-    scored = rescore(prompts, completions, [True, True, True, False], [2, 1, 1], "train")
+    scored = rescore(prompts, completions, [True, True, True, False], [2, 1, 1])
     assert [s is not None for s in scored] == [True, True, True, False]
     assert torch.equal(scored[2], torch.full((3,), -0.5))
     assert {c[0] for c in clients[0].calls} == {(1, 2), (1, 2, 3)}, "both rows of trajectory 0 hit server 0"
     assert {c[0] for c in clients[1].calls} == {(4,)}, "trajectory 1 hits server 1; row 3 never scored"
-    assert host._metrics["train"]["sampling/engine_rescore_miss_frac"] == [0.0]
+    assert flushed_metrics(host)["sampling/engine_rescore_miss_frac"] == [0.0]
 
 
 def test_rescore_reports_partial_failures_and_never_raises():
     clients = [_FakeClient(fail=True), _FakeClient()]
     rescore, host = _rescore_host(clients)
     prompts, completions = _rows()
-    scored = rescore(prompts, completions, [True, True, True, True], [2, 1, 1], "train")
+    scored = rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
     # trajectories 0 and 2 land on the failing server 0, trajectory 1 on server 1
     assert scored[0] is None and scored[1] is None and scored[3] is None, "a failed request is that row's miss"
     assert torch.equal(scored[2], torch.full((3,), -0.5))
-    assert host._metrics["train"]["sampling/engine_rescore_miss_frac"] == [pytest.approx(0.75)]
+    assert flushed_metrics(host)["sampling/engine_rescore_miss_frac"] == [pytest.approx(0.75)]
     rescore, host = _rescore_host([_FakeClient(fail=True)])
-    scored = rescore(prompts, completions, [True, True, True, True], [2, 1, 1], "train")
+    scored = rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
     assert scored == [None] * 4
-    assert host._metrics["train"]["sampling/engine_rescore_miss_frac"] == [1.0]
+    assert flushed_metrics(host)["sampling/engine_rescore_miss_frac"] == [1.0]
 
 
 def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
@@ -150,7 +152,7 @@ def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
 
     rescore, host = _rescore_host([_Short()])
     prompts, completions = _rows()
-    scored = rescore(prompts, completions, [True, True, True, True], [2, 1, 1], "train")
+    scored = rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
     assert scored[1] is not None and scored[2] is None, "one log-prob for a three-token completion is a miss"
 
 

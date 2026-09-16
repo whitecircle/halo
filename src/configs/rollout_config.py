@@ -5,8 +5,8 @@ Kept free of Ray and rollout-engine imports: ``AsyncTrainingConfig`` builds one 
 it pickled, so those imports must not be pulled into every ``import src.configs``.
 """
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 # ``AsyncTrainingConfig`` is the validated YAML surface and supplies every mirrored field below, so a
 # directly-built RolloutConfig defaults to what that path would produce; one shared constant per pair
@@ -67,6 +67,10 @@ class RolloutConfig:
     """Token ids that end a turn (vLLM ``stop_token_ids``). Set to the model's tool-call terminator so a
     turn stops when the model emits its call; otherwise a non-eos terminator keeps the model generating,
     hallucinating the tool result and playing the whole episode in one turn."""
+    chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Chat-template variables sent with every request (``chat_template_kwargs``), e.g. Qwen3.x's
+    ``preserve_thinking`` so reasoning the env carries stays rendered across a later user message. Never
+    the reasoning effort, which travels top-level (``generation_control_fields``)."""
 
     model_name: str | None = None
     """Model name for /v1/chat/completions. Optional — vllm-serve uses the loaded model when omitted."""

@@ -24,12 +24,13 @@ Each is a class because it reads live trainer state; the methods a test or a cal
 
 Four modules in the same package sit outside that composition. `StoredMetricsMixin`
 (`src/trainers/mixins/stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
-distillation, and SDPG for buffered per-step metric logging. Offline GRPO
-and the embedding trainer keep their own `log` instead: offline reads the train/eval bucket off
-`model.training` rather than the mixin's `"loss" in logs`, and the embedding trainer's eval metrics
-go into `output.metrics` for best-model tracking. Under PP the store would be fed from the last
-stage ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md), not yet available in this
-release).
+distillation, and SDPG for buffered per-step metric logging. Under PP the store would be fed from
+the last stage ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md), not yet available in
+this release).
+
+Offline GRPO and the embedding trainer keep their own `log` instead: offline reads the train/eval
+bucket off `model.training` rather than the mixin's `"loss" in logs`, and the embedding trainer's
+eval metrics go into `output.metrics` for best-model tracking.
 
 `GradientSyncMixin` dispatches by method, not by mode string: `_setup_ep_gradient_sync`,
 `_setup_cp_gradient_sync` and `_setup_ep_tp_gradient_sync` are called directly from `mixins/base.py`'s
@@ -66,15 +67,19 @@ trainers take the axis when the engine lands ([Pipeline Parallelism](../parallel
 Support is declared per class as `_supports_ep` / `_supports_cp` / `_supports_tp` / `_supports_pp`
 and enforced in `ParallelismValidationMixin`; `_pp_unsupported_reason` carries the rejection text.
 `DistributedTrainerMixin` defaults them to EP/TP on and CP/PP off, so a trainer states only what it
-flips — plus its PP verdict, which is written out even when it matches the default because
-`_pp_unsupported_reason` is meaningless without it. There is no `_supports_etp` — ETP folds into
-`ep_group_size = ep_size × expert_tp_size`, so it is gated by `_supports_ep`.
+flips. Its PP verdict is written out even when it matches the default, because
+`_pp_unsupported_reason` is meaningless without it.
+
+There is no `_supports_etp`: ETP folds into `ep_group_size = ep_size × expert_tp_size`, so it is
+gated by `_supports_ep`.
 
 **CP** works only where the loss is computable from a sequence chunk. The rest inherit the default
-`_supports_cp = False` because the trainer uses `logits_to_keep` (offline GRPO), needs global
-log-probability sums (DPO, KTO), needs full-sequence pooling (classification, reward, embedding),
-wraps two models (distillation), or runs a separate-length privileged-teacher or rollout sequence
-(self distillation, SDPG, online and environmental GRPO).
+`_supports_cp = False`.
+
+The reasons: the trainer uses `logits_to_keep` (offline GRPO, Async GRPO with Environments), needs
+global log-probability sums (DPO, KTO), needs full-sequence pooling (classification, reward,
+embedding), wraps two models (distillation), or runs a separate-length privileged-teacher or rollout
+sequence (self distillation, SDPG, online GRPO).
 
 **PP** needs a single-forward objective on one stage's logits, and the conditional rows above are
 constructor-time gates rather than class attributes. Rejections land in three places.
@@ -98,6 +103,7 @@ Modality routing differs by method. SFT, SMPO, DPO, reward modeling and the dist
 on the **run** (`is_vlm_run`): the VLM data path needs a multimodal checkpoint *and* declared image
 data, so text-only rows on a natively-multimodal model (Qwen3.5/3.6, Gemma 4, Inkling) train through
 the text pipeline with packing available ([declaration rules](../data/dataset-formats.md#sft-vlm)).
+
 KTO takes its processor **class** from the checkpoint (`install_resolved_tokenizer` keeps the
 processor a multimodal checkpoint resolved to) but routes its data path off the **dataset**, as
 `scripts/training/preference/kto.py` states. The model class always follows the checkpoint.
@@ -111,7 +117,7 @@ processor a multimodal checkpoint resolved to) but routes its data path off the 
 | Self-distillation (SDPG offline) | Yes | Privileged hint appended to the last user turn; teacher branch fails loud on overflow |
 | Reward | Yes, on score-headed families | `DataCollatorForVLMPreference` expands images into the shared prompt at collation. Refused before the distributed init on a multimodal family with no sequence-classification head. See [Reward — VLMs](../training-methods/preference/reward-modeling.md#vision-language) |
 | Classification | No | Same head roster as reward modeling, but the classification script has no vision data path; multimodal architectures still train on text |
-| GRPO (offline / online / environmental) | No | Text rollouts |
+| GRPO (offline / online / async) | No | Text rollouts |
 | Embedding | No | Text towers only |
 
 Pipeline parallelism rejects a vision-language **run** on every trainer — an image column, embedded
@@ -147,7 +153,7 @@ raises `ValueError`), the save flag `save_sharded_ep` (default `False`), `moe_ba
 A trainer that forwards `**kwargs` calls it as above. One whose `__init__` names those parameters
 passes them through `**explicit` instead (SMPO, Classification, offline GRPO, teacher distillation);
 kwargs-style values win over explicit ones. `training_args` defaults to `kwargs["args"]`, so a
-trainer with an explicit `args` parameter passes `training_args=` (online and environmental GRPO)
+trainer with an explicit `args` parameter passes `training_args=` (online and async GRPO)
 and `EmbeddingTrainer` passes a synthetic `{"args": args}`.
 
 `ParallelismConfig` validates the combination and exposes mode-flag properties (`is_ep_mode`,
@@ -156,13 +162,14 @@ and `EmbeddingTrainer` passes a synthetic `{"args": args}`.
 `PipelineTrainerMixin._maybe_prepare_pipeline_model` runs *before* `super().__init__()` to split the
 model into this rank's stage.
 
-**`create_accelerator_and_postprocess()`** is overridden during base init — on the custom path only
+**`create_accelerator_and_postprocess()`** is overridden during base init, on the custom path only
 (`_needs_custom_accelerator()`; otherwise it delegates to the base): no DDP wrapping (manual gradient
-sync), `gradient_accumulation_steps=1` (the Trainer drives accumulation), bf16/fp16 autocast. On
-either path `fp32_output_conversion: false` (the default) clears `accelerator.native_amp`, dropping
-the fp32 logits upcast that can cost many GB at long sequence. Under `fp16` it is ignored with a warning —
-`native_amp` also gates GradScaler unscaling there, so clearing it would clip and step on scaled
-gradients.
+sync), `gradient_accumulation_steps=1` (the Trainer drives accumulation), bf16/fp16 autocast.
+
+On either path `fp32_output_conversion: false` (the default) clears `accelerator.native_amp`,
+dropping the fp32 logits upcast that can cost many GB at long sequence. Under `fp16` it is ignored
+with a warning: `native_amp` also gates GradScaler unscaling there, so clearing it would clip and
+step on scaled gradients.
 
 **`_setup_distributed_modes()`** dispatches on the mode flags, in this order:
 
@@ -192,10 +199,11 @@ sync wherever DP > 1 — pure TP and EP+TP at DP=1 skip the wrap entirely.
 
 QLoRA skips FSDP2 on both the plain-DP and the CP path (`fully_shard` cannot wrap bnb's non-float
 `Params4bit`). `_setup_qlora_gradient_sync` sets a flag rather than per-parameter hooks, whose
-rank-local firing would hang a job whose microbatch touches different adapters per rank. The sync is
-one bucketed all-reduce over every trainable grad per optimizer step, with membership agreed by a
-grad-presence mask so no rank reduces alone. It is ordered ahead of clipping — otherwise each rank
-clips by its own coefficient — and backstopped by a step-pre-hook for `max_grad_norm: 0`.
+rank-local firing would hang a job whose microbatch touches different adapters per rank.
+
+The sync is one bucketed all-reduce over every trainable grad per optimizer step, with membership
+agreed by a grad-presence mask so no rank reduces alone. It is ordered ahead of clipping (otherwise
+each rank clips by its own coefficient) and backstopped by a step-pre-hook for `max_grad_norm: 0`.
 
 ## Parallelism modes
 
@@ -251,14 +259,16 @@ coefficient the EP, TP and pipeline clips share.
 
 ## Optimizer construction
 
-Each optimizer module under `src/optimizers/` owns its own builder, and every builder is pure — it
+Each optimizer module under `src/optimizers/` owns its own builder, and every builder is pure: it
 takes the model, args and decay parameters and returns an optimizer without touching trainer state.
-`create_optimizer` picks one and owns the `self.optimizer` assignment: `bf16_optimizer` →
-`AdamWBF16` (stochastic rounding); an `args.optim` present in the `NAMED_OPTIMIZER_BUILDERS`
-registry (`src/optimizers/registry.py`; Muon, FlashAdamW) → that builder; `fp32_non_ep_params` (or
-`optim: sgd` on a model with EP layers) → param groups split by `(weight_decay, dtype, is_dtensor)`
-with `foreach`/`fused` disabled (PyTorch's foreach/fused optimizers cannot mix DTensor and
-plain-tensor params); else the base Trainer optimizer.
+`create_optimizer` picks one and owns the `self.optimizer` assignment:
+
+| Condition | Optimizer |
+|---|---|
+| `bf16_optimizer` | `AdamWBF16` (stochastic rounding) |
+| `args.optim` present in the `NAMED_OPTIMIZER_BUILDERS` registry (`src/optimizers/registry.py`; Muon, FlashAdamW) | That builder |
+| `fp32_non_ep_params` (or `optim: sgd` on a model with EP layers) | Param groups split by `(weight_decay, dtype, is_dtensor)` with `foreach`/`fused` disabled (PyTorch's foreach/fused optimizers cannot mix DTensor and plain-tensor params) |
+| else | The base Trainer optimizer |
 
 The last branch is gated, not a fallthrough: `_refuse_stock_optimizer_on_mixed_params` raises on a
 stock fused/foreach AdamW whenever `ep_group_size > 1`, or the EP wrappers hold the experts and
@@ -269,16 +279,18 @@ DTensor" over that parameter set at the first step; the message names AdamWBF16 
 It then registers three step-pre-hooks so their grad syncs still run when `max_grad_norm: 0` skips
 clipping: `_register_tp_replicated_grad_sync_hook` (TP replicated-grad sync),
 `_register_deferred_ep_grad_sync_hook` (the multi-group-EP cross-replica sweep), and
-`_register_qlora_grad_sync_hook` (the QLoRA DP sweep). The TP hook no-ops
-when `max_grad_norm > 0`; the EP hook must *not* gate on `max_grad_norm` — on a logging step at
-`max_grad_norm == 0` transformers still reaches the patched `clip_grad_norm_`, so it gates on
-whether the sweep already ran this step.
+`_register_qlora_grad_sync_hook` (the QLoRA DP sweep).
+
+The TP hook no-ops when `max_grad_norm > 0`. The EP hook must *not* gate on `max_grad_norm`: on a
+logging step at `max_grad_norm == 0` transformers still reaches the patched `clip_grad_norm_`, so it
+gates on whether the sweep already ran this step.
 
 At `max_grad_norm <= 0` transformers asks for an unclipped norm purely to log it. The mixin's
-`_get_grad_norm` answers `None` on the steps that log nothing — replicating `DefaultFlowCallback`'s
-rule off replicated trainer state, so every rank answers alike — rather than paying a
-`torch._foreach_norm` and an all-reduce per rank per step for a discarded number. The three hooks
-above are what keeps the grad sweeps running on those steps. See
+`_get_grad_norm` answers `None` on the steps that log nothing, replicating `DefaultFlowCallback`'s
+rule off replicated trainer state so every rank answers alike, rather than paying a
+`torch._foreach_norm` and an all-reduce per rank per step for a discarded number.
+
+The three hooks above are what keeps the grad sweeps running on those steps. See
 [BF16 Optimizer](../optimization/bf16-optimizer.md).
 
 ## DataLoader and data parallelism
@@ -290,7 +302,7 @@ True: TP, CP, ETP, or PP active, or the dataset is pre-sharded per DP rank. EP a
 it (EP is orthogonal to DP) unless the dataset is pre-sharded.
 
 Some trainers diverge: SMPO sets custom tokenized signature columns; Classification defaults
-`remove_unused_columns=False`; online/environmental GRPO scale the batch by `steps_per_generation`
+`remove_unused_columns=False`; online and async GRPO scale the batch by `steps_per_generation`
 and rebuild TRL's `RepeatSampler` at the DP consumption rate
 ([batch geometry](../training-methods/grpo/online-grpo.md#data-flow-and-batch-construction));
 Offline GRPO uses `MultiGroupSampler`.
@@ -298,8 +310,10 @@ Offline GRPO uses `MultiGroupSampler`.
 `ParallelismConfig` computes both. DP size is
 `(world_size / pp_size) / max(tp_size, cp_size, expert_tp_size)`; `get_data_parallel_rank()` derives
 the shard index per mode ([per-mode derivation](../parallelism/data-loading.md)). It divides the
-**stage-local** rank, not the global one — that is what makes every rank of one pipeline chain
-consume the same batch. `_prepare_dataloader()` passes the computed size/rank to
+**stage-local** rank, not the global one, which is what makes every rank of one pipeline chain
+consume the same batch.
+
+`_prepare_dataloader()` passes the computed size/rank to
 `accelerate.prepare_data_loader()` as `num_processes` / `process_index`. A dataset already sharded
 per DP rank passes `1` / `0` instead, so accelerate places batches on the device without re-sharding
 away `(N-1)/N` of each slice; offline GRPO passes the same pair, its `MultiGroupSampler` having
@@ -346,10 +360,10 @@ but under CP they cover only the local chunk.
 - **DistributedDistillationTrainer** — losses `kl_divergence`, `mse`, `soft_cross_entropy`,
   `cosine_similarity`, `jensen_shannon`, `earth_mover_distance`, `alpha_beta_divergence`, `slim`;
   the teacher forward runs under `torch.no_grad()` in `eval()` mode.
-- **DistributedAsyncEnvironmentalGRPOTrainer** — async
-  multi-turn RL with Ray actors and vLLM servers; rollout
-  generation overlaps training; environments resolved by `environment_type` through
-  `src/environments/registry.py`. See [Environmental GRPO](../training-methods/grpo/environmental-grpo.md).
+- **DistributedAsyncEnvironmentalGRPOTrainer** — async multi-turn RL with Ray actors against vLLM or
+  SGLang servers (`rollout_backend`); rollout generation overlaps training; environments resolved by
+  `environment_type` through `src/environments/registry.py`. See
+  [Async GRPO](../training-methods/grpo/async-grpo/README.md).
 
 The `src/trainers/grpo/` package keeps the three trainers (`environmental.py`, `online.py`,
 `offline.py`) at the top level, with support code in `objective/` (pure loss-side functions),
@@ -357,7 +371,7 @@ The `src/trainers/grpo/` package keeps the three trainers (`environmental.py`, `
 advantages, the IS trust region and the rank-uniform fences.
 
 `rollout/` holds function modules (`weight_sync.py`, `weight_sync_clients.py`, `trajectory_spans.py`,
-`routing_replay.py`, `completions_logging.py`) plus the three mixins the environmental trainer composes:
+`routing_replay.py`, `completions_logging.py`) plus the three mixins the async GRPO trainer composes:
 `AsyncRolloutMixin` (`async_rollouts.py` — Ray actors, the prefetch thread, engine weight sync),
 `TrajectoryTokenizeMixin` (`trajectory_tokenize.py` — trajectory → training rows) and
 `RolloutMetricsMixin` (`rollout_metrics.py` — completion logs and per-episode diagnostics).
@@ -366,18 +380,20 @@ advantages, the IS trust region and the rank-uniform fences.
 
 `DistributedGRPOTrainer._setup_weight_sync` replaces TRL's
 `VLLMGeneration.sync_weights` with `_distributed_sync_weights` whenever vLLM generation is set up.
+It uses the vendored `VLLMWeightSyncClient` (`src/distributed/nccl/`) instead of TRL's
+`VLLMClient`, which would import the vLLM package.
+
 TRL's default only unfolds DTensors when its `DistributedBackend.is_fsdp` flag is set (an accelerate
-`fsdp_plugin`), but FSDP2 is applied manually via `fully_shard` with accelerate in MULTI_GPU mode, so the default forwards DTensors
-verbatim and the `torch.cat` in `packed_broadcast_producer` triggers a DTensor dispatch that
-deadlocks against the trainer↔vLLM NCCL group. It uses the vendored `VLLMWeightSyncClient`
-(`src/distributed/nccl/`) instead of TRL's `VLLMClient`, which would import the vLLM package.
+`fsdp_plugin`). FSDP2 is applied manually via `fully_shard` with accelerate in MULTI_GPU mode, so
+the default forwards DTensors verbatim, and the `torch.cat` in `packed_broadcast_producer` triggers
+a DTensor dispatch that deadlocks against the trainer↔vLLM NCCL group.
 
 `_generate_single_turn` broadcasts the per-rank rollout result from the TP-group leader; without it
 TRL slices the broadcast by `process_index`, each TP rank lands on different completions, and the
 first forward deadlocks on its first all-reduce.
 
 `_distributed_sync_weights` calls `sync_trainer_weights`
-(`src/trainers/grpo/rollout/weight_sync.py`, also used by the environmental trainer), which gathers,
+(`src/trainers/grpo/rollout/weight_sync.py`, also used by the async GRPO trainer), which gathers,
 sends, and resets the vLLM prefix cache — see
 [the gather](../training-methods/grpo/online-grpo.md#weight-sync) for what it collects.
 EP layers are found by `isinstance(module, EPMoELayerBase)` rather than an `ep_config` probe (a PEFT
@@ -389,8 +405,9 @@ merged into the base for the gather and forwarded under base-model param names.
 Transformers models capture auxiliary outputs (router logits, hidden states, attention weights) via
 a `capture_outputs` decorator keyed on `_CAN_RECORD_REGISTRY` (`str(class)` → capturable flags).
 FSDP2 `fully_shard` creates dynamic subclasses at wrap time (`GptOssModel` → `FSDPGptOssModel`) that
-are not in the registry, so capture silently fails. `_register_output_capturing_for_fsdp()` walks
-the wrapped model, finds modules with `_can_record_outputs` not yet registered, and adds them. It
+are not in the registry, so capture silently fails.
+
+`_register_output_capturing_for_fsdp()` walks the wrapped model, finds modules with `_can_record_outputs` not yet registered, and adds them. It
 runs from `_setup_distributed_modes()` only when `_fsdp_wrapped=True` (the torchrun path);
 accelerate-managed FSDP v1 does not create dynamic subclasses and is unaffected.
 
@@ -399,11 +416,13 @@ accelerate-managed FSDP v1 does not create dynamic subclasses and is unaffected.
 Weight save/load lives in `src/distributed/checkpoint/`. `save_model()` builds a
 `CheckpointContext` snapshot (the one place trainer internals are read) and hands it to
 `save_checkpoint()`, whose `select_checkpoint_saver()` ladder returns the per-mode `CheckpointSaver`
-(`None` = fall through to `Trainer.save_model`); weight resume is driven by
-`CheckpointLoader` and the per-rank optimizer shards by `OptimizerShardStore`, both built over the
-mixin's `_checkpoint_load_context()` (the `_load_from_checkpoint` / `_load_optimizer_and_scheduler` /
-`_load_best_model` hooks are thin delegators). The ladder reads rank-uniform config only, so every
+(`None` = fall through to `Trainer.save_model`). The ladder reads rank-uniform config only, so every
 rank picks the identical saver.
+
+Weight resume is driven by `CheckpointLoader` and the per-rank optimizer shards by
+`OptimizerShardStore`, both built over the mixin's `_checkpoint_load_context()` (the
+`_load_from_checkpoint` / `_load_optimizer_and_scheduler` / `_load_best_model` hooks are thin
+delegators).
 
 Around it the mixin keeps the non-weight parts of a checkpoint: `_save_checkpoint` (which defers
 `save_total_limit` rotation until the new checkpoint is complete),
@@ -424,4 +443,4 @@ multi-node filesystem handling, and resume, see [Checkpoints & Resume](checkpoin
 
 - [Checkpoints & Resume](checkpoints.md) · [Pipeline Parallelism](../parallelism/pipeline-parallelism.md)
 - [Expert](../parallelism/expert-parallelism.md) · [Tensor](../parallelism/tensor-parallelism.md) · [Context](../parallelism/context-parallelism.md) Parallelism
-- [SMPO](../training-methods/preference/smpo.md) · [Offline GRPO](../training-methods/grpo/offline-grpo.md) · [RLVR Online GRPO](../training-methods/grpo/online-grpo.md) · [Environmental GRPO](../training-methods/grpo/environmental-grpo.md)
+- [SMPO](../training-methods/preference/smpo.md) · [Offline GRPO](../training-methods/grpo/offline-grpo.md) · [RLVR Online GRPO](../training-methods/grpo/online-grpo.md) · [Async GRPO](../training-methods/grpo/async-grpo/README.md)

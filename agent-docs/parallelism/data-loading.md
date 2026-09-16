@@ -40,9 +40,11 @@ EP, contiguous under cross-node EP), so partners sharing a dispatch rank process
 `DataParallelDataLoaderMixin` (`src/trainers/mixins/dataloader.py`, composed into
 `DistributedTrainerMixin`) takes the custom path when `_needs_custom_dataloader()` sees `is_tp_mode`,
 `is_cp_mode`, `is_expert_tp_mode`, `is_pp_mode`, or `_dataset_presharded`; otherwise (DDP / EP-only,
-not presharded) it uses the base Trainer flow. PP must take the custom path: accelerate's default
-shards by **global** rank, which would hand every rank of a pipeline chain a different batch — stage
-0 forwarding one row set while the last stage scores another's labels, with nothing raised.
+not presharded) it uses the base Trainer flow.
+
+PP must take the custom path: accelerate's default shards by **global** rank, which would hand every
+rank of a pipeline chain a different batch. Stage 0 would forward one row set while the last stage
+scores another's labels, with nothing raised.
 
 On the custom path `_prepare_dataloader()` wraps the loader through Accelerate's
 `prepare_data_loader` passing `num_processes=data_parallel_size` and
@@ -61,23 +63,23 @@ identical worker randomness.
 Under PP the train loader is forced to `drop_last=True`: a pipeline would freeze its P2P shapes on
 the first step, so a short final batch would raise mid-epoch.
 
-**Third-party sweeps over the dataset** — TRL's `precompute_ref_log_probs` builds its own loader and
+**Third-party sweeps over the dataset.** TRL's `precompute_ref_log_probs` builds its own loader and
 prepares it with the world-keyed accelerator, so it would shard by global rank and let TP/CP/expert-TP
-siblings forward *different* rows through a collective attention/expert path. `data_parallel_sweep()`
-pins both ends of such a sweep to the DP axis for its duration: `prepare_data_loader` routes to
-`_prepare_dataloader`, and the gather is deduplicated to one chunk per DP rank in DP order. It is an
-identity when `dp_size == world_size`. Pre-sharded datasets are rejected under
-`precompute_ref_log_probs`: TRL caches one rank-0-authoritative file that each rank would concatenate
-onto its own different shard.
+siblings forward *different* rows through a collective attention/expert path.
+
+`data_parallel_sweep()` pins both ends of such a sweep to the DP axis for its duration:
+`prepare_data_loader` routes to `_prepare_dataloader`, and the gather is deduplicated to one chunk
+per DP rank in DP order. It is an identity when `dp_size == world_size`.
+
+Pre-sharded datasets are rejected under `precompute_ref_log_probs`: TRL caches one
+rank-0-authoritative file that each rank would concatenate onto its own different shard.
 
 The two paths shard by different indices — the standard path by global rank (one distinct batch per
 rank), the custom path by DP rank (ranks in a TP/CP group share a batch):
 
-<div class="diagram-row" markdown>
-![Standard DataLoader path (DDP / FSDP / EP-only, dataset not pre-sharded): Accelerate shards batches by global rank, so 16 ranks see 16 distinct batches per step](../assets/diagrams/dataloader_standard.png)
+![Standard dataloader path: with no TP/CP/ETP/PP and no pre-sharded dataset the base Trainer's loader goes through accelerator.prepare with num_processes = world_size, so BatchSamplerShard hands each of the 16 ranks its own batch](../assets/diagrams/dataloader_standard.png)
 
-![Custom DataLoader path (TP / CP / ETP / PP / pre-sharded): sharding uses dp_rank = rank // group_size, so ranks within a TP/CP group share a batch — 16 ranks, 2 distinct batches per step](../assets/diagrams/dataloader_custom.png)
-</div>
+![Custom dataloader path: under TP/CP/ETP/PP or a pre-sharded dataset the loader passes num_processes = data_parallel_size and process_index = dp_rank, so at tp 2 on 16 ranks the eight TP pairs read eight distinct batches](../assets/diagrams/dataloader_custom.png)
 
 ## Per-trainer sampling
 
@@ -90,27 +92,33 @@ rank), the custom path by DP rank (ranks in a TP/CP group share a batch):
 
 **Online GRPO** uses TRL's `RepeatSampler`: same prompts to all GPUs (for reward normalization across
 generations) and prompt reuse across updates, with `mini_repeat_count = num_generations` and
-`repeat_count = num_iterations * steps_per_generation`. Same seed on all ranks gives identical prompt
-ordering; each GPU generates different completions, so an advantage centers each completion's reward
+`repeat_count = num_iterations * steps_per_generation`.
+
+Same seed on all ranks gives identical prompt ordering; each GPU generates different completions, so
+an advantage centers each completion's reward
 on its prompt-group statistics (`advantage[i] = (reward[i] - mean(group)) / (std(group) + eps)` under
 TRL's default `scale_rewards="group"`). When TP or ETP reduces DP, `_prepare_dataloader` shards
 prompts across DP groups while all ranks within a TP group share the same prompts.
 
 On that custom-dataloader path the trainers override `_get_train_sampler`
 (`GRPOTrainDataLoaderMixin` in `src/trainers/grpo/mixins/dataloader.py`) to size the sampler at the
-loader's real DP consumption rate — TRL's world-rate geometry would re-roll part of every prompt
-block and silently skip the rest. Two raises guard the shape: the DP-rate generation batch must be
-divisible by `num_generations` (every round covers whole prompt groups), and under TP/ETP the
-*per-rank* rows must be divisible by it too, because TP siblings inject duplicate blocks into TRL's
-world-order reward gather and only whole per-rank groups regroup correctly. Pre-sharded datasets
-consume per DP rank, so the rate is one rank's.
+loader's real DP consumption rate. TRL's world-rate geometry would re-roll part of every prompt
+block and silently skip the rest.
+
+Two raises guard the shape. The DP-rate generation batch must be divisible by `num_generations`
+(every round covers whole prompt groups). Under TP/ETP the *per-rank* rows must be divisible by it
+too, because TP siblings inject duplicate blocks into TRL's world-order reward gather and only whole
+per-rank groups regroup correctly. Pre-sharded datasets consume per DP rank, so the rate is one
+rank's.
 
 **Offline GRPO** uses `MultiGroupSampler` (`src/trainers/grpo/mixins/dataloader.py`). Advantages are
 pre-computed per example at tokenization time (`compute_group_advantages` normalizes a group's
 rewards via `advantage_method`, default `quantile_norm`), so the sampler does not pack a group into
-one batch — it emits each group's indices in group-appearance order, shards the sequence across DP
-ranks itself, then seed-shuffles each rank's slice (re-shuffled per epoch). The dataloader passes
-`num_processes=1` to skip Accelerate's sharding. Per-rank index counts differ (the remainder goes to
+one batch. It emits each group's indices in group-appearance order, shards the sequence across DP
+ranks itself, then seed-shuffles each rank's slice (re-shuffled per epoch).
+
+The dataloader passes `num_processes=1` to skip Accelerate's sharding. Per-rank index counts differ
+(the remainder goes to
 the first ranks), so the loader all-reduce-MINs the per-rank batch count and truncates to the global
 minimum, keeping every rank's optimizer-step count equal; a global minimum of 0 raises.
 
@@ -131,24 +139,29 @@ what turns that into a failure.
 The length-equalizer (`_equalize_presharded_length`, collective — every rank must reach it) runs for
 **both train and eval**: unequal per-rank lengths make ranks run different step counts and hang at
 the gradient sync or metrics gather, so each split is all-reduce-MIN truncated to the global minimum
-(with a data-loss warning when uneven). A minimum of 0 raises instead of truncating every rank to
-empty — for eval this means a small test split (sharding skips empty shards) must still yield at
-least `data_parallel_size` non-empty shards, or evaluation must be disabled.
+(with a data-loss warning when uneven).
+
+A minimum of 0 raises instead of truncating every rank to empty. For eval this means a small test
+split (sharding skips empty shards) must still yield at least `data_parallel_size` non-empty shards,
+or evaluation must be disabled.
 
 Downstream map/filter caches key on a forced deterministic fingerprint (`load_datasets` in
 `src/data/sources/loading.py`) that folds in a content signature of the freshly loaded data, so
-an in-place re-push cannot serve stale mapped rows. For pre-sharded loads the key also carries the DP
-rank/size: each rank holds a disjoint slice, and without the DP identity equal-length shards would
+an in-place re-push cannot serve stale mapped rows.
+
+For pre-sharded loads the key also carries the DP rank/size: each rank holds a disjoint slice, and
+without the DP identity equal-length shards would
 stamp identical keys and non-writer ranks would load rank 0's mapped shard. Replicated (non-sharded)
 loads keep a shared key so single-writer caching works.
 
 The map/filter itself runs under `coordinated_dataset_operation`
 (`src/data/pipeline/processing.py`): one writer rank per filesystem scope, the rest reading its
 cache. That call **is** the rank ordering — never nest it in a main-first block
-(`fs_aware_main_first`, `local_main_process_first()`). The phases join on the c10d store
-(`store_reject_across_ranks`, bounded by `DIST_STORE_TIMEOUT_HOURS`), so an hours-long fresh-cache
-map neither trips the NCCL watchdog on the waiting ranks nor hides a per-rank failure — the real
-cause is re-raised on every rank. Shared vs
+(`fs_aware_main_first`, `local_main_process_first()`).
+
+The phases join on the c10d store (`store_reject_across_ranks`, bounded by
+`DIST_STORE_TIMEOUT_HOURS`), so an hours-long fresh-cache map neither trips the NCCL watchdog on the
+waiting ranks nor hides a per-rank failure: the real cause is re-raised on every rank. Shared vs
 per-node scope: [Filesystem Handling](../data/filesystem-handling.md).
 
 ## Common pitfalls

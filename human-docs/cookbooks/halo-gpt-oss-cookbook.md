@@ -350,4 +350,4 @@ shipped ep4 configs assume four trainer GPUs.
 - [GPT-OSS 120B model card](https://huggingface.co/openai/gpt-oss-120b)
 - [Halo GPT-OSS model notes](../../agent-docs/models/gpt-oss.md) ↗
 - Halo GPT-OSS SFT example: `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`
-- [Environmental GRPO](../../agent-docs/training-methods/grpo/environmental-grpo.md) ↗
+- [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗

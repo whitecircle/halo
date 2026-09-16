@@ -47,6 +47,7 @@ _NON_DEFAULT_VALUES = {
     "episode_timeout": 600.0,
     "max_retries": 1,
     "retry_base_wait": 2.5,
+    "rollout_chat_template_kwargs": {"preserve_thinking": True},
 }
 
 

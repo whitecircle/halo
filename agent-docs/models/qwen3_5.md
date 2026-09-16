@@ -9,7 +9,11 @@ A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSpars
 
 ¹ The full-attention block has a working CP wrapper; the hybrid linear-attention layers are the blocker — see [Why CP is blocked](#why-cp-is-blocked-on-real-checkpoints).
 
-² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). Its shipped contract admits a text-only run of the multimodal checkpoints — the vision tower and projector are held by no stage, stashed on the save rank for re-emission in every checkpoint, so an export reloads as the composite class — and refuses any image evidence: an image column, embedded image parts, or a collator consuming one. The hub's `mtp_num_hidden_layers` is metadata (the MTP weights are dropped at load) and passes the live-MTP gate. The split contract binds stage boundaries to whole periods of the period-4 `layer_types` pattern, and its collator gate refuses `packing` for this family: PP keeps the packed rows instead of flattening them, and the delta rule's varlen `cu_seq_lens` have no per-row convention ([Collators](../data/collators.md#document-isolation-under-packing)).
+² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). Its shipped contract admits a text-only run of the multimodal checkpoints: the vision tower and projector are held by no stage, stashed on the save rank and re-emitted in every checkpoint, so the export reloads as the composite class. Only image evidence (an image column, embedded image parts, or a collator consuming one) refuses the run.
+
+The hub's `mtp_num_hidden_layers` is metadata (the MTP weights are dropped at load) and passes the live-MTP gate. Stage boundaries land on whole periods of the period-4 `layer_types` pattern.
+
+`packing` is refused under PP for this family: PP keeps the packed rows instead of flattening them, and the delta rule's varlen `cu_seq_lens` have no per-row convention ([Collators](../data/collators.md#document-isolation-under-packing)).
 
 ## Architecture
 
@@ -25,11 +29,19 @@ Each decoder layer is *either* full softmax attention *or* a linear-attention bl
 | RoPE | Partial — only the first `head_dim * partial_rotary_factor` channels rotate (default `0.25`) |
 | Heads | 16 Q heads, 2 KV heads (GQA factor 8), which caps TP at `tp_size=2` |
 
-> **FlashAttention-4 is unsupported for this family on Blackwell.** FA4's backward emits NaN gradients for the combination head_dim 256 + partial RoPE + output gate + GQA 16:2. `model_fa4_backward_nan_prone` (`src/models/patches/attention.py`) demotes the load to SDPA, keyed on the `qwen3_5*` / `qwen3_next*` `model_type` prefixes. Qwen3.6 is covered by those: it reuses the 3.5 classes and ships under the 3.5 types — `Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower. On Hopper the standard detector picks FA3 when installed, else FA2.
+> **FlashAttention-4 is unsupported for this family on Blackwell.** FA4's backward emits NaN gradients for the combination head_dim 256 + partial RoPE + output gate + GQA 16:2. `model_fa4_backward_nan_prone` (`src/models/patches/attention.py`) demotes the load to SDPA, keyed on the `qwen3_5*` / `qwen3_next*` `model_type` prefixes. Qwen3.6 is covered by those: it reuses the 3.5 classes and ships under the 3.5 types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower).
+
+On Hopper the standard detector picks FA3 when installed, else FA2.
 
 ### Linear attention (`Qwen3_5MoeGatedDeltaNet`)
 
-A gated delta-rule recurrent attention with a sequence-axis causal Conv1d on the input. The fast path is gated on the `fla` / `causal-conv1d` imports (both pinned in `pyproject.toml` and installed in the images, so it is on by default). The imports reach the layer through transformers' hub-kernel funnel, whose package resolution attribute-walks a bare package import — `fla` exports nothing at root, so upstream alone silently captures the torch scan, at ~10x the kernel's step time. `src/models/patches/kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed — that warning in a training log is a throughput alarm. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair. The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+A gated delta-rule recurrent attention with a sequence-axis causal Conv1d on the input. The fast path is gated on the `fla` / `causal-conv1d` imports (both pinned in `pyproject.toml` and installed in the images, so it is on by default).
+
+The imports reach the layer through transformers' hub-kernel funnel, whose package resolution attribute-walks a bare package import. `fla` exports nothing at root, so upstream alone silently captures the torch scan, at ~10x the kernel's step time.
+
+`src/models/patches/kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair.
+
+The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
 These layers need no CP for memory: the recurrent state is independent of `S`, per-layer activations are `O(B·S·d)`, and the Conv1d left-context is a 3-token state. The long-context ceiling comes from the 10 full-attention layers — 33K on a single B200/B300 rank at `num_heads=16, head_dim=256, num_kv_heads=2`.
 
@@ -49,13 +61,22 @@ The wrapper re-derives selection from the router's own logits — top-k on the b
 
 The architecture has **no bias slot** (the gate is a bare weight), so the trained bias can only be trainer-side: `moe_balancing: bias_update` **raises**, and the explicit `bias_update_transient` is the opt-in. Balancing works during training and resumes exactly, while every exported checkpoint serves without the bias (near-tied top-k picks flip vs training).
 
-On the multimodal checkpoints `aux_loss` cannot work either — `Qwen3_5MoeForConditionalGeneration.forward` declares no `output_router_logits` parameter, so an explicit `aux_loss` raises and `auto` resolves to `none` with a warning naming the transient opt-in. The text-only `Qwen3_5MoeForCausalLM` declares the parameter and stays on `aux_loss` under `auto` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)). `text_only_model: true` loads a VLM checkpoint through that CausalLM class deliberately — the vision tower and MTP tail are dropped from the build **and from the export**: the artifact carries no `processor_config.json` and no vision token ids. The two pinned engines differ on that export. **vLLM 0.26.0** registers only `Qwen3_5ForConditionalGeneration` / `Qwen3_5MoeForConditionalGeneration`, so serving it there needs `scripts/after_training/reattach_vision_tower.py` first — it re-prefixes the trained text weights to `model.language_model.*` and streams the base's untrained vision tower and MTP tail back in. **SGLang 0.5.17** registers the text-only `Qwen3_5MoeForCausalLM` / `Qwen3_5ForCausalLM` beside the multimodal classes and serves the export unchanged. Image-bearing datasets are refused loudly (the text path would otherwise prune the column silently), and the PP VLM refusal does not apply (there is no tower to strand). `aux_loss` becomes the exported-by-construction balancing.
+On the multimodal checkpoints `aux_loss` cannot work either: `Qwen3_5MoeForConditionalGeneration.forward` declares no `output_router_logits` parameter, so an explicit `aux_loss` raises and `auto` resolves to `none` with a warning naming the transient opt-in. The text-only `Qwen3_5MoeForCausalLM` declares the parameter and stays on `aux_loss` under `auto` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)).
+
+`text_only_model: true` loads a VLM checkpoint through that CausalLM class deliberately. The vision tower and MTP tail are dropped from the build **and from the export**: the artifact carries no `processor_config.json` and no vision token ids. `aux_loss` becomes the exported-by-construction balancing.
+
+Image-bearing datasets are refused loudly (the text path would otherwise prune the column silently), and the PP VLM refusal does not apply, since the build carries no tower to strand.
+
+The two pinned engines differ on that export. **vLLM 0.26.0** registers only `Qwen3_5ForConditionalGeneration` / `Qwen3_5MoeForConditionalGeneration`, so serving it there needs `scripts/after_training/reattach_vision_tower.py` first; it re-prefixes the trained text weights to `model.language_model.*` and streams the base's untrained vision tower and MTP tail back in. **SGLang 0.5.17** registers the text-only `Qwen3_5MoeForCausalLM` / `Qwen3_5ForCausalLM` beside the multimodal classes and serves the export unchanged.
 
 ## CP wrapper
 
 `Qwen3_5MoeUlyssesAttention` (`src/distributed/context_parallel/layers/qwen3_5.py`) replaces `Qwen3_5MoeAttention` / `Qwen3_5Attention` and handles two quirks:
 
-- **Double-width `q_proj`** — the output is viewed as `[..., num_q_heads, head_dim * 2]` and chunked into query + gate. The query goes through Ulysses (q_norm + RoPE + all-to-all + flash-attn + all-to-all back), then `attn_output * sigmoid(gate)` before `o_proj`. The gate stays on the local sequence shard, so no extra communication.
+- **Double-width `q_proj`** — the output is viewed as `[..., num_q_heads, head_dim * 2]` and chunked into query + gate. The query goes through Ulysses (q_norm + RoPE + all-to-all + flash-attn + all-to-all back), then `attn_output * sigmoid(gate)` before `o_proj`.
+
+    The gate stays on the local sequence shard, so no extra communication.
+
 - **Partial RoPE** — only the first `rotary_dim` channels of Q/K rotate; the rest is concatenated unrotated.
 
 Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_qwen3_5_cp_correctness.py`.
@@ -71,7 +92,9 @@ Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGat
 
 ## TP and ETP
 
-Attention-only TP works: `Qwen3_5MoeAttention` and dense `Qwen3_5Attention` are in the TP accept-list, and the MoE block is skipped because EP owns it. The double-width `q_proj` is ColwiseParallel-compatible — the split is per head, so each head keeps its full `head_dim * 2` (query + gate) on one rank. Only the full-attention layers shard: the linear-attention layers stay replicated on every rank, so the per-rank footprint falls by far less than `1/tp_size` (the TP path warns).
+Attention-only TP works: `Qwen3_5MoeAttention` and dense `Qwen3_5Attention` are in the TP accept-list, and the MoE block is skipped because EP owns it. The double-width `q_proj` is ColwiseParallel-compatible: the split is per head, so each head keeps its full `head_dim * 2` (query + gate) on one rank.
+
+Only the full-attention layers shard: the linear-attention layers stay replicated on every rank, so the per-rank footprint falls by far less than `1/tp_size` (the TP path warns).
 
 ETP is supported: the routed experts use the fused-GLU contiguous-halves layout, so `_init_fused_glu_params` splits the halves before sharding and stores `gate_proj` / `up_proj` / `down_proj` separately when `expert_tp_size > 1`. The sigmoid-gated shared expert stays replicated. See the [ETP guide](../parallelism/expert-tensor-parallelism.md#limitations).
 
@@ -83,7 +106,13 @@ Pin `attn_implementation: flash_attention_2` with `packing: true` (fixed-length)
 
 Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeGatedDeltaNet` receives its boundaries from the collators: the packing/padding-free collators emit `seq_idx` (its causal conv) and `cu_seq_lens_q` (its chunked delta rule) for the family, the two kwargs upstream reads and nothing model-side derives ([Document isolation](../data/collators.md#document-isolation-under-packing)). The same holds for Qwen3-Next.
 
-Examples: `examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml`. `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 single-node, or EP=16 with `ep_scope: global` across two Hopper nodes; it keeps the experts bf16 (`fp32_experts` off) — fp32 expert masters fit the 35B shape but OOM at 122B. VLM SFT on Qwen3.5-9B: `qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`. Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Environmental GRPO: `examples/grpo/environmental/qwen3_5/vllm/` plus the `sglang/` ep1 siblings — both pinned engines read the fused hub expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+Examples under `examples/sft/qwen3_5/`:
+
+- `qwen3.5-35b-a3b-ultrachat-ep.yaml`.
+- `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 single-node, or EP=16 with `ep_scope: global` across two Hopper nodes; it keeps the experts bf16 (`fp32_experts` off), since fp32 expert masters fit the 35B shape but OOM at 122B.
+- VLM SFT on Qwen3.5-9B: `qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
+
+Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Async GRPO with Environments: `examples/grpo/environmental/qwen3_5/vllm/` plus the `sglang/` ep1 siblings; both pinned engines read the fused hub expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn). `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (tool-call `arguments` must be a parsed mapping). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
 

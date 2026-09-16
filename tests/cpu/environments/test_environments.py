@@ -93,7 +93,7 @@ class SimpleTestEnvironment:
     """Simple test environment implementation."""
 
     def __init__(self, max_turns: int = 5):
-        from src.environments.base import BaseEnvironment, Message, Trajectory
+        from src.environments.base import BaseEnvironment, EpisodeGrade, Message, Trajectory
 
         class TestEnv(BaseEnvironment):
             def _reset_single(self, prompt, context=None):
@@ -104,14 +104,13 @@ class SimpleTestEnvironment:
 
             def _step_single(self, trajectory, action, context=None):
                 done = "Final Answer:" in action
-                reward = 0.1
-                return trajectory, reward, done, False, {}
+                trajectory.info["completed"] = done
+                return trajectory, 0.1, done, False, {}
 
-            def _compute_reward(self, trajectory, context=None):
+            def _grade_episode(self, trajectory, context=None):
                 expected = trajectory.info.get("expected", "42")
-                if trajectory.info.get("completed") and str(expected) in str(trajectory.messages[-1].content):
-                    return trajectory.total_reward + 1.0
-                return trajectory.total_reward
+                solved = trajectory.info.get("completed") and str(expected) in str(trajectory.messages[-1].content)
+                return EpisodeGrade(1.0 if solved else 0.0)
 
         self.env = TestEnv(max_turns=max_turns)
 
@@ -143,6 +142,8 @@ def test_base_environment_reset():
 
 def test_base_environment_step():
     """Test BaseEnvironment step."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
+
     test_env = SimpleTestEnvironment()
     env = test_env.get_env()
 
@@ -158,10 +159,19 @@ def test_base_environment_step():
 
     steps = env.step([episode_id], ["Final Answer: 42"])
     assert steps[0].done
+    # The base prices the episode at its end: the two accrued step deltas plus the grade at weight 1.
+    traj = steps[0].trajectory
+    assert traj.info[REWARD_COMPONENTS_KEY] == {
+        "reward/turn_shaping": pytest.approx(0.2),
+        OBJECTIVE_REWARD_KEY: 1.0,
+    }
+    assert traj.total_reward == pytest.approx(1.2)
 
 
 def test_base_environment_max_turns():
     """Test max turns truncation."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
+
     test_env = SimpleTestEnvironment(max_turns=2)
     env = test_env.get_env()
 
@@ -174,6 +184,7 @@ def test_base_environment_max_turns():
 
     assert steps[0].done
     assert steps[0].truncated
+    assert steps[0].trajectory.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 0.0
 
 
 def test_environment_cleanup():
@@ -364,11 +375,7 @@ def test_native_tool_use_environment():
     from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
-    env = NativeToolUseEnvironment(
-        tool_registry=registry,
-        max_turns=5,
-        success_reward=1.0,
-    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(["Calculate 2 + 2"], [{"answer": "4"}])
 
@@ -469,11 +476,7 @@ def test_react_environment_basic():
     from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
-    env = ReActEnvironment(
-        tool_registry=registry,
-        max_turns=5,
-        success_reward=1.0,
-    )
+    env = ReActEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(["What is 25 * 4?"], [{"answer": "100"}])
 
@@ -500,17 +503,14 @@ Final Answer: 100"""
 
 
 def test_react_environment_reward():
-    """Test ReActEnvironment reward computation."""
+    """A correct Final Answer earns the thought credit plus the objective at weight 1; ReAct has no
+    protocol shaping component of its own."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
     from src.environments.envs.protocols.react import ReActEnvironment
     from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
-    env = ReActEnvironment(
-        tool_registry=registry,
-        max_turns=5,
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = ReActEnvironment(tool_registry=registry, max_turns=5, thought_reward=0.02)
 
     episode_ids, _ = env.reset(["Test"], [{"answer": "42"}])
 
@@ -519,7 +519,9 @@ Final Answer: 42"""
 
     env.step(episode_ids, [action])
 
-    assert env.get_trajectories(episode_ids)[0].total_reward > 0
+    traj = env.get_trajectories(episode_ids)[0]
+    assert traj.info[REWARD_COMPONENTS_KEY] == {"reward/turn_shaping": pytest.approx(0.02), OBJECTIVE_REWARD_KEY: 1.0}
+    assert traj.total_reward == pytest.approx(1.02)
 
 
 def test_react_environment_unknown_tool():
@@ -557,7 +559,7 @@ Action: fake_tool(arg="test")"""
 def test_react_tool_that_raises_is_logged_and_charged(caplog):
     """A ReAct tool that raises must reach the logs, not only the model's observation.
 
-    Without the log the episode just scores ``failure_reward`` with nothing anywhere saying why: the
+    Without the log the episode just grades 0 with nothing anywhere saying why: the
     observation is trained on, not read by an operator, and a submit/grading handler dying on a
     malformed payload looks exactly like a model that used the tool wrong.
     """
@@ -596,11 +598,12 @@ def test_react_math_factory():
     action is parsed out of plain text, so a server-side parser would strip it into a burnt turn."""
     from src.environments.envs.protocols.react import create_react_math_environment
 
-    env = create_react_math_environment(max_turns=10, success_reward=2.0)
+    env = create_react_math_environment(max_turns=10, reward_terms=[{"source": "environment", "weight": 2.0}])
 
     assert env.get_tools_schema() is None
     assert {"calculate", "python"}.issubset(env.registry.names())
     assert "calculate" in env.system_prompt and "python" in env.system_prompt
+    assert [term.weight for term in env.reward_terms] == [2.0], "the factory forwards the reward terms"
 
 
 def test_rollout_manager_round_robin():
@@ -671,7 +674,7 @@ def test_registry_forwards_environment_kwargs():
 
 def test_registry_register_custom(isolated_registry):
     """Test registering a custom environment type."""
-    from src.environments.base import BaseEnvironment, Message, Trajectory
+    from src.environments.base import BaseEnvironment, EpisodeGrade, Message, Trajectory
     from src.environments.registry import register_environment, resolve_environment
 
     class TestCustomEnv(BaseEnvironment):
@@ -683,8 +686,8 @@ def test_registry_register_custom(isolated_registry):
         def _step_single(self, trajectory, action, context=None):
             return trajectory, 0.0, True, False, {}
 
-        def _compute_reward(self, trajectory, context=None):
-            return 1.0
+        def _grade_episode(self, trajectory, context=None):
+            return EpisodeGrade(1.0)
 
     def factory(config):
         return TestCustomEnv(max_turns=config.get("max_turns", 5))
@@ -736,7 +739,7 @@ def test_code_environment_init():
     """Test SweEnvironment initialization."""
     from src.environments.envs.tasks.coding.swe import SweEnvironment
 
-    env = SweEnvironment(max_turns=10, success_reward=2.0)
+    env = SweEnvironment(max_turns=10)
 
     tools_schema = env.get_tools_schema()
     tool_names = [t["function"]["name"] for t in tools_schema]
@@ -751,7 +754,7 @@ def test_code_environment_reset_step():
     """Test SweEnvironment reset and step."""
     from src.environments.envs.tasks.coding.swe import SweEnvironment
 
-    env = SweEnvironment(max_turns=5, success_reward=1.0)
+    env = SweEnvironment(max_turns=5)
 
     episode_ids, steps = env.reset(["Fix the bug in the code"], [{"answer": "fixed"}])
 
@@ -770,7 +773,7 @@ def test_code_environment_reset_step():
 
 async def test_async_base_environment():
     """Test AsyncBaseEnvironment."""
-    from src.environments.base import AsyncBaseEnvironment, Message, Trajectory
+    from src.environments.base import AsyncBaseEnvironment, EpisodeGrade, Message, Trajectory
 
     class TestAsyncEnv(AsyncBaseEnvironment):
         def _reset_single(self, prompt, context=None):
@@ -782,8 +785,8 @@ async def test_async_base_environment():
             done = "done" in action.lower()
             return trajectory, 0.1, done, False, {}
 
-        def _compute_reward(self, trajectory, context=None):
-            return trajectory.total_reward + 1.0
+        def _grade_episode(self, trajectory, context=None):
+            return EpisodeGrade(1.0)
 
         async def _reset_single_async(self, prompt, context=None):
             await asyncio.sleep(0.01)
@@ -804,6 +807,9 @@ async def test_async_base_environment():
 
     assert not steps[0].done
     assert steps[1].done
+    # The async path prices the finished episode the same way: the step delta plus the grade.
+    assert steps[1].trajectory.total_reward == pytest.approx(1.1)
+    assert steps[0].trajectory.total_reward == pytest.approx(0.1)
 
 
 async def test_async_native_tool_use():
@@ -887,12 +893,12 @@ def test_create_native_mcp_environment():
     env = create_native_mcp_environment(
         "filesystem",
         max_turns=10,
-        success_reward=1.5,
+        reward_terms=[{"source": "environment", "weight": 1.5}],
     )
 
     assert env.server_command == "npx"
     assert env.max_turns == 10
-    assert env.success_reward == 1.5
+    assert [term.weight for term in env.reward_terms] == [1.5]
 
     env2 = create_native_mcp_environment(
         "brave_search",
@@ -911,14 +917,14 @@ def test_native_mcp_client_environment_init():
         server_command="npx",
         server_args=["-y", "@modelcontextprotocol/server-memory"],
         max_turns=10,
-        success_reward=2.0,
+        reward_terms=[{"source": "environment", "weight": 2.0}],
         tool_success_reward=0.2,
     )
 
     assert env.transport == "stdio"
     assert env.server_command == "npx"
     assert env.max_turns == 10
-    assert env.success_reward == 2.0
+    assert [term.weight for term in env.reward_terms] == [2.0]
     assert env.tool_success_reward == 0.2
 
     env2 = NativeMCPClientEnvironment(
@@ -937,11 +943,7 @@ def test_multi_tool_environment_with_all_tools():
     from src.environments.tools.factories import create_all_native_tools
 
     registry = create_all_native_tools()
-    env = NativeToolUseEnvironment(
-        tool_registry=registry,
-        max_turns=10,
-        success_reward=1.0,
-    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=10)
 
     tools_schema = env.get_tools_schema()
     assert len(tools_schema) >= 6
@@ -1072,9 +1074,10 @@ def test_unknown_tool_handling():
 
 def test_react_search_environment():
     """Test create_react_search_environment factory."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
     from src.environments.envs.protocols.react import create_react_search_environment
 
-    env = create_react_search_environment(max_turns=8, success_reward=1.5)
+    env = create_react_search_environment(max_turns=8, reward_terms=[{"source": "environment", "weight": 1.5}])
 
     assert env.get_tools_schema() is None
     assert "web_search" in env.registry.names()
@@ -1097,6 +1100,7 @@ Final Answer: Paris"""
     steps = env.step(episode_ids, [action2])
     assert steps[0].done
     assert traj.info["final_answer"] == "Paris"
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 1.5, "the factory forwards the term weight"
 
 
 def test_react_environment_with_python_tool():
@@ -1398,7 +1402,7 @@ def test_an_unselectable_search_backend_is_refused_when_the_ENV_IS_BUILT(monkeyp
 
 def test_normalize_text():
     """Test text normalization."""
-    from src.environments.rewards import normalize_text
+    from src.rewards.matching import normalize_text
 
     assert normalize_text("  The Answer is 42  ") == "42"
     assert normalize_text("\\boxed{42}") == "42"
@@ -1409,7 +1413,7 @@ def test_normalize_text():
 
 def test_exact_match():
     """Test exact match."""
-    from src.environments.rewards import exact_match
+    from src.rewards.matching import exact_match
 
     assert exact_match("Paris", "paris")
     assert exact_match("42", "42")
@@ -1419,7 +1423,7 @@ def test_exact_match():
 
 def test_numeric_match():
     """Test numeric match with tolerance."""
-    from src.environments.rewards import numeric_match
+    from src.rewards.matching import numeric_match
 
     assert numeric_match("42", "42")
     assert numeric_match("42.001", "42", rtol=0.01)
@@ -1457,7 +1461,7 @@ def test_multiple_choice_match():
 
 def test_validate_answer():
     """Test composite validation."""
-    from src.environments.rewards import validate_answer
+    from src.rewards.matching import validate_answer
 
     assert validate_answer("42", "42")
     assert not validate_answer("wrong", "42")
@@ -1473,118 +1477,141 @@ def test_validate_answer():
     assert validate_answer("17", "7", methods=[lambda p, e: e in p])
 
 
-def test_compute_answer_reward():
-    """Test reward computation."""
-    from src.environments.rewards import compute_answer_reward
+def test_answer_grading_is_all_or_nothing():
+    """A near-miss validates as wrong, and the environment prices the verdict at the objective term's
+    full weight or at 0 — never a similarity-scaled credit in between."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
+    from src.environments.envs.protocols.native import NativeToolUseEnvironment
+    from src.environments.tools.definitions import NativeToolRegistry
+    from src.rewards.matching import validate_answer
 
-    # Correct answer
-    assert compute_answer_reward("42", "42", 1.0, 0.0) == 1.0
-    # Wrong answer
-    assert compute_answer_reward("wrong", "42", 1.0, 0.0) == 0.0
-    # Grading is all-or-nothing: a near-miss earns the failure reward, never a similarity-scaled one.
-    assert compute_answer_reward("Leonardo da Vinchi", "Leonardo da Vinci", 1.0, 0.0) == 0.0
+    assert validate_answer("42", "42")
+    assert not validate_answer("wrong", "42")
+    assert not validate_answer("Leonardo da Vinchi", "Leonardo da Vinci")
+
+    env = NativeToolUseEnvironment(tool_registry=NativeToolRegistry(), max_turns=2)
+    episode_ids, _ = env.reset(["Who painted the Mona Lisa?"] * 3, [{"answer": "Leonardo da Vinci"}] * 3)
+    env.step(episode_ids, ["Leonardo da Vinci", "Leonardo da Vinchi", "Michelangelo"])
+    objectives = [t.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] for t in env.get_trajectories(episode_ids)]
+    assert objectives == [1.0, 0.0, 0.0]
 
 
 # NativeToolUse Reward Fix
 
 
 def test_native_tool_use_reward_with_answer():
-    """Test NativeToolUseEnvironment validates answers from context."""
+    """A final answer that validates against ``context["answer"]`` grades 1, priced at the term's weight."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
     from src.environments.envs.protocols.native import NativeToolUseEnvironment
     from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
-    env = NativeToolUseEnvironment(
-        tool_registry=registry,
-        max_turns=5,
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
-    # Reset with answer context
-    episode_ids, steps = env.reset(
-        ["What is 2 + 2?"],
-        [{"answer": "4"}],
-    )
+    episode_ids, steps = env.reset(["What is 2 + 2?"], [{"answer": "4"}])
 
-    # Simulate model response (no tool calls = done)
+    # A plain-text response (no tool calls) ends the episode.
     env.step(episode_ids, ["The answer is 4"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.done
-    # Should get success_reward because answer matches
-    assert traj.total_reward >= 1.0
+    assert traj.info[REWARD_COMPONENTS_KEY] == {
+        "reward/turn_shaping": 0.0,
+        "reward/tool_shaping": 0.0,
+        OBJECTIVE_REWARD_KEY: 1.0,
+    }
+    assert traj.total_reward == 1.0
 
     env.cleanup(episode_ids)
 
 
 def test_native_tool_use_reward_wrong_answer():
-    """Test NativeToolUseEnvironment gives failure for wrong answer."""
+    """A final answer that fails validation grades 0."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
     from src.environments.envs.protocols.native import NativeToolUseEnvironment
     from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
-    env = NativeToolUseEnvironment(
-        tool_registry=registry,
-        max_turns=5,
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
-    episode_ids, steps = env.reset(
-        ["What is 2 + 2?"],
-        [{"answer": "4"}],
-    )
+    episode_ids, steps = env.reset(["What is 2 + 2?"], [{"answer": "4"}])
 
     env.step(episode_ids, ["The answer is 7"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.done
-    # Should get failure_reward because answer is wrong
-    assert traj.total_reward < 1.0
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 0.0
+    assert traj.total_reward == 0.0
+    assert not traj.episode_invalid
 
     env.cleanup(episode_ids)
 
 
 def test_native_tool_use_reward_no_answer():
-    """Test backward compatibility when no answer in context."""
+    """With no ``answer`` in the context, completing IS the objective: the episode grades 1."""
     from src.environments.envs.protocols.native import NativeToolUseEnvironment
     from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
-    env = NativeToolUseEnvironment(
-        tool_registry=registry,
-        max_turns=5,
-        success_reward=1.0,
-    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
-    # No answer in context — should still give success_reward
     episode_ids, steps = env.reset(["Do something"], [{}])
     env.step(episode_ids, ["Done!"])
     traj = env.get_trajectories(episode_ids)[0]
-    assert traj.total_reward >= 1.0
+    assert traj.total_reward == 1.0
 
     env.cleanup(episode_ids)
 
 
 def test_native_tool_use_null_answer_is_invalid_not_a_free_success():
     """A row that IS answer-graded but whose ``answer`` cell is null must not take the completion
-    fallback above: that pays full success_reward to any episode that merely finished, and every
+    fallback above: that pays the full objective to any episode that merely finished, and every
     sibling in its GRPO group finishes just as easily, so the whole group learns nothing but "stop"."""
     from src.environments.envs.protocols.native import NativeToolUseEnvironment
     from src.environments.tools.factories import create_native_math_tools
 
-    env = NativeToolUseEnvironment(
-        tool_registry=create_native_math_tools(),
-        max_turns=5,
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = NativeToolUseEnvironment(tool_registry=create_native_math_tools(), max_turns=5)
 
     episode_ids, _ = env.reset(["What is 2 + 2?"], [{"answer": None}])
     env.step(episode_ids, ["Done!"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.info["completed"] is True
-    assert traj.total_reward == 0.0  # failure_reward, never the completion payout
+    assert traj.total_reward == 0.0  # graded 0, never the completion payout
     assert traj.episode_invalid is True  # and dropped from the group baseline
+
+    env.cleanup(episode_ids)
+
+
+def test_react_null_answer_is_invalid_not_a_free_success():
+    """A ReAct row that IS answer-graded but whose ``answer`` cell is null must not take the
+    completion fallback: that pays the full objective to any episode that reached a Final Answer,
+    and every sibling in its GRPO group reaches one just as easily. Same contract as the native
+    protocol's null cell — dropped from the baseline, never taught as a success."""
+    from src.environments.base import EPISODE_INVALID_KEY
+    from src.environments.envs.protocols.react import create_react_math_environment
+
+    env = create_react_math_environment(thought_reward=0.0)
+
+    episode_ids, _ = env.reset(["What is 2 + 2?"], [{"answer": None}])
+    env.step(episode_ids, ["Thought: add\nFinal Answer: 4"], [{}])
+    traj = env.get_trajectories(episode_ids)[0]
+    assert traj.info["completed"] is True
+    assert traj.total_reward == 0.0  # graded 0, never the completion payout
+    assert traj.info[EPISODE_INVALID_KEY] is True
+
+    env.cleanup(episode_ids)
+
+
+def test_react_missing_answer_key_still_pays_for_finishing():
+    """Guards the invalid path above from swallowing the ungraded mode: with NO ``answer`` key at all
+    there is nothing to verify, and reaching a Final Answer is the objective."""
+    from src.environments.envs.protocols.react import create_react_math_environment
+
+    env = create_react_math_environment(thought_reward=0.0)
+
+    episode_ids, _ = env.reset(["What is 2 + 2?"], [{}])
+    env.step(episode_ids, ["Thought: add\nFinal Answer: 4"], [{}])
+    traj = env.get_trajectories(episode_ids)[0]
+    assert traj.total_reward == 1.0
+    assert not traj.episode_invalid
 
     env.cleanup(episode_ids)
 
@@ -1606,12 +1633,7 @@ def test_qa_search_environment_correct_answer(allow_mock_search):
     """Test SearchQA rewards correct answer."""
     from src.environments.envs.tasks.qa import create_qa_search_environment
 
-    env = create_qa_search_environment(
-        max_turns=5,
-        search_backend="mock",
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = create_qa_search_environment(max_turns=5, search_backend="mock")
 
     episode_ids, _ = env.reset(
         ["What year was the Eiffel Tower completed?"],
@@ -1631,33 +1653,33 @@ def test_qa_search_environment_correct_answer(allow_mock_search):
 
 
 def test_no_tool_use_is_charged_once_by_the_dedicated_knob(allow_mock_search):
-    """The zero-tool-call giveup costs exactly ``no_tool_use_penalty``, once.
+    """The zero-tool-call giveup costs exactly ``no_tool_use_penalty``, once, under ``reward/tool_shaping``.
 
     ``require_tool_use`` and ``_tool_use_shaping`` both fire on that condition; the terminal step must
     not add a second (per-call) charge on top of the episode-level one.
     """
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
     from src.environments.envs.tasks.qa import create_qa_search_environment
 
-    env = create_qa_search_environment(
-        max_turns=5, search_backend="mock", success_reward=1.0, failure_reward=0.0, no_tool_use_penalty=0.3
-    )
+    env = create_qa_search_environment(max_turns=5, search_backend="mock", no_tool_use_penalty=0.3)
     episode_ids, _ = env.reset(["Q?"], [{"answer": "A"}])
     env.step(episode_ids, ["A"])
     traj = env.get_trajectories(episode_ids)[0]
-    assert abs(traj.total_reward - 0.7) < 1e-9, traj.total_reward  # 1.0 success - 0.3 once, NOT twice
+    assert traj.info[REWARD_COMPONENTS_KEY] == {
+        "reward/turn_shaping": 0.0,
+        "reward/tool_shaping": pytest.approx(-0.3),
+        OBJECTIVE_REWARD_KEY: 1.0,
+    }
+    assert abs(traj.total_reward - 0.7) < 1e-9, traj.total_reward  # 1.0 objective - 0.3 once, NOT twice
     env.cleanup(episode_ids)
 
 
 def test_qa_search_environment_wrong_answer(allow_mock_search):
-    """Test SearchQA penalizes wrong answer."""
+    """Test SearchQA grades a wrong answer 0."""
+    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
     from src.environments.envs.tasks.qa import create_qa_search_environment
 
-    env = create_qa_search_environment(
-        max_turns=5,
-        search_backend="mock",
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = create_qa_search_environment(max_turns=5, search_backend="mock")
 
     episode_ids, _ = env.reset(
         ["What year was the Eiffel Tower completed?"],
@@ -1667,7 +1689,8 @@ def test_qa_search_environment_wrong_answer(allow_mock_search):
     env.step(episode_ids, ["2005"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.done
-    assert traj.total_reward < 0.5  # failure_reward (0.0) minus possible penalty
+    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 0.0
+    assert traj.total_reward == 0.0
 
     env.cleanup(episode_ids)
 
@@ -1748,11 +1771,7 @@ def test_exam_qa_multiple_choice_correct():
     """Test correct multiple-choice answer."""
     from src.environments.envs.tasks.qa import ExamQAEnvironment
 
-    env = ExamQAEnvironment(
-        max_turns=3,
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = ExamQAEnvironment(max_turns=3)
 
     episode_ids, _ = env.reset(
         ["Which is the largest planet?"],
@@ -1762,7 +1781,7 @@ def test_exam_qa_multiple_choice_correct():
     env.step(episode_ids, ["The answer is B"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.done
-    assert traj.total_reward >= 1.0
+    assert traj.total_reward == 1.0
 
     env.cleanup(episode_ids)
 
@@ -1771,11 +1790,7 @@ def test_exam_qa_multiple_choice_wrong():
     """Test wrong multiple-choice answer."""
     from src.environments.envs.tasks.qa import ExamQAEnvironment
 
-    env = ExamQAEnvironment(
-        max_turns=3,
-        success_reward=1.0,
-        failure_reward=0.0,
-    )
+    env = ExamQAEnvironment(max_turns=3)
 
     episode_ids, _ = env.reset(
         ["Which is the largest planet?"],
@@ -1785,7 +1800,7 @@ def test_exam_qa_multiple_choice_wrong():
     env.step(episode_ids, ["The answer is A"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.done
-    assert traj.total_reward < 1.0
+    assert traj.total_reward == 0.0
 
     env.cleanup(episode_ids)
 
@@ -1794,11 +1809,11 @@ def test_exam_qa_index_answer_is_graded_as_its_choice_letter():
     """MMLU/ARC ship ``answer`` as a 0-based index into ``choices``.
 
     ``multiple_choice_match`` scores anything that is not a single letter as wrong, so an unconverted
-    index gives EVERY completion ``failure_reward``: a GRPO group with zero variance, no gradient, and
-    nothing in the logs saying the rows were never gradable."""
+    index grades EVERY completion 0: a GRPO group with zero variance, no gradient, and nothing in the
+    logs saying the rows were never gradable."""
     from src.environments.envs.tasks.qa import ExamQAEnvironment
 
-    env = ExamQAEnvironment(max_turns=3, success_reward=1.0, failure_reward=0.0)
+    env = ExamQAEnvironment(max_turns=3)
     choices = ["Mars", "Jupiter", "Saturn", "Neptune"]
 
     episode_ids, _ = env.reset(["Which is the largest planet?"], [{"answer": 1, "choices": choices}])
@@ -1818,11 +1833,9 @@ def test_exam_qa_index_answer_is_graded_as_its_choice_letter():
 def test_exam_qa_letter_answers_pass_through_and_bad_shapes_fail_loud():
     """A real letter keeps grading unchanged; any shape the grader cannot score raises at episode
     start, because a constant-reward run costs far more than a refused one."""
-    import pytest
-
     from src.environments.envs.tasks.qa import ExamQAEnvironment
 
-    env = ExamQAEnvironment(max_turns=3, success_reward=1.0, failure_reward=0.0)
+    env = ExamQAEnvironment(max_turns=3)
     choices = ["Mars", "Jupiter", "Saturn", "Neptune"]
 
     episode_ids, _ = env.reset(["Which is the largest planet?"], [{"answer": "b", "choices": choices}])
@@ -1847,7 +1860,7 @@ def test_exam_qa_open_ended():
     """Test open-ended exam question."""
     from src.environments.envs.tasks.qa import ExamQAEnvironment
 
-    env = ExamQAEnvironment(max_turns=3, success_reward=1.0, failure_reward=0.0)
+    env = ExamQAEnvironment(max_turns=3)
 
     episode_ids, _ = env.reset(
         ["What is the capital of France?"],
@@ -1857,7 +1870,7 @@ def test_exam_qa_open_ended():
     env.step(episode_ids, ["Paris"])
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.done
-    assert traj.total_reward >= 1.0
+    assert traj.total_reward == 1.0
 
     env.cleanup(episode_ids)
 
@@ -1878,11 +1891,13 @@ def test_exam_qa_open_book(allow_mock_search):
 def test_environment_config_defaults():
     """Test EnvironmentConfig default values."""
     from src.configs.environment_config import EnvironmentConfig
+    from src.rewards.spec import EnvironmentTerm
 
     config = EnvironmentConfig()
     assert config.environment_type == "react_math"
-    assert config.success_reward == 1.0
-    assert config.failure_reward == 0.0
+    # The default reward is the environment's own grade alone, at weight 1 and exponent 1.
+    assert config.rewards == [{"source": "environment"}]
+    assert config.reward_terms == (EnvironmentTerm(),)
     # None sentinel: the env class default wins unless the YAML sets max_turns explicitly.
     assert config.max_turns is None
     assert config.environment_kwargs == {}
@@ -1895,12 +1910,9 @@ def test_environment_config_to_env_config():
     config = EnvironmentConfig()
     env_dict = config.to_env_config()
 
-    # Core reward shaping is always emitted; max_turns is omitted when unset so the env class
-    # default (CodeContests 15, SWE 20, ExamQA 8, ...) wins.
-    assert env_dict == {
-        "success_reward": 1.0,
-        "failure_reward": 0.0,
-    }
+    # The reward terms are always emitted, as the raw term dicts; max_turns is omitted when unset so
+    # the env class default (CodeContests 15, SWE 20, ExamQA 8, ...) wins.
+    assert env_dict == {"reward_terms": [{"source": "environment"}]}
     assert "max_turns" not in env_dict
     assert EnvironmentConfig(max_turns=12).to_env_config()["max_turns"] == 12
 
@@ -1911,13 +1923,13 @@ def test_environment_config_env_specific_kwargs():
 
     config = EnvironmentConfig(
         environment_type="qa_search",
-        success_reward=2.0,
+        rewards=[{"source": "environment", "weight": 2.0}],
         max_turns=15,
         environment_kwargs={"search_backend": "mock", "include_python_tools": True},
     )
     env_dict = config.to_env_config()
 
-    assert env_dict["success_reward"] == 2.0
+    assert env_dict["reward_terms"] == [{"source": "environment", "weight": 2.0}]
     assert env_dict["max_turns"] == 15
     assert env_dict["search_backend"] == "mock"
     assert env_dict["include_python_tools"] is True

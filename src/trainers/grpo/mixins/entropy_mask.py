@@ -7,13 +7,12 @@ into the entropy mask. The token set is read from the tokenizer (``all_special_i
 tokens), so it is model-agnostic.
 """
 
-import logging
-
 import torch
+from accelerate.logging import get_logger
 
 from src.models.structure import resolve_tokenizer
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__, log_level="INFO")
 
 
 class ProtectedTokenEntropyMixin:
@@ -47,7 +46,7 @@ class ProtectedTokenEntropyMixin:
 
     def _get_per_token_logps_and_entropies(self, model, input_ids, attention_mask, logits_to_keep, *args, **kwargs):
         # Stash completion ids for get_high_entropy_mask, called on the same micro-batch by _compute_loss.
-        self._entropy_completion_ids = input_ids[:, -logits_to_keep:] if logits_to_keep else None
+        self._entropy_completion_ids = input_ids[:, input_ids.size(1) - logits_to_keep :]
         return super()._get_per_token_logps_and_entropies(
             model, input_ids, attention_mask, logits_to_keep, *args, **kwargs
         )
@@ -55,10 +54,17 @@ class ProtectedTokenEntropyMixin:
     def get_high_entropy_mask(self, entropies: torch.Tensor, mask: torch.Tensor, threshold: float) -> torch.Tensor:
         high_entropy = super().get_high_entropy_mask(entropies, mask, threshold)
 
-        completion_ids = getattr(self, "_entropy_completion_ids", None)
         protected_ids = self._protected_token_ids()
-        if completion_ids is None or protected_ids is None or completion_ids.shape != high_entropy.shape:
+        if protected_ids is None:
             return high_entropy
+        completion_ids = getattr(self, "_entropy_completion_ids", None)
+        if completion_ids is None or completion_ids.shape != high_entropy.shape:
+            raise RuntimeError(
+                f"top_entropy_quantile protection lost its completion ids: the entropy mask is "
+                f"{tuple(high_entropy.shape)} but the ids stashed by the last log-prob forward are "
+                f"{None if completion_ids is None else tuple(completion_ids.shape)}, so the two come from "
+                f"different micro-batches and the structural tokens would silently leave the trained set."
+            )
 
         if protected_ids.device != completion_ids.device:
             protected_ids = protected_ids.to(completion_ids.device)

@@ -1,131 +1,130 @@
-"""Generate SMPO Training Pipeline diagram."""
+"""Generate the SMPO loss diagram for training-methods/preference/smpo.md.
 
-import functools
+One forward over the pair gives per-token log-probs, which feed two paths: the margin path, where
+the percentile clip trims them before the per-sequence mean, and the SFT anchors, which take the
+same log-probs pre-clip. They rejoin in the total, weighted by `chosen_sft_ratio`.
+"""
 
 import matplotlib.pyplot as plt
-from _flow_style import *
-from matplotlib.patches import FancyBboxPatch
+from _pipeline_style import *
 
-fig, ax = plt.subplots(figsize=(10, 15))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, 10)
-ax.set_ylim(0, 15)
-ax.set_aspect("equal")
+W, H = 12.2, 5.83
+M = 0.305  # left/right margin, matching `title`'s 2.5% inset
+
+(COL_A, COL_B, COL_C), COL_W = columns(W, 3, M)
+ROW1_Y, ROW1_H = 2.97, 1.96
+ROW2_Y, ROW2_H = 1.17, 1.18
+TOTAL_X = COL_B
+TOTAL_W = W - M - TOTAL_X
+
+fig, ax = plt.subplots(figsize=(W, H))
+ax.set_xlim(0, W)
+ax.set_ylim(0, H)
 ax.axis("off")
 
-ax.text(5, 14.7, "SMPO Training Pipeline", ha="center", va="top", fontsize=20, fontweight="bold", color=TEXT)
-ax.text(
-    5,
-    14.1,
-    "Reference-free preference optimization  \u00b7  Smooth margin loss",
-    ha="center",
-    va="top",
-    fontsize=11,
-    color=TEXT_SEC,
-)
+title(ax, "SMPO — the preference pair", "z = mean logp(chosen) − mean logp(rejected) − margin")
 
-cw = 8.0
-cx = (10 - cw) / 2
+section(ax, M, H - 0.52, "MARGIN TERM")
 
-
-draw_card, _, draw_arrow_v = bind_drawers(ax, CardLayout(title_dy=0.22, sep_dy=0.55, line_dy=0.35, line_step=0.36))
-
-# Every arrow in this figure runs down the single centered column.
-draw_arrow = functools.partial(draw_arrow_v, 5)
-
-# ── Layout (top to bottom with explicit positions) ──
-GAP = 0.7  # gap between blocks for arrows
-
-h1 = 1.7
-y1 = 12.1
-draw_card(
-    cx,
-    y1,
-    cw,
-    h1,
-    "Dataset",
+card(
+    ax,
+    COL_A,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "One forward — the pair",
     [
-        "prompt (message list)",
-        "chosen (completion)",
-        "rejected (completion)",
+        "the pair concatenated, 2N rows",
+        "chosen rows first, then rejected",
+        "labels −100 over the prompt",
+        "shift + mask, then log-softmax",
+        "→ per-token log p, [2N, T]",
     ],
-    accent_left=True,
+    color=BLUE,
 )
 
-draw_arrow(y1, y1 - GAP)
-
-h2 = 1.7
-y2 = y1 - GAP - h2
-draw_card(
-    cx,
-    y2,
-    cw,
-    h2,
-    "Tokenization & Collation",
+card(
+    ax,
+    COL_B,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "Percentile clip — margin path",
     [
-        "Tokenize prompt, chosen, rejected",
-        "Handle BOS/EOS tokens",
-        "Truncate if needed",
+        "runs on the per-token log p",
+        "rejected tail → 2% token quantile",
+        "chosen tail capped (upper, off)",
+        "then min_log_prob −2.3, rejected",
+        "one detached bound per half",
     ],
+    color=AMBER,
 )
 
-draw_arrow(y2, y2 - GAP)
-
-h3 = 2.6
-y3 = y2 - GAP - h3
-draw_card(
-    cx,
-    y3,
-    cw,
-    h3,
-    "Concatenated Forward Pass",
+card(
+    ax,
+    COL_C,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "Per-sequence mean → margin",
     [
-        "Input: [chosen | rejected] (2N sequences)",
-        "Build full sequences: prompt + completion",
-        "Create labels: \u2212100 for prompt tokens",
-        "Forward pass \u2192 logits for all 2N sequences",
-        "Per-token log probs + token-level clipping",
+        "logp_c/r = fp32 Σ ÷ tokens",
+        "z = logp_c − logp_r − margin",
+        "L_margin = relu(−β·z)²",
+        "loss_type smooth_lower_bound",
+        "β = 1.2 · margin 0.01 → 0.35",
     ],
-    bg=ACCENT_LIGHT,
-    border=ACCENT,
+    color=BLUE,
+    mono_lines=True,
 )
 
-draw_arrow(y3, y3 - GAP)
+section(ax, M, ROW2_Y + ROW2_H + 0.30, "SFT ANCHORS")
 
-h4 = 2.4
-y4 = y3 - GAP - h4
-draw_card(cx, y4, cw, h4, "Loss Computation", [], bg=CARD, border=CARD_BORDER)
+card(
+    ax,
+    COL_A,
+    ROW2_Y,
+    COL_W,
+    ROW2_H,
+    "Anchors — pre-clip",
+    [
+        "mean NLL over completion tokens",
+        "taken before the clip, both sides",
+    ],
+    color=TEAL,
+)
 
-sep_y = y4 + h4 - 0.55
-ax.plot([cx + 0.2, cx + cw - 0.2], [sep_y, sep_y], color=BORDER_SOFT, lw=0.6)
+card(
+    ax,
+    TOTAL_X,
+    ROW2_Y,
+    TOTAL_W,
+    ROW2_H,
+    "Total",
+    [
+        "L_total = mean_pairs L_margin + α·CE(chosen) + (1−α)·CE(rejected)",
+        "α = chosen_sft_ratio 0.8 · no reference model",
+    ],
+    color=SLATE,
+    mono_lines=True,
+)
 
-formulas = [
-    ("L_total", "L_margin + L_sft"),
-    ("L_margin", "loss_fn(\u03b2 \u00b7 (log p(chosen) \u2212 log p(rejected) \u2212 margin))"),
-    ("L_sft", "\u03b1 \u00b7 CE(chosen) + (1\u2212\u03b1) \u00b7 CE(rejected)"),
-]
-for i, (lhs, rhs) in enumerate(formulas):
-    fy = sep_y - 0.4 - i * 0.48
-    bw = len(lhs) * 0.11 + 0.25
-    badge = FancyBboxPatch(
-        (cx + 0.3, fy - 0.15), bw, 0.3, boxstyle="round,pad=0.03", facecolor=OP_BG, edgecolor="none"
-    )
-    ax.add_patch(badge)
-    ax.text(
-        cx + 0.3 + bw / 2,
-        fy,
-        lhs,
-        ha="center",
-        va="center",
-        fontsize=9.5,
-        fontweight="bold",
-        color=OP_TEXT,
-        family="monospace",
-    )
-    ax.text(
-        cx + 0.3 + bw + 0.15, fy, f"= {rhs}", ha="left", va="center", fontsize=9.5, color=TEXT_SEC, family="monospace"
-    )
+row1_mid = ROW1_Y + ROW1_H / 2
+row2_mid = ROW2_Y + ROW2_H / 2
+arrow(ax, COL_A + COL_W, row1_mid, COL_B, row1_mid, "token log p")
+arrow(ax, COL_B + COL_W, row1_mid, COL_C, row1_mid, "clipped")
+arrow(ax, COL_A + 0.72 * COL_W, ROW1_Y, COL_A + 0.72 * COL_W, ROW2_Y + ROW2_H, "per-token NLL", side="right")
+arrow(ax, COL_C + 0.5 * COL_W, ROW1_Y, COL_C + 0.5 * COL_W, ROW2_Y + ROW2_H, "L_margin", side="right")
+arrow(ax, COL_A + COL_W, row2_mid, TOTAL_X, row2_mid, "CE terms")
+
+footnote(
+    ax,
+    M,
+    0.22,
+    W - 2 * M,
+    "The margin term is exactly zero once z clears 0 — where a sigmoid loss keeps pushing — while the anchors train both sides.",
+)
 
 save(plt.gcf(), "smpo_pipeline")
 plt.close()
-print("\u2713 smpo_pipeline.png")
+print("✓ smpo_pipeline.png")

@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 
 def _rollout(price: float | None, tokens: int):
@@ -23,11 +24,11 @@ def _rollout(price: float | None, tokens: int):
 
 
 def _apply(rollouts):
-    trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
     trainer._metrics = {"train": defaultdict(list)}
     rewards = torch.zeros(len(rollouts))
-    trainer._apply_effort_token_costs(rewards, rollouts, "train")
-    return rewards, trainer._metrics["train"]
+    trainer._apply_effort_token_costs(rewards, rollouts)
+    return rewards, flushed_metrics(trainer)
 
 
 def test_cost_charges_per_generated_token():

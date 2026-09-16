@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests: a SWE grader that itself crashes must drop its episode from the GRPO group baseline.
 
-``SweEnvironment._compute_reward`` scores a raising ``test_function`` as a failure. That verdict is
+``SweEnvironment._grade_episode`` scores a raising ``test_function`` as a failure. That verdict is
 about the grader, not the completion, so the episode also has to carry ``EPISODE_INVALID_KEY`` — the
 flag the trainer reads to exclude a row from the group mean every sibling's advantage is measured
 against. A real pass/fail verdict must NOT carry it.
@@ -29,7 +29,7 @@ class _StubSandbox(SandboxExecutor):
 
 
 def _finished_episode(test_function) -> Trajectory:
-    """Drive one episode to a plain-text answer, so ``_compute_reward`` runs the grader."""
+    """Drive one episode to a plain-text answer, so ``_grade_episode`` runs the grader."""
     env = SweEnvironment(sandbox=_StubSandbox(), test_function=test_function)
     ids, _ = env.reset(["fix the bug"], [{}])
     step = env.step(ids, ["all done"], [{}])[0]
@@ -43,7 +43,7 @@ def test_crashing_test_function_marks_the_episode_invalid():
 
     traj = _finished_episode(boom)
     assert traj.episode_invalid is True, "a crashed grader carries no signal — it must leave the group baseline"
-    assert traj.total_reward == pytest.approx(0.0), "and it still scores the failure reward"
+    assert traj.total_reward == pytest.approx(0.0), "and it still grades 0"
 
 
 def test_real_verdicts_stay_in_the_baseline():

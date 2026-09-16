@@ -16,14 +16,15 @@ test_size: 0.01                    # 1% holdout carved out of train only
 prompt_field: question
 system_prompt: "Solve the problem step by step and put your final numeric answer in \\boxed{}."
 
-# --- Reward Functions ---
-use_accuracy_reward: true
+# --- Rewards ---
+rewards:
+  - source: accuracy   # the last \boxed{} equals the answer, weight 1.0
 
 # --- GRPO Hyperparameters ---
 beta: 0.0                  # no reference model
 num_iterations: 1
 epsilon: 0.2
-scale_rewards: true
+scale_rewards: group
 num_generations: 4
 temperature: 1.0
 loss_type: grpo

@@ -313,6 +313,19 @@ def test_build_payload_gates_model_and_omits_empty_tools():
     assert "tools" not in payload
 
 
+def test_build_payload_carries_the_chat_template_kwargs_only_when_set():
+    """The run's template variables ride nested; the effort level never does (it travels top-level)."""
+    from src.environments.ray_actors import RolloutConfig
+
+    actor = _make_actor("native_math")
+    actor._tools_schema = None
+    messages = [{"role": "user", "content": "hi"}]
+    carried = actor._build_payload(messages, RolloutConfig(chat_template_kwargs={"preserve_thinking": True}), "low")
+    assert carried["chat_template_kwargs"] == {"preserve_thinking": True}
+    assert carried["reasoning_effort"] == "low"
+    assert "chat_template_kwargs" not in actor._build_payload(messages, RolloutConfig(), "low")
+
+
 def test_build_payload_sends_no_tools_for_a_react_env():
     """ReAct parses its action out of the assistant TEXT, so the rollout must advertise no tools.
 
@@ -673,8 +686,10 @@ async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
     assert result_b.total_reward == 1.0, f"INCREMENT episode mis-graded (leak?): reward={result_b.total_reward}"
     assert result_a.trajectory.info["tests_passed"] == result_a.trajectory.info["tests_total"] == 1
     assert result_b.trajectory.info["tests_passed"] == result_b.trajectory.info["tests_total"] == 1
-    # The two episodes really were distinct (different stored tests), proving the test is not vacuous.
-    assert result_a.trajectory.info["_test_cases"] != result_b.trajectory.info["_test_cases"]
+    # The two episodes really were distinct (each graded its own submission), proving the test is not
+    # vacuous; the hidden tests themselves are dropped from a finished trajectory.
+    assert result_a.trajectory.info["tool_calls"] != result_b.trajectory.info["tool_calls"]
+    assert "_test_cases" not in result_a.trajectory.info
 
 
 # Test: sync env.step runs OFF the actor's event loop (no episode serialization)

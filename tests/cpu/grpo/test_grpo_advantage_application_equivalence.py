@@ -29,6 +29,7 @@ from src.trainers.grpo.environmental import (
     rollout_valid_mask,
 )
 from src.trainers.grpo.online import DistributedGRPOTrainer
+from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 # --- Online trainer: fake-self driving the real _apply_degenerate_group_drop hook ---
 
@@ -177,13 +178,15 @@ def _env_application(
     """
     rollout_results = _rollouts(truncated.tolist(), valid)
     rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, train_on_sampled_tokens)
-    me = types.SimpleNamespace(
-        drop_degenerate_groups=drop_degenerate_groups,
-        args=types.SimpleNamespace(mask_truncated_completions=mask_truncated_completions),
-        accelerator=types.SimpleNamespace(gather=lambda x: x),
-        model=types.SimpleNamespace(training=True),
-        _empty_rollout_steps=0,
-        _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
+    me = attach_world_metrics(
+        types.SimpleNamespace(
+            drop_degenerate_groups=drop_degenerate_groups,
+            args=types.SimpleNamespace(mask_truncated_completions=mask_truncated_completions),
+            accelerator=types.SimpleNamespace(gather=lambda x: x),
+            model=types.SimpleNamespace(training=True),
+            _empty_rollout_steps=0,
+            _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
+        )
     )
     me._check_step_has_valid_episodes = types.MethodType(
         DistributedAsyncEnvironmentalGRPOTrainer._check_step_has_valid_episodes, me
@@ -201,7 +204,7 @@ def _env_application(
         rewards.device,
         "train",
     )
-    fracs = me._metrics["train"]["sampling/degenerate_group_frac"]
+    fracs = flushed_metrics(me)["sampling/degenerate_group_frac"]
     return local_advantages, comp, tool, num_items, (fracs[0] if fracs else None)
 
 

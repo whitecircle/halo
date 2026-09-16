@@ -19,12 +19,9 @@ Why tiling attention is the standard fix for the model's most memory-bound op: [
 
 GPU support: A100 (SM80) = FA2/flex/sdpa. H100/H200 (SM90) = FA2/FA3/flex/sdpa, no FA4. B200 (SM100) / B300 (SM103) = FA2/FA4/flex/sdpa, no FA3.
 
-The CP column above is what `validate_model_for_ulysses` (`src/distributed/context_parallel/validation.py`)
-accepts as a config label — it is not which kernel runs. CP's attention call goes through
-`get_flash_attn_func` (`src/distributed/context_parallel/base_layer.py`), which ignores that label and
-probes in a fixed order: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+), then FA2, then the
-`kernels-community/flash-attn2` kernel. Both architecture probes precede FA2 because every image ships FA2,
-and an FA2 probe placed first would resolve on every device and leave the arch-matched kernel unreachable.
+The CP column above is what `validate_model_for_ulysses` (`src/distributed/context_parallel/validation.py`) accepts as a config label; it is not which kernel runs. CP's attention call goes through `get_flash_attn_func` (`src/distributed/context_parallel/base_layer.py`), which ignores that label and probes in a fixed order: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+), then FA2, then the `kernels-community/flash-attn2` kernel.
+
+Both architecture probes precede FA2 because every image ships FA2; an FA2 probe placed first would resolve on every device and leave the arch-matched kernel unreachable.
 
 The one exception is model-level: `get_flash_attn_func` takes an `allow_fa4` veto, resolved per wrapper from
 `model_fa4_backward_nan_prone`, so the FA4-backward-NaN families (Qwen3.5/3.6/Qwen3-Next, GLM-4 MoE Lite)
@@ -32,11 +29,9 @@ run FA2 on Blackwell under CP. The probe overrides the configured label, so that
 protection. Its device predicates are the same `is_hopper_gpu` / `is_blackwell_gpu` the automatic detection
 uses, so CP and the config-level choice can never disagree about a device.
 
-The order matters because CP calls the **non-varlen** forward, the path FA2 serves worst on both
-architectures. On Hopper the image stubs out the split-K kernels FA2 selects there by occupancy heuristic.
-On B300, CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memory, the margin widening with
-sequence length (+19% at 32k, +63% at 128k on gpt-oss-20b ep8+cp8; +197% on dense Qwen3-4B ep1+cp8 at 128k).
-FA2 is faster only below ~16k, where per-call overhead dominates.
+The order matters because CP calls the **non-varlen** forward, the path FA2 serves worst on both architectures. On Hopper the image stubs out the split-K kernels FA2 selects there by occupancy heuristic.
+
+On B300, CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memory, the margin widening with sequence length (+19% at 32k, +63% at 128k on gpt-oss-20b ep8+cp8; +197% on dense Qwen3-4B ep1+cp8 at 128k). FA2 is faster only below ~16k, where per-call overhead dominates.
 
 ## Automatic detection
 
@@ -86,8 +81,17 @@ EP/long-context throughput tables live in [Throughput Benchmarks](throughput-ben
 **GptOss** (attention sinks):
 
 1. Disables transformers' auto-fallback to `vllm-flash-attn3` (`_disable_gpt_oss_fa_fallback`). transformers reroutes FA2 requests to `kernels-community/vllm-flash-attn3` (SM90-only), which crashes on Blackwell; the attribute is reset to `None` before `from_pretrained`.
-2. Applies the sink policy (`src/models/patches/gpt_oss_sinks.py`). **SFT** neutralizes them: FA2 (no `s_aux`) gets `self_attn.sinks = None`; FA3/FA4/flex/eager get `dtype.min`, frozen (preserves shape, ~0 softmax contribution), so FA2 runs end-to-end on B200/B300 — equivalent to `flex_attention`. **RL** (online/env-GRPO, `reset_sinks: false`) keeps the pretrained sinks live and frozen: the rollout engine serves the same sinks, so the trainer reads them via FA4 (`learnable_sink`) to stay on-policy. `train_sinks: true` keeps them live and trainable — full fine-tuning only (an adapter run raises, since the adapter artifact has no slot for the sinks) and refused by the RL weight sync, on FA4 through the sink-gradient rescale or on `eager`; every other implementation raises rather than training nothing. See [GPT-OSS](../models/gpt-oss.md#attention-sinks). The Blackwell default for GptOss is FA4 either way.
-3. **Variable-length RL (environmental GRPO) runs FA4 via a per-row dense forward** (`_dense_last_hidden_state`). A padded batch unpads to a `cu_seqlens` **varlen** FA4 call whose cross-row attention would break per-row log-prob identity with the sampling policy. The dense kernel is seqlen-invariant, so the path forwards each row on its own, trimmed to its real contiguous span, with `attention_mask=None`: RoPE positions `[0, len)`, log-probs bit-identical to the unpadded forward. FA4 is where the trim is *mandatory*; `rows_forward_densely` also takes it on any attention path at `per_device_train_batch_size: 1`, for the cost alone ([Chunked log-probs](../training-methods/grpo/environmental-grpo.md#chunked-log-probs)).
+2. Applies the sink policy (`src/models/patches/gpt_oss_sinks.py`). The Blackwell default for GptOss is FA4 under every policy. See [GPT-OSS](../models/gpt-oss.md#attention-sinks).
+
+    **SFT** neutralizes the sinks: FA2 (no `s_aux`) gets `self_attn.sinks = None`; FA3/FA4/flex/eager get `dtype.min`, frozen (preserves shape, ~0 softmax contribution). FA2 then runs end-to-end on B200/B300, equivalent to `flex_attention`.
+
+    **RL** (online/async GRPO, `reset_sinks: false`) keeps the pretrained sinks live and frozen. The rollout engine serves the same sinks, so the trainer reads them via FA4 (`learnable_sink`) to stay on-policy.
+
+    `train_sinks: true` keeps them live and trainable, on FA4 through the sink-gradient rescale or on `eager`; every other implementation raises rather than training nothing. Full fine-tuning only: an adapter run raises (the adapter artifact has no slot for the sinks), and the RL weight sync refuses it.
+
+3. **Variable-length RL (async GRPO) runs FA4 via a per-row dense forward** (`_dense_last_hidden_state`). A padded batch unpads to a `cu_seqlens` **varlen** FA4 call whose cross-row attention would break per-row log-prob identity with the sampling policy.
+
+    The dense kernel is seqlen-invariant, so the path forwards each row on its own, trimmed to its real contiguous span, with `attention_mask=None`: RoPE positions `[0, len)`, log-probs bit-identical to the unpadded forward. FA4 is where the trim is *mandatory*; `rows_forward_densely` also takes it on any attention path at `per_device_train_batch_size: 1`, for the cost alone ([Chunked log-probs](../training-methods/grpo/async-grpo/performance.md#chunked-log-probs)).
 
     Per-rank forward counts are all-reduced to a max and padded with tied dummy forwards, and every row — the padding included — stays connected to the loss, so the forward **and** backward collective sequences stay in lockstep. A disconnected row would let autograd prune its backbone backward and desync the FSDP/EP grad collectives across ranks.
 
@@ -97,7 +101,11 @@ With sinks reset for SFT (the default), an explicit `attn_implementation='sdpa'`
 
 With **live** sinks (`reset_sinks: false`, the RL flow) a sink-dropping impl shifts every logprob by nats against the served policy (measured ~−3 nats on gpt-oss-20b under FA2/SDPA), so `validate_attn_implementation` **raises** on `flash_attention_2` and `sdpa` and only admits sink-carrying impls — FA4 (`learnable_sink`), FA3 with `s_aux` (Hopper), `flex_attention`, `eager`. The Docker Hopper FA3 build exposes no `s_aux`, so live-sinks runs on Hopper use `flex_attention` or `eager`.
 
-Capability is read from the installed kernel's signature (`_attn_impl_handles_sinks`), probing the module transformers actually dispatches (FA3 via `flash_attn_interface` first, then `flash_attn_3`), so a flash-attn upgrade that adds sink support is picked up automatically. The probe reads the **varlen** entry point (`flash_varlen_fn`): transformers builds its per-argument capability map from `_flash_varlen_fn` alone and applies it to the dense call too, so a sink argument only the dense signature accepts would never be forwarded. The `reset_sinks` decision is recorded on the config instance, so the nested EP/CP/lazy-loader re-validations (which pass no `sinks_reset`) enforce the same matrix.
+Capability is read from the installed kernel's signature (`_attn_impl_handles_sinks`), probing the module transformers actually dispatches (FA3 via `flash_attn_interface` first, then `flash_attn_3`), so a flash-attn upgrade that adds sink support is picked up automatically.
+
+The probe reads the **varlen** entry point (`flash_varlen_fn`): transformers builds its per-argument capability map from `_flash_varlen_fn` alone and applies it to the dense call too, so a sink argument only the dense signature accepts would never be forwarded.
+
+The `reset_sinks` decision is recorded on the config instance, so the nested EP/CP/lazy-loader re-validations (which pass no `sinks_reset`) enforce the same matrix.
 
 **Gemma4** (5 full-attention layers at `global_head_dim=512`): FA2/FA3/FA4/cuDNN-SDPA all reject head_dim>256 (FA2 cap 256, cuDNN cap 128 on cu13, FA4's SM100 kernel overflows tensor memory and asserts in `flash_fwd_sm100`); math SDPA materializes `[B, heads, S, S]` (64 GB/layer at 32k → OOM).
 
@@ -107,11 +115,15 @@ The loader therefore redirects any FlashAttention impl — auto-detected or call
 
 The shared trigger is a **head_dim-256 attention with partial rotary**: Qwen3.5/3.6/Qwen3-Next pair QK-norm + partial rotary + an attention output gate; GLM-4.7-Flash is MLA-style (`qk_nope_head_dim` 192 + `qk_rope_head_dim` 64 = a 256-wide query/key, `v_head_dim` 256, rope on only the 64-dim split). SDPA keeps fp32 reductions and trains cleanly. gpt-oss is unaffected (head_dim 64) and keeps FA4.
 
-**Bailing / Ling (`bailing_moe`, `bailing_moe_linear`, `bailing_hybrid`)**: the remote code declares only the v4-era `_supports_flash_attn_2`, which transformers v5 ignores in favor of `_supports_flash_attn`, so every flash label is refused at model build and the family runs SDPA. The EP lazy loader (`instantiate_on_meta`) catches the dispatch `ValueError` and retries on SDPA; the CP loader does not, so a CP run sets `attn_implementation: sdpa` itself (its Ulysses wrapper waives the flash-label check — see [Bailing](../models/bailing.md#cp-wrapper)).
+**Bailing / Ling (`bailing_moe`, `bailing_moe_linear`, `bailing_hybrid`)**: the remote code declares only the v4-era `_supports_flash_attn_2`, which transformers v5 ignores in favor of `_supports_flash_attn`, so every flash label is refused at model build and the family runs SDPA.
+
+The EP lazy loader (`instantiate_on_meta`) catches the dispatch `ValueError` and retries on SDPA; the CP loader does not, so a CP run sets `attn_implementation: sdpa` itself (its Ulysses wrapper waives the flash-label check; see [Bailing](../models/bailing.md#cp-wrapper)).
 
 **DeepSeek-V4 (`deepseek_v4`)**: eager-only. `head_dim=512` exceeds every FlashAttention kernel's 256 cap, SDPA drops the learnable sink column, and the CSA/HCA compressors concatenate KV entries after the mask is built (no BlockMask resize), so transformers marks all non-eager backends unsupported. `resolve_attn_implementation` forces `attn_implementation="eager"` for any requested backend (`_model_is_deepseek_v4`). There is no varlen path under eager, so the collator factory rejects `padding_free` (see [Padding-Free Collator](padding-free-collator.md)). See [DeepSeek-V4](../models/deepseek-v4.md).
 
-**Padded workloads**: the scripts that forward right-padded batches — DPO / SMPO / KTO, teacher distillation, reward modeling, classification, and all three GRPO scripts (offline, online, environmental) — default `attn_implementation` to **SDPA** when the YAML sets none (`padded_workload_attn_implementation` / `attn_default="sdpa"`, both overridable). Every one of them takes that default only under `reset_sinks: true`; with live gpt-oss sinks (`reset_sinks: false`) the default drops and the model config passes through untouched, since SDPA drops the sink column and would be rejected outright. SFT keeps the auto-selected FA4 — a packed batch takes its varlen path, kept fast by the `max_seqlen` int-coercion.
+**Padded workloads**: the scripts that forward right-padded batches — DPO / SMPO / KTO, teacher distillation, reward modeling, classification, and all three GRPO scripts (offline, online, environmental) — default `attn_implementation` to **SDPA** when the YAML sets none (`padded_workload_attn_implementation` / `attn_default="sdpa"`, both overridable).
+
+Every one of them takes that default only under `reset_sinks: true`. With live gpt-oss sinks (`reset_sinks: false`) the default drops and the model config passes through untouched, since SDPA drops the sink column and would be rejected outright. SFT keeps the auto-selected FA4: a packed batch takes its varlen path, kept fast by the `max_seqlen` int-coercion.
 
 That default costs throughput at the lengths these methods actually run. Measured on 8×B300 with `benchmark_smpo_ep.py`, which does *not* apply it (tokens/s/GPU, auto = FA4):
 
@@ -143,13 +155,9 @@ git clone https://github.com/Dao-AILab/flash-attention.git
 cd flash-attention/hopper && pip install --no-cache-dir --no-build-isolation .
 ```
 
-On Hopper (sm_90) under CUDA 13.2, `ptxas` hangs on the 24 `flash_fwd_split_hdim*_*_sm80.cu` kernels. The
-Docker Hopper build replaces them with throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`).
-`mha_varlen_fwd` gates split-K behind `seqlenq_ngroups_swapped`, so packed/padding-free training and the
-whole backward never reach these kernels; `mha_fwd` (non-varlen) does **not** gate it — with dropout 0 the
-occupancy heuristic picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs`, so a
-non-varlen caller must prefer FA3 on sm_90, which `src/distributed/context_parallel/base_layer.py` does.
-Building FA2 for Hopper outside Docker on CUDA 13.2 needs the same workaround (or CUDA 13.1).
+On Hopper (sm_90) under CUDA 13.2, `ptxas` hangs on the 24 `flash_fwd_split_hdim*_*_sm80.cu` kernels. The Docker Hopper build replaces them with throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`). Building FA2 for Hopper outside Docker on CUDA 13.2 needs the same workaround (or CUDA 13.1).
+
+`mha_varlen_fwd` gates split-K behind `seqlenq_ngroups_swapped`, so packed/padding-free training and the whole backward never reach these kernels. `mha_fwd` (non-varlen) does **not** gate it: with dropout 0 the occupancy heuristic picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs`, so a non-varlen caller must prefer FA3 on sm_90, which `src/distributed/context_parallel/base_layer.py` does.
 
 Import FA3 from `flash_attn_interface` (`import flash_attn_3` succeeds but does not guarantee a functional
 build). transformers auto-detects FA3 through `is_flash_attn_3_available()`, which reads the
@@ -167,10 +175,12 @@ auto-detection plus the model-specific handling above.
 
 **Gradient checkpointing with EP.** EP MoE layers go through `enable_ep_gradient_checkpointing`
 (`src/distributed/expert_parallel/patching.py`), which enables GC and installs the checkpoint scope its
-recompute replays the DeepEP dispatch from; enabling GC by any other route leaves EP without that scope
-and raises. Outside pipeline parallelism, EP and CP force `use_reentrant=True` (a configured `False` is
-overridden with a warning); under PP ([not yet available in this release](../parallelism/pipeline-parallelism.md))
-the shipped gates require non-reentrant instead, so the override does not apply there. EP replays its
+recompute replays the DeepEP dispatch from. Enabling GC by any other route leaves EP without that scope
+and raises.
+
+Outside pipeline parallelism, EP and CP force `use_reentrant=True` (a configured `False` is overridden
+with a warning). Under PP ([not yet available in this release](../parallelism/pipeline-parallelism.md))
+the shipped gates require non-reentrant instead, so the override would not apply there; EP replays its
 dispatch from the checkpoint scope in either mode.
 
 ## Backend benchmark
@@ -206,17 +216,23 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 
 ## Known issues
 
-**flex_attention + FSDP2 NaN gradients (GptOss).** Loss starts normally then collapses to 0 with NaN `grad_norm`. transformers wraps `flex_attention` in `torch.compile(dynamic=False)` (`WrappedFlexAttention`); the compiled backward produces NaN when GptOss sinks (plain `nn.Parameter`) interact with FSDP2's DTensor-wrapped LSE during post-attention renorm. `patch_flex_attention_compile()` (`src/models/patches/attention.py`) bypasses the compile wrapper. `load_distributed_model` applies it whenever flex is the resolved backend and either EP is on (the compile path also deadlocks with EP's all-to-all on seq-length recompiles) or the model is a sinks model running with `reset_sinks: true`.
+**flex_attention + FSDP2 NaN gradients (GptOss).** Loss starts normally then collapses to 0 with NaN `grad_norm`. transformers wraps `flex_attention` in `torch.compile(dynamic=False)` (`WrappedFlexAttention`); the compiled backward produces NaN when GptOss sinks (plain `nn.Parameter`) interact with FSDP2's DTensor-wrapped LSE during post-attention renorm.
+
+`patch_flex_attention_compile()` (`src/models/patches/attention.py`) bypasses the compile wrapper. `load_distributed_model` applies it whenever flex is the resolved backend and either EP is on (the compile path also deadlocks with EP's all-to-all on seq-length recompiles) or the model is a sinks model running with `reset_sinks: true`.
 
 **flex_attention gradient overflow on dense Qwen3.** flex produces ~6e18 grad norms on Qwen3-0.6B/8B, even single-GPU without distributed wrapping; losses are fine but overflow is a stability risk. Use the auto-detected flash backend for training, not flex. Upstream PyTorch/transformers issue.
 
 **FA4 first-use compile under multi-rank parallelism.** FA4 JIT-compiles each kernel on first use (~10 s) mid-forward. A cache-miss compile on one rank stalls it while peers race ahead to the next collective (a TP `o_proj` all-reduce, an EP DeepEP dispatch), desyncing the group into a deadlock.
 
-`warm_attention_kernels` (`src/distributed/loading/warmup.py`, called at the end of `load_distributed_model`) runs the rank-local `warmup_fa4_kernels` (`src/models/patches/attention.py`) on every rank behind one barrier, so the training loop only hits warm kernels. It covers both entry points — dense `flash_attn_func` and varlen `flash_attn_varlen_func` over a two-document `cu_seqlens` — each in the variants the model can reach: sliding-window when the config declares one, and a learnable sink when the model carries sinks. It is a no-op unless FA4 is active and `world_size > 1`.
+`warm_attention_kernels` (`src/distributed/loading/warmup.py`, called at the end of `load_distributed_model`) runs the rank-local `warmup_fa4_kernels` (`src/models/patches/attention.py`) on every rank behind one barrier, so the training loop only hits warm kernels. It is a no-op unless FA4 is active and `world_size > 1`.
+
+It covers both entry points — dense `flash_attn_func` and varlen `flash_attn_varlen_func` over a two-document `cu_seqlens` — each in the variants the model can reach: sliding-window when the config declares one, and a learnable sink when the model carries sinks.
 
 The on-disk cache (`ensure_fa4_kernel_cache_env`, anchored on `HF_HOME`) makes the compile a one-time cost across processes. The DeepEP `ElasticBuffer` dispatch/combine timeout is long (100 s) and absorbs residual skew. FA2 is precompiled and unaffected.
 
-**FA4 varlen backward JIT-cache key (packed / masked batches).** A packed or attention-masked batch unpads to a `cu_seqlens` varlen FA4 call. transformers' `_process_flash_attention_kwargs` coerces the 0-dim `max_seqlen` tensor to `int` only under tracing; in eager it forwards a fresh CUDA tensor each step, and `flash_attn.cute`'s varlen backward keys its JIT cache on that tensor by *identity*. The backward then recompiles every step: ~190 s/step vs ~10 s on gpt-oss-20b ep4, flat across sequence length because it is codegen of the backward template, not real attention.
+**FA4 varlen backward JIT-cache key (packed / masked batches).** A packed or attention-masked batch unpads to a `cu_seqlens` varlen FA4 call. transformers' `_process_flash_attention_kwargs` coerces the 0-dim `max_seqlen` tensor to `int` only under tracing; in eager it forwards a fresh CUDA tensor each step, and `flash_attn.cute`'s varlen backward keys its JIT cache on that tensor by *identity*.
+
+The backward then recompiles every step: ~190 s/step vs ~10 s on gpt-oss-20b ep4, flat across sequence length because it is codegen of the backward template, not real attention.
 
 `patch_transformers_flash_varlen_int_seqlen` (`src/models/patches/attention.py`, applied by `load_distributed_model` when FA4 is active) coerces `max_seqlen_{q,k}` to `int` at that boundary, so the key caches by value and the backward compiles once — one `.item()` per call, where the forward already syncs. `warmup_fa4_kernels` warms this varlen backward too, so the first packed step is already compiled.
 

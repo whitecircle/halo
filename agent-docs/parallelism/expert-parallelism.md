@@ -3,8 +3,10 @@
 EP distributes MoE experts across GPUs to cut per-GPU expert memory while keeping full data
 parallelism. EP is orthogonal to DP: unlike CP, TP and ETP it never reduces `data_parallel_size`.
 Every GPU loads different data and holds a different expert slice; tokens reach the right experts via
-DeepEP all-to-all. Use it when expert layers exceed single-GPU memory. Why the tokens-per-expert
-count sets the speed of every expert GEMM:
+DeepEP all-to-all.
+
+Use it when expert layers exceed single-GPU memory. Why the tokens-per-expert count sets the speed of
+every expert GEMM:
 [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example-why-small-per-expert-m-is-slow).
 
 EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP) — there is no NCCL fallback.
@@ -12,7 +14,7 @@ Non-EP gradients sync via FSDP2 (`fully_shard`, EP modules in `ignored_params`);
 gradients sync via the EP layer's own backward hooks. [Expert Tensor
 Parallelism](expert-tensor-parallelism.md) further shards each expert's FFN inside the EP group.
 
-![EP token routing: All-to-All dispatch sends each token to the rank that owns its experts, experts compute locally, then a second All-to-All combines results back to the originating rank](../assets/diagrams/ep_token_routing.png){ .diagram-narrow }
+![EP token routing: each rank routes its own batch's tokens by router top-k, DeepEP's dispatch all-to-all sends every token to the rank that owns its expert, a grouped GEMM runs the local experts, and the combine all-to-all returns each token to its origin rank](../assets/diagrams/ep_token_routing.png)
 
 ## Supported models
 
@@ -41,10 +43,12 @@ Source of truth: `MOE_LAYER_MAP` in `src/distributed/expert_parallel/patching.py
   with `freeze_layers_patterns: ["*.mlp.gate.weight"]` during SFT.
 - **LoRA** targets attention (PEFT) and the experts (native grouped adapters — list expert names in
   `lora_target_modules`). Attention adapters are replicated across EP ranks; expert adapters are
-  rank-local and gathered on save. Expert LoRA is rejected with `expert_tp_size > 1`. The grouped
-  adapters honor `r` / `alpha` / `dropout` / `use_rslora`; knobs with no grouped implementation
-  (`use_dora`, `lora_target_parameters`) are rejected rather than applied to the attention half alone.
-  See [PEFT](../optimization/peft.md#moe-models-expert-targets-and-full-trained-modules).
+  rank-local and gathered on save.
+
+    Expert LoRA is rejected with `expert_tp_size > 1`. The grouped adapters honor `r` / `alpha` /
+    `dropout` / `use_rslora`; knobs with no grouped implementation (`use_dora`,
+    `lora_target_parameters`) are rejected rather than applied to the attention half alone. See
+    [PEFT](../optimization/peft.md#moe-models-expert-targets-and-full-trained-modules).
 
 ### Per-family EP restrictions
 
@@ -66,10 +70,12 @@ EP surface. The table is pinned against the classes by
 | GLM-5 Next | RL weight sync — the live tree spells the KDA/hyper-connection tensors differently from the hub namespace a server reads, and no pinned rollout engine loads `glm5_next` | `_supports_weight_sync` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
-the engine: each client declares the model types its pinned release cannot take an online update for
+the engine. Each client declares the model types its pinned release cannot take an online update for
 (`UNSERVABLE_MODEL_TYPES` in `src/distributed/nccl/clients/`), and `validate_weight_sync_support`
-refuses that model+backend pair at trainer construction, quoting the loader fact. SGLang 0.5.17's
-list is the longer of the two — Laguna and Step-3.7 sync on vLLM only. Full roster with each reason:
+refuses that model+backend pair at trainer construction, quoting the loader fact.
+
+SGLang 0.5.17's list is the longer of the two: Laguna and Step-3.7 sync on vLLM only. Full roster
+with each reason:
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
 Attention-side support is a separate question owned by each axis: which families TP can shard is
@@ -80,16 +86,20 @@ split is the Ulysses wrapper registry
 
 ## EP grouping
 
-`ep_size` must divide `num_experts` exactly — DeepEP dispatch assumes a uniform expert→rank
+`ep_size` must divide `num_experts` exactly; DeepEP dispatch assumes a uniform expert→rank
 division. `ParallelismConfig.validate_against_model_config` raises off `config.json` at the top of
-`load_distributed_model`, before the process groups and the meta shell;
-`EPConfig.finalize_expert_assignment` re-checks it once the EP groups exist. `ep_group_size` must
-divide the NVLink domain (node-local); under `ep_scope="global"` the bound is the **stage** world
-(`world_size / pp_size`), and divisibility alone is not enough — the group must also tile that world
-as equal contiguous per-domain blocks ([Multi-Node](multi-node.md#node-local-vs-cross-node-ep)). On a
-single 8-GPU node every pure-EP job is DP=8; what changes is how many DeepEP dispatch groups form.
+`load_distributed_model`, before the process groups and the meta shell.
+`EPConfig.finalize_expert_assignment` re-checks it once the EP groups exist.
 
-![EP group hierarchy: the world splits into EP groups (here ep_size=2 → two 2-rank groups), each GPU owns an expert slice, and DeepEP All-to-All runs within each group; DP stays orthogonal (DP=4)](../assets/diagrams/ep_group_hierarchy.png){ .diagram-narrow }
+`ep_group_size` must divide the NVLink domain (node-local). Under `ep_scope="global"` the bound is
+the **stage** world (`world_size / pp_size`), and divisibility alone is not enough: the group must
+also tile that world as equal contiguous per-domain blocks
+([Multi-Node](multi-node.md#node-local-vs-cross-node-ep)).
+
+On a single 8-GPU node every pure-EP job is DP=8; what changes is how many DeepEP dispatch groups
+form.
+
+![EP groups: world 4 at ep_size 2 forms two 2-rank DeepEP dispatch groups, each rank owning 16 of 32 experts while still reading its own batch (dp 4); ranks holding the same expert slice are DP replicas averaged after the backward](../assets/diagrams/ep_group_hierarchy.png)
 
 Example: 32 experts, world=4, `ep_size=2` → 2 EP groups of 2 GPUs, 16 experts each, DP=4.
 Node-local EP assigns consecutive ranks within a domain; cross-node EP (`ep_scope="global"`) uses
@@ -100,17 +110,19 @@ else cross-node. `"node"` forces NVLink-only groups; `"global"` spans domains ov
 
 ### Single-domain multi-group EP races and hangs
 
-Inside **one NVLink domain** (not one OS node — on NVL72 the domain is the rack), `ep_size=4` on
+Inside **one NVLink domain** (not one OS node; on NVL72 the domain is the rack), `ep_size=4` on
 8 GPUs (two 4-rank groups) makes the groups' DeepEP combine barriers
-**race FSDP2's DP-wide NCCL collectives**. Both backends fail, with different symptoms: the `legacy`
-buffer (DeepEP V1) deadlocks deterministically on ~step 2 (`DeepEP timeout check failed` →
-`cudaErrorLaunchFailure`), and the `elastic` default (V2) faults with `CUDA error: Invalid access of
-peer GPU memory over nvlink`. Both measured on 8×B300 against an `ep8` control that trains clean,
-with gradient checkpointing on or off; `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into
-the images) does not cover it. `ParallelismConfig._validate_single_domain_multigroup_ep` **rejects the
-shape at config construction**, before the model loads;
-`EpIntrospectionMixin._setup_ep_gradient_checkpointing` is a second gate after load. A single node
-has no cross-node reduce to defer, so this stays blocked.
+**race FSDP2's DP-wide NCCL collectives**.
+
+Both backends fail, with different symptoms. The `legacy` buffer (DeepEP V1) deadlocks
+deterministically on ~step 2 (`DeepEP timeout check failed` → `cudaErrorLaunchFailure`); the
+`elastic` default (V2) faults with `CUDA error: Invalid access of peer GPU memory over nvlink`.
+Gradient checkpointing on or off does not change this, and `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked
+into the images) does not cover it.
+
+`ParallelismConfig._validate_single_domain_multigroup_ep` **rejects the shape at config
+construction**, before the model loads; `EpIntrospectionMixin._setup_ep_gradient_checkpointing` is a
+second gate after load. A single node has no cross-node reduce to defer, so this stays blocked.
 
 Safe single-node pure-EP shapes — one group, or 2-rank groups:
 
@@ -194,8 +206,10 @@ FSDP2's uniform-dtype check.
 **Gemma 4: `fp32_non_ep_params` under EP is refused at load**, off the family's
 `_supports_fp32_non_ep_params = False` and before the model is built. Its router (`Gemma4TextRouter`)
 lives in the parent decoder layer and its norms re-emit activations at weight dtype, so the upcast
-would feed fp32 tokens into DeepEP's 2-byte transport. `fp32_router` is a warned no-op there for the
-same reason — the router is outside the wrapper and stays BF16; only `fp32_experts` applies.
+would feed fp32 tokens into DeepEP's 2-byte transport.
+
+`fp32_router` is a warned no-op there for the same reason: the router is outside the wrapper and
+stays BF16. Only `fp32_experts` applies.
 
 **AdamWBF16** is auto-enabled with `bf16=True` (6 vs 12 bytes/param, stochastic rounding on the
 weight write) and takes precedence over the dtype-grouped optimizer, so it — not
@@ -208,17 +222,21 @@ fused SR kernel, fp32 params standard in-place AdamW. See
 [DeepEP](../infrastructure/deepep.md) owns installation, buffer sizing, transport and fabric tuning.
 What an EP run has to plan around:
 
-- **Two dispatch ceilings**, both raised at buffer sizing rather than left to fault mid-kernel. The
-  32-bit wire index caps every topology at `2³¹ / (num_topk × padded_hidden)` ≈ **175k tokens per
-  forward** for GPT-OSS. Cross-node (Gin) dispatch caps at `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`
-  (default **8192**, `0` disables), above which an EFA proxy-GIN dispatch **wedges instead of
-  erroring**. The second is the binding limit on `per_device_train_batch_size × max_length` for any
-  `ep_scope=global` run spanning more than one NVLink domain
-  ([AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)); intra-node NVLink
-  dispatch is validated to 65536 tokens per rank. Both are applied before the load as well, against
-  the declared budget — `rows-per-forward × per_device_train_batch_size × max_length`, with
-  `max_length: null` resolved to the model's own context window (the largest budget that spelling
-  can mean).
+- **Two dispatch ceilings**, both raised at buffer sizing rather than left to fault mid-kernel:
+
+    - The 32-bit wire index caps every topology at `2³¹ / (num_topk × padded_hidden)` ≈ **175k tokens
+      per forward** for GPT-OSS.
+    - Cross-node (Gin) dispatch caps at `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` (default **8192**, `0`
+      disables), above which an EFA proxy-GIN dispatch **wedges instead of erroring**. Intra-node
+      NVLink dispatch is validated to 65536 tokens per rank.
+
+    The Gin cap is the binding limit on `per_device_train_batch_size × max_length` for any
+    `ep_scope=global` run spanning more than one NVLink domain
+    ([AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)). Both ceilings are also
+    applied before the load, against the declared budget:
+    `rows-per-forward × per_device_train_batch_size × max_length`, with `max_length: null` resolved
+    to the model's own context window (the largest budget that spelling can mean).
+
 - **The dispatched count is `per_device_train_batch_size × tokens-per-sequence`.** It does not scale
   with `num_generations` or `gradient_accumulation_steps`, and the buffer is per-rank, so raising
   `ep_size` does not lower it. Bound the *single-sequence* length: `per_device_train_batch_size = 1`
@@ -230,10 +248,9 @@ What an EP run has to plan around:
   contiguous; token tensors keep their dtype across dispatch/combine. The wire zero-pads the feature
   dim to a multiple of 256 and slices it back symmetrically (GPT-OSS hidden 2880 → 3072), so
   gradients are exact.
-- **`ep_buffer_backend: legacy`** selects the V1 CUDA-IPC `deep_ep.Buffer` — numerically identical,
-  intranode only, and rejected at config time for a cross-node group, a dispatch width above 8
-  NVLink peers or above `gpus_per_node`, or a rank count DeepEP ships no tuned `Config` for. Destroy
-  buffers before process exit (`trainer.cleanup_ep()`).
+- **`ep_buffer_backend: legacy`** selects the V1 CUDA-IPC `deep_ep.Buffer`: numerically identical,
+  intranode only. It is rejected at config time for a cross-node group, a dispatch width above 8
+  NVLink peers or above `gpus_per_node`, or a rank count DeepEP ships no tuned `Config` for.
 
 ## Gradient synchronization
 
@@ -247,17 +264,21 @@ Hybrid sync (`src/distributed/expert_parallel/grad_sync.py`):
   no collective — it divides by `world_size / expert_tp_size` and nothing else.
 
 Hooks integrate with accelerate's `GradientState`: they skip sync while `sync_gradients` is False
-(accumulation steps). A post-accumulate hook fires only for params in that backward's graph, so a
-bank (or a single expert in the eager loop) that idles in the **sync** microbatch after accumulating
-earlier would miss the divide — the layer adds a zero-valued graph edge onto every
-already-accumulated expert param (`_expert_hook_grad_edge`) so the hook always reaches it; a bank
-with no accumulated grad keeps `grad=None` and the optimizer skips it.
+(accumulation steps).
+
+A post-accumulate hook fires only for params in that backward's graph, so a bank (or a single expert
+in the eager loop) that idles in the **sync** microbatch after accumulating earlier would miss the
+divide. The layer adds a zero-valued graph edge onto every already-accumulated expert param
+(`_expert_hook_grad_edge`) so the hook always reaches it; a bank with no accumulated grad keeps
+`grad=None` and the optimizer skips it.
 
 **More than one EP group registers no hooks at all.** The cross-replica `all_reduce(SUM)` those
-topologies need cannot ride a post-accumulate hook — it fires only where a grad accumulated, so a
+topologies need cannot ride a post-accumulate hook: it fires only where a grad accumulated, so a
 rank whose dispatch delivered no tokens for a layer would leave its replicas hanging in a collective
-it never enters. `EPConfig.defer_grad_sync` routes every such shape, single-node included, to the
-[post-backward sweep](multi-node.md#deferred-cross-replica-sync); `ep_group_size == 1` under
+it never enters.
+
+`EPConfig.defer_grad_sync` routes every such shape, single-node included, to the
+[post-backward sweep](multi-node.md#deferred-cross-replica-sync). `ep_group_size == 1` under
 `fsdp_shard_ep1_experts` is the exception, since FSDP2 already owns those experts.
 
 **Gradient clipping** is custom because experts are distributed
@@ -270,10 +291,11 @@ expert-TP group, then the **dispatch** group, then across replica groups divided
 
 A checkpointed layer runs its body twice, and the second run must NOT touch DeepEP: a fresh dispatch
 reuses the same `ElasticBuffer` and invalidates the handle the original forward's backward node
-still holds, which corrupts every gradient in the model and raises nothing. So the first pass caches
-detached dispatch/combine results and the recompute replays them through `ReplayDispatchFunction` /
-`ReplayCombineFunction`; only the expert compute is recomputed, and backward still calls
-`buffer.combine()` / `buffer.dispatch()` for the gradient comm.
+still holds, which corrupts every gradient in the model and raises nothing.
+
+So the first pass caches detached dispatch/combine results and the recompute replays them through
+`ReplayDispatchFunction` / `ReplayCombineFunction`. Only the expert compute is recomputed, and
+backward still calls `buffer.combine()` / `buffer.dispatch()` for the gradient comm.
 
 That cache lives on an `EPCheckpointScope` (`src/distributed/expert_parallel/gc_scope.py`) created
 per checkpoint invocation and entered by both passes, not on the layer: concurrent frames stay
@@ -290,7 +312,7 @@ error 4.3e-05 vs no checkpointing, across all 155 parameters), non-reentrant abo
 parallelism — [not yet available](pipeline-parallelism.md) — would invert the rule: its schedule
 serializes each microbatch's backward, and the shipped config-time gates already encode that.)
 
-Under [routing replay](../training-methods/grpo/environmental-grpo.md#off-policy-mismatch-and-stability-knobs)
+Under [routing replay](../training-methods/grpo/async-grpo/objective.md#routing-replay)
 the recompute reads the frame's saved expert selection. Expert-load counters record only a scope's
 grad-driven **original** pass, gated on the outer grad mode captured at invocation: the recompute
 never double-counts `moe/*` metrics or bias-update balancing, and a `no_grad` forward through a
@@ -318,45 +340,56 @@ on EP MoE — the DeepEP all-to-all breaks the graph at every MoE boundary eithe
 
 Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size > 1`) traces it on
 its **first forward, before that forward's dispatch** (`_warm_activation_graphs`): one grad-enabled
-pass with a backward and one under `no_grad`, at two token counts — these kernels take the element
-count as a runtime argument and Triton compiles a separate binary per divisibility-by-16 class of it.
-The inputs are zeros rather than a draw, and the backward runs under identity saved-tensor hooks:
-the warm-up sits inside the gradient-checkpointed block, whose recompute restores the RNG to region
-entry and whose non-reentrant form would otherwise recompute the whole block mid-forward. A cold
-activation compiles between `dispatch` and `combine`
-instead, where every peer of the group is already inside DeepEP's barrier — and that barrier's budget
-bounds rank *skew*, not idle time. At `ep_size == 1` the dispatcher is a no-op, so there is no barrier
-to stall and no warmup.
+pass with a backward and one under `no_grad`, at two token counts. These kernels take the element
+count as a runtime argument, and Triton compiles a separate binary per divisibility-by-16 class of
+it.
+
+The inputs are zeros rather than a draw, and the backward runs under identity saved-tensor hooks.
+The warm-up sits inside the gradient-checkpointed block, whose recompute restores the RNG to region
+entry and whose non-reentrant form would otherwise recompute the whole block mid-forward.
+
+Without the warm-up, a cold activation compiles between `dispatch` and `combine`, where every peer
+of the group is already inside DeepEP's barrier, and that barrier's budget bounds rank *skew*, not
+idle time. At `ep_size == 1` the dispatcher is a no-op, so there is no barrier to stall and no
+warm-up.
 
 ## Model loading
 
 `ep_lazy_loading` (default `true`) builds the model shell with **parameters on the meta device and
 buffers computed for real** (`accelerate.init_empty_weights(include_buffers=False)`), then streams
 each rank's expert slice straight from safetensors
-(`src/distributed/expert_parallel/lazy_loader.py`). Buffers must be real: a config-less rotary derives
-`inv_freq` from ctor args it never stores, which a meta build loses irrecoverably. The
-`from_pretrained(device_map="meta")` route strands the non-persistent ones on meta, so it builds a
-config-only twin and grafts them back. The shell carries the **run's** dtype, not the checkpoint
-config's. An architecture that route cannot place is built from the config alone; a failure there
-raises rather than falling back, since `from_pretrained` inside a meta context still streams the whole
+(`src/distributed/expert_parallel/lazy_loader.py`). The shell carries the **run's** dtype, not the
+checkpoint config's.
+
+Buffers must be real: a config-less rotary derives `inv_freq` from ctor args it never stores, which a
+meta build loses irrecoverably. The `from_pretrained(device_map="meta")` route strands the
+non-persistent ones on meta, so it builds a config-only twin and grafts them back.
+
+An architecture that route cannot place is built from the config alone. A failure there raises
+rather than falling back, since `from_pretrained` inside a meta context still streams the whole
 checkpoint into host RAM.
 
 State the checkpoint does not carry (`score` for reward / classification on top of a base LM
 checkpoint) is random-initialized through the family's own `_init_weights`, exactly as
-`from_pretrained` does; the run's identical seeding makes every rank draw the same values. A module
-only *partially* absent raises rather than overwrite the tensors that did load, and a tied shadow
-(`lm_head.weight`) is left to the post-load `tie_weights()`. A parameter **or buffer** that reaches
-device placement still on meta raises — filling either would train or score uninitialized memory that
-differs on every rank.
+`from_pretrained` does; the run's identical seeding makes every rank draw the same values.
+
+A module only *partially* absent raises rather than overwrite the tensors that did load, and a tied
+shadow (`lm_head.weight`) is left to the post-load `tie_weights()`. A parameter **or buffer** that
+reaches device placement still on meta raises: filling either would train or score uninitialized
+memory that differs on every rank.
 
 The disk side is guarded symmetrically, because a ranged read is silently satisfiable by a checkpoint
-whose shapes disagree with the config: every materialized tensor's shape is checked against the live
-target, a fused expert axis longer than the config's expert count raises before the read, a
-per-expert fusion must cover the rank's full contiguous expert range with both GLU halves, keys
-matching no model tensor are warned once, and two disk keys claiming one tensor is refused (an
-error). The per-rank reads are fenced through the same
-rank-consensus seam the save side uses, so a torn shard on one rank fails the whole world with the
-real disk error instead of stranding peers at the next collective.
+whose shapes disagree with the config:
+
+- every materialized tensor's shape is checked against the live target;
+- a fused expert axis longer than the config's expert count raises before the read;
+- a per-expert fusion must cover the rank's full contiguous expert range with both GLU halves;
+- keys matching no model tensor are warned once;
+- two disk keys claiming one tensor is refused (an error).
+
+The per-rank reads are fenced through the same rank-consensus seam the save side uses, so a torn
+shard on one rank fails the whole world with the real disk error instead of stranding peers at the
+next collective.
 
 ## Checkpointing
 
@@ -366,49 +399,60 @@ real disk error instead of stranding peers at the next collective.
 | **Sharded** (`save_sharded_ep`) | every rank, in parallel | Per-rank files | `merge_ep_shards.py` first |
 
 **Gathered:** experts are `all_gather`ed (every rank must enter) but only the **save rank** keeps
-the tensors — global rank 0 on a shared FS, each node's local rank 0 otherwise. `retain` reaches
-inside the family gather, so a non-writing rank joins every collective and returns `{}` without
-running the layout assembly (per-expert split, re-interleave, transpose + `contiguous`, host copy)
-that follows it; the expert-axis gather itself receives into one preallocated buffer rather than a
-shard list plus a `cat`. Both bound the *transient* on every rank that keeps nothing. It streams one EP
-layer at a time into a `StageShardWriter` and finalizes with `close_as_hf_checkpoint()`, so its host
-RAM peaks at the replicated non-expert params plus one gathered layer and one pending shard
-(`save_max_shard_size`, default `5GB`) — not the whole checkpoint. At gpt-oss-120b (ep8) that peak
-is ~11 GB on the writer; at Qwen3.5-397B-A17B (ep64) it projects to ~26 GB. The plain FSDP2, CP and TP gathered
-saves stream the same way, one decoder layer at a time
-(`stream_gathered_checkpoint`) — ~22 GB on the writer at 397B instead of the whole 794 GB state
-dict.
+the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise.
+
+`retain` reaches inside the family gather, so a non-writing rank joins every collective and returns
+`{}` without running the layout assembly (per-expert split, re-interleave, transpose + `contiguous`,
+host copy) that follows it. The expert-axis gather itself receives into one preallocated buffer
+rather than a shard list plus a `cat`. Both bound the *transient* on every rank that keeps nothing.
+
+The save streams one EP layer at a time into a `StageShardWriter` and finalizes with
+`close_as_hf_checkpoint()`, so its host RAM peaks at the replicated non-expert params plus one
+gathered layer and one pending shard (`save_max_shard_size`, default `5GB`), not the whole
+checkpoint. At gpt-oss-120b (ep8) that peak is ~11 GB on the writer; at Qwen3.5-397B-A17B (ep64)
+~26 GB.
+
+The plain FSDP2, CP and TP gathered saves stream the same way, one decoder layer at a time
+(`stream_gathered_checkpoint`): ~22 GB on the writer at 397B instead of the whole 794 GB state dict.
 
 **Sharded exists for write bandwidth, not for memory.** N ranks write their own slice in parallel,
-so the pause at each save is bounded by one rank's shard instead of by the whole artifact funnelled
-through a single writer. Host memory is not a reason to choose it — a sharded save holds *more* per
-node (every local rank buffers its own slice). The cost is that nothing loads the result:
-`merge_ep_shards.py` must run before resume or serving, and the merge carries no optimizer state, so
-a resume from the merged directory warm-restarts. Pair it with `save_only_model: true`, as every
-shipped sharded config does. `save_max_shard_size` does not apply to these files — a per-rank shard
-is one file by design; the cap bounds the gathered save and the merged artifact.
+so the pause at each save is bounded by one rank's shard instead of by the whole artifact funneled
+through a single writer. Host memory is not a reason to choose it: a sharded save holds *more* per
+node (every local rank buffers its own slice).
+
+The cost is that nothing loads the result. `merge_ep_shards.py` must run before resume or serving,
+and the merge carries no optimizer state, so a resume from the merged directory warm-restarts. Pair
+it with `save_only_model: true`, as every shipped sharded config does.
+
+`save_max_shard_size` does not apply to these files; a per-rank shard is one file by design. The cap
+bounds the gathered save and the merged artifact.
 
 **Sharded** writes `model-{rank:05d}-of-{world_size:05d}.safetensors` plus an index carrying
-`ep_size`. `validate_ep_sharded_save()` rejects it **at trainer construction** whenever
-`ep_group_size != world_size`, `expert_tp_size > 1`, CP, native expert LoRA,
-`merge_expert_lora_on_save`, a `model_type` no EP layer class claims or whose EP layer exports the
-hub namespace through transformers' save-side revert (Step-3.7 Flash — the merge streams key by key
-and cannot apply it), or a non-shared multi-node filesystem. A run with **no EP layers at
-all** (dense, or an MoE without EP wrappers) is rejected too: every save would be an ordinary
-gathered checkpoint while a planned merge waits for shards that never appear. The merge raises on an
-incomplete shard set.
+`ep_size`. `validate_ep_sharded_save()` rejects it **at trainer construction** whenever any of these
+holds:
+
+- `ep_group_size != world_size`, `expert_tp_size > 1`, or CP;
+- native expert LoRA or `merge_expert_lora_on_save`;
+- a `model_type` no EP layer class claims, or whose EP layer exports the hub namespace through
+  transformers' save-side revert (Step-3.7 Flash; the merge streams key by key and cannot apply it);
+- a non-shared multi-node filesystem;
+- **no EP layers at all** (dense, or an MoE without EP wrappers): every save would be an ordinary
+  gathered checkpoint while a planned merge waits for shards that never appear.
+
+The merge raises on an incomplete shard set.
 
 ```bash
 python scripts/after_training/merge_ep_shards.py --input_dir checkpoint --output_dir merged
 ```
 
-On resume, EP is a **Path B** mode: the gathered HF checkpoint cannot load into the EP-fused
-tree, so the trained weights load at model construction — the training scripts repoint the model
-source at the checkpoint, and the checkpoint loader raises when the live model was constructed from
-anything else, rather than silently continuing on stale weights. The loader then restores adapters
-and extra trained params; optimizer, scheduler and balancing biases resume from trainer state. An
-unmerged sharded save is refused at resume resolution, and `load_best_model_at_end` is refused
-under EP full fine-tune (export the best checkpoint instead). See
+On resume, EP is a **Path B** mode: the gathered HF checkpoint cannot load into the EP-fused tree,
+so the trained weights load at model construction. The training scripts repoint the model source at
+the checkpoint, and the checkpoint loader raises when the live model was constructed from anything
+else, rather than silently continuing on stale weights.
+
+The loader then restores adapters and extra trained params; optimizer, scheduler and balancing
+biases resume from trainer state. An unmerged sharded save is refused at resume resolution, and
+`load_best_model_at_end` is refused under EP full fine-tune (export the best checkpoint instead). See
 [Checkpoints & Resume](../reference/checkpoints.md).
 
 **Non-EP params in EP+TP saves** take three routes: DTensor attention params through
@@ -419,7 +463,7 @@ replicas from rank 0. All ranks must enter the collectives even though only one 
 
 **Trainers.** Every trainer supports EP (`_supports_ep`, default `True`, never overridden), and the
 same flag gates the `ep_size == 1` grouped-GEMM wrappers. The families whose EP layer declares
-`_supports_weight_sync = False` narrow this — online and environmental GRPO raise at construction for
+`_supports_weight_sync = False` narrow this — online and async GRPO raise at construction for
 each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
@@ -471,36 +515,44 @@ roughly halving per doubling of `ep_size`. `ep4` is not a legal shape on 8 GPUs
 
 ## Adding a new model
 
-1. **Declare** the HF MoE class name in the wrapper's `HF_MODULE_NAMES`. `MOE_LAYER_MAP` is derived
-   from the `EPMoELayerBase` subclass tree by `build_moe_layer_map()` (duplicate names raise), and
-   `layers/roster.py` imports every module in the package, so dropping the file into `layers/` is the
-   whole registration.
+1. **Declare** the HF MoE class name in the wrapper's `HF_MODULE_NAMES`.
    `patch_moe_model_for_ep()` instantiates it and auto-detects `num_experts`.
+
+    `MOE_LAYER_MAP` is derived from the `EPMoELayerBase` subclass tree by `build_moe_layer_map()`
+    (duplicate names raise), and `layers/roster.py` imports every module in the package, so dropping
+    the file into `layers/` is the whole registration.
+
 2. **Choose a wrapper** by expert layout:
     - Pre-fused contiguous halves (`gate_up_proj` `[gate | up]`): reuse `EPGlm4MoELayer` or call
       `_init_fused_glu_params`.
     - Separate `gate_proj`/`up_proj` fused at init: reuse `EPQwen3MoELayer` / `EPBailingMoELayer`.
     - Interleaved fused weights (`[g0, u0, g1, u1, …]`): reuse `EPGptOssMoELayer`.
     - Custom routing: subclass `EPMoELayerBase`. The base owns `__init__` and expert-compute
-      dispatch; a contiguous-halves family only needs `forward`. Construction is a template with
-      one hook per step (`_detect_hidden_dim` / `_init_routing` / `_init_shared_experts` /
-      `_init_expert_compute` / `_init_expert_params`), so a family declares what differs and
-      inherits the rest — `self.top_k` included, which routing replay sizes its mask from.
+      dispatch; a contiguous-halves family only needs `forward`.
     - Per-expert hub layout (GLM4, LFM2): declare `_PER_EXPERT_UNFUSED_KEYS` and the base
       `gather_expert_state_dict` splits the fused gather automatically.
+
+    Construction is a template with one hook per step (`_detect_hidden_dim` / `_init_routing` /
+    `_init_shared_experts` / `_init_expert_compute` / `_init_expert_params`), so a family declares
+    what differs and inherits the rest, `self.top_k` included, which routing replay sizes its mask
+    from.
+
 3. **Expert detection:** declare `_NUM_EXPERTS_ATTR_PATHS` with the family's dotted attribute path —
    `detect_num_experts` is one base implementation for every family, probing those paths first and
    the generic container attributes second.
-4. **(Optional) bias-update balancing** — only for families doing routing *selection* in-layer
+
+4. **(Optional) bias-update balancing**, only for families doing routing *selection* in-layer
    (every wrapper except Gemma 4, whose router sits outside it, and Zaya, whose own gate owns the
-   buffer). Set
-   `_supports_bias_balancing = True` (+ `_ep_severs_aux_loss = True` when the family's aux-loss path
-   dies under EP); add the per-expert bias to selection scores before top-k and gather gate weights
-   from the **unbiased** scores; call `self._record_expert_load(...)`.
-   `_deepseek_biased_route(logits)` does both in one call. Also declare
-   `_NATIVE_BALANCING_BIAS_ATTR` when the family ships a checkpoint slot for the bias — without one
-   the family reaches only `bias_update_transient`, whose bias no export carries. See
+   buffer). See
    [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+
+    - Set `_supports_bias_balancing = True` (+ `_ep_severs_aux_loss = True` when the family's
+      aux-loss path dies under EP).
+    - Add the per-expert bias to selection scores before top-k and gather gate weights from the
+      **unbiased** scores; call `self._record_expert_load(...)`. `_deepseek_biased_route(logits)`
+      does both in one call.
+    - Declare `_NATIVE_BALANCING_BIAS_ATTR` when the family ships a checkpoint slot for the bias.
+      Without one the family reaches only `bias_update_transient`, whose bias no export carries.
 
 Routing weights must produce FP32 `topk_weights`. Test:
 

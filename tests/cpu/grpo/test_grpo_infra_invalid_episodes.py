@@ -2,8 +2,8 @@
 """Grading-infra-outage episodes must not poison the GRPO group baseline.
 
 A ``CodeContestsEnvironment`` episode whose submission grade lost every test to backend errors
-completes WITHOUT a ``RolloutResult.error``, so nothing stops the trainer reading its forced failure
-reward as a genuine wrong answer — biasing every sibling's advantage. The protocol-level contract:
+completes WITHOUT a ``RolloutResult.error``, so nothing stops the trainer reading its forced 0 grade
+as a genuine wrong answer — biasing every sibling's advantage. The protocol-level contract:
 
 - the environment marks the trajectory via ``EPISODE_INVALID_KEY`` (``Trajectory.episode_invalid``);
 - ``rollout_valid_mask`` excludes it from the baseline exactly like ``RolloutResult.error``;
@@ -21,7 +21,13 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, Trajectory
+from src.environments.base import (
+    EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
+    OBJECTIVE_REWARD_KEY,
+    REWARD_COMPONENTS_KEY,
+    Trajectory,
+)
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import (
@@ -56,10 +62,13 @@ def test_outage_marks_episode_invalid():
         tests_ran_ok=0,
         tests_infra_errors=3,
     )
-    reward = env._compute_reward(traj)
+    env._settle_grade(traj, None)
     assert traj.episode_invalid is True
     assert traj.info[EPISODE_INVALID_KEY] is True
-    assert reward == pytest.approx(env.failure_reward + env._shaped_base_reward(traj))
+    components = traj.info[REWARD_COMPONENTS_KEY]
+    assert components[OBJECTIVE_REWARD_KEY] == 0.0  # the forced failure grade, no rung on top
+    assert sum(components.values()) == pytest.approx(0.0)
+    assert traj.total_reward == pytest.approx(0.0)
 
 
 def test_genuine_failure_stays_valid():
@@ -73,14 +82,14 @@ def test_genuine_failure_stays_valid():
         tests_ran_ok=3,
         tests_infra_errors=0,
     )
-    env._compute_reward(traj)
+    env._settle_grade(traj, None)
     assert traj.episode_invalid is False
 
 
 def test_never_submitted_stays_valid():
     env = CodeContestsEnvironment(language="python")
     traj = _graded_traj(env)  # no submission_result at all
-    env._compute_reward(traj)
+    env._settle_grade(traj, None)
     assert traj.episode_invalid is False
 
 

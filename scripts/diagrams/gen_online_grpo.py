@@ -1,158 +1,166 @@
-"""Generate the Online GRPO (RLVR) pipeline diagram."""
+"""Generate the online GRPO (RLVR) pipeline for training-methods/grpo/online-grpo.md.
+
+The step is a cycle: the trainer renders and tokenizes, vLLM generates, the rule-based rewards
+score the completions, and the updated weights go back over NCCL before the next generation.
+The scoring band reads right-to-left under the generation band, so the loop closes on itself.
+"""
 
 import matplotlib.pyplot as plt
-from _flow_style import *
-from matplotlib.patches import FancyBboxPatch
+from _pipeline_style import *
 
-GREEN_BG = "#f0fdf4"
-GREEN_BORDER = "#86efac"
+W, H = 12.2, 6.71
+M = 0.305  # left/right margin, matching `title`'s 2.5% inset
+LANE = 1.50  # band gap: holds the completions arrow and the weight-sync return path
 
-fig, ax = plt.subplots(figsize=(15, 10))
-fig.patch.set_facecolor(BG)
-ax.set_xlim(0, 15)
-ax.set_ylim(0, 10)
-ax.set_aspect("equal")
+(COL_A, COL_B, COL_C), COL_W = columns(W, 3, M)
+ROW2_Y, ROW2_H = 1.17, 1.70
+ROW1_Y, ROW1_H = ROW2_Y + ROW2_H + LANE, 1.44
+SYNC_LANE_Y = ROW2_Y + ROW2_H + 0.45  # horizontal run of the weight-sync return
+
+fig, ax = plt.subplots(figsize=(W, H))
+ax.set_xlim(0, W)
+ax.set_ylim(0, H)
 ax.axis("off")
 
-ax.text(7.5, 9.7, "RLVR Online GRPO Pipeline", ha="center", va="top", fontsize=20, fontweight="bold", color=TEXT)
-ax.text(
-    7.5,
-    9.15,
-    "Live generation  \u00b7  Rule-based rewards  \u00b7  NCCL weight sync",
-    ha="center",
-    va="top",
-    fontsize=11,
-    color=TEXT_SEC,
-)
+title(ax, "Online GRPO (RLVR)", "A = (r − mean) / std over each group of num_generations")
 
+section(ax, M, H - 0.52, "GENERATE")
 
-draw_card, draw_arrow_h, draw_arrow_v = bind_drawers(ax, CardLayout(bullet_dx=0.2))
-
-# ── Main pipeline: 3 boxes in a row ──
-r1_y = 5.4
-ch = 2.8
-
-d_x, d_w = 0.3, 3.0
-draw_card(
-    d_x,
-    r1_y,
-    d_w,
-    ch,
+card(
+    ax,
+    COL_A,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
     "Dataset",
     [
-        "prompt (messages)",
-        "answer (ground truth)",
-        "Rule-based rewards",
-        "(no API calls needed)",
+        "prompt: text or messages",
+        "answer: the ground truth",
+        "each prompt × num_generations",
     ],
-    accent_left=True,
+    color=TEAL,
 )
 
-v_x, v_w = 5.3, 3.4
-draw_card(
-    v_x,
-    r1_y,
-    v_w,
-    ch,
-    "vLLM Server",
+card(
+    ax,
+    COL_B,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "Render + tokenize",
     [
-        "Dedicated inference GPU",
-        "Generates completions",
-        "NCCL weight sync",
-        "Separate process group",
+        "the trainer's chat template",
+        "TRL tokenizes the rendered text",
+        "over budget → dropped, not cut",
     ],
-    bg=ACCENT_LIGHT,
-    border=ACCENT,
-    title_size=12,
+    color=TEAL,
 )
 
-t_x, t_w = 10.8, 3.8
-draw_card(
-    t_x,
-    r1_y,
-    t_w,
-    ch,
-    "Training Loop",
+card(
+    ax,
+    COL_C,
+    ROW1_Y,
+    COL_W,
+    ROW1_H,
+    "vLLM server — GPU 7",
     [
-        "Compute log probs",
-        "Run reward functions",
-        "Compute advantages",
-        "Policy gradient update",
-        "Sync weights to vLLM",
+        "separate container, :8000",
+        "server mode only, never colocate",
+        "applies no template of its own",
     ],
+    color=BLUE,
 )
 
-arrow_y = r1_y + ch / 2
-draw_arrow_h(d_x + d_w, arrow_y, v_x, "prompts")
-draw_arrow_h(v_x + v_w, arrow_y, t_x, "completions")
+section(ax, M, ROW2_Y + ROW2_H + 0.38, "SCORE + UPDATE")
 
-ax.annotate(
-    "",
-    xy=(v_x + v_w, r1_y + 0.2),
-    xytext=(t_x, r1_y + 0.2),
-    arrowprops={"arrowstyle": "-|>", "color": ACCENT, "lw": 1.3, "shrinkA": 6, "shrinkB": 6},
-)
-
-sync_mx = (v_x + v_w + t_x) / 2
-ax.text(
-    sync_mx, r1_y + 0.2 - 0.2, "NCCL weight sync", ha="center", va="center", fontsize=8.5, color=TEXT_SEC, zorder=5
-)
-
-rf_y = 0.4
-rf_h = 3.6
-rf_box = FancyBboxPatch(
-    (0.3, rf_y), 14.4, rf_h, boxstyle="round,pad=0.06", facecolor=CARD, edgecolor=CARD_BORDER, linewidth=0.8
-)
-ax.add_patch(rf_box)
-ax.text(
-    7.5,
-    rf_y + rf_h - 0.2,
-    "Reward Functions  (rule-based, no API calls)",
-    ha="center",
-    va="top",
-    fontsize=13,
-    fontweight="bold",
-    color=TEXT,
-)
-sep_ry = rf_y + rf_h - 0.55
-ax.plot([0.7, 14.3], [sep_ry, sep_ry], color=BORDER_SOFT, lw=0.6)
-
-rw = 6.2
-rh = 2.0
-draw_card(
-    0.8,
-    rf_y + 0.3,
-    rw,
-    rh,
-    "accuracy_reward",
+card(
+    ax,
+    COL_C,
+    ROW2_Y,
+    COL_W,
+    ROW2_H,
+    "Rewards",
     [
-        "Extract \\boxed{answer} from completion",
-        "Compare to ground truth",
-        "Returns 1.0 or 0.0",
+        r"accuracy_reward: last \boxed{}",
+        "equals answer → 1.0 / 0.0",
+        "format_reward: regex, off",
+        "weighted sum → reward_weights",
     ],
-    bg=GREEN_BG,
-    border=GREEN_BORDER,
-    title_size=11,
+    color=TEAL,
 )
 
-draw_card(
-    7.8,
-    rf_y + 0.3,
-    rw,
-    rh,
-    "format_reward",
+card(
+    ax,
+    COL_B,
+    ROW2_Y,
+    COL_W,
+    ROW2_H,
+    "Group advantages",
     [
-        "Match regex pattern",
-        "e.g., <think>...</think>",
-        "Returns 1.0 or 0.0",
+        "A = (r − mean) / std, per group",
+        "scale_rewards: group",
+        "all-equal group → A = 0",
+        "num_generations rows per prompt",
     ],
-    bg=GREEN_BG,
-    border=GREEN_BORDER,
-    title_size=11,
+    color=AMBER,
 )
 
-draw_arrow_v(t_x + t_w / 2, r1_y, rf_y + rf_h)
+card(
+    ax,
+    COL_A,
+    ROW2_Y,
+    COL_W,
+    ROW2_H,
+    "GRPO loss + step",
+    [
+        "recipes: loss_type grpo, beta 0",
+        "IS ratio from the sampling logps",
+        "sequence_mask: ratio > 3.0 → 0",
+        "FSDP2 / EP / TP update",
+    ],
+    color=BLUE,
+)
+
+row1_mid = ROW1_Y + ROW1_H / 2
+row2_mid = ROW2_Y + ROW2_H / 2
+arrow(ax, COL_A + COL_W, row1_mid, COL_B, row1_mid, "prompts")
+arrow(ax, COL_B + COL_W, row1_mid, COL_C, row1_mid, "token ids", color=TEAL)
+arrow(
+    ax,
+    COL_C + 0.40 * COL_W,
+    ROW1_Y,
+    COL_C + 0.40 * COL_W,
+    ROW2_Y + ROW2_H,
+    "completions + logprobs",
+    color=TEAL,
+    side="right",
+)
+arrow(ax, COL_C, row2_mid, COL_B + COL_W, row2_mid, "reward r")
+arrow(ax, COL_B, row2_mid, COL_A + COL_W, row2_mid, "advantage")
+
+sync_x0 = COL_A + 0.85 * COL_W
+sync_x1 = COL_C + 0.10 * COL_W
+polyline_arrow(
+    ax,
+    [
+        (sync_x0, ROW2_Y + ROW2_H),
+        (sync_x0, SYNC_LANE_Y),
+        (sync_x1, SYNC_LANE_Y),
+        (sync_x1, ROW1_Y),
+    ],
+    "NCCL weight sync — before the next generation",
+    ((sync_x0 + sync_x1) / 2, SYNC_LANE_Y + 0.09),
+    color=VIOLET,
+)
+
+footnote(
+    ax,
+    M,
+    0.22,
+    W - 2 * M,
+    "vLLM only, server mode only: the engine must own GPUs no trainer rank uses — a rank cannot broadcast to itself.",
+)
 
 save(plt.gcf(), "online_grpo_pipeline")
 plt.close()
-print("\u2713 online_grpo_pipeline.png")
+print("✓ online_grpo_pipeline.png")

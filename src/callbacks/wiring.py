@@ -70,7 +70,7 @@ def build_perf_callbacks(
             ``data_parallel_size`` every cluster-throughput figure divides by.
         policy_gradient_loss: True for GRPO-family trainers, whose loss never adds the router aux loss;
             makes ``aux_loss`` balancing warn-and-no-op and steers users to ``bias_update``.
-        syncs_to_external_generator: True for on-policy RL syncing weights to a live vLLM generator.
+        syncs_to_external_generator: True for on-policy RL syncing weights to a live rollout engine.
             The weight-sync does not forward ``bias_update``'s routing bias, so it is downgraded to
             ``none`` for trainer↔generator routing parity — which, with ``aux_loss`` inert under a
             policy-gradient loss, leaves such runs with no router balancing at all.
@@ -88,8 +88,8 @@ def build_perf_callbacks(
     if syncs_to_external_generator and mode in BIAS_UPDATE_MODES:
         logger.warning(
             f"moe_balancing={mode} is incompatible with on-policy weight-sync RL: the routing bias "
-            "isn't forwarded by the vLLM weight-sync (parameters only — an adopted native slot is a "
-            "buffer), so trainer↔generator routing diverges. Downgrading to moe_balancing=none — "
+            "isn't forwarded by the rollout-engine weight sync (parameters only — an adopted native slot "
+            "is a buffer), so trainer↔generator routing diverges. Downgrading to moe_balancing=none — "
             "with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING "
             "AT ALL and router_balancing_rate is unreachable. Families that only balance via "
             "bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here."

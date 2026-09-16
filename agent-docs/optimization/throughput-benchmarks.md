@@ -4,8 +4,14 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **8× NVIDIA B300** 
 
 ## Setup
 
-- **GPU**: B300 SXM6 (288 GB HBM3e, 148-SM die). Peak TFLOPS from the toolkit's registry (`src/hardware.py`): bf16 **2250 TF**, fp8 4500 TF, fp4 9000 TF; the measured best large square bf16 GEMM is ~1800 TF (80% of peak). The peak scales the MFU/S-MFU percentages only — the tok/s/GPU and achieved-TFLOPS columns below do not use it.
-- **Framework**: PyTorch 2.11+cu130 + DeepEP + Flash Attention + Liger. The Blackwell image ships FA2 and FA4 co-installed; `--attn_implementation` defaults to `None` in `tests/common/benchmark_args.py`, which auto-selects `flash_attention_4`. **All tables are FA4 unless a row says otherwise.** FA4 is ≈ +13% end-to-end for MoE/EP but 1.1–2.3× for dense long-context — see [Flash Attention](flash-attention.md).
+- **GPU**: B300 SXM6 (288 GB HBM3e, 148-SM die). Peak TFLOPS from the toolkit's registry (`src/hardware.py`): bf16 **2250 TF**, fp8 4500 TF, fp4 9000 TF; the measured best large square bf16 GEMM is ~1800 TF (80% of peak).
+
+    The peak scales the MFU/S-MFU percentages only; the tok/s/GPU and achieved-TFLOPS columns below do not use it.
+
+- **Framework**: PyTorch 2.11+cu130 + DeepEP + Flash Attention + Liger. The Blackwell image ships FA2 and FA4 co-installed; `--attn_implementation` defaults to `None` in `tests/common/benchmark_args.py`, which auto-selects `flash_attention_4`. **All tables are FA4 unless a row says otherwise.**
+
+    FA4 is ≈ +13% end-to-end for MoE/EP but 1.1–2.3× for dense long-context; see [Flash Attention](flash-attention.md).
+
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`.
 
@@ -46,38 +52,52 @@ throughput/memory only.
 All metrics computed by `EfficiencyCallback` (`src/callbacks/efficiency.py`).
 
 **Achieved TFLOPS** = `(tokens_per_gpu × (6·N_trainable + 4·N_frozen) + attention_score_flops / tp_size) / step_time`
-(PaLM/Megatron FLOP count). The linear-projection term is `6·N` for trainable params (2N forward + 4N backward)
-and `4·N` for frozen ones (forward + input-gradient backward, no weight gradient — a LoRA base or frozen
-layers); for full fine-tuning `N_frozen = 0` and it is the usual `6·N_local`. `N` counts all params physically
-on this GPU (DTensor-aware for TP). `tokens_per_gpu` = `num_input_tokens_seen / world_size`, further divided by
-`cp_size` (each CP rank receives the full `input_ids`; the wrapper splits inside forward).
+(PaLM/Megatron FLOP count).
+
+The linear-projection term is `6·N` for trainable params (2N forward + 4N backward) and `4·N` for frozen ones
+(forward + input-gradient backward, no weight gradient — a LoRA base or frozen layers); for full fine-tuning
+`N_frozen = 0` and it is the usual `6·N_local`. `N` counts all params physically on this GPU (DTensor-aware
+for TP).
+
+`tokens_per_gpu` = `num_input_tokens_seen / world_size`, further divided by `cp_size` (each CP rank receives
+the full `input_ids`; the wrapper splits inside forward).
 
 The attention-score term costs each decoder layer at `6 × keys × heads·(d_qk + d_v)` per token (QKᵀ and Attn·V,
-forward + backward — `12·S·H` for standard heads), with `keys` set by the layer's `config.layer_types` entry
-(`src/models/attention_layout.py`): the document length for full attention, `min(L, sliding_window)` for
-sliding, `min(L, attention_chunk_size)` for chunked, the top-k plus a pooled indexer for GLM-5's sparse
-attention, `L / compress_rate` plus the local band for DeepSeek-V4's compressed layers, and nothing for
-linear-attention / conv layers. Full attention is costed at every key (the PaLM convention, not the causal
-half); bounded layers at the keys their kernel visits. `L` is each **document's** length: the trainer costs
-every batch's documents (`cu_seq_lens_q`, `position_ids` resets, or the padded row) and the callback swaps that
-rank-local measurement in per step, so a packed 64k row of 1–40k-token documents is not costed as one 64k
-sequence. A trainer whose collator emits no `input_ids` keeps the config term (every token in a `max_seq_len`
-document) — every GRPO trainer, KTO, SMPO and embedding. The layer set is this rank's own, so under PP
-([not yet available](../parallelism/pipeline-parallelism.md)) each stage's term would match its real slice
-rather than an even split of the depth. The measured term divides by `tp_size` (heads are sharded) and,
-under Ulysses CP, by `cp_size` (the wrapper splits the sequence's heads inside forward); the tokens divide
-by `world_size` and `cp_size`, never by `ep_size`. Per-step wiring and the logged fields:
+forward + backward; `12·S·H` for standard heads). Full attention is costed at every key (the PaLM convention,
+not the causal half); bounded layers at the keys their kernel visits. `keys` is set by the layer's
+`config.layer_types` entry (`src/models/attention_layout.py`):
+
+| `layer_types` entry | `keys` |
+|---|---|
+| full attention | the document length `L` |
+| sliding | `min(L, sliding_window)` |
+| chunked | `min(L, attention_chunk_size)` |
+| GLM-5 sparse attention | the top-k plus a pooled indexer |
+| DeepSeek-V4 compressed layers | `L / compress_rate` plus the local band |
+| linear-attention / conv | nothing |
+
+`L` is each **document's** length: the trainer costs every batch's documents (`cu_seq_lens_q`, `position_ids`
+resets, or the padded row) and the callback swaps that rank-local measurement in per step, so a packed 64k
+row of 1–40k-token documents is not costed as one 64k sequence. A trainer whose collator emits no `input_ids`
+keeps the config term (every token in a `max_seq_len` document): every GRPO trainer, KTO, SMPO and embedding.
+
+The layer set is this rank's own, so under PP ([not yet available](../parallelism/pipeline-parallelism.md))
+each stage's term would match its real slice rather than an even split of the depth. The measured term
+carries the same divisors as the tokens: `tp_size` (heads are sharded) and, under Ulysses CP, `cp_size`
+(the wrapper splits the sequence's heads inside forward). Per-step wiring and the logged fields:
 [Callbacks](../training-methods/callbacks.md#efficiencycallback).
 
 **S-MFU** (sparsity-aware utilization) is the meaningful roofline fraction for MoE: it scales the *expert*
 FLOP term by `(top_k / num_experts) × ep_size` before dividing by `step_time × peak_gpu_flops`, so it does
 not credit experts that never fired. Shared experts, router and attention params count at full weight;
-`expert_tp_size` does not appear, since it already divides the local expert params. The `ep_size` factor is
-not a sharding correction — a rank holds `num_experts / ep_size` experts but serves the whole EP group's
-tokens, so per-rank active FLOPs/token is ep-invariant and S-MFU stays comparable across EP degrees. With
-`num_full_model_params` set, the full expert bank is reconstructed as
-`local_expert_params × ep_size × expert_tp_size`, so pure ETP is counted too. If top-k is not detected the
-sparsity factor stays 1.0 and S-MFU silently collapses to plain MFU — check the
+`expert_tp_size` does not appear, since it already divides the local expert params.
+
+The `ep_size` factor is not a sharding correction: a rank holds `num_experts / ep_size` experts but serves
+the whole EP group's tokens, so per-rank active FLOPs/token is ep-invariant and S-MFU stays comparable across
+EP degrees. With `num_full_model_params` set, the full expert bank is reconstructed as
+`local_expert_params × ep_size × expert_tp_size`, so pure ETP is counted too.
+
+If top-k is not detected the sparsity factor stays 1.0 and S-MFU silently collapses to plain MFU; check the
 `S-MFU: N experts, top_k=K` startup line.
 
 Compare configs with tok/s/GPU and achieved TFLOPS; reach for S-MFU only when you need a roofline fraction
@@ -129,7 +149,9 @@ Achieved TFLOPS rises with sequence length (longer sequences amortize the Ulysse
 
 ### EP+TP
 
-TP shards attention (Q/K/V/O) via DTensor; EP distributes experts. **EP+TP requires `ep_size` to be a multiple of `tp_size`** — each EP group must span whole TP groups (the validator rejects `ep_size % tp_size != 0`). On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all valid); `ep2tp8`/`ep4tp8` are rejected (ep < tp). The table below is `ep8tp8` (one TP group of 8). DP=1, so tok/s/GPU equals cluster throughput.
+TP shards attention (Q/K/V/O) via DTensor; EP distributes experts. **EP+TP requires `ep_size` to be a multiple of `tp_size`**: each EP group must span whole TP groups (the validator rejects `ep_size % tp_size != 0`).
+
+On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all valid); `ep2tp8`/`ep4tp8` are rejected (ep < tp). The table below is `ep8tp8` (one TP group of 8). DP=1, so tok/s/GPU equals cluster throughput.
 
 | SeqLen | tok/s/GPU | TFLOPS | peak mem | step |
 |--------|-----------|--------|----------|------|
@@ -196,9 +218,11 @@ The per-MoE-layer CUDA self-time at b1/s4096 (serialized attribution via `benchm
 
 The dispatch all-to-all is a near-fixed per-step latency (~49 ms here), so it dominates at small `M`. The
 expert GEMM is a minority because the model is very sparse (per-expert GEMM stays small-`M` /
-weight-bandwidth-bound), which is also why utilization reads low. Raising batch or sequence grows the compute
-term against the fixed comm cost — throughput plateaus around b4 (b8 only adds memory). At these shapes EP
-matches dense-FSDP throughput at ~6× less local memory (26 vs 148 GB).
+weight-bandwidth-bound), which is also why utilization reads low.
+
+Raising batch or sequence grows the compute term against the fixed comm cost; throughput plateaus around b4
+(b8 only adds memory). At these shapes EP matches dense-FSDP throughput at ~6× less local memory (26 vs
+148 GB).
 
 **Feature A/B at the optimal point (ep8 b4 s4096):**
 
@@ -211,10 +235,13 @@ matches dense-FSDP throughput at ~6× less local memory (26 vs 148 GB).
 | fp8 / fp4 | net-slower | — | bf16 is the throughput path at these shapes ([low-precision](low-precision-moe-kernels.md)) |
 
 `sdpa` silently drops GptOss attention sinks, so `validate_attn_implementation` orders it below flex and FA
-in the fallback chain — use FA4 or flex. The roofline crossover (gpt-oss expert K=N=2880: weight-bandwidth-
-bound below ≈256–512 tokens/expert, compute-bound above; ridge AI ≈ 275 on B300) is why bf16 stays optimal —
-the small-`M` experts sit in the bandwidth-bound regime where fp8/fp4 quant overhead only loses.
-`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is free as a default — neutral on dense/ep2, **+9.7%
+in the fallback chain; use FA4 or flex.
+
+The roofline crossover (gpt-oss expert K=N=2880: weight-bandwidth-bound below ≈256–512 tokens/expert,
+compute-bound above; ridge AI ≈ 275 on B300) is why bf16 stays optimal: the small-`M` experts sit in the
+bandwidth-bound regime where fp8/fp4 quant overhead only loses.
+
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is free as a default: neutral on dense/ep2, **+9.7%
 on ep8** ([DeepEP](../infrastructure/deepep.md#environment-variables)).
 
 > **Profiling EP.** `torch.profiler` (CUPTI) does not complete a step of a multi-GPU EP run with Flash

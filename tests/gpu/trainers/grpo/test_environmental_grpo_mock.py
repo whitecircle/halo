@@ -446,11 +446,7 @@ def test_react_environment_basic_flow():
     from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
-    env = ReActEnvironment(
-        tool_registry=registry,
-        max_turns=5,
-        success_reward=1.0,
-    )
+    env = ReActEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(
         ["What is 25 * 4?"],

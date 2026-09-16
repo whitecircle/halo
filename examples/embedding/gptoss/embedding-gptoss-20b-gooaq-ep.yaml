@@ -5,9 +5,8 @@
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2   # FA2 carries no sink argument, so reset_sinks (default
-                                         #   true) sets self_attn.sinks = None and the save re-emits
-                                         #   dtype.min; live sinks are rejected under FA2
+attn_implementation: flash_attention_2   # FA2 carries no sink argument; live sinks are rejected
+                                         #   under it, so reset_sinks must stay on (its default)
 
 # --- Parallelism ---
 expert_parallel_size: 8

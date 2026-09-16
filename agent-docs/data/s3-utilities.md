@@ -44,13 +44,24 @@ HALO_S3_DATASET_CACHE_DIR="$LARGE_VOLUME"/s3_datasets torchrun --nproc_per_node=
 How it works:
 
 - **Cache key**: MD5 of `bucket/key` → one subdirectory per dataset.
-- **File locking**: `filelock.FileLock` prevents duplicate downloads across processes.
-- **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache.
-- **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a mismatch triggers a re-download. A marker carrying no fingerprint is trusted and upgraded in place.
-- **Offline-resilient hit**: a complete cache skips the existence probe and the download, and the staleness probe fails soft — an unreachable S3 (no credentials, expired SSO, outage) reads as "cannot validate" and the cache is served. A *cold* cache with S3 unreachable raises instead, naming the cache path and the way out.
-- **Control-file mirror**: `metadata.json` and `shard_index.json` reads (`read_control_json_with_cache`) write a local mirror under `$HALO_S3_DATASET_CACHE_DIR/control/` on every live read and serve it when S3 is unreachable, so preprocessed/sharded classification survives an outage too — not just the dataset bytes. Live wins; a live 404 drops the mirror, so a re-pushed raw dataset cannot keep its old classification offline.
 
-The per-shard cache used by sharded pre-processed datasets (`src/data/sources/sharded_dataset.py`) uses the same marker + fingerprint scheme. The first probe that finds S3 unreachable logs a warning and skips the remaining shard probes (an empty prefix listing is a real absence, not a transport fault, and does not disarm them), so a fully cached offline run pays a few control-read timeouts — the sharded probe and per-split index each try live first — not one per shard.
+- **File locking**: `filelock.FileLock` prevents duplicate downloads across processes.
+
+- **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache.
+
+- **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a mismatch triggers a re-download. A marker carrying no fingerprint is trusted and upgraded in place.
+
+- **Offline-resilient hit**: a complete cache skips the existence probe and the download, and the staleness probe fails soft.
+
+    An unreachable S3 (no credentials, expired SSO, outage) reads as "cannot validate" and the cache is served. A *cold* cache with S3 unreachable raises instead, naming the cache path and the way out.
+
+- **Control-file mirror**: `metadata.json` and `shard_index.json` reads (`read_control_json_with_cache`) write a local mirror under `$HALO_S3_DATASET_CACHE_DIR/control/` on every live read and serve it when S3 is unreachable.
+
+    Preprocessed/sharded classification therefore survives an outage too, not just the dataset bytes. Live wins; a live 404 drops the mirror, so a re-pushed raw dataset cannot keep its old classification offline.
+
+The per-shard cache used by sharded pre-processed datasets (`src/data/sources/sharded_dataset.py`) uses the same marker + fingerprint scheme. The first probe that finds S3 unreachable logs a warning and skips the remaining shard probes, so a fully cached offline run pays a few control-read timeouts (the sharded probe and per-split index each try live first), not one per shard.
+
+An empty prefix listing is a real absence, not a transport fault, and does not disarm the probes.
 
 Each rank's shard loads join across the world on the c10d store (`DIST_STORE_TIMEOUT_HOURS`), so one rank's failed or slow first-run download surfaces its real cause on every rank instead of an NCCL watchdog dump.
 
@@ -125,9 +136,14 @@ python scripts/before_training/s3_datasets.py delete my_folder --recursive --yes
 
 Commands: `push`, `download`, `list`, `exists`, `delete`. Every command takes `--subfolder/-s`,
 `--bucket/-b`, `--verbose/-v` and `--quiet/-q` (suppresses the transfer progress bar, so it acts on
-push/download only); `--no-overwrite` is push/download,
-`--recursive/-r` is list/delete, `--yes/-y` is delete, and `--max-keys/-n` is list (default 100 here,
-unlike `list_objects`'s 1000). CLI `delete` removes ONE object;
-`--recursive/-r` is opt-in and removes every object under the prefix (the Python `delete()` above
-defaults the other way, `recursive=True`). A non-recursive delete aimed at a prefix is refused rather
-than reported as a no-op success. `--yes` skips the confirmation.
+push/download only). The other flags are per command:
+
+| Flag | Commands | Notes |
+|---|---|---|
+| `--no-overwrite` | push, download | |
+| `--recursive/-r` | list, delete | Opt-in on `delete`: removes every object under the prefix. The Python `delete()` above defaults the other way (`recursive=True`) |
+| `--yes/-y` | delete | Skips the confirmation |
+| `--max-keys/-n` | list | Default 100 here, unlike `list_objects`'s 1000 |
+
+CLI `delete` removes ONE object; a non-recursive delete aimed at a prefix is refused rather than
+reported as a no-op success.
