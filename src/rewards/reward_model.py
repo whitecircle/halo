@@ -80,7 +80,17 @@ class ServedRewardModel(Scorer):
 
     async def _score_batch(self, client: httpx.AsyncClient, samples: Sequence[ScoringSample]) -> list[ScoreResult]:
         term = self.term
-        texts = self._render(samples)
+        # The load stays loud (the launch probe surfaces a bad tokenizer); the render does not. A
+        # ``full`` transcript hands the template tool turns and tool_calls, which a reward model's
+        # template may refuse — and a raise here escapes every guard up to the actor's catch-all,
+        # masking the whole episode for the rest of the run.
+        self._tokenizer_for_rendering()
+        try:
+            texts = self._render(samples)
+        except Exception as e:
+            logger.warning("reward model %r render failed: %s: %s", term.name, type(e).__name__, e)
+            error = f"render failed: {type(e).__name__}: {e}"
+            return [ScoreResult(None, error=error) for _ in samples]
         try:
             logits = await self._logits(client, texts)
         except Exception as e:

@@ -165,7 +165,13 @@ class GenerativeJudge(Scorer):
 
     async def _grade(self, client: AsyncOpenAI, sample: ScoringSample, max_tokens: int) -> ScoreResult:
         term = self.term
-        kwargs = self._request_kwargs(sample, max_tokens)
+        # Building the prompt serializes the row's reference; a raise here would escape every guard up
+        # to the actor's catch-all and mask the whole episode, so it books as a verdict-less result.
+        try:
+            kwargs = self._request_kwargs(sample, max_tokens)
+        except Exception as e:
+            logger.warning("judge %r prompt build failed: %s: %s", term.name, type(e).__name__, e)
+            return ScoreResult(None, error=f"prompt build failed: {type(e).__name__}: {e}")
         for attempt in range(_UPSTREAM_RETRIES + 1):
             try:
                 completion = await client.chat.completions.create(**kwargs)

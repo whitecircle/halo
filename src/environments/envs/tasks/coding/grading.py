@@ -453,7 +453,7 @@ def grade_solution(
     if resolved is not None and not resolved.is_compiled:
         # Floor an interpreted language's budget so a C++-tuned limit doesn't TLE a slower CPython solution.
         limit = max(limit, spec.default_timeout)
-    else:
+    elif resolved is not None:
         # Statement limits are calibrated for C++ on a dedicated judge; the scale pays for shared grading cores.
         limit *= spec.compiled_time_limit_scale
     return run_solution_against_tests(

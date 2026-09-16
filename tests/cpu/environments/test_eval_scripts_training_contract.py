@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """``--training_config`` makes an eval sample under the generation contract the policy was trained with.
 
 The shared eval flags carry temperature, top-p, max tokens and a request timeout; the training

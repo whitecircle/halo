@@ -1,6 +1,7 @@
 """Configuration for async Environmental GRPO training (DistributedAsyncEnvironmentalGRPOTrainer)."""
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from math import isfinite
 from typing import Any, Literal
@@ -17,6 +18,7 @@ from src.configs.rollout_config import (
     RolloutConfig,
 )
 from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
+from src.environments.episode import DEFAULT_UNDER_USE_WEIGHT
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +345,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     )
 
     reasoning_compliance_under_use_weight: float = field(
-        default=0.3,
+        default=DEFAULT_UNDER_USE_WEIGHT,
         metadata={
             "help": "Weight of the below-band (under-use) side of the calibration term, relative to the "
             "over-use side's 1.0: a turn with r reasoning tokens under 0.3x the budget B pays "
@@ -509,6 +511,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         # A fraction of the step's corrected trajectories/tokens; 0 would trip on every step, >1 never.
         if self.skip_update_masked_frac is not None and not 0.0 < self.skip_update_masked_frac <= 1.0:
             raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self.skip_update_masked_frac}")
+        if not isinstance(self.rollout_chat_template_kwargs, Mapping):
+            raise ValueError(
+                "rollout_chat_template_kwargs must be a mapping of template variables, got "
+                f"{type(self.rollout_chat_template_kwargs).__name__}"
+            )
         if "reasoning_effort" in self.rollout_chat_template_kwargs:
             raise ValueError(
                 "rollout_chat_template_kwargs must not carry reasoning_effort: the level is per episode and "

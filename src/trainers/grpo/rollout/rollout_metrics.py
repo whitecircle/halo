@@ -15,6 +15,7 @@ import torch.distributed as dist
 from accelerate.utils import gather_object
 
 from src.distributed.runtime import (
+    current_device,
     fs_aware_save_rank,
     is_multi_rank_run,
     is_output_shared_filesystem,
@@ -40,7 +41,9 @@ def gathered_fractions(
     Call on every rank. Per-rank fractions cannot be averaged — their denominators differ, and TRL's
     ``log`` would report the main process's alone. A world denominator of 0 reads 0.
     """
-    device = next((v.device for pair in pairs for v in pair if isinstance(v, torch.Tensor)), None)
+    # A pair of plain numbers would otherwise stack on CPU and hand the accelerator's NCCL gather a
+    # CPU tensor; the device the trainer computes on is the right default.
+    device = next((v.device for pair in pairs for v in pair if isinstance(v, torch.Tensor)), current_device())
     local = torch.stack([torch.as_tensor(v, device=device).double() for pair in pairs for v in pair])
     counts = gather_fn(local).view(-1, 2 * len(pairs)).sum(dim=0)
     return (counts[0::2] / counts[1::2].clamp(min=1)).tolist()

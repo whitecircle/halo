@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """A completion without ``usage.completion_tokens`` counts its captured token ids, never a word count.
 
 ``len(text.split())`` fabricated a length that fed ``episode/generation_tokens`` and the

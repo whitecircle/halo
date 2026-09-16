@@ -17,10 +17,11 @@ dataset:
 - HuggingFaceH4/ultrachat_200k@train_sft
 test_size: 0.01
 conversation_field: messages
-# The multiturn jinja ends EVERY assistant turn with <|return|>, the completion-span terminator, and
-# renders the <|channel|>final the served model emits; the bundled harmony template closes non-final
-# turns with <|end|>, which is not a terminator, so on multi-turn rows only the last assistant turn
-# would train.
+# The multiturn jinja renders EVERY assistant turn with <|channel|>final and ends each with <|return|>,
+# the completion-span terminator, so completion-only masking trains every turn. Harmony renders a plain
+# assistant turn channel-less (<|start|>assistant<|message|>...) and ends only the final turn with
+# <|return|> (earlier turns close with <|end|>, not a terminator): the marker below would then match no
+# turn at all, and its channel-less spelling would train only the last assistant turn.
 chat_template: jinja-templates/gpt-oss/gpt-oss-multiturn.jinja
 force_chat_template: true
 assistant_message_template: <|start|>assistant<|channel|>final<|message|>

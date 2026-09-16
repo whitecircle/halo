@@ -101,7 +101,7 @@ enable_prefetch: true       # one-step staleness corrected by the sampling-logpr
 
 # --- Dataset ---
 # HardTests problems with sound checkers, banded by Codeforces rating; `medium` (1500-1999) is the entry band,
-# `hard` and `extra-hard` the later curriculum stages (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+# `hard` and `extra-hard` the later curriculum stages (agent-docs/training-methods/grpo/environments/code-contests.md#dataset).
 dataset:
 - your-org/code-contests-hardtests-rl:medium
 

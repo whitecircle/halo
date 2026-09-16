@@ -10,7 +10,7 @@ from _pipeline_style import *
 
 W, H = 12.4, 4.9
 
-COL_W, COL_XS = 2.8, (0.3, 4.8, 9.3)
+COL_XS, COL_W = columns(W, 3, 0.3, 1.7)
 ROW_H = card_height(2)
 ROW_YS = (2.72, 1.25)
 HEAD_Y = 4.40

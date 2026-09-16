@@ -304,7 +304,7 @@ def main():
         async_config.get_server_urls(),
         temperature=async_config.rollout_temperature,
         top_p=async_config.rollout_top_p,
-        sequence_ratio_active=async_config.isr_geo_band_min is not None,
+        sequence_ratio_active=async_config.isr_geo_band_min is not None or async_config.isr_opsm_delta is not None,
         backend=async_config.rollout_backend,
     )
 

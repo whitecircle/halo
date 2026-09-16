@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """An engine abort is re-issued, never stepped: the fragment is the engine's doing, not the policy's.
 
 SGLang's sync pause aborts every in-flight request, and ``finish_reason: abort`` is an engine-cut
@@ -15,6 +16,8 @@ from src.configs.rollout_config import RolloutConfig
 from src.environments.episode import TurnGeneration
 from src.environments.ray_actors import EnvironmentActor
 from src.inference.response import FINISH_REASON_ABORT
+
+_OBSERVATION = [{"role": "user", "content": "2+2?"}]
 
 
 def _actor():
@@ -50,7 +53,7 @@ async def test_an_aborted_turn_is_re_issued_for_the_same_observation():
     result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", RolloutConfig(max_retries=1))
 
     assert result.error is None, result.error
-    assert len(served) == 2 and served[0] == served[1], "the re-issue must replay the SAME observation"
+    assert served == [_OBSERVATION, _OBSERVATION], "the re-issue must replay the SAME observation"
     assert result.episode_length == 1, "the fragment never reached the env"
     assert result.trajectory.info.get("length_cutoff_turns", 0) == 0, "an abort must not spend a recovery"
     assert result.generation_tokens == 5, "an aborted fragment is not part of the episode's generation"

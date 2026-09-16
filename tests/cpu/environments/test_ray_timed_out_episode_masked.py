@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """A timed-out episode must be an INVALID row, not a valid zero-reward group member.
 
 Both deadlines surface as a bare ``TimeoutError`` — ``asyncio.wait_for`` on the episode deadline,

@@ -24,12 +24,16 @@ def build_scorer(term: RewardTerm) -> Scorer:
 class RewardComposer:
     """The terms of one reward: prices their scores into components and scores the external ones.
 
-    At most one term is the environment's own grade; every other term is scored through
-    :func:`build_scorer`, built on first use so construction stays offline.
+    A reward carries at least one term and at most one environment grade; every other term is scored
+    through :func:`build_scorer`, built on first use so construction stays offline.
     """
 
     def __init__(self, terms: Sequence[RewardTerm]):
         self.terms = tuple(terms)
+        if not self.terms:
+            # Without a term the episode reward is turn shaping alone: a run with no objective, which
+            # trains on noise rather than failing.
+            raise ValueError("a reward needs at least one term")
         environment_terms = [term for term in self.terms if isinstance(term, EnvironmentTerm)]
         if len(environment_terms) > 1:
             raise ValueError("a reward carries at most one environment term")

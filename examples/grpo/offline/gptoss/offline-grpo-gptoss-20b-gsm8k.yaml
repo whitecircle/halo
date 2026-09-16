@@ -10,15 +10,15 @@ attn_implementation: flash_attention_2  # FA2 carries no sink argument; live sin
 model_init_kwargs:
   output_router_logits: true
   router_aux_loss_coef: 0.001
-moe_balancing: none  # aux_loss is a warn-and-no-op under GRPO trainers; router logits kept for MoE metrics
+moe_balancing: none  # explicit aux_loss is REJECTED on a GRPO trainer (it never enters the loss); router logits stay on for MoE metrics
 
 # --- Parallelism (EP=8: one dispatch group, DP=8) ---
 expert_parallel_size: 8
 fp32_router: true
 
 # --- Dataset ---
-# Where the rejection-sampling step above wrote its dataset (policy_rejection_sampling.py --output_path, an S3
-# URI; rm_rejection_sampling.py --output_folder) — off the small root FS.
+# Where the rejection-sampling step above wrote its dataset (rm_rejection_sampling.py --output_folder, or
+# an s3:// path from the scripts/inference/ --output_path tools) — off the small root FS.
 dataset:
 - path/to/gsm8k-gptoss-20b-offline-grpo
 test_size: 0.05

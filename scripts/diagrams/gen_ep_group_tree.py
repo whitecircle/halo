@@ -17,7 +17,6 @@ TOPOLOGIES = {
     "ep_group_hierarchy": {"nodes": 1, "gpus": 4, "ep": 2, "tp": 1, "scope": "node", "dp": 4},
     "ep_multi_node_layout": {"nodes": 2, "gpus": 8, "ep": 16, "tp": 8, "scope": "global", "dp": 2},
 }
-from matplotlib.patches import FancyBboxPatch
 
 # ── EP group hierarchy ────────────────────────────────────────────────────────
 

@@ -20,11 +20,12 @@ from src.environments.base import (
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 # Reasoning-budget calibration band, as fractions of the episode's applied CoT budget, and the two
-# penalty weights outside it (over-use weighs more than under-use; the under-use weight is the default
-# of a run knob). See :func:`reasoning_calibration_penalty`.
+# penalty weights outside it (over-use weighs more than under-use). See
+# :func:`reasoning_calibration_penalty`. The under-use weight is a run knob, so it is also the default
+# ``AsyncTrainingConfig.reasoning_compliance_under_use_weight`` reads: one constant keeps the pair in step.
 _CALIBRATION_BAND_LO = 0.3
 _CALIBRATION_BAND_HI = 0.9
-_UNDER_USE_WEIGHT = 0.3
+DEFAULT_UNDER_USE_WEIGHT = 0.3
 _OVER_USE_WEIGHT = 1.0
 
 
@@ -92,7 +93,7 @@ def bind_episode_effort(
 
 
 def reasoning_calibration_penalty(
-    reasoning_tokens: list[int], budget: int, under_use_weight: float = _UNDER_USE_WEIGHT
+    reasoning_tokens: list[int], budget: int, under_use_weight: float = DEFAULT_UNDER_USE_WEIGHT
 ) -> float:
     """Asymmetric reasoning-budget calibration penalty (0 = compliant), averaged over turns. Per turn,
     given reasoning tokens ``r`` and budget ``B``: inside the compliant band → 0; below →

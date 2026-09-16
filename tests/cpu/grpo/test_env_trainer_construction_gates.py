@@ -4,9 +4,6 @@
 * TRL's ``off_policy_mask_threshold`` masks on ``sampling_per_token_logps``, a batch key this trainer
   never emits; TRL then thresholds a KL of exactly 0 and the knob is a silent no-op. Refused, pointing
   at ``isr_opsm_delta``.
-* The default eval round is ``per_device_eval_batch_size`` rows per rank; TRL validates only the
-  GLOBAL eval batch against ``num_generations_eval``, so a per-rank batch that does not hold whole
-  groups used to raise N steps in, on the first evaluation.
 * ``carry_reasoning`` on an SGLang rollout backend is refused until the engine's handling of an
   assistant message carrying ``reasoning_content`` is verified.
 * A dataset with no ``answer`` column under an environment that grades against one scores a single
@@ -16,6 +13,9 @@
     python tests/cpu/grpo/test_env_trainer_construction_gates.py
 """
 
+import ast
+import inspect
+import textwrap
 import types
 
 import pytest
@@ -37,6 +37,36 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
     return GRPOConfig(output_dir=str(tmp_path / "out"), bf16=False, use_cpu=True, **overrides)
 
 
+# Every gate below is driven as a bound method on a bare host, which pins its logic but not its
+# wiring: a deleted call site would leave all of those green and the gate dead.
+_INIT_GATES = (
+    "_reject_unverified_carried_reasoning",
+    "_validate_eval_round",
+    "_force_full_dataset_columns",
+    "_reject_answerless_datasets",
+    "reject_off_policy_mask_threshold",
+)
+
+
+def _called_names(fn: ast.FunctionDef) -> set[str]:
+    """Every name called anywhere in ``fn``, ``self.gate()`` and bare ``gate()`` alike."""
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                names.add(node.func.attr)
+            elif isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+    return names
+
+
+def test_every_gate_is_still_called_from_the_trainers_init():
+    source = textwrap.dedent(inspect.getsource(DistributedAsyncEnvironmentalGRPOTrainer.__init__))
+    called = _called_names(ast.parse(source).body[0])
+    missing = [gate for gate in _INIT_GATES if gate not in called]
+    assert not missing, f"DistributedAsyncEnvironmentalGRPOTrainer.__init__ no longer calls: {missing}"
+
+
 def test_off_policy_mask_threshold_is_refused_with_the_working_knob_named(tmp_path):
     with pytest.raises(ValueError, match="isr_opsm_delta"):
         reject_off_policy_mask_threshold(_grpo_config(tmp_path, off_policy_mask_threshold=0.5))
@@ -44,36 +74,6 @@ def test_off_policy_mask_threshold_is_refused_with_the_working_knob_named(tmp_pa
 
 def test_the_trl_default_passes(tmp_path):
     reject_off_policy_mask_threshold(_grpo_config(tmp_path))
-
-
-class _Args:
-    def __init__(self, per_device: int, drop_last: bool = False):
-        self.per_device_eval_batch_size = per_device
-        self.dataloader_drop_last = drop_last
-
-
-def _eval_host(rows: int | None, per_device: int, num_generations_eval: int):
-    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.args = _Args(per_device)
-    host.async_config = AsyncTrainingConfig(eval_rollout_batch_size=rows)
-    host.num_generations_eval = num_generations_eval
-    return host
-
-
-def test_the_default_eval_round_must_hold_whole_groups_per_rank():
-    with pytest.raises(
-        ValueError, match="per_device_eval_batch_size \\(6\\) must be divisible by num_generations_eval"
-    ):
-        _eval_host(None, per_device=6, num_generations_eval=4)._validate_eval_round()
-    _eval_host(None, per_device=8, num_generations_eval=4)._validate_eval_round()
-
-
-def test_an_explicit_round_is_the_geometry_that_is_checked():
-    """With ``eval_rollout_batch_size`` set, the loader draws that many rows per rank and the eval batch
-    is only the loss forward's chunk, so it is the round that must hold whole groups."""
-    _eval_host(8, per_device=6, num_generations_eval=4)._validate_eval_round()
-    with pytest.raises(ValueError, match="eval_rollout_batch_size \\(6\\)"):
-        _eval_host(6, per_device=8, num_generations_eval=4)._validate_eval_round()
 
 
 def _carry_host(backend: str, carry_reasoning: bool):

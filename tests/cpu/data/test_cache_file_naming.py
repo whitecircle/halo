@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 from datasets import Dataset
-from transformers import ProcessorMixin
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import AutoTokenizer, ProcessorMixin
 
 from src.data.collators.self_distill import SelfDistillTextCollator
 from src.data.pipeline import processing
@@ -23,6 +25,7 @@ from src.data.pipeline.processing import (
     _build_cache_file_name,
     _get_closure_fingerprint,
     _get_kwargs_fingerprint,
+    _tokenizer_content_sig,
     coordinated_filter,
     coordinated_map,
     get_function_identifier,
@@ -386,6 +389,56 @@ def test_kwargs_tokenizer_content_beats_path():
     fp_other = _get_kwargs_fingerprint({"processing_class": Tok("org/base-model", {"a": 0, "b": 1, "c": 2, "e": 3})})
     assert fp_source == fp_resumed, "Same tokenizer content at a checkpoint path missed the cache"
     assert fp_source != fp_other, "Different vocab content at one path shared a fingerprint"
+
+
+def test_tokenizer_content_sig_ignores_per_call_padding_and_truncation():
+    """A fast tokenizer serializes its MUTABLE padding/truncation state alongside its content, and
+    ``PreTrainedTokenizerFast.__call__`` rewrites that state on every call passing ``truncation=`` or
+    ``padding=``. Hashing the raw ``to_str()`` therefore keys the cache on whatever the process
+    tokenized last: at ``num_proc <= 1`` only the writer rank runs a map's fn, so after the truncating
+    tokenize map the writer's key diverges from its peers' and every peer re-runs the next map,
+    writing the same arrow file concurrently — the shared-FS race this module exists to prevent."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    assert tokenizer.is_fast and tokenizer.backend_tokenizer is not None, "the probe needs a fast tokenizer"
+
+    pristine = _tokenizer_content_sig(tokenizer)
+    assert pristine, "a fast tokenizer must produce a content signature"
+
+    tokenizer("halo halo halo", truncation=True, max_length=4)
+    assert _tokenizer_content_sig(tokenizer) == pristine, "a truncating call re-keyed the cache"
+
+    tokenizer("halo", padding="max_length", max_length=8)
+    assert _tokenizer_content_sig(tokenizer) == pristine, "a padding call re-keyed the cache"
+
+    # The whole identity moves with it, not just the content term.
+    tokenizer("halo halo", truncation=True, max_length=2, padding="max_length")
+    assert _get_kwargs_fingerprint({"tokenizer": tokenizer}) == _get_kwargs_fingerprint(
+        {"tokenizer": AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")}
+    ), "a used tokenizer keyed a different cache than a freshly loaded one"
+
+
+def test_tokenizer_content_sig_still_separates_different_vocabs():
+    """Dropping the mutable state must not flatten the term: two backends differing only in vocab
+    still key different caches (otherwise the fix would trade a race for a cross-model collision)."""
+
+    class _Fast:
+        def __init__(self, backend):
+            self.backend_tokenizer = backend
+
+    def _backend(vocab):
+        return Tokenizer(WordLevel(vocab=vocab, unk_token="[UNK]"))
+
+    shared = {"[UNK]": 0, "a": 1, "b": 2}
+    same = _tokenizer_content_sig(_Fast(_backend(dict(shared))))
+    other = _tokenizer_content_sig(_Fast(_backend({**shared, "c": 3})))
+    assert same and other
+    assert same == _tokenizer_content_sig(_Fast(_backend(dict(shared)))), "same vocab must key one cache"
+    assert same != other, "different vocabs must key different caches"
+
+    # Enabling truncation on one of two identical backends must not split them.
+    truncating = _backend(dict(shared))
+    truncating.enable_truncation(max_length=2)
+    assert _tokenizer_content_sig(_Fast(truncating)) == same, "enabling truncation re-keyed the cache"
 
 
 def test_kwargs_scalar_lists_distinct():

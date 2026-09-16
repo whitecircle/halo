@@ -94,6 +94,12 @@ _SAMPLE_FILE_NAMES = {"train": "train_sample.txt", "test": "eval_sample.txt", "e
 # Values a cache-key fingerprint can read directly; anything else takes the one-time skip warning.
 _SCALAR_TYPES = (str, int, float, bool, type(None))
 
+# Per-call state a fast tokenizer serializes alongside its content: ``PreTrainedTokenizerFast.__call__``
+# rewrites both whenever a call passes ``truncation=``/``padding=``, so a signature over the raw
+# ``backend_tokenizer.to_str()`` would key on whatever the process tokenized last — and the writer
+# rank, the only one that runs a map's fn at ``num_proc <= 1``, would then diverge from its peers.
+_MUTABLE_BACKEND_STATE_KEYS = ("padding", "truncation")
+
 # (owner, type name) pairs already reported by :func:`_warn_unfingerprintable`: one line per shape,
 # not per row.
 _UNFINGERPRINTABLE_WARNED: set[tuple[str, str]] = set()
@@ -187,11 +193,15 @@ def _template_sig(chat_template: Any) -> str | None:
 
 def _tokenizer_content_sig(val: Any) -> str | None:
     """Content hash of what a tokenizer does to text: the fast backend's serialized state (vocab,
-    merges, normalizer), else the vocab table. ``None`` when neither is readable."""
+    merges, normalizer) minus its per-call ``_MUTABLE_BACKEND_STATE_KEYS``, else the vocab table.
+    ``None`` when neither is readable."""
     try:
         backend = getattr(val, "backend_tokenizer", None)
         if backend is not None:
-            return hashlib.md5(backend.to_str().encode()).hexdigest()[:16]
+            state = json.loads(backend.to_str())
+            for key in _MUTABLE_BACKEND_STATE_KEYS:
+                state.pop(key, None)
+            return hashlib.md5(json.dumps(state, sort_keys=True).encode()).hexdigest()[:16]
         get_vocab = getattr(val, "get_vocab", None)
         if callable(get_vocab):
             return hashlib.md5(json.dumps(sorted(get_vocab().items())).encode()).hexdigest()[:16]

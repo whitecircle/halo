@@ -34,9 +34,16 @@ class _Args:
         return self.per_device_eval_batch_size
 
 
-def _trainer(rows, *, custom_path: bool = False, drop_last: bool = False, num_generations_eval: int = 1):
+def _trainer(
+    rows,
+    *,
+    custom_path: bool = False,
+    drop_last: bool = False,
+    num_generations_eval: int = 1,
+    per_device: int = 4,
+):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.args = _Args(drop_last=drop_last)
+    host.args = _Args(per_device=per_device, drop_last=drop_last)
     host.async_config = AsyncTrainingConfig(eval_rollout_batch_size=rows)
     host.num_generations_eval = num_generations_eval
     host._needs_custom_dataloader = lambda: custom_path
@@ -97,6 +104,22 @@ def test_round_must_hold_whole_eval_groups_and_a_full_tail():
         _trainer(70, num_generations_eval=4)._validate_eval_round()
     with pytest.raises(ValueError, match="dataloader_drop_last"):
         _trainer(68, drop_last=True)._validate_eval_round()
+
+
+def test_the_default_round_must_hold_whole_groups_per_rank():
+    """With no ``eval_rollout_batch_size`` the round IS ``per_device_eval_batch_size``, so that is the
+    geometry the gate reads. TRL validates only the GLOBAL eval batch, so nothing else catches it."""
+    with pytest.raises(ValueError, match=r"per_device_eval_batch_size \(6\) must be divisible"):
+        _trainer(None, per_device=6, num_generations_eval=4)._validate_eval_round()
+    _trainer(None, per_device=8, num_generations_eval=4)._validate_eval_round()
+
+
+def test_an_explicit_round_is_the_geometry_that_is_checked():
+    """With ``eval_rollout_batch_size`` set, the loader draws that many rows per rank and the eval batch
+    is only the loss forward's chunk, so it is the round that must hold whole groups."""
+    _trainer(8, per_device=6, num_generations_eval=4)._validate_eval_round()
+    with pytest.raises(ValueError, match=r"eval_rollout_batch_size \(6\)"):
+        _trainer(6, per_device=8, num_generations_eval=4)._validate_eval_round()
 
 
 def test_round_may_not_exceed_the_in_flight_cap():

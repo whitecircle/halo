@@ -4,14 +4,15 @@
 Smooth Margin Preference Optimization — reference-model-free preference training. One script serves
 both text and vision-language models. The model class follows the checkpoint
 (``load_model_for_training`` auto-detects it); the data path follows the run (``is_vlm_run``), so a
-natively-multimodal checkpoint trained on text-only pairs takes the text path and keeps CP,
-padding_free and PP. A VLM run passes its raw rows through: the trainer normalizes and
+natively-multimodal checkpoint trained on text-only pairs takes the text path and keeps CP and
+padding_free. A VLM run passes its raw rows through: the trainer normalizes and
 chat-templates them itself and auto-selects ``DataCollatorForVLMSMPO`` (image processing at
 collation, vision tensors threaded through the chosen/rejected concat). A text run templates the
 pairs here and runs generation-eval examples.
 
-Supported Parallelism Modes: EP, CP, TP, ETP, PP and their allowlisted combinations
+Supported Parallelism Modes: EP, CP, TP, ETP and their allowlisted combinations
 (``SUPPORTED_AXIS_SETS``; TP+CP unsupported; a VLM run supports neither CP nor padding_free).
+PP is declared but not yet available in this release.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \\
@@ -66,7 +67,7 @@ def main():
     reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
 
     # The run's data path, not the checkpoint's modality: a multimodal checkpoint carrying text-only
-    # pairs is a text run, and CP / padding_free / PP stay legal for it. Decided here so the VLM
+    # pairs is a text run, and CP / padding_free stay legal for it. Decided here so the VLM
     # guards (the trainer enforces the same ones) raise before the model load, and pinned to the same
     # revision as that load, since hub `main` can name a different modality than the commit this run
     # trains.

@@ -61,10 +61,10 @@ SOLUTION_HEADROOM_TOKENS = 4096
 
 # The coding envs this script's adapters, language prompt and rating buckets are written for.
 CODING_ENV_TYPES = ("codeforces", "code_contests")
-# Script defaults, applied where neither a flag nor ``--training_config`` sets the knob.
+# Script defaults, applied where neither a flag nor ``--training_config`` sets the knob. No language
+# or turn budget among them: both are the env class's own, and a script-side copy would silently grade
+# under a different contract than the class ships once the class moves.
 DEFAULT_ENV_TYPE = "codeforces"
-DEFAULT_LANGUAGE = "python"
-DEFAULT_MAX_TURNS = 15
 DEFAULT_TEMPERATURE = 0.2
 
 
@@ -107,17 +107,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--language",
         default=None,
-        help=f"Solution language to prompt for and grade (python/cpp/c). A comma-separated list lets the "
-        f"model choose per program and grades each in the language it named. Default: the training config's "
-        f"under --training_config, else {DEFAULT_LANGUAGE}.",
+        help="Solution language to prompt for and grade (python/cpp/c). A comma-separated list lets the "
+        "model choose per program and grades each in the language it named. Default: the training config's "
+        "under --training_config, else the environment's own.",
     )
     p.add_argument(
         "--max_turns",
         type=int,
         default=None,
-        help=f"Max env turns per episode (default: the training config's under --training_config, else "
-        f"{DEFAULT_MAX_TURNS}). Agentic models iterate test→fix→submit, so a tight cap (e.g. 6) truncates "
-        f"them mid-loop.",
+        help="Max env turns per episode (default: the training config's under --training_config, else the "
+        "environment's own). Agentic models iterate test→fix→submit, so a tight cap (e.g. 6) truncates "
+        "them mid-loop.",
     )
     p.add_argument("--success_threshold", type=float, default=1.0, help="Reward at/above which a sample is solved.")
     p.add_argument(
@@ -201,24 +201,26 @@ def main() -> None:
         raise SystemExit(
             f"{args.training_config} trains environment_type={env_type!r}, not a coding env {CODING_ENV_TYPES}"
         )
-    language = parse_language_flag(args.language) if args.language else trained_env.get("language", DEFAULT_LANGUAGE)
-    language_label = language if isinstance(language, str) else ",".join(language)
     reasoning_effort = resolve_setting(
         args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
     )
-    max_turns = resolve_setting(args.max_turns, trained_env.get("max_turns"), DEFAULT_MAX_TURNS)
+    max_turns = resolve_setting(args.max_turns, trained_env.get("max_turns"), None)
     # The training run's env config first, the resolved settings and flags over it: an eval under a
-    # contract grades as the run did.
+    # contract grades as the run did. An unset language or turn budget is left out entirely, so the
+    # env class's own default applies.
     env = resolve_environment(
         env_type,
         {
             **trained_env,
             "max_turns": max_turns,
-            "language": language,
+            **({"language": parse_language_flag(args.language)} if args.language else {}),
             "reasoning_effort": reasoning_effort,
             **env_kwargs,
         },
     )
+    # Read the effective language set back off the env, which resolved the default.
+    language = list(env.languages) if env.chooses_language else env.language
+    language_label = ",".join(env.languages)
     # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
     env.verify_backend()
     examples = build_examples(args, adapter)

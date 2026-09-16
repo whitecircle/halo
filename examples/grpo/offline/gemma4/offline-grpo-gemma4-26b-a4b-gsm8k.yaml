@@ -14,8 +14,8 @@ expert_parallel_size: 8
 # so the knob has no fp32 route to take — setting it only logs a per-layer no-op warning.
 
 # --- Dataset ---
-# Where the rejection-sampling step above wrote its dataset (policy_rejection_sampling.py --output_path, an S3
-# URI; rm_rejection_sampling.py --output_folder) — off the small root FS.
+# Where the rejection-sampling step above wrote its dataset (rm_rejection_sampling.py --output_folder, or
+# an s3:// path from the scripts/inference/ --output_path tools) — off the small root FS.
 dataset:
 - path/to/gsm8k-gemma4-26b-a4b-offline-grpo
 test_size: 0.05

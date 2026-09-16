@@ -17,7 +17,8 @@ STAGE_W, STAGE_XS = 2.6, (0.3, 3.15, 6.0, 8.85)
 STRIP_X, STRIP_W = 0.3, 10.9
 RANK_Y, BATCH_Y, ROW_H = 1.80, 1.18, 0.5
 RANKS, CELL_GAP = 16, 0.1
-CELL_W = (STRIP_W - (RANKS - 1) * CELL_GAP) / RANKS
+# The strip is its own page: the cells span STRIP_W with no margin, offset by STRIP_X.
+CELL_XS, CELL_W = columns(STRIP_W, RANKS, 0.0, CELL_GAP)
 
 GATE_FLAGS = "is_tp_mode · is_cp_mode · is_expert_tp_mode · is_pp_mode · _dataset_presharded"
 SAMPLER = ("Sampler (not distributed)", ["_get_train_sampler()", "→ RandomSampler"], TEAL)
@@ -25,7 +26,7 @@ SAMPLER = ("Sampler (not distributed)", ["_get_train_sampler()", "→ RandomSamp
 
 def cell_x(i):
     """Left edge of rank `i`'s cell — both figures share one strip geometry."""
-    return STRIP_X + i * (CELL_W + CELL_GAP)
+    return STRIP_X + CELL_XS[i]
 
 
 def rank_row(ax):

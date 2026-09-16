@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from _pipeline_style import *
 
 # ── Scenario 1: one training node, one inference node ────────────────────────────────────────
-STRIP_Y, STRIP_H = 0.28, 1.70
+STRIP_Y, STRIP_H = 0.28, card_height(4)
 FRAME_Y = STRIP_Y + STRIP_H + 0.54
 FRAME_H = 4.35
 FRAME_TOP = FRAME_Y + FRAME_H
@@ -20,7 +20,7 @@ M1 = 0.33
 N1_X, N1_W = M1, 6.2
 N2_X = N1_X + N1_W + 1.3
 N2_W = W1 - M1 - N2_X
-N2_H = FRAME_LABEL + 2.22 + FRAME_PAD
+N2_H = FRAME_LABEL + card_height(6) + FRAME_PAD
 N2_Y = FRAME_Y + (FRAME_H - N2_H) / 2
 CARD_X, CARD_W = N1_X + FRAME_PAD, N1_W - 2 * FRAME_PAD
 ENGINE_X, ENGINE_W = N2_X + FRAME_PAD, N2_W - 2 * FRAME_PAD
@@ -35,13 +35,13 @@ title(ax, "Separate inference node", "one server · one NCCL group · actors bes
 frame(ax, N1_X, FRAME_Y, N1_W, FRAME_H, "NODE 1 — training + actors")
 frame(ax, N2_X, N2_Y, N2_W, N2_H, "NODE 2 — inference")
 
-trainer_y = FRAME_TOP - FRAME_LABEL - 1.70
+trainer_y = FRAME_TOP - FRAME_LABEL - card_height(4)
 card(
     ax,
     CARD_X,
     trainer_y,
     CARD_W,
-    1.70,
+    card_height(4),
     "Trainer — torchrun ranks",
     [
         "model + optimizer, FSDP2 / EP / TP",
@@ -52,13 +52,13 @@ card(
     color=BLUE,
 )
 
-actors_y = trainer_y - 0.30 - 1.70
+actors_y = trainer_y - 0.30 - card_height(4)
 card(
     ax,
     CARD_X,
     actors_y,
     CARD_W,
-    1.70,
+    card_height(4),
     "Ray actors — same node, CPU",
     [
         "num_rollout_workers actors per training rank",
@@ -75,7 +75,7 @@ card(
     ENGINE_X,
     engine_y,
     ENGINE_W,
-    2.22,
+    card_height(6),
     "Rollout server",
     [
         "vLLM :8000 · SGLang :30000",
@@ -95,7 +95,7 @@ arrow(
     CARD_X + 0.5 * CARD_W,
     trainer_y,
     CARD_X + 0.5 * CARD_W,
-    actors_y + 1.70,
+    actors_y + card_height(4),
     "Ray — local, ray_address null",
     color=SLATE,
     side="right",
@@ -137,9 +137,9 @@ STRIP = [
     ),
 ]
 CELL_GAP = 0.15
-cell_w = (W1 - 2 * M1 - (len(STRIP) - 1) * CELL_GAP) / len(STRIP)
-for i, (name, lines) in enumerate(STRIP):
-    card(ax, M1 + i * (cell_w + CELL_GAP), STRIP_Y, cell_w, STRIP_H, name, lines, color=SLATE)
+cell_xs, cell_w = columns(W1, len(STRIP), M1, CELL_GAP)
+for x, (name, lines) in zip(cell_xs, STRIP, strict=True):
+    card(ax, x, STRIP_Y, cell_w, STRIP_H, name, lines, color=SLATE)
 
 save(plt.gcf(), "multi_node_separate_inference")
 plt.close()
@@ -173,7 +173,7 @@ card(
     L_CARD_X,
     TOP2 - 2.41,
     L_CARD_W,
-    1.96,
+    card_height(5),
     "Trainer — torchrun ranks",
     [
         "model + optimizer, FSDP2 / EP / TP",
@@ -190,7 +190,7 @@ card(
     R_CARD_X,
     TOP2 - 1.63,
     R_CARD_W,
-    1.18,
+    card_height(2),
     "Inference node 1 — vLLM or SGLang",
     ["url        http://inf1:8000", "group_port 51216"],
     color=BLUE,
@@ -202,7 +202,7 @@ card(
     R_CARD_X,
     TOP2 - 3.11,
     R_CARD_W,
-    1.18,
+    card_height(2),
     "Inference node 2 — vLLM or SGLang",
     ["url        http://inf2:8000", "group_port 51217"],
     color=BLUE,
@@ -214,7 +214,7 @@ card(
     L_CARD_X,
     TOP2 - 5.62,
     L_CARD_W,
-    1.96,
+    card_height(5),
     "Ray actors — no GPU needed",
     [
         "num_rollout_workers ÷ world_size per rank",
@@ -231,7 +231,7 @@ card(
     R_X,
     TOP2 - 5.82,
     R_W,
-    2.22,
+    card_height(6),
     "Config",
     [
         'ray_address: "ray-head:6379"',

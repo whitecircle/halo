@@ -1,6 +1,8 @@
 {#- --- Multi-turn chat template for GPT-OSS (no reasoning) --- -#}
 {#- Supports any number of user/assistant turns -#}
 {#- Uses <|return|> to end ALL assistant responses for train_on_completions_only compatibility -#}
+{#- Renders system/user/assistant content only: `developer` and `tool` turns, assistant `tool_calls`
+    and `thinking`, and any `tools` argument are dropped — use gpt-oss-harmony.jinja for those -#}
 {#- --- Main message rendering --- -#}
 {%- for message in messages -%}
   {%- if message.role == "system" -%}

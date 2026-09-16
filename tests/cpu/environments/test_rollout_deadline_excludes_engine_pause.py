@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """The episode deadline counts engine-serving time, not the seconds a weight sync held the engines paused.
 
 A sync freezes every in-flight generation (vLLM ``mode=keep``) for the whole push; a wall-clock
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.configs.rollout_config import RolloutConfig
+from src.environments import ray_actors
 from src.environments.base import Trajectory
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, _await_with_deadline
@@ -67,7 +69,7 @@ def test_the_episodes_own_timeout_error_is_not_mistaken_for_the_deadline():
             raise TimeoutError("the episode's own")
 
     with pytest.raises(TimeoutError, match="the episode's own"):
-        asyncio.run(_await_with_deadline(_FailingRef(), 5.0, _PausedClock(credit=100.0)))
+        asyncio.run(_await_with_deadline(_FailingRef(), 5.0, _PausedClock(credit=1.0)))
 
 
 def _manager(episode_timeout: float) -> RolloutManager:
@@ -80,11 +82,15 @@ def _manager(episode_timeout: float) -> RolloutManager:
     )
 
 
-def test_manager_pause_window_counts_while_open_and_takes_the_measured_figure_when_closed():
+def test_manager_pause_window_counts_while_open_and_takes_the_measured_figure_when_closed(monkeypatch):
     manager = _manager(1.0)
     assert manager.paused_seconds == 0.0
+    ticks = iter([100.0, 103.0])
+    # The module's ``time`` name, not the stdlib clock: only the pause window reads it, and an
+    # unexpected read exhausts the ticks instead of passing on a real elapsed time.
+    monkeypatch.setattr(ray_actors, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
     manager.begin_engine_pause()
-    assert manager.paused_seconds >= 0.0
+    assert manager.paused_seconds == 3.0, "an open window counts while it is open"
     manager.end_engine_pause(5.0)
     assert manager.paused_seconds == 5.0, "the forwarding rank's measured push replaces the open window"
     manager.end_engine_pause(2.0)

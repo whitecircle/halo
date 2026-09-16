@@ -7,7 +7,8 @@ toolkit registers two more itself in src/models/seq_cls_heads.py — Gemma 4 and
 each in both spellings a checkpoint can carry (composite and text tower). Other VLM families have no such head, so general VLM classification is
 not supported upstream.
 
-Supported Parallelism Modes: EP, TP, ETP, PP. CP is not supported — the trainer pools over the
+Supported Parallelism Modes: EP, TP, ETP (PP is declared but not yet available in this release).
+CP is not supported — the trainer pools over the
 complete sequence, which no CP shard holds.
 
 Usage:

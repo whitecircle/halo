@@ -9,7 +9,6 @@ and the fixed paddings here stay proportionate to the point sizes in `_theory_st
 """
 
 from _theory_style import *
-from matplotlib.figure import Figure
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 CARD_PAD = 0.16  # inset from a card's border to its text
@@ -215,14 +214,8 @@ def footnote(ax, x, y, w, text):
     ax.text(x + w / 2, y + FOOT_H / 2, text, ha="center", va="center", fontsize=SMALL, color=INK)
 
 
-def title(fig_or_ax, text, sub_mono=""):
+def title(ax, text, sub_mono=""):
     """Left-aligned title with an optional mono subtitle flushed right on the same line."""
-    if isinstance(fig_or_ax, Figure):
-        fig_or_ax.text(0.01, 0.995, text, ha="left", va="top", fontsize=TITLE, fontweight="bold", color=INK)
-        if sub_mono:
-            fig_or_ax.text(0.99, 0.982, sub_mono, ha="right", va="top", fontsize=SUB, color=INK2, fontfamily=MONO)
-        return
-    ax = fig_or_ax
     x0, x1 = ax.get_xlim()
     y1 = ax.get_ylim()[1]
     inset = 0.025 * (x1 - x0)

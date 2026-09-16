@@ -63,6 +63,8 @@ class EnvironmentConfig(RangeValidatedConfig):
             raise ValueError(
                 f"max_turns must be >= 1 (null keeps the environment class default), got {self.max_turns}"
             )
+        if not self.rewards:
+            raise ValueError("rewards must list at least one reward term")
         self.reward_terms  # noqa: B018  parse at config time so a bad term fails here
 
     @property

@@ -8,6 +8,8 @@ import math
 
 import pytest
 
+from src.configs.environment_config import EnvironmentConfig
+from src.rewards.composer import RewardComposer
 from src.rewards.spec import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_OPENROUTER_BASE_URL,
@@ -152,6 +154,20 @@ def test_reward_model_normalization_is_a_shifted_scaled_logistic():
     assert term.normalize(6.0) == pytest.approx(1 / (1 + math.exp(-1)))
     assert term.normalize(-1000.0) == pytest.approx(0.0) and term.normalize(1000.0) == pytest.approx(1.0)
     assert term.normalize(3.0) + term.normalize(1.0) == pytest.approx(1.0)
+
+
+def test_a_reward_with_no_terms_is_refused():
+    """``rewards: []`` leaves the episode reward as turn shaping alone — a run with no objective at
+    all, which trains on shaping and reports nothing wrong. The composer refuses it wherever it is
+    built (including inside a Ray actor), and the config refuses it before the cluster comes up."""
+    with pytest.raises(ValueError, match="at least one term"):
+        RewardComposer([])
+    with pytest.raises(ValueError, match="at least one reward term"):
+        EnvironmentConfig(rewards=[])
+    # The upper bound and the lower bound are the same guard's two sides.
+    with pytest.raises(ValueError, match="at most one environment term"):
+        RewardComposer([EnvironmentTerm(), EnvironmentTerm()])
+    assert len(RewardComposer([EnvironmentTerm()]).terms) == 1
 
 
 if __name__ == "__main__":

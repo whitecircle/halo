@@ -60,6 +60,7 @@ def test_a_failed_push_closes_the_window_before_raising():
     with pytest.raises(RuntimeError, match="server gone"):
         _Trainer(manager, "fail")._sync_weights_to_engine_fenced()
     assert manager._pause_started_at is None
+    assert manager.paused_seconds == 0.0, "a push that never landed paused no engine"
 
 
 def test_cleanup_closes_the_score_only_clients_sessions():

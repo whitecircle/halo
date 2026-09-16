@@ -12,10 +12,10 @@ from _pipeline_style import *
 W, H = 11.9, 6.6
 
 ROW_H = card_height(2)
-TOP_Y, TOP_W, TOP_XS = 5.00, 3.6, (0.3, 4.15, 8.0)
+TOP_Y, (TOP_XS, TOP_W) = 5.00, columns(W, 3, 0.3, 0.25)
 LAYER_Y, LAYER_H = 2.95, 1.60
-INNER_Y, INNER_W, INNER_XS = 3.05, 5.3, (0.55, 6.05)
-OUT_Y, OUT_W, OUT_XS = 1.32, 5.4, (0.3, 6.2)
+INNER_Y, (INNER_XS, INNER_W) = 3.05, columns(W, 2, 0.55, 0.2)
+OUT_Y, (OUT_XS, OUT_W) = 1.32, columns(W, 2, 0.3, 0.5)
 ENTER_X = TOP_XS[-1] + TOP_W / 2  # the stack is entered under the last top-band card
 EXIT_X = OUT_XS[0] + OUT_W / 2  # and left again above the first output card
 

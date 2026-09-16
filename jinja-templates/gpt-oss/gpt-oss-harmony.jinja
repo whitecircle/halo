@@ -2,12 +2,13 @@
 {#-
   Full OpenAI-harmony chat template for gpt-oss — verbatim from the upstream
   `unsloth/gpt-oss-20b-BF16` checkpoint, kept identical so that the *training*
-  render matches the gpt-oss render vLLM applies server-side. Use this (not the
-  stripped `gpt-oss-instruct.jinja`) whenever the data is multi-turn, carries a
-  reasoning channel, or uses tools, and ALWAYS for gpt-oss RL where the training
-  template must match the serving template (see agent-docs/training-methods/grpo and
-  agent-docs/models/gpt-oss.md). For env-GRPO, pass the SAME file to vLLM via
-  `--chat-template` (compose: `VLLM_CHAT_TEMPLATE`).
+  render matches the gpt-oss render vLLM applies server-side. Use this whenever
+  the data carries a reasoning channel or uses tools, and ALWAYS for gpt-oss RL
+  where the training template must match the serving template (see
+  agent-docs/training-methods/grpo and agent-docs/models/gpt-oss.md). For env-GRPO,
+  pass the SAME file to vLLM via `--chat-template` (compose: `VLLM_CHAT_TEMPLATE`).
+  For plain multi-turn SFT use `gpt-oss-multiturn.jinja` instead: it ends EVERY
+  assistant turn with <|return|>, so completion-only masking trains them all.
 
   In addition to the normal inputs of `messages` and `tools`, this template also accepts the
   following kwargs:

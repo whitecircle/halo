@@ -153,9 +153,8 @@ bench: ## run the EP/TP throughput benchmarks
 docs: ## relative-link check over agent-docs/, human-docs/, skills/ and the root markdown
 	./scripts/docs/check_links.sh
 
-# Each generator writes its figures at import time and most carry no `__main__` guard, so they run
-# one per `python` invocation. `_style_base.py` / `_theory_style.py` / `_pipeline_style.py` are shared
-# style modules, not generators — the `gen_*.py` glob leaves them out.
+# One `python` per generator: each writes its figures at import time, and `_style_base.py` /
+# `_theory_style.py` / `_pipeline_style.py` are shared style, not generators.
 diagrams: ## regenerate agent-docs/assets figures from scripts/diagrams (in-image; matplotlib ships there)
 	$(DOCKER_RUN_CPU) bash -lc 'set -e; for g in scripts/diagrams/gen_*.py; do echo "$$g"; python "$$g"; done'
 

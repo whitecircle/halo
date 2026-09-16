@@ -111,9 +111,9 @@ def verify_sampler_logprob_reference(
     step — entropy inflates at T > 1, collapses at T < 1 — while the ratio still reads ≈ 1. A nucleus-
     renormalized reference (vLLM ``processed_logprobs`` with top-p < 1) lifts every uncertain position
     by its nucleus mass; a consumer that sums the per-token log-ratios over a sequence
-    (``sequence_ratio_active``: the trajectory geometric band, or a sequence-level IS mode) reads the
-    sum as drift or a collapsing sequence weight, so that pairing is refused. An unverifiable server
-    warns: a preflight probe never fails the run by itself.
+    (``sequence_ratio_active``: the trajectory geometric band, OPSM's per-trajectory mean, or a
+    sequence-level IS mode) reads the sum as drift or a collapsing sequence weight, so that pairing is
+    refused. An unverifiable server warns: a preflight probe never fails the run by itself.
     """
     if temperature == 1.0 and not (top_p < 1.0 and sequence_ratio_active):
         return
@@ -138,17 +138,17 @@ def verify_sampler_logprob_reference(
                 logger.warning(
                     f"Rollout server {url}: could not verify whether its logprobs are renormalized over the "
                     f"top-p nucleus; with top_p={top_p} a renormalized reference biases every sequence-summed "
-                    f"log-ratio (geometric band, sequence-level IS)."
+                    f"log-ratio (geometric band, OPSM, sequence-level IS)."
                 )
             elif semantics.nucleus_renormalized:
                 raise ValueError(
                     f"Rollout server {url} reports logprobs renormalized over the top-p nucleus while top_p={top_p} "
                     f"and the per-token log-ratios are summed over each sequence: every uncertain position is "
-                    f"lifted by its nucleus mass, so the trajectory geometric band reads the sum as drift and a "
-                    f"sequence-level vLLM IS ratio collapses toward 0 (sequence_mask only zeroes ratios ABOVE the "
-                    f"cap, so the run stalls silently). Sample at top_p: 1.0 (rollout_top_p: 1.0 on the "
-                    f"environmental arm), or take the ratio per token: a token_* vllm_importance_sampling_mode, "
-                    f"or drop isr_geo_band_min/max."
+                    f"lifted by its nucleus mass, so the trajectory geometric band and OPSM's per-trajectory "
+                    f"mean log-ratio read the sum as drift and a sequence-level vLLM IS ratio collapses toward 0 "
+                    f"(sequence_mask only zeroes ratios ABOVE the cap, so the run stalls silently). Sample at "
+                    f"top_p: 1.0 (rollout_top_p: 1.0 on the environmental arm), or take the ratio per token: a "
+                    f"token_* vllm_importance_sampling_mode, or drop isr_geo_band_min/max and isr_opsm_delta."
                 )
 
 

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from src.args.mixins import AdvantageShaping, RLRRArguments, RLRRConfig, SDPGArguments, rlrr_arg_name
+from src.args.mixins import AdvantageShaping, RLRRArguments, RLRRConfig, rlrr_arg_name
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.training.parser import H4ArgumentParser
 from src.training.script_runner import reject_non_default_args
@@ -133,7 +133,12 @@ def test_rlrr_tunables_without_the_gate_are_refused_by_the_default_comparing_gua
 
 def test_sdpg_tunables_cover_the_shared_block_plus_the_rlvr_only_gate():
     assert set(RLVROnlineGRPOScriptArguments.SDPG_TUNABLES) == {
-        *(f.name for f in dataclasses.fields(SDPGArguments)),
+        "sdpg_hint_template",
+        "sdpg_loss",
+        "sdpg_temperature",
+        "sdpg_beta_base",
+        "sdpg_beta_warmup_steps",
+        "sdpg_beta_decay_steps",
         "opd_positive_advantage_only",
     }
     # opd_positive_advantage_only defaults to True: only the default-comparing form can guard it.

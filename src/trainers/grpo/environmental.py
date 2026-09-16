@@ -1304,8 +1304,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             cost = price * r.generation_tokens / 1000.0
             rewards[i] -= cost
             costs.append(-cost)
-        if any(costs):
-            self._world_metrics.fraction("reward/token_cost", sum(costs), len(costs))
+        # Recorded on every rank, priced or not: a gate here would make the world mean an average over
+        # the ranks that charged something rather than over the batch.
+        self._world_metrics.fraction("reward/token_cost", sum(costs), len(costs))
 
     def _apply_reasoning_calibration(
         self,

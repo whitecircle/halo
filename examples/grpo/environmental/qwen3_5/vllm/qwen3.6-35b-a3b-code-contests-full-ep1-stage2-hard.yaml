@@ -5,6 +5,8 @@
 # Launch: start 2 vLLM servers, TP=1 each, on GPUs 6 and 7 with --weight-transfer-config '{"backend":"nccl"}', then CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
 
 # --- Model ---
+# checkpoint-235 is the last checkpoint of a one-epoch stage-1 run over the shipped pool
+# (save_steps: 47 x save_total_limit: 5) — it has to come from your own stage-1 run.
 model_name_or_path: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage1-codeforces/checkpoint-235  # stage-1 weights only: the optimizer starts fresh
 model_name: Qwen/Qwen3.6-35B-A3B   # the id the rollout servers serve; unset, the path above would be sent as the model id
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
@@ -22,7 +24,7 @@ use_peft: false
 # --- Environment ---
 environment_type: codeforces
 max_turns: 16               # the high profile's 3 submissions + 8 test calls, 2 cut-turn recoveries and
-                            # the closing turn; a cut turn costs a turn, not the episode
+                            # the closing turn, plus 2 spare; a cut turn costs a turn, not the episode
 environment_kwargs:
   language: [python, cpp]   # the model names each program's language; python is graded at timeout_per_test,
                             # cpp at compiled_time_limit_scale x the stated limit
@@ -122,7 +124,8 @@ mask_truncated_completions: false  # `truncated` means ONLY the max_turns overfl
 # --- Training ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
-eval_rollout_batch_size: 34       # rows per rank in one eval rollout round; one wave across 6 ranks
+eval_rollout_batch_size: 34       # rows per rank per eval rollout round: 34 x 6 ranks = 204 requests in
+                                  # flight at once, so the 400-row split takes two rounds
 gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (12 prompts x 12); the per-rank value must
                                 # divide by num_generations
 max_steps: 150

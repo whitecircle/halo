@@ -21,7 +21,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from src.configs.rollout_config import RolloutConfig
-from src.environments.base import Trajectory
+from src.environments.base import EPISODE_ERROR_KEY, Trajectory
 from src.environments.engine_wire import build_payload, capture_generation_tokens, capture_routing_mask
 from src.environments.episode import (
     EpisodeDispatcher,
@@ -261,7 +261,7 @@ class EnvironmentActor:
             reason = _describe_exc(e)
             return RolloutResult(
                 prompt=prompt,
-                trajectory=Trajectory(done=True, info={"error": reason}),
+                trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: reason}),
                 total_reward=0.0,
                 success=False,
                 latency=time.time() - start,
@@ -602,7 +602,7 @@ class RolloutManager:
                 msg = _describe_exc(errors[i]) if errors[i] is not None else "Unknown error"
                 r = RolloutResult(
                     prompt=prompts[i],
-                    trajectory=Trajectory(done=True, info={"error": msg}),
+                    trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: msg}),
                     success=False,
                     error=msg,
                 )

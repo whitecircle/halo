@@ -99,6 +99,15 @@ def test_sglang_request_and_parsing():
     assert results[0].score == 0.5
 
 
+def test_label_index_picks_the_head_output():
+    """A 2-class RM whose positive label is index 1: reading index 0 would reward the negative logit."""
+    term = RewardModelTerm(name="pref", url="http://rm", model="m", label_index=1)
+    scorer, _ = _scorer(term, lambda request: httpx.Response(200, json={"data": [{"index": 0, "probs": [9.0, -9.0]}]}))
+    (result,) = asyncio.run(scorer.score([_sample("x")]))
+    assert result.metrics["reward_model/pref/logit"] == -9.0
+    assert result.score == pytest.approx(1 / (1 + math.exp(9)))
+
+
 def test_sglang_single_object_payload_is_one_result():
     scorer, _ = _scorer(
         RewardModelTerm(name="pref", url="http://rm", model="m", backend="sglang"),
@@ -154,6 +163,24 @@ def test_verify_scores_a_probe_and_raises_on_failure():
     )
     with pytest.raises(RuntimeError, match="probe failed"):
         asyncio.run(bad.verify())
+
+
+def test_verify_probes_through_a_fresh_client_and_closes_it():
+    """The launch probe runs on a different loop than the Ray actor, and a cached AsyncClient carries a
+    pool bound to the loop it was built on — so the probe must build its own and close it."""
+    scorer, _ = _scorer(
+        RewardModelTerm(name="pref", url="http://rm", model="m"),
+        lambda r: httpx.Response(200, json={"data": [{"index": 0, "probs": [0.1]}]}),
+    )
+    build, created = scorer._create_client, []
+
+    def tracked() -> httpx.AsyncClient:
+        created.append(client := build())
+        return client
+
+    scorer._create_client = tracked
+    asyncio.run(scorer.verify())
+    assert len(created) == 1 and created[0].is_closed and scorer._client is None
 
 
 def test_transcript_view_selects_what_is_rendered():

@@ -18,6 +18,7 @@ import types
 
 import pytest
 
+from src.configs.async_training_config import AsyncTrainingConfig
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.weight_sync_clients import (
@@ -28,6 +29,17 @@ from tests.common.utils import REPO_ROOT
 from tests.cpu.grpo.test_weight_sync_protocol import FakeVLLMServer
 
 RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"
+ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"
+
+
+def _gate_expression(script) -> str:
+    """The ``sequence_ratio_active=`` source the script feeds the preflight, from its own AST."""
+    for node in ast.walk(ast.parse(script.read_text())):
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_sampler_logprob_reference_synced":
+            for keyword in node.keywords:
+                if keyword.arg == "sequence_ratio_active":
+                    return ast.unparse(keyword.value)
+    raise AssertionError(f"{script.name} no longer runs the sampler-logprob preflight")
 
 
 @pytest.fixture
@@ -85,14 +97,25 @@ def test_the_synced_form_takes_the_consumer_flag_under_its_new_name(nucleus_serv
 def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():
     """The script must derive the flag from the config, not pin it — a pinned False is the bug this
     fixes: TRL's default ``sequence_mask`` ran against a renormalized reference unchecked."""
-    for node in ast.walk(ast.parse(RLVR_SCRIPT.read_text())):
-        if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_sampler_logprob_reference_synced":
-            keywords = {kw.arg: ast.unparse(kw.value) for kw in node.keywords}
-            assert keywords["sequence_ratio_active"] == (
-                "DistributedGRPOTrainer.sequence_level_importance_sampling(grpo_config)"
-            ), keywords
-            return
-    raise AssertionError("rlvr.py no longer runs the sampler-logprob preflight")
+    assert _gate_expression(RLVR_SCRIPT) == "DistributedGRPOTrainer.sequence_level_importance_sampling(grpo_config)"
+
+
+@pytest.mark.parametrize(
+    ("knobs", "expected"),
+    [
+        ({}, False),
+        ({"isr_geo_band_min": 0.99, "isr_geo_band_max": 1.01}, True),
+        ({"isr_opsm_delta": 0.1}, True),
+    ],
+    ids=["neither", "geo_band_only", "opsm_only"],
+)
+def test_the_env_script_arms_the_gate_for_every_sequence_summing_consumer(knobs, expected):
+    """OPSM sums the per-token log-ratios over a trajectory exactly as the geometric band does
+    (``apply_opsm`` thresholds ``|mean log-ratio|``), so a nucleus-renormalized reference biases it the
+    same way. The env script's flag is evaluated from its own source: an expression naming only the
+    geometric band leaves an OPSM-only run's reference unchecked."""
+    async_config = AsyncTrainingConfig(**knobs)
+    assert eval(_gate_expression(ENV_SCRIPT), {"async_config": async_config}) is expected  # noqa: S307
 
 
 if __name__ == "__main__":

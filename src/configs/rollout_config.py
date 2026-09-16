@@ -67,6 +67,7 @@ class RolloutConfig:
     """Token ids that end a turn (vLLM ``stop_token_ids``). Set to the model's tool-call terminator so a
     turn stops when the model emits its call; otherwise a non-eos terminator keeps the model generating,
     hallucinating the tool result and playing the whole episode in one turn."""
+
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     """Chat-template variables sent with every request (``chat_template_kwargs``), e.g. Qwen3.x's
     ``preserve_thinking`` so reasoning the env carries stays rendered across a later user message. Never

@@ -25,6 +25,7 @@ SAMPLE = ScoringSample(
     completion=[{"role": "assistant", "content": "It is 4."}],
     reference="4",
 )
+PERFECT_VERDICT = json.dumps({"scores": {"correctness": 10, "clarity": 10}, "rationale": ""})
 
 
 def _term(**overrides) -> JudgeTerm:
@@ -58,9 +59,41 @@ class _FakeClient:
         self.closed = True
 
 
+class _Yield:
+    """One loop tick. Not ``asyncio.sleep``: two tests here monkeypatch the module's ``sleep``."""
+
+    def __await__(self):
+        yield
+
+
+class _OverlappingClient(_FakeClient):
+    """Suspends inside every request and records how many were in flight at that moment."""
+
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.inflight: list[int] = []
+        self._open = 0
+
+    async def _create(self, **kwargs):
+        self._open += 1
+        self.inflight.append(self._open)
+        try:
+            await _Yield()
+            return await super()._create(**kwargs)
+        finally:
+            self._open -= 1
+
+
 def _judge(term, replies) -> tuple[GenerativeJudge, _FakeClient]:
     judge = GenerativeJudge(term)
     client = _FakeClient(replies)
+    judge._create_client = lambda: client
+    return judge, client
+
+
+def _overlapping_judge(term, count: int) -> tuple[GenerativeJudge, _OverlappingClient]:
+    judge = GenerativeJudge(term)
+    client = _OverlappingClient([_reply(PERFECT_VERDICT) for _ in range(count)])
     judge._create_client = lambda: client
     return judge, client
 
@@ -154,6 +187,17 @@ def test_score_is_the_weighted_fraction_with_diagnostics():
     assert result.detail == "Right and clear." and result.error is None
 
 
+def test_out_of_scale_requirement_scores_are_clamped_in_the_diagnostics():
+    """A judge that answers outside ``[0, scale]`` must not log 1.2 for a 12/10: the diagnostic is
+    clamped like the score, so the W&B panel and the reward agree."""
+    reply = _reply(json.dumps({"scores": {"correctness": 12, "clarity": -3}, "rationale": "off scale"}))
+    judge, _ = _judge(_term(), [reply])
+    (result,) = asyncio.run(judge.score([SAMPLE]))
+    assert result.metrics["judge/quality/correctness"] == 1.0
+    assert result.metrics["judge/quality/clarity"] == 0.0
+    assert result.score == pytest.approx(10 / 15)
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -237,9 +281,23 @@ def test_samples_score_concurrently_in_order():
     results = asyncio.run(judge.score([SAMPLE, SAMPLE, SAMPLE]))
     assert [round(r.score, 2) for r in results] == [1.0, 0.0, 0.5]
     assert len(client.requests) == 3
-    # A second run on a new loop must not trip over the first loop's semaphore.
-    judge, _ = _judge(_term(max_concurrency=1), replies[:1])
-    assert asyncio.run(judge.score([SAMPLE]))[0].score == 1.0
+
+
+def test_the_cap_bounds_the_requests_in_flight():
+    judge, client = _overlapping_judge(_term(max_concurrency=2), count=6)
+    results = asyncio.run(judge.score([SAMPLE] * 6))
+    assert [r.score for r in results] == [1.0] * 6
+    assert max(client.inflight) == 2, "max_concurrency bounds the judge calls in flight"
+
+
+def test_one_judge_reused_on_a_second_loop_rebinds_its_semaphore():
+    """A semaphore binds to the loop it first blocks on: the launch probe and the Ray actor run on
+    different loops, so a judge that kept the first one raises ``bound to a different event loop``."""
+    judge, client = _overlapping_judge(_term(max_concurrency=1), count=4)
+    first = asyncio.run(judge.score([SAMPLE, SAMPLE]))
+    second = asyncio.run(judge.score([SAMPLE, SAMPLE]))
+    assert [r.score for r in first + second] == [1.0] * 4
+    assert max(client.inflight) == 1, "both runs must contend, or the rebinding branch is never reached"
 
 
 def test_verify_probes_through_a_fresh_client_and_closes_it():

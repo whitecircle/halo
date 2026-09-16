@@ -11,7 +11,7 @@ from _pipeline_style import *
 W, H = 12.4, 5.85
 
 CARD_Y, CARD_H = 4.00, card_height(2)
-CARD_W, CARD_GAP, CARD_X0 = 2.184, 0.22, 0.3
+CARD_GAP, CARD_X0 = 0.22, 0.3
 
 CP, HEADS = 4, 64
 CELL_W, CELL_H = 0.66, 0.42
@@ -27,6 +27,7 @@ STAGES = [
     ("all-to-all #2", ["scatter sequence", "gather heads"], VIOLET),
     ("Per-rank output", ["[B, S/4, 64, D]", "reshape → o_proj"], TEAL),
 ]
+CARD_XS, CARD_W = columns(W, len(STAGES), CARD_X0, CARD_GAP)
 
 
 fig, ax = plt.subplots(figsize=(W, H))
@@ -37,8 +38,7 @@ ax.axis("off")
 
 title(ax, "Ulysses attention", "cp 4 · 64 Q / 8 KV heads → 16 Q / 2 KV per rank")
 
-xs = [CARD_X0 + i * (CARD_W + CARD_GAP) for i in range(len(STAGES))]
-card_row(ax, xs, CARD_Y, CARD_W, CARD_H, STAGES, mono_lines=True)
+card_row(ax, CARD_XS, CARD_Y, CARD_W, CARD_H, STAGES, mono_lines=True)
 
 section(ax, 0.3, GRID_Y + 0.5, "Who holds what — rank × sequence chunk")
 

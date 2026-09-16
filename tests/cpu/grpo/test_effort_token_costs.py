@@ -39,10 +39,13 @@ def test_cost_charges_per_generated_token():
     assert metrics["reward/token_cost"] == [pytest.approx(-0.1 / 3)]
 
 
-def test_all_free_episodes_log_nothing():
+def test_all_free_episodes_log_a_zero_cost_over_the_whole_batch():
+    """The key is recorded on every rank whatever it charged: ``WorldMetrics`` folds the union of what
+    the ranks recorded, so a rank that skipped the record would drop out of the world denominator and
+    the logged mean would be an average over the ranks that charged something, not over the batch."""
     rewards, metrics = _apply([_rollout(None, 3000), _rollout(0.0, 3000)])
     assert rewards.sum().item() == 0.0
-    assert "reward/token_cost" not in metrics
+    assert metrics["reward/token_cost"] == [pytest.approx(0.0)]
 
 
 def test_missing_trajectory_is_free():

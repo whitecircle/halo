@@ -13,8 +13,8 @@ M = 0.305  # left/right margin, matching `title`'s 2.5% inset
 LANE = 1.50  # band gap: holds the completions arrow and the weight-sync return path
 
 (COL_A, COL_B, COL_C), COL_W = columns(W, 3, M)
-ROW2_Y, ROW2_H = 1.17, 1.70
-ROW1_Y, ROW1_H = ROW2_Y + ROW2_H + LANE, 1.44
+ROW2_Y, ROW2_H = 1.17, card_height(4)
+ROW1_Y, ROW1_H = ROW2_Y + ROW2_H + LANE, card_height(3)
 SYNC_LANE_Y = ROW2_Y + ROW2_H + 0.45  # horizontal run of the weight-sync return
 
 fig, ax = plt.subplots(figsize=(W, H))
@@ -81,9 +81,9 @@ card(
     ROW2_H,
     "Rewards",
     [
-        r"accuracy_reward: last \boxed{}",
+        r"rewards: accuracy — last \boxed{}",
         "equals answer → 1.0 / 0.0",
-        "format_reward: regex, off",
+        "rewards: format — regex, off",
         "weighted sum → reward_weights",
     ],
     color=TEAL,

@@ -322,5 +322,52 @@ def test_an_undeclared_shaping_component_is_refused():
     assert traj.info[REWARD_COMPONENTS_KEY]["reward/bonus"] == 0.1 and traj.total_reward == pytest.approx(1.1)
 
 
+def test_a_grade_that_is_not_an_episode_grade_is_refused():
+    """``_settle_grade`` reads ``.objective``/``.shaping`` off the return value; a bare float (the
+    retired ``_compute_reward`` shape) would otherwise fail deep inside pricing, or — for a duck-typed
+    stand-in — price an unvalidated objective straight into the reward."""
+
+    class NotAGrade(base_module.BaseEnvironment):
+        def _reset_single(self, prompt, context=None):
+            return self._init_trajectory(prompt, context)
+
+        def _step_single(self, trajectory, action, context=None):
+            return trajectory, 0.0, True, False, {}
+
+        def _grade_episode(self, trajectory, context=None):
+            return 1.0
+
+    env = NotAGrade()
+    ids, _ = env.reset(["q"], [{}])
+    with pytest.raises(TypeError, match="must return an EpisodeGrade"):
+        env.step(ids, ["a"], [{}])
+
+
+def test_a_shaping_component_declared_by_both_halves_is_refused():
+    """The protocol's ``_episode_shaping`` and the env's own grade both contribute shaping under bare
+    names. A name produced by both would silently take the grade's value (a plain dict update), losing
+    the protocol's — so the collision is refused instead."""
+
+    class Colliding(base_module.BaseEnvironment):
+        SHAPING_COMPONENTS = ("bonus",)
+
+        def _reset_single(self, prompt, context=None):
+            return self._init_trajectory(prompt, context)
+
+        def _step_single(self, trajectory, action, context=None):
+            return trajectory, 0.0, True, False, {}
+
+        def _episode_shaping(self, trajectory):
+            return {"bonus": 0.25}
+
+        def _grade_episode(self, trajectory, context=None):
+            return EpisodeGrade(1.0, {"bonus": 0.1})
+
+    env = Colliding()
+    ids, _ = env.reset(["q"], [{}])
+    with pytest.raises(ValueError, match="'reward/bonus' is declared twice"):
+        env.step(ids, ["a"], [{}])
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

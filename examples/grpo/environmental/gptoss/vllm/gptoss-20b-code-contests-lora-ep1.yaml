@@ -100,7 +100,7 @@ enable_prefetch: true       # one-step staleness corrected by the sampling-logpr
 
 # --- Dataset ---
 # HardTests problems with sound checkers, banded by Codeforces rating; `medium` = 1500-1999
-# (agent-docs/training-methods/grpo/environments/code-contests.md#preparation).
+# (agent-docs/training-methods/grpo/environments/code-contests.md#dataset).
 dataset:
 - your-org/code-contests-hardtests-rl:medium
 
@@ -151,7 +151,7 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: false      # no EP → non-reentrant GC
+  use_reentrant: false      # forced to True at runtime: the ep1 grouped-GEMM expert layer counts as EP (the trainer warns)
 fp32_grad_reduce: true
 
 # --- Output ---

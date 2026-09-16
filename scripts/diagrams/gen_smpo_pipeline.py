@@ -12,8 +12,8 @@ W, H = 12.2, 5.83
 M = 0.305  # left/right margin, matching `title`'s 2.5% inset
 
 (COL_A, COL_B, COL_C), COL_W = columns(W, 3, M)
-ROW1_Y, ROW1_H = 2.97, 1.96
-ROW2_Y, ROW2_H = 1.17, 1.18
+ROW1_Y, ROW1_H = 2.97, card_height(5)
+ROW2_Y, ROW2_H = 1.17, card_height(2)
 TOTAL_X = COL_B
 TOTAL_W = W - M - TOTAL_X
 

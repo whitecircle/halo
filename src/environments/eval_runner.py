@@ -282,7 +282,8 @@ async def collect_results(
                 rec: dict[str, Any] = {"reward": reward, "success": reward >= success_threshold, "stats": stats}
                 if traj is not None and traj.episode_invalid:
                     # A grade with no signal (a grader outage, a dead judge) is an error row, not a
-                    # score: the training baseline drops it, and the eval mean must not count it.
+                    # score: the training baseline drops it. The eval keeps the row and scores it
+                    # zero, so `error` is what separates a failed grade from a genuine miss.
                     rec.update(
                         reward=0.0,
                         success=False,
