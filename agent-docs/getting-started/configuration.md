@@ -75,7 +75,7 @@ liger_kernel_config:
 `halo launch <method> <config>` (`src/cli.py`) resolves the method to a script under
 `scripts/training/` and picks the launcher: `accelerate launch` whenever `-a accelerate/<config>.yaml`
 is given (there `-n N` becomes `--num_processes`), else `torchrun` when `-n N` sets more than one
-process (required for EP/CP/TP/ETP), else plain Python. Every flag the launcher does not own reaches the trainer, so overrides follow the config directly (`halo launch sft cfg.yaml -n 8 --learning_rate=1e-5`); a standalone `--` is needed only before a flag that collides with the launcher's own (`--help`, `--port`, `--dry-run`, ...).
+process (required for EP/CP/TP/ETP), else plain Python. A plain-Python run trains on the one GPU it binds however many are visible: `init_training_script` pins `n_gpu` to 1, so HF never wraps the model in `nn.DataParallel` (whose loss and gradients scale with the GPU count). Every flag the launcher does not own reaches the trainer, so overrides follow the config directly (`halo launch sft cfg.yaml -n 8 --learning_rate=1e-5`); a standalone `--` is needed only before a flag that collides with the launcher's own (`--help`, `--port`, `--dry-run`, ...).
 `--list` prints the method names, `--dry-run` prints the command, `-p <port>` sets the rendezvous port
 so concurrent launches do not collide (it raises on a single-process launch). A missing config path
 fails before any process starts.

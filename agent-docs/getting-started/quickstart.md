@@ -40,7 +40,7 @@ logging_steps: 1
 torchrun --nproc_per_node=8 scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 ```
 
-`torchrun` is the default launcher — it lands on FSDP2 even with no parallelism flag. Use `python` for a single GPU; `accelerate launch` stays supported for plain data parallelism ([launcher selection](configuration.md#launcher-selection)). BF16, Liger kernels and grouped GEMM (SM90+, MoE experts) are on by default, and the attention implementation is auto-detected per architecture unless the config pins one, as this one does.
+`torchrun` is the default launcher — it lands on FSDP2 even with no parallelism flag. Use `python` for a single GPU (a single process trains on the one GPU it binds however many are visible, never under `nn.DataParallel`); `accelerate launch` stays supported for plain data parallelism ([launcher selection](configuration.md#launcher-selection)). BF16, Liger kernels and grouped GEMM (SM90+, MoE experts) are on by default, and the attention implementation is auto-detected per architecture unless the config pins one, as this one does.
 
 `assistant_message_template` must byte-match the model's rendered assistant-turn prefix or the completion mask misfires and loss stays 0. It has no default — set the ChatML form for Qwen, the Llama-3 header for Llama-3. See [SFT](../training-methods/sft.md).
 

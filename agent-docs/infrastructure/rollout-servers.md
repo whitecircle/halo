@@ -428,7 +428,9 @@ window OOMs the training forward before the fail-on-overflow check.
 R3 runs (`routing_replay: rollout`) set `VLLM_ENABLE_R3=1`, which adds
 `--enable-return-routed-experts`; without the flag the trainer raises at the first capture. The
 FlashInfer monolithic MoE kernels bypass the capturer and return all-zero expert ids, hence the
-triton backend.
+triton backend. Set `VLLM_ENABLE_R3` for MoE models only: the capturer reads the experts-per-token count off the
+config and the engine exits at start on a dense model, which under the compose `restart` policy
+shows up as a server that restarts forever and never turns healthy.
 
 `VLLM_USE_V2_MODEL_RUNNER=0` is not a serve flag but an env var the compose file already passes
 through from your shell (`VLLM_USE_V2_MODEL_RUNNER=0 docker compose -f docker-compose.vllm.yml up`).
@@ -545,9 +547,9 @@ Engine behavior under RL:
     full sequence, so prompt spans replay too.
 
     The engine's capturer is per family: it serves GptOss, Qwen3 MoE, Qwen3.5/3.6 and GLM-4 MoE Lite,
-    exits at start for Gemma 4 (whose config carries no `num_experts_per_tok`; the family has no
-    routing replay on either engine) and raises at the first capture for Bailing. Serve those two
-    without `SGLANG_ENABLE_R3`.
+    exits at start for a dense model and for Gemma 4 (whose config carries no
+    `num_experts_per_tok`; the family has no routing replay on either engine) and raises at the
+    first capture for Bailing. Serve those without `SGLANG_ENABLE_R3`.
 
 - **`rollout_max_thinking_tokens` is rejected at config time** for every model: SGLang ignores
   unknown request fields, and the trainer wires neither of its budget mechanisms. Steer with the

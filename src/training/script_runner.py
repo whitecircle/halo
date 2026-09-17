@@ -67,10 +67,10 @@ def init_training_script(
 ) -> ScriptRuntime:
     """Run the common pre-model phase of a training entry script.
 
-    Token-field sync → ``init_distributed`` → ``PartialState`` → CUDA device pinning →
-    :func:`parallelism_config_from_args` (+ expert-LoRA split) → ``setup_training_environment``
-    (run name ``{script_prefix}-{mode_suffix}``) → checkpoint-resume resolution. Every entry script
-    depends on that order.
+    Token-field sync → ``init_distributed`` → ``PartialState`` → CUDA device pinning (a process
+    stays on that one GPU) → :func:`parallelism_config_from_args` (+ expert-LoRA split) →
+    ``setup_training_environment`` (run name ``{script_prefix}-{mode_suffix}``) → checkpoint-resume
+    resolution. Every entry script depends on that order.
 
     Args:
         args: parsed script-arguments dataclass.
@@ -98,6 +98,7 @@ def init_training_script(
     local_rank = get_local_rank()
     if torch.cuda.is_available():  # CUDA-less interpreters (config-parse checks, CPU boxes) stay usable
         torch.cuda.set_device(local_rank)
+    pin_single_process_to_bound_gpu(training_config)
 
     # Before the weight load (a check placed after it would be the first collective a straggler
     # misses, and the watchdog would then time out here) and after the device bind (the gather
@@ -130,6 +131,23 @@ def init_training_script(
     resume_checkpoint, model_source = prepare_distributed_resume(training_config, model_config, parallelism_config)
 
     return ScriptRuntime(parallelism_config, mode_suffix, local_rank, resume_checkpoint, model_source)
+
+
+def pin_single_process_to_bound_gpu(training_config) -> None:
+    """Keep a process on the one GPU it bound.
+
+    With several GPUs visible HF wraps the model in ``nn.DataParallel``, which the token-normalized
+    losses are not written for: the logged loss and the gradients scale with the GPU count. A
+    torchrun or accelerate launch already reports ``n_gpu == 1``.
+    """
+    visible = training_config.n_gpu
+    if visible <= 1:
+        return
+    logger.warning(
+        f"{visible} GPUs are visible to this process; it trains on the one it bound. A multi-GPU run "
+        f"takes one process per GPU: `halo launch <method> <config> -n <gpus>` (torchrun)."
+    )
+    training_config._n_gpu = 1
 
 
 def sync_token_field(args, training_config, field_name: str) -> None:

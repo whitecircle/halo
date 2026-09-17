@@ -30,7 +30,7 @@ data format and keys. The online RL recipes need a separate
 Inside the container:
 
 ```bash
-# Single GPU (LoRA)
+# Single GPU (LoRA): without -n the run uses one GPU, however many the container sees
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 
 # 8 GPUs, full fine-tune
