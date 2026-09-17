@@ -1,11 +1,13 @@
 # Environmental GRPO — Gemma-4 26B-A4B full fine-tune on code_contests, SGLang backend, no EP, ZeRO-3, KL-free
 # (IS bands as the trust region). rollout_max_thinking_tokens is vLLM-only: rollout_max_tokens is the per-turn bound.
-# Serve with: 2 sglang-servers on GPUs 4-7, ports 30000/30001, --moe-runner-backend triton --tool-call-parser auto,
+# Serve with: 2 sglang-servers on GPUs 4-7, ports 30000/30001, --moe-runner-backend triton --tool-call-parser auto, SGLANG_CHAT_TEMPLATE=jinja-templates/gemma4/gemma4-reasoning-effort.jinja (the file chat_template: pins below)
 #   NCCL_CUMEM_ENABLE=1 in the server env, no SGLANG_ENABLE_R3 (routing replay is refused for Gemma 4).
 # Launch: CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 
 # --- Model ---
 model_name_or_path: google/gemma-4-26B-A4B-it
+chat_template: jinja-templates/gemma4/gemma4-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the hub template has no effort variable and its thinking toggle would differ between the server and the trainer's renders
+force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
 attn_implementation: sdpa  # only viable backend (global_head_dim=512; mem-efficient SDPA auto-forced)
 
 # --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-3) ---
@@ -24,7 +26,7 @@ environment_kwargs:
   stop_on_first_failure: false
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit
   reasoning_effort: random
-  max_length_cutoff_recoveries: 2  # past two recoveries the episode ends truncated
+  max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
   # One profile per effort level. thinking_tokens is an engine cap on vLLM only; on SGLang it reaches
   # the trajectory, so nothing caps CoT below rollout_max_tokens.
   reasoning_effort_profiles:
@@ -34,7 +36,7 @@ environment_kwargs:
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only; expected/got would make the judge a test oracle
-  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first
+  resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
   no_tool_use_penalty: 0.1
   multi_turn_reward: 0
   tool_success_reward: 0

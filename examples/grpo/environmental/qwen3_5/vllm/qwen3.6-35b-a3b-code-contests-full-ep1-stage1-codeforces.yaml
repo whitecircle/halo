@@ -1,11 +1,13 @@
 # Environmental GRPO — Qwen3.6-35B-A3B full fine-tune, code-contests curriculum stage 1 of 3: the base model on the
 # Codeforces `verifiable` pool at rating 1500-2600, no EP, ZeRO-3, KL-free (IS bands as the trust region).
-# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton --enable-prefix-caching,
+# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --chat-template jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below) --moe-backend triton --enable-prefix-caching,
 #   plus VLLM_USE_V2_MODEL_RUNNER=0 in the server env (V2 400s the thinking_token_budget this config sends).
 # Launch: start 2 vLLM servers, TP=1 each, on GPUs 6 and 7 with --weight-transfer-config '{"backend":"nccl"}', then CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
+chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
+force_chat_template: true      # the checkpoint ships the stock template; serve with --chat-template on the same file
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
 # No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag still runs
 # transformers' load-balancing loss — a layers x tokens x top_k x experts int64 one-hot, tens of GB here.
@@ -31,7 +33,7 @@ environment_kwargs:
   stop_on_first_failure: false
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
-  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past two the episode ends truncated
+  max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
   # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
     low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
@@ -75,7 +77,6 @@ rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS refere
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_max_tokens: 24000              # per-turn total: thinking budget + a 6k answer headroom (code + call after </think>)
 rollout_max_thinking_tokens: 18000     # global CoT ceiling >= the profiles' high
-rollout_chat_template_kwargs: {preserve_thinking: true}  # Qwen3.x keeps carried reasoning rendered past the cut-turn nudge, a user message
 reasoning_compliance_weight: 0.15            # a turn that thinks past 0.9x its budget pays up to this, averaged over the episode's turns
 reasoning_compliance_under_use_weight: 0     # no floor: a short repair turn after a verdict is not under-use
 

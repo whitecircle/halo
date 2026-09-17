@@ -8,7 +8,7 @@ return those facts in different places. Transport and the episode loop belong to
 import logging
 from typing import Any, get_args, get_type_hints
 
-from src.configs.rollout_config import RolloutConfig
+from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
@@ -142,15 +142,17 @@ def capture_routing_mask(choice: dict[str, Any], data: dict[str, Any]) -> str | 
 
 def generation_control_fields(config: RolloutConfig, reasoning_effort: str | None = None) -> dict[str, Any]:
     """The request fields carrying a turn's generation contract: the reasoning level, the CoT budget
-    bound to that level, and the turn terminator. Shared by both drivers (the training payload below
-    and the eval runner's SDK call), so a knob reaches them alike.
+    bound to that level, and the turn terminator. One owner for both drivers — the training payload
+    below and the eval runner's SDK call — so a knob cannot reach one and quietly miss the other.
 
-    ``reasoning_effort`` is sent top-level only. Both engines derive their thinking toggles from that
-    spelling (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``) and not from the
-    nested ``chat_template_kwargs`` form, which vLLM merges under the top-level field anyway. Sending
-    both is ambiguous: vLLM resolves a disagreement to the top-level value, SGLang to the nested one.
-    The run's other template variables (``config.chat_template_kwargs``) do ride in the nested form;
-    the config refuses the effort key there.
+    ``reasoning_effort`` goes out TOP-LEVEL: that spelling is the one both engines derive their
+    thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``). vLLM
+    also merges it into the template's variables; SGLang hands a template only the nested
+    ``chat_template_kwargs``, so on SGLang the same value rides there too (a disagreement would resolve
+    to the nested value on SGLang and to the top-level one on vLLM, which is why the copy is exact).
+    The run's other template variables (``config.chat_template_kwargs``) ride in the nested form,
+    joined by the level's thinking budget under :data:`REASONING_BUDGET_TEMPLATE_VAR`; the config
+    refuses both per-episode keys there.
     """
     fields: dict[str, Any] = {}
     if config.stop_token_ids:
@@ -176,10 +178,19 @@ def generation_control_fields(config: RolloutConfig, reasoning_effort: str | Non
                 config.backend,
                 config.max_tokens,
             )
-    if config.chat_template_kwargs:
-        fields["chat_template_kwargs"] = dict(config.chat_template_kwargs)
+    template_kwargs = dict(config.chat_template_kwargs or {})
+    if config.max_thinking_tokens is not None:
+        # The level's per-turn cap as a template variable, so a template can state the budget the
+        # engine enforces; a template that does not read it ignores it.
+        template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = config.max_thinking_tokens
     if reasoning_effort is not None:
         fields["reasoning_effort"] = reasoning_effort
+        if config.backend != VLLM_BACKEND:
+            # SGLang derives its thinking toggle from the top-level field but hands a template only the
+            # nested kwargs, and resolves a disagreement to the nested value; the two carry one value.
+            template_kwargs["reasoning_effort"] = reasoning_effort
+    if template_kwargs:
+        fields["chat_template_kwargs"] = template_kwargs
     return fields
 
 

@@ -79,3 +79,15 @@ Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus th
 The KV-repeat override is not what makes the global layers legal — transformers 5.16 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 Gemma 4 never reaches a varlen kernel, so `select_data_collator` rejects **`padding_free`** for it — the gate is the resolved `_attn_implementation`, and only `flash_attention_2/_3/_4` qualify. `packing: true` (what the example config uses) still isolates documents through per-document `position_ids`, at the cost of a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of `cu_seqlens` ([Collators](../data/collators.md)).
+
+## RL chat template
+
+The async GRPO recipes pin `jinja-templates/gemma4/gemma4-reasoning-effort.jinja` with `force_chat_template: true`,
+and the servers run the same file (`VLLM_CHAT_TEMPLATE` / `SGLANG_CHAT_TEMPLATE` in the compose files). It
+is the hub template reduced to text-only tool use — the `<|think|>` marker opens every system turn, an
+assistant turn renders whatever reasoning it carries, the media placeholders and the Gemma-native
+`tool_responses` branch dropped — plus a system-turn line stating the episode's `reasoning_effort` and
+`reasoning_budget`, which the hub template has no variable for. The hub template keys thinking on an
+`enable_thinking` variable that the vLLM server sets from `reasoning_effort` and the trainer's renders do
+not, so the pinned template is also what keeps the two prompts identical
+([Reasoning budget](../training-methods/grpo/async-grpo/rollouts.md#reasoning-budget)).

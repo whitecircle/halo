@@ -196,20 +196,22 @@ def _build_payload(backend: str, reasoning_effort: str | None = None, **rollout_
     )
 
 
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_the_effort_level_goes_out_top_level_and_never_nested(backend):
-    """One spelling, from one owner, on both engines.
+def test_the_effort_level_goes_out_top_level_and_nested_only_where_the_template_needs_it():
+    """One value, from one owner, on both engines.
 
-    Only the top-level field derives the engines' thinking toggles: vLLM's request model sets
-    ``enable_thinking`` from it and SGLang's validator sets ``thinking``/``enable_thinking``, both
-    before anything reads ``chat_template_kwargs``. The nested spelling reaches the template render
-    and sets neither. It is also not needed as a belt-and-braces copy — vLLM merges the nested dict
-    UNDER the top-level field and drops that field when unset, so it never clobbers — while sending
-    both is ambiguous: vLLM resolves a disagreement to the top-level value, SGLang to the nested one.
+    The top-level field derives the engines' thinking toggles: vLLM's request model sets
+    ``enable_thinking`` from it and SGLang's validator sets ``thinking``/``enable_thinking``. vLLM
+    also merges it into the template's variables, so a nested copy would only be ambiguous there
+    (a disagreement resolves to the top-level value). SGLang hands a template only the nested
+    ``chat_template_kwargs`` and resolves a disagreement to the nested value, so there the same value
+    rides in both places — an exact copy, never a second knob.
     """
-    payload = _build_payload(backend, reasoning_effort="high")
-    assert payload["reasoning_effort"] == "high"
-    assert "chat_template_kwargs" not in payload
+    vllm_payload = _build_payload("vllm", reasoning_effort="high")
+    assert vllm_payload["reasoning_effort"] == "high"
+    assert "chat_template_kwargs" not in vllm_payload
+    sglang_payload = _build_payload("sglang", reasoning_effort="high")
+    assert sglang_payload["reasoning_effort"] == "high"
+    assert sglang_payload["chat_template_kwargs"] == {"reasoning_effort": "high"}
 
 
 def test_an_unset_effort_sends_no_field_at_all():

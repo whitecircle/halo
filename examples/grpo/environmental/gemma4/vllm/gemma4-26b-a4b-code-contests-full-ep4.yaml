@@ -1,11 +1,13 @@
 # Environmental GRPO — Gemma-4 26B-A4B full fine-tune on Codeforces, EP=4, ZeRO-2, KL-free (IS bands as the trust region).
-# Serve with: --moe-backend triton --enable-auto-tool-choice --tool-call-parser hermes on the patched vllm-server
+# Serve with: --moe-backend triton --enable-auto-tool-choice --tool-call-parser hermes on the patched vllm-server --chat-template jinja-templates/gemma4/gemma4-reasoning-effort.jinja (the file chat_template: pins below)
 #   image; code_contests is a native-tool env, and a server with no tool parser 400s every rollout.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
 
 # --- Model ---
 model_name_or_path: google/gemma-4-26B-A4B-it
+chat_template: jinja-templates/gemma4/gemma4-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the hub template has no effort variable and its thinking toggle would differ between the server and the trainer's renders
+force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
 attn_implementation: sdpa  # only viable backend (global_head_dim=512; mem-efficient SDPA auto-forced)
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
 
@@ -31,7 +33,7 @@ environment_kwargs:
   stop_on_first_failure: false
   max_grading_seconds: 150   # seconds of wall clock per submission grade; a budget stop scores the graded prefix
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
-  max_length_cutoff_recoveries: 2  # a cut turn spends a turn but no budget; past this the episode ends truncated
+  max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
   # One profile per effort level: CoT budget + interaction budgets. thinking_tokens is an ENGINE cap
   # that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
@@ -42,7 +44,7 @@ environment_kwargs:
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract)
-  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first
+  resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
   multi_turn_reward: 0
   tool_success_reward: 0

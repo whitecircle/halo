@@ -117,3 +117,13 @@ Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smo
 Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn). `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (tool-call `arguments` must be a parsed mapping). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
 
 The family also carries the per-method canonical examples: Qwen3.5-9B (dense) for DPO/SMPO/KTO (`examples/preference/qwen3_5/`), reward, classification, and distillation; Qwen3.6-35B-A3B for the GRPO task configs. The environmental-GRPO attention-LoRA configs (`examples/grpo/environmental/qwen3_5/{vllm,sglang}/qwen3.6-35b-a3b-code-contests-lora-*.yaml`) share a shape that fails at the first training step (`aten.embedding.default got mixed torch.Tensor and DTensor`), an open issue; the `-full-` siblings train and sync ([Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix)).
+
+## RL chat template
+
+The async GRPO recipes for Qwen3.6 pin `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` with
+`force_chat_template: true`, and the servers run `--chat-template` on the same file
+(`VLLM_CHAT_TEMPLATE` in the compose file). It is the hub template reduced to text-only tool use —
+thinking always on, carried reasoning always rendered, the vision branch and the
+`enable_thinking`/`preserve_thinking` switches dropped — plus a system-block line stating the episode's
+`reasoning_effort` and `reasoning_budget`, which the hub template has no variable for
+([Reasoning budget](../training-methods/grpo/async-grpo/rollouts.md#reasoning-budget)).

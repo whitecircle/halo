@@ -25,6 +25,10 @@ DEFAULT_RETRY_BASE_WAIT_SECONDS = 1.0
 # directly built RolloutConfig does not default above what that validated path allows.
 DEFAULT_EPISODE_TIMEOUT_SECONDS = 1200.0
 
+# Chat-template variable carrying an episode's per-turn thinking budget (the cap the engine enforces),
+# the pair of the request's top-level ``reasoning_effort``; both are per episode, never run-wide.
+REASONING_BUDGET_TEMPLATE_VAR = "reasoning_budget"
+
 
 @dataclass
 class RolloutConfig:

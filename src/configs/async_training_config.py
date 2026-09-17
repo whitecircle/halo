@@ -15,6 +15,7 @@ from src.configs.rollout_config import (
     DEFAULT_ROLLOUT_MAX_TOKENS,
     DEFAULT_ROLLOUT_TEMPERATURE,
     DEFAULT_ROLLOUT_TOP_P,
+    REASONING_BUDGET_TEMPLATE_VAR,
     RolloutConfig,
 )
 from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
@@ -325,10 +326,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         default_factory=dict,
         metadata={
             "help": "Chat-template variables sent with every rollout request as `chat_template_kwargs` and applied "
-            "to the trainer's own renders, so both sides see one template state. Qwen3.x reads "
+            "to the trainer's own renders, so both sides see one template state. The stock Qwen3.x template reads "
             "`preserve_thinking`: with the env's `carry_reasoning`, every prior turn's reasoning stays rendered "
-            "even after a user message (the cut-turn nudge). `reasoning_effort` is refused here: the level is "
-            "per episode and travels as the request's top-level field."
+            "even after a user message (the cut-turn nudge). `reasoning_effort` and `reasoning_budget` are refused "
+            "here: both are per episode; the level travels as the request's top-level field, the budget is added "
+            "to the nested form per request."
         },
     )
 
@@ -516,10 +518,12 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
                 "rollout_chat_template_kwargs must be a mapping of template variables, got "
                 f"{type(self.rollout_chat_template_kwargs).__name__}"
             )
-        if "reasoning_effort" in self.rollout_chat_template_kwargs:
+        per_episode = {"reasoning_effort", REASONING_BUDGET_TEMPLATE_VAR} & set(self.rollout_chat_template_kwargs)
+        if per_episode:
             raise ValueError(
-                "rollout_chat_template_kwargs must not carry reasoning_effort: the level is per episode and "
-                "travels as the request's top-level field, which the engine resolves over the nested form."
+                f"rollout_chat_template_kwargs must not carry {sorted(per_episode)}: the level and its thinking "
+                "budget are per episode; the level travels as the request's top-level field and the budget is "
+                "added to the nested form per request."
             )
         self._validate_backend_capabilities()
 

@@ -96,7 +96,10 @@ Three decisions matter more than the rest.
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) steers how much
   the model thinks; `reasoning_effort_profiles` attaches per-level token and interaction caps, as the code-contests
   recipes do (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). The engine-side cap
-  `rollout_max_thinking_tokens` is vLLM-only.
+  `rollout_max_thinking_tokens` is vLLM-only. The level only reaches the policy if the chat template renders it:
+  `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja`
+  state the level and its per-turn budget in the system block. Pin one with `force_chat_template: true` and serve the
+  same file ([Chat template](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#chat-template)).
 - **Tool budgets.** An environment pays `tool_success_reward` per successful call, charges `tool_error_penalty` per
   failure, and caps what successful calls earn across the episode — not the episode reward — at `tool_reward_cap`
   (default `tool_success_reward × max_turns`). Keep them small beside the objective, or tool-calling beats finishing.

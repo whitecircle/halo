@@ -117,7 +117,8 @@ async def test_both_drivers_bind_the_same_caps(monkeypatch):
     assert calls[0]["extra_body"] == generation_control_fields(actor_cfg, actor_level)
     assert calls[0]["extra_body"]["reasoning_effort"] == "high"
     assert calls[0]["extra_body"]["thinking_token_budget"] == 4000
-    assert "chat_template_kwargs" not in calls[0]["extra_body"]
+    # …and the budget also reaches the template as a variable, the one channel a prompt can state it through.
+    assert calls[0]["extra_body"]["chat_template_kwargs"] == {"reasoning_budget": 4000}
     assert calls[0]["max_tokens"] == actor_cfg.max_tokens
     # …and both leave the episode carrying the budget it ran under: the trainer's calibration reward
     # reads it off the trajectory, the eval records it in the trajectory file.

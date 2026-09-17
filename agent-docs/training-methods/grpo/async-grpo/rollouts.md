@@ -53,6 +53,12 @@ Steer depth with the env's `reasoning_effort`: `low`/`medium`/`high`/`random`/`n
 `BaseEnvironment`, `medium` on `code_contests`). A `random` level is drawn **once per generation
 group**, keeping the conditioning of a group identical.
 
+The level reaches the model only through the chat template. gpt-oss's template renders it natively;
+the stock Qwen3.x and Gemma 4 templates have no effort variable, so those recipes pin
+`jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja`,
+which state the level and its per-turn budget in the system block from the `reasoning_effort` and
+`reasoning_budget` variables below. A level the model cannot see is not a policy it can learn.
+
 `reasoning_effort_profiles` overrides the class's per-level table. Under a set
 `rollout_max_thinking_tokens`, a level's `thinking_tokens` applies as `min(level budget, that cap)`
 and lowers the turn's total to that budget plus the global answer headroom; left `null`, the level
@@ -83,7 +89,8 @@ The trainer refuses the knob under `rollout_backend: sglang`, where SGLang's han
 warned once — the server most likely runs without a reasoning parser.
 
 Where a carried thought renders is the template's decision. `rollout_chat_template_kwargs`
-(`{preserve_thinking: true}` on Qwen3.x) sends template variables with every request **and** applies
+(`{preserve_thinking: true}` on the stock Qwen3.x template; the shipped Qwen3.6 effort template always
+renders carried reasoning) sends template variables with every request **and** applies
 them to the trainer's own renders, so both sides see one template state. `reasoning_effort` is
 refused there.
 
@@ -112,9 +119,20 @@ template; with it, and no `--chat-template` on the server, the two sides diverge
 governs the re-tokenization paths below: a differing template scores log-probs against a prompt the
 policy never generated under. Per-turn rows take the engine's ids and cannot drift.
 
-`reasoning_effort` goes out as the request's **top-level** field only — the spelling both engines
-derive their thinking toggle from. The nested `chat_template_kwargs` form does not, and sending both
-is ambiguous.
+`reasoning_effort` goes out as the request's **top-level** field — the spelling both engines derive
+their thinking toggle from. vLLM also merges it into the template's variables; SGLang hands a template
+only the nested `chat_template_kwargs`, so on SGLang the same value is added there too. The level's
+per-turn thinking budget rides in the nested form as `reasoning_budget`, added per request; the
+trainer's own renders carry the same variables, and `rollout_chat_template_kwargs` refuses both keys.
+
+`jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` is the hub Qwen3.6 template cut to what the rollouts
+use — text only, thinking always on, an assistant turn rendering whatever reasoning it carries, the
+hub's tool-call and tool-response spellings — plus a system-block line stating the effort and budget.
+`jinja-templates/gemma4/gemma4-reasoning-effort.jinja` is the same cut of the hub Gemma 4 template: the
+`<|think|>` marker opens every system turn, so the server and the trainer's renders agree without the
+`enable_thinking` variable the hub template keys on. Pin either with `chat_template:` +
+`force_chat_template: true` and serve with the same file (`VLLM_CHAT_TEMPLATE` / `SGLANG_CHAT_TEMPLATE`
+in the compose files).
 
 ## Training on sampled tokens
 

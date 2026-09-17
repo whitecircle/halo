@@ -1,11 +1,13 @@
 # Environmental GRPO — Qwen3.6-35B-A3B full fine-tune on code_contests, SGLang backend, no EP, ZeRO-3, KL-free (IS bands as the trust region).
 # rollout_max_thinking_tokens and carry_reasoning are vLLM-only, so rollout_max_tokens is the per-turn bound.
-# Serve with: 2x TP=1 sglang-server on ports 30000/30001, --moe-runner-backend triton (auto-picked runners repack the expert weights each sync writes),
+# Serve with: 2x TP=1 sglang-server on ports 30000/30001, --moe-runner-backend triton (auto-picked runners repack the expert weights each sync writes), SGLANG_CHAT_TEMPLATE=jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below)
 #   --tool-call-parser auto (without it tool calls stay text and every episode scores 0), --reasoning-parser qwen3, NCCL_CUMEM_ENABLE=1 in the server env.
 # Launch: CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=6 scripts/training/environmental_grpo.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
+chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
+force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
 # No output_router_logits: the aux loss is inert under the policy-gradient objective, and the
 # load-balancing loss transformers then runs expands to tens of GB on a 100k-token trajectory.
@@ -26,7 +28,7 @@ environment_kwargs:
   stop_on_first_failure: false
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit
   reasoning_effort: random
-  max_length_cutoff_recoveries: 2  # past two recoveries the episode ends truncated
+  max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
   # One profile per effort level. thinking_tokens is an engine cap on vLLM only; on SGLang it reaches
   # the trajectory, so nothing caps CoT below rollout_max_tokens.
   reasoning_effort_profiles:
@@ -36,7 +38,7 @@ environment_kwargs:
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only; expected/got would make the judge a test oracle
-  resubmission_penalty: 0.1  # magnitude, >= 0 — each graded submission after the first
+  resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
   no_tool_use_penalty: 0.1
   multi_turn_reward: 0
   tool_success_reward: 0

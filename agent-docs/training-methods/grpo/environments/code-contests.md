@@ -53,7 +53,8 @@ The objective's shape is the `environment` term's `exponent` in the top-level `r
 `reasoning_effort` defaults to `medium` here, and the class ladder sets `thinking_tokens` only: low
 4096, medium 8192, high 16384. `reasoning_effort_profiles` merges per level over it, so a profile
 naming only interaction keys keeps the class budget
-([Reasoning budget](../async-grpo/rollouts.md#reasoning-budget)).
+([Reasoning budget](../async-grpo/rollouts.md#reasoning-budget)). The level and its budget reach the
+model through the chat template; on Qwen3.6 that is the shipped effort template the recipes pin.
 
 This environment adds three profile keys, bound per episode:
 

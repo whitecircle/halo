@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 import torch
 
+from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR
 from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, engine_view
 from src.environments.engine_wire import VLLM_BACKEND
 from src.environments.episode import RolloutResult
@@ -43,13 +44,20 @@ def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Ten
     return [TurnRow(*tokenized, None, None)]
 
 
-def rollout_template_kwargs(rollout_kwargs: dict, reasoning_effort: str | None) -> dict:
+def rollout_template_kwargs(
+    rollout_kwargs: dict, reasoning_effort: str | None, reasoning_budget: int | None = None
+) -> dict:
     """Chat-template kwargs a rollout's requests carry: the run's ``rollout_chat_template_kwargs``
-    plus the ``reasoning_effort`` the episode ran under, so a trainer-side render reproduces the
-    template's effort-dependent preamble. The effort key is absent when the episode carries none.
-    One owner for every render that stands in for the engine's: the training rows and the startup
-    prompt-overhead probe."""
-    return {**rollout_kwargs, **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {})}
+    plus the ``reasoning_effort`` the episode ran under and its per-turn thinking budget, so a
+    trainer-side render reproduces the template's effort-dependent preamble. Either key is absent
+    when the episode carries none. One owner for every render that stands in for the engine's: the
+    training rows and the startup prompt-overhead probe."""
+    kwargs = dict(rollout_kwargs)
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
+    if reasoning_budget is not None:
+        kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
+    return kwargs
 
 
 class TrajectoryTokenizeMixin:
@@ -221,7 +229,9 @@ class TrajectoryTokenizeMixin:
         if first_assistant_idx is None:
             return self._masked_trajectory_tensors()
 
-        template_kwargs = rollout_template_kwargs(self._rollout_template_kwargs, result.trajectory.reasoning_effort)
+        template_kwargs = rollout_template_kwargs(
+            self._rollout_template_kwargs, result.trajectory.reasoning_effort, result.trajectory.reasoning_budget
+        )
 
         def _render(msgs: Sequence, add_generation_prompt: bool, include_thinking: bool) -> list[int]:
             return self._render_messages_to_ids(msgs, add_generation_prompt, template_kwargs, include_thinking)
@@ -322,7 +332,9 @@ class TrajectoryTokenizeMixin:
                 )
             return single_trajectory_row(self._tokenize_trajectory(result))
 
-        template_kwargs = rollout_template_kwargs(self._rollout_template_kwargs, traj.reasoning_effort)
+        template_kwargs = rollout_template_kwargs(
+            self._rollout_template_kwargs, traj.reasoning_effort, traj.reasoning_budget
+        )
 
         context_limit = self._context_limit()
         rows: list[TurnRow] = []
