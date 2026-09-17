@@ -19,10 +19,15 @@ acceptable fix.
 Run: pytest tests/cpu/peft/test_lora_targets_peft_cannot_adapt.py
 """
 
+import contextlib
+import datetime
+import os
 import types
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers.models.deepseek_v4 import DeepseekV4Config
@@ -30,9 +35,11 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCa
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 from trl import ModelConfig
 
+import src.distributed.loading.peft_setup as peft_setup
 from src.distributed.loading.peft_setup import build_peft_config, setup_peft_model
 from src.kernels.lowp.linear import LowPrecisionLinear
 from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.ports import free_port
 
 ATTENTION_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -147,17 +154,125 @@ def test_regex_target_string_still_selects_by_pattern():
     assert _adapted_modules(get_peft_model(model, peft_config)) == {"base_model.model.language_model.q_proj"}
 
 
-def test_modules_to_save_is_not_excluded():
-    """``modules_to_save`` entries are full-trained copies, not adapters; the scan must leave them to
-    PEFT, which keeps them out of LoRA targeting itself."""
+def test_modules_to_save_copy_of_an_unadaptable_module_still_trains():
+    """``modules_to_save`` entries are full-trained copies, not adapters: a container the scan excludes
+    from LoRA targeting must still get its trainable copy, and the run must still forward."""
     model = _Multimodal(_ClippableAttention())
 
-    peft_config = build_peft_config(model, _model_config(lora_modules_to_save=["lm_head"]))
+    peft_config = build_peft_config(model, _model_config(lora_modules_to_save=["vision_tower.o_proj"]))
     peft_model = get_peft_model(model, peft_config)
 
-    assert "lm_head" not in (peft_config.exclude_modules or ())
-    assert any("lm_head" in name and param.requires_grad for name, param in peft_model.named_parameters()), (
-        "lm_head lost its trainable modules_to_save copy"
+    copies = [
+        name for name, param in peft_model.named_parameters() if "vision_tower.o_proj" in name and param.requires_grad
+    ]
+    assert copies and all("modules_to_save" in name for name in copies), "the container lost its trainable copy"
+    with torch.no_grad():
+        peft_model.base_model.model.vision_tower.o_proj(torch.zeros(1, 8))
+
+
+def test_rejection_names_the_expert_adapters_that_would_train_alone(monkeypatch):
+    """With native expert adapters live, an all-excluded attention list does not mean the run trains
+    nothing — the message must say what would train, or the user fixes the wrong half."""
+    monkeypatch.setattr(peft_setup, "has_ep_lora", lambda model: True)
+    model = _ClippableAttention()
+
+    with pytest.raises(ValueError, match="native expert adapters would train alone"):
+        build_peft_config(model, _model_config())
+
+
+class _GroupedPastEight(nn.Linear):
+    """One class, two geometries: the affine map up to 8 inputs, a half-wide grouped output beyond."""
+
+    def forward(self, x):
+        out = nn.functional.linear(x, self.weight)
+        return out if self.in_features <= 8 else out[..., : self.out_features // 2]
+
+
+@pytest.mark.parametrize("wide_first", [False, True])
+def test_probe_verdict_is_per_geometry_not_per_class(wide_first):
+    """A class grouped at one width and plain at another gets one verdict per width, whichever
+    instance the scan reaches first."""
+    narrow, wide = _GroupedPastEight(8, 8, bias=False), _GroupedPastEight(16, 16, bias=False)
+    model = nn.Module()
+    model.a_proj, model.b_proj = (wide, narrow) if wide_first else (narrow, wide)
+
+    peft_config = build_peft_config(model, _model_config(targets=["a_proj", "b_proj"]))
+
+    assert peft_config.exclude_modules == ["a_proj" if wide_first else "b_proj"]
+
+
+class _FaultingLinear(nn.Linear):
+    def forward(self, x):
+        raise torch.OutOfMemoryError("CUDA out of memory")
+
+
+def test_a_device_fault_in_the_probe_is_not_a_verdict():
+    """An out-of-memory or accelerator fault says nothing about the layer; swallowing it would exclude
+    the module on the one rank that faulted and hang the others."""
+    model = nn.Module()
+    model.q_proj = _FaultingLinear(8, 8, bias=False)
+
+    with pytest.raises(torch.OutOfMemoryError):
+        build_peft_config(model, _model_config(targets=["q_proj", "o_proj"]))
+
+
+def test_preset_exclusions_are_kept_alongside_the_found_ones():
+    """A ``LoraConfig`` that already excludes modules keeps them: the scan adds, never replaces."""
+    model = _Multimodal(_ClippableAttention())
+    peft_config = LoraConfig(r=4, target_modules=ATTENTION_TARGETS, exclude_modules=["language_model.q_proj"])
+
+    peft_setup._exclude_unadaptable_lora_targets(model, peft_config)
+
+    assert peft_config.exclude_modules == ["language_model.q_proj", "vision_tower.o_proj", "vision_tower.q_proj"]
+    assert _adapted_modules(get_peft_model(model, peft_config)) == {"base_model.model.language_model.o_proj"}
+
+
+# The verdict is agreed across ranks
+
+WORLD_SIZE = 2
+PG_TIMEOUT_SEC = 30
+
+
+class _FaultsOnRankOne(nn.Linear):
+    """A probe that fails on one rank only: an exclusion list that differs between ranks."""
+
+    rank = 0
+
+    def forward(self, x):
+        if self.rank == 1:
+            raise OSError(28, "No space left on device")
+        return nn.functional.linear(x, self.weight)
+
+
+def _divergent_worker(rank: int, tmp_dir: str, port: str) -> None:
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
+    dist.init_process_group(
+        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
+    )
+    _FaultsOnRankOne.rank = rank
+    model = _Multimodal(_PlainAttention())
+    model.language_model.q_proj = _FaultsOnRankOne(8, 8, bias=False)
+    try:
+        build_peft_config(model, _model_config())
+        outcome = "NO RAISE"
+    except BaseException as exc:
+        outcome = f"{type(exc).__name__}: {exc}"
+    with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
+        fh.write(outcome)
+    with contextlib.suppress(Exception):
+        dist.destroy_process_group()
+
+
+def test_an_exclusion_list_that_differs_between_ranks_raises_on_every_rank(tmp_path):
+    """One rank excluding what its peers adapt would train a different parameter set and surface only
+    as a hang in the first collective; the disagreement is caught where it arises, on both ranks."""
+    mp.start_processes(
+        _divergent_worker, args=(str(tmp_path), str(free_port())), nprocs=WORLD_SIZE, join=True, start_method="spawn"
+    )
+
+    outcomes = [(tmp_path / f"result_{rank}.txt").read_text() for rank in range(WORLD_SIZE)]
+    assert all(outcome.startswith("ValueError") and "differs across ranks" in outcome for outcome in outcomes), (
+        outcomes
     )
 
 

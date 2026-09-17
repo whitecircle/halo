@@ -210,18 +210,21 @@ def input_embedding_backbone(model: torch.nn.Module) -> torch.nn.Module | None:
     """The module whose own forward consumes the input embedding, or None if none is reachable.
 
     Usually :func:`backbone_with_layers`, which owns ``embed_tokens`` and embeds the ids itself. A
-    multimodal composite (``model.model`` holding a nested ``language_model``) instead builds
-    ``inputs_embeds`` in its own forward and hands them down, so there the consumer is the composite
-    and the decoder-layer backbone is entered only afterwards. Resolved on the plain transformers
-    tree (:func:`base_transformers_model`), never through a wrapper's attribute forwarding.
+    multimodal composite (``model.model`` holding the decoder-layer backbone below it, as a nested
+    ``language_model``) instead builds ``inputs_embeds`` in its own forward and hands them down, so
+    there the consumer is the composite and the backbone is entered only afterwards. The test is
+    ancestry rather than the one-level ``language_model`` spelling — an ancestor's forward always
+    precedes its descendant's — so a text stack nested deeper resolves the same way. Resolved on the
+    plain transformers tree (:func:`base_transformers_model`), never through a wrapper's attribute
+    forwarding.
     """
     layer_backbone = backbone_with_layers(model)
     if layer_backbone is None:
         return None
     composite = getattr(base_transformers_model(model), "model", None)
-    if composite is not None and getattr(composite, "language_model", None) is layer_backbone:
-        return composite
-    return layer_backbone
+    if composite is None or composite is layer_backbone:
+        return layer_backbone
+    return composite if any(module is layer_backbone for module in composite.modules()) else layer_backbone
 
 
 def persistent_buffers(model, exclude_prefixes=()):

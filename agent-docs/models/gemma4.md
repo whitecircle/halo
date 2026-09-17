@@ -75,8 +75,10 @@ Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus th
 **Attention LoRA** (the `-lora-` recipes) adapts the language model alone. The vision and audio towers'
 projections carry the same `q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper holding
 its weight in a child `nn.Linear` that PEFT cannot decompose, so they are excluded from injection with
-a warning naming the count ([PEFT](../optimization/peft.md#targets-peft-cannot-adapt)). `all-linear`
-resolves to the inner `nn.Linear` and adapts the towers too.
+a warning naming the count ([PEFT](../optimization/peft.md#targets-peft-cannot-adapt)); the vision
+MLP spells `gate_proj`/`up_proj`/`down_proj` the same way, so those names collect exclusions there too
+(under EP the expert peel takes them first). `all-linear` resolves to the inner `nn.Linear` and adapts
+the towers too.
 
 **Long-context attention**: Gemma 4's full-attention layers run at `global_head_dim=512`, which every FlashAttention kernel and cuDNN SDPA reject (FA2 caps at 256; FA4's SM100 kernel overflows tensor memory).
 

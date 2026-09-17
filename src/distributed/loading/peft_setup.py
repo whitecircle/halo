@@ -22,12 +22,16 @@ from src.distributed.expert_parallel.config import ExpertLoraSpec, expert_target
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.filesystem import hub_metadata_main_first
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
-from src.distributed.runtime import reject_across_ranks
+from src.distributed.runtime import reject_across_ranks, reject_divergent_settings
 from src.models.moe_balancing import config_has_experts
 from src.models.patches.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
 from src.models.structure import DECODER_LAYER_LIST_ATTRS, EMBEDDING_HEAD_MARKERS, is_normalization_module
 
 logger = get_logger(__name__)
+
+_TORCH_LAYER_PACKAGE = "torch.nn.modules."
+# The forward-probe verdict cache key: a class can be grouped at one width and plain at another.
+_ProbeKey = tuple[type, int, int]
 
 
 def _reject_lora_target_parameters_under_ep(model: PreTrainedModel, model_config: ModelConfig) -> None:
@@ -183,9 +187,6 @@ def _reject_layer_indexed_patterns_under_pp(model, patterns, flag: str) -> None:
         )
 
 
-_TORCH_LAYER_PACKAGE = "torch.nn.modules."
-
-
 def _inherits_its_layer_forward(cls: type) -> bool:
     """Whether ``cls`` runs the ``forward`` of a concrete ``torch.nn`` layer rather than its own."""
     forward = cls.forward
@@ -195,23 +196,27 @@ def _inherits_its_layer_forward(cls: type) -> bool:
     )
 
 
-def _computes_its_layers_affine_map(linear: torch.nn.Linear, verdicts: dict[type, bool]) -> bool:
+def _computes_its_layers_affine_map(linear: torch.nn.Linear, verdicts: dict[_ProbeKey, bool]) -> bool:
     """Whether the layer maps ``(1, in_features)`` to ``(1, out_features)``, as ``F.linear`` does.
 
     A subclass overriding ``nn.Linear.forward`` may change only *how* the affine map is computed (the
     low-precision compute drop-in, a quantized kernel) or may compute a different map entirely (a
     block-diagonal grouped projection, whose output is one group wide). Nothing in the class tells the
-    two apart, and only the second breaks the adapter delta — so it is measured, once per class. A
-    layer that cannot take an ``nn.Linear`` input at all is the answer, not an error to swallow.
+    two apart, and only the second breaks the adapter delta — so it is measured, once per class and
+    geometry (a class can be grouped at one width and plain at another). A layer that cannot take an
+    ``nn.Linear`` input at all is the answer; a device fault is not an answer about the layer.
     """
-    if (verdict := verdicts.get(type(linear))) is None:
+    key = (type(linear), linear.in_features, linear.out_features)
+    if (verdict := verdicts.get(key)) is None:
         probe = torch.zeros(1, linear.in_features, device=linear.weight.device, dtype=linear.weight.dtype)
         try:
             with torch.no_grad():
                 verdict = linear(probe).shape[-1] == linear.out_features
+        except (torch.OutOfMemoryError, torch.AcceleratorError):
+            raise
         except Exception:
             verdict = False
-        verdicts[type(linear)] = verdict
+        verdicts[key] = verdict
     return verdict
 
 
@@ -232,7 +237,7 @@ def _is_probeable_linear(module: torch.nn.Module) -> bool:
     )
 
 
-def _unadaptable_reason(module: torch.nn.Module, verdicts: dict[type, bool]) -> str | None:
+def _unadaptable_reason(module: torch.nn.Module, verdicts: dict[_ProbeKey, bool]) -> str | None:
     """Why stock LoRA cannot adapt this module, or ``None`` when it can.
 
     PEFT decomposes the *matched* module's own weight and adds the delta to that module's output
@@ -259,19 +264,32 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
     tower whose projections carry the language model's ``q_proj``…``o_proj`` spelling is matched too,
     and ``all-linear`` reaches every custom projection a family defines. Where the match is an ordinary
     leaf layer it is adapted as before; the two shapes stock LoRA cannot reach (Gemma 4's
-    ``Gemma4ClippableLinear`` wrapper, DeepSeek-V4's grouped ``o_a_proj``) are excluded by FULL module
-    path, so an identically named leaf elsewhere in the tree is untouched.
+    ``Gemma4ClippableLinear`` wrapper, DeepSeek-V4's grouped ``o_a_proj``) are excluded by full module
+    path (PEFT also honours an entry as a dotted suffix), so an identically named leaf elsewhere in the
+    tree is untouched.
 
     The matcher is PEFT's own, so ``all-linear`` (resolved to ``nn.Linear`` paths at injection time),
     regex targets, ``layers_to_transform`` and ``modules_to_save`` all keep their semantics.
+
+    Collective: the tree and the targets are rank-uniform, so the verdict is too unless a rank's probe
+    faulted; both the rejection and the exclusion list are agreed across ranks, since a rank adapting a
+    different parameter set than its peers would only surface as a hang in the first collective.
     """
     # `all-linear` is a sentinel PEFT resolves against the model at injection time; resolve a copy the
-    # same way so the scan sees what injection will target and the saved config keeps the sentinel.
+    # same way so the scan sees what injection will target, and leave the config itself to PEFT, which
+    # rewrites it in place at injection.
     scan_config = _maybe_include_all_linear_layers(copy.deepcopy(peft_config), model)
+    preset = peft_config.exclude_modules
+    if isinstance(preset, str):
+        raise ValueError(
+            f"exclude_modules={preset!r} is a regex; the scan adds module paths to the list form. Spell the "
+            f"exclusion as a list of module names."
+        )
     excluded: dict[str, list[str]] = {}
-    verdicts: dict[type, bool] = {}
+    verdicts: dict[_ProbeKey, bool] = {}
     adaptable = 0
     for name, module in model.named_modules():
+        # The scan config carries the preset exclusions, so PEFT's matcher already skips those.
         if not name or not check_target_module_exists(scan_config, name):
             continue
         if reason := _unadaptable_reason(module, verdicts):
@@ -279,27 +297,46 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
         else:
             adaptable += 1
 
+    reason = None
+    if excluded and not adaptable:
+        total = sum(len(names) for names in excluded.values())
+        # Native grouped expert adapters, when present, would train on without any attention adapter.
+        consequence = (
+            "The native expert adapters would train alone, with no attention adapter at all"
+            if has_ep_lora(model)
+            else "The run would train nothing"
+        )
+        reason = (
+            f"lora_target_modules={peft_config.target_modules} matched {total} module(s) and PEFT can "
+            f"adapt none of them — {_excluded_detail(model, excluded)}. {consequence}. Name the projections "
+            f"of the backbone you mean to adapt, or use 'all-linear'."
+        )
+    reject_across_ranks(reason, "lora_target_modules", ValueError)
+    found = sorted(name for names in excluded.values() for name in names)
+    reject_divergent_settings(
+        {"lora_exclude_modules": tuple(found)},
+        "The LoRA exclusion list",
+        "The module tree and lora_target_modules are the same on every rank, so a differing list means "
+        "the forward probe faulted on one rank.",
+    )
     if not excluded:
         return
-    total = sum(len(names) for names in excluded.values())
-    detail = "; ".join(
+    total = len(found)
+    warnings.warn(
+        f"Excluded {total} of {total + adaptable} lora_target_modules matches from PEFT injection — "
+        f"{_excluded_detail(model, excluded)}. No stock LoRA adapter fits those; the other {adaptable} "
+        f"module(s) are adapted.",
+        stacklevel=2,
+    )
+    peft_config.exclude_modules = sorted(set(preset or ()) | set(found))
+
+
+def _excluded_detail(model: torch.nn.Module, excluded: dict[str, list[str]]) -> str:
+    """One counted clause per reason, with an example path and its class."""
+    return "; ".join(
         f"{len(names)} {reason} (e.g. {names[0]}, a {type(model.get_submodule(names[0])).__name__})"
         for reason, names in excluded.items()
     )
-    # Rank-local like every other verdict on this path: the scan reads the module tree and the target
-    # names, both rank-uniform, so every rank reaches the same branch together.
-    if not adaptable:
-        raise ValueError(
-            f"lora_target_modules={peft_config.target_modules} matched {total} module(s) and PEFT can "
-            f"adapt none of them — {detail}. The run would train nothing. Name the projections of the "
-            f"backbone you mean to adapt, or use 'all-linear'."
-        )
-    warnings.warn(
-        f"Excluded {total} of {total + adaptable} lora_target_modules matches from PEFT injection — "
-        f"{detail}. No stock LoRA adapter fits those; the other {adaptable} module(s) are adapted.",
-        stacklevel=2,
-    )
-    peft_config.exclude_modules = sorted(name for names in excluded.values() for name in names)
 
 
 def build_peft_config(model: torch.nn.Module, model_config: ModelConfig) -> object | None:
