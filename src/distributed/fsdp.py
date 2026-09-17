@@ -14,7 +14,6 @@ import logging
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate.utils import is_peft_model
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import (
     FSDPModule,
@@ -28,9 +27,10 @@ from src.distributed.runtime import is_global_main_process
 from src.models.structure import (
     DECODER_LAYER_LIST_ATTRS,
     backbone_with_layers,
+    base_transformers_model,
     decoder_layers,
     fp32_pinned_param_names,
-    unwrap_model,
+    input_embedding_backbone,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,9 +91,7 @@ def _reject_unreachable_decoder_layers(model: nn.Module) -> None:
     wrap legitimately serves (a SentenceTransformer, a classification backbone, a PP stage) are not
     generative decoders.
     """
-    inner = unwrap_model(model)
-    if is_peft_model(inner):
-        inner = unwrap_model(inner.get_base_model())
+    inner = base_transformers_model(model)
     if not (isinstance(inner, PreTrainedModel) and inner.can_generate()):
         return
     raise RuntimeError(
@@ -246,12 +244,9 @@ def apply_fsdp2_per_layer(
     _warn_fp32_pins_cast_by_policy(model, mp_policy)
     underlying_model = _get_underlying_model(model)
 
-    # Shard the module whose forward consumes ``embed_tokens``: wrappers that build ``inputs_embeds``
-    # in the parent while decoder layers sit in a nested ``language_model`` unshard it too late.
-    if hasattr(model, "model") and getattr(model.model, "language_model", None) is underlying_model:
-        embed_backbone = model.model
-    else:
-        embed_backbone = underlying_model
+    # Shard the module whose forward consumes ``embed_tokens``: a group on a nested backbone unshards
+    # it after the composite parent above has already embedded the ids.
+    embed_backbone = input_embedding_backbone(model) or underlying_model
 
     # A tied weight spans two `_shard` calls; reserve it for the root call or fully_shard severs the
     # tie, leaving each half with half the gradient.
