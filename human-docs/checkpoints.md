@@ -56,7 +56,7 @@ full base checkpoint.
 
 ## Post-processing tools
 
-All run as `halo run <tool> -- <flags>`; each answers `-- --help`.
+All run as `halo run <tool> <flags>`; each answers `-- --help`.
 
 | Tool | When |
 | --- | --- |

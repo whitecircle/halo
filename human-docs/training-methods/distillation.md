@@ -8,7 +8,7 @@ them is where the teacher comes from and whether the data is fixed or generated 
 | --- | --- | :--: | :--: | --- |
 | Teacher distillation | a separate frozen model | yes | no | `teacher-distill` |
 | Self-distillation | the student, shown the answer | no | no | `self-distill` |
-| Online SDPG | the student, shown the answer | no | yes (vLLM) | `rlvr -- --use_sdpg=true` |
+| Online SDPG | the student, shown the answer | no | yes (vLLM) | `rlvr --use_sdpg=true` |
 
 Expert, tensor and expert-tensor parallelism apply to the student in all three. None of them takes
 context parallelism: the two offline variants need a second whole-model forward a sequence split
@@ -106,7 +106,7 @@ flip the gate:
 # trainer on GPUs 0-6, the vLLM server holding GPU 7
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch rlvr \
     examples/grpo/online/rlvr-online-grpo-template.yaml -n 7 \
-    -- --use_sdpg=true --sdpg_beta_base=1.0
+    --use_sdpg=true --sdpg_beta_base=1.0
 ```
 
 Setting any `sdpg_*` knob without `use_sdpg: true` is refused rather than ignored. A train dataset

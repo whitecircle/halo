@@ -9,7 +9,7 @@ with `python`/`torchrun`; the CLI just saves the typing.
 ## `halo launch`
 
 ```bash
-halo launch <method> <config.yaml> [flags] [-- trainer flags]
+halo launch <method> <config.yaml> [launcher flags] [field overrides]
 ```
 
 | Flag | Short | Meaning |
@@ -22,13 +22,13 @@ halo launch <method> <config.yaml> [flags] [-- trainer flags]
 
 Launcher selection: plain `python` for a single process, `torchrun` when
 `--nproc` is above 1 (required for EP/CP/TP), `accelerate launch` when
-`--accelerate` is given. Anything after `--` goes to the trainer untouched, so
-config overrides ride along:
+`--accelerate` is given. Any other flag after the config goes to the trainer
+untouched, so config overrides ride along:
 
 ```bash
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml -n 8
-halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 -- \
+halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
     --expert_parallel_size=8 --learning_rate=1e-5
 ```
 
@@ -47,11 +47,13 @@ see [Clusters](clusters.md).
 ## `halo run`
 
 ```bash
-halo run <tool> [flags] [-- tool flags]
+halo run <tool> [launcher flags] [tool flags]
 ```
 
-Same flags minus `--accelerate`. Every tool answers `-- --help`, and
-`halo run --list` prints the full catalog. The ones you'll actually reach for:
+Same flags minus `--accelerate`; everything else goes to the tool. A standalone `--` is only
+needed before a flag the launcher owns itself (`--help`, `--dry-run`, `--port`, `--root`, `--list`,
+`-n`, `-p`) when you mean the tool's: `halo run <tool> -- --help` prints the tool's help, not the
+launcher's. `halo run --list` prints the full catalog. The ones you'll actually reach for:
 
 | Tool | Purpose |
 | --- | --- |
@@ -72,8 +74,8 @@ Same flags minus `--accelerate`. Every tool answers `-- --help`, and
 | `weight-sync-transport` | check which transport a trainer↔rollout-server weight sync formed on |
 
 ```bash
-halo run merge-ep-shards -- --input_dir <ep-checkpoint-dir> --output_dir <merged-dir>
-halo run quantize-to-lowp -- --input_dir <bf16-model-dir> --output_dir <nvfp4-out-dir> --format nvfp4
+halo run merge-ep-shards --input_dir <ep-checkpoint-dir> --output_dir <merged-dir>
+halo run quantize-to-lowp --input_dir <bf16-model-dir> --output_dir <nvfp4-out-dir> --format nvfp4
 ```
 
 What goes in the config file the launch names is

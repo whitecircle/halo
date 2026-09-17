@@ -29,7 +29,7 @@ prompt are two groups and are normalized separately.
 ```
 
 A mismatch between `completions` and `rewards` raises with the row index, and a non-finite reward raises with the
-group. If you don't have such a dataset yet, `halo run rm-rejection-sampling -- --output_format offline_grpo`
+group. If you don't have such a dataset yet, `halo run rm-rejection-sampling --output_format offline_grpo`
 generates candidates against a served model, scores them with a reward model and writes exactly this shape.
 
 ## Config

@@ -128,14 +128,14 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml -n 8
 halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8
 ```
 
-Override any field after `--` (`-- --learning_rate=1e-5`). Before a long run, smoke the config on
-two GPUs with `-- --max_steps=5 --save_strategy=no --report_to=none`: that catches template, length
+Override any field after the config (`--learning_rate=1e-5`). Before a long run, smoke the config on
+two GPUs with `--max_steps=5 --save_strategy=no --report_to=none`: that catches template, length
 and parallelism mistakes in a minute.
 
 ## Pre-training and from-scratch
 
 Continued pre-training on raw text is the same trainer. Prepare the corpus once with
-`halo run prepare-dataset -- --mode text --text-field text --pack-sequences ...` — it tokenizes
+`halo run prepare-dataset --mode text --text-field text --pack-sequences ...` — it tokenizes
 documents with no chat template and appends an EOS per document — then point `dataset` at the
 result. The config must state `train_on_completions_only: false` and the exact `max_length` the
 preparation used, or startup raises.

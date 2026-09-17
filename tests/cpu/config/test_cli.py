@@ -1,4 +1,5 @@
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -453,6 +454,135 @@ def test_launch_port_option_reaches_torchrun(tmp_path):
 
     assert result.exit_code == 0
     assert "--master_port=29751" in result.stdout
+
+
+def _dry_run(tmp_path, verb_args: list[str]) -> list[str]:
+    """Tokens of the command a dry run prints."""
+    verb, *rest = verb_args
+    # Launcher flags first: whatever follows a separator in ``rest`` is the script's.
+    result = runner.invoke(app, [verb, "--dry-run", "--root", str(tmp_path), *rest])
+    assert result.exit_code == 0, result.output
+    return shlex.split(result.stdout.strip())
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["--learning_rate=1e-5"],
+        ["--learning_rate", "1e-5"],
+        ["--seed", "-1"],
+        ["--packing"],
+        ["--run_name", "a b"],
+        ["--expert_parallel_size=8", "--learning_rate", "1e-5", "--packing"],
+    ],
+)
+def test_launch_forwards_field_overrides_without_a_separator(tmp_path, overrides):
+    """Overrides follow the config as typed: no ``--`` is needed for a flag the launcher does not own."""
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+
+    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", *overrides])
+
+    assert tokens[-len(overrides) :] == overrides
+    assert tokens[-len(overrides) - 1] == str(tmp_path / "config.yaml")
+
+
+def test_launcher_flags_are_consumed_wherever_they_sit_among_the_overrides(tmp_path):
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+
+    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", "--learning_rate=1e-5", "-n", "8", "--packing"])
+
+    assert tokens[:2] == ["torchrun", "--nproc_per_node=8"]
+    assert tokens[-2:] == ["--learning_rate=1e-5", "--packing"]
+    assert "-n" not in tokens
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        ["--", "--a=1", "--b=2"],
+        ["--a=1", "--", "--b=2"],
+        ["--a=1", "--b=2", "--"],
+    ],
+)
+def test_the_separator_is_optional_and_never_reaches_the_script(tmp_path, typed):
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+
+    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", *typed])
+
+    assert tokens[-2:] == ["--a=1", "--b=2"]
+    assert "--" not in tokens
+
+
+def test_a_second_separator_belongs_to_the_script(tmp_path):
+    """Only the launcher's own separator is consumed; one typed after it is the script's argument."""
+    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
+
+    tokens = _dry_run(tmp_path, ["run", "merge-ep-shards", "--", "--cmd", "--", "ls"])
+
+    assert tokens[-3:] == ["--cmd", "--", "ls"]
+
+
+def test_a_flag_the_launcher_owns_reaches_the_tool_only_after_the_separator(tmp_path):
+    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
+
+    consumed = runner.invoke(
+        app, ["run", "merge-ep-shards", "--input_dir", "ckpt", "--dry-run", "--root", str(tmp_path)]
+    )
+    forwarded = runner.invoke(
+        app, ["run", "merge-ep-shards", "--dry-run", "--root", str(tmp_path), "--", "--input_dir", "ckpt", "--dry-run"]
+    )
+
+    assert shlex.split(consumed.stdout.strip())[-2:] == ["--input_dir", "ckpt"]
+    assert shlex.split(forwarded.stdout.strip())[-3:] == ["--input_dir", "ckpt", "--dry-run"]
+
+
+def test_positional_tool_arguments_pass_through_without_a_separator(tmp_path):
+    write_script(tmp_path / "scripts/profiling/py_spy_diag.py")
+
+    tokens = _dry_run(tmp_path, ["run", "py-spy-diag", "record", "--duration", "30"])
+
+    assert tokens[-3:] == ["record", "--duration", "30"]
+
+
+def test_an_override_typed_before_the_config_names_the_argument_order(tmp_path):
+    """An unknown flag is pass-through, so one typed first is parsed as CONFIG itself; the error must
+    say so instead of reporting a missing file called ``--learning_rate``."""
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+
+    result = runner.invoke(
+        app, ["launch", "sft", "--learning_rate", "1e-5", "config.yaml", "--dry-run", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "CONFIG must come before any flag" in result.output
+    assert "config not found" not in result.output
+
+
+def test_a_flag_in_the_tool_slot_is_refused_by_name(tmp_path):
+    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
+
+    result = runner.invoke(
+        app, ["run", "--input_dir", "ckpt", "merge-ep-shards", "--dry-run", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "TOOL must come before any flag" in result.output
+
+
+def test_the_single_process_port_refusal_names_the_separator(tmp_path):
+    """A tool's own ``--port`` collides with the launcher's; the refusal has to say how to pass it."""
+    write_script(tmp_path / "scripts/inference/serve.py")
+
+    result = runner.invoke(app, ["run", "serve", "--port", "7860", "--dry-run", "--root", str(tmp_path)])
+    forwarded = _dry_run(tmp_path, ["run", "serve", "--", "--port", "7860"])
+
+    assert result.exit_code != 0
+    assert "`--`" in result.output
+    assert forwarded[-2:] == ["--port", "7860"]
 
 
 if __name__ == "__main__":

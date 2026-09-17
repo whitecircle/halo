@@ -19,13 +19,13 @@ data you already have to the trainer that reads it.
 | Async GRPO with Environments | multi-turn, tool-using trajectories | `environmental-grpo` | [Async GRPO](async-grpo-environments.md) |
 | Teacher distillation | conversations, plus a second frozen model | `teacher-distill` | [Distillation](distillation.md) |
 | Self-distillation | conversations with gold answers, one model | `self-distill` | [Distillation](distillation.md) |
-| Online SDPG | prompts with an answer, generated live | `rlvr -- --use_sdpg=true` | [Distillation](distillation.md#online-sdpg) |
+| Online SDPG | prompts with an answer, generated live | `rlvr --use_sdpg=true` | [Distillation](distillation.md#online-sdpg) |
 | Embedding | text pairs, triplets or scored pairs | `embedding` | [Embedding](embedding.md) |
 
 ## What every method shares
 
 One config format. A config is a flat YAML file of trainer fields, and any field can be overridden
-on the command line after `--`. The parser applies the same three toolkit defaults everywhere
+on the command line after the config path. The parser applies the same three toolkit defaults everywhere
 (`bf16: true`, `use_liger_kernel: true`, `logging_nan_inf_filter: false`) and raises on a key it does
 not know rather than ignoring it — see [Configuration](../configuration.md).
 

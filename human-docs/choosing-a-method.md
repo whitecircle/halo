@@ -18,7 +18,7 @@ switching is a config change, not a rewrite. The last column is the `halo launch
 | [Async GRPO with Environments](training-methods/async-grpo-environments.md) | Multi-turn, tool-using, agentic trajectories | `prompt`, plus `answer` where the environment grades one | `environmental-grpo` |
 | Teacher distillation | Compress a separate larger teacher into a smaller student | conversations | `teacher-distill` |
 | Self-distillation | Self-improve with a privileged answer hint, no second model | conversations + answer | `self-distill` |
-| Online SDPG | On-policy form of self-distillation | `prompt`, `answer` | `rlvr -- --use_sdpg=true` |
+| Online SDPG | On-policy form of self-distillation | `prompt`, `answer` | `rlvr --use_sdpg=true` |
 | Embedding | Fine-tune for retrieval, similarity, or clustering | pairs / triplets / scored pairs | `embedding` |
 
 Pretraining runs the `sft` path on raw text. From-scratch adds `--init_from_scratch` and is dense FSDP only;
@@ -37,7 +37,7 @@ See the `agent-docs` [Pretraining](../agent-docs/training-methods/pretraining.md
   generates single-turn completions with verifiable rewards; async GRPO with environments adds multi-turn tool use and
   overlaps rollouts with training.
 - **Teacher vs self distillation** — teacher-distill transfers from a separate larger model; self-distill uses the
-  same model as its own answer-hinted teacher, offline (`self-distill`) or on-policy (`rlvr -- --use_sdpg=true`).
+  same model as its own answer-hinted teacher, offline (`self-distill`) or on-policy (`rlvr --use_sdpg=true`).
 
 ## Extra infrastructure
 

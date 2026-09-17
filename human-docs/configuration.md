@@ -51,10 +51,10 @@ A few notes on the ones that bite:
 Most fields can be overridden at launch, which is how you sweep without copying files:
 
 ```bash
-halo launch sft my-run.yaml -n 8 -- --learning_rate=1e-5 --max_length=32000
+halo launch sft my-run.yaml -n 8 --learning_rate=1e-5 --max_length=32000
 ```
 
-Everything after `--` goes to the trainer untouched, parallelism flags included
+Every flag the launcher does not own goes to the trainer untouched, parallelism flags included
 (`--expert_parallel_size=8`), so one config can serve several shapes. Write each
 override as `--key=value`; a field holding a dict or a list of dicts (`rewards`,
 `gradient_checkpointing_kwargs`) raises and has to be set in the YAML.

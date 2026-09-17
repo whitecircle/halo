@@ -40,7 +40,7 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml -n 8
 halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8
 ```
 
-Most config fields can be overridden on the command line after `--`
+Most config fields can be overridden on the command line after the config
 (`--learning_rate=1e-5 --max_length=32000`; dict-valued fields stay in the YAML),
 and `halo launch --list` shows every method. The full CLI is [The halo CLI](cli.md); what goes in a config file is
 [Writing a Config](configuration.md).

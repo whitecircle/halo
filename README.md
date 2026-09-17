@@ -103,12 +103,12 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 halo launch --list
 ```
 
-`halo` selects `python`, `torchrun`, or `accelerate launch` based on the arguments. Options after `--`
-are passed to the trainer and override the YAML config:
+`halo` selects `python`, `torchrun`, or `accelerate launch` based on the arguments. Options after the
+config that are not the launcher's own are passed to the trainer and override the YAML config:
 
 ```bash
 halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml \
-    -n 8 -- \
+    -n 8 \
     --expert_parallel_size=8 \
     --learning_rate=1e-5 \
     --max_length=32000
@@ -126,8 +126,8 @@ halo launch sft config.yaml --dry-run
 Checkpoint, inference, data, and environment utilities use halo run:
 
 ```bash
-halo run merge-ep-shards -- --input_dir <ep-checkpoint-dir> --output_dir <merged-dir>
-halo run quantize-to-lowp -- --input_dir <bf16-model-dir> --output_dir <nvfp4-out-dir> --format nvfp4
+halo run merge-ep-shards --input_dir <ep-checkpoint-dir> --output_dir <merged-dir>
+halo run quantize-to-lowp --input_dir <bf16-model-dir> --output_dir <nvfp4-out-dir> --format nvfp4
 
 # all tools (merge-*, quantize-to-lowp, rm-scoring, run-env, …)
 halo run --list             
@@ -251,10 +251,10 @@ EP, CP, TP, and ETP are configured independently:
 | EP+TP | MoE + weight sharding                     |
 | EP+ETP | MoE + sharded experts                     |
 
-Pass them directly to `torchrun`, or after `--` with `halo launch`:
+Pass them directly to `torchrun`, or after the config with `halo launch`:
 
 ```bash
-halo launch sft config.yaml -n 8 -- --expert_parallel_size=8
+halo launch sft config.yaml -n 8 --expert_parallel_size=8
 ```
 
 Multi-node runs support shared (NFS/Lustre) and node-local filesystems.

@@ -33,6 +33,8 @@ TRAINING_ROOT = SCRIPTS_ROOT / "training"
 _NON_TOOL_DIRS = frozenset({TRAINING_ROOT.name, "diagrams"})
 
 _EXTRA_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+_LAUNCH_USAGE = "halo launch METHOD CONFIG [launcher flags] [--field=value ...]"
+_RUN_USAGE = "halo run TOOL [launcher flags] [tool flags]"
 
 # torchrun's multi-node / rendezvous flags. ``halo launch`` builds a single-node command line and
 # passes everything after the config to the script, whose parser would reject these as unknown
@@ -175,7 +177,10 @@ def command(
             launcher.append(f"--master_port={port}")
     else:
         if port is not None:
-            raise typer.BadParameter("--port only applies to multi-process launches (--nproc > 1 or --accelerate)")
+            raise typer.BadParameter(
+                "--port only applies to multi-process launches (--nproc > 1 or --accelerate); to hand a "
+                "script its own --port, put it after a standalone `--`"
+            )
         launcher = [sys.executable]
     positionals = [str(script)] if config is None else [str(script), str(config)]
     return [*launcher, *positionals, *args]
@@ -191,7 +196,23 @@ def resolve_config(config: Path, root: Path) -> Path:
 
 
 def _extra_args(ctx: typer.Context) -> list[str]:
-    return ctx.args[1:] if ctx.args[:1] == ["--"] else ctx.args
+    """The pass-through args, as typed.
+
+    Unknown flags pass through on their own, so the ``--`` separator is needed only before a flag
+    that collides with the launcher's. Click consumes that separator itself: a ``--`` found here was
+    typed after it and belongs to the script.
+    """
+    return list(ctx.args)
+
+
+def _reject_option_as_positional(value: str | Path | None, name: str, usage: str) -> None:
+    """Refuse a flag that landed in a positional slot.
+
+    Unknown options are pass-through, so one typed before ``name`` is parsed as ``name`` itself and
+    would otherwise surface as a missing file or an unknown method.
+    """
+    if value is not None and str(value).startswith("-"):
+        raise click.UsageError(f"{name} must come before any flag, but got '{value}'. Usage: {usage}")
 
 
 def reject_multinode_flags(args: list[str]) -> None:
@@ -294,6 +315,10 @@ def launch(
     Defaults to Python (single process) or torchrun (``--nproc > 1``, required for EP/CP/TP).
     Pass ``--accelerate <config>`` for standard FSDP data-parallel via ``accelerate launch``.
 
+    Config-field overrides follow the config and reach the training script as typed
+    (``halo launch sft config.yaml -n 8 --learning_rate=1e-5``). A standalone ``--`` is needed only
+    before a flag that collides with the launcher's own.
+
     The run executes from ``--root``, so relative paths in the config (and in CLI overrides) resolve
     against the repository root, not the caller's cwd.
     """
@@ -303,6 +328,8 @@ def launch(
     if list_methods:
         _show(index, root)
         return
+    _reject_option_as_positional(method, "METHOD", _LAUNCH_USAGE)
+    _reject_option_as_positional(config, "CONFIG", _LAUNCH_USAGE)
     if method is None or config is None:
         raise click.UsageError("halo launch requires METHOD and CONFIG")
     script = _lookup(index, method, "method", root)
@@ -351,6 +378,7 @@ def run(
     if list_tools:
         _show(index, root)
         return
+    _reject_option_as_positional(tool, "TOOL", _RUN_USAGE)
     if tool is None:
         raise click.UsageError("halo run requires a TOOL name (use --list to see options)")
     script = _lookup(index, tool, "tool", root)

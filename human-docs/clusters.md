@@ -63,7 +63,7 @@ image. Three situations need extra environment:
   fabric — start it with the compose EFA overlay after the base file
   (`-f docker-compose.vllm.yml -f docker-compose.vllm.efa.yml`, or the SGLang
   pair) and the trainer with `make ... EFA=1`.
-  `halo run weight-sync-transport -- --server-url http://<server>:8000 --expect efa`
+  `halo run weight-sync-transport --server-url http://<server>:8000 --expect efa`
   confirms the sync formed on EFA before you train.
 
 On GB200/GB300 NVL72 racks, set `NVLINK_DOMAIN_SIZE=72` so Halo knows the NVLink

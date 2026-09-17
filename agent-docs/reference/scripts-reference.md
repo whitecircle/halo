@@ -6,7 +6,7 @@ Every entry script answers `python <script> --help` with its full flag list, inc
 
 The `halo` CLI (`src/cli.py`) runs them by name: `halo launch <method> <config>` for `scripts/training/`, `halo run <tool>` for every other `scripts/` subtree except `diagrams/` (`--list` on either enumerates them). The launcher follows the flags, never the config: `accelerate launch` with `--accelerate <cfg>`, `torchrun` when `--nproc/-n > 1`, plain `python` otherwise. So `halo launch sft <ep-config>.yaml` without `-n` runs single-process.
 
-Run scripts from the repo root with the repo root importable. The wheel installs `src` only (`packages = ["src"]`), and `python scripts/a/b.py` puts the *script's* directory on `sys.path`, not the repo root. So every CLI that imports a `scripts.*` helper needs `scripts` importable as well as `src`.
+Run scripts from the repo root with the repo root importable. The wheel installs `src` only (`packages = ["src"]`), and `python scripts/<subtree>/<tool>.py` puts the *script's* directory on `sys.path`, not the repo root. So every CLI that imports a `scripts.*` helper needs `scripts` importable as well as `src`.
 
 Both training images set `PYTHONPATH=/workspace` and the Makefile passes it into every container it starts. A host run needs `PYTHONPATH=.` from the repo root.
 

@@ -125,7 +125,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 halo launch environmen
 A native-tool environment needs the server started with the tool-call parser for the model family: without one vLLM
 rejects every rollout, and with the wrong one the calls come back as text and every episode scores zero. ReAct
 environments need no parser. Before a long run, put the config through a
-few rows with `halo run run-env -- --training_config <config>.yaml --dataset <hub-id-or-path> --num_examples 20
+few rows with `halo run run-env --training_config <config>.yaml --dataset <hub-id-or-path> --num_examples 20
 --base_url http://localhost:8000/v1 --model <served-id>`: that exercises the parser, the template, the sandbox or
 judge backend and the dataset columns in a minute.
 
