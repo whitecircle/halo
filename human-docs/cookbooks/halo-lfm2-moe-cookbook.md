@@ -23,9 +23,10 @@ CP is not supported. The short-convolution layers operate across the sequence ax
 | LFM2.5-8B-A1B | 32 | 4 | Two GPUs with EP2 |
 | LFM2-24B-A2B | 64 | 4 | Four or eight GPUs |
 
-This cookbook uses LFM2.5-8B-A1B. No LFM2 SFT config ships with Halo; the path is
-exercised by `tests/gpu/trainers/sft/test_sft_lfm2_moe.py`, which runs LFM2-24B-A2B in
-both plain FSDP and EP modes.
+This cookbook uses LFM2.5-8B-A1B. The runnable EP2 configuration is
+[`examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml`](../../examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml).
+The path is also exercised by `tests/gpu/trainers/sft/test_sft_lfm2_moe.py`, which runs
+LFM2-24B-A2B in both plain FSDP and EP modes.
 
 Start with two NVIDIA B300 GPUs for LFM2.5-8B-A1B and four or eight GPUs for
 LFM2-24B-A2B; the GRPO continuation needs four, two for the rollout server and two for the
@@ -78,7 +79,6 @@ a ChatML-style template, and completion masking trains only the assistant turns.
 
 ```yaml
 model_name_or_path: LiquidAI/LFM2.5-8B-A1B
-model_revision: 5673e0de372b64331504de73bbbc33b0dde71903
 moe_balancing: bias_update
 
 dataset:
@@ -155,7 +155,6 @@ Change the model fields.
 
 ```yaml
 model_name_or_path: LiquidAI/LFM2-24B-A2B
-model_revision: 8ef52d16709b3c707176a469a005addc0460ea36
 expert_parallel_size: 4
 output_dir: /data/checkpoints/lfm2-24b-a2b-ultrachat-ep4
 ```

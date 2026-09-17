@@ -1,0 +1,65 @@
+# LFM2.5 8B-A1B — EP2 SFT on UltraChat 200K. CP unsupported. See agent-docs/models/lfm2.md.
+# Launch: torchrun --nproc_per_node=2 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: LiquidAI/LFM2.5-8B-A1B
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+train_on_completions_only: true
+assistant_message_template: "<|im_start|>assistant\n"
+pad_token: "<|pad|>"
+eos_token: "<|im_end|>"
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 2              # 32 routed experts → 16/rank
+moe_balancing: bias_update           # LFM2 has no router auxiliary loss; update expert-selection bias
+save_sharded_ep: false               # gather a standard Hugging Face checkpoint on save
+use_grouped_gemm: true
+fp32_router: true
+fp32_experts: false
+
+# --- Attention & kernels ---
+attn_implementation: flash_attention_2
+use_liger_kernel: false
+packing: true
+max_length: 8192
+bf16: true
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+# --- Optimizer & LR schedule ---
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/lfm2.5-8b-a1b-ultrachat-ep2
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: none
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false

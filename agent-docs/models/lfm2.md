@@ -40,7 +40,13 @@ The short-conv layers mix tokens along the sequence axis, so a Ulysses sequence 
 
 ## Configs
 
-No SFT configs ship for LFM-2; the path is exercised by `tests/gpu/trainers/sft/test_sft_lfm2_moe.py` (`LiquidAI/LFM2-24B-A2B`, `--mode fsdp` and `--mode ep`). To train in production, copy an EP config from another MoE family (e.g. `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`) and swap the model path. The one shipped LFM-2 config is the LFM-2.5 VL self-distillation example, `examples/distillation/lfm2/self-distill-lfm2.5-vl-1.6b.yaml` — a **dense** `LiquidAI/LFM2.5-VL-1.6B` checkpoint (`text_config.model_type: lfm2`, no experts), so none of the MoE columns above apply to it.
+The production SFT example is `examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml`.
+It trains `LiquidAI/LFM2.5-8B-A1B` on UltraChat with EP2 and gathered Hugging Face
+checkpoints. The path is also exercised by `tests/gpu/trainers/sft/test_sft_lfm2_moe.py`
+(`LiquidAI/LFM2-24B-A2B`, `--mode fsdp` and `--mode ep`). The LFM2.5 VL
+self-distillation example, `examples/distillation/lfm2/self-distill-lfm2.5-vl-1.6b.yaml`,
+uses a **dense** `LiquidAI/LFM2.5-VL-1.6B` checkpoint (`text_config.model_type: lfm2`,
+no experts), so none of the MoE columns above apply to it.
 
 **Routing drift**: sigmoid routing under SFT can collapse onto a handful of experts (same failure mode as Bailing). Two mitigations work — freeze the router weights with `freeze_layers_patterns: ["*.feed_forward.gate.weight"]`, or set `moe_balancing: bias_update` (EP path), whose DeepSeek-V3 sign-updates land in the block's own `expert_bias` buffer, adopted whole so the trained bias exports with every checkpoint.
 
