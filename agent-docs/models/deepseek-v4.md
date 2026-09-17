@@ -77,6 +77,11 @@ Train V4 under EP (every shipped config), where the lazy loader materializes uni
 Example configs under `examples/sft/deepseek_v4/`:
 
 - `v4-flash-ultrachat-lora-ep.yaml` — EP=8 LoRA on the converted checkpoint: PEFT on `q_a_proj`/`q_b_proj`/`o_b_proj`, native grouped expert-LoRA on `gate_up_proj`/`down_proj`. `merge_expert_lora_on_save: true` folds both halves into a servable checkpoint; `false` writes the mixed adapter, which this toolkit resumes but no merge tool folds.
+
+    `o_a_proj` is excluded from adapter injection, by name and under `all-linear` alike: it is a
+    `DeepseekV4GroupedLinear`, whose block-diagonal forward returns one group's width, so a stock LoRA
+    delta added to it is the wrong shape ([PEFT](../optimization/peft.md#targets-peft-cannot-adapt)).
+    Its sibling mix-down `o_b_proj` carries the output projection's adapter.
 - `v4-tiny-random-smoke-ep.yaml` — EP=2 pipeline smoke on a tiny random-init checkpoint (materialization recipe in the file).
 
 The hub checkpoint ships **no chat template** (DeepSeek uses an external message encoder) — one is required for conversational SFT. `jinja-templates/deepseek-v4/deepseek-v4-chat.jinja` renders the tokenizer's native `<｜User｜>`/`<｜Assistant｜>` special tokens; pair it with `assistant_message_template: "<｜Assistant｜>"` and `train_on_completions_only: true` (pad == eos).

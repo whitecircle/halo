@@ -194,10 +194,9 @@ VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
 
 ## Train a LoRA adapter
 
-On the multimodal checkpoint this recipe is refused at PEFT setup: the vision tower's
-projections share the `q_proj`…`o_proj` names and are `Gemma4ClippableLinear`, which PEFT
-cannot wrap. Open issue ([Troubleshooting](../troubleshooting.md)); the full fine-tune above
-is the working path.
+These targets adapt the language model only. The vision and audio towers' projections share the
+`q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper PEFT cannot adapt, so they are
+excluded from injection with a warning naming the count. `all-linear` adapts the towers too.
 
 ```yaml
 use_peft: true

@@ -16,7 +16,9 @@
   null-marker raise and ``verify_marker_renders_in_chat_template`` live in ``select_data_collator``,
   and a direct build trains on every token while the log still says completion-only masking.
 - PEFT wrapping: no script may call bare ``get_peft_model`` — self-wrapping scripts
-  (``teacher_distill.py``) must route through ``prepare_peft_model`` (k-bit prep).
+  (``teacher_distill.py``) must route through ``prepare_peft_model`` (k-bit prep) — and none may
+  call bare ``get_peft_config``, which would skip ``build_peft_config``'s exclusion of target-name
+  matches PEFT cannot adapt.
 
 Run: pytest tests/cpu/config/test_training_script_contracts.py
 """
@@ -290,6 +292,22 @@ def test_teacher_distill_wraps_peft_via_prepare_peft_model():
     source = (_TRAINING_DIR / "distillation/teacher_distill.py").read_text(encoding="utf-8")
     assert _named_calls(ast.parse(source), "prepare_peft_model"), (
         "teacher_distill.py no longer calls prepare_peft_model — its PEFT wrap lost the k-bit prep."
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    _TRAINING_SCRIPTS,
+    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
+)
+def test_no_script_calls_bare_get_peft_config(script: Path):
+    """A bare ``get_peft_config`` reads the YAML alone and never sees the model, so target names that
+    also spell a module PEFT cannot adapt (a multimodal tower's wrapped projections) reach injection
+    and kill the run. ``build_peft_config`` is the seam that excludes them."""
+    source = script.read_text(encoding="utf-8")
+    assert not _named_calls(ast.parse(source), "get_peft_config"), (
+        f"{script}: calls bare get_peft_config — route through build_peft_config "
+        f"(src/distributed/loading/peft_setup.py), directly or via setup_peft_model."
     )
 
 

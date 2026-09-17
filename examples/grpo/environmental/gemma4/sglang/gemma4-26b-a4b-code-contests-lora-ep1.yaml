@@ -1,5 +1,5 @@
 # Environmental GRPO — Gemma-4 26B-A4B LoRA (r=64, attention projections) on code_contests, SGLang backend, no EP, ZeRO-2, KL-free (IS bands as the trust region).
-# rollout_max_thinking_tokens is vLLM-only here, and PEFT refuses these targets on the multimodal checkpoint — the vision tower's `q_proj` is a `Gemma4ClippableLinear`.
+# rollout_max_thinking_tokens is vLLM-only here. Adapters land on the language model only: the vision and audio towers share the projection names but wrap them in a `Gemma4ClippableLinear` PEFT cannot adapt, so those matches are excluded.
 # Serve with: 2 sglang-servers on GPUs 4-7, ports 30000/30001, --moe-runner-backend triton --tool-call-parser auto,
 #   NCCL_CUMEM_ENABLE=1 in the server env, no SGLANG_ENABLE_R3 (routing replay is refused for Gemma 4).
 # Launch: CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>

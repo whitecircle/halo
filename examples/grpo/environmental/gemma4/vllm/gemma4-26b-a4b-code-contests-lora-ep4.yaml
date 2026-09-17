@@ -1,5 +1,5 @@
 # Environmental GRPO — Gemma-4 26B-A4B on Codeforces, LoRA (r=64, attention projections), EP=4, ZeRO-2, KL-free (IS bands as the trust region).
-# PEFT refuses these targets on the multimodal checkpoint — the vision tower's `q_proj` is a `Gemma4ClippableLinear`.
+# Adapters land on the language model only: the vision and audio towers share the projection names but wrap them in a `Gemma4ClippableLinear` PEFT cannot adapt, so those matches are excluded.
 # Serve with: --moe-backend triton --enable-auto-tool-choice --tool-call-parser hermes on the patched vllm-server image
 #   (code_contests is a native-tool env: a server with no tool parser 400s every rollout).
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>

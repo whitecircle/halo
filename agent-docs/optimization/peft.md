@@ -36,14 +36,44 @@ lora_task_type: CAUSAL_LM     # CAUSAL_LM | SEQ_CLS | FEATURE_EXTRACTION
 lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 ```
 
-`lora_target_modules` is tri-state: unset (`None`) uses the architecture defaults, and a populated list
-selects those modules. Expert-LoRA-only means listing **only** expert projections — the peel then empties
+`lora_target_modules` is tri-state: unset (`None`) falls to PEFT's own per-architecture table, which
+covers almost none of this roster (PEFT raises `Please specify target_modules`), so name the modules;
+a populated list selects those modules. Expert-LoRA-only means listing **only** expert projections — the peel then empties
 the list, which is what disables attention PEFT. Writing `lora_target_modules: []` yourself names nothing
 at all and is rejected: with no adapter to create, the run would full-finetune at the LoRA learning rate.
 
 A one-entry list is collapsed to a bare string by TRL's `ModelConfig`, so `lora_target_modules: [experts]`
 arrives as `"experts"`. The expert peel handles that; PEFT does not (it reads a lone string as a regex
 matched against full module paths), so an attention-only single target needs `all-linear` or two entries.
+
+### Targets PEFT cannot adapt
+
+A stock LoRA adapter decomposes the matched module's own weight and adds the delta to that module's
+output, which leaves two module shapes out of its reach:
+
+| Shape | Example | Without the exclusion |
+|---|---|---|
+| A wrapper holding its weight in a child module | Gemma 4's `Gemma4ClippableLinear`, the vision and audio towers' projections | injection raises `Target module ... is not supported` |
+| A layer subclass computing something other than its base layer's affine map | DeepSeek-V4's grouped `o_a_proj`, whose block-diagonal output is one group wide | the delta has the wrong width and the first forward raises |
+
+Both are reachable by an ordinary target list — target names are matched by suffix over the whole
+module tree, so a multimodal tower is matched by the language model's `q_proj`…`o_proj` spelling — and
+by `all-linear`, which reaches every `nn.Linear` subclass a family defines.
+
+`build_peft_config` (`src/distributed/loading/peft_setup.py`) scans the live model with PEFT's own
+matcher and puts those modules in the `LoraConfig`'s `exclude_modules` by full path, so an identically
+named leaf elsewhere keeps its adapter. A warning names the count and one example path per reason. If
+it leaves no adaptable target at all, the run is rejected rather than trained with nothing.
+
+The two shapes are told apart structurally: a wrapper owns no parameter of its own, and a subclass
+overriding `nn.Linear.forward` is measured once per class against `F.linear`'s output geometry — the
+low-precision compute drop-in and a quantized base change only *how* the map is computed and keep their
+adapters. The exclusion is saved into `adapter_config.json`, so reloading the adapter onto the same base
+— `merge_peft_adapters.py` included — reproduces the same injection; resume rebuilds it from the live
+model instead and never reads that file.
+
+A tower whose projections are plain `nn.Linear` (CLIP/SigLIP/Pixtral-style) is untouched by any of
+this and keeps its adapters.
 
 ### Hyperparameters
 

@@ -19,13 +19,14 @@ from peft import inject_adapter_in_model
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Normalize, Pooling
 from transformers import AutoModel
-from trl import ModelConfig, get_peft_config, get_quantization_config
+from trl import ModelConfig, get_quantization_config
 
 from src.args.distributed_args import DistributedArguments
 from src.args.embedding_args import EmbeddingScriptArguments
 from src.configs.embedding_config import EmbeddingConfig
 from src.data.sources.loading import reject_image_columns
 from src.distributed.filesystem import fs_aware_main_first
+from src.distributed.loading.peft_setup import build_peft_config
 from src.distributed.runtime import barrier, is_global_main_process
 from src.models.loading.dtype import resolve_training_dtype
 from src.models.loading.tokenizer_setup import resolve_length_to_context
@@ -253,7 +254,7 @@ def main():
     # Inject LoRA with peft's inject_adapter_in_model, not SentenceTransformer.add_adapter (ST 5.5
     # gates that on peft >= 0.18.2 while the image pins 0.18.1). It does not freeze, so freeze every
     # non-adapter param below.
-    peft_config = get_peft_config(model_config)
+    peft_config = build_peft_config(model, model_config)
     if peft_config is not None:
         # modules_to_save is unsupported here: the trainable copies are created, the freeze below
         # re-freezes them, and the wrapper renames the base tensor, so the saved ST module lacks the
