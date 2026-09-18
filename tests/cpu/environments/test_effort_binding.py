@@ -120,8 +120,8 @@ async def test_both_drivers_bind_the_same_caps(monkeypatch):
     # …and the budget also reaches the template as a variable, the one channel a prompt can state it through.
     assert calls[0]["extra_body"]["chat_template_kwargs"] == {"reasoning_budget": 4000}
     assert calls[0]["max_tokens"] == actor_cfg.max_tokens
-    # …and both leave the episode carrying the budget it ran under: the trainer's calibration reward
-    # reads it off the trajectory, the eval records it in the trajectory file.
+    # …and both leave the episode carrying the budget it ran under: the trainer's re-render reads it
+    # off the trajectory, the eval records it in the trajectory file.
     assert (eval_traj.reasoning_effort, eval_traj.reasoning_budget) == ("high", 4000)
     assert (result.trajectory.reasoning_effort, result.trajectory.reasoning_budget) == ("high", 4000)
     recorded = eval_runner.serialize_trajectory(eval_traj)

@@ -83,8 +83,10 @@ rollout_max_tokens: 8192
 # rollout_stop_tokens: []             # special-token strings that end a turn's generation (e.g. gpt-oss "<|call|>")
 # train_on_sampled_tokens: true       # train on the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
 # max_train_row_tokens: null          # longest training row (prompt + completion tokens) a rank takes; null = the model's context window
-# reasoning_compliance_weight: 0.0    # weight of the reasoning-budget calibration reward (0 = off)
-# reasoning_compliance_under_use_weight: 0.3  # weight of the under-use side of that term, relative to the over-use side's 1.0
+# effort_length_penalty_k0: null      # coefficient of the capped, effort-conditioned reasoning-length price at the lowest level (null = off)
+# effort_length_penalty_c_max: 0.1    # cap of that price; effort_length_penalty_tau 25.0, _l_norm 8192.0, _levels {low: 25, medium: 50, high: 100}
+# effort_length_floor_weight: 0.0     # weight of the under-use floor: an episode reasoning less than the budgets below in total (0 = off)
+# effort_length_floor_budgets: 0.75   # the floor's reference, in per-turn thinking budgets; below 1 so one assistant turn can clear it
 
 # --- Prefetch (AsyncTrainingConfig fields) ---
 enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the

@@ -13,7 +13,6 @@ import pytest
 
 from src.environments.base import VALID_REASONING_EFFORTS, BaseEnvironment, EpisodeGrade, resolve_reasoning_effort
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.episode import reasoning_calibration_penalty
 
 
 class _MinimalEnv(BaseEnvironment):
@@ -62,33 +61,6 @@ def test_codeforces_binds_level_to_budget():
     assert env.thinking_budget_for_effort("medium") == 8192
     assert env.thinking_budget_for_effort("high") == 16384
     assert env.thinking_budget_for_effort("nonexistent") is None
-
-
-def test_calibration_in_band_is_zero():
-    B = 8000
-    # Anywhere in [0.3B, 0.9B] is compliant → no penalty.
-    for r in (int(0.3 * B), int(0.6 * B), int(0.9 * B)):
-        assert reasoning_calibration_penalty([r], B) == 0.0
-
-
-def test_calibration_asymmetric_overuse_punished_more():
-    B = 8000
-    under = reasoning_calibration_penalty([int(0.1 * B)], B)  # below 0.3B
-    over = reasoning_calibration_penalty([B], B)  # at the cap (truncated)
-    assert under < 0 and over < 0
-    assert over < under, f"over-use {over} should be a stronger (more negative) penalty than under-use {under}"
-    # Extremes hit the max weights: over_use 1.0 at the cap, the milder under_use 0.3 at r == 0.
-    assert over == pytest.approx(-1.0, abs=1e-6)
-    assert reasoning_calibration_penalty([0], B) == pytest.approx(-0.3, abs=1e-6)
-
-
-def test_calibration_averages_over_turns_and_guards():
-    B = 8000
-    # One in-band turn + one truncated turn → average of 0 and -1.
-    assert reasoning_calibration_penalty([int(0.5 * B), B], B) == pytest.approx(-0.5, abs=1e-6)
-    # No budget / no turns → no penalty (guarded).
-    assert reasoning_calibration_penalty([], B) == 0.0
-    assert reasoning_calibration_penalty([5000], 0) == 0.0
 
 
 if __name__ == "__main__":

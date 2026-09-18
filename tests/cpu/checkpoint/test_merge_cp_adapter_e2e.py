@@ -234,6 +234,24 @@ def test_cp_saved_exclusions_are_spelled_for_a_plain_model():
     assert hasattr(layers[1].self_attn.q_proj, "lora_A") and hasattr(layers[0].self_attn.v_proj, "lora_A")
 
 
+def test_cp_saved_all_linear_targets_are_spelled_for_a_plain_model():
+    """``all-linear`` makes PEFT rewrite ``target_modules`` in place to the full paths of the tree it
+    injected into — under CP the wrapped one — and a plain reload then finds no target at all. Suffix
+    names pass through untouched, and the live config keeps the wrapped spelling."""
+    wrapped = {
+        "model.model.layers.0.self_attn.original_attention.q_proj",
+        "model.model.layers.1.self_attn.original_attention.v_proj",
+    }
+    all_linear = LoraConfig(r=_LORA_R, lora_alpha=_LORA_ALPHA, target_modules=set(wrapped))
+
+    saved = PeftAdapterSaver._cp_normalized_config(all_linear)
+
+    assert saved.target_modules == ["model.layers.0.self_attn.q_proj", "model.layers.1.self_attn.v_proj"]
+    assert all_linear.target_modules == wrapped, "the live config was respelled"
+    by_name = LoraConfig(r=_LORA_R, lora_alpha=_LORA_ALPHA, target_modules=list(_TARGETS))
+    assert PeftAdapterSaver._cp_normalized_config(by_name) is by_name
+
+
 def test_saved_cp_adapter_records_its_base_model():
     """Without the saver's backfill the CP adapter records ``base_model_name_or_path: null`` and the
     merge has no base to load — the whole path dies before the keys ever matter."""

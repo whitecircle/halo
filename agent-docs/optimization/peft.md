@@ -46,6 +46,8 @@ at all and is rejected: with no adapter to create, the run would full-finetune a
 A one-entry list is collapsed to a bare string by TRL's `ModelConfig`, so `lora_target_modules: [experts]`
 arrives as `"experts"`. The expert peel handles that; PEFT does not (it reads a lone string as a regex
 matched against full module paths), so an attention-only single target needs `all-linear` or two entries.
+A CLI `--lora_target_modules=all-linear` lands after that collapse as a one-entry list; `build_peft_config`
+restores PEFT's bare-string sentinel.
 
 ### Targets PEFT cannot adapt
 
@@ -62,7 +64,7 @@ module tree, so a multimodal tower is matched by the language model's `q_proj`�
 by `all-linear`, which reaches every `nn.Linear` subclass a family defines.
 
 `build_peft_config` (`src/distributed/loading/peft_setup.py`) scans the live model with PEFT's own
-matcher and puts those modules in the `LoraConfig`'s `exclude_modules` by full path (PEFT also honours
+matcher and puts those modules in the `LoraConfig`'s `exclude_modules` by full path (PEFT also honors
 an entry as a dotted suffix), so an identically named leaf elsewhere keeps its adapter. A warning names
 the count and one example path per reason. If it leaves no adaptable target at all, the run is rejected
 rather than trained with nothing — or, when native expert adapters are live, with the attention half
@@ -76,16 +78,19 @@ and keep their adapters. A module of a type PEFT has no adapter layer for at all
 `rel_logits_proj`) is matched by no recipe's names and still raises PEFT's own
 `Target module ... is not supported` when named. The exclusion is saved into `adapter_config.json`,
 so reloading the adapter onto the same base loaded through the same class reproduces the same
-injection; resume rebuilds it from the live model instead and never reads that file.
-`merge_peft_adapters.py` loads the base through the class the adapter's keys address — the text-only
-class after a `text_only_model: true` run — and refuses a base those keys name no module of. One tree
-the saved paths do not carry over to: a plain reload of an adapter trained under context parallelism,
-whose paths carry the CP wrapper's spelling — neither family that collects exclusions today supports
-CP.
+injection; resume rebuilds it from the live model instead and never reads that file. The merge tools
+pick that class off the adapter's keys ([Merging adapters](#merging-adapters)). An exclusion found on
+the context-parallel wrapped tree is written in the plain module spelling, as the adapter's tensor keys
+already are, so a plain reload and the merge tool honor it; the live config keeps the wrapper's spelling
+for the wrapped model.
 
 A tower whose projections are plain `nn.Linear` (CLIP/SigLIP/Pixtral-style) is untouched by any of
 this and keeps its adapters; on text-only data those adapters receive no gradient and stay at their
-zero initialisation, costing optimizer state and nothing else.
+zero initialization, costing optimizer state and nothing else.
+
+One consequence for a mistyped target: a name that matches a container rather than a leaf (`mlp` on
+Qwen3) drops out of the injection with that warning instead of aborting it, so the run trains the
+targets that did match. Read the excluded count — it is the tell.
 
 ### Hyperparameters
 
@@ -135,6 +140,12 @@ Requests are **logical**; what gets built follows the family's storage. One adap
 On a family that stores the fused `gate_up_proj` — every family except Qwen3 and Bailing — asking for
 `gate_proj` alone adapts the whole `[E, H, 2M]` tensor: gate and up share one rank-`r` subspace. On the two
 separate-storage families it adapts gate alone, with its own rank `r`.
+
+`lora_r` must be a multiple of 8. The grouped GEMM reads the adapter's rank dimension as a stride that
+spans a multiple of 16 bytes (`GROUPED_MM_STRIDE_ALIGNMENT_BYTES`), and the adapter GEMMs run at the
+activation dtype, bf16 at the narrowest, whatever the experts are stored in; the EP layer refuses any
+other rank as it builds the adapters, where the first expert matmul would otherwise fail with
+`strides should be multiple of 16 bytes`.
 
 GptOss picks its layout at runtime: with grouped-GEMM (SM90+, the default) it stores
 `gate_proj_gmm`/`up_proj_gmm` separately, without it a fused interleaved tensor. The same YAML therefore
@@ -378,7 +389,9 @@ save instead. Per mode:
     depends on (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
 
 - **CP:** adapter keys normalized to strip CP wrapper paths (`.original_attention.`, extra `.model.`) so they
-  load onto non-CP models; DTensor reconstruction also applied.
+  load onto non-CP models; the module paths in the written `adapter_config.json` (`exclude_modules`, and
+  `target_modules` once `all-linear` made PEFT rewrite it to full paths) are respelled the same way, while
+  the live config keeps the wrapper's spelling; DTensor reconstruction also applied.
 - **FSDP2:** DTensor adapter params reconstructed via `full_tensor()` (a collective) before save; global rank
   0 saves on a shared FS, rank 0 per node otherwise.
 - **EP+CP:** combines EP rank selection with CP key normalization.
@@ -424,6 +437,12 @@ python scripts/after_training/merge_peft_adapters.py \
 Add `--task classification --num_labels N` for classification models. Handles causal LM, sequence
 classification, multimodal/VLM, and trust_remote_code architectures. Use `--device_map auto` for large
 models.
+
+The base loads through the class the adapter's tensor keys address: an adapter from a `text_only_model: true`
+run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the multimodal wrapper, and keys
+naming no module of either class are refused — applied to the wrong class, PEFT matches nothing, warns, and
+the tool would write the bare base as a finished model. `convert_to_bf16.py` shares the rule on both its
+`--peft` paths.
 
 The merge re-applies the run's training sidecars to the merged model and copies both files into the output:
 the GptOss sinks policy recorded in `training_provenance.json`, and `router_balancing_biases.pt` into the

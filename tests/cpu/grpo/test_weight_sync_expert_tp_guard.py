@@ -35,8 +35,8 @@ from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 LAYER_PATH = "mlp"
 # HIDDEN != 2 * INTERMEDIATE on purpose: at equal dims a stray transpose still satisfies every shape.
 NUM_EXPERTS, HIDDEN, INTERMEDIATE = 2, 8, 6
-# fp32 stub weights: the grouped GEMM's 16-byte stride contract needs a rank that is a multiple of 4.
-LORA_R, LORA_ALPHA = 4, 8
+# The grouped GEMM's 16-byte stride contract at the bf16 the adapters run in: a rank that is a multiple of 8.
+LORA_R, LORA_ALPHA = 8, 16
 
 
 class _EPLayerStub(EPMoELayerBase):

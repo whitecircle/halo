@@ -63,12 +63,12 @@ which state the level and its per-turn budget in the system block from the `reas
 `rollout_max_thinking_tokens`, a level's `thinking_tokens` applies as `min(level budget, that cap)`
 and lowers the turn's total to that budget plus the global answer headroom; left `null`, the level
 caps reasoning alone and `rollout_max_tokens` still bounds the turn. A profile may also carry
-`max_length_cutoff_recoveries` and `token_cost`, reward units per 1k generated tokens.
+`max_length_cutoff_recoveries`.
 
 `thinking_tokens` is a **vLLM** request field (`thinking_token_budget`). On `rollout_backend:
 sglang` a level's budget reaches no request field (warned once per process): nothing caps CoT
-below `rollout_max_tokens`, and the budget survives only as the target
-`reasoning_compliance_weight` prices against.
+below `rollout_max_tokens`; the level still steers through the chat template, and the budget
+stays the reference of the [effort length floor](#effort-length-reward).
 
 A turn the engine cuts at its token cap is nudged and retried within `max_turns` and the episode's
 `max_length_cutoff_recoveries` (`environment_kwargs`; `null` = every cut within `max_turns`). A
@@ -94,18 +94,34 @@ renders carried reasoning) sends template variables with every request **and** a
 them to the trainer's own renders, so both sides see one template state. `reasoning_effort` is
 refused there.
 
-## Reasoning compliance reward
+## Effort length reward
 
-`reasoning_compliance_weight` (default `0` = off) adds an asymmetric term matching CoT length to the
-episode's applied budget `B`. Per assistant turn with `r` reasoning tokens: **0** inside
-`[0.3·B, 0.9·B]`, a mild penalty below, a strong penalty above that reaches `-1` at `r ≥ B`. The term
-is the mean over turns, scaled by the weight; an episode with no budget scores 0.
+Two trainer-side terms price an episode's reasoning tokens, summed over its assistant turns, by its
+effort level. Both enter the task reward before advantages.
 
-`reasoning_compliance_under_use_weight` (default `0.3`) scales the below-band side against the
-over-use side's `1.0`; `0` prices over-use only, so a short repair turn pays nothing.
+**The price** (`effort_length_penalty_k0`, default `None` = off) is
+`-min(c_max, k(effort) × tokens / l_norm)` with `k(effort) = k0 × exp(-(effort - effort_min) / tau)`.
+`effort_length_penalty_levels` gives each level its scalar (`low` 25, `medium` 50, `high` 100), so at
+the default `tau` of 25 the same trace costs `low` about 20× what it costs `high`. It prices reasoning
+tokens only — code and tool calls are free — and `c_max` caps it, so a long trace cannot outweigh the
+task reward.
 
-It enters the task reward before advantages, so keep it small (`0.15` in the code-contests
-recipes); watch `reward/calibration`.
+A price is paid within the group, so the sibling that reasons less wins it whatever the outcome. That
+is why it is capped and near zero at the highest level, and why the recipes never run it alone:
+
+**The floor** (`effort_length_floor_weight`, default `0` = off) is the one term that pays for more
+reasoning. Its reference is `effort_length_floor_budgets` (default `0.75`) times the per-turn thinking
+budget the episode ran under, so it needs no number of its own. The default sits below 1 so that an
+episode of a single assistant turn can clear its floor without running into the cap the engine
+enforces per turn. An episode short of the floor pays `-weight × shortfall / floor`. It reads the episode's
+total, not a per-turn mean, so a terse repair turn after a verdict is not under-use and an extra tool
+turn never lowers the score. An episode with no thinking budget or no assistant turn pays nothing;
+turns that carry no reasoning at all pay the whole weight.
+
+Keep `c_max + floor weight` below what the environment charges for the decisions it prices (the
+code-contests recipes: `0.1 + 0.05` under the `0.2` resubmission price). Smaller shaping terms, a
+`0.05` tool error among them, can still be outweighed by a long trace at the lowest level. Watch
+`reward/effort_length_penalty` and `reward/effort_length_floor`.
 
 ## Chat template
 

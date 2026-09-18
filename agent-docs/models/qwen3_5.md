@@ -63,7 +63,7 @@ The architecture has **no bias slot** (the gate is a bare weight), so the traine
 
 On the multimodal checkpoints `aux_loss` cannot work either: `Qwen3_5MoeForConditionalGeneration.forward` declares no `output_router_logits` parameter, so an explicit `aux_loss` raises and `auto` resolves to `none` with a warning naming the transient opt-in. The text-only `Qwen3_5MoeForCausalLM` declares the parameter and stays on `aux_loss` under `auto` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)).
 
-`text_only_model: true` loads a VLM checkpoint through that CausalLM class deliberately. The vision tower and MTP tail are dropped from the build **and from the export**: the artifact carries no `processor_config.json` and no vision token ids. `aux_loss` becomes the exported-by-construction balancing. A LoRA trained this way addresses `model.layers`, and `merge_peft_adapters.py` reads that off the adapter's keys and loads the base through the same CausalLM class, so the merged checkpoint is this text-only export.
+`text_only_model: true` loads a VLM checkpoint through that CausalLM class deliberately. The vision tower and MTP tail are dropped from the build **and from the export**: the artifact carries no `processor_config.json` and no vision token ids. `aux_loss` becomes the exported-by-construction balancing; every 122B recipe sets it. A LoRA trained this way addresses `model.layers`, and `merge_peft_adapters.py` reads that off the adapter's keys and loads the base through the same CausalLM class, so the merged checkpoint is this text-only export.
 
 Image-bearing datasets are refused loudly (the text path would otherwise prune the column silently), and the PP VLM refusal does not apply, since the build carries no tower to strand.
 

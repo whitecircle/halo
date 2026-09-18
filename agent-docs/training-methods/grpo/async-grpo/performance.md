@@ -28,7 +28,7 @@ Cap the longest training row with [`max_train_row_tokens`](rollouts.md#trajector
 
 Bound tool output: every tool-use environment truncates an observation at `max_observation_chars` (default `16384`, set in `environment_kwargs`). The coding grader's `max_output_size` defaults to `1_000_000` bytes for gradeable large-array results — cap it for training.
 
-The usual levers apply otherwise: `gradient_checkpointing: true` (EP forces `use_reentrant: true`, `src/trainers/mixins/base.py`) and `optim: adamw_torch_fused` → AdamWBF16 at 6 B/param ([BF16 optimizer](../../../optimization/bf16-optimizer.md#usage)).
+The usual levers apply otherwise: `gradient_checkpointing: true` (`use_reentrant` is forced to `true` on every MoE, EP or not — `src/trainers/mixins/base.py`) and `optim: adamw_torch_fused` → AdamWBF16 at 6 B/param ([BF16 optimizer](../../../optimization/bf16-optimizer.md#usage)).
 
 ## Throughput levers
 

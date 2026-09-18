@@ -6,6 +6,7 @@ graded the same way whichever one collects it.
 
 import asyncio
 import contextvars
+import math
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -18,15 +19,6 @@ from src.environments.base import (
     resolve_reasoning_effort,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
-
-# Reasoning-budget calibration band, as fractions of the episode's applied CoT budget, and the two
-# penalty weights outside it (over-use weighs more than under-use). See
-# :func:`reasoning_calibration_penalty`. The under-use weight is a run knob, so it is also the default
-# ``AsyncTrainingConfig.reasoning_compliance_under_use_weight`` reads: one constant keeps the pair in step.
-_CALIBRATION_BAND_LO = 0.3
-_CALIBRATION_BAND_HI = 0.9
-DEFAULT_UNDER_USE_WEIGHT = 0.3
-_OVER_USE_WEIGHT = 1.0
 
 
 @dataclass(frozen=True)
@@ -41,8 +33,8 @@ class EpisodeEffort:
     def stamp(self, trajectory: Trajectory | None) -> None:
         """Record this contract on the episode's trajectory (no-op when the episode produced none).
 
-        Every rollout driver stamps through here: re-tokenization must render the same steer the model
-        generated under, and the calibration reward prices CoT against the applied budget."""
+        Every rollout driver stamps through here: re-tokenization has to render the level and budget
+        the model generated under, and the effort length terms price the episode by its level."""
         if trajectory is None:
             return
         trajectory.reasoning_effort = self.level
@@ -92,32 +84,35 @@ def bind_episode_effort(
     return EpisodeEffort(level=level, thinking_budget=budget, max_tokens=min(max_tokens, budget + headroom))
 
 
-def reasoning_calibration_penalty(
-    reasoning_tokens: list[int], budget: int, under_use_weight: float = DEFAULT_UNDER_USE_WEIGHT
+def effort_length_penalty(
+    reasoning_tokens: list[int], effort: float, effort_min: float, k0: float, tau: float, c_max: float, l_norm: float
 ) -> float:
-    """Asymmetric reasoning-budget calibration penalty (0 = compliant), averaged over turns. Per turn,
-    given reasoning tokens ``r`` and budget ``B``: inside the compliant band → 0; below →
-    ``-under_use_weight`` scaled by the shortfall (``-under_use_weight`` at ``r = 0``); above → strong
-    penalty, ``-1`` once ``r >= B``. Over-use is punished harder than under-use.
+    """Capped, effort-conditioned reasoning-length price in ``[-c_max, 0]``:
+    ``-min(c_max, k(effort) * sum(reasoning_tokens) / l_norm)`` with ``k(effort) = k0 * exp(-(effort - effort_min) / tau)``.
 
-    The band and the over-use weight are the term's definition, not run knobs — the config help and
-    ``agent-docs/training-methods/grpo/async-grpo/README.md`` state them. ``under_use_weight`` is the
-    run knob ``reasoning_compliance_under_use_weight`` (0 disables the below-band side), and
-    ``reasoning_compliance_weight`` scales the whole term.
-    """
-    if not reasoning_tokens or budget <= 0:
+    The coefficient falls by ``e`` per ``tau`` effort units above the lowest level, so the same trace
+    costs most at the lowest effort; the cap keeps a long trace from outweighing the task reward, which
+    an uncapped per-token price does. Prices reasoning tokens only, summed over the trajectory's turns."""
+    tokens = sum(reasoning_tokens)
+    if tokens <= 0:
         return 0.0
-    lo, hi = _CALIBRATION_BAND_LO * budget, _CALIBRATION_BAND_HI * budget
-    penalties = []
-    for r in reasoning_tokens:
-        if r < lo:
-            penalties.append(-under_use_weight * (lo - r) / lo if lo > 0 else 0.0)
-        elif r > hi:
-            over = (r - hi) / max(budget - hi, 1.0)
-            penalties.append(-_OVER_USE_WEIGHT * min(over, 1.0))
-        else:
-            penalties.append(0.0)
-    return sum(penalties) / len(penalties)
+    k = k0 * math.exp(-(effort - effort_min) / tau)
+    return -min(c_max, k * tokens / l_norm)
+
+
+def effort_length_floor(reasoning_tokens: list[int], min_tokens: int, weight: float) -> float:
+    """Under-use floor in ``[-weight, 0]``: ``-weight * (min_tokens - total) / min_tokens`` while the
+    trajectory's reasoning tokens fall short of ``min_tokens``, a multiple of its per-turn budget.
+
+    The price only ever pays for less reasoning; this is the term that resists reasoning shrinking
+    toward nothing. Summed over the episode, never averaged per turn: a short repair turn after a
+    verdict is not under-use, and an extra tool turn cannot lower the score. An episode with no
+    assistant turn is a lost one, not under-use, and pays nothing; turns that carry no reasoning at
+    all pay the whole weight."""
+    shortfall = min_tokens - sum(reasoning_tokens)
+    if not reasoning_tokens or min_tokens <= 0 or weight <= 0 or shortfall <= 0:
+        return 0.0
+    return -weight * shortfall / min_tokens
 
 
 @dataclass

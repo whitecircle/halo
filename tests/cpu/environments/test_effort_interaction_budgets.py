@@ -265,15 +265,6 @@ def test_bonus_only_profile_still_binds_and_scales_by_effort():
     assert "episode_tested_submission_reward" not in low.info  # no bonus at that level
 
 
-def test_token_cost_stamps_from_profile():
-    profiles = {"low": {"token_cost": 0.05}, "high": {"max_test_calls": 6}}
-    env = _make_env(reasoning_effort_profiles=profiles)
-    low = _reset(env, {"reasoning_effort": "low", **_TESTS})
-    high = _reset(env, {"reasoning_effort": "high", **_TESTS})
-    assert low.info["episode_token_cost"] == 0.05
-    assert "episode_token_cost" not in high.info  # no price set -> free
-
-
 def test_effort_binding_caps_both_channels():
     # The budget must bound the WHOLE turn: an unbounded visible channel displaces the tool call.
     # Both budgets are stated here so the arithmetic below does not ride on the class defaults.
@@ -301,8 +292,6 @@ def test_invalid_profiles_raise():
         _make_env(reasoning_effort_profiles={"low": {"max_test_calls": -1}})
     with pytest.raises(ValueError, match="tested_submission_reward.*must be >= 0"):
         _make_env(reasoning_effort_profiles={"low": {"tested_submission_reward": -0.1}})
-    with pytest.raises(ValueError, match="token_cost.*must be >= 0"):
-        _make_env(reasoning_effort_profiles={"low": {"token_cost": -0.01}})
 
 
 def test_recovery_cap_tightens_per_level_and_never_exceeds_the_env_cap():

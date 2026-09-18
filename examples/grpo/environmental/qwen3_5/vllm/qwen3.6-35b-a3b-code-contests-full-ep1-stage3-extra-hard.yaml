@@ -23,8 +23,8 @@ use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 16               # the high profile's 3 submissions + 8 test calls, 2 cut-turn recoveries and
-                            # the closing turn, plus 2 spare; a cut turn costs a turn, not the episode
+max_turns: 16               # the high profile's 2 submissions + 8 test calls, a cut-turn recovery and the
+                            # closing turn, with slack for failed calls; a cut turn costs a turn, not the episode
 environment_kwargs:
   language: [python, cpp]   # the model names each program's language; python is graded at timeout_per_test,
                             # cpp at compiled_time_limit_scale x the stated limit
@@ -38,8 +38,8 @@ environment_kwargs:
   # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
     low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 4}
-    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 6}
-    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 8}
+    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 6}
+    high: {thinking_tokens: 16384, max_submissions: 2, max_test_calls: 8}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
@@ -79,8 +79,10 @@ rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS refere
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_max_tokens: 24000              # per-turn total: thinking budget + a 6k answer headroom (code + call after </think>)
 rollout_max_thinking_tokens: 18000     # global CoT ceiling >= the profiles' high
-reasoning_compliance_weight: 0.15            # a turn that thinks past 0.9x its budget pays up to this, averaged over the episode's turns
-reasoning_compliance_under_use_weight: 0     # no floor: a short repair turn after a verdict is not under-use
+effort_length_penalty_k0: 0.03         # reasoning tokens are priced per level: -min(c_max, k(level) x tokens / 8192), with k
+effort_length_penalty_c_max: 0.1       #   falling by e per 25 effort units (low 25, medium 50, high 100): low pays ~20x high
+effort_length_floor_weight: 0.05       # the one term that pays for MORE reasoning: an episode whose turns together reason
+                                       #   under 0.75x one turn's thinking_tokens pays up to this; price + floor < a resubmission
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
@@ -127,8 +129,8 @@ eval_rollout_batch_size: 34       # rows per rank per eval rollout round: 34 x 6
                                   # flight at once, so the 400-row split takes two rounds
 gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (12 prompts x 12); the per-rank value must
                                 # divide by num_generations
-max_steps: 200
-num_train_epochs: 1
+num_train_epochs: 1              # one pass over the pool: the stage runs to the end of its data, and the evals
+                                 # say which checkpoint to keep
 learning_rate: 3.0e-07
 max_grad_norm: 1.0
 lr_scheduler_type: constant_with_warmup  # the useful length of a frontier stage is read off its evals, not fixed in advance
@@ -139,18 +141,18 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: false      # forced to True at runtime: the ep1 grouped-GEMM expert layer counts as EP
+  use_reentrant: true       # a MoE runs reentrant GC (the trainer force-promotes false)
 fp32_grad_reduce: true
 
 # --- Output ---
 output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage3-extra-hard
 save_strategy: steps
-save_steps: 50
-save_total_limit: 2
+save_steps: 25
+save_total_limit: 3              # ~200 GB each: copy the eval-peak checkpoint aside before it rotates out
 
 # --- Eval (the pool's held-out split: 400 problems, 100 per band; pass@1) ---
 eval_strategy: steps
-eval_steps: 50
+eval_steps: 25                   # with every checkpoint: a peak between two coarse evals is a peak lost
 eval_on_start: true         # eval the starting checkpoint
 
 # --- Logging ---

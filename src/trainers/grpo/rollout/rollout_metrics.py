@@ -243,11 +243,10 @@ class RolloutMetricsMixin:
         return "\n".join(parts)
 
     def _assistant_turn_reasoning_tokens(self, traj) -> list[int]:
-        """Per-assistant-turn CoT token counts for calibration and the per-effort metrics.
+        """Per-assistant-turn CoT token counts for the effort length terms and the per-effort metrics.
 
-        Every assistant turn counts, a thinking-free one as 0: skipping them would score "no thinking
-        at all" as 0 while brief thinking pays the under-band penalty — a preference for dropping CoT
-        entirely, the opposite of the calibration term's intent.
+        Every assistant turn counts, a thinking-free one as 0, so the list's sum is the episode's
+        reasoning and its length the turn count the metrics average over.
         """
         return [
             len(self._tokenizer(m.thinking, add_special_tokens=False)["input_ids"]) if m.thinking else 0

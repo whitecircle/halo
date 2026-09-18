@@ -30,7 +30,7 @@ from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_
 from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.models.loading.config_levels import text_config
 from src.models.loading.tokenizer_setup import is_bounded_length
-from src.models.moe_balancing import BIAS_UPDATE_MODES, native_balancing_bias_attrs
+from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, native_balancing_bias_attrs
 from src.models.patches.attention import model_has_sinks, validate_attn_implementation
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.parallelism import make_parallelism_config
@@ -314,22 +314,27 @@ def test_moe_weight_sync_example_names_the_triton_moe_backend(config):
 
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_ep_example_declares_the_reentrant_checkpointing_it_runs(config):
-    """Under EP the trainer FORCES ``use_reentrant: True``; a config saying ``false`` describes fiction.
+def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
+    """A MoE (EP or not) and CP FORCE ``use_reentrant: True``; a config saying ``false`` describes fiction.
 
-    CP's and EP's collectives do not survive non-reentrant recompute, so the mixin overwrites the
-    kwarg before gradient checkpointing is enabled — warning when it is explicitly ``false``. Both
-    spellings therefore run identically, so a tree carrying both reads as two contradicting
-    comments. Pipeline parallelism is the opposite rule (non-reentrant REQUIRED, reentrant raises),
-    so it is excluded here rather than folded in.
+    CP's and EP's collectives do not survive non-reentrant recompute, and a MoE routes in its
+    recompute, so the mixin overwrites the kwarg before gradient checkpointing is enabled — warning
+    when it is explicitly ``false``. Both spellings therefore run identically, so a tree carrying both
+    reads as two contradicting comments. Pipeline parallelism is the opposite rule (non-reentrant
+    REQUIRED, reentrant raises), so it is excluded here rather than folded in. A MoE this host cannot
+    resolve from its cache is read off ``expert_parallel_size`` alone.
     """
     raw = raw_config(config)
-    if (raw.get("expert_parallel_size") or 1) <= 1 or (raw.get("pipeline_parallel_size") or 1) > 1:
+    if (raw.get("pipeline_parallel_size") or 1) > 1:
+        return
+    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+    model_config = cached_model_config(parsed_field(parsed, "model_name_or_path"))
+    if (raw.get("expert_parallel_size") or 1) <= 1 and not config_has_experts(model_config):
         return
     declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
     assert declared is not False, (
-        "expert parallelism force-promotes use_reentrant to True (src/trainers/mixins/base.py), so this "
-        "config's use_reentrant: false is silently overridden — write true, or drop the kwarg"
+        "a MoE force-promotes use_reentrant to True (src/trainers/mixins/base.py), so this config's "
+        "use_reentrant: false is silently overridden — write true, or drop the kwarg"
     )
 
 

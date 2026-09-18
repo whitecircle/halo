@@ -109,12 +109,13 @@ class TrajectoryTokenizeMixin:
         """Whether the rollout sent prior-turn reasoning to the engine, so a context re-render includes it."""
         return self._rollout_env.carry_reasoning
 
-    def _warn_if_no_reasoning_captured(self, rollout_results: list[RolloutResult], compliance_weight: float) -> None:
+    def _warn_if_no_reasoning_captured(self, rollout_results: list[RolloutResult], length_terms_on: bool) -> None:
         """Once per run: a step whose assistant turns carry no reasoning while a knob consumes it.
 
-        Reasoning reaches a turn only through the server's reasoning parser; without one the
-        calibration term scores every turn as maximal under-use and ``carry_reasoning`` carries
-        nothing, and neither says a word on its own. A step with no assistant turn is no evidence.
+        Reasoning reaches a turn only through the server's reasoning parser; without one the length
+        floor scores every episode as maximal under-use, the length price charges nothing, and
+        ``carry_reasoning`` carries nothing — and none says a word on its own. A step with no
+        assistant turn is no evidence.
         """
         turns = [m for r in rollout_results if r.trajectory for m in r.trajectory.messages if m.role == "assistant"]
         if not turns or any(m.thinking for m in turns):
@@ -122,7 +123,7 @@ class TrajectoryTokenizeMixin:
         consumers = [
             name
             for name, on in (
-                ("reasoning_compliance_weight", compliance_weight > 0),
+                ("the effort length terms", length_terms_on),
                 ("carry_reasoning", self._carry_reasoning),
             )
             if on
@@ -132,9 +133,9 @@ class TrajectoryTokenizeMixin:
             self._warned_once,
             "no_reasoning_captured",
             "No assistant turn in this step carried reasoning, but %s consume it: the rollout server is most "
-            "likely running without a reasoning parser (or the model emits none). The calibration term then "
-            "scores every turn as maximal under-use and a carried thought is never sent. Serve with the "
-            "family's reasoning parser, or turn the knob off.",
+            "likely running without a reasoning parser (or the model emits none). The length floor then "
+            "scores every episode as maximal under-use, the length price charges nothing, and a carried "
+            "thought is never sent. Serve with the family's reasoning parser, or turn the knob off.",
             " and ".join(consumers),
         )
 

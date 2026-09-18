@@ -225,8 +225,9 @@ def _is_probeable_linear(module: torch.nn.Module) -> bool:
     """Whether a forward probe on this module is both meaningful and free of side effects.
 
     A packed quantized weight is not a float matrix — PEFT routes those to its own adapter layer, and
-    their kernels are not always loadable where the config is built. A meta or ``DTensor`` weight has
-    nothing to multiply, or would turn the probe into a collective.
+    their kernels are not always loadable where the config is built. An fp8 weight is a float matrix
+    with no CPU kernel behind it, so probing it would report a raise as a different affine map. A meta
+    or ``DTensor`` weight has nothing to multiply, or would turn the probe into a collective.
     """
     weight = getattr(module, "weight", None)
     return (
@@ -234,6 +235,7 @@ def _is_probeable_linear(module: torch.nn.Module) -> bool:
         and isinstance(weight, torch.Tensor)
         and not weight.is_meta
         and weight.dtype.is_floating_point
+        and weight.dtype.itemsize >= 2
         and not isinstance(weight.data, DTensor)
     )
 
@@ -277,8 +279,8 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
     different parameter set than its peers would only surface as a hang in the first collective.
     """
     # `all-linear` is a sentinel PEFT resolves against the model at injection time; resolve a copy the
-    # same way so the scan sees what injection will target, and leave the config itself to PEFT, which
-    # rewrites it in place at injection.
+    # same way so the scan sees what injection will target while the config the caller holds — the one
+    # the warning and raise below quote — still reads the sentinel; PEFT rewrites it in place at injection.
     scan_config = _maybe_include_all_linear_layers(copy.deepcopy(peft_config), model)
     preset = peft_config.exclude_modules
     if isinstance(preset, str):
@@ -347,9 +349,11 @@ def build_peft_config(model: torch.nn.Module, model_config: ModelConfig) -> obje
     :func:`setup_peft_model`, and the SentenceTransformer path calls it directly.
     """
     targets = model_config.lora_target_modules
-    # PEFT reads its sentinel only as a bare string; TRL collapses a one-entry YAML list to that at
-    # construction, but a CLI override lands after construction and arrives as a list.
-    if isinstance(targets, (list, tuple, set)) and list(targets) == [INCLUDE_LINEAR_LAYERS_SHORTHAND]:
+    # PEFT reads its sentinel only as a bare string, case-insensitively; TRL collapses a one-entry YAML
+    # list to that at construction, but a CLI override lands after construction and arrives as a list.
+    if isinstance(targets, (list, tuple, set)) and [str(t).lower() for t in targets] == [
+        INCLUDE_LINEAR_LAYERS_SHORTHAND
+    ]:
         model_config.lora_target_modules = INCLUDE_LINEAR_LAYERS_SHORTHAND
     peft_config = get_peft_config(model_config)
     if peft_config is not None and getattr(peft_config, "target_modules", None):

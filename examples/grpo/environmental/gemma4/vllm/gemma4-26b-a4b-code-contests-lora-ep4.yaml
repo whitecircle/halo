@@ -44,8 +44,8 @@ environment_kwargs:
   # that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
     low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
-    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
+    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
+    high: {thinking_tokens: 16384, max_submissions: 2, max_test_calls: 6}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
@@ -85,8 +85,10 @@ rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, whi
 rollout_max_tokens: 24000              # per-turn total (CoT + answer headroom) and the ONLY CoT bound here:
                                        # rollout_max_thinking_tokens needs the server on VLLM_REASONING_PARSER=gemma4
                                        # AND VLLM_USE_V2_MODEL_RUNNER=0, else every rollout 400s
-reasoning_compliance_weight: 0.15            # a turn that thinks past 0.9x its budget pays up to this, averaged over the episode's turns
-reasoning_compliance_under_use_weight: 0     # no under-use floor
+effort_length_penalty_k0: 0.03         # reasoning tokens are priced per level: -min(c_max, k(level) x tokens / 8192), with k
+effort_length_penalty_c_max: 0.1       #   falling by e per 25 effort units (low 25, medium 50, high 100): low pays ~20x high
+effort_length_floor_weight: 0.05       # the one term that pays for MORE reasoning: an episode whose turns together reason
+                                       #   under 0.75x one turn's thinking_tokens pays up to this; price + floor < a resubmission
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio

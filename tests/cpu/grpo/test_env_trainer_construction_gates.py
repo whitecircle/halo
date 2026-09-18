@@ -44,6 +44,7 @@ _INIT_GATES = (
     "_validate_eval_round",
     "_force_full_dataset_columns",
     "_reject_answerless_datasets",
+    "_validate_effort_length_terms",
     "reject_off_policy_mask_threshold",
 )
 

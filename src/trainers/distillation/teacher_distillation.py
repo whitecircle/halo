@@ -90,21 +90,23 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
                 "would be fetched with none of them."
             )
 
+        # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
+        student_model, _ = load_model_from_pretrained(student_model, args)
         dist_kwargs = self._init_distributed_config(
             kwargs,
             training_args=args,
+            model=student_model,
             parallelism_config=parallelism_config,
             save_sharded_ep=save_sharded_ep,
             dataset_presharded=dataset_presharded,
         )
+        student_model = dist_kwargs.pop("model")
 
         # Method knobs are read from ``args`` (DistillationConfig); only the resolved loss callable
         # is cached here.
         self.distillation_loss_fn = get_distillation_loss_fn(args.distill_loss)
 
         self.teacher_model = teacher_model
-
-        student_model, _ = load_model_from_pretrained(student_model, args)
 
         super().__init__(
             model=student_model,

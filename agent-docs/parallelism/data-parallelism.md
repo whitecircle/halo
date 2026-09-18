@@ -272,6 +272,7 @@ FSDP2 shards over what is left. HSDP is the exception with a scope of its own: p
 - **FSDP + Accelerate config conflict** — wrong FSDP strategy or double-wrapping under `torchrun`,
   caused by HuggingFace FSDP fields (`fsdp`, `fsdp_config`) in the training YAML. Do not set them
   when using `torchrun` with parallelism.
-- **Gradient checkpointing with EP or CP** — the mixin forces `use_reentrant=True` before
-  `super().__init__()`, even when the config sets `false` (the GRPO templates commonly do); the
-  recompute replays the checkpoint frame's DeepEP dispatch instead of issuing a second one.
+- **Gradient checkpointing with EP, CP or a MoE** — the mixin forces `use_reentrant=True` before
+  `super().__init__()`, even when the config sets `false` (the GRPO templates commonly do); the MoE
+  mechanism is in [Flash Attention](../optimization/flash-attention.md#usage). The recompute replays
+  the checkpoint frame's DeepEP dispatch instead of issuing a second one.

@@ -240,7 +240,8 @@ class Trajectory:
     info: dict[str, Any] = field(default_factory=dict)
     # Set by the rollout so re-tokenization renders the same steer the model generated under.
     reasoning_effort: str | None = None
-    # Applied per-episode CoT budget (min(level budget, global cap)), for the calibration reward.
+    # Applied per-episode, per-turn CoT budget (min(level budget, global cap)): the template states it,
+    # so a re-render needs it, and the trainer's under-use floor is a multiple of it.
     reasoning_budget: int | None = None
 
     _assistant_count: int = field(default=0, repr=False)
@@ -337,12 +338,11 @@ class BaseEnvironment(ABC):
     # Profile keys this class admits and the minimum each takes; a subclass declares only the keys it
     # adds, and the union over the MRO is what a profile may carry. ``thinking_tokens`` is the
     # per-turn CoT budget, ``max_length_cutoff_recoveries`` tightens the env's recovery cap for the
-    # level, ``token_cost`` prices generated tokens (reward units per 1k, charged by the trainer).
-    # An int minimum declares a count (only ints admitted); a float minimum admits any finite number.
+    # level. An int minimum declares a count (only ints admitted); a float minimum admits any finite
+    # number.
     EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {
         "thinking_tokens": 1,
         "max_length_cutoff_recoveries": 0,
-        "token_cost": 0.0,
     }
 
     def __init__(
@@ -519,8 +519,8 @@ class BaseEnvironment(ABC):
     def _bind_effort_profile(self, trajectory: Trajectory, context: dict[str, Any] | None) -> None:
         """Stamp the episode's effort profile once its level is concrete at reset.
 
-        The generic keys land as the ``info`` stamps their consumers read (``_handle_length_cutoff``,
-        the trainer's token-cost charge); task-specific keys go through :meth:`_apply_effort_profile`.
+        The generic keys land as the ``info`` stamps their consumers read (``_handle_length_cutoff``);
+        task-specific keys go through :meth:`_apply_effort_profile`.
         An undetermined level (:meth:`reset_effort_level` returns ``None``) binds an empty profile, so
         the hook still runs and can state the class caps.
         """
@@ -528,8 +528,6 @@ class BaseEnvironment(ABC):
         profile = self.reasoning_effort_profiles.get(level, {}) if level is not None else {}
         if "max_length_cutoff_recoveries" in profile:
             trajectory.info["episode_max_length_cutoff_recoveries"] = profile["max_length_cutoff_recoveries"]
-        if "token_cost" in profile:
-            trajectory.info["episode_token_cost"] = float(profile["token_cost"])
         self._apply_effort_profile(trajectory, level, profile)
 
     def _apply_effort_profile(  # noqa: B027  optional hook; task envs override

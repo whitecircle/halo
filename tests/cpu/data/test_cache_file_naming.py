@@ -17,6 +17,7 @@ import pytest
 from datasets import Dataset
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
+from tokenizers.processors import TemplateProcessing
 from transformers import AutoTokenizer, ProcessorMixin
 
 from src.data.collators.self_distill import SelfDistillTextCollator
@@ -439,6 +440,12 @@ def test_tokenizer_content_sig_still_separates_different_vocabs():
     truncating = _backend(dict(shared))
     truncating.enable_truncation(max_length=2)
     assert _tokenizer_content_sig(_Fast(truncating)) == same, "enabling truncation re-keyed the cache"
+
+    # Every other serialized block still separates: a post-processor that wraps the sequence changes
+    # the ids a map writes, so widening the dropped keys past the per-call pair must re-key here.
+    templated = _backend(dict(shared))
+    templated.post_processor = TemplateProcessing(single="a $A", special_tokens=[("a", 1)])
+    assert _tokenizer_content_sig(_Fast(templated)) != same, "a post-processor change must key a different cache"
 
 
 def test_kwargs_scalar_lists_distinct():

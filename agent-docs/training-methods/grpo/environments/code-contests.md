@@ -27,8 +27,8 @@ environment_kwargs:
   reasoning_effort: random
   reasoning_effort_profiles:
     low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
-    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
+    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
+    high: {thinking_tokens: 16384, max_submissions: 2, max_test_calls: 6}
 ```
 
 | Knob | Default | Effect |
@@ -117,6 +117,14 @@ is the anti-sparsity signal: where every completion fails, it separates runnable
 crashes. Components log as `reward/*` and sum exactly to the reward. A `judge` or `reward_model`
 term reads the submitted program as a fenced code block, not the tool-call turn that carried it
 ([Reward Terms](../rewards.md#environment-arm)).
+
+The trainer's two effort length terms sit outside these components, as `reward/effort_length_penalty`
+and `reward/effort_length_floor` ([Effort length reward](../async-grpo/rollouts.md#effort-length-reward));
+the floor's reference is `0.75 ×` each level's own `thinking_tokens`. The recipes keep their sum
+(`0.1 + 0.05`) under the `0.2` resubmission price, so how long an episode reasons never outweighs
+whether it resubmits; with `submission_reward` and `no_tool_use_penalty` at `0.1` each, a graded submission that
+passes nothing still scores above an episode that never attempts. `tests/cpu/config/test_env_grpo_reward_economy.py`
+holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls`,
 `episode/tested_before_submission` (over submitting episodes, the rate the tested-submission bonus
