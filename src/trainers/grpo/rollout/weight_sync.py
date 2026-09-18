@@ -23,7 +23,6 @@ from functools import partial
 from typing import Any
 
 import torch
-from accelerate.utils import is_peft_model
 from transformers.core_model_loading import (
     WeightConverter,
     WeightRenaming,
@@ -56,11 +55,11 @@ from src.models.moe_balancing import (
 )
 from src.models.patches.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from src.models.structure import (
+    base_transformers_model,
     merged_adapters,
     model_has_quantized_params,
     normalize_peft_param_name,
     unwrap_framework_wrappers,
-    unwrap_model,
 )
 from src.trainers.mixins.ep_introspection import named_ep_layers
 
@@ -219,13 +218,6 @@ def _hub_param_name(name: str, ep_layers: dict[str, EPMoELayerBase]) -> str:
     return name
 
 
-def _hub_model(model: torch.nn.Module) -> torch.nn.Module:
-    """The plain transformers model under every framework, toolkit and PEFT wrapper: the tree whose
-    ``base_model_prefix`` and sub-model paths transformers' conversion mapping is scoped by."""
-    base = unwrap_model(model)
-    return unwrap_model(base.get_base_model()) if is_peft_model(base) else base
-
-
 class _HubForwarder:
     """Forward gathered tensors to the engine client under the family's hub keys, the spelling the
     engine's loader reads. Built on the forwarding rank only.
@@ -261,7 +253,7 @@ class _HubForwarder:
         self._held_bytes = 0
         if not any(cls._EXPORTS_HUB_NAMESPACE for _where, cls in _sync_contract_classes(model)):
             return
-        self._model = _hub_model(model)
+        self._model = base_transformers_model(model)
         # The resolution every save-side revert uses, so the streamed renames and the held converts
         # come from the same reversed list the gathered save inverts.
         conversions = revert_conversions_for(self._model)

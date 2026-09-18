@@ -178,8 +178,9 @@ auto-detection plus the model-specific handling above.
 recompute replays the DeepEP dispatch from. Enabling GC by any other route leaves EP without that scope
 and raises.
 
-Outside pipeline parallelism, EP and CP force `use_reentrant=True` (a configured `False` is overridden
-with a warning). Under PP ([not yet available in this release](../parallelism/pipeline-parallelism.md))
+Outside pipeline parallelism, EP, CP and every MoE force `use_reentrant=True` (a configured `False` is
+overridden with a warning; a MoE routes in its recompute, and non-reentrant checkpointing rejects the
+routing shapes that change when a nondeterministic attention recompute flips a near-tie pick). Under PP ([not yet available in this release](../parallelism/pipeline-parallelism.md))
 the shipped gates require non-reentrant instead, so the override would not apply there; EP replays its
 dispatch from the checkpoint scope in either mode.
 

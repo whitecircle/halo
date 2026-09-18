@@ -63,7 +63,7 @@ from src.kernels.liger.orchestrator import (
     warn_if_flce_unreachable,
 )
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
-from src.models.moe_balancing import ep_wraps_experts
+from src.models.moe_balancing import config_has_experts, ep_wraps_experts
 from src.models.structure import model_has_quantized_params, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
@@ -148,6 +148,21 @@ def _knobs_set_by_user(config, names: Iterable[str]) -> list[str]:
     """
     defaults = {f.name: f.default for f in fields(ParallelismConfig)}
     return [name for name in names if getattr(config, name) != defaults[name]]
+
+
+def forces_reentrant_checkpointing(parallelism_config, model_config) -> bool:
+    """Whether gradient checkpointing has to run reentrant for this run.
+
+    CP's sequence all-to-alls do not survive non-reentrant recompute, and EP's DeepEP barriers desync
+    ranks under its lazy recompute. A MoE routes in its recompute too: the router re-runs on a
+    recomputed (nondeterministically, on most attention kernels) hidden state and a near-tie pick can
+    flip, so the routing tensors change shape, which non-reentrant checkpointing rejects as a metadata
+    mismatch — with or without EP wrappers. Pipeline parallelism is the exception: reentrant runs the
+    original forward in no_grad, so FSDP2 registers no pre-backward hooks there.
+    """
+    if parallelism_config.is_pp_mode:
+        return False
+    return parallelism_config.is_ep_mode or parallelism_config.is_cp_mode or config_has_experts(model_config)
 
 
 class DistributedTrainerMixin(
@@ -286,18 +301,18 @@ class DistributedTrainerMixin(
 
         # Force use_reentrant before super().__init__ enables GC. Not under PP, which requires non-reentrant.
         if (
-            (parallelism_config.is_ep_mode or parallelism_config.is_cp_mode)
-            and not parallelism_config.is_pp_mode
-            and training_args is not None
+            training_args is not None
             and getattr(training_args, "gradient_checkpointing", False)
+            and forces_reentrant_checkpointing(parallelism_config, getattr(kwargs.get("model"), "config", None))
         ):
             gc_kwargs = dict(getattr(training_args, "gradient_checkpointing_kwargs", None) or {})
             if gc_kwargs.get("use_reentrant") is False:
                 logger.warning(
-                    "Expert/Context Parallelism uses use_reentrant=True for gradient checkpointing; "
-                    "overriding the configured use_reentrant=False. CP's sequence all-to-alls do "
-                    "not survive non-reentrant recompute; non-reentrant is validated only under "
-                    "pipeline parallelism, which requires it."
+                    "Expert/Context Parallelism and MoE routing use use_reentrant=True for gradient "
+                    "checkpointing; overriding the configured use_reentrant=False. CP's sequence "
+                    "all-to-alls do not survive non-reentrant recompute, and a recomputed router may "
+                    "route differently, which non-reentrant checkpointing rejects; non-reentrant is "
+                    "validated only under pipeline parallelism, which requires it."
                 )
             gc_kwargs["use_reentrant"] = True
             training_args.gradient_checkpointing_kwargs = gc_kwargs

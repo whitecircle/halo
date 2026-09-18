@@ -8,6 +8,7 @@ share the CP key remap defined here.
 
 from __future__ import annotations
 
+import copy
 import itertools
 import json
 import logging
@@ -56,6 +57,9 @@ from src.models.structure import (
 )
 
 logger = logging.getLogger(__name__)
+
+# What PEFT prepends to every adapter key below the model it wraps.
+_PEFT_KEY_PREFIX = "base_model.model."
 
 # Superset of every param name PEFT may serialize into an adapter file: LoRA tensors,
 # modules_to_save clones, and the embed/lm_head pair save_embedding_layers can add.
@@ -164,8 +168,9 @@ class PeftAdapterSaver:
         fs_aware_makedirs(output_dir)
         with barrier_on_exit():
             if should_save:
+                peft_config = peft_model.peft_config["default"]
                 self._write_mixed_adapter_config(
-                    peft_model.peft_config["default"],
+                    self._cp_normalized_config(peft_config) if ctx.is_cp_mode else peft_config,
                     getattr(ctx.parallelism_config, "expert_lora", None),
                     output_dir,
                 )
@@ -268,7 +273,10 @@ class PeftAdapterSaver:
         fs_aware_makedirs(output_dir)
         with barrier_on_exit():
             if should_save:
-                peft_model.peft_config["default"].save_pretrained(output_dir)
+                peft_config = peft_model.peft_config["default"]
+                (self._cp_normalized_config(peft_config) if ctx.is_cp_mode else peft_config).save_pretrained(
+                    output_dir
+                )
                 self._write_adapter_state_dict(cast_adapter_state_to_save_dtype(adapter_state_dict), output_dir)
                 if ctx.tokenizer is not None:
                     ctx.tokenizer.save_pretrained(output_dir)
@@ -325,6 +333,25 @@ class PeftAdapterSaver:
     def _normalize_cp_adapter_keys(state_dict: dict) -> dict:
         """Apply :meth:`_normalize_cp_adapter_key` across an adapter state dict."""
         return {PeftAdapterSaver._normalize_cp_adapter_key(k): v for k, v in state_dict.items()}
+
+    @staticmethod
+    def _cp_normalized_config(peft_config):
+        """The adapter config as a non-CP model reads it: ``exclude_modules`` respelled like the keys.
+
+        The exclusion scan ran on the CP-wrapped tree, so its paths carry the wrapper's extra ``model.``
+        level and ``.original_attention.`` segment; a plain reload matches none of them and PEFT then
+        injects into the very module the path excluded. A copy is written so the live config keeps the
+        spelling the wrapped model still has.
+        """
+        paths = peft_config.exclude_modules
+        if not isinstance(paths, (list, tuple, set)):
+            return peft_config
+        config = copy.deepcopy(peft_config)
+        config.exclude_modules = sorted(
+            PeftAdapterSaver._normalize_cp_adapter_key(_PEFT_KEY_PREFIX + path).removeprefix(_PEFT_KEY_PREFIX)
+            for path in paths
+        )
+        return config
 
 
 def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> None:

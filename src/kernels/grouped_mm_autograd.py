@@ -9,6 +9,10 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Function
 
+# torch's grouped GEMM reads every operand's trailing stride as a multiple of this; a rank or width
+# below it is refused with a stride error at the first matmul, not at construction.
+GROUPED_MM_STRIDE_ALIGNMENT_BYTES = 16
+
 
 def grouped_mm_grads(mat_a, mat_b, grad_output, offs, needs_a: bool, needs_b: bool):
     """Gradient pair for a grouped matmul, with the SM100+ zero-stride materialization.
