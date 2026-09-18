@@ -75,12 +75,13 @@ shape — the low-precision compute drop-in and a quantized base change only *ho
 and keep their adapters. A module of a type PEFT has no adapter layer for at all (Inkling's
 `rel_logits_proj`) is matched by no recipe's names and still raises PEFT's own
 `Target module ... is not supported` when named. The exclusion is saved into `adapter_config.json`,
-so reloading the adapter onto the same base loaded through the same class — `merge_peft_adapters.py`
-included — reproduces the same injection; resume rebuilds it from the live model instead and never
-reads that file. Two trees the saved paths do not carry over to: a base loaded as its multimodal class
-after training with `text_only_model: true`, and a plain reload of an adapter trained under context
-parallelism, whose paths carry the CP wrapper's spelling — neither family that collects exclusions
-today supports CP.
+so reloading the adapter onto the same base loaded through the same class reproduces the same
+injection; resume rebuilds it from the live model instead and never reads that file.
+`merge_peft_adapters.py` loads the base through the class the adapter's keys address — the text-only
+class after a `text_only_model: true` run — and refuses a base those keys name no module of. One tree
+the saved paths do not carry over to: a plain reload of an adapter trained under context parallelism,
+whose paths carry the CP wrapper's spelling — neither family that collects exclusions today supports
+CP.
 
 A tower whose projections are plain `nn.Linear` (CLIP/SigLIP/Pixtral-style) is untouched by any of
 this and keeps its adapters; on text-only data those adapters receive no gradient and stay at their
