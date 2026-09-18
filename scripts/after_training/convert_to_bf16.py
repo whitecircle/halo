@@ -106,16 +106,19 @@ def _reject_unsupported_peft_type(model_type: str) -> None:
         raise ValueError(f"PEFT is only supported for model types {sorted(_PEFT_MODEL_TYPES)}, not {model_type!r}")
 
 
-def _load_verified(model_path, model_type, *, excuse_task_head: bool, **load_kwargs):
+def _load_verified(model_path, model_type, *, excuse_task_head: bool, text_only: bool = False, **load_kwargs):
     """``model_path`` loaded as ``model_type``, missing-key report gated and buffers finalized.
 
     ``--check_inference`` generates from what this returns, and transformers 5 hands back every
     non-persistent buffer as uninitialized memory, so the repair belongs on the load rather than on
-    whichever caller happens to run a forward.
+    whichever caller happens to run a forward. ``text_only`` (the merge's request for the class an
+    adapter was trained through) applies to the causal-LM resolution only.
     """
     model_class = _MODEL_CLASSES[model_type]
     if model_class is None:
-        model = auto_load_model(model_path, excuse_task_head=excuse_task_head, **load_kwargs)
+        model = auto_load_model(model_path, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs)
+    elif text_only:
+        raise ValueError(f"model_type={model_type!r} loads one class; text_only applies to causal_lm only.")
     else:
         model = from_pretrained_verified(model_class, model_path, excuse_task_head=excuse_task_head, **load_kwargs)
     finalize_loaded_model(model)
@@ -269,8 +272,10 @@ def _merge_adapter_to_bf16(
     """
     _reject_unsupported_peft_type(model_type)
 
-    def load_base_model(base_model_path, *, excuse_task_head: bool):
-        return _load_verified(base_model_path, model_type, excuse_task_head=excuse_task_head, **load_kwargs)
+    def load_base_model(base_model_path, *, excuse_task_head: bool, text_only: bool = False):
+        return _load_verified(
+            base_model_path, model_type, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs
+        )
 
     merge_adapter_into_base(
         adapter_dir,

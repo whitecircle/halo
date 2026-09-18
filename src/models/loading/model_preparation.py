@@ -107,7 +107,9 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
     return AutoModelForCausalLM
 
 
-def auto_load_model(model_name_or_path: str, *, trust_remote_code: bool = False, model_class=None, **kwargs):
+def auto_load_model(
+    model_name_or_path: str, *, trust_remote_code: bool = False, model_class=None, text_only: bool = False, **kwargs
+):
     """Load a model from a path, picking the widest Auto* class for its config unless one is pinned.
 
     The unsharded load core: the compat shims, the config fetch, the class resolution and the
@@ -115,7 +117,8 @@ def auto_load_model(model_name_or_path: str, *, trust_remote_code: bool = False,
     distributed paths use ``load_distributed_model()``.
 
     ``model_class`` pins the class and skips the config fetch, for a caller that resolved its own
-    (a task head).
+    (a task head). ``text_only`` is :func:`resolve_auto_model_class`'s: the text-only class of a
+    multimodal checkpoint, as a ``text_only_model`` run trains it.
     """
     # Before the config fetch, which is already enough to import a remote modeling file: every
     # standalone tool loads through here, so the shims cannot depend on each caller applying them
@@ -126,7 +129,7 @@ def auto_load_model(model_name_or_path: str, *, trust_remote_code: bool = False,
         config = AutoConfig.from_pretrained(
             model_name_or_path, trust_remote_code=trust_remote_code, revision=kwargs.get("revision")
         )
-        model_class = resolve_auto_model_class(config)
+        model_class = resolve_auto_model_class(config, text_only=text_only)
     return from_pretrained_verified(model_class, model_name_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
 

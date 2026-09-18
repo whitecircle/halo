@@ -94,7 +94,11 @@ def test_known_types_dispatch_to_their_registered_class_through_the_gate(monkeyp
         calls.clear()
         finalized.clear()
         load_model("/some/path", model_type, dtype="bf16")
-        assert calls["gated"] == (model_class, "/some/path", {"dtype": "bf16", "excuse_task_head": False})
+        expected = {"dtype": "bf16", "excuse_task_head": False}
+        if model_class is None:
+            # The config-resolving loader alone takes the class request an adapter's keys can make.
+            expected["text_only"] = False
+        assert calls["gated"] == (model_class, "/some/path", expected)
         assert finalized == [calls["gated"]], f"{model_type} skipped the post-load buffer seam"
 
 
@@ -117,7 +121,7 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
     monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: (base, path))
 
     assert load_model("/adapter", "causal_lm", is_peft=True) == (base_model, "/adapter")
-    assert seen["load"] == ("/base", {"excuse_task_head": False})
+    assert seen["load"] == ("/base", {"excuse_task_head": False, "text_only": False})
     assert finalized == [base_model], "the base the adapter names is the one that must be finalized"
 
 

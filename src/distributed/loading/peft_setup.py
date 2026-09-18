@@ -13,6 +13,7 @@ import torch
 from accelerate.logging import get_logger
 from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
 from peft.tuners.tuners_utils import BaseTunerLayer, _maybe_include_all_linear_layers, check_target_module_exists
+from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, PreTrainedModel
 from trl import ModelConfig, get_peft_config
@@ -345,6 +346,11 @@ def build_peft_config(model: torch.nn.Module, model_config: ModelConfig) -> obje
     The one seam where a PEFT config meets the live model: every training script reaches it through
     :func:`setup_peft_model`, and the SentenceTransformer path calls it directly.
     """
+    targets = model_config.lora_target_modules
+    # PEFT reads its sentinel only as a bare string; TRL collapses a one-entry YAML list to that at
+    # construction, but a CLI override lands after construction and arrives as a list.
+    if isinstance(targets, (list, tuple, set)) and list(targets) == [INCLUDE_LINEAR_LAYERS_SHORTHAND]:
+        model_config.lora_target_modules = INCLUDE_LINEAR_LAYERS_SHORTHAND
     peft_config = get_peft_config(model_config)
     if peft_config is not None and getattr(peft_config, "target_modules", None):
         _exclude_unadaptable_lora_targets(model, peft_config)

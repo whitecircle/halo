@@ -131,29 +131,39 @@ def test_a_base_that_carries_the_head_loads_the_trained_one(reward_checkpoint):
     assert torch.equal(model.score.weight, saved["score.weight"].to(model.score.weight.dtype))
 
 
-def _keyword_value(source_path: pathlib.Path, call_name: str, keyword: str) -> ast.expr:
-    """The value node passed as ``keyword`` to the (single) call of ``call_name`` in a source file."""
+def _calls(source_path: pathlib.Path, call_name: str) -> list[ast.Call]:
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    calls = [
+    return [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == call_name
     ]
-    assert len(calls) == 1, f"expected one {call_name} call in {source_path.name}, found {len(calls)}"
-    values = [kw.value for kw in calls[0].keywords if kw.arg == keyword]
-    assert values, f"{call_name} in {source_path.name} does not pass {keyword}"
-    return values[0]
+
+
+def _keyword_values(source_path: pathlib.Path, call_name: str, keyword: str) -> list[ast.expr]:
+    """The value node passed as ``keyword`` at every call of ``call_name`` in a source file."""
+    calls = _calls(source_path, call_name)
+    assert calls, f"no {call_name} call in {source_path.name}"
+    values = [kw.value for call in calls for kw in call.keywords if kw.arg == keyword]
+    assert len(values) == len(calls), f"a {call_name} call in {source_path.name} does not pass {keyword}"
+    return values
 
 
 def test_the_excuse_is_derived_from_the_adapter_config():
     """The flag must come from what the adapter declares, not from a caller's default: excusing the
     head unconditionally is the pre-gate behaviour under a new name — and a literal ``True`` here
-    is exactly that. Read at the shared merge, which is where every merge tool's base load goes."""
-    value = _keyword_value(pathlib.Path(adapters.__file__), "load_base_model", "excuse_task_head")
-    assert not isinstance(value, ast.Constant), (
+    is exactly that. Read at the shared merge, which is where every merge tool's base load goes: the
+    one call that derives it, and every base load below it forwarding what it was handed."""
+    source = pathlib.Path(adapters.__file__)
+    (derived,) = _keyword_values(source, "_load_base_the_adapter_addresses", "excuse_task_head")
+    assert not isinstance(derived, ast.Constant), (
         "adapter_supplies_task_head is passed as a literal — the excuse must be read off peft_config.modules_to_save"
     )
-    assert "modules_to_save" in ast.dump(value), "the excuse must be read off peft_config.modules_to_save"
+    assert "modules_to_save" in ast.dump(derived), "the excuse must be read off peft_config.modules_to_save"
+    for forwarded in _keyword_values(source, "load_base_model", "excuse_task_head"):
+        assert isinstance(forwarded, ast.Name) and forwarded.id == "excuse_task_head", (
+            "a base load passes its own excuse instead of the one derived from the adapter"
+        )
 
 
 # --- convert_to_bf16: every load path is gated, not just the causal-LM one --------------------

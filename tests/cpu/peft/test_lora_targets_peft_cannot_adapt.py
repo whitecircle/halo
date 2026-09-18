@@ -227,6 +227,20 @@ def test_preset_exclusions_are_kept_alongside_the_found_ones():
     assert _adapted_modules(get_peft_model(model, peft_config)) == {"base_model.model.language_model.o_proj"}
 
 
+def test_the_all_linear_sentinel_survives_a_cli_list_override():
+    """A CLI override lands after ``ModelConfig.__post_init__``, so ``--lora_target_modules=all-linear``
+    arrives as a one-entry list; PEFT reads its sentinel only as a bare string and would otherwise
+    look for a module named ``all-linear``."""
+    model = _Multimodal(_PlainAttention())
+    model_config = _model_config()
+    model_config.lora_target_modules = ["all-linear"]  # after __post_init__, as the parser's override lands
+
+    peft_config = build_peft_config(model, model_config)
+
+    assert peft_config.target_modules == "all-linear"
+    assert _adapted_modules(get_peft_model(model, peft_config)) >= {"base_model.model.language_model.q_proj"}
+
+
 # The verdict is agreed across ranks
 
 WORLD_SIZE = 2
