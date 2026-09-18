@@ -165,9 +165,12 @@ def add_gradio_server_args(parser: argparse.ArgumentParser, *, port_default: int
     return parser
 
 
-def launch_gradio(demo: "gr.Blocks", args: argparse.Namespace) -> None:
-    """Serve ``demo`` on the address :func:`add_gradio_server_args` parsed, requests queued."""
-    demo.queue().launch(server_name=args.host, server_port=args.port, share=args.share)
+def launch_gradio(demo: "gr.Blocks", args: argparse.Namespace, *, theme: "gr.Theme | None" = None) -> None:
+    """Serve ``demo`` on the address :func:`add_gradio_server_args` parsed, requests queued.
+
+    The theme is a launch argument: Gradio 6 takes it here, not on the ``Blocks``.
+    """
+    demo.queue().launch(server_name=args.host, server_port=args.port, share=args.share, theme=theme)
 
 
 def parse_dataset_args(parser: argparse.ArgumentParser):

@@ -174,7 +174,7 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
         except Exception as e:
             return [], f"**Error:** {e}"
 
-    with gr.Blocks(title="Environment Playground", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Environment Playground") as demo:
         gr.Markdown("# Environment Playground\nTest GRPO environments interactively against a rollout server.")
 
         with gr.Row():
@@ -209,7 +209,7 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
 
             # Main content
             with gr.Column(scale=2):
-                chatbot = gr.Chatbot(label="Episode", type="messages", height=500)
+                chatbot = gr.Chatbot(label="Episode", height=500)
                 summary = gr.Markdown(label="Episode Summary", value="*Run an episode to see results*")
 
         run_btn.click(
@@ -256,7 +256,7 @@ def main():
     args = build_parser().parse_args()
 
     demo = create_demo(default_base_url=args.vllm_url, api_key=args.api_key)
-    launch_gradio(demo, args)
+    launch_gradio(demo, args, theme=gr.themes.Soft())
 
 
 if __name__ == "__main__":

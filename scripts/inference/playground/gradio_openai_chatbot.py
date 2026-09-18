@@ -111,7 +111,6 @@ def create_demo(client: AsyncOpenAI, model: str | None, stop_token_ids: list[int
 
     demo = gr.ChatInterface(
         predict,
-        type="messages",
         title=f"Chat: {model or 'served model'}",
         additional_inputs=[
             gr.Textbox(

@@ -13,6 +13,10 @@
 * Throughput/resume defaults: ``--n_parallel`` (4/8/32) and ``--checkpoint_interval`` (50/100) read
   one home each rather than four and two independent literals across scripts driving the same
   endpoint.
+* Gradio API: each app's real ``create_demo`` is built and served under the gradio the lock pins.
+  A gradio major drops constructor arguments (``type=`` on ``ChatInterface``/``Chatbot``, the
+  theme on ``Blocks``); the apps still import and their parsers still build, so only
+  constructing the demo and launching it catches the break.
 * Environment-playground request plumbing: the app documents a keyless local vLLM, so a ``None``
   API key (which ``AsyncOpenAI`` refuses at construction), an empty ``"model"`` sent verbatim, and a
   scheme-less base URL each break exactly the invocation the docstring advertises.
@@ -25,6 +29,7 @@ import functools
 import json
 import sys
 import types
+import warnings
 from pathlib import Path
 
 import httpx
@@ -33,6 +38,7 @@ import torch
 from openai import AsyncOpenAI
 
 from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL
+from tests.common.ports import free_port
 from tests.common.utils import load_script_module
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -164,6 +170,52 @@ def test_a_gradio_app_publishes_nothing_by_default(app):
         f"{app.name} does not declare --port; the apps share one spelling of the address block, so an "
         f"operator's pinned command line works against all of them"
     )
+
+
+# --- Gradio API: the demos build and serve under the pinned gradio ------------------------------
+
+
+def _chatbot_demo(mod):
+    return mod.create_demo(AsyncOpenAI(base_url=DEFAULT_LOCAL_BASE_URL, api_key="EMPTY"), None, [])
+
+
+def _playground_demo(mod):
+    return mod.create_demo(api_key="EMPTY")
+
+
+# One builder per shipped app, keyed by file name; the sweep below fails on an app with none.
+_DEMO_BUILDERS = {
+    "gradio_openai_chatbot.py": _chatbot_demo,
+    "gradio_environment_playground.py": _playground_demo,
+}
+
+
+@pytest.mark.parametrize("app", _GRADIO_APPS, ids=lambda p: p.name)
+def test_a_gradio_app_builds_and_serves_under_the_pinned_gradio(app):
+    """The app's real ``create_demo``, then queue + launch with the theme, as ``launch_gradio`` does.
+
+    Construction runs with gradio's warnings as errors: a theme passed on the ``Blocks`` is
+    accepted with a warning and silently dropped, which is the same regression as a removed
+    argument, only quieter.
+    """
+    import gradio as gr
+
+    build = _DEMO_BUILDERS.get(app.name)
+    assert build is not None, f"{app.name} has no demo builder here, so its gradio API surface goes untested"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        demo = build(_gradio_app(app))
+    assert isinstance(demo, gr.Blocks), f"{app.name}.create_demo returned {type(demo).__name__}"
+
+    port = free_port()
+    try:
+        _app, local_url, _share_url = demo.queue().launch(
+            server_name="127.0.0.1", server_port=port, share=False, theme=gr.themes.Soft(), prevent_thread_lock=True
+        )
+        assert httpx.get(local_url, timeout=10).status_code == 200, f"{app.name} launched but does not serve"
+    finally:
+        demo.close()
 
 
 # --- Environment playground: the keyless-local-vLLM invocation its docstring documents ------------
