@@ -1,5 +1,5 @@
 # Environmental GRPO — Qwen3.6-35B-A3B LoRA (r=64, attention projections) on code_contests, SGLang backend, no EP, ZeRO-2, KL-free (IS bands as the trust region).
-# rollout_max_thinking_tokens and carry_reasoning are vLLM-only; this attention-LoRA shape fails at the first training step — mixed Tensor/DTensor in the embedding (agent-docs/reference/troubleshooting.md).
+# rollout_max_thinking_tokens and carry_reasoning are vLLM-only; attention adapters land on the language model, whose attention spells the target names; the vision tower spells `qkv`/`proj` and matches none of them.
 # Serve with: 2x TP=1 sglang-server on ports 30000/30001, --moe-runner-backend triton (auto-picked runners repack the expert weights each sync writes),
 #   --tool-call-parser auto (without it tool calls stay text and every episode scores 0), --reasoning-parser qwen3, NCCL_CUMEM_ENABLE=1 in the server env.
 # Launch: CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
