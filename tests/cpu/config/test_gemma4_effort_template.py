@@ -125,6 +125,23 @@ def test_media_items_are_not_rendered(template):
     assert "<|image|>" not in text
 
 
+def _as_content_parts(conversation):
+    """The OpenAI content-parts form a vLLM server renders for this template; the trainer renders strings."""
+    return [
+        {**message, "content": [{"type": "text", "text": message["content"]}]}
+        if isinstance(message.get("content"), str)
+        else message
+        for message in conversation
+    ]
+
+
+def test_string_and_content_parts_render_the_same_prompt(template):
+    """vLLM wraps every message into content parts before rendering and the trainer renders strings; a
+    system turn that renders differently between the two scores a prompt the policy never saw."""
+    kwargs = {"tools": TOOLS, "add_generation_prompt": True, "reasoning_effort": "high", "reasoning_budget": 16384}
+    assert _render(template, _as_content_parts(CONVERSATION), **kwargs) == _render(template, CONVERSATION, **kwargs)
+
+
 def test_matches_the_hub_template_with_thinking_on_apart_from_the_effort_line(template):
     stock = _stock_template()
     if stock is None:

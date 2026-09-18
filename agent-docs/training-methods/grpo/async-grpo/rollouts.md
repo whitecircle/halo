@@ -120,8 +120,9 @@ governs the re-tokenization paths below: a differing template scores log-probs a
 policy never generated under. Per-turn rows take the engine's ids and cannot drift.
 
 `reasoning_effort` goes out as the request's **top-level** field — the spelling both engines derive
-their thinking toggle from. vLLM also merges it into the template's variables; SGLang hands a template
-only the nested `chat_template_kwargs`, so on SGLang the same value is added there too. The level's
+their thinking toggle from and hand the template. SGLang lets a nested copy override that field (it
+pops it into the top-level one before rendering), so on SGLang the same value is added nested too —
+an exact copy, so the render reads one value whichever spelling the engine consults. The level's
 per-turn thinking budget rides in the nested form as `reasoning_budget`, added per request; the
 trainer's own renders carry the same variables, and `rollout_chat_template_kwargs` refuses both keys.
 

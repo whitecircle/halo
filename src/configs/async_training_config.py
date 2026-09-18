@@ -329,8 +329,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "to the trainer's own renders, so both sides see one template state. The stock Qwen3.x template reads "
             "`preserve_thinking`: with the env's `carry_reasoning`, every prior turn's reasoning stays rendered "
             "even after a user message (the cut-turn nudge). `reasoning_effort` and `reasoning_budget` are refused "
-            "here: both are per episode; the level travels as the request's top-level field, the budget is added "
-            "to the nested form per request."
+            "here: both are per episode; the level travels as the request's top-level field (SGLang also gets an exact "
+            "nested copy, the spelling it lets override that field), the budget is added to the nested form per request."
         },
     )
 

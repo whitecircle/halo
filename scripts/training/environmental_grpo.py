@@ -289,8 +289,11 @@ def main():
     max_turns = probe_env.max_turns
     # The probe renders as a rollout request would: the run's template variables plus one concrete
     # effort level (a 'random' env setting draws one, as an episode does).
+    probe_effort = resolve_reasoning_effort(probe_env.reasoning_effort)
     template_kwargs = rollout_template_kwargs(
-        async_config.rollout_chat_template_kwargs, resolve_reasoning_effort(probe_env.reasoning_effort)
+        async_config.rollout_chat_template_kwargs,
+        probe_effort,
+        probe_env.thinking_budget_for_effort(probe_effort) if probe_effort is not None else None,
     )
     prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)
     verify_context_window_synced(

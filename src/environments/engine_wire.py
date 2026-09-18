@@ -146,10 +146,11 @@ def generation_control_fields(config: RolloutConfig, reasoning_effort: str | Non
     below and the eval runner's SDK call — so a knob cannot reach one and quietly miss the other.
 
     ``reasoning_effort`` goes out TOP-LEVEL: that spelling is the one both engines derive their
-    thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``). vLLM
-    also merges it into the template's variables; SGLang hands a template only the nested
-    ``chat_template_kwargs``, so on SGLang the same value rides there too (a disagreement would resolve
-    to the nested value on SGLang and to the top-level one on vLLM, which is why the copy is exact).
+    thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``) and
+    both hand the template. Each engine also reads a nested copy and lets one spelling override the
+    other — vLLM the top-level field, SGLang the nested one, which it pops into the top-level field
+    before rendering — so on SGLang the same value rides nested too, an exact copy that leaves one
+    value whichever spelling the engine reads.
     The run's other template variables (``config.chat_template_kwargs``) ride in the nested form,
     joined by the level's thinking budget under :data:`REASONING_BUDGET_TEMPLATE_VAR`; the config
     refuses both per-episode keys there.
@@ -186,8 +187,8 @@ def generation_control_fields(config: RolloutConfig, reasoning_effort: str | Non
     if reasoning_effort is not None:
         fields["reasoning_effort"] = reasoning_effort
         if config.backend != VLLM_BACKEND:
-            # SGLang derives its thinking toggle from the top-level field but hands a template only the
-            # nested kwargs, and resolves a disagreement to the nested value; the two carry one value.
+            # SGLang pops a nested copy into the top-level field before rendering, so a disagreement
+            # would resolve to the nested value; the exact copy keeps one value either way.
             template_kwargs["reasoning_effort"] = reasoning_effort
     if template_kwargs:
         fields["chat_template_kwargs"] = template_kwargs

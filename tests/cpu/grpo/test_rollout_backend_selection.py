@@ -151,8 +151,8 @@ def test_sglang_rejects_thinking_budget():
 
 
 def test_chat_template_kwargs_refuse_the_effort_key():
-    """The level is per episode and travels top-level; a nested copy would either duplicate it or,
-    on a disagreement, be resolved differently by the two engines."""
+    """The level is per episode and travels top-level; a run-wide nested copy would either duplicate
+    it or, on a disagreement, override it on SGLang and lose to it on vLLM."""
     with pytest.raises(ValueError, match="reasoning_effort"):
         AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
     assert AsyncTrainingConfig(
@@ -200,11 +200,11 @@ def test_the_effort_level_goes_out_top_level_and_nested_only_where_the_template_
     """One value, from one owner, on both engines.
 
     The top-level field derives the engines' thinking toggles: vLLM's request model sets
-    ``enable_thinking`` from it and SGLang's validator sets ``thinking``/``enable_thinking``. vLLM
-    also merges it into the template's variables, so a nested copy would only be ambiguous there
-    (a disagreement resolves to the top-level value). SGLang hands a template only the nested
-    ``chat_template_kwargs`` and resolves a disagreement to the nested value, so there the same value
-    rides in both places — an exact copy, never a second knob.
+    ``enable_thinking`` from it and SGLang's validator sets ``thinking``/``enable_thinking``; both hand
+    it to the template. vLLM resolves a disagreement with a nested copy to the top-level value, so a
+    copy there would only be ambiguous. SGLang pops a nested copy into the top-level field before
+    rendering, resolving a disagreement to the nested value, so there the same value rides in both
+    places — an exact copy, never a second knob.
     """
     vllm_payload = _build_payload("vllm", reasoning_effort="high")
     assert vllm_payload["reasoning_effort"] == "high"
