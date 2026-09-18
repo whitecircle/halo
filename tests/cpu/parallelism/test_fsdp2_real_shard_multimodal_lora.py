@@ -6,8 +6,9 @@ this one lets FSDP2 itself do the sharding. One rank is enough: every managed pa
 DTensor that only its unit's pre-forward unshards, so ``embed_tokens`` owned by the wrong unit raises
 ``aten.embedding.default got mixed torch.Tensor and DTensor`` on the first forward, exactly as a
 multi-GPU run does. Tied and untied embeddings, attention LoRA and ``modules_to_save`` copies (which
-untie a tied embedding), and an image batch through the Qwen-style towers, whose adapters then take
-part in the backward.
+untie a tied embedding), and an image batch through the Qwen-style towers, whose base parameters live
+in the composite's unit (their projections spell `qkv`/`proj`, so an attention target list adapts none
+of them).
 
 Run: pytest tests/cpu/parallelism/test_fsdp2_real_shard_multimodal_lora.py
 """
