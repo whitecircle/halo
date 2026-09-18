@@ -36,14 +36,56 @@ lora_task_type: CAUSAL_LM     # CAUSAL_LM | SEQ_CLS | FEATURE_EXTRACTION
 lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 ```
 
-`lora_target_modules` is tri-state: unset (`None`) uses the architecture defaults, and a populated list
-selects those modules. Expert-LoRA-only means listing **only** expert projections — the peel then empties
+`lora_target_modules` is tri-state: unset (`None`) falls to PEFT's own per-architecture table, which
+has no entry for any MoE or multimodal family here (PEFT raises `Please specify target_modules`) and
+adapts only `q_proj`/`v_proj` on the dense ones it lists (Qwen3, Llama, Mistral), unscanned by the
+exclusion below — so name the modules; a populated list selects those modules. Expert-LoRA-only means listing **only** expert projections — the peel then empties
 the list, which is what disables attention PEFT. Writing `lora_target_modules: []` yourself names nothing
 at all and is rejected: with no adapter to create, the run would full-finetune at the LoRA learning rate.
 
 A one-entry list is collapsed to a bare string by TRL's `ModelConfig`, so `lora_target_modules: [experts]`
 arrives as `"experts"`. The expert peel handles that; PEFT does not (it reads a lone string as a regex
 matched against full module paths), so an attention-only single target needs `all-linear` or two entries.
+
+### Targets PEFT cannot adapt
+
+A stock LoRA adapter decomposes the matched module's own weight and adds the delta to that module's
+output, which leaves two module shapes out of its reach:
+
+| Shape | Example | Without the exclusion |
+|---|---|---|
+| A wrapper holding its weight in a child module | Gemma 4's `Gemma4ClippableLinear`, the vision and audio towers' projections | injection raises `Target module ... is not supported` |
+| A layer subclass computing something other than its base layer's affine map | DeepSeek-V4's grouped `o_a_proj`, whose block-diagonal output is one group wide | the delta has the wrong width and the first forward raises |
+
+Both are reachable by an ordinary target list — target names are matched by suffix over the whole
+module tree, so a multimodal tower is matched by the language model's `q_proj`…`o_proj` spelling — and
+by `all-linear`, which reaches every `nn.Linear` subclass a family defines.
+
+`build_peft_config` (`src/distributed/loading/peft_setup.py`) scans the live model with PEFT's own
+matcher and puts those modules in the `LoraConfig`'s `exclude_modules` by full path (PEFT also honours
+an entry as a dotted suffix), so an identically named leaf elsewhere keeps its adapter. A warning names
+the count and one example path per reason. If it leaves no adaptable target at all, the run is rejected
+rather than trained with nothing — or, when native expert adapters are live, with the attention half
+missing. The verdict is agreed across ranks: a rank whose probe faulted would otherwise adapt a
+different parameter set and surface only as a hang.
+
+The two shapes are told apart structurally: a wrapper owns no parameter of its own, and a subclass
+overriding `nn.Linear.forward` is measured once per class and geometry against `F.linear`'s output
+shape — the low-precision compute drop-in and a quantized base change only *how* the map is computed
+and keep their adapters. A module of a type PEFT has no adapter layer for at all (Inkling's
+`rel_logits_proj`) is matched by no recipe's names and still raises PEFT's own
+`Target module ... is not supported` when named. The exclusion is saved into `adapter_config.json`,
+so reloading the adapter onto the same base loaded through the same class reproduces the same
+injection; resume rebuilds it from the live model instead and never reads that file.
+`merge_peft_adapters.py` loads the base through the class the adapter's keys address — the text-only
+class after a `text_only_model: true` run — and refuses a base those keys name no module of. One tree
+the saved paths do not carry over to: a plain reload of an adapter trained under context parallelism,
+whose paths carry the CP wrapper's spelling — neither family that collects exclusions today supports
+CP.
+
+A tower whose projections are plain `nn.Linear` (CLIP/SigLIP/Pixtral-style) is untouched by any of
+this and keeps its adapters; on text-only data those adapters receive no gradient and stay at their
+zero initialisation, costing optimizer state and nothing else.
 
 ### Hyperparameters
 

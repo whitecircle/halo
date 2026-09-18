@@ -70,7 +70,15 @@ that (`docker/sglang/patches/`). Gemma 4 has no routing replay on either engine
 
 Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-only under EP=8 at 32,768 max length. Example: `examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml`. The multimodal class loads either way, but a text-only dataset takes the **text** data path, which is what makes `packing` legal here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
-Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/grpo/async-grpo/performance.md#chunked-log-probs)). The `-lora-` files are refused at PEFT setup on the multimodal checkpoint (the vision tower's projections share the `q_proj`…`o_proj` names in a `Gemma4ClippableLinear` PEFT cannot wrap — open issue, [Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix)) — both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/grpo/async-grpo/performance.md#chunked-log-probs)). Both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+
+**Attention LoRA** (the `-lora-` recipes) adapts the language model alone. The vision and audio towers'
+projections carry the same `q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper holding
+its weight in a child `nn.Linear` that PEFT cannot decompose, so they are excluded from injection with
+a warning naming the count ([PEFT](../optimization/peft.md#targets-peft-cannot-adapt)); the vision
+MLP spells `gate_proj`/`up_proj`/`down_proj` the same way, so those names collect exclusions there too
+(under EP the expert peel takes them first). `all-linear` resolves to the inner `nn.Linear` and adapts
+the towers too.
 
 **Long-context attention**: Gemma 4's full-attention layers run at `global_head_dim=512`, which every FlashAttention kernel and cuDNN SDPA reject (FA2 caps at 256; FA4's SM100 kernel overflows tensor memory).
 

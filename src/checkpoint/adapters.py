@@ -87,6 +87,73 @@ def _adapter_tensor_keys(path: str) -> list[str]:
     return list(torch.load(path, map_location="cpu", weights_only=True))
 
 
+_ADAPTER_KEY_PREFIX = "base_model.model."
+# What PEFT appends below the adapted module's own path in a saved key.
+_ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
+
+
+def adapter_module_paths(adapter_dir: str) -> set[str]:
+    """The base model's module paths a saved adapter addresses, read off its tensor keys."""
+    paths: set[str] = set()
+    for path in adapter_weight_paths(adapter_dir):
+        if not os.path.isfile(path):
+            continue
+        for key in _adapter_tensor_keys(path):
+            name = key.removeprefix(_ADAPTER_KEY_PREFIX)
+            cut = min(
+                (at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=len(name)
+            )
+            paths.add(name[:cut])
+        break
+    return paths
+
+
+def _paths_absent_from(model: PreTrainedModel, paths: set[str]) -> list[str]:
+    absent = []
+    for path in sorted(paths):
+        try:
+            model.get_submodule(path)
+        except AttributeError:
+            absent.append(path)
+    return absent
+
+
+def _load_base_the_adapter_addresses(
+    adapter_dir: str,
+    base_model_path: str,
+    load_base_model: Callable[..., PreTrainedModel],
+    *,
+    excuse_task_head: bool,
+    log,
+) -> PreTrainedModel:
+    """The base loaded through the class whose module tree the adapter's keys address.
+
+    ``PeftModel.from_pretrained`` only warns when saved keys name no live module, then merges nothing
+    and the tool writes the bare base as a finished model. An adapter trained through a multimodal
+    checkpoint's text-only class (``text_only_model: true``) addresses ``model.layers``, which the
+    widest Auto* class spells ``model.language_model.layers``, so it is met through that class; any
+    other mismatch is a base that does not belong to the adapter.
+    """
+    paths = adapter_module_paths(adapter_dir)
+    base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
+    absent = _paths_absent_from(base_model, paths)
+    if not absent:
+        return base_model
+    if len(absent) == len(paths):
+        wrapper = type(base_model).__name__
+        del base_model
+        base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head, text_only=True)
+        absent = _paths_absent_from(base_model, paths)
+        if not absent:
+            log(f"The adapter addresses the text-only class of {wrapper}; merging as {type(base_model).__name__}.")
+            return base_model
+    raise ValueError(
+        f"The adapter at {adapter_dir} addresses {len(absent)} module(s) that {type(base_model).__name__} loaded "
+        f"from {base_model_path} does not have (e.g. {absent[0]}). PEFT would merge nothing there and the "
+        f"tool would write the bare base; the adapter and its base_model_name_or_path do not belong together."
+    )
+
+
 def read_adapter_file(path: str) -> dict:
     """The adapter tensors at ``path`` — safetensors, or the legacy pickle PEFT still writes."""
     if path.endswith(ADAPTER_SAFETENSORS_FILE):
@@ -221,7 +288,13 @@ def merge_adapter_into_base(
         raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
 
     log(f"Merging {adapter_dir} ({peft_config.peft_type}) into base model {base_model_path}...")
-    base_model = load_base_model(base_model_path, excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)))
+    base_model = _load_base_the_adapter_addresses(
+        adapter_dir,
+        base_model_path,
+        load_base_model,
+        excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
+        log=log,
+    )
     merged_model = PeftModel.from_pretrained(base_model, adapter_dir).merge_and_unload()
 
     for action in apply_training_sidecars(merged_model, adapter_dir):

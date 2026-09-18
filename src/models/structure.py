@@ -78,6 +78,19 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     return model
 
 
+def base_transformers_model(model: torch.nn.Module) -> torch.nn.Module:
+    """The plain transformers model under every framework, toolkit **and** PEFT wrapper.
+
+    :func:`unwrap_model` deliberately stops at a ``PeftModel``; this goes the one level further, for
+    consumers that need the tree as transformers laid it out. Load-bearing for any attribute probe:
+    a wrapper answers ``.model`` with what *it* wraps — a ``PeftModel`` through its tuner's
+    ``__getattr__``, a toolkit wrapper directly — so the same name read off the wrapper lands one
+    level above the plain tree's.
+    """
+    base = unwrap_model(model)
+    return unwrap_model(base.get_base_model()) if is_peft_model(base) else base
+
+
 def resolve_tokenizer(processing_class):
     """Unwrap a VLM processor to its tokenizer; a plain tokenizer passes through."""
     return getattr(processing_class, "tokenizer", processing_class)
@@ -191,6 +204,27 @@ def backbone_with_layers(model: torch.nn.Module) -> torch.nn.Module | None:
             or getattr(candidate, "transformer", None)
         )
     return None
+
+
+def input_embedding_backbone(model: torch.nn.Module) -> torch.nn.Module | None:
+    """The module whose own forward consumes the input embedding, or None if none is reachable.
+
+    Usually :func:`backbone_with_layers`, which owns ``embed_tokens`` and embeds the ids itself. A
+    multimodal composite (``model.model`` holding the decoder-layer backbone below it, as a nested
+    ``language_model``) instead builds ``inputs_embeds`` in its own forward and hands them down, so
+    there the consumer is the composite and the backbone is entered only afterwards. The test is
+    ancestry rather than the one-level ``language_model`` spelling — an ancestor's forward always
+    precedes its descendant's — so a text stack nested deeper resolves the same way. Resolved on the
+    plain transformers tree (:func:`base_transformers_model`), never through a wrapper's attribute
+    forwarding.
+    """
+    layer_backbone = backbone_with_layers(model)
+    if layer_backbone is None:
+        return None
+    composite = getattr(base_transformers_model(model), "model", None)
+    if composite is None or composite is layer_backbone:
+        return layer_backbone
+    return composite if any(module is layer_backbone for module in composite.modules()) else layer_backbone
 
 
 def persistent_buffers(model, exclude_prefixes=()):

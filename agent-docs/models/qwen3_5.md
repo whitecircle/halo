@@ -63,7 +63,7 @@ The architecture has **no bias slot** (the gate is a bare weight), so the traine
 
 On the multimodal checkpoints `aux_loss` cannot work either: `Qwen3_5MoeForConditionalGeneration.forward` declares no `output_router_logits` parameter, so an explicit `aux_loss` raises and `auto` resolves to `none` with a warning naming the transient opt-in. The text-only `Qwen3_5MoeForCausalLM` declares the parameter and stays on `aux_loss` under `auto` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)).
 
-`text_only_model: true` loads a VLM checkpoint through that CausalLM class deliberately. The vision tower and MTP tail are dropped from the build **and from the export**: the artifact carries no `processor_config.json` and no vision token ids. `aux_loss` becomes the exported-by-construction balancing.
+`text_only_model: true` loads a VLM checkpoint through that CausalLM class deliberately. The vision tower and MTP tail are dropped from the build **and from the export**: the artifact carries no `processor_config.json` and no vision token ids. `aux_loss` becomes the exported-by-construction balancing. A LoRA trained this way addresses `model.layers`, and `merge_peft_adapters.py` reads that off the adapter's keys and loads the base through the same CausalLM class, so the merged checkpoint is this text-only export.
 
 Image-bearing datasets are refused loudly (the text path would otherwise prune the column silently), and the PP VLM refusal does not apply, since the build carries no tower to strand.
 
@@ -116,7 +116,7 @@ Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smo
 
 Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn). `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (tool-call `arguments` must be a parsed mapping). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
 
-The family also carries the per-method canonical examples: Qwen3.5-9B (dense) for DPO/SMPO/KTO (`examples/preference/qwen3_5/`), reward, classification, and distillation; Qwen3.6-35B-A3B for the GRPO task configs. The environmental-GRPO attention-LoRA configs (`examples/grpo/environmental/qwen3_5/{vllm,sglang}/qwen3.6-35b-a3b-code-contests-lora-*.yaml`) share a shape that fails at the first training step (`aten.embedding.default got mixed torch.Tensor and DTensor`), an open issue; the `-full-` siblings train and sync ([Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix)).
+The family also carries the per-method canonical examples: Qwen3.5-9B (dense) for DPO/SMPO/KTO (`examples/preference/qwen3_5/`), reward, classification, and distillation; Qwen3.6-35B-A3B for the GRPO task configs.
 
 ## RL chat template
 

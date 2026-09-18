@@ -59,7 +59,7 @@ Graph breaks cap how much compile can fuse — it speeds up the spans between th
 
 - **DeepEP dispatch/combine** — splits the graph at every MoE layer.
 - **Flash Attention** — opaque; the compiler cannot fuse across FA boundaries.
-- **Gradient checkpointing** — EP and CP force `use_reentrant=True`, which adds graph breaks; without them the config's `use_reentrant` stands.
+- **Gradient checkpointing** — EP, CP and every MoE force `use_reentrant=True`, which adds graph breaks; on a dense model outside EP/CP the config's `use_reentrant` stands.
 - **TP DTensor** — sharded-op dispatch breaks the graph at every sharded operation.
 - **CP (Ulysses)** — all-to-all in every attention layer breaks the graph at every block.
 

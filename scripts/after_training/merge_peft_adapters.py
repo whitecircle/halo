@@ -47,6 +47,7 @@ def _load_base_model(
     attn_implementation: str | None,
     *,
     excuse_task_head: bool = False,
+    text_only: bool = False,
     trust_remote_code: bool = True,
 ):
     """Load the base model with appropriate class and settings.
@@ -54,7 +55,8 @@ def _load_base_model(
     Both branches go through the checkpoint-coverage gate: a base directory that is truncated, or
     whose keys do not match the architecture, otherwise random-initializes the absent tensors with
     only a log line and the merge would ship those weights as a finished model. Which absence may be
-    excused is decided by :func:`merge_adapter_into_base` from the adapter's own declaration.
+    excused, and whether a multimodal base loads as its text-only class, is decided by
+    :func:`merge_adapter_into_base` from the adapter's own declaration and keys.
     """
     model_kwargs = {
         "dtype": dtype,
@@ -66,6 +68,8 @@ def _load_base_model(
         model_kwargs["attn_implementation"] = attn_implementation
 
     if task == "classification":
+        if text_only:
+            raise ValueError("A classification base has one class; text_only applies to causal-LM bases only.")
         model_kwargs["num_labels"] = num_labels
         return from_pretrained_verified(
             AutoModelForSequenceClassification,
@@ -75,8 +79,9 @@ def _load_base_model(
         )
 
     # causal_lm: resolve the widest Auto* class from the config so VLM base models load as the full
-    # *ForConditionalGeneration wrapper instead of the text-only subclass.
-    return auto_load_model(base_model_path, **model_kwargs)
+    # *ForConditionalGeneration wrapper instead of the text-only subclass, unless the adapter was
+    # trained through that subclass.
+    return auto_load_model(base_model_path, text_only=text_only, **model_kwargs)
 
 
 def merge_peft_adapter(
@@ -108,7 +113,7 @@ def merge_peft_adapter(
     if verbose:
         logger.info(f"Task: {task}, dtype: {dtype}")
 
-    def load_base_model(base_model_path: str, *, excuse_task_head: bool):
+    def load_base_model(base_model_path: str, *, excuse_task_head: bool, text_only: bool = False):
         return _load_base_model(
             base_model_path,
             task,
@@ -117,6 +122,7 @@ def merge_peft_adapter(
             num_labels,
             attn_implementation,
             excuse_task_head=excuse_task_head,
+            text_only=text_only,
             trust_remote_code=trust_remote_code,
         )
 

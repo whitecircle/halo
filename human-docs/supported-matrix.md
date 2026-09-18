@@ -112,11 +112,11 @@ CP wrapper drop CP. What each family is for: [Supported Models](models.md).
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | LoRA-style attention compression |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | untested | only EP is validated on the 200B+ checkpoint; the other modes pass the tiny-model matrix. No online RL, on either engine |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | untested | No | No | Yes | native in transformers, released checkpoints still load through remote code at a pinned revision; `sdpa`, so `padding_free` is rejected and they pack instead; weight sync on vLLM only |
-| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | partial | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA on the multimodal checkpoint is refused at PEFT setup (open issue), so target the experts or load `text_only_model: true` |
+| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | Yes | KV-shared layers block CP/TP; no router-balancing path at all; attention LoRA adapts the language model only — the vision/audio towers' same-named projections are wrappers PEFT cannot adapt and are excluded |
 | Bailing/Ling | Yes | Yes | Yes | No | Yes | untested | No | Yes | EP covers Ling 2.0, Ling 3.0 and the Ring siblings; CP on Ling 2.0 only; no DTensor attention plan. Ling 3.0 and Ring's linear spellings take no online weight update |
 | LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | short-conv layers block CP |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | untested | Yes | Yes | neither engine registers a `mistral4` class, so no online RL |
-| DeepSeek-V4 | Yes | Yes | No | No | untested | No | No | Yes | shared-KV MQA and the sparse-attention compressors block CP/TP; eager-only, so `padding_free` is rejected (packing works but warns). No online RL |
+| DeepSeek-V4 | Yes | Yes | No | No | untested | No | No | Yes | shared-KV MQA and the sparse-attention compressors block CP/TP; eager-only, so `padding_free` is rejected (packing works but warns). LoRA skips the grouped `o_a_proj`, which no stock adapter fits. No online RL |
 | Zaya | Yes | Yes | No | No | Yes | No | No | Yes | EP or ETP, always without gradient checkpointing; CCA blocks CP, its attention class carries no TP plan. No online RL on either engine |
 | Inkling | Yes | Yes | No | No | Yes | No | No | untested | multimodal MoE; short-conv layers and a relative-logits bias block CP, and its attention class is not TP-shardable. No online RL |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM; KDA linear attention blocks CP and is not TP-shardable, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first. No online RL |

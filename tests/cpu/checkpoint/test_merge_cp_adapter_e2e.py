@@ -28,14 +28,18 @@ from __future__ import annotations
 
 import json
 import tempfile
+import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from accelerate import PartialState
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
+from trl import ModelConfig
 
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -49,6 +53,7 @@ from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.loading.peft_setup import build_peft_config
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from tests.common.utils import load_script_module
 
@@ -182,6 +187,51 @@ def test_cp_trained_adapter_merges_into_a_plain_model():
     assert all(torch.equal(merged[key], original[key]) for key in untargeted), (
         "an untargeted projection changed — the merge is not measuring what it claims"
     )
+
+
+def test_cp_saved_exclusions_are_spelled_for_a_plain_model():
+    """An exclusion the scan finds on the CP-wrapped tree carries the wrapper's spelling (the extra
+    ``model.`` level, ``.original_attention.``). The saved config has to spell it as the plain reload
+    the merge tool performs, or PEFT matches nothing there, warns, and injects into the very module the
+    path excluded — the live config keeps the wrapped spelling the wrapped model still has."""
+    PartialState()
+    with tempfile.TemporaryDirectory() as tmp:
+        base, adapter = Path(tmp) / "base", Path(tmp) / "adapter"
+        _build_base(base)
+        inner = Qwen3ForCausalLM.from_pretrained(base, dtype=torch.float32)
+        inner.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
+        # A container PEFT cannot adapt, spelled like a target: the shape the exclusion exists for.
+        attention = inner.model.layers[0].self_attn
+        attention.q_proj = Gemma4ClippableLinear(
+            SimpleNamespace(use_clipped_linears=False), attention.q_proj.in_features, attention.q_proj.out_features
+        )
+        wrapper = UlyssesCPModelWrapper(inner, CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+        model_config = ModelConfig(
+            model_name_or_path=str(base),
+            use_peft=True,
+            lora_target_modules=_TARGETS,
+            lora_r=_LORA_R,
+            lora_alpha=_LORA_ALPHA,
+        )
+        peft_config = build_peft_config(wrapper, model_config)
+        wrapped_spelling = ["model.model.layers.0.self_attn.original_attention.q_proj"]
+        assert peft_config.exclude_modules == wrapped_spelling
+        peft_model = get_peft_model(wrapper, peft_config)
+
+        assert PeftAdapterSaver().save(_cp_context(peft_model), peft_model, str(adapter))
+
+        saved = json.loads((adapter / ADAPTER_CONFIG_FILE).read_text())
+        assert saved["exclude_modules"] == ["model.layers.0.self_attn.q_proj"]
+        assert peft_model.peft_config["default"].exclude_modules == wrapped_spelling, "the live config was respelled"
+
+        plain = Qwen3ForCausalLM.from_pretrained(base, dtype=torch.float32)
+        with warnings.catch_warnings():
+            # PEFT only warns when an exclusion matches nothing; here that warning is the defect.
+            warnings.simplefilter("error", UserWarning)
+            reloaded = PeftModel.from_pretrained(plain, str(adapter))
+    layers = reloaded.base_model.model.model.layers
+    assert not hasattr(layers[0].self_attn.q_proj, "lora_A"), "the excluded module was adapted on the plain reload"
+    assert hasattr(layers[1].self_attn.q_proj, "lora_A") and hasattr(layers[0].self_attn.v_proj, "lora_A")
 
 
 def test_saved_cp_adapter_records_its_base_model():

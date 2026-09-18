@@ -52,6 +52,7 @@ from src.distributed.runtime import (
 from src.env import env_flag
 from src.kernels.fused_glu import FusedGluMul, resolve_fused_glu_mul
 from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
+from src.kernels.grouped_mm_autograd import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
 from src.kernels.histogram import sync_free_bincount
 from src.models.moe_balancing import (
     ROUTER_TOPK_FIELDS,
@@ -995,6 +996,13 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         for name, param in self.expert_named_params():
             if param.dim() != 3 or not spec.adapts(name):
                 continue
+            if (spec.r * param.element_size()) % GROUPED_MM_STRIDE_ALIGNMENT_BYTES:
+                raise ValueError(
+                    f"lora_r={spec.r} cannot adapt the {param.dtype} expert weight {name!r}: the grouped GEMM "
+                    f"contracts over the adapter's rank dimension and needs it to span a multiple of "
+                    f"{GROUPED_MM_STRIDE_ALIGNMENT_BYTES} bytes — a rank that is a multiple of "
+                    f"{GROUPED_MM_STRIDE_ALIGNMENT_BYTES // param.element_size()} at this dtype."
+                )
             num_local, k, n = param.shape
             lora_a = nn.Parameter(torch.empty(num_local, k, spec.r, dtype=param.dtype, device=param.device))
             lora_b = nn.Parameter(torch.zeros(num_local, spec.r, n, dtype=param.dtype, device=param.device))
