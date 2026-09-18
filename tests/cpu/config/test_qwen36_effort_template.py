@@ -6,16 +6,15 @@ template's ``preserve_thinking=true`` form token-for-token (tool calls, tool res
 Run: python tests/cpu/config/test_qwen36_effort_template.py  (or pytest)
 """
 
-import glob
-import os
 from pathlib import Path
 
 import pytest
+from huggingface_hub import try_to_load_from_cache
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_PATH = REPO_ROOT / "jinja-templates" / "qwen3" / "qwen3.6-reasoning-effort.jinja"
-STOCK_TEMPLATE_GLOB = "models--Qwen--Qwen3.6-35B-A3B/snapshots/*/chat_template.jinja"
+STOCK_TEMPLATE_REPO = "Qwen/Qwen3.6-35B-A3B"
 
 TOOLS = [
     {
@@ -62,11 +61,13 @@ def template() -> str:
 
 
 def _stock_template() -> str | None:
-    cache = os.environ.get("HF_HUB_CACHE") or os.path.join(
-        os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub"
-    )
-    hits = glob.glob(os.path.join(cache, STOCK_TEMPLATE_GLOB))
-    return Path(hits[0]).read_text() if hits else None
+    """The hub template at the revision ``from_pretrained`` loads, from the local cache only.
+
+    A glob over the snapshots would pick whichever revision sorts first (a stale one left in the cache,
+    or another checkpoint's) and compare against a template this one was never cut from.
+    """
+    path = try_to_load_from_cache(STOCK_TEMPLATE_REPO, "chat_template.jinja")
+    return Path(path).read_text() if isinstance(path, str) else None
 
 
 def test_effort_and_budget_are_stated_once_in_the_system_block(template):
