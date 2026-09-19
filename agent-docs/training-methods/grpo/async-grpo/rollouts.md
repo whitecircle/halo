@@ -72,8 +72,10 @@ stays the reference of the [effort length floor](#effort-length-reward).
 
 A turn the engine cuts at its token cap is nudged and retried within `max_turns` and the episode's
 `max_length_cutoff_recoveries` (`environment_kwargs`; `null` = every cut within `max_turns`). A
-recovered cut lands in `episode/length_cutoff_turns` and carries no reward penalty; the cut that
-exhausts the cap ends the episode truncated, priced like a `max_turns` overflow.
+recovered cut lands in `episode/length_cutoff_turns` and pays the protocol's `length_cutoff_penalty`
+(default `0`); the cut that exhausts the cap ends the episode truncated, priced like a `max_turns`
+overflow. Under carried reasoning a cut costs the policy only a turn and the retry thinks on from
+where it stopped, so the per-turn budget binds only once the cut is priced.
 
 An engine abort never reaches the environment: the actor re-issues the turn up to `max_retries` times
 (default `3`) rather than charging a length cut; past that the episode errors into a masked row.

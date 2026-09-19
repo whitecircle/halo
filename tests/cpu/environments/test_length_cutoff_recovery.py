@@ -5,14 +5,16 @@ When the engine cuts a turn short before it produced anything — at its token c
 (``finish_reason == "length"``) or by aborting it (``"abort"``) — the text is a fragment. Finalizing
 it as a plain-text answer ends the episode and books the failure as a NATURAL termination —
 invisible in every health metric. Instead the episode nudges (in its own protocol's words) and
-retries within ``max_turns``, unpriced; the trainer skips the fragment.
+retries within ``max_turns``; the trainer skips the fragment. A recovered cut is unpriced by default and
+pays ``length_cutoff_penalty`` where a protocol configures it; the cut that exhausts the recovery cap
+pays the overflow price instead.
 
 Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
 """
 
 import pytest
 
-from src.environments.base import Message, Trajectory
+from src.environments.base import REWARD_COMPONENTS_KEY, Message, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.episode import TurnGeneration, step_context_from_generation
@@ -59,7 +61,7 @@ def test_length_cutoff_keeps_the_episode_alive_and_is_unpriced():
     step = env.step([eid], ["a thought that ran out of room"], [{"finish_reason": "length"}])[0]
 
     assert step.done is False
-    # Unpriced on purpose: an added penalty is only avoidable by reasoning short of the budget.
+    # Unpriced by default: the price is a knob, and off it is only avoidable by reasoning short of the budget.
     assert step.reward == 0.0
     traj = env.get_trajectories([eid])[0]
     assert traj.info["length_cutoff_turns"] == 1
@@ -464,6 +466,58 @@ def test_recovery_cap_ends_the_episode_truncated_at_the_cut_past_it():
     assert traj.messages[-1].content != NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE, (
         "no nudge for a turn that ends the episode"
     )
+
+
+def _settled_tool_shaping(env, eid):
+    traj = env.get_trajectories([eid])[0]
+    env._settle_grade(traj, None)
+    return traj.info[REWARD_COMPONENTS_KEY]["reward/tool_shaping"], traj
+
+
+def test_a_recovered_cut_pays_the_length_cutoff_penalty_once_per_cut():
+    """Two recovered cuts, then a tool call that ends the episode: the price lands in
+    ``reward/tool_shaping`` twice, beside no overflow, and the decomposition still sums."""
+    env = _make_env(length_cutoff_penalty=0.05, max_turns=6)
+    eid = _reset(env)
+    for _ in range(2):
+        assert not env.step([eid], ["a thought that ran out of room"], [{"finish_reason": "length"}])[0].done
+    env.step(
+        [eid], ['<tool_call>{"name": "echo", "arguments": {"text": "x"}}</tool_call>'], [{"finish_reason": "stop"}]
+    )
+    env.step([eid], ["done"], [{"finish_reason": "stop"}])
+    shaping, traj = _settled_tool_shaping(env, eid)
+    assert traj.done and not traj.truncated
+    assert shaping == pytest.approx(-0.1), shaping
+    assert traj.total_reward == pytest.approx(sum(traj.info[REWARD_COMPONENTS_KEY].values()))
+
+
+def test_the_cut_that_exhausts_the_cap_pays_the_overflow_price_not_the_cut_price():
+    env = _make_env(length_cutoff_penalty=0.05, turn_overflow_penalty=0.1, max_length_cutoff_recoveries=1)
+    eid = _reset(env)
+    env.step([eid], ["a thought that ran out of room"], [{"finish_reason": "length"}])
+    second = env.step([eid], ["another thought that ran out of room"], [{"finish_reason": "length"}])[0]
+    assert second.truncated
+    shaping, _ = _settled_tool_shaping(env, eid)
+    # one recovered cut (0.05) + the overflow (0.1); the exhausting cut is not charged twice
+    assert shaping == pytest.approx(-0.15), shaping
+
+
+def test_without_the_knob_a_recovered_cut_still_costs_nothing():
+    env = _make_env(max_turns=6)
+    eid = _reset(env)
+    env.step([eid], ["a thought that ran out of room"], [{"finish_reason": "length"}])
+    env.step(
+        [eid], ['<tool_call>{"name": "echo", "arguments": {"text": "x"}}</tool_call>'], [{"finish_reason": "stop"}]
+    )
+    env.step([eid], ["done"], [{"finish_reason": "stop"}])
+    shaping, _ = _settled_tool_shaping(env, eid)
+    assert shaping == 0.0
+
+
+@pytest.mark.parametrize("bad", [-0.05, float("nan"), float("inf")])
+def test_the_cut_price_is_a_finite_magnitude(bad):
+    with pytest.raises(ValueError, match="length_cutoff_penalty"):
+        _make_env(length_cutoff_penalty=bad)
 
 
 def test_carried_reasoning_puts_the_cut_thought_in_the_retry_observation():

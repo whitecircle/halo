@@ -39,6 +39,7 @@ def _economy(path: Path) -> dict:
         "refund": env.get("improved_resubmission_refund", 0.0),
         "no_tool_use": env.get("no_tool_use_penalty", 0.0),
         "turn_overflow": env.get("turn_overflow_penalty", 0.0),
+        "cut": env.get("length_cutoff_penalty", 0.0),
         "max_submissions": max(profile["max_submissions"] for profile in profiles.values()),
         "profiles": profiles,
         "k0": cfg.get("effort_length_penalty_k0"),
@@ -101,6 +102,18 @@ def test_a_fix_is_cheaper_than_a_re_roll_and_a_rescue_still_trails_a_first_try_s
     assert 0 < improved < e["resubmission"], (
         f"an improving resubmission costs {improved} against {e['resubmission']} for one that does not: the "
         "price must separate a fix from a re-roll, and a fix must still cost something"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_a_recovered_cut_costs_less_than_the_attempt_bonus_and_no_more_than_an_overflow(path):
+    """The cut price makes the per-turn budget bind without outweighing the loop it protects: a cut
+    never costs more than the graded attempt earns, and a recovered cut never costs more than the
+    cut that ends the episode."""
+    e = _economy(path)
+    assert 0 < e["cut"] < e["submission"], f"cut price {e['cut']} against a submission bonus of {e['submission']}"
+    assert e["cut"] <= e["turn_overflow"], (
+        f"a recovered cut ({e['cut']}) costs more than an overflow ({e['turn_overflow']})"
     )
 
 

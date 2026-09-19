@@ -66,7 +66,7 @@ A `*ForSequenceClassification` or `*ForRewardModel` checkpoint served by the rol
 An environment grades, the terms price. `_grade_episode(trajectory, context)` returns an `EpisodeGrade`: `objective`, the environment's score in `[0, 1]` (pass fraction, answer match, adherence), and `shaping`, its own episode-level terms by bare name. The episode reward is the sum of its `reward/*` components:
 
 - `reward/turn_shaping` — the per-turn deltas accrued during the episode (tool credit and penalties, ReAct thought credit).
-- `reward/tool_shaping` — native-protocol environments only: their episode-level knobs (`no_tool_use_penalty`, `multi_turn_reward`, `turn_overflow_penalty`), from `_episode_shaping`.
+- `reward/tool_shaping` — native-protocol environments only: their episode-level knobs (`no_tool_use_penalty`, `multi_turn_reward`, `turn_overflow_penalty`, `length_cutoff_penalty`), from `_episode_shaping`.
 - `reward/<name>` — each of the environment's shaping terms (code contests: `submission`, `execution`, `tested_submission`, `resubmission`).
 - `reward/objective` — `weight × grade ^ exponent` from the `environment` term.
 - `reward/<name>` — each `judge` / `reward_model` term.

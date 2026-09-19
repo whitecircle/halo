@@ -63,6 +63,7 @@ environment_kwargs:
   multi_turn_reward: 0       # off: a bounty for a second call pays a judge probe like a scratchpad run
   tool_success_reward: 0     # any per-call pay is farmable by duplicate re-runs
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged when the episode burns max_turns
+  length_cutoff_penalty: 0.05  # magnitude, >= 0 — charged per engine-cut turn the episode recovers from
   tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
 # --- Rewards ---

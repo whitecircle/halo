@@ -702,8 +702,8 @@ class BaseEnvironment(ABC):
         (``episode_max_length_cutoff_recoveries`` when an env stamped one, else
         ``max_length_cutoff_recoveries``), never graded — the fragment would end the episode on a
         mid-sentence string that reads as a *natural* termination. A cut past the cap ends the episode
-        truncated, priced like a ``max_turns`` overflow. Carries no reward penalty of its own (why:
-        ``agent-docs/training-methods/grpo/async-grpo/rollouts.md``). Owned by the base so
+        truncated, priced like a ``max_turns`` overflow. A recovered cut is priced by the protocol
+        where it configures ``length_cutoff_penalty``, never here. Owned by the base so
         ``episode/length_cutoff_turns`` means the same thing for every protocol that can recover; the
         wording is each protocol's (:data:`LENGTH_CUTOFF_NUDGE`).
         """

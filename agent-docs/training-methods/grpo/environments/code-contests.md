@@ -110,6 +110,7 @@ resubmission penalty and the tool shaping still apply.
 | `reward/resubmission` | `improved_resubmission_refund` | `0` | the share of that price a resubmission earns back by beating every earlier pass fraction |
 | `reward/tool_shaping` | `multi_turn_reward` | `0` | >1 tool call and a real submission |
 | `reward/tool_shaping` | `no_tool_use_penalty` / `turn_overflow_penalty` | `0` | zero tool calls / burning `max_turns` |
+| `reward/tool_shaping` | `length_cutoff_penalty` | `0` | per engine-cut turn the episode recovers from |
 | `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per executed call; this env zeroes the protocol's 0.05 / 0.1 |
 
 The shaping rungs bootstrap a weak base that never submits, and self-neutralize within a group once

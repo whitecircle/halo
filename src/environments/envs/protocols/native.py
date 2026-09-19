@@ -78,6 +78,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         no_tool_use_penalty: float = 0.0,
         multi_turn_reward: float = 0.0,
         turn_overflow_penalty: float = 0.0,
+        length_cutoff_penalty: float = 0.0,
         tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
@@ -92,6 +93,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
             no_tool_use_penalty=no_tool_use_penalty,
             multi_turn_reward=multi_turn_reward,
             turn_overflow_penalty=turn_overflow_penalty,
+            length_cutoff_penalty=length_cutoff_penalty,
         )
 
         self.registry = tool_registry
@@ -102,6 +104,9 @@ class NativeToolUseEnvironment(BaseEnvironment):
         self.no_tool_use_penalty = no_tool_use_penalty
         self.multi_turn_reward = multi_turn_reward
         self.turn_overflow_penalty = turn_overflow_penalty
+        # Per recovered engine-cut turn. With carried reasoning a cut costs the policy only the turn, and
+        # the retry thinks on from where it stopped, so the per-turn budget binds nothing until it is priced.
+        self.length_cutoff_penalty = length_cutoff_penalty
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
         """Get tools in OpenAI format for vLLM generation."""
@@ -328,7 +333,9 @@ class NativeToolUseEnvironment(BaseEnvironment):
         ``_finalize_step`` before the reward runs) — an episode that burns the turn budget without
         terminating pays ``turn_overflow_penalty`` regardless of what it did earn. An episode its
         driver lost (:data:`EPISODE_ERROR_KEY`) is truncated too but pays no overflow: the fault is
-        not the policy's. All magnitudes default to 0 (no-op). Distinct from the per-call knobs."""
+        not the policy's. Each engine-cut turn the episode recovered from pays ``length_cutoff_penalty``;
+        the cut that exhausted the recovery cap pays the overflow price instead, never both. All
+        magnitudes default to 0 (no-op). Distinct from the per-call knobs."""
         calls = trajectory.info.get("total_tool_calls", 0)
         if calls == 0:
             shaping = -self.no_tool_use_penalty
@@ -338,6 +345,9 @@ class NativeToolUseEnvironment(BaseEnvironment):
             shaping = 0.0
         if trajectory.truncated and EPISODE_ERROR_KEY not in trajectory.info:
             shaping -= self.turn_overflow_penalty
+        cuts = trajectory.info.get("length_cutoff_turns", 0)
+        recovered = cuts - 1 if trajectory.info.get("length_cutoff_recoveries_exhausted") else cuts
+        shaping -= self.length_cutoff_penalty * recovered
         return shaping
 
     def _episode_shaping(self, trajectory: Trajectory) -> dict[str, float]:

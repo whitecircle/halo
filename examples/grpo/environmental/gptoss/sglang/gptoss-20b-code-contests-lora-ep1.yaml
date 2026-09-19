@@ -60,6 +60,7 @@ environment_kwargs:
   multi_turn_reward: 0
   tool_success_reward: 0
   turn_overflow_penalty: 0.1
+  length_cutoff_penalty: 0.05  # magnitude, >= 0 — charged per engine-cut turn the episode recovers from
   tool_error_penalty: 0.05
 
 # --- Rewards ---
