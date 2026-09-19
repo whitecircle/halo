@@ -95,7 +95,7 @@ Three decisions matter more than the rest.
   pinned at the cap, raise it; far below, lower it, since turns are sequential and set step time.
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
   model should think. `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
-  (`{high: {thinking_tokens: 16384, max_submissions: 2, max_test_calls: 6}}`). The engine-side cap
+  (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). The engine-side cap
   `rollout_max_thinking_tokens` is vLLM-only.
 
     The model only sees the level if the chat template renders it. `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`

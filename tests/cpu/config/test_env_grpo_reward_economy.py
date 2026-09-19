@@ -3,10 +3,10 @@
 
 Every shaping term is small next to the objective by intent, but "small" is a relation between the
 recipe's own numbers, and a knob edited alone can break it silently. These pin the relations a run
-depends on: the length terms stay under the resubmission price, an honest failed attempt
-still beats not attempting, the worst solve beats the best zero-objective episode, and — per effort
-level — the under-use floor out-slopes the length price, so below its floor a level is paid to reason
-more and never less.
+depends on: the length terms stay under the resubmission price, a fix costs less than a re-roll yet a
+rescue still scores under a first-try solve, an honest failed attempt still beats not attempting, the
+worst solve beats the best zero-objective episode, and — per effort level — the under-use floor
+out-slopes the length price, so below its floor a level is paid to reason more and never less.
 
 Run: python tests/cpu/config/test_env_grpo_reward_economy.py  (or pytest)
 """
@@ -36,6 +36,7 @@ def _economy(path: Path) -> dict:
         "submission": env.get("submission_reward", 0.0),
         "execution": env.get("execution_progress_reward", 0.0),
         "resubmission": env.get("resubmission_penalty", 0.0),
+        "refund": env.get("improved_resubmission_refund", 0.0),
         "no_tool_use": env.get("no_tool_use_penalty", 0.0),
         "turn_overflow": env.get("turn_overflow_penalty", 0.0),
         "max_submissions": max(profile["max_submissions"] for profile in profiles.values()),
@@ -92,6 +93,18 @@ def test_length_terms_stay_under_the_resubmission_price(path):
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_a_fix_is_cheaper_than_a_re_roll_and_a_rescue_still_trails_a_first_try_solve(path):
+    """The refund is what separates the two resubmissions a group contains. It stays partial: a free
+    rescue would score level with a first-try solve and take the pressure off the first submission."""
+    e = _economy(path)
+    improved = e["resubmission"] * (1 - e["refund"])
+    assert 0 < improved < e["resubmission"], (
+        f"an improving resubmission costs {improved} against {e['resubmission']} for one that does not: the "
+        "price must separate a fix from a re-roll, and a fix must still cost something"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_an_honest_failed_attempt_beats_not_attempting(path):
     e = _economy(path)
     worst_attempt = e["submission"] - (e["c_max"] + e["floor"])  # graded, passed nothing, worst length terms
@@ -109,7 +122,7 @@ def test_the_worst_solve_beats_the_best_zero_objective_episode(path):
     worst_solve = (
         OBJECTIVE_MAX
         + shaping
-        - e["resubmission"] * (e["max_submissions"] - 1)
+        - e["resubmission"] * (e["max_submissions"] - 1 - e["refund"])  # the solving one is the only fix
         - e["turn_overflow"]
         - (e["c_max"] + e["floor"])
     )

@@ -38,7 +38,7 @@ lora_modules_to_save:              # full-trained, not LoRA; the router stays fr
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 14
+max_turns: 15
 environment_kwargs:
   language: python
   timeout_per_test: 5
@@ -49,14 +49,15 @@ environment_kwargs:
   # One profile per effort level: CoT budget + interaction budgets. thinking_tokens is an ENGINE cap
   # that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
+    low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 2}
     medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
-    high: {thinking_tokens: 16384, max_submissions: 2, max_test_calls: 6}
+    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
   verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract); expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
+  improved_resubmission_refund: 0.75  # of that price, earned back by beating every earlier result: a fix is cheap, a re-roll is not
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
   multi_turn_reward: 0
   tool_success_reward: 0
