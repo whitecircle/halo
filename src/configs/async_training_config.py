@@ -19,7 +19,6 @@ from src.configs.rollout_config import (
     RolloutConfig,
 )
 from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
-from src.environments.episode import DEFAULT_UNDER_USE_WEIGHT
 
 logger = logging.getLogger(__name__)
 
@@ -334,26 +333,54 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         },
     )
 
-    reasoning_compliance_weight: float = field(
-        default=0.0,
+    effort_length_penalty_k0: float | None = field(
+        default=None,
         metadata={
-            "help": "Weight of the reasoning-budget calibration reward (0 = off). When > 0 and an "
-            "episode has a CoT budget (reasoning_effort set), the trainer adds an ASYMMETRIC per-turn "
-            "calibration term (reasoning_calibration_penalty): no penalty in [0.3,0.9]x the budget, a "
-            "mild penalty below (under-use, scaled by reasoning_compliance_under_use_weight), a strong "
-            "penalty above / on truncation (over-use, up to -weight). Trains the model to match the "
-            "requested effort. ~0.15 shapes without dominating the verifier reward."
+            "help": "Coefficient of the capped, effort-conditioned reasoning-length price at the lowest effort level "
+            "(None = off). Per episode: -min(c_max, k(effort) * reasoning_tokens / l_norm) with "
+            "k(effort) = k0 * exp(-(effort - effort_min) / tau), reasoning tokens summed over the assistant turns. "
+            "Priced per level, so a low level pays most for the same trace, and capped, so a long trace cannot "
+            "outweigh the task reward. Logged as reward/effort_length_penalty."
         },
     )
-
-    reasoning_compliance_under_use_weight: float = field(
-        default=DEFAULT_UNDER_USE_WEIGHT,
+    effort_length_penalty_tau: float = field(
+        default=25.0,
+        metadata={"help": "Effort units over which the price coefficient falls by e (see effort_length_penalty_k0)."},
+    )
+    effort_length_penalty_c_max: float = field(
+        default=0.1,
         metadata={
-            "help": "Weight of the below-band (under-use) side of the calibration term, relative to the "
-            "over-use side's 1.0: a turn with r reasoning tokens under 0.3x the budget B pays "
-            "-under_use_weight * (0.3B - r) / 0.3B before reasoning_compliance_weight scales it. 0 turns "
-            "that side off, so a short repair turn after a verdict is not penalized and only the above-band "
-            "side prices thinking that runs to the budget. Finite and >= 0."
+            "help": "Cap of the reasoning-length price, in reward units. Keep it, plus effort_length_floor_weight, "
+            "below what the environment charges for the decisions it prices (a resubmission, in code contests)."
+        },
+    )
+    effort_length_penalty_l_norm: float = field(
+        default=8192.0,
+        metadata={"help": "Reasoning tokens per unit of the price (the trace length k(effort) is charged per)."},
+    )
+    effort_length_penalty_levels: dict[str, float] = field(
+        default_factory=lambda: {"low": 25.0, "medium": 50.0, "high": 100.0},
+        metadata={
+            "help": "Scalar effort per categorical level for the price's k(effort); the lowest value is effort_min. "
+            "Must map exactly the environment's effort levels (refused at trainer construction otherwise)."
+        },
+    )
+    effort_length_floor_weight: float = field(
+        default=0.0,
+        metadata={
+            "help": "Weight of the reasoning under-use floor (0 = off). An episode whose reasoning tokens, summed "
+            "over its turns, fall short of effort_length_floor_budgets x its per-turn thinking budget pays "
+            "-weight * shortfall / that floor. The price only ever pays for less reasoning; this is the term that "
+            "resists reasoning shrinking toward nothing. An episode with no thinking budget is free of it, and a "
+            "run where none can have one is refused at trainer construction. Logged as reward/effort_length_floor."
+        },
+    )
+    effort_length_floor_budgets: float = field(
+        default=0.75,
+        metadata={
+            "help": "The floor's reference, in per-turn thinking budgets: an episode is asked to reason at least this "
+            "many times its level's thinking_tokens, summed over its turns. Below 1 by default, so an episode of a "
+            "single assistant turn can clear its floor without running into the cap the engine enforces per turn."
         },
     )
 
@@ -426,14 +453,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             raise ValueError(
                 f"sync_weights_every_n_steps must be >= 1 (1 = every step), got {self.sync_weights_every_n_steps}"
             )
-        # Scales a shortfall in [0, 1]: a negative weight would reward skipping the CoT, and a NaN passes
-        # every ordered comparison.
-        under_use_weight = self.reasoning_compliance_under_use_weight
-        if not isfinite(under_use_weight) or under_use_weight < 0:
-            raise ValueError(
-                f"reasoning_compliance_under_use_weight must be a finite number >= 0 (0 = no under-use "
-                f"penalty), got {under_use_weight}"
-            )
+        self._validate_effort_length_terms()
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
         # server is then retried until the NCCL watchdog kills the job.
         if self.max_retries < 0:
@@ -527,6 +547,31 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             )
         self._validate_backend_capabilities()
 
+    def _validate_effort_length_terms(self) -> None:
+        """A NaN passes every ordered comparison, a non-positive scale inverts or zeroes the price, and a
+        negative floor weight would pay for skipping the reasoning."""
+        if self.effort_length_penalty_k0 is not None:
+            for name in (
+                "effort_length_penalty_k0",
+                "effort_length_penalty_tau",
+                "effort_length_penalty_c_max",
+                "effort_length_penalty_l_norm",
+            ):
+                value = getattr(self, name)
+                if not (isfinite(value) and value > 0):
+                    raise ValueError(f"{name} must be a finite positive number when the price is on, got {value}")
+            levels = self.effort_length_penalty_levels
+            if not levels or not all(isfinite(v) for v in levels.values()):
+                raise ValueError(
+                    f"effort_length_penalty_levels must map every effort level to a finite scalar, got {levels}"
+                )
+        floor = self.effort_length_floor_weight
+        if not isfinite(floor) or floor < 0:
+            raise ValueError(f"effort_length_floor_weight must be a finite number >= 0 (0 = off), got {floor}")
+        budgets = self.effort_length_floor_budgets
+        if floor > 0 and not (isfinite(budgets) and budgets > 0):
+            raise ValueError(f"effort_length_floor_budgets must be a finite positive number, got {budgets}")
+
     def _validate_backend_capabilities(self) -> None:
         """Reject request knobs the selected engine does not implement.
 
@@ -537,10 +582,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         ids in the ``meta_info`` echoed on each choice and publishes routed experts response-level
         (raw-int32 wire format, handled by ``decode_rollout_routing``).
 
-        The environment's per-effort ``thinking_tokens`` profile reaches the same request field but
-        is also stamped on the trajectory, where ``reasoning_compliance_weight`` can price CoT
-        against it, so on an engine without the field it degrades to a soft target. This knob has no
-        such second consumer, so it is rejected instead.
+        Neither is the environment's per-effort ``thinking_tokens`` profile, whose budget reaches the
+        same request field: the level it belongs to still reaches the chat template and the effort
+        length terms, so on an engine without the field the level keeps steering and only the hard
+        cap is lost. The rollout actor warns once per process that it is unenforced. This knob has
+        no such second consumer, so rejecting it is the only honest answer here.
         """
         if self.rollout_backend != "sglang":
             return

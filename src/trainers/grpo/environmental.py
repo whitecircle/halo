@@ -26,11 +26,12 @@ from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
     EPISODE_INVALID_REASON_KEY,
     OBJECTIVE_REWARD_KEY,
+    VALID_REASONING_EFFORTS,
     BaseEnvironment,
     resolve_reasoning_effort,
 )
 from src.environments.engine_wire import SGLANG_BACKEND
-from src.environments.episode import RolloutResult, reasoning_calibration_penalty
+from src.environments.episode import RolloutResult, effort_length_floor, effort_length_penalty
 from src.models.structure import resolve_tokenizer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, rows_forward_densely
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
@@ -265,6 +266,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._validate_eval_round()
         self._force_full_dataset_columns()
         self._reject_answerless_datasets()
+        self._validate_effort_length_terms()
 
         self.reward_func_names = ["environment_reward"]
 
@@ -953,14 +955,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             dtype=torch.float32,
         )
 
-        compliance_weight = self.async_config.reasoning_compliance_weight
-        if compliance_weight > 0 or self._carry_reasoning:
-            self._warn_if_no_reasoning_captured(rollout_results, compliance_weight)
-        if compliance_weight > 0:
-            self._apply_reasoning_calibration(
-                rewards, rollout_results, compliance_weight, self.async_config.reasoning_compliance_under_use_weight
-            )
-        self._apply_effort_token_costs(rewards, rollout_results)
+        cfg = self.async_config
+        length_terms_on = cfg.effort_length_penalty_k0 is not None or cfg.effort_length_floor_weight > 0
+        if length_terms_on or self._carry_reasoning:
+            self._warn_if_no_reasoning_captured(rollout_results, length_terms_on)
+        if length_terms_on:
+            self._apply_effort_length_terms(rewards, rollout_results)
         return rewards
 
     def _log_headline_rewards(self, gathered_rewards: torch.Tensor, gathered_valid: torch.Tensor, mode: str) -> None:
@@ -1289,51 +1289,66 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             world.maximum("sampling/is_ratio_max", surviving.max())
         return eff_corrected
 
-    def _apply_effort_token_costs(self, rewards: torch.Tensor, rollout_results: list[RolloutResult]) -> None:
-        """Charge each episode the compute price its env stamped: ``episode_token_cost`` reward units
-        per 1k generated tokens, both channels; logs the mean under ``reward/token_cost``.
+    def _validate_effort_length_terms(self) -> None:
+        """A level the price table misses would be charged nothing, one it invents is a typo, and a
+        floor in a run where no episode can carry a thinking budget would never fire."""
+        cfg = self.async_config
+        if cfg.effort_length_penalty_k0 is not None:
+            levels = set(cfg.effort_length_penalty_levels)
+            unknown, missing = levels - set(VALID_REASONING_EFFORTS), set(VALID_REASONING_EFFORTS) - levels
+            if unknown or missing:
+                raise ValueError(
+                    f"effort_length_penalty_levels must map exactly the effort levels {sorted(VALID_REASONING_EFFORTS)}; "
+                    f"unknown {sorted(unknown)}, missing {sorted(missing)}"
+                )
+        budgeted = cfg.rollout_max_thinking_tokens is not None or any(
+            self._rollout_env.thinking_budget_for_effort(level) for level in VALID_REASONING_EFFORTS
+        )
+        if cfg.effort_length_floor_weight > 0 and not budgeted:
+            raise ValueError(
+                "effort_length_floor_weight > 0 but no episode can carry a thinking budget: no effort level sets "
+                "thinking_tokens and rollout_max_thinking_tokens is unset, so the floor would never price an episode."
+            )
 
-        Episodes whose environment stamped no price are unaffected.
+    def _apply_effort_length_terms(self, rewards: torch.Tensor, rollout_results: list[RolloutResult]) -> None:
+        """Charge each episode its level's reasoning-length price and its under-use floor, in place.
+
+        :func:`effort_length_penalty` prices the episode's reasoning tokens at its level's coefficient;
+        :func:`effort_length_floor` prices a shortfall against ``effort_length_floor_budgets`` times the
+        per-turn thinking budget the episode ran under. An episode with no level is free of the price,
+        one with no budget of the floor. Logs the batch means under ``reward/effort_length_penalty``
+        and ``reward/effort_length_floor``.
         """
-        costs = []
-        for i, r in enumerate(rollout_results):
-            price = float(r.trajectory.info.get("episode_token_cost", 0.0)) if r.trajectory else 0.0
-            if price <= 0:
-                costs.append(0.0)
-                continue
-            cost = price * r.generation_tokens / 1000.0
-            rewards[i] -= cost
-            costs.append(-cost)
-        # Recorded on every rank, priced or not: a gate here would make the world mean an average over
-        # the ranks that charged something rather than over the batch.
-        self._world_metrics.fraction("reward/token_cost", sum(costs), len(costs))
-
-    def _apply_reasoning_calibration(
-        self,
-        rewards: torch.Tensor,
-        rollout_results: list[RolloutResult],
-        weight: float,
-        under_use_weight: float,
-    ) -> None:
-        """Add the asymmetric reasoning-budget calibration term to ``rewards`` in place.
-
-        For each rollout with an applied CoT budget, score its assistant-turn reasoning tokens against
-        the budget band via :func:`reasoning_calibration_penalty` (``under_use_weight`` scaling its
-        below-band side) and add ``weight`` times the score; logs the batch mean under ``reward/calibration``.
-        """
-        contributions = []
+        cfg = self.async_config
+        price_on, floor_on = cfg.effort_length_penalty_k0 is not None, cfg.effort_length_floor_weight > 0
+        levels = cfg.effort_length_penalty_levels
+        effort_min = min(levels.values()) if price_on else 0.0
+        prices, floors = [], []
         for i, r in enumerate(rollout_results):
             traj = r.trajectory
-            budget = traj.reasoning_budget if traj else None
-            if not budget:
-                contributions.append(0.0)
-                continue
-            contribution = weight * reasoning_calibration_penalty(
-                self._assistant_turn_reasoning_tokens(traj), budget, under_use_weight=under_use_weight
-            )
-            rewards[i] += contribution
-            contributions.append(contribution)
-        self._world_metrics.fraction("reward/calibration", sum(contributions), len(contributions))
+            tokens = self._assistant_turn_reasoning_tokens(traj) if traj else []
+            price = floor = 0.0
+            if price_on and traj and traj.reasoning_effort in levels:
+                price = effort_length_penalty(
+                    tokens,
+                    levels[traj.reasoning_effort],
+                    effort_min,
+                    cfg.effort_length_penalty_k0,
+                    cfg.effort_length_penalty_tau,
+                    cfg.effort_length_penalty_c_max,
+                    cfg.effort_length_penalty_l_norm,
+                )
+            if floor_on and traj and traj.reasoning_budget:
+                minimum = round(cfg.effort_length_floor_budgets * traj.reasoning_budget)
+                floor = effort_length_floor(tokens, minimum, cfg.effort_length_floor_weight)
+            rewards[i] += price + floor
+            prices.append(price)
+            floors.append(floor)
+        # A config gate is rank-uniform, so every rank records the same keys.
+        if price_on:
+            self._world_metrics.fraction("reward/effort_length_penalty", sum(prices), len(prices))
+        if floor_on:
+            self._world_metrics.fraction("reward/effort_length_floor", sum(floors), len(floors))
 
     def _compute_ref_logps(
         self,

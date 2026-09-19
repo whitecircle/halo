@@ -32,25 +32,26 @@ lora_target_modules:
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 14
+max_turns: 15
 environment_kwargs:
   language: python
   timeout_per_test: 5
   stop_on_first_failure: false
-  max_grading_seconds: 150   # seconds of wall clock per submission grade; a budget stop scores the graded prefix
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a budget stop scores the graded prefix
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
   max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
   # One profile per effort level: CoT budget + interaction budgets. thinking_tokens is an ENGINE cap
   # that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
+    low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 2}
+    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
-  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract)
+  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract); expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
+  improved_resubmission_refund: 0.75  # of that price, earned back by beating every earlier result: a fix is cheap, a re-roll is not
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
   multi_turn_reward: 0
   tool_success_reward: 0
@@ -73,20 +74,22 @@ rollout_server_configs:
 - url: "http://localhost:8001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 1200.0       # seconds per HTTP call = one turn
-                              # (agent-docs/training-methods/grpo/async-grpo/performance.md#sizing-a-run)
+request_timeout: 1200.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence decode
+                              # speed at peak concurrency (agent-docs/training-methods/grpo/async-grpo/performance.md#sizing-a-run)
 max_retries: 1                # a timeout re-runs the WHOLE episode; attempts x request_timeout must stay
-                              # under the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
+                              # under the retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 
 # --- Rollout Generation ---
-rollout_temperature: 1.0     # on-policy; the trainer scores at this temperature and the engine's IS reference must match
+rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_max_tokens: 24000              # per-turn total (CoT + answer headroom) and the ONLY CoT bound here:
                                        # rollout_max_thinking_tokens needs the server on VLLM_REASONING_PARSER=gemma4
                                        # AND VLLM_USE_V2_MODEL_RUNNER=0, else every rollout 400s
-reasoning_compliance_weight: 0.15            # a turn that thinks past 0.9x its budget pays up to this, averaged over the episode's turns
-reasoning_compliance_under_use_weight: 0     # no under-use floor
+effort_length_penalty_k0: 0.03         # reasoning tokens are priced per level: -min(c_max, k(level) x tokens / 8192), with k
+effort_length_penalty_c_max: 0.1       #   falling by e per 25 effort units (low 25, medium 50, high 100): low pays ~20x high
+effort_length_floor_weight: 0.05       # the one term that pays for MORE reasoning: an episode whose turns together reason
+                                       #   under 0.75x one turn's thinking_tokens pays up to this; price + floor < a resubmission
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
@@ -104,33 +107,33 @@ max_prompt_length: null
 num_generations: 8
 use_chunked_grpo_logprobs: true # required for gemma-4 (~262k vocab)
 loss_type: dapo
-advantage_mode: asymmetric   # scales negative advantages, which dominate the token-level normalizer
+advantage_mode: asymmetric   # failures run far longer than solves, so their negatives dominate the token-level normalizer
 advantage_neg_scale: 0.7
-beta: 0.0                   # KL-free; drift observability = sampling/logratio_mean + entropy + eval
+beta: 0.0                   # KL-free: the IS bands below are the trust region
 num_iterations: 1
 epsilon: 0.2
 epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
-isr_engine_reference: false  # an engine re-score costs server headroom (--gpu-memory-utilization <= 0.80)
-isr_geo_band_min: 0.95       # geometric-mean ratio band; on sustained masking fix the disagreement,
-isr_geo_band_max: 1.05       #   never widen
+isr_engine_reference: false  # the engine re-score costs server headroom (--gpu-memory-utilization <= 0.80)
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained
+isr_geo_band_max: 1.05       #   masking fix the disagreement, never widen the band
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
 scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
 num_generations_eval: 1
-scale_rewards: batch        # global batch std — never per-group
+scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
 drop_degenerate_groups: true  # all-alike groups would still inflate the DAPO normalizer
-top_entropy_quantile: 1.0   # train ALL tokens
-mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow; a length-cut TURN is
-                                   # priced and retried in-episode
+top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
+mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow — a real failure worth its
+                                   # negative advantage; a length-cut TURN is priced and retried in-episode
 
 # --- Training ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
 eval_rollout_batch_size: 50
-gradient_accumulation_steps: 24 # dp 4 x 24 = 96 episodes/step; per-rank value must divide by num_generations. One optimizer step per generation round (steps_per_generation defaults to it).
+gradient_accumulation_steps: 24 # dp 4 x 24 = 96 episodes/step; the per-rank value must divide by num_generations
 max_steps: 300              # the cosine horizon must match the run's useful length, not the dataset's
 num_train_epochs: 1
 learning_rate: 3.0e-06
@@ -143,7 +146,7 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # Gemma4 has no aux-loss wiring and no bias-update support
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: true       # EP requires reentrant GC
+  use_reentrant: true       # a MoE runs reentrant GC (the trainer force-promotes false)
 fp32_grad_reduce: true
 
 # --- Output ---

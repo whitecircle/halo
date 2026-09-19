@@ -120,7 +120,7 @@ def test_the_hook_composes_with_the_remote_code_compat_shims(liger_first):
 
     ``remote_code_compat`` binds names a remote file uses without importing; dropping that callback
     would turn a Ling forward into a ``NameError`` the moment Liger armed a patch, and conversely.
-    Two independent wrappers used to nest, so a re-application stacked another — the funnel must be
+    Two independent wrappers would nest, so a re-application stacks another — the funnel must be
     wrapped exactly once and re-registering must not change it.
 
     Subprocess per order: both registrars are process-global and guarded against re-installing, so a

@@ -2,8 +2,8 @@
 """
 Test: Muon optimizer with FSDP2 (multi-GPU torchrun).
 
-Reproduces and validates the fix for: Muon's fused Triton kernels fail with
-FSDP2 because DTensor params cannot be passed directly to Triton kernels.
+Muon's fused Triton kernels cannot take DTensor params directly, which is
+what FSDP2 gives them.
 
 When FSDP2 wraps parameters, p.data and p.grad become DTensors. The to_local()
 helper extracts the underlying local tensor shard before passing to Triton,

@@ -25,7 +25,7 @@ from transformers import AutoModel, AutoModelForSequenceClassification, AutoToke
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.adapters import assert_no_expert_lora_adapter, merge_adapter_into_base
+from src.checkpoint.adapters import assert_no_expert_lora_adapter, load_base_for_adapter, merge_adapter_into_base
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
 from src.checkpoint.tool_io import (
     apply_training_sidecars,
@@ -84,6 +84,7 @@ def load_model(model_path, model_type, is_peft=False, **load_kwargs):
     log line, and this tool would write them out as a finished bf16 model. A missing seq-cls head is
     legitimate only when the adapter declares one in ``modules_to_save`` (a classification adapter
     trained on a plain causal-LM base), so the exemption is read off that declaration.
+    The base loads through the class the adapter's keys address (:func:`load_base_for_adapter`).
     """
     if model_type not in _MODEL_CLASSES:
         raise ValueError(f"Unknown model_type {model_type!r}; expected one of {sorted(_MODEL_CLASSES)}")
@@ -91,13 +92,25 @@ def load_model(model_path, model_type, is_peft=False, **load_kwargs):
         return _load_verified(model_path, model_type, excuse_task_head=False, **load_kwargs)
     _reject_unsupported_peft_type(model_type)
     peft_config = PeftConfig.from_pretrained(model_path)
-    base_model = _load_verified(
+    base_model = load_base_for_adapter(
+        model_path,
         peft_config.base_model_name_or_path,
-        model_type,
+        _base_loader(model_type, load_kwargs),
         excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
-        **load_kwargs,
+        log=logger.info,
     )
     return PeftModel.from_pretrained(base_model, model_path)
+
+
+def _base_loader(model_type, load_kwargs):
+    """The base-model loader both adapter paths hand to the shared helpers: this tool's class table and dtype."""
+
+    def load_base_model(base_model_path, *, excuse_task_head: bool, text_only: bool = False):
+        return _load_verified(
+            base_model_path, model_type, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs
+        )
+
+    return load_base_model
 
 
 def _reject_unsupported_peft_type(model_type: str) -> None:
@@ -271,16 +284,10 @@ def _merge_adapter_to_bf16(
     with.
     """
     _reject_unsupported_peft_type(model_type)
-
-    def load_base_model(base_model_path, *, excuse_task_head: bool, text_only: bool = False):
-        return _load_verified(
-            base_model_path, model_type, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs
-        )
-
     merge_adapter_into_base(
         adapter_dir,
         output_path,
-        load_base_model=load_base_model,
+        load_base_model=_base_loader(model_type, load_kwargs),
         tool="convert_to_bf16",
         device_map=device_map,
         max_shard_size=max_shard_size,

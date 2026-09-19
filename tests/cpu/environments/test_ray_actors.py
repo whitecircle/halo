@@ -834,6 +834,21 @@ def test_is_client_error():
     assert not _is_client_error(_http(408, "Request Timeout"))
 
 
+def test_an_engine_serialization_fault_under_a_400_is_retried():
+    """vLLM reports a NaN log-prob it cannot serialise as a 400, though the request was valid and a fresh
+    one succeeds: giving up on it ends every episode in flight on that engine when one decode step faults."""
+    from src.environments.ray_actors import RolloutHTTPError, _is_client_error, _should_giveup
+
+    body = (
+        '{"error":{"message":"Out of range float values are not JSON compliant: nan",'
+        '"type":"BadRequestError","param":null,"code":400}}'
+    )
+    fault = RolloutHTTPError(400, "vllm", body)
+    assert not _is_client_error(fault) and not _should_giveup(fault)
+    # A genuine bad request under the same status is still terminal.
+    assert _should_giveup(RolloutHTTPError(400, "vllm", '{"error":{"message":"max_tokens must be positive"}}'))
+
+
 def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
     """The status is read as data, never re-parsed out of the message.
 

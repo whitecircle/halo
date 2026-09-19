@@ -118,7 +118,7 @@ docker run --gpus all --network=host --ipc=host \
 | `rollout_chat_template_kwargs` | `{}` | chat-template variables sent on every rollout request **and** applied to the trainer's own renders (Qwen3.x `preserve_thinking`); `reasoning_effort` is refused here — it travels per episode |
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
-| `reasoning_compliance_weight` / `_under_use_weight` | `0.0` / `0.3` | off by default; prices each turn's CoT against its budget, the under-use side relative to over-use's 1.0 |
+| `effort_length_penalty_k0` / `effort_length_floor_weight` | `None` / `0.0` | both off by default; the first prices an episode's reasoning tokens by its effort level (capped at `effort_length_penalty_c_max`), the second its shortfall against `effort_length_floor_budgets` × the thinking budget it ran under |
 | `episode_timeout` | `1200.0` | per-episode wall clock, checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
 | `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |

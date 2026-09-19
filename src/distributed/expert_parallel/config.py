@@ -348,11 +348,9 @@ class EPConfig:
 
         # Every cross-replica topology defers, not just the cross-node one: a post-accumulate hook
         # fires only where the expert weight accumulated a grad, and a rank whose dispatch delivered
-        # no tokens for a layer never touches those weights, leaving its replicas inside a collective
-        # it never enters. ``is_deferred_dp`` is a subset of ``needs_expert_grad_sync``, so it adds no
-        # term here. PP defers too: it pins gradient_accumulation_steps to 1, so per-backward hooks
-        # would fire on every microbatch and re-scale already-synced grads (the hook is not
-        # idempotent).
+        # no tokens for a layer never enters the collective its replicas wait in. ``is_deferred_dp``
+        # is a subset of ``needs_expert_grad_sync``, so it adds no term. PP defers too: per-backward
+        # hooks would fire on every microbatch and re-scale already-synced grads (not idempotent).
         self.defer_grad_sync = (
             self.needs_expert_grad_sync or self.num_rank_blocks > 1
         ) and not self.experts_fsdp_managed

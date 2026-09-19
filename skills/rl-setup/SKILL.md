@@ -103,8 +103,9 @@ and full launch examples see [`wiring.md`](wiring.md).
    `rollout_max_thinking_tokens` caps CoT per turn and is enforced **engine-side**
    (vLLM `thinking_token_budget`): it needs a server reasoning parser and
    `VLLM_USE_V2_MODEL_RUNNER=0`, and is refused under `rollout_backend: sglang` — as is
-   `carry_reasoning`. `reasoning_compliance_weight` (default `0.0` = off) prices each turn's
-   CoT against that budget.
+   `carry_reasoning`. The effort length terms (`effort_length_penalty_k0`,
+   `effort_length_floor_weight`; both off by default) price an episode's reasoning length by its
+   effort level and its shortfall against the per-effort budget.
 
 ## Parallelism note
 

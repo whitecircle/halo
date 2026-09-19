@@ -237,9 +237,8 @@ def test_dropped_thinking_budget_is_announced_once(caplog):
     """A per-effort budget that reaches no engine field must say so — once, not per turn.
 
     ``rollout_max_thinking_tokens`` is rejected outright for SGLang, so a budget arriving at the
-    payload builder came from the environment's ``reasoning_effort_profiles``. It is still scored by
-    ``reasoning_compliance_weight``, so dropping it silently prices the policy against a band nothing
-    enforced.
+    payload builder came from the environment's ``reasoning_effort_profiles``. The recipe still states
+    it and the template still renders it, so dropping it silently leaves a cap nothing enforces.
     """
     engine_wire._THINKING_BUDGET_UNENFORCED_WARNED.discard("sglang")
     try:

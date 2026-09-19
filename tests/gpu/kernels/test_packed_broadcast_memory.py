@@ -71,9 +71,9 @@ def test_persistent_streams_bound_reserved_memory():
 
 
 def test_client_reuses_one_stream_pair_across_syncs():
-    """The client half of the fix: VLLMWeightSyncClient must lazily create ONE stream pair and pass
-    the same list into every producer call — reverting the wiring (dropping streams=, or re-creating
-    per sync) reintroduces the production ratchet while the producer-contract test stays green."""
+    """The client half of the contract: VLLMWeightSyncClient must lazily create ONE stream pair and
+    pass the same list into every producer call — dropping ``streams=``, or re-creating them per
+    sync, reintroduces the production ratchet while the producer-contract test stays green."""
     client = object.__new__(VLLMWeightSyncClient)
     client._reset_buffer_state()  # the client's own initializer for the streamed-chunk state
     client._packed_streams = None

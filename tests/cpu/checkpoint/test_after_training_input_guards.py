@@ -701,11 +701,11 @@ def test_converter_progress_lines_survive_the_src_root_handler(module):
 
 
 def test_convert_to_bf16_refuses_merge_adapter_without_peft(tmp_path):
-    """``--merge_adapter`` is read ONLY on the PEFT path, so without ``--peft`` it was a no-op.
+    """``--merge_adapter`` is read ONLY on the PEFT path, so without ``--peft`` it is a silent no-op.
 
-    The tool loaded the source as a full model, never reached ``merge_and_unload``, and exited 0
-    having written an UNMERGED bf16 checkpoint — the exact opposite of what a caller asking to merge
-    an adapter wanted, with nothing in the output to tell the two apart. Refused before any I/O.
+    The tool loads the source as a full model, never reaches ``merge_and_unload``, and exits 0 having
+    written an UNMERGED bf16 checkpoint — the exact opposite of what a caller asking to merge an
+    adapter wants, with nothing in the output to tell the two apart. Refused before any I/O.
     """
     from scripts.after_training.convert_to_bf16 import convert_to_bf16
 

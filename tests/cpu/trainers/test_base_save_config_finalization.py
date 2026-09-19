@@ -4,9 +4,9 @@
 The EP/CP/TP writers run three rewrites transformers does not — the live ``model_type`` restored for
 the vendor classes that declare none (Bailing/Ling), the flat legacy per-layer keys, and the source
 repo's own schema for the families whose serving engines have no config class (Step-3.x). The base
-(single-GPU / DDP / accelerate-FSDP) save path used to run only the middle one, so the same model
-trained without parallelism shipped a directory the merge tools and the pinned server cannot read —
-and nothing at train time says so. These tests fail if that path drops any of the three again.
+(single-GPU / DDP / accelerate-FSDP) save path owes the same three: dropping any of them ships, for a
+model trained without parallelism, a directory the merge tools and the pinned server cannot read —
+and nothing at train time says so. These tests fail if that path drops any of them.
 
     python tests/cpu/trainers/test_base_save_config_finalization.py
 """

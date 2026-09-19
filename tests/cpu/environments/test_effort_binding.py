@@ -113,15 +113,15 @@ async def test_both_drivers_bind_the_same_caps(monkeypatch):
     assert (actor_level, actor_cfg.max_thinking_tokens, actor_cfg.max_tokens) == ("high", 4000, _MAX_TOKENS)
     # Eval side: byte-identical generation-control fields to the ones the actor's payload carries —
     # built from the ACTOR's own per-episode config, so this compares the two drivers, not the helper
-    # with itself. The eval used to compute the CoT budget and then drop it from the request.
+    # with itself. The eval must not compute the CoT budget and then drop it from the request.
     assert calls[0]["extra_body"] == generation_control_fields(actor_cfg, actor_level)
     assert calls[0]["extra_body"]["reasoning_effort"] == "high"
     assert calls[0]["extra_body"]["thinking_token_budget"] == 4000
     # …and the budget also reaches the template as a variable, the one channel a prompt can state it through.
     assert calls[0]["extra_body"]["chat_template_kwargs"] == {"reasoning_budget": 4000}
     assert calls[0]["max_tokens"] == actor_cfg.max_tokens
-    # …and both leave the episode carrying the budget it ran under: the trainer's calibration reward
-    # reads it off the trajectory, the eval records it in the trajectory file.
+    # …and both leave the episode carrying the budget it ran under: the trainer's re-render reads it
+    # off the trajectory, the eval records it in the trajectory file.
     assert (eval_traj.reasoning_effort, eval_traj.reasoning_budget) == ("high", 4000)
     assert (result.trajectory.reasoning_effort, result.trajectory.reasoning_budget) == ("high", 4000)
     recorded = eval_runner.serialize_trajectory(eval_traj)

@@ -66,6 +66,10 @@ from src.models.moe_balancing import (
 
 logger = logging.getLogger(__name__)
 
+# The adapter GEMMs run at the activation dtype (``_expert_proj`` casts lora_A/B to ``out_dtype``), bf16 at
+# the narrowest whatever the experts are stored in, so the rank has to span the stride at bf16.
+EXPERT_LORA_RANK_MULTIPLE = GROUPED_MM_STRIDE_ALIGNMENT_BYTES // torch.bfloat16.itemsize
+
 # Opt-in overlap of the shared-expert FFN with the latency-bound dispatch all-to-all; one stream per device.
 _SHARED_OVERLAP_ENABLED = env_flag("HALO_EP_SHARED_OVERLAP")
 _SHARED_OVERLAP_STREAMS: dict[int, torch.cuda.Stream] = {}
@@ -996,12 +1000,12 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         for name, param in self.expert_named_params():
             if param.dim() != 3 or not spec.adapts(name):
                 continue
-            if (spec.r * param.element_size()) % GROUPED_MM_STRIDE_ALIGNMENT_BYTES:
+            if spec.r % EXPERT_LORA_RANK_MULTIPLE:
                 raise ValueError(
-                    f"lora_r={spec.r} cannot adapt the {param.dtype} expert weight {name!r}: the grouped GEMM "
-                    f"contracts over the adapter's rank dimension and needs it to span a multiple of "
-                    f"{GROUPED_MM_STRIDE_ALIGNMENT_BYTES} bytes — a rank that is a multiple of "
-                    f"{GROUPED_MM_STRIDE_ALIGNMENT_BYTES // param.element_size()} at this dtype."
+                    f"lora_r={spec.r} cannot adapt the expert weight {name!r}: the grouped GEMM contracts over the "
+                    f"adapter's rank dimension and reads it as a stride spanning a multiple of "
+                    f"{GROUPED_MM_STRIDE_ALIGNMENT_BYTES} bytes at the bf16 the adapters run in at the narrowest — "
+                    f"use a multiple of {EXPERT_LORA_RANK_MULTIPLE}."
                 )
             num_local, k, n = param.shape
             lora_a = nn.Parameter(torch.empty(num_local, k, spec.r, dtype=param.dtype, device=param.device))

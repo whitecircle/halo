@@ -93,13 +93,18 @@ Three decisions matter more than the rest.
 - **Turn budget.** `rollout_max_tokens` caps one turn, `max_turns` the turns. The trajectory accumulates across turns
   and is never truncated — the context window bounds it, and a row past that fails the step. Watch `episode/turns`:
   pinned at the cap, raise it; far below, lower it, since turns are sequential and set step time.
-- **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) steers how much
-  the model thinks; `reasoning_effort_profiles` attaches per-level token and interaction caps, as the code-contests
-  recipes do (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). The engine-side cap
-  `rollout_max_thinking_tokens` is vLLM-only. The level only reaches the policy if the chat template renders it:
-  `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja`
-  state the level and its per-turn budget in the system block. Pin one with `force_chat_template: true` and serve the
-  same file ([Chat template](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#chat-template)).
+- **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
+  model should think. `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
+  (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). The engine-side cap
+  `rollout_max_thinking_tokens` is vLLM-only.
+
+    The model only sees the level if the chat template renders it. `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`
+    and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja` do. Pin one with `force_chat_template: true` and serve
+    the same file ([Chat template](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#chat-template) ↗).
+
+    Caps alone do not make `low` reason less than `high`. `effort_length_penalty_k0` charges for reasoning tokens, most
+    at `low`. `effort_length_floor_weight` charges an episode that stops far short of its budget. Both are off by
+    default ([Effort length reward](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#effort-length-reward) ↗).
 - **Tool budgets.** An environment pays `tool_success_reward` per successful call, charges `tool_error_penalty` per
   failure, and caps what successful calls earn across the episode — not the episode reward — at `tool_reward_cap`
   (default `tool_success_reward × max_turns`). Keep them small beside the objective, or tool-calling beats finishing.

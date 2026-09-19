@@ -466,5 +466,29 @@ def test_the_sweep_reads_the_heads_softcap_off_the_model_config():
     torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-5)
 
 
+def test_the_sweep_finds_a_softcap_only_the_nested_text_config_carries():
+    """A multimodal checkpoint carries the cap on its text config, not at the top level (Gemma 4's
+    own head reads ``config.get_text_config().final_logit_softcapping`` for that reason). A raw
+    ``getattr`` on the composite reads ``None`` and the sweep silently drops the cap again, which is
+    the whole bug — so the two configs must score identically."""
+    flat = _CappedHeadHarness(softcap=0.5)
+    torch.manual_seed(1)
+    input_ids = torch.randint(0, 64, (2, 12))
+    attention_mask = torch.ones_like(input_ids)
+    ltk = 7
+
+    nested = _CappedHeadHarness(softcap=0.5)
+    nested.model.load_state_dict(flat.model.state_dict())
+    composite = PretrainedConfig()
+    composite.text_config = nested.model.config
+    assert getattr(composite, "final_logit_softcapping", None) is None, "the probe must hide the cap"
+    nested.model.config = composite
+
+    with torch.no_grad():
+        want, _ = flat._chunked_logps_impl(flat.model, input_ids, attention_mask, ltk, 2, False)
+        got, _ = nested._chunked_logps_impl(nested.model, input_ids, attention_mask, ltk, 2, False)
+    torch.testing.assert_close(got, want, atol=1e-5, rtol=1e-5)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

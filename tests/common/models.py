@@ -443,9 +443,8 @@ TINY_GLM5_VISION_CONFIG = {
 # sparse MoE layers, per-layer post-activation SwiGLU clamps on the last two MoE layers only
 # (0 = unclamped elsewhere, shared bounds on a separate list), sigmoid routing with the
 # ``e_score_correction_bias`` buffer, non-neutral ``moe_router_scaling_factor``, and a full/sliding
-# attention interleave with a different sliding head count. That heterogeneity makes a global
-# ``config.num_attention_heads`` read raise AmbiguousGlobalPerLayerAttributeError, so any path
-# skipping ``per_layer_config`` fails. hidden_size=256 keeps the DeepEP transport pad exact.
+# attention interleave with a different sliding head count, so a global ``num_attention_heads`` read
+# raises and any path skipping ``per_layer_config`` fails. hidden_size=256 keeps the DeepEP pad exact.
 TINY_STEP3P7_CONFIG = {
     "vocab_size": 2048,
     "hidden_size": 256,

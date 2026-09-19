@@ -93,17 +93,19 @@ _ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".or
 
 
 def adapter_module_paths(adapter_dir: str) -> set[str]:
-    """The base model's module paths a saved adapter addresses, read off its tensor keys."""
+    """The base model's module paths a saved adapter addresses, read off its tensor keys.
+
+    A key carrying no PEFT segment is a parameter the save wrote whole (``save_embedding_layers``
+    adds ``...embed_tokens.weight`` / ``...lm_head.weight``); its module is the key minus that leaf.
+    """
     paths: set[str] = set()
     for path in adapter_weight_paths(adapter_dir):
         if not os.path.isfile(path):
             continue
         for key in _adapter_tensor_keys(path):
             name = key.removeprefix(_ADAPTER_KEY_PREFIX)
-            cut = min(
-                (at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=len(name)
-            )
-            paths.add(name[:cut])
+            cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
+            paths.add(name[:cut] if cut >= 0 else name.rpartition(".")[0])
         break
     return paths
 
@@ -118,7 +120,7 @@ def _paths_absent_from(model: PreTrainedModel, paths: set[str]) -> list[str]:
     return absent
 
 
-def _load_base_the_adapter_addresses(
+def load_base_for_adapter(
     adapter_dir: str,
     base_model_path: str,
     load_base_model: Callable[..., PreTrainedModel],
@@ -131,26 +133,34 @@ def _load_base_the_adapter_addresses(
     ``PeftModel.from_pretrained`` only warns when saved keys name no live module, then merges nothing
     and the tool writes the bare base as a finished model. An adapter trained through a multimodal
     checkpoint's text-only class (``text_only_model: true``) addresses ``model.layers``, which the
-    widest Auto* class spells ``model.language_model.layers``, so it is met through that class; any
-    other mismatch is a base that does not belong to the adapter.
+    widest Auto* class spells ``model.language_model.layers``, so it is met through that class; a key
+    set neither class carries is a base that does not belong to the adapter.
     """
     paths = adapter_module_paths(adapter_dir)
     base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
     absent = _paths_absent_from(base_model, paths)
     if not absent:
         return base_model
-    if len(absent) == len(paths):
-        wrapper = type(base_model).__name__
-        del base_model
-        base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head, text_only=True)
-        absent = _paths_absent_from(base_model, paths)
-        if not absent:
-            log(f"The adapter addresses the text-only class of {wrapper}; merging as {type(base_model).__name__}.")
-            return base_model
-    raise ValueError(
-        f"The adapter at {adapter_dir} addresses {len(absent)} module(s) that {type(base_model).__name__} loaded "
-        f"from {base_model_path} does not have (e.g. {absent[0]}). PEFT would merge nothing there and the "
-        f"tool would write the bare base; the adapter and its base_model_name_or_path do not belong together."
+    # A path both classes carry (a ``modules_to_save`` lm_head) resolves on the wrapper too, so any
+    # absence, not every absence, is the text-only hypothesis.
+    wrapper = type(base_model).__name__
+    del base_model
+    try:
+        text_only_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head, text_only=True)
+    except ValueError as no_text_only_class:
+        # A one-class task, or a family shipping only its multimodal wrapper: the mismatch stands.
+        raise ValueError(_no_module_message(adapter_dir, base_model_path, wrapper, absent)) from no_text_only_class
+    if not _paths_absent_from(text_only_model, paths):
+        log(f"The adapter addresses the text-only class of {wrapper}; merging as {type(text_only_model).__name__}.")
+        return text_only_model
+    raise ValueError(_no_module_message(adapter_dir, base_model_path, wrapper, absent))
+
+
+def _no_module_message(adapter_dir: str, base_model_path: str, model_class: str, absent: list[str]) -> str:
+    return (
+        f"The adapter at {adapter_dir} addresses {len(absent)} module(s) that {model_class} loaded from "
+        f"{base_model_path} does not have (e.g. {absent[0]}). PEFT would merge nothing there and the tool "
+        f"would write the bare base; the adapter and its base_model_name_or_path do not belong together."
     )
 
 
@@ -288,7 +298,7 @@ def merge_adapter_into_base(
         raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
 
     log(f"Merging {adapter_dir} ({peft_config.peft_type}) into base model {base_model_path}...")
-    base_model = _load_base_the_adapter_addresses(
+    base_model = load_base_for_adapter(
         adapter_dir,
         base_model_path,
         load_base_model,

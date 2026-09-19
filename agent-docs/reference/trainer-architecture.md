@@ -148,7 +148,8 @@ class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
 before the base trainer sees them: `parallelism_config` (a `ParallelismConfig`; passing `None`
 raises `ValueError`), the save flag `save_sharded_ep` (default `False`), `moe_balancing`,
 `dataset_presharded`, and `bf16_optimizer`. It also reconciles
-`save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested mode.
+`save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested mode and the model
+(every MoE runs reentrant outside PP).
 
 A trainer that forwards `**kwargs` calls it as above. One whose `__init__` names those parameters
 passes them through `**explicit` instead (SMPO, Classification, offline GRPO, teacher distillation);

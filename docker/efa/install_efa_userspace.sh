@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
-# One EFA userspace for every Halo image: rdma-core, AWS libfabric and the aws-ofi-nccl plugin the
-# NCCL weight-sync group needs to ride EFA between a trainer container and a rollout-server container.
-#
-# The whole stack is wire-sensitive, rdma-core included: the plugin probes libfabric for in-order
-# RDMA writes at init and forces NCCL_PROTO=simple when the probe fails, and that probe answers
-# through rdma-core's EFA provider (libefa). Two containers whose libefa builds answer differently
-# form the NCCL group with different protocol tables and hang at the first collective, so every
-# image installs the same three packages from this one script. Versions are pinned here and nowhere
-# else:
-#   * rdma-core and libfabric come from the AWS EFA installer release whose libfabric the NGC base
-#     of the training image already bundles; its MOFED rdma-core is replaced;
-#   * aws-ofi-nccl is built from a pinned commit against the NCCL wheel uv.lock pins, exposing the
-#     GIN entry points DeepEP V2 needs for cross-node EP (the installer's own plugin package lacks them).
-#
-# Needs root, apt, curl, a C toolchain, a CUDA toolkit at /usr/local/cuda and the nvidia-nccl wheel
-# installed.
+# One EFA userspace for every Halo image: rdma-core, AWS libfabric and a GIN-capable aws-ofi-nccl,
+# which the NCCL weight-sync group and DeepEP V2 cross-node EP need to ride EFA. Wire-sensitive down
+# to rdma-core: the plugin probes libfabric (through its EFA provider) for in-order RDMA writes and
+# forces NCCL_PROTO=simple when that probe fails, so images built differently form the group with
+# different protocol tables and hang at the first collective. Versions are pinned here and nowhere else.
 set -euo pipefail
 
 # x86_64 only, like the images' other architecture-specific steps; the installer's deb tree is per arch.
@@ -52,9 +41,9 @@ curl -fsSL -o "$tarball" "https://efa-installer.amazonaws.com/aws-efa-installer-
 echo "${EFA_INSTALLER_SHA256}  ${tarball}" | sha256sum -c -
 tar -xzf "$tarball" -C "$work"
 debs="$work/aws-efa-installer/DEBS/${deb_dir}/x86_64"
-# Userspace only: the verbs libraries and the EFA provider (rdma-core) plus libfabric. The kernel
-# module, MPI, and the installer's own NCCL plugin (no GIN) are not installed. --allow-downgrades so
-# the pin also wins over a base whose rdma-core has moved past it: the builds must match across images.
+# Userspace only: rdma-core's verbs libraries and EFA provider, plus libfabric. The kernel module,
+# MPI and the installer's own (GIN-less) NCCL plugin are left out. --allow-downgrades so the pin also
+# wins over a base whose rdma-core has moved past it — the builds must match across images.
 apt-get install -y --no-install-recommends --allow-downgrades \
     "$debs"/rdma-core/libibverbs1_*.deb \
     "$debs"/rdma-core/ibverbs-providers_*.deb \
@@ -90,10 +79,9 @@ make install
 cd /
 rm -rf "$src"
 
-# NCCL loads the GIN plugin from this name, resolved through the loader's default directory (a
-# symlink under the plugin prefix would be cached under the target's own SONAME instead). The net
-# plugin is found as libnccl-net-ofi.so, and make install also placed it under NCCL's default plugin
-# name libnccl-net.so, so it is tried on every host and yields to NCCL's built-in transports where
+# NCCL loads the GIN plugin under this name from the loader's default directory — a symlink under
+# the plugin prefix would be cached under the target's own SONAME instead. The net plugin also sits
+# under NCCL's default name, so it is tried everywhere and yields to the built-in transports where
 # libfabric finds no provider.
 ln -sf "$PLUGIN_PREFIX/lib/libnccl-net-ofi.so" /usr/lib/x86_64-linux-gnu/libnccl-gin.so
 printf '%s\n' "$EFA_PREFIX/lib" > /etc/ld.so.conf.d/efa.conf

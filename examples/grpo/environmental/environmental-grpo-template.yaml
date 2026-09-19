@@ -15,39 +15,19 @@ environment_type: react_math
 max_turns: 10
 # --- Rewards (agent-docs/training-methods/grpo/rewards.md) ---
 # A sum of terms, each weight x score^exponent over a score in [0, 1]; the environment's per-turn and
-# shaping terms add on top. Sources: environment (the env's own grade, logged as reward/objective),
-# judge (a generative judge), reward_model (a Bradley-Terry model served by vLLM or SGLang).
+# shaping terms add on top.
 rewards:
-  - source: environment      # weight 1.0, exponent 1.0
-  # - source: judge            # openai/gpt-5.6-luna on OpenRouter at reasoning_effort medium (OPENROUTER_API_KEY)
-  #   name: quality
-  #   weight: 0.3
-  #   requirements:
-  #     - {name: correctness, description: "The final answer is correct and fully justified."}
-  #     - {name: clarity, description: "The answer is easy to follow.", weight: 0.5}
-  # - source: reward_model     # vllm serve <model> --runner pooling, or sglang --is-embedding (backend: sglang)
-  #   name: preference
-  #   weight: 0.5
-  #   url: http://localhost:8100
-  #   model: Skywork/Skywork-Reward-V2-Llama-3.1-8B
-# Env-specific kwargs (uncomment and nest as needed):
+  - source: environment      # the env's own grade, logged as reward/objective; weight 1.0, exponent 1.0
+  # - {source: judge, name: quality, weight: 0.3, requirements: [{name: correctness, description: "..."}]}
+  # - {source: reward_model, name: preference, weight: 0.5, url: "http://localhost:8100", model: <BT model id>}
+  # judge needs OPENROUTER_API_KEY; reward_model needs a served BT model (vllm --runner pooling / sglang --is-embedding)
+
+# --- Environment kwargs (per environment: agent-docs/training-methods/grpo/environments/README.md) ---
 # environment_kwargs:
-#   search_backend: duckduckgo   # For qa_search and open-book exam_qa (auto-detect when omitted)
-#   open_book: false             # For exam_qa (enable search tools)
-#   timeout_per_test: 5          # For code_contests / codeforces (seconds per test case)
-#   compiled_time_limit_scale: 1.0  # For code_contests / codeforces: compiled time limit as a multiple of the stated one
-#   mcp_server: filesystem       # For mcp (MCP server name)
-#   include_python_tools: false  # For qa_search (add Python tools)
-#   # Every environment (defaults from src/environments/base.py):
-#   reasoning_effort: null       # chat-template CoT steer: low / medium / high, random (drawn per episode) or null; code_contests defaults to medium
-#   reasoning_effort_profiles: {}  # per-level overrides merged over the class table, e.g. {high: {thinking_tokens: 16384}}; an unknown key raises
-#   carry_reasoning: false       # send the previous assistant turn's reasoning back to the engine with the conversation (vLLM only)
-#   max_length_cutoff_recoveries: null  # engine-cut turns an episode may recover from; null = every one within max_turns
-#   tool_reward_cap: null        # cap on one episode's summed tool_success_reward; null = tool_success_reward x max_turns
-#   # Native-tool environments (native_*, code_contests / codeforces, swe, exam_qa, mcp; envs/protocols/native.py):
-#   multi_turn_reward: 0.0       # bonus for an episode that made more than one tool call
-#   turn_overflow_penalty: 0.0   # magnitude charged when the episode burns max_turns
-#   no_tool_use_penalty: 0.0     # magnitude charged when the episode ends with 0 tool calls
+#   timeout_per_test: 5          # code_contests / codeforces, seconds per test case
+#   search_backend: duckduckgo   # qa_search, open-book exam_qa
+#   reasoning_effort: null       # every environment: low / medium / high, or random (drawn per episode)
+# Shared kwargs: agent-docs/training-methods/grpo/environments/README.md; native-tool shaping: .../environments/native-tool-use.md
 
 # --- Ray Workers (AsyncTrainingConfig fields) ---
 num_rollout_workers: 16
@@ -62,7 +42,7 @@ vllm_group_port: 51216  # NCCL group port for weight sync
 rollout_connection_timeout: 120.0
 sync_weights_every_n_steps: 1
 # model_name: null         # model name sent in the rollout requests; null = model_name_or_path
-# request_timeout: 120.0   # HTTP timeout per rollout-server request in seconds
+# request_timeout: 120.0   # seconds per rollout-server HTTP call
 # episode_timeout: 1200.0  # wall-clock deadline for one rollout episode in seconds; must stay below the NCCL watchdog
 # max_retries: 3           # retries after a failed rollout-server request (total attempts = max_retries + 1)
 # retry_base_wait: 1.0     # base wait in seconds for the exponential backoff between retries
@@ -78,13 +58,17 @@ sync_weights_every_n_steps: 1
 rollout_temperature: 0.7
 rollout_top_p: 0.95
 rollout_max_tokens: 8192
-# rollout_max_thinking_tokens: null   # per-turn reasoning-token budget; vLLM only, needs a server-side reasoning parser
-# rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request and applied to the trainer's own renders
-# rollout_stop_tokens: []             # special-token strings that end a turn's generation (e.g. gpt-oss "<|call|>")
-# train_on_sampled_tokens: true       # train on the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
-# max_train_row_tokens: null          # longest training row (prompt + completion tokens) a rank takes; null = the model's context window
-# reasoning_compliance_weight: 0.0    # weight of the reasoning-budget calibration reward (0 = off)
-# reasoning_compliance_under_use_weight: 0.3  # weight of the under-use side of that term, relative to the over-use side's 1.0
+# rollout_max_thinking_tokens: null   # per-turn reasoning-token budget; vLLM only
+# rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
+# rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
+# train_on_sampled_tokens: true       # the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
+# max_train_row_tokens: null          # longest training row a rank takes; null = the model's context window
+
+# --- Effort-length reward economy (agent-docs/training-methods/grpo/async-grpo/rollouts.md#effort-length-reward) ---
+# effort_length_penalty_k0: null      # capped, effort-conditioned price on reasoning tokens (null = off)
+# effort_length_penalty_c_max: 0.1    # that price's cap, in reward units
+# effort_length_floor_weight: 0.0     # weight of the under-use floor (0 = off)
+# effort_length_floor_budgets: 0.75   # the floor's reference, in per-turn thinking budgets
 
 # --- Prefetch (AsyncTrainingConfig fields) ---
 enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the
@@ -113,22 +97,17 @@ scale_rewards: batch     # global batch std; a per-group std divides by ~0 on a 
 # drop_degenerate_groups: true      # mask GRPO groups whose completions all scored the same reward out of the loss
 # use_chunked_grpo_logprobs: false  # vocab-chunked log-probs instead of full [B, T, vocab] logits (large-vocab models on long completions)
 # routing_replay: none              # MoE routing replay: none, recompute (R2), or rollout (R3; needs a capture-capable server)
-# --- Advantage shaping (AdvantageShapingArguments) ---
-# advantage_mode: mean              # group-baseline / negative-side advantage surgery: mean, qae, asymmetric, neg_mask_hard
-# advantage_quantile: 0.4           # QAE baseline quantile for advantage_mode: qae
-# advantage_pos_scale: 1.0          # positive-advantage multiplier for advantage_mode: asymmetric
-# advantage_neg_scale: 0.4          # negative-advantage multiplier for advantage_mode: asymmetric (0 = full negative mask)
-# advantage_hard_group_threshold: 0.5  # neg_mask_hard: a group is HARD when no member's gate reward reaches this
+# --- Advantage shaping (AdvantageShapingArguments; agent-docs/training-methods/grpo/async-grpo/objective.md#advantages) ---
+# advantage_mode: mean              # mean, qae (+advantage_quantile), asymmetric (+advantage_pos_scale,
+#                                     advantage_neg_scale; 0 = full negative mask), neg_mask_hard
+#                                     (+advantage_hard_group_threshold)
 # scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
-# --- IS trust region (engine<->trainer ratio; a band activates when both of its bounds are set) ---
-# isr_band_min: null                # token band: a corrected token whose raw ratio leaves [min, max] is masked
+# --- IS trust region (engine<->trainer ratio; all eight knobs: agent-docs/training-methods/grpo/async-grpo/objective.md#trust-region-masks) ---
+# isr_band_min: null                # token band on the raw ratio; a band arms only when both bounds are set
 # isr_band_max: null
-# isr_geo_band_min: null            # trajectory band: mask a whole trajectory whose exp(mean log-ratio) leaves [min, max]
+# isr_geo_band_min: null            # trajectory band on exp(mean log-ratio)
 # isr_geo_band_max: null
-# isr_veto_min: null                # mask a whole trajectory when any corrected token's raw ratio falls below this
-# isr_opsm_delta: null              # mask negative-advantage trajectories whose |mean log-ratio| exceeds this many nats
-# isr_engine_reference: false       # re-score every training row on the rollout engine under the just-synced weights for the mask stages
-# skip_update_masked_frac: null     # skip the optimizer step when more than this fraction of corrected trajectories or tokens is masked
+# isr_veto_min: null                # any corrected token below this raw ratio masks its whole trajectory
 
 # --- Training ---
 per_device_train_batch_size: 2
@@ -173,9 +152,5 @@ use_peft: false
 # lora_r: 64
 # lora_alpha: 128
 # lora_dropout: 0.05
-# lora_target_modules:
-# - q_proj
-# - k_proj
-# - v_proj
-# - o_proj
+# lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
 # lora_task_type: CAUSAL_LM

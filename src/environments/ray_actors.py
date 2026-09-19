@@ -37,6 +37,9 @@ from src.log import warn_once
 logger = logging.getLogger(__name__)
 
 _RETRYABLE_4XX = {408, 429}
+# vLLM answers 400 when a NaN log-prob keeps it from serialising its OWN response: the request was
+# valid and a fresh one succeeds, so it is retried like a 5xx rather than ending the episode.
+_ENGINE_SERIALIZATION_FAULT = "not JSON compliant"
 # Backends already warned that their completions carry no ``usage.completion_tokens`` (once per process).
 _COMPLETION_TOKENS_MISSING_WARNED: set[str] = set()
 
@@ -52,6 +55,7 @@ class RolloutHTTPError(RuntimeError):
     def __init__(self, status: int, backend: str, body: str):
         super().__init__(f"{backend} error (status {status}): {body}")
         self.status = status
+        self.body = body
 
 
 def _describe_exc(exc: BaseException) -> str:
@@ -67,10 +71,14 @@ def _describe_exc(exc: BaseException) -> str:
 def _is_client_error(exc: BaseException) -> bool:
     """Return True for non-retryable client errors (give up).
 
-    The status is read off :class:`RolloutHTTPError` rather than out of a message. Only genuine 4xx
-    (minus retryable 429/408) are terminal; anything that is not a rollout HTTP error is retryable.
+    Reads the status off :class:`RolloutHTTPError`, never out of a message: only genuine 4xx (minus
+    retryable 429/408) are terminal, and anything that is not a rollout HTTP error is retryable. The
+    one body it does read names an engine fault reported under a client status; misreading it costs
+    bounded retries of a request that then fails anyway, never an abandoned batch.
     """
     if not isinstance(exc, RolloutHTTPError):
+        return False
+    if _ENGINE_SERIALIZATION_FAULT in exc.body:
         return False
     return 400 <= exc.status < 500 and exc.status not in _RETRYABLE_4XX
 

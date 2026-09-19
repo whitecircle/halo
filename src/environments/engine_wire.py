@@ -172,9 +172,9 @@ def generation_control_fields(config: RolloutConfig, reasoning_effort: str | Non
                 config.backend,
                 "Per-effort thinking budget of %d tokens is NOT enforced on rollout_backend=%r "
                 "(thinking_token_budget is a vLLM-only request field): nothing caps reasoning "
-                "below max_tokens=%d. The budget still reaches the trajectory, so a run with "
-                "reasoning_compliance_weight > 0 prices CoT against it as a soft target; with "
-                "that weight at its default 0 the level steers only the chat template.",
+                "below max_tokens=%d. The level still reaches the chat template and the effort "
+                "length terms (effort_length_penalty_k0, effort_length_floor_weight), which price "
+                "reasoning per level without the engine's help.",
                 config.max_thinking_tokens,
                 config.backend,
                 config.max_tokens,

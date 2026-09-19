@@ -1,20 +1,12 @@
 #!/bin/bash
-# Patch script to disable openai_gptoss reasoning parser and harmony in vllm,
-# and route vllm's logging to stderr so --enable-log-requests / --enable-log-outputs are visible.
-#
-# Every target below is a file vllm 0.26.0 ships. Nothing is existence-gated: a missing target or an
-# unmatched form is a hard failure, so an upstream move is caught at build time rather than shipping
-# an unpatched server.
-#
-# Usage:
-#   ./docker/vllm/patches/patch_vllm_disable_gptoss.sh                      # auto-detect (interpreter's site-packages)
-#   ./docker/vllm/patches/patch_vllm_disable_gptoss.sh /path/to/site-packages/vllm  # explicit path
+# Disables vllm's openai_gptoss reasoning parser and harmony and routes vllm's logging to stderr, so
+# --enable-log-requests / --enable-log-outputs are visible. Every target is a file vllm 0.26.0 ships
+# and nothing is existence-gated: a missing target or an unmatched form fails the build instead of
+# shipping an unpatched server.
+#   ./docker/vllm/patches/patch_vllm_disable_gptoss.sh [/path/to/site-packages/vllm]  # default: auto-detect
 
 set -e
 
-# ---------------------------------------------------------------------------
-# Determine python command: prefer "python3", fall back to "python"
-# ---------------------------------------------------------------------------
 if command -v python3 &>/dev/null; then
     PY="python3"
 elif command -v python &>/dev/null; then
@@ -24,9 +16,6 @@ else
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Resolve vllm path: use argument or auto-detect
-# ---------------------------------------------------------------------------
 if [ -n "$1" ]; then
     VLLM_PATH="$1"
 else
@@ -43,9 +32,6 @@ if [ ! -d "$VLLM_PATH" ]; then
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Detect vllm version
-# ---------------------------------------------------------------------------
 VLLM_VERSION="$($PY -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")"
 echo "============================================"
 echo "  vllm version : $VLLM_VERSION"
@@ -67,13 +53,8 @@ require_file() {
     return 1
 }
 
-# ===========================================================================
-# Patch 1: force the harmony gates off in the serving + rendering files
-# ===========================================================================
-# Three spellings coexist in 0.26.0, so all three are applied to every file:
-#   A: `self.use_harmony = self.model_config...`  (responses/serving.py)
-#   B: `self.use_harmony = model_config...`       (renderers/online_{,de}renderer.py — local arg)
-#   C: `is_harmony=self.model_config...` kwarg    (chat_completion/serving.py, responses/serving.py)
+# Patch 1: force the harmony gates off in the serving + rendering files. Three spellings coexist in
+# 0.26.0, so all three seds run against every file.
 HARMONY_PATTERN_A='self\.use_harmony = self\.model_config\.hf_config\.model_type == "gpt_oss"'
 HARMONY_REPLACE_A='self.use_harmony = False  # self.model_config.hf_config.model_type == "gpt_oss"'
 HARMONY_PATTERN_B='self\.use_harmony = model_config\.hf_config\.model_type == "gpt_oss"'
@@ -85,8 +66,8 @@ HARMONY_REPLACE_C='is_harmony=False\1  # patched: was model_type == "gpt_oss"'
 # Idempotency markers:
 HARMONY_CHECK='self\.use_harmony = False.*# .*model_config\.hf_config'
 HARMONY_CHECK_C='is_harmony=False,\{0,1\}  # patched'
-# Any harmony gate keyed on gpt_oss, in whatever comparison form (==, in (...), startswith, …). Used
-# to tell "this file had nothing to patch" from "this file has a gate the sed forms did not match".
+# Any harmony gate keyed on gpt_oss, in whatever comparison form — tells "nothing to patch here"
+# apart from "a gate the sed forms did not match".
 HARMONY_GATE_ANY='(use|is)_harmony[[:space:]]*=[^#]*gpt_oss'
 
 # Unpatched, the gpt-oss path renders through openai_harmony and ignores the jinja chat template
@@ -117,9 +98,7 @@ for HFILE in "${HARMONY_FILES[@]}"; do
     fi
 done
 
-# ===========================================================================
-# Patch 2: reasoning/__init__.py - Comment out openai_gptoss parser
-# ===========================================================================
+# Patch 2: comment the openai_gptoss parser out of the reasoning registry.
 REASONING_INIT="$VLLM_PATH/reasoning/__init__.py"
 if require_file "reasoning parser registry" "$REASONING_INIT"; then
     echo "Patching $REASONING_INIT..."
@@ -140,10 +119,7 @@ if require_file "reasoning parser registry" "$REASONING_INIT"; then
     fi
 fi
 
-# ===========================================================================
-# Patch 3: envs.py - Default logging stream from stdout → stderr
-# vLLM defaults to stdout, but uvicorn and most servers log to stderr.
-# ===========================================================================
+# Patch 3: default the logging stream to stderr, where uvicorn and most servers log.
 ENVS_PY="$VLLM_PATH/envs.py"
 if require_file "logging stream default" "$ENVS_PY"; then
     echo "Patching $ENVS_PY..."
@@ -156,9 +132,7 @@ if require_file "logging stream default" "$ENVS_PY"; then
     fi
 fi
 
-# ===========================================================================
-# Patch 4: model_executor/models/config.py - Disable auto-setting reasoning_parser
-# ===========================================================================
+# Patch 4: stop config.py auto-setting the reasoning_parser.
 CONFIG_PY="$VLLM_PATH/model_executor/models/config.py"
 if require_file "reasoning_parser auto-set" "$CONFIG_PY"; then
     echo "Patching $CONFIG_PY..."
@@ -179,14 +153,9 @@ if require_file "reasoning_parser auto-set" "$CONFIG_PY"; then
     fi
 fi
 
-# ===========================================================================
-# Patch 5: unquantized MoE backend oracle — demote FlashInfer CUTLASS
-# ===========================================================================
-# FlashInfer CUTLASS unquantized MoE has known bf16 correctness issues (vLLM
-# already demotes it for Qwen3.5 + DP>1 a few lines down in the same file), and
-# it returns incorrect output for gpt-oss-20b bf16 unquantized MoE at any DP/TP.
-# Demote it to last priority so models that can use TRTLLM keep the fast kernel
-# and models whose layout TRTLLM rejects (gpt-oss) fall through to TRITON.
+# Patch 5: demote FlashInfer CUTLASS in the unquantized MoE oracle — its bf16 kernel returns garbage
+# for gpt-oss-20b at any DP/TP (vLLM already demotes it for Qwen3.5 + DP>1 in the same file), so
+# TRTLLM keeps priority and the layouts it rejects fall through to TRITON rather than CUTLASS.
 MOE_ORACLE="$VLLM_PATH/model_executor/layers/fused_moe/oracle/unquantized.py"
 if require_file "unquantized MoE oracle" "$MOE_ORACLE"; then
     echo "Patching $MOE_ORACLE..."
@@ -226,9 +195,7 @@ PY
     fi
 fi
 
-# ===========================================================================
-# Clean __pycache__ to ensure patched .py files take effect
-# ===========================================================================
+# Stale bytecode would shadow the patched .py files.
 echo "Cleaning __pycache__ for patched modules..."
 find "$VLLM_PATH" -type d -name __pycache__ -exec sh -c '
     for d; do
@@ -238,9 +205,7 @@ find "$VLLM_PATH" -type d -name __pycache__ -exec sh -c '
 ' _ {} +
 echo "  - Cleaned stale .pyc files"
 
-# ===========================================================================
-# Validation: verify every patch was applied correctly
-# ===========================================================================
+# Validation: every patch above must be readable back out of the tree.
 echo ""
 echo "============================================"
 echo "  Validating patches..."

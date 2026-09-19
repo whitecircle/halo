@@ -223,8 +223,8 @@ def test_columns_carry_the_quantities_their_names_claim():
 
     Every other test here compares the batched path against a per-micro-batch drain of the SAME
     implementation, so an error shared by both is invisible to them — swapping ``attended_tokens``
-    (attention mask, padding included) for the loss-token count is exactly the confusion
-    ``num_attended_tokens_seen`` was renamed to prevent, and it survives that comparison.
+    (attention mask, padding included) for the loss-token count is exactly the confusion the name
+    ``num_attended_tokens_seen`` guards against, and it survives that comparison.
     """
     chunk = SEQ // CP_SIZE
     # Attended < chunk, so the attention mask and the loss mask cover DIFFERENT token counts —

@@ -335,23 +335,32 @@ class PeftAdapterSaver:
         return {PeftAdapterSaver._normalize_cp_adapter_key(k): v for k, v in state_dict.items()}
 
     @staticmethod
-    def _cp_normalized_config(peft_config):
-        """The adapter config as a non-CP model reads it: ``exclude_modules`` respelled like the keys.
+    def _normalize_cp_module_path(path: str) -> str:
+        """:meth:`_normalize_cp_adapter_key` for a module path — a config entry rather than a tensor key."""
+        return PeftAdapterSaver._normalize_cp_adapter_key(_PEFT_KEY_PREFIX + path).removeprefix(_PEFT_KEY_PREFIX)
 
-        The exclusion scan ran on the CP-wrapped tree, so its paths carry the wrapper's extra ``model.``
-        level and ``.original_attention.`` segment; a plain reload matches none of them and PEFT then
-        injects into the very module the path excluded. A copy is written so the live config keeps the
-        spelling the wrapped model still has.
+    @staticmethod
+    def _cp_normalized_config(peft_config):
+        """The adapter config as a non-CP model reads it: module paths respelled like the keys.
+
+        Two fields carry paths of the tree PEFT injected into, the CP-wrapped one: the exclusion scan's
+        ``exclude_modules``, and ``target_modules`` once ``all-linear`` made PEFT rewrite it in place to
+        full module paths. Both carry the wrapper's extra ``model.`` level and ``.original_attention.``
+        segment; a plain reload matches none of them, so PEFT injects into the very module an exclusion
+        named and finds no target at all. A copy is written so the live config keeps the spelling the
+        wrapped model still has; suffix names (``q_proj``) pass through unchanged.
         """
-        paths = peft_config.exclude_modules
-        if not isinstance(paths, (list, tuple, set)):
-            return peft_config
-        config = copy.deepcopy(peft_config)
-        config.exclude_modules = sorted(
-            PeftAdapterSaver._normalize_cp_adapter_key(_PEFT_KEY_PREFIX + path).removeprefix(_PEFT_KEY_PREFIX)
-            for path in paths
-        )
-        return config
+        config = None
+        for field in ("exclude_modules", "target_modules"):
+            paths = getattr(peft_config, field, None)
+            if not isinstance(paths, (list, tuple, set)):
+                continue
+            plain = sorted(PeftAdapterSaver._normalize_cp_module_path(path) for path in paths)
+            if plain == sorted(paths):
+                continue
+            config = config or copy.deepcopy(peft_config)
+            setattr(config, field, plain)
+        return config or peft_config
 
 
 def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> None:

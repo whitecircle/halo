@@ -155,7 +155,7 @@ def test_the_excuse_is_derived_from_the_adapter_config():
     is exactly that. Read at the shared merge, which is where every merge tool's base load goes: the
     one call that derives it, and every base load below it forwarding what it was handed."""
     source = pathlib.Path(adapters.__file__)
-    (derived,) = _keyword_values(source, "_load_base_the_adapter_addresses", "excuse_task_head")
+    (derived,) = _keyword_values(source, "load_base_for_adapter", "excuse_task_head")
     assert not isinstance(derived, ast.Constant), (
         "adapter_supplies_task_head is passed as a literal — the excuse must be read off peft_config.modules_to_save"
     )

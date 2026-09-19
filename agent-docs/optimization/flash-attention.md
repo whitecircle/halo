@@ -239,4 +239,4 @@ The backward then recompiles every step: ~190 s/step vs ~10 s on gpt-oss-20b ep4
 
 ## Blackwell notes
 
-vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` (older FlashInfer 0.5.x had SM100 JIT failures; the toolkit vLLM image ships a newer FlashInfer but Flash Attention stays the safest default). See [Online GRPO](../training-methods/grpo/online-grpo.md#vllm-on-blackwell-b200).
+vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails on SM 10.0. See [Online GRPO](../training-methods/grpo/online-grpo.md#vllm-on-blackwell-b200).

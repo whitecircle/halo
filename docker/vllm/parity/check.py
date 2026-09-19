@@ -26,9 +26,8 @@ from vllm.model_executor.models.registry import ModelRegistry
 # The global attention geometry every vLLM loader reads off ``hf_text_config``. A config still
 # carrying transformers 5.16's ``per_layer_config`` is refused at parse on the pinned line; one whose
 # parse survives it raises AmbiguousGlobalPerLayerAttributeError on these reads instead. A field a
-# family does not spell (Step-3.7's vendor config names its own) is not a finding.
-# ``rope_parameters`` is the rope schema half: 5.16 exports spell RoPE there and vLLM 0.26.0 reads it
-# off the config, so a future divergence in that spelling fails the build rather than a live run.
+# family does not spell is not a finding. ``rope_parameters`` is the RoPE schema half: 5.16 exports
+# spell RoPE there and vLLM 0.26.0 reads it straight off the config.
 GEOMETRY_FIELDS = (
     "hidden_size",
     "num_hidden_layers",

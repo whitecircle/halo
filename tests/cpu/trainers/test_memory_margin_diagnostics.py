@@ -79,8 +79,8 @@ def test_primary_failure_banner_escapes_the_main_process_only_default(monkeypatc
     """The banner names the rank that OOMed, and this module logs through accelerate's
     ``MultiProcessAdapter``, which drops records on every non-main rank unless
     ``main_process_only=False``. On the default the banner prints only when rank 0 is the one that
-    died — never in the case it exists for, which is what left a real 4-rank OOM post-mortem with
-    peer watchdog timeouts and no primary cause."""
+    died — never in the case it exists for, leaving a post-mortem with peer watchdog timeouts and no
+    primary cause."""
     recorder = _RecordingLogger()
     monkeypatch.setattr("src.trainers.mixins.base.logger", recorder)
 

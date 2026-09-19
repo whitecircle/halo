@@ -9,7 +9,7 @@ Async GRPO metrics are namespaced by the question they answer. Rollout means are
 | `async/*` | rollout throughput | `mean_rollout_latency`; job totals `total_rollouts`, `cumulative_mean_rollout_latency`, `total_generation_tokens`; `prefetch_hit_rate`, `prefetch_hits` / `prefetch_misses` |
 | `episode/*` | agent behavior | `turns`, `generation_tokens` (+`_max`, `_p90`), `natural_termination_rate`, `truncation_rate`, `error_rate`, `length_cutoff_turns`, `empty_answer_rate`, `reasoning_cjk_rate`, `tool_calls`, `reward_scored` |
 | `outcome/*` | task success | `solve_rate`, plus per-env keys such as `test_pass_frac` |
-| `reward/*` | reward and decomposition | bare `reward` / `reward_std`; `within_group_std`; the components `turn_shaping`, `tool_shaping`, `objective`, the environment's own terms (`submission`, …) and each external term's `<name>`; `composition_residue`; the trainer's `calibration`, `token_cost` |
+| `reward/*` | reward and decomposition | bare `reward` / `reward_std`; `within_group_std`; the components `turn_shaping`, `tool_shaping`, `objective`, the environment's own terms (`submission`, …) and each external term's `<name>`; `composition_residue`; the trainer's `effort_length_penalty`, `effort_length_floor` |
 | `judge/*`, `reward_model/*` | external reward terms | `judge/<name>/<requirement>`, `judge/<name>/completion_tokens`, `judge/<name>/cost_usd`; `reward_model/<name>/logit` |
 | `logps/*` | policy confidence | `sampling_mean`; the related `kl`, `entropy`, `kl_clamp_frac` are unnamespaced |
 | `sampling/*` | engine/trainer agreement | `is_correction_active`, `logratio_mean`, `is_ratio_mean` / `is_ratio_max`, `is_correction_coverage`, `is_masked_frac`, `sampler_certain_frac`, `update_skipped`, `degenerate_group_frac`, `invalid_episode_frac`, `rows_over_cap_frac` |
@@ -20,7 +20,7 @@ Async GRPO metrics are namespaced by the question they answer. Rollout means are
 
 Under `sampling/*`, `is_correction_coverage` is the share of loss tokens the engine's sampling log-probs cover, `is_masked_frac` the share of those a mask stage zeroed, `is_ratio_mean` / `is_ratio_max` the surviving ratios, and `sampler_certain_frac` the policy tokens the engine emitted with probability 1, which carry no correction.
 
-Every episode's categorical facts slice the metrics: its resolved effort level under `effort/<level>/*`, and any string an environment stamps under `trajectory.info["slices"]` as `<slice>/<value>/*`. Code-contests stamps the submission language, giving `language/cpp/*`.
+Every episode's categorical facts slice the metrics: its resolved effort level under `effort/<level>/*`, and any string an environment stamps under `trajectory.info["slices"]` as `<slice>/<value>/*`. Code-contests stamps the submission language where the run offers a choice of them, giving `language/cpp/*`.
 
 Each slice carries `count`, `reward`, `generation_tokens`, `reasoning_tokens`, `turns`, `truncation_rate` and `solve_rate`, plus the environment's own `episode/*` keys with that prefix dropped (`effort/high/test_calls`).
 

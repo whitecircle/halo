@@ -1,11 +1,6 @@
 #!/bin/bash
-# Master runner for all MFU/TFLOPS benchmarks.
-#
-# Runs each benchmark at seq=4096 with default steps (10) and warmup (2).
-# Collects the headline summary lines (tokens/s/GPU, peak memory, step time) plus the
-# machine-readable __HALO_BENCH__ JSON sentinel from each run.
-#
-# Usage:
+# Master runner for the MFU/TFLOPS benchmarks: each at seq=4096 with the default steps and warmup,
+# collecting the headline summary lines plus the machine-readable __HALO_BENCH__ JSON sentinel.
 #   ./tests/gpu/profiling/run_all_benchmarks.sh [--gpus=N] [--ep=N] [--seq=N] [--steps=N]
 #   GPUS=8 EP=8 ./tests/gpu/profiling/run_all_benchmarks.sh
 set -e
@@ -14,10 +9,9 @@ cd "$(dirname "$0")/../../.."
 # sys.path[0], not the project root, so the root must be on PYTHONPATH.
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-# One home for master ports (tests/common/ports.py): a fixed literal races the previous launch,
-# whose rendezvous socket is still in TIME_WAIT after `cleanup`.
-# Assigned on its own line at the call site: a command substitution inside an argument list does not
-# trip `set -e`, so a failing allocation would hand torchrun a bare `--master_port=`.
+# One home for master ports (tests/common/ports.py): a fixed literal races the previous launch, whose
+# rendezvous socket is still in TIME_WAIT after `cleanup`. Assigned on its own line at every call
+# site — a command substitution inside an argument list does not trip `set -e`.
 alloc_port() { python -c 'from tests.common.ports import free_port; print(free_port())'; }
 
 GPUS=${GPUS:-2}
@@ -66,7 +60,6 @@ run_bench() {
     if output=$(timeout 600 torchrun --nproc_per_node=$GPUS --master_port="$port" \
         $script --seq $SEQ --steps $STEPS --warmup $WARMUP $extra_args 2>&1); then
         echo "$output"
-        # Extract summary lines
         local summary
         summary=$(echo "$output" | grep -E "__HALO_BENCH__|tokens/s/GPU|peak memory \(GB\)|avg step time|MFU %" || true)
         if [ -n "$summary" ]; then
@@ -86,29 +79,23 @@ echo "=========================================="
 echo "All Benchmarks (GPUs: $GPUS, EP: $EP, seq: $SEQ)"
 echo "=========================================="
 
-# Dense SFT (FSDP, no EP)
 run_bench "SFT Dense (FSDP)" \
     "tests/gpu/profiling/benchmark_sft_dense.py"
 
-# Dense SFT (TP=2)
 if [ "$GPUS" -ge 2 ]; then
     run_bench "SFT Dense (TP=2)" \
         "tests/gpu/profiling/benchmark_sft_dense.py" "--tp 2"
 fi
 
-# MoE SFT with EP
 run_bench "SFT MoE (EP=$EP)" \
     "tests/gpu/profiling/benchmark_sft_ep.py" "--ep $EP"
 
-# MoE SFT with EP+CP
 run_bench "SFT MoE (EP=$EP + CP=$EP)" \
     "tests/gpu/profiling/benchmark_sft_ep_cp.py" "--ep $EP --cp $EP"
 
-# SMPO with EP
 run_bench "SMPO MoE (EP=$EP)" \
     "tests/gpu/profiling/benchmark_smpo_ep.py" "--ep $EP"
 
-# SMPO with EP+CP
 run_bench "SMPO MoE (EP=$EP + CP=$EP)" \
     "tests/gpu/profiling/benchmark_smpo_ep_cp.py" "--ep $EP --cp $EP"
 

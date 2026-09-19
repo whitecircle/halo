@@ -1,12 +1,8 @@
-# vLLM 0.26.0 (CUDA 13) server image with the Halo weight-sync patches and the NCCL version from
-# uv.lock, so both ends of the sync load the same runtime.
-#
-# Over upstream vllm/vllm-openai: the phased weight-sync protocol the trainer drives, the EFA
-# userspace the cross-node weight-sync group rides (docker/efa/install_efa_userspace.sh), routed-experts
-# capture for R3 replay (`--enable-return-routed-experts`, needs `--moe-backend triton`) and the
-# parser plugins.
-# Build: make build-vllm. Serving flags and supported families:
-# agent-docs/infrastructure/rollout-servers.md
+# vLLM 0.26.0 (CUDA 13) server image for RL rollouts and NCCL weight sync (`make build-vllm`). Over
+# upstream vllm/vllm-openai it adds the phased weight-sync protocol the trainer drives, the parser
+# plugins, R3 routed-experts capture (`--enable-return-routed-experts`, needs `--moe-backend
+# triton`), the NCCL wheel at uv.lock's exact pin so both ends load one runtime, and the shared EFA
+# userspace. Serving flags and supported families: agent-docs/infrastructure/rollout-servers.md
 
 ARG VLLM_VERSION=0.26.0
 FROM vllm/vllm-openai:v${VLLM_VERSION}

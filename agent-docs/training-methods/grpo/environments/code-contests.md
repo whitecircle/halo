@@ -15,7 +15,7 @@ It speaks native tool calls, so the server needs a tool-call parser for the mode
 
 ```yaml
 environment_type: codeforces
-max_turns: 14                # the shipped value; the class default is 15
+max_turns: 14                # 14 in most recipes, 16 in the curriculum's stage-2 and stage-3 recipes; the class default is 15
 rewards:
   - source: environment      # the pass fraction of the submitted solution
     exponent: 2.0            # convex partial credit: half-right earns a quarter
@@ -26,8 +26,8 @@ environment_kwargs:
   verdict_detail: outcome
   reasoning_effort: random
   reasoning_effort_profiles:
-    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
+    low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 2}
+    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
 ```
 
@@ -66,7 +66,7 @@ constructor's budgets stand.
 
 ## Tools
 
-- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. Past `max_test_calls` a call is refused.
+- The scratchpad — `python_repl` when the run fixes `python`, else `run_code`. It runs a program through the grading sandbox, standard library included, on the `stdin` the call supplies (empty by default), so the model can feed it the statement's sample input or its own; it never sees the graded tests. Each call is one-shot — nothing a run writes survives into the next. A run with no `stdin` that ends in an error or in no output says so in its result, since a program starved of input fails without naming the cause. Past `max_test_calls` a call is refused.
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. Reaching `max_submissions` ends the episode.
 
 A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. With a
@@ -107,6 +107,7 @@ resubmission penalty and the tool shaping still apply.
 | `reward/execution` | `execution_progress_reward` | `0` | × the fraction of the whole test pool that ran cleanly |
 | `reward/tested_submission` | `tested_submission_reward` (a profile key) | unset | once, if a scratchpad run preceded the first submission |
 | `reward/resubmission` | `resubmission_penalty` | `0` | −1 × each admitted `submit_solution` call after the first |
+| `reward/resubmission` | `improved_resubmission_refund` | `0` | the share of that price a resubmission earns back by beating every earlier pass fraction |
 | `reward/tool_shaping` | `multi_turn_reward` | `0` | >1 tool call and a real submission |
 | `reward/tool_shaping` | `no_tool_use_penalty` / `turn_overflow_penalty` | `0` | zero tool calls / burning `max_turns` |
 | `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per executed call; this env zeroes the protocol's 0.05 / 0.1 |
@@ -117,6 +118,21 @@ is the anti-sparsity signal: where every completion fails, it separates runnable
 crashes. Components log as `reward/*` and sum exactly to the reward. A `judge` or `reward_model`
 term reads the submitted program as a fenced code block, not the tool-call turn that carried it
 ([Reward Terms](../rewards.md#environment-arm)).
+
+A flat resubmission price lands on a fix and on a re-roll alike, and a policy that always resubmits
+after a failure never samples the alternative. With `improved_resubmission_refund` above zero a
+resubmission that beats every earlier result costs `(1 − refund) ×` the price, one that does not costs
+all of it, and the task message states the rule beside the budgets, so stopping on a good partial is
+an option the policy can weigh. Keep the refund under `1`: a free rescue scores level with a first-try
+solve. `episode/resubmission_improved` is the share of resubmissions that improved.
+
+The trainer's two effort length terms sit outside these components, as `reward/effort_length_penalty`
+and `reward/effort_length_floor` ([Effort length reward](../async-grpo/rollouts.md#effort-length-reward));
+the floor's reference is `0.75 ×` each level's own `thinking_tokens`. The recipes keep their sum
+under the resubmission price, so how long an episode reasons never outweighs whether it resubmits;
+with `submission_reward` and `no_tool_use_penalty` at `0.1` each, a graded submission that passes
+nothing still scores above an episode that never attempts.
+`tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls`,
 `episode/tested_before_submission` (over submitting episodes, the rate the tested-submission bonus

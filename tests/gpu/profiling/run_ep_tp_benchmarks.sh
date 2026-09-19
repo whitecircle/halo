@@ -1,14 +1,6 @@
 #!/bin/bash
-# EP+TP benchmark runner.
-#
-# Runs SFT benchmarks with combined Expert Parallelism and Tensor Parallelism
-# at different EP/TP size combinations. Requires MoE model weights and DeepEP.
-#
-# EP+TP mode: attention layers are sharded via TP (DTensor), experts are
-# distributed via EP (DeepEP all-to-all). TP must be node-local. DP size
-# is reduced by TP (world_size / tp_size).
-#
-# Usage:
+# EP+TP benchmark runner: SFT at several EP/TP combinations — attention sharded by TP (DTensor,
+# node-local, shrinks DP), experts distributed by EP. Needs MoE weights and DeepEP.
 #   ./tests/gpu/profiling/run_ep_tp_benchmarks.sh [--gpus=N] [--seq=N] [--steps=N] [--quick]
 #   GPUS=8 ./tests/gpu/profiling/run_ep_tp_benchmarks.sh
 set -e
@@ -17,10 +9,9 @@ cd "$(dirname "$0")/../../.."
 # sys.path[0], not the project root, so the root must be on PYTHONPATH.
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-# One home for master ports (tests/common/ports.py): a fixed literal races the previous launch,
-# whose rendezvous socket is still in TIME_WAIT after `cleanup`.
-# Assigned on its own line at the call site: a command substitution inside an argument list does not
-# trip `set -e`, so a failing allocation would hand torchrun a bare `--master_port=`.
+# One home for master ports (tests/common/ports.py): a fixed literal races the previous launch, whose
+# rendezvous socket is still in TIME_WAIT after `cleanup`. Assigned on its own line at every call
+# site — a command substitution inside an argument list does not trip `set -e`.
 alloc_port() { python -c 'from tests.common.ports import free_port; print(free_port())'; }
 
 GPUS=${GPUS:-8}
@@ -114,8 +105,8 @@ fi
 
 # No half-EP cell: ep_size < world with ep_size > 2 forms multiple >2-rank dispatch groups whose
 # combine barriers race FSDP2's DP-wide NCCL, and ParallelismConfig rejects it at config time (TP
-# does not shrink ep_group_size, so ep4+tp2 on 8 lands on the same rejection). Sharding experts
-# finer than the domain is ETP's job, not EP+TP's.
+# does not shrink ep_group_size, so ep4+tp2 on 8 lands there too). Sharding experts finer than the
+# domain is ETP's job.
 
 # Long sequence comparison (if not in quick mode)
 if [ "$QUICK" = false ] && [ "$GPUS" -ge 4 ]; then

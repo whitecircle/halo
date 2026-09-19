@@ -43,8 +43,7 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
     # the shared body runs as plain top-k. The block's own ``routed_scaling_factor`` (config
     # ``moe_router_scaling_factor``), which upstream applies to the routed-expert sum, resolves into
     # the per-token weights instead: equivalent, since the combine is linear in the expert outputs.
-    # It stays required rather than defaulted: at 1.0 every routed weight misses the model's own
-    # ``moe_router_scaling_factor``.
+    # Required rather than defaulted: at 1.0 every routed weight misses the model's own factor.
     _TOPK_WEIGHT_NORM_EPS = 0.0
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group", "norm_topk_prob")
 

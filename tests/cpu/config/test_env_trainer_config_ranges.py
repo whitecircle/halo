@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Parse-time range checks on ``AsyncTrainingConfig`` that used to live in the trainer, or nowhere.
+"""Parse-time range checks on ``AsyncTrainingConfig``.
 
 * ``skip_update_masked_frac`` is a fraction in (0, 1]: 0 trips the breaker on every step, above 1 never.
   Checked with the other knobs at parse time, not at trainer construction after the servers are up.

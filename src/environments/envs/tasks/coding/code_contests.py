@@ -31,7 +31,13 @@ from src.environments.envs.tasks.coding.grading import (
     GradingSpec,
     grade_solution,
 )
-from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, LanguageSpec, SandboxExecutor, require_language
+from src.environments.sandbox.base import (
+    REPL_NO_OUTPUT_MESSAGE,
+    SANDBOX_DEFAULT_TIMEOUT,
+    LanguageSpec,
+    SandboxExecutor,
+    require_language,
+)
 from src.environments.sandbox.repl import run_code_via_sandbox
 from src.environments.sandbox.resolve import resolve_sandbox
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolArgumentError, ToolParameter
@@ -49,6 +55,9 @@ REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float]] = {
 DEFAULT_REASONING_EFFORT = "medium"
 
 SUBMIT_TOOL = "submit_solution"
+# Pass fraction of each graded submission, in order: what the resubmission price reads improvement off.
+SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
+NO_STDIN_NOTE = "(No stdin was passed to this run; give the program its input in the `stdin` argument.)"
 
 
 class CodeContestsEnvironment(NativeToolUseEnvironment):
@@ -121,6 +130,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         submission_reward: float = 0.0,
         execution_progress_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
+        improved_resubmission_refund: float = 0.0,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         **kwargs,
@@ -148,6 +158,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             execution_progress_reward=execution_progress_reward,
             resubmission_penalty=resubmission_penalty,
         )
+        if not 0.0 <= improved_resubmission_refund <= 1.0:
+            raise ValueError(
+                f"improved_resubmission_refund is a fraction of resubmission_penalty in [0, 1], "
+                f"got {improved_resubmission_refund}"
+            )
         # The canonical names the model may name; ``language`` is the run's default (and the grading
         # contract's), the only one when the run fixes it.
         self.languages = tuple(spec.name for spec in specs)
@@ -160,6 +175,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # Each graded submission after the first is a probe of the judge. Free, and with only the last
         # one counting, probing out-earns testing in the scratchpad within a GRPO group at every effort.
         self.resubmission_penalty = resubmission_penalty
+        # The share of that price a resubmission earns back by beating every earlier result: a fix is
+        # then cheap and a re-roll is not, and the task message states the rule so stopping is an option.
+        self.improved_resubmission_refund = improved_resubmission_refund
         # Reaching the cap ends the episode; further calls are rejected as tool errors.
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
@@ -346,6 +364,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         """Graded-submission calls admitted so far (the protocol counts a call before its handler runs)."""
         return trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(SUBMIT_TOOL, 0)
 
+    @staticmethod
+    def _improved_resubmissions(trajectory: Trajectory) -> int:
+        """Graded submissions after the first whose pass fraction beat every earlier one."""
+        fracs = trajectory.info.get(SUBMISSION_PASS_FRACS_KEY, [])
+        return sum(1 for i in range(1, len(fracs)) if fracs[i] > max(fracs[:i]))
+
     def _test_calls(self, trajectory: Trajectory) -> int:
         """Scratchpad calls admitted so far."""
         return trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(self.test_tool_name, 0)
@@ -367,9 +391,14 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         trajectory = self.active_trajectory()
         if trajectory is not None:
             self._note_language(trajectory, language)
-        return run_code_via_sandbox(
-            code, sandbox=self.sandbox, timeout=self.repl_timeout, language=language, stdin=str(stdin or "")
+        stdin = str(stdin or "")
+        result = run_code_via_sandbox(
+            code, sandbox=self.sandbox, timeout=self.repl_timeout, language=language, stdin=stdin
         )
+        # A program that reads input it was not given ends in a parse error or in silence, neither of
+        # which names the cause; the run is spent either way.
+        starved = not stdin and (result == REPL_NO_OUTPUT_MESSAGE or result.splitlines()[-1].startswith("Error:"))
+        return f"{result}\n{NO_STDIN_NOTE}" if starved else result
 
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade a submission against the active episode's tests in ``language`` (the run's, or the
@@ -393,6 +422,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         trajectory.info["tests_graded"] = grade.graded
         trajectory.info["grading_budget_hit"] = grade.budget_hit
         trajectory.info["submission_result"] = grade.details
+        trajectory.info.setdefault(SUBMISSION_PASS_FRACS_KEY, []).append(
+            grade.passed / grade.total if grade.total else 0.0
+        )
         # The graded artifact an external scorer reads (``_scoring_sample``); private, so it leaves
         # the record with the grading payload.
         trajectory.info["_submitted_code"] = code
@@ -446,7 +478,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             traj.info["episode_tested_submission_reward"] = float(profile["tested_submission_reward"])
         if not self._profiles_bind_interaction:
             return
-        last_wins = " (the last one is the graded result)" if max_subs > 1 else ""
+        priced = self.resubmission_penalty > 0 and self.improved_resubmission_refund > 0
+        price_rule = "; a resubmission that does not beat your best result so far costs part of the score"
+        last_wins = f" (the last one is the graded result{price_rule if priced else ''})" if max_subs > 1 else ""
         contract = (
             f"\n\nBudgets for this task: {max_subs} graded submission{'s' if max_subs != 1 else ''}"
             f"{last_wins}, {max_tests} scratchpad run{'s' if max_tests != 1 else ''}."
@@ -537,7 +571,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             if graded_content and info.get("tested_before_submission")
             else 0.0
         )
-        resubmission = -self.resubmission_penalty * max(0, self._submissions(trajectory) - 1)
+        resubmission = -self.resubmission_penalty * (
+            max(0, self._submissions(trajectory) - 1)
+            - self.improved_resubmission_refund * self._improved_resubmissions(trajectory)
+        )
         return EpisodeGrade(
             objective,
             {
@@ -579,6 +616,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         if submissions > 0:
             # Mean over submitting episodes = the test-first rate the tested-submission bonus targets.
             metrics["episode/tested_before_submission"] = 1.0 if info.get("tested_before_submission") else 0.0
+        if submissions > 1:
+            # Over resubmitting episodes: the share of resubmissions that beat every earlier result.
+            metrics["episode/resubmission_improved"] = self._improved_resubmissions(trajectory) / (submissions - 1)
         if self.chooses_language:
             metrics["episode/language_switches"] = float(info.get("language_switches", 0))
         if graded and tests_total > 0:

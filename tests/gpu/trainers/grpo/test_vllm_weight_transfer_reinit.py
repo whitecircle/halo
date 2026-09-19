@@ -2,14 +2,14 @@
 """Repeated trainer connect → sync → disconnect cycles against ONE live vLLM server.
 
 A long-lived server outlives its trainers: a crashed run resumed from a checkpoint, or a sequence of
-short runs, reconnects to the same engine. Both ends of that weight-transfer group used to strand
-their ``PyNcclCommunicator`` on every cycle — the class has no ``__del__``, stock vLLM 0.26.0's
-``init_transfer_engine`` only dereferences the previous one, and this client's ``close_communicator``
-did the same — so each cycle left a live NCCL communicator behind until ``ncclCommInitRank`` failed
-outright, while ``/health`` kept answering 200. The server half is fixed by
-``docker/vllm/patches/vllm_weight_transfer_reinit_patch.py``, the trainer half by
-``VLLMWeightSyncClient.close_communicator``; the device-memory checks below are what prove both, and
-the served-policy checks prove the destroy did not break re-init itself.
+short runs, reconnects to the same engine. Neither end of that weight-transfer group destroys its
+``PyNcclCommunicator`` on its own — the class has no ``__del__``, and stock vLLM 0.26.0's
+``init_transfer_engine`` only dereferences the previous one — so without
+``docker/vllm/patches/vllm_weight_transfer_reinit_patch.py`` (server half) and
+``VLLMWeightSyncClient.close_communicator`` (trainer half) every cycle strands a live NCCL
+communicator until ``ncclCommInitRank`` fails outright, while ``/health`` keeps answering 200. The
+device-memory checks below prove both halves; the served-policy checks prove the destroy does not
+break re-init itself.
 
 Requires the vLLM container serving the SAME dense checkpoint on a GPU outside
 ``CUDA_VISIBLE_DEVICES`` (a rank cannot NCCL broadcast to itself).

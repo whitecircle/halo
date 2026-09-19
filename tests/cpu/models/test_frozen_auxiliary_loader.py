@@ -49,14 +49,10 @@ AUX_MODEL = "org/auxiliary"
 FROZEN_LOAD_STEPS = ("resolve_attn_implementation", "apply_sinks_policy")
 
 # Allowlist, not a list of known offenders: the sweep below is over the whole tree, so a new copy is
-# caught by default. attention.py defines the resolver and gpt_oss_sinks.py the policy;
-# model_preparation.py owns ``finalize_run_model``, the one post-load application BOTH loaders run;
-# frozen_models.py is the frozen (unparallelized) loader; model_loading.py is the POLICY loader,
-# re-running the resolver AFTER the parallelism-specific overrides (CP's flex→FA switch, EP's
-# flex-compile disable); embedding.py applies the policy to the backbone SentenceTransformer returns;
-# tool_io.py, patch_vocab.py and reset_sinks.py apply a RECORDED or explicit policy to a
-# checkpoint on disk — reset_sinks.py exists to apply exactly one, so it reaches the shared seam
-# rather than filling ``.sinks`` by name behind it.
+# caught by default. attention.py and gpt_oss_sinks.py define the two steps; the loaders and the
+# shared ``finalize_run_model`` apply them, with model_loading.py re-running the resolver AFTER the
+# parallelism-specific overrides (CP's flex→FA switch, EP's flex-compile disable). The rest apply a
+# RECORDED or explicit policy to a checkpoint on disk rather than filling ``.sinks`` by name behind it.
 FROZEN_LOAD_STEP_OWNERS = frozenset(
     {
         "src/models/patches/attention.py",

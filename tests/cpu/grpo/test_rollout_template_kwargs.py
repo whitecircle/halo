@@ -50,5 +50,16 @@ def test_run_wide_template_kwargs_refuse_the_per_episode_variables():
         AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
 
 
+def test_run_wide_template_kwargs_must_be_a_mapping():
+    """A JSON string satisfies ``in`` and ``set()`` character-wise, so the per-episode key check alone
+    passes it through: the run then loads the model and brings up the servers before the trainer
+    rejects the value."""
+    for wrong in ('{"preserve_thinking": true}', ["preserve_thinking"], 3):
+        with pytest.raises(ValueError, match="must be a mapping"):
+            AsyncTrainingConfig(rollout_chat_template_kwargs=wrong)
+    kwargs = {"preserve_thinking": True}
+    assert AsyncTrainingConfig(rollout_chat_template_kwargs=kwargs).rollout_chat_template_kwargs == kwargs
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

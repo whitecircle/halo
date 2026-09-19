@@ -6,7 +6,7 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
 chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
-force_chat_template: true      # the checkpoint ships the stock template; serve with --chat-template on the same file
+force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
 # No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag still runs
 # transformers' load-balancing loss — a layers x tokens x top_k x experts int64 one-hot, tens of GB here.
@@ -19,38 +19,39 @@ ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only; elastic's
                                    # breaks at these tokens/rank
 fp32_router: true
 fp32_experts: true
-fp32_non_ep_params: false          # dense params stay bf16
+fp32_non_ep_params: false          # dense params stay bf16 (memory)
 
 # --- Full fine-tune (no PEFT) ---
 use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 14               # the high profile's 3 submissions + 6 test calls, 2 cut-turn recoveries and
-                            # the closing turn; a cut turn costs a turn, not the episode
+max_turns: 15               # the high profile's 3 submissions + 6 test calls, a cut-turn recovery and the
+                            # closing turn, with slack for failed calls; a cut turn costs a turn, not the episode
 environment_kwargs:
   language: python
   carry_reasoning: true      # each turn sees the reasoning of the turn before it
   timeout_per_test: 5
   stop_on_first_failure: false
-  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a budget stop scores the graded prefix
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
   max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
   # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
-    low: {thinking_tokens: 8192, max_submissions: 2, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, max_submissions: 3, max_test_calls: 4}
+    low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 2}
+    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
     high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
-  verdict_detail: outcome    # FAIL / pass count only; expected/got would make the judge a free test oracle
+  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract); expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
+  improved_resubmission_refund: 0.75  # of that price, earned back by beating every earlier result: a fix is cheap, a re-roll is not
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
   multi_turn_reward: 0       # off: a bounty for a second call pays a judge probe like a scratchpad run
   tool_success_reward: 0     # any per-call pay is farmable by duplicate re-runs
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged when the episode burns max_turns
-  tool_error_penalty: 0.05   # magnitude, >= 0 — applied as minus per call that fails to parse/execute
+  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
 # --- Rewards ---
 rewards:
@@ -59,7 +60,7 @@ rewards:
 
 # --- Ray Workers ---
 num_rollout_workers: 32
-max_concurrent_rollouts: 50  # = eval_rollout_batch_size: the eval round must fit one wave; training needs fewer
+max_concurrent_rollouts: 50  # = eval_rollout_batch_size: the eval round must fit one wave
 
 # --- vLLM Servers ---
 rollout_server_configs:
@@ -68,8 +69,8 @@ rollout_server_configs:
 - url: "http://localhost:8001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 1200.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence
-                              # decode speed at peak concurrency
+request_timeout: 1200.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence decode
+                              # speed at peak concurrency (agent-docs/training-methods/grpo/async-grpo/performance.md#sizing-a-run)
 max_retries: 1                # a timeout re-runs the WHOLE episode; attempts x request_timeout must stay
                               # under the retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
@@ -79,8 +80,10 @@ rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS refere
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_max_tokens: 24000              # per-turn total: thinking budget + a 6k answer headroom
 rollout_max_thinking_tokens: 18000     # global CoT ceiling >= the profiles' high
-reasoning_compliance_weight: 0.15            # a turn that thinks past 0.9x its budget pays up to this, averaged over the episode's turns
-reasoning_compliance_under_use_weight: 0     # no floor: a short repair turn after a verdict is not under-use
+effort_length_penalty_k0: 0.03         # reasoning tokens are priced per level: -min(c_max, k(level) x tokens / 8192), with k
+effort_length_penalty_c_max: 0.1       #   falling by e per 25 effort units (low 25, medium 50, high 100): low pays ~20x high
+effort_length_floor_weight: 0.05       # the one term that pays for MORE reasoning: an episode whose turns together reason
+                                       #   under 0.75x one turn's thinking_tokens pays up to this; price + floor < a resubmission
 
 # --- Prefetch ---
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
@@ -106,8 +109,8 @@ epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
 isr_engine_reference: false  # the engine re-score costs server headroom (--gpu-memory-utilization <= 0.80)
-isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained masking
-isr_geo_band_max: 1.05       #   at low entropy fix the disagreement, never widen the band
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained
+isr_geo_band_max: 1.05       #   masking fix the disagreement, never widen the band
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
@@ -136,19 +139,19 @@ optim: adamw_torch_fused    # AdamWBF16 (bf16 master + stochastic rounding)
 moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: true       # EP requires reentrant GC
+  use_reentrant: true       # a MoE runs reentrant GC (the trainer force-promotes false)
 fp32_grad_reduce: true
 
 # --- Output ---
 output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep4
 save_strategy: steps
 save_steps: 50              # full checkpoints are ~70 GB — coarser cadence, tighter limit than LoRA
-save_total_limit: 2         # 2 kept + 1 writing fits the volume at the size above
+save_total_limit: 2         # archive the eval-peak checkpoint before it rotates out
 
 # --- Eval (held-out test split, 400 problems, pass@1) ---
 eval_strategy: steps
 eval_steps: 50
-eval_on_start: true         # base-policy reference before the first update
+eval_on_start: true         # eval the starting checkpoint
 
 # --- Logging ---
 logging_steps: 1

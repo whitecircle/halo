@@ -115,6 +115,35 @@ def _assert_sinks_reset(directory, source_sinks: dict[str, torch.Tensor]) -> Non
     assert written["model.embed_tokens.weight"].shape == (VOCAB_SIZE, HIDDEN_SIZE)
 
 
+def test_a_publish_that_fails_part_way_leaves_the_staged_checkpoint_whole(tmp_path, monkeypatch):
+    """Under ``--in_place`` the staged copy is the only complete checkpoint. Publishing by moving the
+    staged entries empties it as the swap proceeds, so a failure part-way leaves neither directory
+    holding a whole checkpoint; cloning each entry first keeps the staged one intact to recover from."""
+    staging, target = tmp_path / f"out{STAGING_SUFFIX}", tmp_path / "out"
+    staging.mkdir()
+    names = sorted(f"model-{i}.safetensors" for i in range(6))
+    for name in names:
+        (staging / name).write_text(name)
+
+    real_replace, calls = os.replace, []
+
+    def replace_failing_part_way(src, dst):
+        calls.append(dst)
+        if len(calls) == 3:
+            raise PermissionError(13, "Permission denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_failing_part_way)
+    with pytest.raises(RuntimeError, match="the complete, verified checkpoint is in"):
+        reset_sinks_mod._swap_staged_checkpoint(staging, target)
+    monkeypatch.undo()
+
+    assert sorted(p.name for p in staging.iterdir()) == names, (
+        "a publish that failed part way left the staged checkpoint incomplete or littered with clones"
+    )
+    assert all((staging / name).read_text() == name for name in names), "a staged entry was corrupted"
+
+
 def test_the_single_file_branch_sweeps_the_previous_runs_leftovers(tmp_path):
     """The branch that clears nothing on its own: it copies the source directory over and writes one
     ``model.safetensors``, so a complete previous sharded save survives it untouched — index, shards
@@ -367,10 +396,10 @@ def test_both_branches_preflight_the_full_checkpoint_load(tmp_path, monkeypatch,
 
 
 def test_an_unrecognized_sink_layout_raises_instead_of_saving_live_sinks(tmp_path, monkeypatch):
-    """THE regression the shared policy closes: this tool used to fill ``.sinks`` parameters by name,
-    so a layout its own walk could not resolve simply reset nothing — and the tool then wrote, swept
-    and reported a "reset" checkpoint whose sinks were untouched. Routed through the trainers'
-    ``apply_sinks_policy``, a sinks-carrying model the walk finds no attention layers on is a raise."""
+    """Filling ``.sinks`` parameters by name here would let a layout the walk cannot resolve reset
+    nothing, and the tool would still write, sweep and report a "reset" checkpoint whose sinks are
+    untouched. Routed through the trainers' ``apply_sinks_policy``, a sinks-carrying model the walk
+    finds no attention layers on is a raise."""
     from src.models.patches import gpt_oss_sinks
 
     source, out = tmp_path / "src", tmp_path / "out"

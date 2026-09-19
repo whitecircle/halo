@@ -118,8 +118,8 @@ def test_every_whole_model_filename_answers_both_probes_the_same_way(tmp_path, f
     """The stats-only probe and its safetensors-only mode are ONE list of filenames.
 
     The lazy gate asks the narrower question (a legacy ``.bin`` is a whole-model checkpoint it cannot
-    read), and it used to ask it over its own copy of the names — so a new whole-model filename would
-    land in one probe and silently route every lazy load down the eager fallback.
+    read) but must ask it over the SAME list: over its own copy of the names, a new whole-model
+    filename lands in one probe alone and silently routes every lazy load down the eager fallback.
     """
     (tmp_path / filename).write_bytes(b"")
     directory = str(tmp_path)

@@ -29,12 +29,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Layer classes whose weight loads bypass the reload lifecycle:
-#   FusedMoE / RoutedExperts — expert-weight owners; gpt-oss loads them by direct ``copy_``, and
-#     excluding RoutedExperts keeps other families' in-place ``weight_loader`` loads live too
-#   OAIAttention — holds gpt-oss ``sinks`` (direct copy)
-#   Gemma4Router — a partial ``scale`` load takes layerwise's "delayed processing" branch, which
-#     materializes the non-checkpoint ``root_size`` buffer as uninitialized memory into the live one
+# Layer classes whose weight loads bypass the reload lifecycle: FusedMoE / RoutedExperts (expert
+# owners; gpt-oss loads them by direct ``copy_``, and excluding RoutedExperts keeps other families'
+# in-place ``weight_loader`` loads live), OAIAttention (gpt-oss ``sinks``, direct copy) and
+# Gemma4Router, whose partial ``scale`` load takes layerwise's delayed-processing branch and
+# materializes the non-checkpoint ``root_size`` buffer from uninitialized memory.
 SKIP_LAYER_NAMES = frozenset({"FusedMoE", "RoutedExperts", "OAIAttention", "Gemma4Router"})
 
 _APPLIED = False

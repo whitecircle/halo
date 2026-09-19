@@ -2,10 +2,10 @@
 """A reasoning-consuming knob with no captured reasoning warns once per run.
 
 Reasoning reaches an assistant turn only through the rollout server's reasoning parser. Without one,
-``reasoning_compliance_weight > 0`` scores every turn as maximal under-use and ``carry_reasoning``
-sends nothing back — both silently. The trainer warns once, at the point the calibration is applied,
-when a step's assistant turns carry no reasoning while either knob is on; a step with reasoning, a
-step with no assistant turn, or a run with both knobs off warns nothing.
+the effort length floor scores every episode as maximal under-use, the length price charges nothing,
+and ``carry_reasoning`` sends nothing back — all silently. The trainer warns once, at the point the
+length terms are applied, when a step's assistant turns carry no reasoning while either knob is on; a
+step with reasoning, a step with no assistant turn, or a run with both knobs off warns nothing.
 
     python tests/cpu/grpo/test_env_trainer_reasoning_warning.py
 """
@@ -31,9 +31,9 @@ class _StubTokenizer:
         return {"input_ids": [0] * len(text)}
 
 
-def _trainer(compliance_weight: float, carry_reasoning: bool):
+def _trainer(floor_weight: float, carry_reasoning: bool):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncTrainingConfig(reasoning_compliance_weight=compliance_weight)
+    trainer.async_config = AsyncTrainingConfig(effort_length_floor_weight=floor_weight)
     trainer._tokenizer = _StubTokenizer()
     attach_world_metrics(trainer)
     trainer._metrics = {"train": defaultdict(list)}
@@ -52,14 +52,14 @@ def _warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "reasoning" in r.getMessage()]
 
 
-def test_calibration_with_no_captured_reasoning_warns_once_per_run(caplog):
+def test_length_terms_with_no_captured_reasoning_warn_once_per_run(caplog):
     trainer = _trainer(0.15, carry_reasoning=False)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         for _ in range(2):
             trainer._build_rollout_rewards(_rollouts([None, None]), torch.device("cpu"))
             flushed_metrics(trainer)  # the step boundary: a second record before it is refused
     assert len(_warnings(caplog)) == 1
-    assert "reasoning_compliance_weight" in _warnings(caplog)[0]
+    assert "the effort length terms" in _warnings(caplog)[0]
     assert "carry_reasoning" not in _warnings(caplog)[0]
 
 

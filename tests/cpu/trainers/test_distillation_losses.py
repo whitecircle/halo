@@ -372,7 +372,7 @@ def test_slim_is_the_documented_exception_and_keeps_the_unscaled_core():
 
 
 def test_soft_cross_entropy_and_jsd_carry_the_temperature_squared_prefactor():
-    """The two losses that used to omit it, against their own unscaled definitions."""
+    """The two temperature-scaled losses, against their own unscaled definitions."""
     t = 3.0
     unscaled_ce = -(torch.softmax(LOGITS_B / t, dim=-1) * torch.log_softmax(LOGITS_A / t, dim=-1)).sum()
     assert torch.allclose(

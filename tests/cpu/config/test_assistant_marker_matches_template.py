@@ -42,6 +42,10 @@ _MULTI_TURN = [
     {"role": role, "content": f"{role[0]}{i}"} for i in range(1, _TURNS + 1) for role in ("user", "assistant")
 ]
 
+# What a single-turn template's own guard raises. Any other TemplateError is a template that broke,
+# not one refusing the shape by design, and must fail rather than skip.
+_SINGLE_TURN_REFUSAL = "only supports single-turn data"
+
 # The pairing the gpt-oss multiturn template exists to make trainable: every assistant turn carries
 # the final-channel marker AND is terminated by <|return|>, the id the completion span ends on.
 _GPT_OSS_TEMPLATE = "jinja-templates/gpt-oss/gpt-oss-multiturn.jinja"
@@ -100,7 +104,7 @@ def test_some_config_pins_a_repo_template():
 
 
 def test_the_scan_reaches_the_doc_trees():
-    """The doc half of the scan is the reason a broken cookbook recipe used to survive a green suite."""
+    """A doc recipe is held to the pairing contract only while the scan reaches the doc trees."""
     assert any(source.endswith("]") for source, _, _ in _MARKER_CONFIGS), (
         f"no ```yaml fence under {_DOC_TREES} pairs a chat_template with an assistant_message_template — "
         f"the doc half of the scan is dead"
@@ -133,6 +137,8 @@ def test_every_assistant_turn_of_a_multi_turn_row_carries_the_marker(source, tem
     try:
         rendered = _render(template, _MULTI_TURN)
     except TemplateError as e:
+        if _SINGLE_TURN_REFUSAL not in str(e):
+            raise
         pytest.skip(f"{template} refuses multi-turn data by design ({e})")
     assert rendered.count(marker) == _TURNS, (
         f"{source}: {template} renders the marker {rendered.count(marker)}x on a {_TURNS}-turn row, "

@@ -133,7 +133,7 @@ class _DenseMLP(nn.Module):
 
 
 class _NativeSparseMLP(nn.Module):
-    """HF-native-shaped sparse block carrying stale dense duplicates (the historical corruption)."""
+    """HF-native-shaped sparse block carrying stale dense duplicates — the shape the filter must drop."""
 
     def __init__(self):
         super().__init__()

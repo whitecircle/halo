@@ -137,8 +137,8 @@ def test_react_budget_refuses_past_the_cap():
 # --- effort profiles on the base ---
 
 
-def test_base_profiles_bind_thinking_budget_recovery_cap_and_token_cost_at_reset():
-    profiles = {"high": {"thinking_tokens": 2048, "max_length_cutoff_recoveries": 1, "token_cost": 0.02}}
+def test_base_profiles_bind_thinking_budget_and_recovery_cap_at_reset():
+    profiles = {"high": {"thinking_tokens": 2048, "max_length_cutoff_recoveries": 1}}
     env = NativeToolUseEnvironment(
         tool_registry=_registry(),
         reasoning_effort="high",
@@ -150,18 +150,19 @@ def test_base_profiles_bind_thinking_budget_recovery_cap_and_token_cost_at_reset
     ids, _ = env.reset(["t"])
     traj = env.get_trajectories(ids)[0]
     assert traj.info["episode_max_length_cutoff_recoveries"] == 1
-    assert traj.info["episode_token_cost"] == 0.02
 
     ids, _ = env.reset(["t"], [{"reasoning_effort": "low"}])
     low = env.get_trajectories(ids)[0]
-    assert "episode_max_length_cutoff_recoveries" not in low.info and "episode_token_cost" not in low.info
+    assert "episode_max_length_cutoff_recoveries" not in low.info
 
 
 def test_base_rejects_non_finite_and_non_numeric_profile_values():
-    """NaN passes a plain minimum check; stamped as a token price it would poison every reward."""
+    """NaN passes a plain minimum check and would reach the engine as a thinking budget."""
     for bad in (float("nan"), float("inf"), True, "0.05", None):
-        with pytest.raises(ValueError, match="token_cost for effort 'low' must be a finite number"):
-            NativeToolUseEnvironment(tool_registry=_registry(), reasoning_effort_profiles={"low": {"token_cost": bad}})
+        with pytest.raises(ValueError, match="thinking_tokens for effort 'low' must be a finite number"):
+            NativeToolUseEnvironment(
+                tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": bad}}
+            )
 
 
 def test_base_rejects_a_fractional_count_budget():
@@ -170,7 +171,6 @@ def test_base_rejects_a_fractional_count_budget():
         NativeToolUseEnvironment(
             tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": 1.5}}
         )
-    NativeToolUseEnvironment(tool_registry=_registry(), reasoning_effort_profiles={"low": {"token_cost": 0.5}})
 
 
 async def test_async_admission_binds_against_the_async_handler():
@@ -219,7 +219,6 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
     assert _Task.effort_profile_key_minima() == {
         "thinking_tokens": 1,
         "max_length_cutoff_recoveries": 0,
-        "token_cost": 0,
         "max_probes": 0,
     }
     env = _Task(
