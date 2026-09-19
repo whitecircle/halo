@@ -3,8 +3,8 @@
 
 The mixin stashes the completion ids in ``_get_per_token_logps_and_entropies`` and unions their
 special-token positions into ``get_high_entropy_mask`` on the SAME micro-batch. A stash from a
-different micro-batch (or none at all) used to fall through to TRL's plain mask, silently dropping
-the structural tokens from the trained set — the template rot the mixin exists to prevent.
+different micro-batch (or none at all) must not fall through to TRL's plain mask, which silently
+drops the structural tokens from the trained set — the template rot the mixin exists to prevent.
 
     python tests/cpu/grpo/test_online_entropy_mask_alignment.py
 """

@@ -170,8 +170,8 @@ def test_lowp_shape_gate_compares_against_the_argument_defaults():
 
 def test_ep_scope_auto_default_resolves_a_hand_built_cross_domain_config():
     """The behavior the shared ``"auto"`` default buys: a hand-built config for 16 GPUs of EP over
-    two 8-GPU NVLink domains resolves to global scope. With a ``"node"`` default it was rejected —
-    the identical YAML run (which passes ep_scope='auto') was accepted."""
+    two 8-GPU NVLink domains resolves to global scope. With a ``"node"`` default it is rejected while
+    the identical YAML run (which passes ep_scope='auto') is accepted."""
     config = make_parallelism_config(ep_size=16, world_size=16, gpus_per_node=8)
     assert config.ep_scope == "global"
 

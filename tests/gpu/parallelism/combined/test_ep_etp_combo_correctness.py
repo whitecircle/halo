@@ -47,7 +47,7 @@ EP_SIZE = 2
 EXPERT_TP_SIZE = 2
 NUM_TRAIN_SAMPLES = 32
 MAX_SEQ_LENGTH = 2048
-NUM_TRAIN_STEPS = 6  # > 3 so the historical step-~3 deadlock would surface
+NUM_TRAIN_STEPS = 6  # > 3 so the EP+ETP combine deadlock, which surfaces around step 3, would show
 BATCH_SIZE = 1
 SEED = 42
 

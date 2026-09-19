@@ -187,7 +187,7 @@ def run(ctx) -> dict:
     checks["fused_loss_finite"] = bool(torch.isfinite(torch.tensor(fused_loss)))
 
     # lm_head invoked during loss-only eval == full [B, S, vocab] logits materialized instead of the
-    # fused FLCE path: the eval-mode OOM the fix targets.
+    # fused FLCE path: the eval-mode OOM the fused path avoids.
     checks["fused_eval_skips_lm_head"] = fused_lm_head_calls == 0
 
     # The reference run must take the unfused full-logits path (injection disabled); lm_head never

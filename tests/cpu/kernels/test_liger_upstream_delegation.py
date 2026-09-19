@@ -143,7 +143,7 @@ def test_a_delegating_applier_offers_upstreams_knobs_with_the_toolkit_loss_conve
     """Signature = upstream's names, toolkit's loss defaults.
 
     The orchestrator reads valid kernels, the ``rope`` auto-off and ``_PER_MODEL_DEFAULTS`` off this
-    signature. Narrowing it drops a kernel the family used to get; widening it offers one upstream
+    signature. Narrowing it drops a kernel the family otherwise gets; widening it offers one upstream
     would reject as an unexpected keyword.
     """
     applier = orchestrator._TOOLKIT_LIGER_APPLIERS[spec.model_types[0]]

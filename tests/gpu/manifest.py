@@ -420,15 +420,11 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=1, markers=("gpu", "full", "1gpu", "ep", "moe", "step3p7", "vllm_server"), timeout=1200
     ),
     # --ep-size 1 gathers DTensor experts out of the FSDP2 shard, --ep-size 2 gathers FSDP-ignored
-    # plain tensors; both must land in the engine's loader.
-    # The three bare rows are the per-family server arms (a family pass runs them with
-    # -k "not peft and not resume and not thinking"); the --peft / --resume rows are the Qwen3-30B pass.
-    # --thinking-budget is not a row: the budget is a gpt-oss shape (its arming marker lives in the
-    # server image's reasoning plugin, agent-docs/models/gpt-oss.md#serving-for-grpo-vllm) while this
-    # file's server runs Qwen3-30B. It needs HALO_TEST_ENV_GRPO_MODEL and VLLM_MODEL both pointed at
-    # a gpt-oss checkpoint, against a server carrying that plugin. The --routing-replay rows need the
-    # server on VLLM_ENABLE_R3=1 (--enable-return-routed-experts); the flag is additive, so one server
-    # carrying it runs the whole entry.
+    # plain tensors; both must land in the engine's loader. The three bare rows are the per-family
+    # server arms (a family pass runs them with -k "not peft and not resume and not thinking"); the
+    # --peft / --resume rows are the Qwen3-30B pass. --thinking-budget is not a row: it is a gpt-oss
+    # shape that needs that image's reasoning plugin (agent-docs/models/gpt-oss.md#serving-for-grpo-vllm).
+    # The --routing-replay rows need the server on VLLM_ENABLE_R3=1; the flag is additive.
     "trainers/grpo/test_env_grpo_vllm_e2e.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "etp", "tp", "lora", "moe", "qwen3", "vllm_server"),
@@ -500,14 +496,11 @@ MANIFEST: dict[str, TestSpec] = {
             "--ep-size 2 --peft expert_lora",
             "--ep-size 2 --peft expert_lora --resume",
         ),
-        # The --routing-replay rows need more of the server than the others: SGLANG_ENABLE_R3=1
-        # (--enable-return-routed-experts) with SGLANG_MOE_RUNNER_BACKEND=triton, since the fused
-        # runners bypass the capture hook and return no ids. The flag is additive, so one server
-        # carrying it runs the whole entry. The last two are the R3 rows whose post-sync policy
-        # produces runaway completions: every turn is cut at the token cap and excluded, giving the
-        # zero-gradient batch the replay gate exempts (``_assemble_rollout_routing``).
-        # The resume row sets the budget: two model builds plus a checkpoint round-trip, on an engine
-        # that quiesces for every sync.
+        # The --routing-replay rows need SGLANG_ENABLE_R3=1 with SGLANG_MOE_RUNNER_BACKEND=triton,
+        # since the fused runners bypass the capture hook and return no ids; the flag is additive, so
+        # one server carrying it runs the whole entry. The last two are the R3 rows whose post-sync
+        # policy produces runaway completions, the zero-gradient batch the replay gate exempts. The
+        # resume row sets the budget: two model builds and a checkpoint round-trip.
         timeout=2400,
         flaky=True,
     ),

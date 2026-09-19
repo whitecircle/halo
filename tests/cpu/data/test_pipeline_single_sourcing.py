@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The data pipeline's shared seams, pinned so a second copy cannot reappear beside them.
 
-Each twin below used to exist twice, and every duplicate was silent: a change landing in one arm
-left the other rendering, splitting or masking a row differently. The tests are mutation-shaped —
+Each twin below has exactly one implementation, and a duplicate would be silent: a change landing in
+one arm leaves the other rendering, splitting or masking a row differently. The tests are mutation-shaped —
 they break the SHARED implementation and require every consumer to see it, which is exactly what a
 re-inlined copy would survive.
 
@@ -149,8 +149,8 @@ def test_the_shared_prologue_refuses_images_inside_a_completion():
 def test_both_text_renderers_go_through_the_shared_render(monkeypatch):
     """Break the image backstop inside ``render_conversation``; both text renderers must fail on it.
 
-    The SDPG collator used to re-implement the render (fold + template kwargs + backstop) line for
-    line, so a fold-policy change reached SFT alone. It now has to route here.
+    A re-implemented render (fold + template kwargs + backstop) in the SDPG collator would let a
+    fold-policy change reach SFT alone, so the collator has to route here.
     """
 
     class _SharedRenderReached(Exception):
@@ -171,7 +171,7 @@ def test_both_text_renderers_go_through_the_shared_render(monkeypatch):
 
 
 def test_the_shared_render_applies_the_system_fold_to_both_renderers():
-    """The fold is the policy that used to live twice: prove it reaches the collator's own render."""
+    """The fold is shared policy: prove it reaches the collator's own render."""
     tokenizer = _RenderTokenizer()
     row = {"messages": _PROMPT}
     collator = SelfDistillTextCollator(
@@ -216,9 +216,9 @@ def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
     """The offline bake refuses processor keys its stored schema cannot hold — the set is read off
     VLM_OUTPUT_COLUMNS, not hand-typed beside it.
 
-    ``pixel_values_shape`` is the proof: the schema stores it, the hand-typed copy did not name it,
-    so a processor emitting it used to be refused as unstorable. Widening the schema must widen the
-    refusal with it, and a re-inlined literal would not move.
+    ``pixel_values_shape`` is the proof: the schema stores it, and a hand-typed copy that omits it
+    refuses a processor emitting it as unstorable. Widening the schema must widen the refusal with
+    it, and a re-inlined literal would not move.
     """
 
     def _emitting(extra_key):
@@ -375,9 +375,9 @@ def test_filter_by_length_reports_through_the_shared_rejection_reporter(caplog):
     ],
 )
 def test_completion_masking_without_a_marker_is_refused_at_construction(build):
-    """The refusal used to fire from the label builder — at the FIRST BATCH, after the model load and
-    the whole dataset map. Nothing about it needs a batch: the pair is knowably unserviceable where
-    it is accepted."""
+    """Nothing about this refusal needs a batch. From the label builder it fires at the FIRST BATCH,
+    after the model load and the whole dataset map; the pair is knowably unserviceable where it is
+    accepted."""
     with pytest.raises(ValueError, match="requires assistant_message_template"):
         build()
 

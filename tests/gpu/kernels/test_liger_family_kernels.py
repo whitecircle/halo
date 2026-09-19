@@ -54,14 +54,11 @@ GATED_NORM_SHAPES = ((1, 8192, 32, HEAD_DIM), (BATCH, SEQ, 4, HEAD_DIM), (BATCH 
 TOL_FP32 = 1e-4
 TOL_BF16 = 3e-2
 TOL_GLU_BF16 = 5e-2
-# The gated norm is pinned against the FUNCTION, not against the eager module: fla keeps the whole
-# reduction, the weight multiply and the gate in fp32, while the Qwen modules round the normalized
-# activation to the storage dtype before the weight multiply — so the fused path is deliberately the
-# more accurate of the two and cannot agree with eager to better than bf16 storage rounding. Worst
-# measured across both weight dtypes and every shape below: fused-vs-oracle 3.3e-3 (dx),
-# fused/eager error ratio 0.37-1.00. The cap is an order of magnitude above the first, and the ratio
-# admits no regression — a wrong gate, a wrong reduction axis or a dropped fp32 upcast blows through
-# both by orders of magnitude.
+# The gated norm is pinned against the function, not the eager module: fla keeps the reduction, the
+# weight multiply and the gate in fp32, while the Qwen modules round the normalized activation to the
+# storage dtype first, so the fused path is the more accurate of the two and cannot agree with eager
+# to better than bf16 storage rounding. Worst measured over every shape below: fused-vs-oracle 3.3e-3
+# (dx), fused/eager error ratio 0.37-1.00; a wrong gate, axis or upcast exceeds both by orders of magnitude.
 TOL_GATED_ORACLE = 2e-2
 GATED_ORACLE_RATIO_MAX = 1.05
 # Below this the eager module is already exact against the oracle and the ratio would divide by noise.

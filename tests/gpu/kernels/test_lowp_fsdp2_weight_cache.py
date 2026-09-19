@@ -14,7 +14,7 @@ a cache keyed on it serves the step-0 quantization for the whole run. Two halves
 2. ``grouped_gemm`` contract ([E,K,N] FSDP2-managed expert weight, MXFP8): with
    ``weight_cacheable=False`` the output tracks the master (differs after an optimizer step); with
    ``weight_cacheable=True`` on the same frozen-version weight the output provably stays the stale
-   step-0 result while the master moves underneath — the control that fails without the fix.
+   step-0 result while the master moves underneath — the negative control for that special-casing.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -131,10 +131,10 @@ def _grouped_gemm_contract(ctx) -> dict:
     outs_fresh, moved_fresh = _train_grouped(ctx, cacheable=False)
     outs_cached, moved_cached = _train_grouped(ctx, cacheable=True)
     return {
-        # The fix: an uncached weight quant follows the master, so the output changes after a step.
+        # An uncached weight quant follows the master, so the output changes after a step.
         "gg_master_moved_uncached": moved_fresh,
         "gg_uncached_output_tracks_master": not torch.equal(outs_fresh[0], outs_fresh[-1]),
-        # The control that fails without the fix: same frozen-version weight, cache enabled — the
+        # The negative control: same frozen-version weight, cache enabled — the
         # output is bitwise the step-0 result on every step even though the master moved.
         "gg_master_moved_cached": moved_cached,
         "gg_cached_output_stale": all(torch.equal(outs_cached[0], o) for o in outs_cached[1:]),

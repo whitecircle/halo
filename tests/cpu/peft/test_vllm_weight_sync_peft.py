@@ -102,7 +102,7 @@ def test_peft_sync_broadcasts_merged_not_base():
     base_weight = model.base_model.model.proj.base_layer.weight.detach()
     sent = client.flushed["proj.weight"]
 
-    # The fix: the flushed weight is the merged adapter, decoupled from the later unmerge.
+    # The flushed weight is the merged adapter, decoupled from the later unmerge.
     assert torch.allclose(sent, merged["proj.weight"], atol=1e-6), (
         "vLLM received weights that do not match the merged adapter (W + B@A)"
     )

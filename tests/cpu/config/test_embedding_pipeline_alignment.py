@@ -75,8 +75,8 @@ def test_pipeline_without_pooling_raises_instead_of_dropping_the_knob():
 
 
 def test_dataset_num_proc_is_not_a_field():
-    """It was declared but never read (the ST path runs no dataset map), so a YAML setting it looked
-    honored. Keeping it off the dataclass makes the parser reject the key instead."""
+    """Declared, it would never be read (the ST path runs no dataset map) and a YAML setting it would
+    look honored. Off the dataclass, the parser rejects the key instead."""
     assert "dataset_num_proc" not in EmbeddingConfig.__dataclass_fields__
 
 

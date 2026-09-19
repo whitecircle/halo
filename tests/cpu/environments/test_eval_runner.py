@@ -356,10 +356,10 @@ def test_load_hf_split_refuses_an_s3_uri(monkeypatch):
 async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
     """Every sampling knob on the RolloutConfig must reach the request.
 
-    ``top_p`` is the one this pins hardest: it was omitted at this call for the whole life of the
-    runner, so every eval sampled at the SERVER's default nucleus while training sampled at
-    ``rollout_top_p`` — the eval measured a policy the trainer never optimized, and nothing in the
-    output said so. The rest ride along because the contract is passed as one object.
+    ``top_p`` is the one this pins hardest: omitted at this call, every eval samples at the SERVER's
+    default nucleus while training samples at ``rollout_top_p`` — the eval then measures a policy the
+    trainer never optimized, with nothing in the output to say so. The rest ride along because the
+    contract is passed as one object.
     """
     seen: list[dict] = []
 

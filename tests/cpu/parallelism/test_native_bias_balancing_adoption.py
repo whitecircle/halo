@@ -247,8 +247,8 @@ def test_lfm2_tolerates_an_absent_slot_only_where_the_flag_its_routing_reads_is_
 
 def test_lfm2_refuses_a_block_whose_router_asks_for_a_bias_it_does_not_carry():
     """The construction-time half of the pair above: the flag may only be False because the ROUTER
-    says so. Silently flipping it off (as this once did) routes unbiased for the whole run, with the
-    pretrained selection bias dropped and no shape, dtype or key moving."""
+    says so. Silently flipping it off routes unbiased for the whole run, with the pretrained
+    selection bias dropped and no shape, dtype or key moving."""
     router = nn.Module()
     router.norm_topk_prob = True
     router.routed_scaling_factor = 1.0

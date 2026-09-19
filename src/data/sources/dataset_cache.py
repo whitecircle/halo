@@ -143,14 +143,11 @@ def publish_cached_download(
         tmp_path = f"{cache_path}.tmp-{uuid.uuid4().hex}"
         fetch(tmp_path)
         _write_download_marker(os.path.join(tmp_path, DOWNLOAD_COMPLETE_MARKER), source_uri, fresh_fingerprint())
-        # Replaced only once the new tree is fully staged and marked, and by renaming the old tree
-        # aside rather than deleting it in place: the tree at cache_path may be a complete cache
-        # another node is loading (loads run outside the lock, and flock does not exclude across NFS
-        # clients), and deleting it under that reader raises FileNotFoundError mid-load. Renaming
-        # keeps the reader's already-open files valid and narrows the window where cache_path is
-        # absent to one rename; a crash in it leaves the path absent (re-downloaded next run) rather
-        # than a half-written tree behind a completion marker. The superseded tree wears the same
-        # `.tmp-<uuid>` name a crashed writer's does, so one reaper covers both.
+        # The old tree is renamed aside rather than deleted in place: another node may be loading it
+        # (loads run outside the lock, and flock does not exclude across NFS clients), and deleting
+        # it under that reader raises FileNotFoundError mid-load. A crash between the two renames
+        # leaves cache_path absent (re-downloaded next run), never a half-written tree behind a
+        # completion marker. The superseded tree reuses the `.tmp-<uuid>` name, so one reaper covers both.
         superseded = f"{cache_path}.tmp-{uuid.uuid4().hex}"
         try:
             os.rename(cache_path, superseded)

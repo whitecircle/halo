@@ -10,16 +10,11 @@ from __future__ import annotations
 
 from src.kernels.liger.builder import LigerFamilySpec
 
-# A multimodal wrapper is listed only where its text tower can be nothing but the family named here
-# (`inkling_mm_model`, `step3p7`, `glm5_next`). One whose tower may be either of two families
-# (`mistral3`: `mistral` or `mistral4`; `lfm2_vl`; `cohere2_vision`) is resolved by the orchestrator
-# through `text_config.model_type` instead, so it is never pinned to the wrong sibling.
-#
-# Of the families the toolkit patches end to end, three declare no `causal_lm`: GLM-5 Next and
-# Step-3.7 define no `*ForCausalLM` at all — their `*ForConditionalGeneration` head is the only one,
-# and GLM-5 Next's adds the router aux loss after the projection — and Inkling divides the hidden
-# states by `logits_mup_width_multiplier` and truncates the logits to `unpadded_vocab_size` before the
-# loss. None of that is what the generic fused loss computes, so they keep the unfused head.
+# A multimodal wrapper is listed only where its text tower can be nothing but the family named here;
+# one whose tower may be either of two siblings (`mistral3`, `lfm2_vl`, `cohere2_vision`) is resolved
+# by the orchestrator through `text_config.model_type` instead. Three families keep the unfused head:
+# GLM-5 Next and Step-3.7 define no `*ForCausalLM` at all (and GLM-5 Next's only head adds the router
+# aux loss after the projection); Inkling scales the hidden states and truncates the logits first.
 LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
     # Mistral 4, the text tower of `mistral3` checkpoints such as Mistral Small 4. Rotary is
     # interleaved (`rope_interleave`) YARN; the llama-4 log scale is applied to the queries after it.

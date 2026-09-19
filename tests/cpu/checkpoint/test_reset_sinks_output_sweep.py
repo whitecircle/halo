@@ -396,10 +396,10 @@ def test_both_branches_preflight_the_full_checkpoint_load(tmp_path, monkeypatch,
 
 
 def test_an_unrecognized_sink_layout_raises_instead_of_saving_live_sinks(tmp_path, monkeypatch):
-    """THE regression the shared policy closes: this tool used to fill ``.sinks`` parameters by name,
-    so a layout its own walk could not resolve simply reset nothing — and the tool then wrote, swept
-    and reported a "reset" checkpoint whose sinks were untouched. Routed through the trainers'
-    ``apply_sinks_policy``, a sinks-carrying model the walk finds no attention layers on is a raise."""
+    """Filling ``.sinks`` parameters by name here would let a layout the walk cannot resolve reset
+    nothing, and the tool would still write, sweep and report a "reset" checkpoint whose sinks are
+    untouched. Routed through the trainers' ``apply_sinks_policy``, a sinks-carrying model the walk
+    finds no attention layers on is a raise."""
     from src.models.patches import gpt_oss_sinks
 
     source, out = tmp_path / "src", tmp_path / "out"

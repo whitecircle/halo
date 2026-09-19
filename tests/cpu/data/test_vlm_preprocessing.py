@@ -462,7 +462,7 @@ def test_image_token_ids_are_resolved_once_per_collator_not_per_batch():
 
 
 def test_image_token_ids_are_resolved_once_per_bake_not_per_row(tmp_path, monkeypatch):
-    """Same read, hoisted out of the offline map's row closure — there it was paid once per ROW."""
+    """Same read, hoisted out of the offline map's row closure, where it would be paid once per ROW."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets"))  # a cache hit would skip the map
     tok = _VocabCountingVLMTokenizer()
 

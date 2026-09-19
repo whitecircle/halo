@@ -125,9 +125,9 @@ def test_two_completion_normal_methods_are_symmetric():
 def test_non_finite_rewards_are_refused(method, bad, group):
     """A NaN/Inf reward must fail loud rather than be absorbed.
 
-    It used to be absorbed into a ``0.0``/``±1`` advantage in one-and two-completion groups while
-    already NaN-ing the batch at three — so the same bad row trained as an average completion or
-    poisoned every sibling's gradient depending only on how many completions it happened to have.
+    Unrefused, it is absorbed into a ``0.0``/``±1`` advantage in one- and two-completion groups while
+    already NaN-ing the batch at three — so the same bad row trains as an average completion or
+    poisons every sibling's gradient depending only on how many completions it happens to have.
     """
     rewards = [0.0, 1.0, 0.5][: group - 1] + [bad]
     with pytest.raises(ValueError, match="Non-finite reward"):

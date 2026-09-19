@@ -113,7 +113,7 @@ async def test_both_drivers_bind_the_same_caps(monkeypatch):
     assert (actor_level, actor_cfg.max_thinking_tokens, actor_cfg.max_tokens) == ("high", 4000, _MAX_TOKENS)
     # Eval side: byte-identical generation-control fields to the ones the actor's payload carries —
     # built from the ACTOR's own per-episode config, so this compares the two drivers, not the helper
-    # with itself. The eval used to compute the CoT budget and then drop it from the request.
+    # with itself. The eval must not compute the CoT budget and then drop it from the request.
     assert calls[0]["extra_body"] == generation_control_fields(actor_cfg, actor_level)
     assert calls[0]["extra_body"]["reasoning_effort"] == "high"
     assert calls[0]["extra_body"]["thinking_token_budget"] == 4000

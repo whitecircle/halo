@@ -195,7 +195,7 @@ def test_probe_cached_per_instance():
 
 def test_nominal_bos_tokenizer_gets_no_bos():
     """A tokenizer that defines bos_token without post-processing it must NOT gain a BOS —
-    prepending one would train on a token the served policy never produces (gpt-oss regression)."""
+    prepending one would train on a token the served policy never produces."""
     tok = NominalBosTokenizer()
     text = "hello world"
     ids = tokenize_rendered(tok, text)["input_ids"]
@@ -204,8 +204,8 @@ def test_nominal_bos_tokenizer_gets_no_bos():
 
 
 def test_gemma4_style_template_bos_survives():
-    """gemma-4-style: the template's rendered BOS must survive — the historical strip +
-    add_special_tokens=True dropped it (the post-processor never re-adds)."""
+    """gemma-4-style: the template's rendered BOS must survive — a strip +
+    add_special_tokens=True drops it (the post-processor never re-adds)."""
     tok = Gemma4StyleTokenizer()
     text = tok.apply_chat_template([{"role": "user", "content": "hi there"}])
     assert text.startswith(tok.bos_token), "precondition: the template emits BOS"
@@ -216,7 +216,7 @@ def test_gemma4_style_template_bos_survives():
 
 
 def test_no_bos_tokenizer_equivalence():
-    """No-BOS path is token-ID identical to the historical tokenizer(text) call."""
+    """No-BOS path is token-ID identical to a plain tokenizer(text) call."""
     tok = NoBosTokenizer()
     text = "hello world how are you"
     assert tokenize_rendered(tok, text)["input_ids"] == tok(text)["input_ids"]
@@ -227,8 +227,8 @@ def test_no_bos_tokenizer_equivalence():
 
 
 def test_bos_template_no_double_bos():
-    """Rendered text that already carries BOS yields exactly ONE leading BOS (reward-path fix:
-    the historical add_special_tokens=True call produced two)."""
+    """Rendered text that already carries BOS yields exactly ONE leading BOS (a plain
+    add_special_tokens=True call produces two)."""
     tok = BosTokenizer()
     text = tok.bos_token + "hello world"
 
@@ -241,7 +241,7 @@ def test_bos_template_no_double_bos():
 
 def test_stripped_render_gains_single_bos():
     """A BOS-stripped render regains exactly one BOS when the post-processor owns BOS
-    (teacher-distill fix: the historical add_special_tokens=False call had zero)."""
+    (a plain add_special_tokens=False call yields zero)."""
     tok = BosTokenizer()
     text = "hello world"
 

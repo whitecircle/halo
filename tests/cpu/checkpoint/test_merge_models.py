@@ -194,7 +194,7 @@ def test_ties_density_trims_small_deltas():
 
 def test_reference_keys_uses_base_for_task_methods():
     """task_arithmetic/ties merge over the BASE key set (vectors are base-relative), so a key in base
-    but absent from model[0] is included — not silently dropped as it was when iterating model[0].
+    but absent from model[0] is included — iterating model[0] instead would silently drop it.
     linear/slerp have no base and use model[0]."""
 
     class _StubReader:

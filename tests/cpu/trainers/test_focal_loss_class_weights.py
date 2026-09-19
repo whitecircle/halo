@@ -72,7 +72,7 @@ def test_weighted_focal_matches_canonical():
 def test_weighted_focal_modulator_is_weight_independent():
     """The per-example modulator must depend only on p_t, so scaling a class weight scales its loss linearly.
 
-    This is the property the defect broke: under ``p_t = exp(-weighted_ce)`` the modulator itself
+    This is the property the ``p_t = exp(-weighted_ce)`` form breaks: there the modulator itself
     moves with the weight, so doubling a class's weight does NOT double its contribution.
     """
     logits, labels = _logits_and_labels()

@@ -37,7 +37,7 @@ def test_missing_imex_channels_is_a_reason():
 
 
 def test_an_incomplete_fabric_registration_is_a_reason():
-    """The disarm this fix closes: ``None`` is exactly what a non-COMPLETED Fabric State reports."""
+    """The disarm this closes: ``None`` is exactly what a non-COMPLETED Fabric State reports."""
     reason = mnnvl_prerequisite_reason(imex_ok=True, fabric_clique=None)
     assert reason is not None, "an unregistered fabric must not read as 'nothing to report'"
     assert "COMPLETED" in reason, f"the nvidia-smi field to look at must be named: {reason}"

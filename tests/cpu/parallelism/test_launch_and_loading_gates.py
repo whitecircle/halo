@@ -313,7 +313,7 @@ def test_tp_load_accepts_an_architecture_that_does_shard(tp_materialized_model):
 def test_tp_load_refuses_a_plainly_materialized_load(sharding_model):
     """The same architecture, loaded WITHOUT transformers placing its shards, must be refused.
 
-    This is the transformers materialization regression the post-load guard was added for: the plan
+    This is the transformers materialization regression the post-load guard exists for: the plan
     covers q/k/v/o and the MLP, so every rank holds a bare slice of them that the trainer sorts into
     the replicated AVG bucket and averages against its peers' disjoint slices — silently, since a
     plain tensor is what a genuine replica looks like. Refused at load, or never noticed at all.

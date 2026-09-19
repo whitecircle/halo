@@ -1,8 +1,8 @@
 """Bounded tail for TRL's k3 KL estimator (``clamp_ref_logps``).
 
 ``per_token_kl = exp(ref - logp) - (ref - logp) - 1`` is unbounded where the policy suppresses a token
-the reference likes. Unclamped, a single token drove the batch KL to 19.3 and grad_norm to 39.5 (step 64
-of the codeforces run), hijacking the whole optimizer step. Clamping the log-ratio bounds both.
+the reference likes. Unclamped, one such token drives the batch KL and grad_norm up by an order of
+magnitude and hijacks the whole optimizer step. Clamping the log-ratio bounds both.
 """
 
 import math

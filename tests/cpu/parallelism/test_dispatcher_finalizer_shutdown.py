@@ -37,7 +37,7 @@ class _Dispatcher:
 
 
 def test_the_shutdown_probe_is_bound_at_definition_time():
-    """The whole point of the fix: no module-global lookup happens inside the finalizer."""
+    """The whole point: no module-global lookup happens inside the finalizer."""
     assert list(inspect.signature(DeepEPDispatcher.__del__).parameters) == ["self", "_is_finalizing"]
     assert DeepEPDispatcher.__del__.__defaults__ == (sys.is_finalizing,)
 

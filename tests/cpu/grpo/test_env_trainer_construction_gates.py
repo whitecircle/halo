@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Construction-time gates of the environmental GRPO trainer that used to fail late or not at all.
+"""Construction-time gates of the environmental GRPO trainer — each refuses before the run starts.
 
 * TRL's ``off_policy_mask_threshold`` masks on ``sampling_per_token_logps``, a batch key this trainer
   never emits; TRL then thresholds a KL of exactly 0 and the knob is a silent no-op. Refused, pointing
