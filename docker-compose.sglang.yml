@@ -1,12 +1,8 @@
-# SGLang inference server — plain serving, and the RL rollout/weight-sync pairing for env-GRPO.
-#
-# Default image is the NCCL-aligned build (Dockerfile.sglang); the weight-sync group cannot form
-# against upstream `lmsysorg/sglang`, so point SGLANG_IMAGE back at it only for serving-only use.
-# network_mode host: the rendezvous port is never published, so the trainer reaches it at localhost,
-# and it must use GPUs other than SGLANG_CUDA_DEVICES — NCCL cannot broadcast to itself.
-# Usage: SGLANG_MODEL=<hub id or path> docker compose -f docker-compose.sglang.yml up (`down` needs it too).
-# On an EFA host layer docker-compose.sglang.efa.yml after this file: it passes the fabric devices
-# and names the aws-ofi-nccl net, so a trainer on another node syncs over EFA.
+# SGLang server — plain serving, and the rollout/weight-sync pairing for env-GRPO. The default image
+# is the NCCL-aligned Dockerfile.sglang build: upstream's NCCL does not match uv.lock's pin, and a
+# skew hangs the sync group. Host networking; SGLANG_CUDA_DEVICES must not overlap the trainer's.
+#   SGLANG_MODEL=<hub id|local dir> docker compose -f docker-compose.sglang.yml up   # `down` needs it too
+#   (add -f docker-compose.sglang.efa.yml on an EFA host)
 
 services:
   sglang-server:
@@ -46,10 +42,9 @@ services:
       - ${SGLANG_MODEL_DIR:-/mnt/models}:${SGLANG_MODEL_DIR:-/mnt/models}:ro
     # Two flags are required and silent when wrong: --tool-call-parser (tool-using environments need
     # the calls parsed; `auto` reads the parser off the chat template) and --moe-runner-backend
-    # triton (the auto runners bypass R3 capture and repack expert weights). --attention-backend is
-    # a per-family need (GLM-4's MLA head size has no default kernel on Blackwell; `triton` serves
-    # it) and --trust-remote-code a per-checkpoint one (the Bailing repos ship their modeling code).
-    # SGLANG_EXTRA_ARGS is appended last, so a flag repeated there overrides the ones above.
+    # triton (the auto runners bypass R3 capture and repack expert weights). --attention-backend is a
+    # per-family need, --trust-remote-code a per-checkpoint one, and SGLANG_EXTRA_ARGS is appended
+    # last so a flag repeated there wins. Values per family: agent-docs/infrastructure/rollout-servers.md
     command: >
       python3 -m sglang.launch_server
       --model-path ${SGLANG_MODEL:?set SGLANG_MODEL to a hub id or a local checkpoint dir}

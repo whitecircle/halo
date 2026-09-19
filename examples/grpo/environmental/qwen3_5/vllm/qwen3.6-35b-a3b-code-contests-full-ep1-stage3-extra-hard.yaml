@@ -8,14 +8,14 @@
 model_name_or_path: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage2-hard/checkpoint-200  # weights only: the optimizer starts fresh
 model_name: Qwen/Qwen3.6-35B-A3B   # the id the rollout servers serve; unset, the path above would be sent as the model id
 chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
-force_chat_template: true      # the checkpoint ships the stock template; serve with --chat-template on the same file
+force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
 # No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag still runs
 # transformers' load-balancing loss — a layers x tokens x top_k x experts int64 one-hot, tens of GB here.
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
 
 # --- Parallelism (6 train GPUs: pure data-parallel, DP=6, ZeRO-3) ---
-expert_parallel_size: 1            # pure DP; vLLM holds the other 2 GPUs
+expert_parallel_size: 1            # pure DP; the servers hold the other 2 GPUs
 fsdp_reshard_after_forward: true   # ZeRO-3: max activation headroom for long full-FT trajectories
 
 # --- Full fine-tune (no PEFT) ---
@@ -32,7 +32,7 @@ environment_kwargs:
   compiled_time_limit_scale: 2.0   # a compiled solution's time limit as a multiple of the stated one
   timeout_per_test: 5
   stop_on_first_failure: false
-  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a budget stop scores the graded prefix
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
   max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
   # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + answer headroom).
@@ -43,13 +43,13 @@ environment_kwargs:
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
-  verdict_detail: outcome    # FAIL / pass count only; expected/got would make the judge a free test oracle
+  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract); expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
   multi_turn_reward: 0       # off: a bounty for a second call pays a judge probe like a scratchpad run
   tool_success_reward: 0     # any per-call pay is farmable by duplicate re-runs
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged when the episode burns max_turns
-  tool_error_penalty: 0.05   # magnitude, >= 0 — applied as minus per call that fails to parse/execute
+  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
 # --- Rewards ---
 rewards:
@@ -68,8 +68,8 @@ rollout_server_configs:
 - url: "http://localhost:8001"
   group_port: 51217
 rollout_connection_timeout: 180.0
-request_timeout: 1200.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence
-                              # decode speed at peak concurrency
+request_timeout: 1200.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence decode
+                              # speed at peak concurrency (agent-docs/training-methods/grpo/async-grpo/performance.md#sizing-a-run)
 max_retries: 1                # a timeout re-runs the WHOLE episode; attempts x request_timeout must stay
                               # under the retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
 episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
@@ -109,8 +109,8 @@ epsilon_high: 0.28        # inert at num_iterations=1 (PPO ratio ≡ 1)
 # --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
 # Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
 isr_engine_reference: false  # the engine re-score costs server headroom (--gpu-memory-utilization <= 0.80)
-isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained masking
-isr_geo_band_max: 1.05       #   at low entropy fix the disagreement, never widen the band
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained
+isr_geo_band_max: 1.05       #   masking fix the disagreement, never widen the band
 isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
 isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
 skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
@@ -127,8 +127,7 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
 eval_rollout_batch_size: 34       # rows per rank per eval rollout round: 34 x 6 ranks = 204 requests in
                                   # flight at once, so the 400-row split takes two rounds
-gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (12 prompts x 12); the per-rank value must
-                                # divide by num_generations
+gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (12 prompts x 12); the per-rank value must divide by num_generations
 num_train_epochs: 1              # one pass over the pool: the stage runs to the end of its data, and the evals
                                  # say which checkpoint to keep
 learning_rate: 3.0e-07
@@ -148,7 +147,7 @@ fp32_grad_reduce: true
 output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage3-extra-hard
 save_strategy: steps
 save_steps: 25
-save_total_limit: 3              # ~200 GB each: copy the eval-peak checkpoint aside before it rotates out
+save_total_limit: 3              # archive the eval-peak checkpoint before it rotates out
 
 # --- Eval (the pool's held-out split: 400 problems, 100 per band; pass@1) ---
 eval_strategy: steps

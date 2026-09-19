@@ -1,16 +1,8 @@
 # Training + vLLM 0.26.0 rollout server: two containers on one host, HTTP for rollouts and a shared
-# NCCL group for weight sync.
-#
-# Prerequisites (compose builds `vllm-server:0.26.0` from Dockerfile.vllm when the tag is absent):
-#   make build-blackwell   # training image; for Hopper, make build-hopper + TRAIN_IMAGE=halo:hopper
-#   docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0   # prebuilt server, anonymous
-#
-# Usage: docker compose -f docker-compose.vllm.yml up [vllm-server]. Weight sync needs network_mode
-# + ipc host on both containers (the rendezvous port is ephemeral and never published) and all GPUs
-# visible; VLLM_CUDA_DEVICES and TRAINER_CUDA_DEVICES must not overlap.
-# The NCCL defaults below are the no-fabric recipe (sockets, InfiniBand off). On an EFA host layer
-# docker-compose.vllm.efa.yml after this file: it passes the fabric devices to both services and
-# names the aws-ofi-nccl net, so a trainer on another node syncs over EFA.
+# NCCL group for weight sync. `docker compose -f docker-compose.vllm.yml up [vllm-server]` builds
+# `vllm-server:0.26.0` from Dockerfile.vllm when the tag is absent; the trainer image comes from
+# `make build-blackwell` (TRAIN_IMAGE=halo:hopper on Hopper). The sync needs network_mode + ipc host
+# and all GPUs visible, VLLM_ and TRAINER_CUDA_DEVICES disjoint; EFA layers docker-compose.vllm.efa.yml.
 
 services:
   vllm-server:
@@ -54,15 +46,11 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    # vllm serve args (ENTRYPOINT is `vllm serve`). Required and silent when wrong: --moe-backend
-    # triton (the auto Blackwell backends repack expert weights), --return-tokens-as-token-ids
-    # (train_on_sampled_tokens needs the sampled ids), --logprobs-mode processed_logprobs (the IS
-    # ratio divides by these logprobs, so they must be the sampling distribution's; the default
-    # raw_logprobs are pre-temperature and the trainer refuses them at any rollout_temperature != 1),
-    # and a --tool-call-parser matching the family. --enable-prefix-caching is explicit because vLLM
-    # keeps it opt-in for hybrid families (Qwen3.5/3.6's linear-attention layers); the pause around
-    # every weight sync wipes the cache, and it goes off together with MTP speculative decoding on
-    # 0.26.0 (VLLM_PREFIX_CACHING_FLAG, VLLM_SPECULATIVE_CONFIG). See agent-docs/infrastructure/rollout-servers.md.
+    # `vllm serve` args. Three are load-bearing and silent when wrong: --moe-backend triton (the auto
+    # Blackwell backends repack expert weights, so a synced write corrupts the experts),
+    # --return-tokens-as-token-ids (train_on_sampled_tokens recovers the sampled ids) and
+    # --logprobs-mode processed_logprobs (the IS ratio divides by them; raw_logprobs are
+    # pre-temperature). Parsers, prefix caching, chat template: agent-docs/infrastructure/rollout-servers.md
     command: >
       ${VLLM_MODEL:-Qwen/Qwen3-0.6B}
       --port ${VLLM_PORT:-8000}

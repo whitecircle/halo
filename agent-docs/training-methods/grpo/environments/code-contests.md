@@ -15,7 +15,7 @@ It speaks native tool calls, so the server needs a tool-call parser for the mode
 
 ```yaml
 environment_type: codeforces
-max_turns: 14                # the shipped value; the class default is 15
+max_turns: 14                # 14 in most recipes, 16 in the curriculum's stage-2 and stage-3 recipes; the class default is 15
 rewards:
   - source: environment      # the pass fraction of the submitted solution
     exponent: 2.0            # convex partial credit: half-right earns a quarter
@@ -121,10 +121,10 @@ term reads the submitted program as a fenced code block, not the tool-call turn 
 The trainer's two effort length terms sit outside these components, as `reward/effort_length_penalty`
 and `reward/effort_length_floor` ([Effort length reward](../async-grpo/rollouts.md#effort-length-reward));
 the floor's reference is `0.75 ×` each level's own `thinking_tokens`. The recipes keep their sum
-(`0.1 + 0.05`) under the `0.2` resubmission price, so how long an episode reasons never outweighs
-whether it resubmits; with `submission_reward` and `no_tool_use_penalty` at `0.1` each, a graded submission that
-passes nothing still scores above an episode that never attempts. `tests/cpu/config/test_env_grpo_reward_economy.py`
-holds the shipped recipes to those relations.
+under the resubmission price, so how long an episode reasons never outweighs whether it resubmits;
+with `submission_reward` and `no_tool_use_penalty` at `0.1` each, a graded submission that passes
+nothing still scores above an episode that never attempts.
+`tests/cpu/config/test_env_grpo_reward_economy.py` holds the shipped recipes to those relations.
 
 Behavior counters ride alongside: `episode/submission_rate`, `episode/test_calls`,
 `episode/tested_before_submission` (over submitting episodes, the rate the tested-submission bonus

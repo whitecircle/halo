@@ -20,7 +20,7 @@ Async GRPO metrics are namespaced by the question they answer. Rollout means are
 
 Under `sampling/*`, `is_correction_coverage` is the share of loss tokens the engine's sampling log-probs cover, `is_masked_frac` the share of those a mask stage zeroed, `is_ratio_mean` / `is_ratio_max` the surviving ratios, and `sampler_certain_frac` the policy tokens the engine emitted with probability 1, which carry no correction.
 
-Every episode's categorical facts slice the metrics: its resolved effort level under `effort/<level>/*`, and any string an environment stamps under `trajectory.info["slices"]` as `<slice>/<value>/*`. Code-contests stamps the submission language, giving `language/cpp/*`.
+Every episode's categorical facts slice the metrics: its resolved effort level under `effort/<level>/*`, and any string an environment stamps under `trajectory.info["slices"]` as `<slice>/<value>/*`. Code-contests stamps the submission language where the run offers a choice of them, giving `language/cpp/*`.
 
 Each slice carries `count`, `reward`, `generation_tokens`, `reasoning_tokens`, `turns`, `truncation_rate` and `solve_rate`, plus the environment's own `episode/*` keys with that prefix dropped (`effort/high/test_calls`).
 

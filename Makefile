@@ -1,9 +1,7 @@
-# Halo — common Docker build, training, verification and publishing targets.
-#
-# Everything that executes runs inside the image; pick the one for your GPU:
+# Halo — common Docker build, training, verification and publishing targets. Everything that
+# executes runs inside the image; pick the one for your GPU:
 #   make ... IMAGE=halo:blackwell   # B200/B300 (default)
 #   make ... IMAGE=halo:hopper      # H100/H200
-#
 # Lint/format and the docs link check run on the host.
 
 # bash, not dash (the default /bin/sh on Debian/Ubuntu): several recipes use bashisms.
@@ -53,17 +51,12 @@ DOCKER_RUN = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_
   $(IMAGE)
 # Per-target additions to the run above (see test-gpu-vllm).
 EXTRA_DOCKER_ENV ?=
-# Fabric for NCCL in the container: the weight-sync group to a rollout server on another node, and
-# every other trainer collective. EFA=1 passes the EFA devices and names the aws-ofi-nccl net (a
-# missing plugin then fails loudly instead of falling back to sockets); the rollout server must run
-# under the matching compose overlay (docker-compose.*.efa.yml). Without it the two server test
-# tiers force the no-fabric socket recipe the compose files default to.
-# NCCL_SOCKET_IFNAME (from the shell or the make command line; make does not read .env) overrides
-# either recipe's interface selection. The fabric default excludes lo:
-# an excluded-only list still ranks loopback first, and a bootstrap address of 127.0.0.1 never
-# reaches a peer on another node; the no-fabric default keeps the same-host loopback path.
-# NCCL_PROTO, when set in the calling shell, reaches the container: a protocol table on the trainer
-# alone hangs the first collective, so the compose EFA overlays pass it to the server the same way.
+# Fabric for NCCL in the container — the weight-sync group to a rollout server and every other
+# trainer collective. EFA=1 passes the EFA devices and names the aws-ofi-nccl net, so a missing
+# plugin fails loudly instead of falling back to sockets; the server must run under the matching
+# compose overlay. Its interface default excludes lo (an excluded-only list still ranks loopback
+# first, and a 127.0.0.1 bootstrap never reaches another node); the no-fabric default keeps lo for the
+# same-host path. NCCL_SOCKET_IFNAME overrides either (make does not read .env); NCCL_PROTO passes through.
 EFA ?=
 NCCL_SOCKET_IFNAME ?=
 EFA_SOCKET_IFNAME_DEFAULT = ^lo,docker,veth,tailscale

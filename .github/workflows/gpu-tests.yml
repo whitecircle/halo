@@ -1,23 +1,10 @@
 name: gpu-tests
 
-# Core GPU test tier. Halo needs Blackwell (SM100) or Hopper (SM90) for FA3/FA4 + DeepEP, which no
-# GitHub-hosted runner provides, so this runs on a trusted self-hosted runner on the GPU box, where
-# `halo:blackwell` is already built.
-#
-# Only `workflow_dispatch` is active. The `pull_request` trigger below needs the
-# `[self-hosted, halo]` runner registered (see agent-docs/infrastructure/ci.md), and is label-gated
-# once enabled: a maintainer adds the `run-ci-gpu` label to a PR to run it. The label is a per-PR
-# opt-in, not the security boundary — a `pull_request` run executes the PR's own copy of this file
-# and the Makefile, and the label survives later pushes (`synchronize` re-runs each one) — so before
-# enabling, set Settings → Actions → General to require run approval for ALL outside collaborators
-# and re-review the diff before each approval. There is deliberately no `push` trigger — it would
-# fire the tier on every merge with no label gate.
-#
-# Security: this runs contributor code on the runner. It is deliberately creds-free
-# (`ENV_FILE= AWS_DIR=` drops the `.env` and `~/.aws` mounts); tests read the runner's HF model
-# cache (`HALO_SCRATCH`, default /mnt) instead. Keep the `pull_request` trigger (not
-# `pull_request_target`) so PR code never receives repo secrets. If a test needs a gated model,
-# inject `HF_TOKEN` from a repo secret at that step rather than mounting `.env`.
+# Core GPU test tier on a trusted self-hosted runner on the GPU box — Halo needs Blackwell (SM100)
+# or Hopper (SM90) for FA3/FA4 + DeepEP, which no GitHub-hosted runner provides. Only
+# `workflow_dispatch` is active until that runner is registered; enabling the `pull_request` trigger
+# below keeps it label-gated (`run-ci-gpu`), and contributor code runs creds-free (`ENV_FILE=
+# AWS_DIR=`) under `pull_request`, never `pull_request_target`. Setup: agent-docs/infrastructure/ci.md.
 
 on:
   workflow_dispatch:

@@ -16,7 +16,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 
 - **Literal validation** — fields annotated `Literal[...]` (e.g. `advantage_method`) reject out-of-set values at parse time, in YAML and `--key=value` alike. Mixed unions (`float | Literal["auto"]`) are not validated.
 - **Boolean spellings** — YAML 1.2 booleans are unquoted `true`/`false`; the 1.1 spellings `yes`/`no`/`on`/`off` parse as (truthy) strings, so a string value on a bool field is rejected at parse time instead of silently inverting `packing: no`.
-- **No field renames.** Nothing is migrated and nothing is stripped: every key no config declares raises and names the field, retired knobs and retired ecosystem spellings (TRL's own `max_seq_length`, now `max_length`) alike.
+- **No field renames.** Nothing is migrated and nothing is stripped: every key no config declares raises and names the field, ecosystem spellings this toolkit does not accept included (TRL's own `max_seq_length` — use `max_length`).
 - **`output_dir` strftime expansion** — `%<letter>` directives expand from one shared timestamp, so `checkpoints/sft-%Y-%m-%dT%H-%M-%S` becomes a timestamped path; `%%` collapses to a literal `%`, and any other `%` (`sft-100%-data`) survives byte-identical.
 - **Distributed init happens first.** `parse()` calls `init_distributed()` before building the dataclasses: constructing a `TrainingArguments` touches `self.device`, which lets accelerate create the default process group *without* `device_id`. Losing that binding costs a `new_group` per mesh dimension instead of one `ncclCommSplit` and leaves every barrier guessing its device.
 

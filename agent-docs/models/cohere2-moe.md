@@ -117,4 +117,4 @@ memory-validated shape.
 
 | Config | EP | Notes |
 |---|:--:|---|
-| `examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml` | 8 | VLM checkpoint, text-only SFT; `max_length: 1024` peaks ~255 of the B300's ~268 GiB at EP=8 — 4096 OOMs when DeepEP's elastic buffer resizes. Pins `model_revision` to the layout those numbers were measured on and `attn_implementation: flash_attention_2` (the family has no forced fallback; FA4 loads too but was not the measured backend) |
+| `examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml` | 8 | VLM checkpoint, text-only SFT; `max_length: 1024` peaks ~255 of the B300's ~268 GiB at EP=8 — 4096 OOMs when DeepEP's elastic buffer resizes. Pins `model_revision` to the layout those numbers hold for and `attn_implementation: flash_attention_2` (the family has no forced fallback; FA4 loads but is unmeasured here) |

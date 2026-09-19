@@ -42,9 +42,7 @@ its one-step staleness, sync cadence, trajectory-length knobs) stay on the
 | Expert layout on sync | the layout the family's own `gather_expert_state_dict` emits, per-expert or fused; 0.26.0's expert loader reads both. A family whose hub namespace differs from its module tree (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families they cannot update are listed under [Which families each engine serves](#which-families-each-engine-serves) |
 | Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
 
-Use vLLM unless you need SGLang specifically: it is the only backend for Online GRPO, the only one
-that enforces a thinking budget, and its 0.26.0 loaders take the sync for two families SGLang's do
-not.
+Use vLLM unless a run needs SGLang specifically.
 
 ## Weight sync
 
@@ -54,10 +52,8 @@ collective; every rank takes part and none may skip.
 
 One rank owns the clients and does the sending: the **forwarding rank** (global main; TP-rank 0 under
 TP). Its sends sit between the gathers, so a failure there (an engine 500, a refused tensor, a host
-OOM on the snapshot) is recorded rather than raised.
-
-The forwarding rank stays in every remaining collective, and the whole world raises together at the
-end of the sync, naming the failing rank and its cause.
+OOM on the snapshot) is recorded rather than raised: the rank stays in every remaining collective,
+and the whole world raises together at the end of the sync, naming the failing rank and its cause.
 
 The gather **reshards the FSDP2 modules first**. A forward leaves their transient unsharded params
 registered while the optimizer steps the shards. Reading the registered params would ship a policy
@@ -69,10 +65,9 @@ The push is **streamed, not buffered**. Both engines take an update as a sequenc
 inside one quiesce: `/start_weight_update` … N × `/update_weights` … `/finish_weight_update` on
 vLLM, N × `/update_weights_from_distributed` between `/pause_generation` and `/continue_generation`
 on SGLang. The forwarding rank sends each chunk as the gather fills it and stages one chunk on its
-sync GPU, not one model (~800 GB at 400B).
-
-`/finish_weight_update` closes the layerwise reload phase on every path. The broadcast is packed
-(~1 GB buffers, double-buffered) on vLLM and typed 1 GB chunks on SGLang.
+sync GPU, not one model (~800 GB at 400B). `/finish_weight_update` closes the layerwise reload phase
+on every path; the broadcast is packed (~1 GB buffers, double-buffered) on vLLM and typed 1 GB chunks
+on SGLang.
 
 The chunk stays on the device, not in host memory: a chunk that transits pinned host memory is copied
 out and back over PCIe before the NIC sees it, 19–24 GB/s against 53–80 GB/s staged on the device.
@@ -86,11 +81,8 @@ fixed 1 GiB vLLM packed buffers.
 
 In multi-server mode (`rollout_server_configs`) one snapshot per parameter is shared across all
 servers. Each chunk goes out to every server on concurrent threads and is released once they all
-have it.
-
-The threads share the forwarding rank's GPU, NICs and process, so the fan-out costs the sum rather
-than the max: two servers each push at 27 GB/s over EFA, half of one server's rate, and the per-sync
-cost grows with the server count.
+have it. The threads share the forwarding rank's GPU, NICs and process, so the fan-out costs the sum
+rather than the max: two servers each push at 27 GB/s over EFA, half of one server's rate.
 
 A chunk cannot be replayed. A server that fails **after** its first chunk is reported rather than
 reconnected; the trainer does not hold what already landed. One that fails before any chunk went out
@@ -100,11 +92,9 @@ client owns its own NCCL connection to its server on a `group_port` bound on the
 
 **The quiesce spans the streaming, not just the final broadcast.** The update opens with the first
 full chunk (~1 GB into the gather) and closes when the last one lands, so a server stops serving for
-as long as the gather runs: minutes at 397B.
-
-Only the raw-model path is rolling, one server at a time: a single training process, no adapters, no
-EP wrappers, in multi-server mode. Every other shape streams the gather and pauses all servers
-together
+as long as the gather runs: minutes at 397B. Only the raw-model path is rolling, one server at a time
+— a single training process, no adapters, no EP wrappers, in multi-server mode; every other shape
+pauses all servers together
 ([single vs multi-server](../training-methods/grpo/async-grpo/setup.md#multiple-servers-and-prefetch)).
 
 The client pauses vLLM with `/pause?mode=keep`: in-flight generations (the prefetched rollout round)
@@ -128,18 +118,15 @@ Otherwise the frozen request times out and its retry re-issues a turn the engine
 old policy nor the new one, and vLLM's layerwise reload materializes a layer whose tensors straddled
 the boundary from *uninitialized* storage while it waits for the rest. The abort therefore leaves
 that engine **paused** instead of resuming it, refuses every later sync on that client, and logs
-`RESTART the … server`.
-
-Restart the container: the trainer kept no copy of what landed and cannot repair it.
+`RESTART the … server`. Restart the container: the trainer kept no copy of what landed and cannot
+repair it.
 
 On vLLM, each client owns **one persistent CUDA stream pair** for the pack uploads. PyTorch's caching
 allocator keeps freed blocks in per-stream pools, so a fresh stream per sync would strand one payload
-of reserved memory every sync. The forwarding rank's steady state is therefore its training footprint
-plus about one sync of pack buffers.
-
-The SGLang client keeps one persistent send stream for the same reason and drops its arena at the end
-of every sync, so between syncs that memory is the allocator's rather than pinned at the largest
-chunk's size.
+of reserved memory every sync; the forwarding rank's steady state is therefore its training footprint
+plus about one sync of pack buffers. The SGLang client keeps one persistent send stream for the same
+reason and drops its arena at the end of every sync, so between syncs that memory is the allocator's
+rather than pinned at the largest chunk's size.
 
 `HALO_WEIGHT_SYNC_MEM_LOG=1` (off by default) brackets each collective sync with a per-rank
 `[mem rankNN] weight-sync pre/post` line ([Debugging](../reference/debugging.md#3-gpu-memory-profiling));
@@ -157,11 +144,9 @@ repacks and must not serve RL.
 
 The same rule excludes quantized serving: a weight-quantized engine stores transformed tensors the
 broadcast cannot update. Serve bf16. For gpt-oss that means the **BF16** checkpoint, not the stock
-MXFP4 one (`openai/gpt-oss-20b`, whose quantization the engine auto-detects with no flag to fail on).
-
-Its MXFP4 expert loader branches on packed blocks and on biases with no branch for a bf16 expert
-tensor, so every synced expert weight is dropped while the biases land. The failure is silent: the
-trainer sees only a slow log-ratio drift.
+MXFP4 one (`openai/gpt-oss-20b`, whose quantization the engine auto-detects with no flag to fail on):
+its MXFP4 expert loader has no branch for a bf16 expert tensor, so every synced expert weight is
+dropped while the biases land, silently, and the trainer sees only a slow log-ratio drift.
 
 ### vLLM server patches
 
@@ -250,11 +235,8 @@ for Qwen3.5/3.6 and Gemma 4, GptOss's interleaved pair. The sync carries one lay
 either engine.
 
 What differs per engine is which families its pinned release can take an online update for at all.
-Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), and
-`validate_weight_sync_support` refuses the pair at construction, quoting it. A family neither engine
-can take the sync for stays a family flag (`_supports_weight_sync`): Inkling and GLM-5 Next are
-served under a checkpoint namespace no gather spells, Cohere2 MoE has no validated end-to-end sync
-on either engine.
+Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), quoted by the
+[construction gate](#construction-gates).
 
 | Family (`model_type`) | vLLM 0.26.0 | SGLang 0.5.17 | Loader fact |
 |---|:--:|:--:|---|
@@ -266,9 +248,10 @@ on either engine.
 | Laguna | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
-Every other family the trainer trains (dense families, GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4
-MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE) syncs on both engines, expert distribution included
-([CI](ci.md) has the per-family pass).
+The families not in that table sync on both engines, expert distribution included ([CI](ci.md) has
+the per-family pass): dense families, GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4,
+Ling 2.0, LFM-2 MoE. Inkling, GLM-5 Next and Cohere2 MoE are the exception — they declare
+`_supports_weight_sync = False` and are refused on both ([Construction gates](#construction-gates)).
 
 Three SGLang 0.5.17 loader facts shape its image and its client.
 
@@ -314,8 +297,8 @@ choice), and `nvidia-nccl-cu13` installed at `uv.lock`'s exact pin, the same NCC
 images run. `VLLM_NCCL_SO_PATH` is baked to that wheel so the base image's older system copy can
 never win the soname race.
 
-A skew fails `ncclCommInitRank` at `/init_weight_transfer_engine` (HTTP 500,
-`NCCL error: internal error`); rebuild the image after any lock bump of the pin.
+A skew fails `ncclCommInitRank` at `/init_weight_transfer_engine` or hangs it with no error;
+rebuild the image after any lock bump of the pin.
 
 0.26.0 is the last vLLM release on torch 2.11, the training image's torch and NCCL generation; 0.27
 moves to torch 2.13, whose NCCL does not match that pin. The image also installs the EFA userspace
@@ -339,28 +322,21 @@ all and reads the family only through the release's `auto_map` modules, which it
 loads cleanly on either line. Its exports therefore carry the source repo's own config schema and
 those modules ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
 
-`docker/vllm/parity/check.py` runs at image build over one `config.json` per fixtured family: what
-the toolkit exports for it, built from the tiny roster config in `tests/common/models.py`, through
-the vendor config module the fixture ships where transformers carries no class for the family
-(Bailing/Ling).
+`docker/vllm/parity/check.py` runs at image build: the server's transformers must parse what the
+toolkit exports for every family whose EP layer admits weight sync, since the server loads that
+checkpoint before a single tensor can be synced into it. One `config.json` fixture per family,
+rendered offline from the tiny roster config in `tests/common/models.py` (only the source-schema
+carry is pinned to a release config at a fixed revision, the one thing a tiny config cannot express),
+plus a negative control under `unparseable/` (the folded Gemma 4 form, the native-schema Step-3.7
+export) that must still be refused.
 
-Only the source-schema carry is pinned to a release config at a fixed revision, the one thing a tiny
-config cannot express; everything else re-renders offline (`generate.py`, regenerated in the training
-image).
+A transformers bump on either side then fails the build rather than the first live sync, and a family
+no pinned engine can load (Mistral4) surfaces as a refusal rather than a dead sync.
+`tests/cpu/checkpoint/test_vllm_parity_fixtures.py` fails when the roster or the fixtures drift.
 
-The roster is derived from the EP registry: every family whose layer class admits weight sync owes a
-fixture, because the server has to parse that family's checkpoint before a single tensor can be
-synced into it. That is how a family no pinned engine can load (Mistral4) surfaces as a refusal
-rather than a dead sync. `tests/cpu/checkpoint/test_vllm_parity_fixtures.py` fails when the roster
-or the rendered fixtures drift.
-
-Each rewrite also ships its negative control under `unparseable/` (the folded Gemma 4 form, the
-native-schema Step-3.7 export), which must still be refused: a transformers bump on either side that
-breaks the schema fails the build, not the first live sync.
-
-`docker-compose.vllm.yml` runs it with `network_mode: host` + `ipc: host`: to form the NCCL group the
-two sides first find each other on an ephemeral trainer port (the rendezvous), which a bridge network
-would hide, and group formation then times out at "1/2 clients joined".
+`docker-compose.vllm.yml` runs the server with `network_mode: host` + `ipc: host`: to form the NCCL
+group the two sides first find each other on an ephemeral trainer port (the rendezvous), which a
+bridge network would hide, and group formation then times out at "1/2 clients joined".
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0` (anonymous, no AWS account), then
 `docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0` — compose names that tag.
@@ -376,7 +352,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 |---|---|---|
 | `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint |
 | `VLLM_PORT` | `8000` | Bound on the host (`network_mode: host`). One knob for the whole stack: it drives the serve command, the healthcheck, the container's `VLLM_SERVER_URL` and the readiness banner, and the Makefile derives its own `VLLM_SERVER_URL` from it (`SGLANG_PORT` is the SGLang equivalent) |
-| `VLLM_CUDA_DEVICES` | `7` | Server GPUs; must exclude the trainer's (a rank cannot broadcast to itself). Selects via `CUDA_VISIBLE_DEVICES` inside a container that sees every GPU: hiding devices from the container instead (`--gpus device=N`) breaks the cross-container NCCL P2P import of the trainer's buffers (`Cuda failure 101 'invalid device ordinal'`, `500` on `/init_weight_transfer_engine`) |
+| `VLLM_CUDA_DEVICES` | `7` | Server GPUs; must exclude the trainer's (a rank cannot broadcast to itself). Selects via `CUDA_VISIBLE_DEVICES` inside a container that sees every GPU: hiding devices from the container instead (`--gpus device=N`) breaks the cross-container NCCL P2P import of the trainer's buffers, and `/init_weight_transfer_engine` fails with `unhandled cuda error` on the first connection (the stranded-communicator case under [Troubleshooting](#troubleshooting) fails only after several) |
 | `VLLM_TP` | `1` | `--tensor-parallel-size` |
 | `VLLM_GPU_MEM` | `0.85` | `--gpu-memory-utilization` |
 | `VLLM_MOE_BACKEND` | `triton` | Keep `triton` for MoE RL ([Weight sync](#weight-sync)) |
@@ -661,8 +637,8 @@ when the served id is a server-side path or an alias).
 
 It reports the transport NCCL formed on (`NET/Libfabric/…/GDRDMA` is EFA with GPUDirect; `NET/IB`,
 `NET/Socket`, `P2P/CUMEM` for same-host CUDA IPC, or `SHM`), the `aws-ofi-nccl` build string, the
-libfabric provider, and GB/s. `--expect efa|ib|socket|p2p|shm` makes it a gate: exit 1 on a mismatch,
-on an altered served model, or when the group fails to form. Flags:
+libfabric provider, and GB/s. It exits 1 when the group fails to form or the push changed the served
+model; `--expect efa|ib|socket|p2p|shm` adds the transport to that gate. Flags:
 [Scripts](../reference/scripts-reference.md#profiling--benchmarks).
 
 Measured on 8× B300 nodes, trainer node → server node, one worker, the trainer's own streamed path, full
@@ -725,7 +701,7 @@ returns at RL concurrency.
 at 100% of a core from ~48 concurrent sequences (Qwen3.6-35B-A3B on a B300: ~15 ms per step).
 
 A trainer sharing the host (its ranks and the environments' judge sandboxes) slows every step: 22–25
-tok/s per sequence in a run against 63–66 for the same server alone. Pin each server container to
+tok/s per sequence against 63–66 for the same server alone. Pin each server container to
 its own cores (`docker run --cpuset-cpus`, compose `cpuset:`) and the trainer to the rest.
 
 Step latency grows with running sequences (about 14 ms + 0.22 ms per sequence here under MTP), so
@@ -765,14 +741,12 @@ vLLM's `fused_moe/configs`, and logs `Using default MoE config. Performance migh
 when neither matches; the image ships none for B300 in bf16. At RL concurrency the step is CPU-bound
 (above) and the tuned tiles change nothing measurable; they matter for prefill-heavy phases.
 
-`benchmarks/kernels/benchmark_moe.py --tune` in the vLLM image writes one. It needs `pip install
-ray`, runs one batch size per visible GPU in parallel (1920 tile configs each, 8–27 minutes), writes
-the JSON only at the end, and aborts the whole run on a Triton compile failure of a single config
-unless its `OutOfResources` handler also catches `RuntimeError`.
-
-Pass `--tp-size 1` (the default of 2 halves `N`) and `--batch-size` with the decode batch
-(concurrent sequences × (1 + speculative tokens)) and the prefill chunk. The file is read once per
-process, so a new one needs a server restart.
+`benchmarks/kernels/benchmark_moe.py --tune` in the vLLM image writes one (needs `pip install ray`;
+one batch size per visible GPU in parallel, 1920 tile configs each, 8–27 minutes, JSON written only
+at the end; a single config's Triton compile failure aborts the run unless its `OutOfResources`
+handler also catches `RuntimeError`). Pass `--tp-size 1` (the default of 2 halves `N`) and
+`--batch-size` with the decode batch (concurrent sequences × (1 + speculative tokens)) and the
+prefill chunk. The file is read once per process, so a new one needs a server restart.
 
 **Generation volume is the step-time lever** once prefetch overlaps collection into training
 (`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens` caps a

@@ -84,7 +84,7 @@ Rows carry two masks. `completion_mask` is attention-valid — every real comple
 
 | Knob | Sets | Sizing rule |
 |---|---|---|
-| `num_generations` | GRPO group size | 8 in the code-contests recipes, 4 in the templates. Trades unique prompts for samples each. |
+| `num_generations` | GRPO group size | 8 in most code-contests recipes, 12 in the curriculum's stage-2 and stage-3 recipes, 4 in the templates. Trades unique prompts for samples each. |
 | `max_concurrent_rollouts` | Per-rank cap on rollouts in flight | Defaults to 4× this rank's actor share; above the round's count it never binds. |
 | `num_rollout_workers` | Ray actor pool per rank (default `64`) | The environment's blocking per-episode cost ([Pool sizing](../../../infrastructure/ray.md#pool-sizing)). |
 

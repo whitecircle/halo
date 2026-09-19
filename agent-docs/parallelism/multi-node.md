@@ -312,7 +312,7 @@ over NVLink) — which proves the rank math and the gradient algebra, not the fa
 | 2-node, 2/4/8 GPUs per node — plain FSDP2 DP, HSDP, node-local multi-group EP (deferred sync), cross-node EP, EP+TP, EP+CP, pure ETP, cross-node EP+ETP | ✅ | real multi-node runs over an EFA fabric |
 | **Wider layouts** (4-node, 8-node, the 512-GPU layouts in [Large-Scale Scenarios](large-scale-scenarios.md)) | ❌ | rank math only — `ParallelismConfig` is exercised at world 8/16/32, no recorded run |
 | **NVL72 / MNNVL rack-wide domains** | ❌ | simulated domain sizes only; see the warning below and [Scale & Limits](../reference/scale-and-limitations.md) |
-| **InfiniBand/RoCE as a multi-node fabric** | ❌ | the recorded multi-node runs used EFA; the IB path is config guidance, not a measurement |
+| **InfiniBand/RoCE as a multi-node fabric** | ❌ | EFA only; the IB path is config guidance, not a measurement |
 | Multi-node weight sync for online / async GRPO — trainer node → rollout-server node over EFA, both engines, plus a two-node trainer syncing to a server on a third node | ✅ | [Rollout Servers → Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
 | **Cross-node gathered EP save** on a shared filesystem | ❌ | hand-run recipe in `tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py`; not exercised multi-node |
 

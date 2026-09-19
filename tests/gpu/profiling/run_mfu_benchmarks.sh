@@ -1,12 +1,6 @@
 #!/bin/bash
-# MFU benchmark sweep at 4k, 8k, 16k sequence lengths.
-#
-# Runs SFT, SMPO, and GRPO (if available) benchmarks at multiple
-# sequence lengths to produce a performance comparison table.
-# Extracts the headline summary lines (tokens/s/GPU, peak memory, step time) plus the
-# machine-readable __HALO_BENCH__ JSON sentinel from each run.
-#
-# Usage:
+# MFU sweep at 4k/8k/16k sequence lengths across the SFT and SMPO benchmarks, extracting the headline
+# summary lines plus the machine-readable __HALO_BENCH__ JSON sentinel from each run.
 #   ./tests/gpu/profiling/run_mfu_benchmarks.sh [--gpus=N] [--ep=N] [--steps=N]
 #   GPUS=8 EP=8 ./tests/gpu/profiling/run_mfu_benchmarks.sh
 set -e
@@ -15,10 +9,9 @@ cd "$(dirname "$0")/../../.."
 # sys.path[0], not the project root, so the root must be on PYTHONPATH.
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-# One home for master ports (tests/common/ports.py): a fixed literal races the previous launch,
-# whose rendezvous socket is still in TIME_WAIT after `cleanup`. Assigned on its OWN line at every
-# call site: a command substitution inside an argument list does not trip `set -e`, so a failing
-# allocation would hand torchrun a bare `--master_port=` and it would die on an argparse error.
+# One home for master ports (tests/common/ports.py): a fixed literal races the previous launch, whose
+# rendezvous socket is still in TIME_WAIT after `cleanup`. Assigned on its own line at every call
+# site — a command substitution inside an argument list does not trip `set -e`.
 alloc_port() { python -c 'from tests.common.ports import free_port; print(free_port())'; }
 
 GPUS=${GPUS:-2}
@@ -53,7 +46,6 @@ for SEQ in 4096 8192 16384; do
     echo ""
     echo "########## seq=$SEQ ##########"
 
-    # SFT EP
     echo "=== SFT EP=$EP seq=$SEQ ==="
     cleanup
     port=$(alloc_port)
@@ -63,7 +55,6 @@ for SEQ in 4096 8192 16384; do
         grep -E "__HALO_BENCH__|tokens/s/GPU|peak memory \(GB\)|avg step time|MFU %" || echo "FAILED"
     cleanup
 
-    # SFT EP+CP
     echo "=== SFT EP=$EP+CP=$EP seq=$SEQ ==="
     cleanup
     port=$(alloc_port)
@@ -73,7 +64,6 @@ for SEQ in 4096 8192 16384; do
         grep -E "__HALO_BENCH__|tokens/s/GPU|peak memory \(GB\)|avg step time|MFU %" || echo "FAILED"
     cleanup
 
-    # SMPO EP
     echo "=== SMPO EP=$EP seq=$SEQ ==="
     cleanup
     port=$(alloc_port)
@@ -83,7 +73,6 @@ for SEQ in 4096 8192 16384; do
         grep -E "__HALO_BENCH__|tokens/s/GPU|peak memory \(GB\)|avg step time|MFU %" || echo "FAILED"
     cleanup
 
-    # SMPO EP+CP
     echo "=== SMPO EP=$EP+CP=$EP seq=$SEQ ==="
     cleanup
     port=$(alloc_port)
@@ -93,7 +82,6 @@ for SEQ in 4096 8192 16384; do
         grep -E "__HALO_BENCH__|tokens/s/GPU|peak memory \(GB\)|avg step time|MFU %" || echo "FAILED"
     cleanup
 
-    # Dense SFT (FSDP baseline)
     echo "=== SFT Dense (FSDP) seq=$SEQ ==="
     cleanup
     port=$(alloc_port)
