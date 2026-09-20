@@ -25,7 +25,7 @@ use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 17               # the high profile's 3 submissions + 8 test calls, a cut-turn recovery and the
+max_turns: 18               # the high profile's 3 submissions + 8 test calls, two cut-turn recoveries and the
                             # closing turn, with slack for failed calls; a cut turn costs a turn, not the episode
 environment_kwargs:
   language: [python, cpp]   # the model names each program's language; python is graded at timeout_per_test,
@@ -36,7 +36,7 @@ environment_kwargs:
   stop_on_first_failure: false
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a budget stop scores the graded prefix
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
-  max_length_cutoff_recoveries: 1  # one recovery: the second turn cut inside its budget ends the episode truncated
+  max_length_cutoff_recoveries: 2  # two recoveries: the third turn cut inside its budget ends the episode truncated
   # thinking_tokens is an ENGINE cap that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
     low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 4}
@@ -52,7 +52,7 @@ environment_kwargs:
   multi_turn_reward: 0       # off: a bounty for a second call pays a judge probe like a scratchpad run
   tool_success_reward: 0     # any per-call pay is farmable by duplicate re-runs
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged when the episode burns max_turns
-  length_cutoff_penalty: 0.05  # magnitude, >= 0 — charged per engine-cut turn the episode recovers from
+  length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per engine-cut turn the episode recovers from
   tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
 # --- Rewards ---
