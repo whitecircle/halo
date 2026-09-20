@@ -82,7 +82,7 @@ episode_timeout: 2700         # whole-episode wall clock; must stay below the NC
 rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]      # end each turn at the harmony tool-call terminator
-rollout_max_tokens: 24000              # per-turn total: thinking budget + answer headroom
+rollout_max_tokens: 30000              # per-turn total: thinking budget + answer headroom
 rollout_max_thinking_tokens: 18000     # global CoT ceiling >= the profiles' high
 effort_length_penalty_k0: 0.03         # reasoning tokens are priced per level: -min(c_max, k(level) x tokens / 8192), with k
 effort_length_penalty_c_max: 0.1       #   falling by e per 25 effort units (low 25, medium 50, high 100): low pays ~20x high
