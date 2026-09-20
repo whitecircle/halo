@@ -1,6 +1,7 @@
-# Halo / Gemma 4 MoE cookbook
+# Fine-tune Gemma 4 MoE with Halo
 
-Fine-tune [Gemma 4 26B A4B IT](https://huggingface.co/google/gemma-4-26B-A4B-it) with Halo.
+Fine-tune [Gemma 4 26B A4B IT](https://huggingface.co/google/gemma-4-26B-A4B-it)
+with expert parallelism, then serve the Hugging Face checkpoint or continue with GRPO.
 
 Gemma 4 26B A4B has 128 routed experts and selects eight experts for each token. The checkpoint can process text and images. This recipe uses text data.
 
@@ -12,23 +13,24 @@ Gemma 4 26B A4B has 128 routed experts and selects eight experts for each token.
 
 Halo uses DeepEP for token dispatch and grouped GEMM for the expert projections. CP and TP are not supported for this model family.
 
-This recipe starts with eight NVIDIA B300 GPUs. EP8 places 16 experts on each GPU.
+This recipe uses eight NVIDIA B300 GPUs. EP8 places 16 experts on each GPU. On
+H100 or H200, use the Hopper image. The training config does not change.
 
 ## Start the training container
 
 ```bash
 git clone --recurse-submodules https://github.com/whitecircle/halo
 cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
+export HALO_IMAGE=public.ecr.aws/whitecircle/halo:blackwell
+# On H100 or H200, use public.ecr.aws/whitecircle/halo:hopper.
+docker pull "$HALO_IMAGE"
 ```
 
 Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell. Downloading the Gemma checkpoint requires accepting Google's license on Hugging Face.
 
 ```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
+export HALO_SCRATCH=/path/to/storage
+mkdir -p "$HALO_SCRATCH/hf" "$HALO_SCRATCH/checkpoints" "$HALO_SCRATCH/tmp"
 docker run --rm -it \
   --name halo-gemma4 \
   --gpus all \
@@ -46,9 +48,9 @@ docker run --rm -it \
   -e PYTHONPATH=/workspace \
   -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
   -v "$(pwd)":/workspace \
-  -v "$D":/data \
+  -v "$HALO_SCRATCH":/data \
   -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
+  "$HALO_IMAGE" bash
 ```
 
 Run all remaining commands inside this container.
@@ -139,8 +141,8 @@ expert_parallel_size: 1
 expert_tensor_parallel_size: 8
 ```
 
-Do not enable TP or CP. On one eight-GPU node `expert_parallel_size` must also be 8, 2,
-or 1. An intermediate size such as 4 forms two four-rank DeepEP dispatch groups whose
+With eight training GPUs, `expert_parallel_size` must be 8, 2, or 1. A value of 4
+forms two four-rank DeepEP dispatch groups whose
 combine barriers race FSDP2, and [`ParallelismConfig`](../parallelism.md) rejects it at
 config time.
 
@@ -173,23 +175,17 @@ print(processor.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 
 Use the same model class and processor for image-and-text inference.
 
-Serve the gathered checkpoint with Halo's vLLM image, which listens on port
-8000: the toolkit writes Gemma 4 exports in the config schema vLLM 0.26.0's
-model code reads, and its expert loader takes the gathered save's fused layout
-directly. SGLang 0.5.17 reads the same fused pair on port 30000, and the
-upstream image serves it. Run the server on the host, not inside the training
-container, and add
-`- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to
-serve a checkpoint from disk, since the compose service otherwise mounts only
-the HuggingFace cache.
+Serve the gathered checkpoint with Halo's SGLang image. Run this command on the host.
+The compose service mounts `SGLANG_MODEL_DIR` at the same path inside the container.
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
+docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
 
-VLLM_MODEL=/data/checkpoints/gemma-4-26b-a4b-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
+SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gemma-4-26b-a4b-ultrachat-ep8" \
+SGLANG_MODEL_DIR="$HALO_SCRATCH/checkpoints" \
+SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
+  docker compose -f docker-compose.sglang.yml up sglang-server
 ```
 
 ## Train a LoRA adapter
@@ -215,69 +211,54 @@ output_dir: /data/checkpoints/gemma-4-26b-a4b-ultrachat-lora
 
 Keep TP disabled for LoRA.
 
-## Continue with GRPO
+## Train with GRPO
 
-Start from `examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests-full-ep1.yaml`,
-or from `examples/grpo/environmental/environmental-grpo-template.yaml`. Set
-`model_name_or_path` to the gathered checkpoint.
-
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
-serves and weight-syncs this family (`rollout_backend: sglang`; ep1 configs under
-`examples/grpo/environmental/gemma4/sglang/`); that sync needs this repo's SGLang image
-([Supported Matrix](../supported-matrix.md#rollout-engines)). Start the server on
-separate GPUs.
-
-Run the server on the host, not inside the training container. Pull the prebuilt server
-image, retag it to the name the compose file expects, and add
-`- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to serve a
-checkpoint from disk, since its service mounts only the HuggingFace cache.
+Use the shipped SGLang LoRA recipe. It trains from the base checkpoint by default.
+To continue from the SFT checkpoint, set `model_name_or_path` to its `/data` path.
+Set `SGLANG_MODEL` to the matching `$HALO_SCRATCH` path on the host.
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
-VLLM_MODEL=/data/checkpoints/gemma-4-26b-a4b-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
-VLLM_REASONING_PARSER=gemma4 VLLM_USE_V2_MODEL_RUNNER=0 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
+cp \
+  examples/grpo/environmental/gemma4/sglang/gemma4-26b-a4b-code-contests-lora-ep1.yaml \
+  gemma4-grpo.yaml
 ```
 
-That command already passes the required `--moe-backend triton`; Blackwell's
-auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. The reasoning parser and the V1 model runner are what the per-effort
-`thinking_tokens` profile needs: the trainer sends `thinking_token_budget` on every
-request, and vLLM refuses it with a 400 without them.
+The config contains a placeholder dataset. Prepare a HardTests pool as described in
+[Code Contests](../../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗,
+then replace `your-org/code-contests-hardtests-rl:medium` in `gemma4-grpo.yaml`.
 
-For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
-trainer will not use.
+The shipped config uses two SGLang servers on four GPUs. Start both servers on the
+host. The trainer will use GPUs 0–3.
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
 
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/gemma-4-26b-a4b-ultrachat-ep8 \
-SGLANG_MODEL_DIR=/data/checkpoints \
-SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
-  docker compose -f docker-compose.sglang.yml up sglang-server
+export SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17
+export SGLANG_MODEL=google/gemma-4-26B-A4B-it
+cp jinja-templates/gemma4/gemma4-reasoning-effort.jinja "$HALO_SCRATCH/"
+export SGLANG_MODEL_DIR="$HALO_SCRATCH"
+export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/gemma4-reasoning-effort.jinja"
+
+SGLANG_CUDA_DEVICES=4,5 SGLANG_TP=2 SGLANG_PORT=30000 \
+  docker compose -p gemma4-rollout-0 -f docker-compose.sglang.yml up -d sglang-server
+
+SGLANG_CUDA_DEVICES=6,7 SGLANG_TP=2 SGLANG_PORT=30001 \
+  docker compose -p gemma4-rollout-1 -f docker-compose.sglang.yml up -d sglang-server
+
+curl --fail http://localhost:30000/health
+curl --fail http://localhost:30001/health
 ```
 
-The compose default `--moe-runner-backend triton` is required for weight sync, and this
-family must be served without `SGLANG_ENABLE_R3` — the engine exits at start with it.
-
-```yaml
-rollout_server_url: http://localhost:8000
-train_on_sampled_tokens: true
-routing_replay: none
-```
-
-Leave `routing_replay` at `none`. Both replay modes are rejected for Gemma 4: its router
-sits outside the EP wrapper, so gate weights cannot be re-derived at a forced selection.
+The compose file sets `--moe-runner-backend triton`, which keeps the expert weights in
+the layout required for synchronization. Do not set `SGLANG_ENABLE_R3`. Gemma 4 does
+not support routing replay.
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gemma4-grpo.yaml -n 4
+CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
+  halo launch environmental-grpo gemma4-grpo.yaml -n 4
 ```
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server; they cannot share a GPU.
-Size `expert_parallel_size` to the trainer's GPU count, not the node's: the SFT value
-assumes the whole node. Full setup:
+The shipped SGLang recipe uses `expert_parallel_size: 1`. For a shipped EP4 recipe,
+use a config under `examples/grpo/environmental/gemma4/vllm/`. Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.
