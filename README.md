@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="/logo.png" height="88">
+    <img src="/logo.png" height="100">
     <h3 align="center">Halo</h3>
 </p>
 
