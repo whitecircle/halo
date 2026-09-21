@@ -23,7 +23,7 @@ HF MoE class it claims and the config `model_type`. They subclass a shared base,
 so a family whose expert-weight layout matches an existing one subclasses that
 instead of starting over — Laguna reuses GLM-4's in 39 lines. Most land between
 40 and 140 lines. GPT-OSS, with interleaved gate/up weights and attention sinks,
-is the outlier at about 370.
+is the outlier at 366.
 
 Context parallelism is the same shape: one `UlyssesAttentionBase` subclass under
 `context_parallel/layers/` declaring the attention classes it wraps. Tensor

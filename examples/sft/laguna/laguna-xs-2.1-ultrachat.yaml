@@ -25,7 +25,7 @@ num_train_epochs: 1.0
 gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-# Quantized optimizer states keep a full 33B fine-tune within one B300.
+# Quantized optimizer states keep the full fine-tune within one B300.
 optim: flash_adamw
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine

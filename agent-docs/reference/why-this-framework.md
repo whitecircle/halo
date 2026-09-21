@@ -3,7 +3,7 @@
 Built on HuggingFace Transformers, Accelerate, and TRL — every distributed trainer subclasses a TRL, Transformers, or SentenceTransformers trainer. What it adds over that stack:
 
 - **EP/CP/TP/ETP on native HF models, no Megatron conversion** (DeepEP for MoE expert parallelism).
-- **Coupled EP+CP / EP+TP / pure ETP** shapes that HF-native tools don't have.
+- **EP+TP and pure ETP** shapes that other HF-native tools don't compose (Axolotl composes EP with CP, not TP).
 - **Full BF16 masters + optimizer state** (`AdamWBF16` + stochastic rounding, ~6 bytes/param) — others keep fp32 masters.
 - **SMPO** and **Offline GRPO** (pre-scored completions) — methods absent elsewhere.
 - **Fully asynchronous multi-turn RL** — Ray rollout actors overlap training via a prefetch queue, a clean Transformers ↔ vLLM/SGLang split with NCCL weight sync, and built-in environments; no Megatron backend, no veRL.
@@ -11,7 +11,7 @@ Built on HuggingFace Transformers, Accelerate, and TRL — every distributed tra
 
 ## Framework comparison
 
-Versions compared: TRL 1.6.0, Accelerate 1.11.0, Axolotl 0.17.0, MS-SWIFT 4.0, veRL (Megatron backend), Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
+Versions compared: TRL 1.6.0, Accelerate 1.11.0, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend), Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
 
 | Feature | This Toolkit | HF TRL | Accelerate | Unsloth | Axolotl | MS-SWIFT | veRL | Megatron-LM |
 |---------|:------------:|:------:|:----------:|:-------:|:-------:|:--------:|:----:|:-----------:|
@@ -20,7 +20,7 @@ Versions compared: TRL 1.6.0, Accelerate 1.11.0, Axolotl 0.17.0, MS-SWIFT 4.0, v
 | EP for MoE (no conversion) | **DeepEP** | No | No | No | **DeepEP** (v0.17) | Via Megatron | Via Megatron | MCore format |
 | Context Parallelism | **Ulysses (SFT + SMPO)** | SFT-only | Yes (FSDP2) | No | Yes (ring/seq) | Via Megatron | Via Megatron | MCore |
 | Tensor Parallelism | Yes (DTensor) | Via Accelerate | Yes (ND-parallel) | No | Yes (experimental) | Via Megatron | Via Megatron | MCore |
-| Combined EP+CP / EP+TP / pure ETP | **Yes** | No | No (no EP) | No | Partial (FSDP+EP, FSDP+TP+CP; not coupled) | Via Megatron | Via Megatron | Yes |
+| Combined EP+CP / EP+TP / pure ETP | **Yes** | No | No (no EP) | No | Partial (EP×CP and EP×CP×FSDP; EP×TP raises) | Via Megatron | Via Megatron | Yes |
 | Full BF16 (~6 bytes/param) | **AdamWBF16 + SR** | No (FP32 masters) | Plumbing only | No | bf16 MP only | No | No | No |
 | Multi-turn RL | **Async Ray + built-in envs** | Async GRPO (thin envs) | — | Via ART | Async GRPO + NeMo Gym | GYM env | AgentLoop + SGLang | No |
 | Native HF models (no conversion) | **Yes (all modes)** | Yes (no EP) | Yes (plumbing) | Yes (no EP/CP/TP) | Yes | MCore for EP/CP/TP | MCore for EP/CP/TP | No |
@@ -28,13 +28,13 @@ Versions compared: TRL 1.6.0, Accelerate 1.11.0, Axolotl 0.17.0, MS-SWIFT 4.0, v
 | Native `s3://` datasets | **Yes** | No | No | No | Yes | No | No | Via MSC |
 | Multi-node | **Tested** | Via Accelerate | Yes | Paid tiers | Yes | Yes | Yes | Yes |
 
-Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, only this toolkit and Axolotl (v0.17.0) run Expert Parallelism on native HF MoE without conversion.
+Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself has an expert-parallel path (`DistributedConfig(enable_expert_parallel=True)`, accelerate ≥1.12) whose router all-reduces the full MoE output on every rank instead of dispatching tokens.
 
 ### When to use which
 
 | Use case | Recommended | Why |
 |----------|:-----------:|-----|
-| Coupled EP+CP / EP+TP / pure ETP on MoE | **This Toolkit** | The coupled shapes HF-native tools don't have |
+| EP+TP or pure ETP on MoE | **This Toolkit** | Expert shapes other HF-native tools don't compose |
 | Memory-constrained full fine-tuning | **This Toolkit** | AdamWBF16 — ~6 bytes/param |
 | Long-context training (scales with nGPUs) | **This Toolkit** | CP splits sequences; combines with EP |
 | SMPO or Offline GRPO | **This Toolkit** | Unique methods |
@@ -47,13 +47,35 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 | Broad model coverage + no-code UI | MS-SWIFT | 600+ models, Gradio Web UI |
 | Pre-training at 1000+ GPU scale | Megatron-LM | Pipeline parallelism, peak utilization |
 
+### Published numbers in similar setups
+
+Vendor-reported figures beside Halo's, with the setup stated; only the Megatron-LM and Axolotl rows
+share hardware. B300 has 2.3× the bf16 peak of H100, so read a cross-GPU row as a ceiling on the
+gap, not the gap.
+
+- **gpt-oss-20b, seq 4096, bf16.** Halo: 24,456 tok/s/GPU at EP1 (8× B300, batch 4, GC off; 20,174
+  GC on) and 10,051 at EP8 (batch 4, GC on, 57 GB). NeMo AutoModel reports 13,058 on 8× H100 (mock
+  data, forced-balanced routing). Megatron-LM on the same 8× B300 (batch 2, GC off): OOM at EP1 where
+  Halo runs 27,707; 13,932 vs Halo 21,642 at EP2; 15,876 vs 17,519 at EP4; 14,734 vs 11,856 at EP8
+  (Megatron ahead there), at 246 vs 158 GB peak at EP1 and 104 vs 58 GB at EP8.
+- **Qwen3-30B-A3B, bf16.** transformers' own expert-parallel path: 3,485 tok/s/GPU at 38.6 GB
+  (8× H100, seq 2048, `tp_size=8`). Halo EP2 on 8× B300 at seq 4096: 6,898 / 11,343 / 14,536 at
+  batch 1 / 2 / 4. NeMo AutoModel reports 12,040 on 8× H100 at EP8, seq 4096 (mock data,
+  forced-balanced routing).
+- **Same hardware.** Gemma 4 26B-A4B and Mistral Small 4 119B against NeMo AutoModel, Axolotl,
+  Megatron Bridge, MS-SWIFT and Unsloth: [Throughput Benchmarks](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison).
+  Laguna-S 2.1 on 4× B300: Halo 11,298 vs Axolotl 5,617 tok/s/GPU at 15% less memory. LFM2.5-8B-A1B:
+  Halo 31,262 vs Axolotl 28,330 at seq 8192, 35,517 vs 29,520 at seq 16384.
+
+The Megatron-LM, Laguna and LFM2.5 rows are from the Halo research page (whitecircle.com/research/halo).
+
 Notes on individual frameworks:
 
 - **Accelerate** is the foundation layer this toolkit builds on (launcher + FSDP2/DTensor TP/CP plumbing over native HF), not a competing trainer — it ships no trainers, RL, MoE/EP, attention kernels, or `s3://` loading.
 - **Megatron-LM** adds deeper TE/FP8 optimization for 1000+ GPU dense pre-training; its alignment is split across four repos and needs MCore conversion. This toolkit's pipeline parallelism is [not yet available](../parallelism/pipeline-parallelism.md) (the seams ship, the engine lands in a future release); on large NVLink domains FSDP2 + EP/TP avoids the pipeline bubble — see [When PP is worth it](../parallelism/README.md#when-pipeline-parallelism-is-worth-it).
-- **Axolotl** (v0.17.0) closes most of the EP gap (DeepEP on native HF, no conversion) and offers config-driven YAML, s3/GCS data, FA2/3/4, and async-GRPO + NeMo Gym. This toolkit still adds SMPO, Offline GRPO, the coupled EP+CP / EP+TP / pure-ETP shapes, and full BF16.
+- **Axolotl** (v0.19.0) closes most of the EP gap (DeepEP on native HF, no conversion, composed with CP and FSDP) and offers config-driven YAML, s3/GCS data, FA2/3/4, and async-GRPO + NeMo Gym. This toolkit still adds SMPO, Offline GRPO, EP+TP and pure ETP (Axolotl's EP×TP raises), and full BF16.
 - **NVIDIA NeMo RL** — alignment on DTensor (FSDP2+TP+CP) or Megatron-Core; MCore conversion on the Megatron path; capabilities span four repos.
-- **SkyRL** — RL-only (no SFT/DPO/reward/distillation), async dispatcher ~1.55× over naive batching; EP/CP/TP need its Megatron backend.
+- **SkyRL** — RL plus a native SFT trainer (v0.3.0), no DPO/reward/distillation; async dispatcher ~1.55× over naive batching; EP/CP/TP need its Megatron backend.
 
 ## Model compatibility
 
@@ -61,8 +83,8 @@ Any HuggingFace `AutoModelForCausalLM` works with standard FSDP, and any model c
 gets TP. Advanced parallelism (EP, CP, ETP) requires per-family wrappers, not a model
 reimplementation or a checkpoint conversion.
 
-For EP, that is a wrapper under `src/distributed/expert_parallel/layers/` (under 160 lines; GPT-OSS
-the outlier at 379) subclassing `EPMoELayerBase` and declaring its `HF_MODULE_NAMES` /
+For EP, that is a wrapper under `src/distributed/expert_parallel/layers/` (under 140 lines; GPT-OSS
+the outlier at 366) subclassing `EPMoELayerBase` and declaring its `HF_MODULE_NAMES` /
 `HF_MODEL_TYPES`, with `MOE_LAYER_MAP` derived from the subclass tree so the family self-registers on
 import. Fifteen MoE families ship one; the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the

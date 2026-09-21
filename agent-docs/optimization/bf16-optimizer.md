@@ -21,7 +21,7 @@ SR rounds up or down probabilistically based on the truncated bits (carry probab
 The two moments round differently:
 
 - **`exp_avg` (first moment) — nearest rounding.** Signed, ~zero-mean EMA, so truncation is already unbiased; SR would only add noise.
-- **`exp_avg_sq` (second moment) — SR.** A non-negative accumulator near the bf16 underflow floor; nearest rounding there biases the running variance upward (measured ~+50% at small gradients), inflating `sqrt(v)` and silently shrinking the effective step below `lr`. SR keeps it unbiased.
+- **`exp_avg_sq` (second moment) — SR.** A non-negative accumulator near the bf16 underflow floor; nearest rounding there biases the running variance by tens of percent (the sign depends on the gradient regime; `tests/cpu/optimizers/test_optimizer_sr.py` pins a >15% bias against fp32), which moves `sqrt(v)` and the effective step away from `lr`. SR keeps it unbiased.
 
 The kernel computes both EMAs and the weight update in fp32, truncating only on store-back, so the update always sees the exact fp32 second moment.
 

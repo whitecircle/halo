@@ -22,9 +22,9 @@ Halo is an open-source framework built by [White Circle](https://whitecircle.com
 
 The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP, FSDP2, fused kernels, BF16 training, and distributed rollouts.
 
-Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and supporting a new model family typically requires about 100 lines of integration code.
+Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and supporting a new model family typically takes under 140 lines of integration code.
 
-On 8× B300, Halo delivers up to ~2.8× the training throughput of stock TRL while using less peak memory, with larger margins over the other frameworks benchmarked.
+On 8× B300, Halo delivers up to ~2.8× the training throughput of stock TRL (2.7× at 25% less peak memory when both sides shard ZeRO-3), with larger margins over the other frameworks benchmarked.
 
 `Pre- & Post-Training` · `EP / CP / TP / ETP` ·
 `Multi-Node` · `Verifiable & Multi-Turn RL` · `FA4 + Liger + Grouped GEMM` · `Full BF16`
@@ -220,7 +220,7 @@ Liger kernels, and grouped GEMM.
 |---|---|
 | **2.3–2.8× stock TRL throughput** | gpt-oss-20b, 4k–16k; EP2 / dense EP1. Loss matches the baseline to ~1% by step 100. |
 | **24,456 tok/s/GPU** | gpt-oss-20b, 4k, batch 4, GC off — ~196k tok/s across 8 GPUs. |
-| **12,584 tok/s/GPU at 1,435 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2 — the highest achieved TFLOPS of the MoE rosters. |
+| **12,584 tok/s/GPU at 1,410 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2 — the highest achieved TFLOPS of the MoE rosters. |
 | **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. CP configurations cut per-GPU memory to roughly half the baseline. |
 | **23–76 GB/GPU on the same 16k workload** | EP8+CP8: 23 GB at 5.4k tok/s/GPU. Dense EP1: 76 GB at 18.3k tok/s/GPU. |
 | **2.12× Grouped GEMM** | Qwen3-30B-A3B, EP2; 3.43× at batch 1. |
@@ -275,7 +275,8 @@ Enabled by default where supported:
   FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with mxfp8/nvfp4 export.
 
 - **Memory and PEFT** — padding-free, boundary-aware packing with `cu_seq_lens`, plus LoRA and QLoRA.
-  QLoRA runs on a single 24 GB consumer GPU. Attention falls back to FA2/SDPA on older hardware.
+  The Qwen3-4B QLoRA recipe peaks at ~33 GB on one GPU as shipped (batch 4, 4k packed rows). The images
+  target Hopper and Blackwell data-center GPUs and emit no Ampere or consumer-GPU kernels.
 
 - **Checkpoints** — large gathered checkpoints are automatically sharded, with tools for merging
   EP/TP shards and PEFT adapters back into a standard HuggingFace checkpoint.
