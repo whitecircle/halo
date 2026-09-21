@@ -281,7 +281,7 @@ def test_an_unproductive_last_turn_pays_the_overflow_price_and_not_the_cut_price
     env = _make_env(length_cutoff_penalty=0.05, turn_overflow_penalty=0.1, max_turns=1)
     eid = _reset(env)
     step = env.step([eid], [action], [ctx])[0]
-    assert step.done and step.truncated and step.info["length_cutoff_recoveries_exhausted"]
+    assert step.done and step.truncated and step.info.get("unrecovered_turn") is True
     traj = env.get_trajectories([eid])[0]
     assert traj.messages[-1].role == "assistant" and traj.messages[-1].untrainable
     shaping, _ = _settled_tool_shaping(env, eid)
@@ -295,7 +295,7 @@ def test_cuts_and_empty_turns_share_the_recovery_cap():
     eid = _reset(env)
     assert not env.step([eid], ["a thought that ran out of room"], [{"finish_reason": "length"}])[0].done
     second = env.step([eid], [""], [{"finish_reason": "stop"}])[0]
-    assert second.done and second.truncated and second.info["length_cutoff_recoveries_exhausted"]
+    assert second.done and second.truncated and second.info["unrecovered_turn"]
     traj = env.get_trajectories([eid])[0]
     assert traj.info["length_cutoff_turns"] == 1 and traj.info["empty_turns"] == 1
     last = traj.messages[-1]
@@ -557,7 +557,7 @@ def test_recovery_cap_ends_the_episode_truncated_at_the_cut_past_it():
     assert traj.messages[-1].content == NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE
     second = env.step([eid], ["another thought that ran out of room"], [{"finish_reason": "length"}])[0]
     assert second.done and second.truncated, "the cut past the cap ends the episode like a max_turns overflow"
-    assert second.info["length_cutoff_recoveries_exhausted"]
+    assert second.info["unrecovered_turn"]
     traj = env.get_trajectories([eid])[0]
     assert traj.info["length_cutoff_turns"] == 2
     assert traj.messages[-1].content != NativeToolUseEnvironment.LENGTH_CUTOFF_NUDGE, (

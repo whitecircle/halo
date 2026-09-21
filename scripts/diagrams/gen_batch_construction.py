@@ -96,7 +96,7 @@ card(
     R - 9.60,
     card_height(3),
     "The episode ends at",
-    ["a final answer", "max_turns burned", "spent cut-turn recoveries"],
+    ["a final answer", "max_turns burned", "spent recoveries"],
     color=SLATE,
 )
 

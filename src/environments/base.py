@@ -368,8 +368,8 @@ class BaseEnvironment(ABC):
         successful calls in total, ``None`` resolving to ``tool_success_reward * max_turns`` — at most
         one paid call per turn of the budget, so per-call pay cannot out-earn the objective through
         call spam (five paid calls a turn over ten turns would otherwise pay 2.5 against a 1.0 solve).
-        ``max_length_cutoff_recoveries`` caps how many engine-cut turns an episode may recover from
-        (``None`` = every one within ``max_turns``): a cut turn spends a turn but no tool budget, so
+        ``max_length_cutoff_recoveries`` caps how many unproductive turns (engine-cut, or ended on nothing) an episode may recover from
+        (``None`` = every one within ``max_turns``): such a turn spends a turn but no tool budget, so
         without a cap an episode whose thoughts overrun their budget re-thinks until ``max_turns``.
         ``carry_reasoning`` sends the previous assistant turn's reasoning back to the engine with the
         conversation, so the next turn (a tool round, the retry after a cut) conditions on the thought
@@ -736,7 +736,7 @@ class BaseEnvironment(ABC):
         ``max_length_cutoff_recoveries``), which the two kinds of unproductive turn share. The turn is
         counted under ``<kind>_turns`` and stamped ``<kind>`` in the step info. A turn past the cap, or
         on the episode's last turn, cannot be retried: it ends the episode truncated, priced like a
-        ``max_turns`` overflow and never as a recovered turn (``length_cutoff_recoveries_exhausted``).
+        ``max_turns`` overflow and never as a recovered turn (``unrecovered_turn``).
         A recovered one is priced by the protocol where it configures ``length_cutoff_penalty``,
         never here."""
         nudge = getattr(self, nudge_attr)
@@ -750,7 +750,7 @@ class BaseEnvironment(ABC):
         cap = trajectory.info.get("episode_max_length_cutoff_recoveries", self.max_length_cutoff_recoveries)
         past_cap = cap is not None and self._unproductive_turns(trajectory) > cap
         if past_cap or trajectory.num_turns >= self.max_turns:
-            return trajectory, 0.0, True, True, {kind: True, "length_cutoff_recoveries_exhausted": True}
+            return trajectory, 0.0, True, True, {kind: True, "unrecovered_turn": True}
         trajectory.add_message(Message.user(nudge))
         return trajectory, 0.0, False, False, {kind: True}
 

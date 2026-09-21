@@ -26,8 +26,8 @@ use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 16               # the high profile's 3 submissions + 6 test calls, two cut-turn recoveries and the
-                            # closing turn, with slack for failed calls; a cut turn costs a turn, not the episode
+max_turns: 16               # the high profile's 3 submissions + 6 test calls, two recoveries and the
+                            # closing turn, with slack for failed calls; an unproductive turn costs a turn, not the episode
 environment_kwargs:
   language: python
   carry_reasoning: true      # each turn sees the reasoning of the turn before it

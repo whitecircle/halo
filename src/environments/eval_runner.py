@@ -239,6 +239,7 @@ async def run_episode(
                 "tool_calls": traj.info.get("total_tool_calls", 0),
                 "completion_tokens": completion_tokens,
                 "length_capped": any(fr == FINISH_REASON_LENGTH for fr in finish_reasons),
+                "empty_turns": traj.info.get("empty_turns", 0),
             }
 
         return traj
@@ -332,12 +333,14 @@ def report(results: list[dict[str, Any]], *, num_samples: int, title: str, group
         episodes = len(stats)
         used_tools = sum(1 for st in stats if st.get("tool_calls", 0) > 0)
         capped = sum(1 for st in stats if st.get("length_capped"))
+        empty = sum(1 for st in stats if st.get("empty_turns"))
         lines.append(
             f"trajectory: mean_turns={statistics.mean(st.get('generations', 0) for st in stats):.2f}  "
             f"used_tools={100 * used_tools / episodes:.0f}%  "
             f"mean_tool_calls={statistics.mean(st.get('tool_calls', 0) for st in stats):.2f}  "
             f"mean_completion_tokens={int(statistics.mean(st.get('completion_tokens', 0) for st in stats))}  "
-            f"length_capped={100 * capped / episodes:.0f}%"
+            f"length_capped={100 * capped / episodes:.0f}%  "
+            f"empty_turns={100 * empty / episodes:.0f}%"
         )
 
     if group_label and any(r.get("group") is not None for r in results):

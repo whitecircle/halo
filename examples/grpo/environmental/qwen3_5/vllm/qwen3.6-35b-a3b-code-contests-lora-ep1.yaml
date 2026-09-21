@@ -33,8 +33,8 @@ lora_target_modules:
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 16               # high's 3 submissions + 6 scratchpad runs, two cut-turn recoveries and the closing turn,
-                            # with slack for a failed call; a cut turn costs a turn, not the episode
+max_turns: 16               # high's 3 submissions + 6 scratchpad runs, two recoveries and the closing turn,
+                            # with slack for a failed call; an unproductive turn costs a turn, not the episode
 environment_kwargs:
   language: python
   carry_reasoning: true      # each turn sees the reasoning of the turn before it

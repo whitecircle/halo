@@ -351,7 +351,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         if trajectory.truncated and EPISODE_ERROR_KEY not in trajectory.info:
             shaping -= self.turn_overflow_penalty
         unproductive = self._unproductive_turns(trajectory)
-        recovered = unproductive - 1 if trajectory.info.get("length_cutoff_recoveries_exhausted") else unproductive
+        recovered = unproductive - 1 if trajectory.info.get("unrecovered_turn") else unproductive
         shaping -= self.length_cutoff_penalty * recovered
         return shaping
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for the two episode-health signals a natural-termination rate hides.
 
-A turn that stops inside its reasoning reaches the environment as an empty final answer, and
+A turn that stops inside its reasoning arrives with no visible content and no tool call, and
 reasoning that drifts into another script reads as a normal turn; both are only visible in
 transcripts unless the environment counts them.
 

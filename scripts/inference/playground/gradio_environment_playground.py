@@ -114,8 +114,8 @@ def run_playground_episode(
     """Run one episode through the shared eval driver and render it for the UI.
 
     The shared driver rather than a local copy of the loop: it stamps ``finish_reason`` (so a
-    length-cut turn is recovered here as in training rather than graded as a final answer), binds the
-    episode's reasoning-effort level and token budget, and finalizes a truncated episode.
+    length-cut or empty turn is recovered here as in training rather than graded as a final answer),
+    binds the episode's reasoning-effort level and token budget, and finalizes a truncated episode.
     """
     env = resolve_environment(env_type, {"max_turns": int(max_turns)})
     # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a

@@ -22,8 +22,8 @@ use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 16               # the high profile's 3 submissions + 6 test calls, two cut-turn recoveries and the
-                            # closing turn, with slack for failed calls; a cut turn costs a turn, not the episode
+max_turns: 16               # the high profile's 3 submissions + 6 test calls, two recoveries and the
+                            # closing turn, with slack for failed calls; an unproductive turn costs a turn, not the episode
 environment_kwargs:
   language: [python, cpp]   # the model names each program's language; python is graded at timeout_per_test,
                             # cpp at compiled_time_limit_scale x the stated limit

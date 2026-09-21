@@ -26,6 +26,7 @@ to disturb the easy case.
 
 import os
 import types
+from dataclasses import replace
 
 import pytest
 
@@ -249,14 +250,7 @@ def _content_bounds(stub, messages, index):
         return None
     full = _render(stub, messages)
     perturbed = list(messages)
-    perturbed[index] = Message(
-        role=messages[index].role,
-        content="ZQXPERTURBEDZQX content of a deliberately different length",
-        name=messages[index].name,
-        tool_calls=messages[index].tool_calls,
-        tool_call_id=messages[index].tool_call_id,
-        thinking=messages[index].thinking,
-    )
+    perturbed[index] = replace(messages[index], content="ZQXPERTURBEDZQX content of a deliberately different length")
     other = _render(stub, perturbed)
     head = 0
     while head < min(len(full), len(other)) and full[head] == other[head]:
