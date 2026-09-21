@@ -1,4 +1,4 @@
-# SFT — Qwen3-4B QLoRA on UltraChat 200K (4-bit NF4 base + bf16 LoRA adapters; ~33 GB peak on one GPU as shipped).
+# SFT — Qwen3-4B QLoRA on UltraChat 200K (4-bit NF4 base + bf16 LoRA adapters; 7.9 GB peak at batch 1, fits a 24 GB GPU).
 # Launch: python scripts/training/sft.py <this config>
 #   or: accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/sft.py <this config>
 
@@ -34,10 +34,10 @@ lora_target_modules:
 lora_task_type: CAUSAL_LM
 
 # --- Training ---
-per_device_train_batch_size: 4
-per_device_eval_batch_size: 4
+per_device_train_batch_size: 1  # batch 4 packs four rows into one 16k row and peaks at 33 GB
+per_device_eval_batch_size: 1
 num_train_epochs: 1.0
-gradient_accumulation_steps: 4
+gradient_accumulation_steps: 16
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false

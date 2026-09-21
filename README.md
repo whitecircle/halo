@@ -275,8 +275,8 @@ Enabled by default where supported:
   FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with mxfp8/nvfp4 export.
 
 - **Memory and PEFT** — padding-free, boundary-aware packing with `cu_seq_lens`, plus LoRA and QLoRA.
-  The Qwen3-4B QLoRA recipe peaks at ~33 GB on one GPU as shipped (batch 4, 4k packed rows). The images
-  target Hopper and Blackwell data-center GPUs and emit no Ampere or consumer-GPU kernels.
+  QLoRA fits a 24 GB consumer GPU: Qwen3-4B peaks at 7.9 GB (batch 1, 4k) and Qwen3-8B at 32k fits in
+  20.9 GB with the fused loss. Ampere and Ada cards run single-GPU LoRA/QLoRA from `halo:blackwell` (FA2/SDPA).
 
 - **Checkpoints** — large gathered checkpoints are automatically sharded, with tools for merging
   EP/TP shards and PEFT adapters back into a standard HuggingFace checkpoint.

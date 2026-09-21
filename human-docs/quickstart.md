@@ -11,7 +11,7 @@ points — check the hardware column before launching:
 | Recipe | Config | Hardware |
 | --- | --- | --- |
 | Qwen3 LoRA SFT | `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` | 1 GPU |
-| Qwen3 QLoRA SFT | `examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml` | 1 GPU (~33 GB peak as shipped) |
+| Qwen3 QLoRA SFT | `examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml` | 1 GPU (7.9 GB peak; fits 24 GB) |
 | Qwen3 full SFT | `examples/sft/qwen3/qwen3-4b-ultrachat.yaml` | 1–8 GPUs |
 | GPT-OSS EP SFT | `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` | 2 × 8 GPUs as written (MoE, expert parallel) |
 | SMPO | `examples/preference/qwen3_5/smpo-qwen3.5-9b-tulu3-prefmix.yaml` | 8 GPUs |

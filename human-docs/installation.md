@@ -14,6 +14,7 @@ Pick the image that matches your GPUs:
 | --- | --- | --- |
 | B200 / B300 / GB200 / GB300 | `halo:blackwell` | Flash Attention 4 + 2 |
 | H100 / H200 | `halo:hopper` | Flash Attention 3 + 2 |
+| A100, RTX 3090 / 4090 (single GPU, LoRA/QLoRA) | `halo:blackwell` | Flash Attention 2 / SDPA; no DeepEP |
 
 You still need the repo — configs, scripts, and the `make` targets live there:
 

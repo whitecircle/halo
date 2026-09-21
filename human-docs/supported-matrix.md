@@ -18,7 +18,8 @@ truth; this is the summary, and it wins over any recipe that disagrees with it.
 | NVIDIA B200 / B300 | `halo:blackwell` | supported, primary Blackwell target |
 | NVIDIA GB200 / GB300 NVL72 | `halo:blackwell` | supported; set `NVLINK_DOMAIN_SIZE=72` |
 | NVIDIA H100 / H200 | `halo:hopper` | supported |
-| NVIDIA A100 / Ampere | custom-arch build | not a release target — the shipped builds emit no sm_80 kernels |
+| NVIDIA A100 / Ampere, RTX 3090 / 4090 (Ada) | `halo:blackwell` | single-GPU LoRA/QLoRA: the image's torch, FA2 and bitsandbytes carry sm_80–sm_89 kernels; DeepEP, FA3 and FA4 do not run there; not a validated release target (the Hopper image builds FA2 for sm_90 only) |
+| RTX 50-series (SM 12.x) | — | not supported: bitsandbytes ships no sm_120 kernel and the attention auto-select treats it as Blackwell |
 
 Pull the prebuilt images or build them from source: [Installation](installation.md).
 

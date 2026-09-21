@@ -89,7 +89,7 @@ learning_rate: 1.0e-04     # LoRA wants 5-10x the full fine-tuning rate
 ```
 
 The `-qlora` counterpart adds `load_in_4bit: true`, `bnb_4bit_quant_type: nf4` and
-`use_bnb_nested_quant: true`, which peaks at ~33 GB for a 4B model with the shipped recipe (batch 4, 4k packed rows). On MoE models `all-linear` misses
+`use_bnb_nested_quant: true`, which peaks at 7.9 GB for a 4B model at batch 1 and 4k, so it fits a 24 GB GPU (batch 4 packs four rows into one 16k row and peaks at 33 GB). On MoE models `all-linear` misses
 the fused expert tensors, so name the expert projections explicitly; LoRA is rejected under tensor
 parallelism ([PEFT](../../agent-docs/optimization/peft.md) ↗).
 

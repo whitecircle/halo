@@ -10,7 +10,7 @@
 | Requirement | Version | Notes |
 |---|---|---|
 | Python | 3.12 | `requires-python = ">=3.12,<3.13"` |
-| GPU | Hopper (SM90) or Blackwell (SM100/103) | The two release targets; Ampere runs only via a best-effort source build with the FA2 fallback |
+| GPU | Hopper (SM90) or Blackwell (SM100/103) | The two release targets. Ampere and Ada (SM80–89) run single-GPU LoRA/QLoRA from the Blackwell image, whose torch, FA2 and bitsandbytes carry sm_80–sm_89 kernels; DeepEP, FA3 and FA4 do not run there |
 | CUDA | 13.2 | Image pinned to NGC `nvcr.io/nvidia/pytorch:26.03-py3`; local installs need a matching toolkit for source-built wheels |
 | OS | Ubuntu 24.04 LTS | The NGC base |
 | GPU driver | R580+ | CUDA 13.2-compatible |
