@@ -74,10 +74,6 @@ TOOL_CALL_COUNTS_KEY = "tool_call_counts"
 # What the episode has been paid for successful tool calls so far, against ``tool_reward_cap``.
 TOOL_REWARD_PAID_KEY = "tool_reward_paid"
 
-# Set by a protocol when the model's final text answer had no visible content: a turn that ended
-# inside its reasoning. Read by ``episode/empty_answer_rate``.
-EMPTY_FINAL_ANSWER_KEY = "empty_final_answer"
-
 # CJK ideographs, kana and hangul: the scripts a Latin-script task's CoT drifts into under RL.
 # ``episode/reasoning_cjk_rate`` counts the episodes whose reasoning carries any of them.
 _CJK_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
@@ -161,6 +157,9 @@ class Message:
     # Every tool call named a tool that does not exist, so the turn accomplished nothing; skipped
     # like a fragment to avoid reinforcing the invented call.
     calls_rejected: bool = False
+    # The model ended the turn with neither visible content nor a tool call — skipped for the same
+    # reason: a recovering episode would reinforce stopping on nothing.
+    empty: bool = False
 
     def to_dict(self, include_thinking: bool = False) -> dict[str, Any]:
         """Convert to dict for tokenizer/API. ``include_thinking`` is opt-in: the training render, and the
@@ -179,11 +178,11 @@ class Message:
 
     @property
     def untrainable(self) -> bool:
-        """An assistant turn no tokenization path may weight: an engine-cut fragment (``truncated``)
-        or a turn whose every tool call named a nonexistent tool (``calls_rejected``). It stays in
-        the render later turns condition on, but reinforcing it would reward the runaway or the
-        invented call whenever the episode recovers."""
-        return self.truncated or self.calls_rejected
+        """An assistant turn no tokenization path may weight: an engine-cut fragment (``truncated``),
+        a turn whose every tool call named a nonexistent tool (``calls_rejected``) or one that ended
+        on nothing (``empty``). It stays in the render later turns condition on, but reinforcing it
+        would reward the runaway, the invented call or the empty stop whenever the episode recovers."""
+        return self.truncated or self.calls_rejected or self.empty
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Message":
@@ -319,10 +318,12 @@ class BaseEnvironment(ABC):
     # it in the trajectory meta. ``None`` = no system turn.
     system_prompt: str | None = None
 
-    # What :meth:`_handle_length_cutoff` feeds back after the engine cuts a turn short. Per protocol,
-    # since the text must ask for that protocol's next move; ``None`` means the protocol has no
-    # recovery path and does not route cut-off turns there.
+    # What :meth:`_handle_length_cutoff` feeds back after the engine cuts a turn short, and what
+    # :meth:`_handle_empty_turn` feeds back after the model ends one on nothing. Per protocol, since
+    # the text must ask for that protocol's next move; ``None`` means the protocol has no recovery
+    # path for that kind of turn and does not route it there.
     LENGTH_CUTOFF_NUDGE: str | None = None
+    EMPTY_TURN_NUDGE: str | None = None
 
     # Names of the episode-level shaping components this class adds to the reward (``reward/<name>``),
     # the union over the MRO being what an episode may carry: a protocol declares its own
@@ -567,13 +568,19 @@ class BaseEnvironment(ABC):
         return credit
 
     @staticmethod
-    def _flag_calls_rejected(trajectory: Trajectory) -> None:
-        """Mark the turn just taken — the last assistant message — as one whose every call named a
-        nonexistent tool (:attr:`Message.calls_rejected`), so no tokenization path weights it."""
-        for message in reversed(trajectory.messages):
-            if message.role == "assistant":
-                message.calls_rejected = True
-                return
+    def _last_assistant_message(trajectory: Trajectory) -> Message:
+        """The turn just taken: every step appends the model's message before it is handled."""
+        message = next((m for m in reversed(trajectory.messages) if m.role == "assistant"), None)
+        if message is None:
+            raise ValueError(
+                "the trajectory holds no assistant turn to flag; a step records the model's message first"
+            )
+        return message
+
+    def _flag_calls_rejected(self, trajectory: Trajectory) -> None:
+        """Mark the turn just taken as one whose every call named a nonexistent tool
+        (:attr:`Message.calls_rejected`), so no tokenization path weights it."""
+        self._last_assistant_message(trajectory).calls_rejected = True
 
     def _truncate_observation(self, content: str) -> str:
         """Cap a tool observation's length. An unbounded output bloats the trajectory and makes the
@@ -616,10 +623,10 @@ class BaseEnvironment(ABC):
         metrics: dict[str, float] = {}
         if "total_tool_calls" in trajectory.info:
             metrics["episode/tool_calls"] = float(trajectory.info["total_tool_calls"])
-        # Tracked separately: a termination-rate metric cannot tell a cut-off turn from an answer.
+        # Tracked separately: a termination-rate metric cannot tell a cut-off turn, or one that
+        # stopped inside its reasoning, from an answer.
         metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
-        # Nor this: a turn that stopped inside its reasoning ends the episode as a natural, empty answer.
-        metrics["episode/empty_answer_rate"] = 1.0 if trajectory.info.get(EMPTY_FINAL_ANSWER_KEY) else 0.0
+        metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
         metrics["episode/reasoning_cjk_rate"] = (
             1.0
             if any(
@@ -698,27 +705,54 @@ class BaseEnvironment(ABC):
         """Handle a turn the engine cut short before it produced anything — at its token cap, or by
         aborting it (:data:`~src.inference.response.ENGINE_CUT_FINISH_REASONS`).
 
-        Nudged and retried within ``max_turns`` and within the episode's recovery cap
-        (``episode_max_length_cutoff_recoveries`` when an env stamped one, else
-        ``max_length_cutoff_recoveries``), never graded — the fragment would end the episode on a
-        mid-sentence string that reads as a *natural* termination. A cut past the cap ends the episode
-        truncated, priced like a ``max_turns`` overflow. A recovered cut is priced by the protocol
-        where it configures ``length_cutoff_penalty``, never here. Owned by the base so
-        ``episode/length_cutoff_turns`` means the same thing for every protocol that can recover; the
-        wording is each protocol's (:data:`LENGTH_CUTOFF_NUDGE`).
+        Never graded — the fragment would end the episode on a mid-sentence string that reads as a
+        *natural* termination. Owned by the base so ``episode/length_cutoff_turns`` means the same
+        thing for every protocol that can recover; the wording is each protocol's
+        (:data:`LENGTH_CUTOFF_NUDGE`).
         """
-        if self.LENGTH_CUTOFF_NUDGE is None:
+        return self._recover_unproductive_turn(trajectory, "length_cutoff", "LENGTH_CUTOFF_NUDGE")
+
+    def _handle_empty_turn(self, trajectory: Trajectory) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+        """Handle a turn the model ended with neither visible content nor a tool call: a stop inside
+        its reasoning, below the cap.
+
+        Graded, it would end the episode on an empty final answer; the turn is flagged
+        (:attr:`Message.empty`) so no tokenization path weights it, and the episode recovers like it
+        does from a cut. The wording is each protocol's (:data:`EMPTY_TURN_NUDGE`).
+        """
+        self._last_assistant_message(trajectory).empty = True
+        return self._recover_unproductive_turn(trajectory, "empty", "EMPTY_TURN_NUDGE")
+
+    @staticmethod
+    def _unproductive_turns(trajectory: Trajectory) -> int:
+        """Turns that produced nothing — cut by the engine or ended by the model on nothing."""
+        return trajectory.info.get("length_cutoff_turns", 0) + trajectory.info.get("empty_turns", 0)
+
+    def _recover_unproductive_turn(
+        self, trajectory: Trajectory, kind: str, nudge_attr: str
+    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+        """Nudge and retry a turn that produced nothing, within ``max_turns`` and within the episode's
+        recovery cap (``episode_max_length_cutoff_recoveries`` when an env stamped one, else
+        ``max_length_cutoff_recoveries``), which the two kinds of unproductive turn share. The turn is
+        counted under ``<kind>_turns`` and stamped ``<kind>`` in the step info. A turn past the cap, or
+        on the episode's last turn, cannot be retried: it ends the episode truncated, priced like a
+        ``max_turns`` overflow and never as a recovered turn (``length_cutoff_recoveries_exhausted``).
+        A recovered one is priced by the protocol where it configures ``length_cutoff_penalty``,
+        never here."""
+        nudge = getattr(self, nudge_attr)
+        if nudge is None:
             raise NotImplementedError(
-                f"{type(self).__name__} routed a length-cut turn to _handle_length_cutoff without "
-                f"declaring LENGTH_CUTOFF_NUDGE — the episode would continue with no message telling "
-                f"the model what happened."
+                f"{type(self).__name__} routed an unproductive turn to recovery without declaring "
+                f"{nudge_attr} — the episode would continue with no message telling the model what happened."
             )
-        trajectory.info["length_cutoff_turns"] = trajectory.info.get("length_cutoff_turns", 0) + 1
+        counter = f"{kind}_turns"
+        trajectory.info[counter] = trajectory.info.get(counter, 0) + 1
         cap = trajectory.info.get("episode_max_length_cutoff_recoveries", self.max_length_cutoff_recoveries)
-        if cap is not None and trajectory.info["length_cutoff_turns"] > cap:
-            return trajectory, 0.0, True, True, {"length_cutoff": True, "length_cutoff_recoveries_exhausted": True}
-        trajectory.add_message(Message.user(self.LENGTH_CUTOFF_NUDGE))
-        return trajectory, 0.0, False, False, {"length_cutoff": True}
+        past_cap = cap is not None and self._unproductive_turns(trajectory) > cap
+        if past_cap or trajectory.num_turns >= self.max_turns:
+            return trajectory, 0.0, True, True, {kind: True, "length_cutoff_recoveries_exhausted": True}
+        trajectory.add_message(Message.user(nudge))
+        return trajectory, 0.0, False, False, {kind: True}
 
     def _first_step(self, trajectory: Trajectory) -> EnvStep:
         """Opening :class:`EnvStep` for a freshly reset episode (sync + async reset paths)."""

@@ -47,7 +47,7 @@ environment_kwargs:
   stop_on_first_failure: false
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a budget stop scores the graded prefix
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
-  max_length_cutoff_recoveries: 2  # two recoveries: the third turn cut inside its budget ends the episode truncated
+  max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
   # One profile per effort level: CoT budget + interaction budgets. thinking_tokens is an ENGINE cap
   # that also bounds the turn total (thinking + answer headroom).
   reasoning_effort_profiles:
@@ -64,7 +64,7 @@ environment_kwargs:
   multi_turn_reward: 0
   tool_success_reward: 0
   turn_overflow_penalty: 0.1 # magnitude, >= 0 — charged when the episode burns max_turns
-  length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per engine-cut turn the episode recovers from
+  length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut, or ended without a call or an answer
   tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
 # --- Rewards ---

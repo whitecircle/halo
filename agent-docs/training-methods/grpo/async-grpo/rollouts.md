@@ -70,12 +70,13 @@ sglang` a level's budget reaches no request field (warned once per process): not
 below `rollout_max_tokens`; the level still steers through the chat template, and the budget
 stays the reference of the [effort length floor](#effort-length-reward).
 
-A turn the engine cuts at its token cap is nudged and retried within `max_turns` and the episode's
-`max_length_cutoff_recoveries` (`environment_kwargs`; `null` = every cut within `max_turns`). A
-recovered cut lands in `episode/length_cutoff_turns` and pays the protocol's `length_cutoff_penalty`
-(default `0`); the cut that exhausts the cap ends the episode truncated, priced like a `max_turns`
-overflow. Under carried reasoning a cut costs the policy only a turn and the retry thinks on from
-where it stopped, so the per-turn budget binds only once the cut is priced.
+A turn the engine cuts at its token cap, or one the model ends with neither a tool call nor visible
+content, is nudged and retried within `max_turns` and the episode's `max_length_cutoff_recoveries`
+(`environment_kwargs`; `null` = every such turn within `max_turns`). A recovered turn lands in
+`episode/length_cutoff_turns` or `episode/empty_turns` and pays the protocol's `length_cutoff_penalty`
+(default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
+priced like a `max_turns` overflow. Under carried reasoning a cut costs the policy only a turn and
+the retry thinks on from where it stopped, so the per-turn budget binds only once the cut is priced.
 
 An engine abort never reaches the environment: the actor re-issues the turn up to `max_retries` times
 (default `3`) rather than charging a length cut; past that the episode errors into a masked row.
@@ -163,9 +164,10 @@ vLLM returns the ids under `--return-tokens-as-token-ids`; SGLang requests them 
 flag. The importance-sampling correction additionally needs vLLM's
 `--logprobs-mode processed_logprobs` ([Objective](objective.md#importance-sampling-correction)).
 
-Turns the rollout marked unusable are left out: engine-cut (`truncated`), and turns whose every tool
-call named a nonexistent tool (`calls_rejected`). They stay in the next turn's prompt. An episode
-with every turn excluded yields one fully masked row.
+Turns the rollout marked unusable are left out: engine-cut (`truncated`), turns the model ended with
+neither a tool call nor visible content (`empty`), and turns whose every tool call named a nonexistent
+tool (`calls_rejected`). They stay in the next turn's prompt. An episode with every turn excluded
+yields one fully masked row.
 
 A trajectory where any trainable turn lost its completion ids drops whole to the single re-tokenized
 row, warned once with the engine's remedy — all-or-nothing, never a partial capture.

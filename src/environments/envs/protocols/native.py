@@ -8,7 +8,6 @@ from contextvars import ContextVar
 from typing import Any
 
 from src.environments.base import (
-    EMPTY_FINAL_ANSWER_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
@@ -61,12 +60,16 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
     SHAPING_COMPONENTS = ("tool_shaping",)
 
-    # States the fact and asks for the action — never for shorter reasoning. This text is trained on
+    # State the fact and ask for the action — never for shorter reasoning. These texts are trained on
     # wherever a recovery succeeds, so any instruction here becomes a GLOBAL lesson, learned far
     # outside the situation it was written for.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you made a tool call, so nothing was recorded. Make "
         "your tool call now with the best solution you have."
+    )
+    EMPTY_TURN_NUDGE = (
+        "Your previous turn ended without a tool call or an answer, so nothing was recorded. Make "
+        "your tool call now, or give your final answer, with the best solution you have."
     )
 
     def __init__(
@@ -104,8 +107,9 @@ class NativeToolUseEnvironment(BaseEnvironment):
         self.no_tool_use_penalty = no_tool_use_penalty
         self.multi_turn_reward = multi_turn_reward
         self.turn_overflow_penalty = turn_overflow_penalty
-        # Per recovered engine-cut turn. With carried reasoning a cut costs the policy only the turn, and
-        # the retry thinks on from where it stopped, so the per-turn budget binds nothing until it is priced.
+        # Per recovered unproductive turn (engine-cut, or ended on nothing). With carried reasoning a cut
+        # costs the policy only the turn, and the retry thinks on from where it stopped, so the per-turn
+        # budget binds nothing until it is priced.
         self.length_cutoff_penalty = length_cutoff_penalty
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
@@ -197,8 +201,6 @@ class NativeToolUseEnvironment(BaseEnvironment):
         """
         trajectory.info["completed"] = True
         trajectory.info["final_response"] = action
-        # A turn that stopped inside its reasoning arrives as a final answer with nothing visible.
-        trajectory.info[EMPTY_FINAL_ANSWER_KEY] = not action.strip()
 
         info: dict[str, Any] = {}
         if self.require_tool_use and trajectory.info["total_tool_calls"] == 0:
@@ -315,9 +317,11 @@ class NativeToolUseEnvironment(BaseEnvironment):
         self, trajectory: Trajectory, action: str, ctx: dict[str, Any]
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Handle a turn that called no tool, shared by the sync and async steps: an engine-cut turn
-        recovers, anything else is the model's final text answer."""
+        and a turn that ended on nothing recover, anything else is the model's final text answer."""
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             return self._handle_length_cutoff(trajectory)
+        if not action.strip():
+            return self._handle_empty_turn(trajectory)
         return self._finalize_text_response(trajectory, action)
 
     def _tool_use_engaged(self, trajectory: Trajectory) -> bool:
@@ -333,9 +337,10 @@ class NativeToolUseEnvironment(BaseEnvironment):
         ``_finalize_step`` before the reward runs) — an episode that burns the turn budget without
         terminating pays ``turn_overflow_penalty`` regardless of what it did earn. An episode its
         driver lost (:data:`EPISODE_ERROR_KEY`) is truncated too but pays no overflow: the fault is
-        not the policy's. Each engine-cut turn the episode recovered from pays ``length_cutoff_penalty``;
-        the cut that exhausted the recovery cap pays the overflow price instead, never both. All
-        magnitudes default to 0 (no-op). Distinct from the per-call knobs."""
+        not the policy's. Each unproductive turn the episode recovered from — cut by the engine, or
+        ended by the model on nothing — pays ``length_cutoff_penalty``; the one that exhausted the
+        recovery cap pays the overflow price instead, never both. All magnitudes default to 0 (no-op).
+        Distinct from the per-call knobs."""
         calls = trajectory.info.get("total_tool_calls", 0)
         if calls == 0:
             shaping = -self.no_tool_use_penalty
@@ -345,8 +350,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
             shaping = 0.0
         if trajectory.truncated and EPISODE_ERROR_KEY not in trajectory.info:
             shaping -= self.turn_overflow_penalty
-        cuts = trajectory.info.get("length_cutoff_turns", 0)
-        recovered = cuts - 1 if trajectory.info.get("length_cutoff_recoveries_exhausted") else cuts
+        unproductive = self._unproductive_turns(trajectory)
+        recovered = unproductive - 1 if trajectory.info.get("length_cutoff_recoveries_exhausted") else unproductive
         shaping -= self.length_cutoff_penalty * recovered
         return shaping
 

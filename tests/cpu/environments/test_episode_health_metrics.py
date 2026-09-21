@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""CPU tests for the two episode-health metrics a natural-termination rate hides.
+"""CPU tests for the two episode-health signals a natural-termination rate hides.
 
-A turn that stops inside its reasoning ends the episode as an empty final answer, and reasoning that
-drifts into another script reads as a normal turn; both are only visible in transcripts unless the
-environment counts them.
+A turn that stops inside its reasoning reaches the environment as an empty final answer, and
+reasoning that drifts into another script reads as a normal turn; both are only visible in
+transcripts unless the environment counts them.
 
 Run: python tests/cpu/environments/test_episode_health_metrics.py  (or pytest)
 """
 
 import pytest
 
-from src.environments.base import EMPTY_FINAL_ANSWER_KEY, Message, Trajectory
+from src.environments.base import Message, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
@@ -36,23 +36,25 @@ def _episode(text: str, ctx: dict) -> tuple[NativeToolUseEnvironment, Trajectory
     return env, env.get_trajectories(ids)[0]
 
 
-def test_a_reasoning_only_final_turn_counts_as_an_empty_answer():
+def test_a_reasoning_only_turn_is_recovered_and_counted():
     env, traj = _episode("", {"finish_reason": "stop", "reasoning": "a thought that never reached an answer"})
-    assert traj.done and traj.info[EMPTY_FINAL_ANSWER_KEY] is True
-    assert env.rollout_metrics(traj)["episode/empty_answer_rate"] == 1.0
+    assert not traj.done and traj.info["empty_turns"] == 1
+    assert traj.messages[-1].content == NativeToolUseEnvironment.EMPTY_TURN_NUDGE
+    assert env.rollout_metrics(traj)["episode/empty_turns"] == 1.0
 
 
-def test_a_text_answer_is_not_an_empty_answer():
+def test_a_text_answer_is_not_an_empty_turn():
     env, traj = _episode("the answer is 4", {"finish_reason": "stop"})
-    assert traj.done and traj.info[EMPTY_FINAL_ANSWER_KEY] is False
-    assert env.rollout_metrics(traj)["episode/empty_answer_rate"] == 0.0
+    assert traj.done and "empty_turns" not in traj.info
+    assert env.rollout_metrics(traj)["episode/empty_turns"] == 0.0
 
 
-def test_a_cut_turn_is_not_an_empty_answer():
-    # The recovery path never finalizes a text answer, so the flag stays unset and the rate 0.
+def test_a_cut_turn_is_a_cut_and_not_an_empty_turn():
+    # The two counts tell an engine cut from a stop inside the reasoning; one turn lands in one of them.
     env, traj = _episode("", {"finish_reason": "length", "reasoning": "half a thought"})
-    assert not traj.done and EMPTY_FINAL_ANSWER_KEY not in traj.info
-    assert env.rollout_metrics(traj)["episode/empty_answer_rate"] == 0.0
+    assert not traj.done and "empty_turns" not in traj.info
+    metrics = env.rollout_metrics(traj)
+    assert metrics["episode/length_cutoff_turns"] == 1.0 and metrics["episode/empty_turns"] == 0.0
 
 
 def _metrics_for(messages: list[Message]) -> dict[str, float]:

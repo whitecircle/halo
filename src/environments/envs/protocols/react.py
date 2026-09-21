@@ -167,13 +167,17 @@ class ReActEnvironment(BaseEnvironment):
     # grades in its place and clears this per instance.
     requires_answer = True
 
-    # Asks for the protocol's own next move (an Action or a Final Answer) and never for shorter
-    # reasoning: the text is trained on wherever a recovery succeeds, so an instruction here becomes a
-    # global lesson learned far outside the situation it was written for.
+    # Ask for the protocol's own next move (an Action or a Final Answer) and never for shorter
+    # reasoning: the texts are trained on wherever a recovery succeeds, so an instruction here becomes
+    # a global lesson learned far outside the situation it was written for.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you produced an Action or a Final Answer, so nothing "
         "was recorded. Give your next Action now, or your Final Answer if you already have the "
         "solution."
+    )
+    EMPTY_TURN_NUDGE = (
+        "Your previous turn ended without an Action or a Final Answer, so nothing was recorded. Give "
+        "your next Action now, or your Final Answer if you already have the solution."
     )
 
     DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant that solves problems step by step.
@@ -282,6 +286,9 @@ Always think before acting, and provide a Final Answer when you're done."""
         # earn a reward on a turn the trainer then excludes. Same rule as the native protocol.
         if (context or {}).get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             return self._handle_length_cutoff(trajectory)
+        # Nothing to parse: not a format failure the hint below corrects, but a stop on nothing.
+        if not action.strip():
+            return self._handle_empty_turn(trajectory)
 
         step = parse_react_output(action)
 

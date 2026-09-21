@@ -83,9 +83,12 @@ def render_summary(env_type: str, trajectory: Trajectory | None, elapsed: float,
         f"**Tokens generated:** {stats.get('completion_tokens', 0)}",
         f"**Latency:** {elapsed:.1f}s",
     ]
-    # A turn the engine cut off at its token cap is a common cause of a zero-scoring episode.
+    # A turn the engine cut off at its token cap, or one the model ended on nothing, is a common
+    # cause of a zero-scoring episode.
     if stats.get("length_capped"):
         parts.append(f"**Length-capped turns:** {trajectory.info.get('length_cutoff_turns', 0)}")
+    if trajectory.info.get("empty_turns"):
+        parts.append(f"**Empty turns:** {trajectory.info['empty_turns']}")
     if trajectory.info.get("final_answer"):
         parts.append(f"**Final answer:** {trajectory.info['final_answer']}")
     if trajectory.info.get("total_tool_calls"):
