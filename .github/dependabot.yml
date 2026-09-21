@@ -1,0 +1,11 @@
+# Keeps the SHA-pinned actions in .github/workflows current. Python dependencies are not managed
+# here: uv.lock changes go through a reviewed PR with the image rebuilt.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    commit-message:
+      prefix: ci

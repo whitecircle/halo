@@ -89,13 +89,13 @@ install: ## sync deps inside the image (uv pip install from the lock; preserves 
 	  -r <(uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers --format requirements-txt)"
 
 lint: ## ruff check (pinned binary on host)
-	uvx ruff@$(RUFF_VERSION) check . || ruff check .
+	if command -v uvx >/dev/null 2>&1; then uvx ruff@$(RUFF_VERSION) check .; else ruff check .; fi
 
 format: ## ruff format the tree
-	uvx ruff@$(RUFF_VERSION) format . || ruff format .
+	if command -v uvx >/dev/null 2>&1; then uvx ruff@$(RUFF_VERSION) format .; else ruff format .; fi
 
 precommit: lint ## format-check + lint (CI gate)
-	uvx ruff@$(RUFF_VERSION) format --check . || ruff format --check .
+	if command -v uvx >/dev/null 2>&1; then uvx ruff@$(RUFF_VERSION) format --check .; else ruff format --check .; fi
 
 test-cpu: ## pytest CPU tier inside the image
 	$(DOCKER_RUN_CPU) bash -lc "pytest -m cpu tests/cpu $(PYTEST_ARGS)"

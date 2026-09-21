@@ -24,5 +24,5 @@ labels: enhancement
 
 ## Willing to implement?
 
-- [ ] I'd like to implement this myself if it's accepted (a maintainer will `/approve` me)
+- [ ] I'd like to implement this myself if it's accepted (a maintainer will comment `/approve @my-handle`)
 - [ ] Proposing only — happy for a maintainer or someone else to take it

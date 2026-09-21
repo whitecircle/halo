@@ -1,8 +1,8 @@
 name: approve-contributor
 
 # A maintainer commenting `/approve @username` on an issue adds that user to
-# .github/APPROVED_CONTRIBUTORS, so pr-gate lets their PR through. Write access is required to
-# approve.
+# .github/APPROVED_CONTRIBUTORS, so pr-gate lets their PR through, and assigns them to the issue,
+# which keeps stale.yml off it. Write access is required to approve.
 
 on:
   issue_comment:
@@ -15,44 +15,50 @@ permissions:
 
 jobs:
   approve:
-    if: ${{ contains(github.event.comment.body, '/approve') }}
+    if: ${{ contains(github.event.comment.body, '/approve') && github.event.comment.user.type != 'Bot' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v8
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
             const commenter = context.payload.comment.user.login;
-
-            // only maintainers may approve
-            try {
-              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: commenter });
-              if (!['admin', 'maintain', 'write'].includes(data.permission)) { core.info(`${commenter} lacks write access — ignore`); return; }
-            } catch (e) { core.info(`permission check failed: ${e.message}`); return; }
+            const issue_number = context.issue.number;
 
             // Commenting is feedback, not the approval itself — a locked issue must not turn a
             // successful approval into a red run. Failures land in the log instead.
-            const issue_number = context.issue.number;
             const say = async (body) => {
               try { await github.rest.issues.createComment({ owner, repo, issue_number, body }); }
               catch (e) { core.warning(`could not comment on the issue (${e.message}): ${body}`); }
             };
+
+            // Only maintainers may approve. A check that errors is reported, not skipped: a silent
+            // return would let the maintainer believe the approval went through.
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: commenter });
+              if (!['admin', 'maintain', 'write'].includes(data.permission)) { core.info(`${commenter} lacks write access — ignore`); return; }
+            } catch (e) {
+              await say(`⚠️ Couldn't verify @${commenter}'s permission (\`${e.message}\`), so nobody was approved. Retry the command.`);
+              core.setFailed(`permission check failed: ${e.message}`);
+              return;
+            }
 
             // Fenced code is stripped first (an unclosed fence runs to the end), so a pasted log
             // excerpt or a "don't run this yet" example never approves anyone. The @ is required:
             // without it `/approve looks good to me` would add "looks" to the allowlist. Anchored to
             // line start so QUOTING the command doesn't approve anyone — pr-gate's comment contains
             // the literal `/approve @author`, and a maintainer replying with that text quoted
-            // (`> ...`) must not trigger an approval.
+            // (`> ...`) must not trigger an approval. Every line-start command counts, so one
+            // comment can approve several people.
             const body = context.payload.comment.body.replace(/(```|~~~)[\s\S]*?(?:\1|$)/g, '');
-            const m = body.match(/^\/approve\s+@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)(?:\s|$)/m);
-            if (!m) {
+            const command = /^\/approve\s+@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)(?:\s|$)/gm;
+            const users = [...new Set([...body.matchAll(command)].map((m) => m[1]))];
+            if (users.length === 0) {
               // A line-start `/approve` with a malformed handle is a maintainer who believes they
               // approved someone; say so, or the contributor's next PR silently hits the gate.
               if (/^\/approve\b/m.test(body)) await say('No user was approved: write the command as `/approve @their-github-handle` on its own line.');
               return;
             }
-            const user = m[1];
 
             // The commit lands on the `allowlist` branch, deliberately outside main's ruleset:
             // GitHub refuses the Actions app as a bypass actor by design, so keeping the list off
@@ -63,36 +69,59 @@ jobs:
             // LOUD on the issue, because a silent workflow error looks like a successful approval.
             const path = '.github/APPROVED_CONTRIBUTORS';
             const branch = 'allowlist';
-            let committed = false, lastErr;
-            for (let attempt = 0; attempt < 2 && !committed; attempt++) {
-              let file;
-              try { ({ data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch })); }
-              catch (e) { lastErr = e; break; }
-              const current = Buffer.from(file.content, 'base64').toString('utf8');
-              const existing = current.split('\n').map(s => s.trim().toLowerCase()).filter(s => s && !s.startsWith('#'));
-              if (existing.includes(user.toLowerCase())) {
-                await say(`@${user} is already approved. ✅`);
-                return;
+            const approveOne = async (user) => {
+              let lastErr;
+              for (let attempt = 0; attempt < 2; attempt++) {
+                let file;
+                try { ({ data: file } = await github.rest.repos.getContent({ owner, repo, path, ref: branch })); }
+                catch (e) { return e; }
+                const current = Buffer.from(file.content, 'base64').toString('utf8');
+                const existing = current.split('\n').map(s => s.trim().toLowerCase()).filter(s => s && !s.startsWith('#'));
+                if (existing.includes(user.toLowerCase())) return 'present';
+                const updated = current.replace(/\n*$/, '') + `\n${user}\n`;
+                try {
+                  await github.rest.repos.createOrUpdateFileContents({
+                    owner, repo, path, branch,
+                    message: `chore: approve @${user} as a contributor`,
+                    content: Buffer.from(updated).toString('base64'),
+                    sha: file.sha,
+                  });
+                  return 'approved';
+                } catch (e) { lastErr = e; }
               }
-              const updated = current.replace(/\n*$/, '') + `\n${user}\n`;
+              return lastErr;
+            };
+
+            // An assignee marks the issue as accepted work: stale.yml exempts assigned issues, so
+            // the issue an approved contributor is working on is not closed under them. GitHub
+            // silently drops an assignee it does not accept (no collaborator, never commented on
+            // the issue), so the result is checked rather than the call.
+            const assign = async (user) => {
+              if (context.payload.issue.pull_request) return;
               try {
-                await github.rest.repos.createOrUpdateFileContents({
-                  owner, repo, path, branch,
-                  message: `chore: approve @${user} as a contributor`,
-                  content: Buffer.from(updated).toString('base64'),
-                  sha: file.sha,
-                });
-                committed = true;
-              } catch (e) { lastErr = e; }
-            }
-            if (!committed) {
+                const { data } = await github.rest.issues.addAssignees({ owner, repo, issue_number, assignees: [user] });
+                if (!(data.assignees || []).some((a) => a.login.toLowerCase() === user.toLowerCase())) {
+                  await say(`Couldn't assign @${user} to this issue (GitHub only assigns users who have commented here). Add the \`keep-open\` label so the issue doesn't go stale while they work.`);
+                }
+              } catch (e) { core.warning(`could not assign ${user}: ${e.message}`); }
+            };
+
+            let failed = false;
+            for (const user of users) {
+              const result = await approveOne(user);
+              if (result === 'present') { await say(`@${user} is already approved. ✅`); await assign(user); continue; }
+              if (result === 'approved') {
+                await say(`@${user} is now approved to open a PR for this issue. 🎉 Welcome aboard!`);
+                await assign(user);
+                core.info(`approved ${user}`);
+                continue;
+              }
+              failed = true;
               await say([
-                `⚠️ Couldn't update the allowlist automatically (\`${lastErr.message}\`).`,
+                `⚠️ Couldn't update the allowlist automatically (\`${result.message}\`).`,
                 `A maintainer needs to append \`${user}\` to \`.github/APPROVED_CONTRIBUTORS\` on the \`allowlist\` branch by hand —`,
                 `and if the branch itself is missing, recreate it (see agent-docs/infrastructure/ci.md, Contribution gate).`,
               ].join(' '));
-              core.setFailed(`allowlist update failed: ${lastErr.message}`);
-              return;
+              core.error(`allowlist update failed for ${user}: ${result.message}`);
             }
-            await say(`@${user} is now approved to open a PR for this issue. 🎉 Welcome aboard!`);
-            core.info(`approved ${user}`);
+            if (failed) core.setFailed('an approval did not land');

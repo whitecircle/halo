@@ -40,9 +40,12 @@ git clone https://github.com/<your-handle>/halo.git   # maintainers: whitecircle
 cd halo
 
 cp .env.example .env          # the GPU make targets pass it with --env-file and fail without it
-make build-blackwell          # B200 (SM100) / B300 (SM103); or build-hopper for H100/H200 (SM90)
-make install                  # uv install inside the image
-make test-cpu                 # sanity check
+# Either pull the prebuilt image under the name the make targets use ...
+docker pull public.ecr.aws/whitecircle/halo:blackwell && docker tag public.ecr.aws/whitecircle/halo:blackwell halo:blackwell
+# ... or build it: B200 (SM100) / B300 (SM103); build-hopper for H100/H200 (SM90)
+make build-blackwell
+make install                  # uv install inside the image (a pulled image already has it)
+make test-cpu                 # sanity check; needs Docker, not a GPU
 ```
 
 Both builds are credential-free — no token, no registry login, no BuildKit secret.
@@ -353,13 +356,14 @@ first-class content — report it with the reason.
 ## Submitting a PR
 
 1. **Get approved first** — an accepted issue plus `/approve` on it. An un-approved PR is closed by
-   `pr-gate.yml`. Merging a PR adds you to the allowlist, so the gate applies once. An idle issue
-   goes stale after 30 days and closes 7 days later.
-2. **Branch** off `main` — in your fork, unless you have write access — and sign your commits
-   (SSH or GPG): the repo requires signed commits, so a PR with unsigned commits can only be
-   squash-merged.
+   `pr-gate.yml`; reopen it once approved — the gate re-runs on reopen. Merging a PR adds you to the
+   allowlist, so the gate applies once. `/approve` assigns you to the issue, which keeps it open
+   while you work; an unassigned idle issue goes stale after 30 days and closes 7 days later.
+2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged;
+   signed commits (SSH or GPG) are required only on branches of this repository, not in a fork.
 3. **Pass the gates.** `make lint`, `make format`, `make test-cpu` (plus `make test-gpu-core` for
-   GPU-affecting changes), `make docs`.
+   GPU-affecting changes), `make docs`. Hosted CI runs `ruff`, `actionlint` and the docs link
+   check; the test tiers run locally, so report their result in the PR.
 4. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
 5. **No secrets.** Never add `keys/`, `.env`, `*.pem`, or any credential.
 

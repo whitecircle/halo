@@ -19,7 +19,8 @@ not a wall. Read this before opening an issue or PR; the full dev guide (build, 
    [`.github/APPROVED_CONTRIBUTORS`](https://github.com/whitecircle/halo/blob/allowlist/.github/APPROVED_CONTRIBUTORS)
    (kept on the `allowlist` branch) by commenting `/approve @your-handle` on an accepted issue. **PRs from anyone not on that list (and without write access) are auto-commented
    and closed.** A reaction, comment, branch, or draft does **not** reserve the work or approve your
-   PR path. Land one PR and you're added automatically — repeat contributors skip the gate.
+   PR path. Land one PR and you're added automatically — repeat contributors skip the gate. A PR the
+   gate closed before you were approved can be reopened once you are; the gate re-runs on reopen.
 4. **Demand ≠ implementation.** Reactions and comments show interest; they don't guarantee implementation,
    priority, or maintainer attention.
 
@@ -43,11 +44,14 @@ Coding agents working in this repo must respect this gate — see [`AGENTS.md`](
 Once your PR path is approved, the normal bar applies (full detail in
 [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md)):
 
-- **Everything runs in the Docker image.** The host has no usable Python; use the `make` targets
-  (`make build-blackwell`, `make install`, `make test-cpu`); only `make lint` / `make format` /
-  `make precommit` (`uvx ruff`) and `make docs` (a pure link check) run on the host.
+- **Everything runs in the Docker image.** The host has no usable Python. Pull the prebuilt image
+  (`docker pull public.ecr.aws/whitecircle/halo:blackwell`, then tag it `halo:blackwell` — or `hopper`)
+  or build it (`make build-blackwell`), then use the `make` targets (`make test-cpu`, ...); only
+  `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (a pure link check)
+  run on the host. `make test-cpu` needs Docker, not a GPU.
 - **Pass the gates.** `make lint`, `make format`, `make test-cpu` (and `make test-gpu-core` for
-  GPU-affecting changes), `make docs`.
+  GPU-affecting changes), `make docs`. Hosted CI runs only `ruff`, `actionlint` and the docs link
+  check on a PR; the test tiers run on your machine, so state their result in the PR.
 - **Tests ship with behavior — and must not be slop.** A test must *fail when the behavior breaks*; no
   tautologies, smoke-only "didn't raise" checks, vacuous `assert x is not None`, or mock-the-thing-under-test.
   See the anti-slop test guide in [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md).
@@ -56,11 +60,12 @@ Once your PR path is approved, the normal bar applies (full detail in
 - **Keep it focused.** A diff over **~2,000 lines** is hard to review and will be deferred — split it.
 - **Work from a fork.** Outside contributors have no push access here: fork the repo, clone your
   fork, branch off `main`, push to your fork, and open the PR against `whitecircle/halo`'s `main`.
-- **Sign your commits** (SSH or GPG — the *Verified* badge): this repository requires signed
-  commits on every branch. A PR whose commits are unsigned can still land, but only by **squash
-  merge** (GitHub signs the squash commit it creates) — sign your commits if you want your commit
-  structure preserved. One-time setup: `git config --global gpg.format ssh`,
-  `git config --global user.signingkey ~/.ssh/id_ed25519.pub`, `git config --global commit.gpgsign true`.
+- **Every PR is squash-merged.** Merge commits and rebase merges are disabled, so a PR's commit
+  structure is never preserved, and GitHub signs the squash commit it creates. Signed commits
+  (SSH or GPG — the *Verified* badge) are required only on branches pushed to this repository, an
+  organization rule; a fork needs no signing setup. Maintainers' one-time setup:
+  `git config --global gpg.format ssh`, `git config --global user.signingkey ~/.ssh/id_ed25519.pub`,
+  `git config --global commit.gpgsign true`.
 
 ## Markdown locations
 

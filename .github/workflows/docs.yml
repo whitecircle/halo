@@ -20,7 +20,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: relative-link check (agent-docs, human-docs, skills, root markdown)
         run: ./scripts/docs/check_links.sh
 
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     container: python:3.12-slim
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Install matplotlib at the locked version
         run: pip install --quiet "matplotlib==$(awk '/^name = "matplotlib"$/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' uv.lock)"
       - name: Regenerate the figures
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: markdownlint (docs)
         uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265 # v19
         continue-on-error: true

@@ -16,11 +16,12 @@ go through an accepted issue and a maintainer approval first.
 | Usage or design question | Issue — **Question / support** template |
 | Docs error or gap | Issue — **Documentation** template |
 | Security issue | Private report — see [`SECURITY.md`](../SECURITY.md) |
-| Code change | Accepted issue + maintainer `/approve` first |
+| Code change | Accepted issue + a maintainer's `/approve @your-handle` on it first |
 
 Don't open a PR before a maintainer approves you on an accepted issue —
-unapproved PRs are closed automatically. Once you land one PR, you're added
-to the approved list and skip the gate next time.
+unapproved PRs are closed automatically; a PR closed this way can be reopened
+once you are approved. Once you land one PR, you're added to the approved list
+and skip the gate next time.
 
 Work from a **fork**: fork the repo, clone your fork, branch off `main`, push
 to your fork, and open the PR against `whitecircle/halo`.
@@ -36,15 +37,17 @@ models you used.
 ## The short checklist
 
 1. Issue → approval → focused PR (keep diffs under ~2,000 lines).
-2. Build the image and run the gates: `make lint`, `make format`,
+2. Pull (or build) the image and run the gates: `make lint`, `make format`,
    `make test-cpu`, `make docs` — plus `make test-gpu-core` for GPU-affecting
-   changes. Lint/format and the docs link check run on the host; tests run inside the image.
+   changes. Lint/format and the docs link check run on the host; tests run inside
+   the image (`make test-cpu` needs no GPU). Hosted CI runs only lint and the link
+   check, so report the test result in the PR.
 3. Ship tests that **fail when the behavior breaks** — no smoke-only or
    `assert x is not None` tests. The anti-slop test guide is in
    [`agent-docs/contributing/`](../agent-docs/contributing/README.md) ↗.
-4. Sign your commits (SSH or GPG). The repo requires signed commits on every
-   branch; an unsigned PR can still land, but only by squash merge. Never
-   commit secrets, `.env`, or keys.
+4. Every PR is squash-merged. Signed commits (SSH or GPG) are required only on
+   branches of this repository, not in a fork. Never commit secrets, `.env`, or
+   keys.
 
 The dev-environment guide (building images, running tests, docs tooling) is
 [`agent-docs/contributing/development-environment.md`](../agent-docs/contributing/development-environment.md) ↗.

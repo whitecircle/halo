@@ -16,12 +16,17 @@ jobs:
     if: ${{ github.event.pull_request.merged == true }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v8
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
             const user = context.payload.pull_request.user.login;
             if (context.payload.pull_request.user.type === 'Bot' || user.endsWith('[bot]')) return;
+            // Maintainers pass pr-gate on their write access; the roster is for outside contributors.
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: user });
+              if (['admin', 'maintain', 'write'].includes(data.permission)) { core.info(`${user} has write access — not listed`); return; }
+            } catch (e) { core.warning(`permission check failed (${e.message}) — listing ${user} anyway`); }
 
             // Commits to the `allowlist` branch — deliberately outside main's ruleset, since GitHub
             // refuses the Actions app as a bypass actor by design (see approve-contributor.yml).
