@@ -35,9 +35,12 @@ DEFAULT_MAX_OUTPUT_SIZE = 1_000_000
 
 _STDERR_EXCERPT_CHARS = 200
 _OUTPUT_EXCERPT_CHARS = 100
-# Verdict detail is failures-only, capped: per-test PASS lines carry no information the summary's
-# pass count doesn't, and an uncapped failure list turns a broken solution into a page of noise.
+# Verdict detail is failures-only, one entry per distinct verdict, capped: per-test PASS lines carry no
+# information the summary's pass count doesn't, tests failing the same way say it once, and an
+# uncapped failure list turns a broken solution into a page of noise.
 _MAX_FAILURE_DETAILS = 5
+# Tests named on one folded verdict line before the rest are counted.
+_MAX_FOLDED_TESTS_NAMED = 6
 # What a non-passing test's detail line shows the policy. ``full`` adds the expected and produced
 # output to a wrong answer; ``outcome`` states the verdict alone, the Codeforces contract.
 VERDICT_DETAIL_FULL = "full"
@@ -52,6 +55,28 @@ _CHECKER_DRIVER = (
     f"sys.argv = {['checker.py', *CHECKER_FILES]!r}\n"
     'runpy.run_path("checker.py", run_name="__main__")\n'
 )
+
+
+def _stderr_tail(stderr: str) -> str:
+    """The end of a program's stderr: a traceback names the exception on its last line, so a head
+    excerpt of a long one shows the frames and drops the error."""
+    text = stderr.strip()
+    return text if len(text) <= _STDERR_EXCERPT_CHARS else "…" + text[-_STDERR_EXCERPT_CHARS:]
+
+
+@dataclass
+class _Failure:
+    """One distinct non-passing verdict and the tests that produced it, in order."""
+
+    body: str
+    tests: list[int]
+
+    def render(self) -> str:
+        if len(self.tests) == 1:
+            return f"Test {self.tests[0]}: {self.body}"
+        named = ", ".join(str(t) for t in self.tests[:_MAX_FOLDED_TESTS_NAMED])
+        rest = len(self.tests) - _MAX_FOLDED_TESTS_NAMED
+        return f"Tests {named}{f' and {rest} more' if rest > 0 else ''}: {self.body}"
 
 
 def _tokenize(text: str) -> list[str]:
@@ -243,8 +268,10 @@ def run_solution_against_tests(
 
     Each test feeds ``input`` to stdin and compares stdout to expected ``output`` via ``verdict_fn``
     (default: trimmed exact match) in an independent sandbox run. Details list only non-passing tests,
-    capped at ``_MAX_FAILURE_DETAILS``; ``verdict_detail`` decides whether a wrong answer shows the
-    expected and produced output (``full``) or the verdict alone (``outcome``).
+    one entry per distinct verdict (tests failing the same way are folded into it), capped at
+    ``_MAX_FAILURE_DETAILS`` distinct entries; ``verdict_detail`` decides whether a wrong answer shows
+    the expected and produced output (``full``) or the verdict alone (``outcome``). A runtime error
+    shows the tail of stderr, where a traceback names the exception.
 
     ``max_grading_seconds`` bounds one grade's total wall clock, since tests run sequentially and a
     several-hundred-test problem would otherwise stall the whole rollout round. It is checked between
@@ -266,20 +293,23 @@ def run_solution_against_tests(
     ran_ok = 0  # clean exit + produced output (PASS or FAIL), NOT crash/TLE/overflow/backend error
     infra_errors = 0  # tests lost to a backend/transport failure, not the program's fault
     total = len(test_cases)
-    details = []
+    failures: list[_Failure] = []
+    notes: list[str] = []
     suppressed = 0
     deadline = None if max_grading_seconds is None else time.monotonic() + max_grading_seconds
     graded = 0
     budget_hit = False
 
-    failure_details_shown = 0
-
-    def add_detail(line: str) -> None:
-        """Append a non-passing test's detail while under the cap; count it as suppressed past it."""
-        nonlocal suppressed, failure_details_shown
-        if failure_details_shown < _MAX_FAILURE_DETAILS:
-            details.append(line)
-            failure_details_shown += 1
+    def add_detail(i: int, body: str) -> None:
+        """Book a non-passing test: onto the failure with the same verdict, else as a new one while
+        under the cap, else counted as suppressed."""
+        nonlocal suppressed
+        for failure in failures:
+            if failure.body == body:
+                failure.tests.append(i)
+                return
+        if len(failures) < _MAX_FAILURE_DETAILS:
+            failures.append(_Failure(body, [i]))
         else:
             suppressed += 1
 
@@ -296,29 +326,30 @@ def run_solution_against_tests(
             if result.compile_failed:
                 # The source never built, so every test fails the same way: judged once, the whole
                 # pool counted, with the compiler's diagnostics as the verdict.
+                # The compiler names the first error first, so the head of its output is the excerpt.
                 line = "COMPILATION ERROR (every test fails)"
                 if result.stderr:
                     line += f"\n  {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
-                add_detail(line)
+                notes.append(line)
                 graded = total
                 break
 
             test_passed = False
             if result.timed_out:
-                add_detail(f"Test {i}: TIME LIMIT EXCEEDED ({timeout_per_test:g}s)")
+                add_detail(i, f"TIME LIMIT EXCEEDED ({timeout_per_test:g}s)")
             elif result.error:
                 # Backend/transport failure (not the program's stderr); bucket as ERROR even with partial stdout.
                 infra_errors += 1
-                add_detail(f"Test {i}: ERROR -- {result.error}")
+                add_detail(i, f"ERROR -- {result.error}")
             elif result.returncode not in (0, None):
                 # Non-zero exit is a Runtime Error on every judge, never a pass even if stdout matches.
-                line = f"Test {i}: RUNTIME ERROR (exit {result.returncode})"
+                body = f"RUNTIME ERROR (exit {result.returncode})"
                 if result.stderr:
-                    line += f"\n  Stderr: {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
-                add_detail(line)
+                    body += f"\n  Stderr: {_stderr_tail(result.stderr)}"
+                add_detail(i, body)
             elif len(result.stdout) > max_output_size:
                 # Over-cap output is its own verdict: truncate-and-compare would grade a correct-but-long answer wrong.
-                add_detail(f"Test {i}: OUTPUT LIMIT EXCEEDED ({len(result.stdout)} > {max_output_size} bytes)")
+                add_detail(i, f"OUTPUT LIMIT EXCEEDED ({len(result.stdout)} > {max_output_size} bytes)")
             else:
                 actual_output = result.stdout
                 try:
@@ -326,7 +357,7 @@ def run_solution_against_tests(
                 except CheckerInfraError as e:
                     # Verdict lost to infra: no ran_ok/pass credit, keeping an all-infra outage visible.
                     infra_errors += 1
-                    add_detail(f"Test {i}: ERROR -- {e}")
+                    add_detail(i, f"ERROR -- {e}")
                 else:
                     if test_passed or actual_output.strip() or not expected_output.strip():
                         # Requiring output stops a no-output stub tying an honest attempt on this rung.
@@ -334,21 +365,22 @@ def run_solution_against_tests(
                     if test_passed:
                         passed += 1
                     else:
-                        line = f"Test {i}: FAIL"
+                        body = "FAIL"
                         if verdict_detail == VERDICT_DETAIL_FULL:
-                            line += (
+                            body += (
                                 f"\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
                                 f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
                             )
                         if result.stderr:
-                            line += f"\n  Stderr: {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
-                        add_detail(line)
+                            body += f"\n  Stderr: {_stderr_tail(result.stderr)}"
+                        add_detail(i, body)
 
             graded = i
             if stop_on_first_failure and not test_passed:
-                details.append(f"Stopped after first failing test ({total - i} not run).")
+                notes.append(f"Stopped after first failing test ({total - i} not run).")
                 break
 
+    details = [failure.render() for failure in failures] + notes
     if suppressed:
         details.append(f"...and {suppressed} more non-passing tests (details omitted).")
 

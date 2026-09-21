@@ -81,7 +81,9 @@ records the last language as its `language` slice, which the trainer slices metr
 
 Grading goes through `grade_solution` (`src/environments/envs/tasks/coding/grading.py`), shared with
 the offline re-grader, so a checkpoint scores identically online and offline. The verdict lists
-non-passing tests only, capped at five. One sandbox session serves the whole grade, so a compiled
+non-passing tests only, one entry per distinct verdict with the tests that failed the same way folded
+into it, capped at five; a runtime error shows the tail of stderr, where a traceback names the
+exception. One sandbox session serves the whole grade, so a compiled
 submission builds once, reset after every test. A compile failure is graded once against the whole
 pool.
 

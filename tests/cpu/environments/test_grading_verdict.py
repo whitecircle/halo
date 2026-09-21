@@ -21,6 +21,8 @@ import pytest
 import src.environments.envs.tasks.coding.grading as grading_module
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import (
+    _MAX_FAILURE_DETAILS,
+    _STDERR_EXCERPT_CHARS,
     CheckerInfraError,
     CheckerVerdict,
     GradeResult,
@@ -359,6 +361,37 @@ def test_select_verdict_prefers_checker():
 def test_select_verdict_unknown_comparison_raises():
     with pytest.raises(ValueError):
         select_verdict(None, "bogus", _StubSandbox(SandboxResult()))
+
+
+def test_a_runtime_error_excerpt_ends_with_the_exception_line():
+    """A traceback names the exception on its last line; a head excerpt of a long one showed the frames
+    and dropped the error, and the policy then guessed at the cause."""
+    frames = "".join(f'  File "main.py", line {n}, in solve\n    step_{n}()\n' for n in range(12))
+    stderr = (
+        "Traceback (most recent call last):\n" + frames + "AttributeError: module 'math' has no attribute 'gamma2'"
+    )
+    assert len(stderr) > 2 * _STDERR_EXCERPT_CHARS
+    crash = _StubSandbox(SandboxResult(stdout="", stderr=stderr, returncode=1))
+    grade = run_solution_against_tests("code", [{"input": "1", "output": "1"}], sandbox=crash)
+    assert "AttributeError: module 'math' has no attribute 'gamma2'" in grade.details
+    assert "Traceback (most recent call last)" not in grade.details
+    assert "Stderr: …" in grade.details
+
+
+def test_tests_failing_identically_fold_into_one_verdict_outside_the_cap():
+    """Eight tests crash the same way and one fails on output: the crash is one entry naming its tests,
+    it takes one slot of the cap, and the distinct failure is still shown, not suppressed."""
+    crash = SandboxResult(stdout="", stderr="ZeroDivisionError: division by zero", returncode=1)
+    n = _MAX_FAILURE_DETAILS + 3
+    sandbox = _ScriptedSandbox([crash] * n + [SandboxResult(stdout="X\n", returncode=0)])
+    tests = [{"input": str(k), "output": "1"} for k in range(n)] + [{"input": "z", "output": "Y"}]
+    grade = run_solution_against_tests("code", tests, sandbox=sandbox)
+    assert (grade.passed, grade.total) == (0, n + 1)
+    assert grade.details.count("RUNTIME ERROR") == 1
+    assert f"Tests 1, 2, 3, 4, 5, 6 and {n - 6} more: RUNTIME ERROR (exit 1)" in grade.details
+    assert "ZeroDivisionError: division by zero" in grade.details
+    assert f"Test {n + 1}: FAIL" in grade.details
+    assert "details omitted" not in grade.details
 
 
 if __name__ == "__main__":

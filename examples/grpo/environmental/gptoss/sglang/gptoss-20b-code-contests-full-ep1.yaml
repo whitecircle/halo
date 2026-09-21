@@ -23,7 +23,7 @@ use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 16               # a cut turn costs a turn, not the episode
+max_turns: 16               # an unproductive turn costs a turn, not the episode
 environment_kwargs:
   language: python
   timeout_per_test: 5

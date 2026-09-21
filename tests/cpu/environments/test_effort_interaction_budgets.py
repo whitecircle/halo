@@ -4,8 +4,8 @@
 ``reasoning_effort_profiles`` binds an effort level to a thinking budget and optional per-episode
 ``max_submissions``/``max_test_calls``, stamped at reset from a deterministic level (context-supplied
 — the trainer stamps one per GRPO group — or a concrete env setting) as the per-tool caps the protocol
-enforces, and stated in the task message. The grading verdict lists only non-passing tests, capped at
-``_MAX_FAILURE_DETAILS``.
+enforces, and stated in the task message. The grading verdict lists only non-passing tests, one entry
+per distinct verdict, capped at ``_MAX_FAILURE_DETAILS``.
 
 These drive ``CodeContestsEnvironment`` against a stub sandbox whose ``run`` returns a canned
 :class:`SandboxResult` (no subprocesses, no network), through the protocol's tool dispatch.
@@ -65,8 +65,11 @@ _TESTS = {"answer": {"tests": [{"input": "", "output": "X"}]}}
 
 
 def test_verdict_lists_failures_only_and_caps_them():
+    # Distinct expected outputs make every failure its own verdict; identical ones would fold into one entry.
     sandbox = _StubSandbox(SandboxResult(stdout="X\n", returncode=0))
-    tests = [{"input": "", "output": "X"}] * 2 + [{"input": "", "output": "Y"}] * (_MAX_FAILURE_DETAILS + 3)
+    tests = [{"input": "", "output": "X"}] * 2 + [
+        {"input": "", "output": f"Y{k}"} for k in range(_MAX_FAILURE_DETAILS + 3)
+    ]
     grade = run_solution_against_tests("code", tests, sandbox=sandbox)
     assert grade.passed == 2
     assert ": PASS" not in grade.details
