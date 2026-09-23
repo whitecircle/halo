@@ -30,7 +30,7 @@ A `diagrams` job re-runs `scripts/diagrams/` in a `python:3.12-slim` container a
 3. Restores the HF cache from the Actions cache, keyed on the seed list (`python -m tests.common.hub_seed --list`) and `tests/common/hub_seed.py`. On a miss it runs `make seed-hf-cache`, which fetches the seed from the Hub and names any repo it cannot fetch, and saves the cache before testing.
 4. Runs `make test-cpu` on its quarter of the tests (`pytest-shard`, split by test id) with four `pytest-xdist` workers, offline (`HF_HUB_OFFLINE=1`) and with `HALO_TEST_REQUIRE_HUB_CACHE=1`, so a test that reads a Hub repo outside the seed fails instead of skipping. The target mounts the checkout over the source baked into the image.
 
-The seed is every Hub id an `examples/` config trains plus every checkpoint constant in `tests/common/models.py`, configs and tokenizers only (about 0.6 GB). A test that loads a new repo names it there; the tier then fetches it.
+The seed is every Hub id an `examples/` config trains, every checkpoint constant in `tests/common/models.py`, and the revisions its `PINNED_REVISIONS` pins. Of each it holds the configs, tokenizers, chat templates and remote-code `*.py` files, never weights (about 0.6 GB). A test that loads a new repo names it in `tests/common/models.py`; the tier then fetches it.
 
 The `cpu-tier` job fails unless every shard passed, including when the run was cancelled, so a required-check rule can name that one job. A shard's tests take 3–4.5 minutes pinned to 4 cores and 16 GB of a B300 node, with container memory (page cache included) peaking under 12 GB; the runner's pull and extract come on top. Reproduce one shard:
 

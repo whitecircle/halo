@@ -106,7 +106,7 @@ jobs:
 
   cpu-tier:
     # One check name over every shard, whatever the matrix size, for a required-status rule. It runs
-    # even when the run is cancelled, so a cancelled or skipped shard reads as a failure, not a pass.
+    # even when the run is cancelled, so a cancelled shard reads as a failure, not a pass.
     if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: shard
     runs-on: ubuntu-latest
