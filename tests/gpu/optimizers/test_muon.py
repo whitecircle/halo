@@ -36,6 +36,8 @@ LAYERS_PAST_CHUNK = _GNS_CHUNK_SIZE + 1
 # One stochastic-rounding bf16 write lands on a neighbour of the exact value: under one ULP, and a
 # bf16 ULP is at most eps of the value.
 SR_WRITE_RTOL = torch.finfo(torch.bfloat16).eps
+# gram_newton_schulz runs its CUDA kernels from compute capability 9.0.
+KERNEL_MIN_MAJOR = 9
 
 
 class FFNModel(nn.Module):
@@ -251,31 +253,43 @@ def check_step_writes_orthogonalized_update():
     first step's Nesterov input ``u`` is ``(1 + momentum) * grad`` (Newton-Schulz ignores the scale)
     and ``adjusted_lr`` is the rms-norm scale the step applies. Each matrix of ``-p / adjusted_lr``
     must sit in the Newton-Schulz band and point along its own gradient's polar factor, which a
-    mis-ordered restack across chunks or a dropped learning-rate scale breaks. Where the CUDA kernels
-    run, ``wide`` must take them, so this covers the kernel backend rather than only the torch one.
-    tests/cpu/optimizers/test_muon_orthogonalization.py covers the orthogonalizer alone on CPU.
+    mis-ordered restack across chunks or a dropped learning-rate scale breaks. On SM90+ the step must
+    run ``wide`` through the CUDA kernels, so this covers the kernel backend rather than only the
+    torch one. tests/cpu/optimizers/test_muon_orthogonalization.py covers the orthogonalizer alone on
+    CPU.
     """
     generator = torch.Generator().manual_seed(0)
     model = ZeroMatrices().cuda()
     lr = 1e-2
     optimizer = create_muon_optimizer(model, lr=lr, weight_decay=0.0)
 
-    kernel_backend = optimizer.newton_schulz._kernel_backend
-    if _muon_kernels_available():
-        assert kernel_backend is not None, (
-            "the CUDA Newton-Schulz kernels run here but the optimizer did not enable them"
-        )
-        probe = torch.empty(1, *model.wide.shape)
-        assert optimizer.newton_schulz._select_backend(probe) is kernel_backend, "wide no longer takes the kernels"
-        log("  Newton-Schulz: CUDA kernel backend")
-    else:
-        log("  Newton-Schulz: CUDA kernels unavailable on this device, torch backend only")
-
     for p in model.parameters():
         rows, cols = p.shape[-2:]
         matrices = [log_spectrum_matrix(rows, cols, generator) for _ in range(math.prod(p.shape[:-2]))]
         p.grad = torch.stack(matrices).view(p.shape).to(device=p.device, dtype=p.dtype)
-    optimizer.step()
+
+    kernel_backend = optimizer.newton_schulz._kernel_backend
+    if torch.cuda.get_device_capability()[0] < KERNEL_MIN_MAJOR:
+        log("  Newton-Schulz: no CUDA kernels below SM90, torch backend only")
+        optimizer.step()
+    else:
+        # Both images ship quack, so a failed probe here is a broken kernel stack, not a fallback.
+        assert _muon_kernels_available(), "the CUDA Newton-Schulz kernels do not run on this SM90+ device"
+        assert kernel_backend is not None, "the CUDA Newton-Schulz kernels run but the optimizer did not enable them"
+        kernel_inputs = []
+        kernel_sym_mm = kernel_backend.sym_mm
+
+        def recording_sym_mm(a, b):
+            kernel_inputs.append(tuple(a.shape))
+            return kernel_sym_mm(a, b)
+
+        kernel_backend.sym_mm = recording_sym_mm
+        try:
+            optimizer.step()
+        finally:
+            kernel_backend.sym_mm = kernel_sym_mm
+        assert kernel_inputs, "no matrix reached the CUDA Newton-Schulz kernels during the step"
+        log(f"  Newton-Schulz CUDA kernels ran on {sorted(set(kernel_inputs))}")
 
     checked = 0
     for name, p in model.named_parameters():

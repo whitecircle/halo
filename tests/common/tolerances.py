@@ -88,17 +88,16 @@ class _Tolerances:
     kernel_rtol: float = 1e-2
 
     # ── Muon orthogonalization ──────────────────────────────────────────────
-    # Singular values of the Newton-Schulz output. The five composed Polar Express quintics map every
-    # input singular value of at least 1.20e-3 of the Frobenius norm into [0.846, 1.124], and the bf16
-    # output moves those extremes by under 1e-3 on the torch and the CUDA-kernel backends. Measured,
-    # the band holds on the square (standard) path from 1.4e-3; on the rectangular path the fp16 Gram
-    # matrix breaks it below ~4e-3 (out at 2.7e-3, in at 3.7e-3). Dropping step 4 or 5 lands at
-    # [0.40, 2.14] or [0.44, 1.56]; steps 1-3 only lift inputs below ~1e-2. Without their safety factor
-    # the coefficients stay inside the band in exact arithmetic ([0.876, 1.124]) and overshoot it
-    # (1.15-1.40) only through the fp16 iteration.
+    # Singular values of the Newton-Schulz output. In exact arithmetic the five composed Polar Express
+    # quintics map an input singular value of at least 1.22e-3 of the Frobenius norm into
+    # [0.846, 1.124] (the 0.84 floor at 1.20e-3); the bf16 output moves those extremes by under 1e-3.
+    # Steps 1-3 only act on inputs below ~1e-2, so a dropped one shows only there. The coefficients'
+    # safety factor matters only on the fp16 Gram path: without it that path overshoots to 1.2-1.4.
     muon_orthogonal_sv_min: float = 0.84
     muon_orthogonal_sv_max: float = 1.13
-    # The smallest input singular value, relative to the Frobenius norm, each path holds the band from.
+    # The smallest input singular value, relative to the Frobenius norm, each path holds the band from:
+    # a round margin over 1.22e-3 on the square (standard) path, and a measured one on the rectangular
+    # path, whose fp16 Gram matrix breaks the band below ~4e-3.
     muon_band_domain_square: float = 1.4e-3
     muon_band_domain_rectangular: float = 4e-3
 
