@@ -11,15 +11,15 @@ Built on HuggingFace Transformers, Accelerate, and TRL — every distributed tra
 
 ## Framework comparison
 
-The TRL and Accelerate columns describe the feature sets of the pinned TRL 1.6.0 and Accelerate 1.11.0, not the latest upstream releases; the others describe Unsloth, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend) and Megatron-LM/Core. TRL's TP and CP need a newer Accelerate than the pinned one (see below). "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
+Versions compared: TRL 1.6.0 and Accelerate 1.11.0 (the pinned releases), Unsloth, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend), Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
 
 | Feature | This Toolkit | HF TRL | Accelerate | Unsloth | Axolotl | MS-SWIFT | veRL | Megatron-LM |
 |---------|:------------:|:------:|:----------:|:-------:|:-------:|:--------:|:----:|:-----------:|
 | SMPO (reference-free PO) | **Yes** | No | — | No | No | No | No | No |
 | Offline GRPO (pre-scored) | **Yes** | No | — | No | No | No | No | No |
 | EP for MoE (no conversion) | **DeepEP** | No | No | No | **DeepEP** (v0.17) | Via Megatron | Via Megatron | MCore format |
-| Context Parallelism | **Ulysses (SFT + SMPO)** | SFT-only | Yes (FSDP2) | No | Yes (ring/seq) | Via Megatron | Via Megatron | MCore |
-| Tensor Parallelism | Yes (DTensor) | Via Accelerate | Yes (ND-parallel) | No | Yes (experimental) | Via Megatron | Via Megatron | MCore |
+| Context Parallelism | **Ulysses (SFT + SMPO)** | SFT-only; needs a newer Accelerate | Yes (FSDP2) | No | Yes (ring/seq) | Via Megatron | Via Megatron | MCore |
+| Tensor Parallelism | Yes (DTensor) | Via Accelerate; needs a newer Accelerate | Yes (ND-parallel) | No | Yes (experimental) | Via Megatron | Via Megatron | MCore |
 | Combined EP+CP / EP+TP / pure ETP | **Yes** | No | No (no EP) | No | Partial (EP×CP and EP×CP×FSDP; EP×TP raises) | Via Megatron | Via Megatron | Yes |
 | Full BF16 (~6 bytes/param) | **AdamWBF16 + SR** | No (FP32 masters) | Plumbing only | No | bf16 MP only | No | No | No |
 | Multi-turn RL | **Async Ray + built-in envs** | Async GRPO (thin envs) | — | Via ART | Async GRPO + NeMo Gym | GYM env | AgentLoop + SGLang | No |

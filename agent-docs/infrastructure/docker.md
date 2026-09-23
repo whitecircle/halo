@@ -275,8 +275,8 @@ docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
 ```
 
 Each moving tag has immutable SemVer pins (`blackwell-1.0.0`); there is deliberately no `latest` — it
-would let a Hopper host silently pull a Blackwell image. Roll back by pulling a pinned tag and
-retagging locally:
+would let a Hopper host silently pull a Blackwell image. Pin a release by pulling its versioned tag
+and retagging locally:
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:hopper-1.0.0

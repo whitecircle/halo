@@ -22,23 +22,23 @@ import pytest
 
 from tests.common.utils import REPO_ROOT
 
+# Every image build file at the root: each one's ``ARG VERSION`` default labels the image it builds.
+DOCKERFILES = sorted(path.name for path in REPO_ROOT.glob("Dockerfile*"))
+ARG_VERSION = re.compile(r"^ARG VERSION=(?P<version>\S+)$", re.MULTILINE)
+
 # Files that state the release at a fixed spot. Each pattern must find at least one statement, so a
 # spelling change fails here instead of leaving the file unchecked. Anchoring on ``^version:`` keeps
 # ``cff-version``, the citation schema's own version, out.
 FIXED_STATEMENTS: dict[str, re.Pattern[str]] = {
     "Makefile": re.compile(r"^VERSION\s*\?=\s*(?P<version>\S+)\s*$", re.MULTILINE),
-    "Dockerfile": re.compile(r"^ARG VERSION=(?P<version>\S+)$", re.MULTILINE),
-    "Dockerfile.vllm": re.compile(r"^ARG VERSION=(?P<version>\S+)$", re.MULTILINE),
-    "Dockerfile.sglang": re.compile(r"^ARG VERSION=(?P<version>\S+)$", re.MULTILINE),
+    **dict.fromkeys(DOCKERFILES, ARG_VERSION),
     "CITATION.cff": re.compile(r'^version:\s*"?(?P<version>[^"\s]+)"?\s*$', re.MULTILINE),
     "uv.lock": re.compile(r'^name = "halo"\nversion = "(?P<version>[^"]+)"$', re.MULTILINE),
 }
 
 # The README feed is newest first, so only its first release entry states the current release; the
-# entries below it, up to the next section, are history, and so are the pins they name.
+# entries below it are history.
 RELEASE_ENTRY = re.compile(r"^- \*\*(?P<date>\d{4}-\d{2}-\d{2}) — Halo (?P<version>\d+(?:\.\d+)+)\.\*\*", re.MULTILINE)
-FEED_ENTRY = re.compile(r"^- \*\*\d{4}-\d{2}-\d{2} — ", re.MULTILINE)
-SECTION = re.compile(r"^## ", re.MULTILINE)
 DATE_RELEASED = re.compile(r'^date-released:\s*"?(?P<date>\d{4}-\d{2}-\d{2})"?\s*$', re.MULTILINE)
 
 # A published pin: ``blackwell-X.Y.Z`` / ``hopper-X.Y.Z``, or a rollout image's
@@ -108,15 +108,6 @@ def _newest_release_entry(readme: str) -> re.Match[str]:
     return entry
 
 
-def _feed_history(readme: str) -> range:
-    """The README span holding the feed entries older than the newest release entry."""
-    newest = _newest_release_entry(readme)
-    section = SECTION.search(readme, newest.end())
-    feed_end = section.start() if section else len(readme)
-    older = FEED_ENTRY.search(readme, newest.end(), feed_end)
-    return range(older.start(), feed_end) if older else range(0)
-
-
 def release_statements(texts: Mapping[str, str]) -> list[Statement]:
     """Every statement of the release version outside ``pyproject.toml``."""
     statements = []
@@ -124,12 +115,9 @@ def release_statements(texts: Mapping[str, str]) -> list[Statement]:
         found = [_statement(path, texts[path], match) for match in pattern.finditer(texts[path])]
         assert found, f"{path} states no release version: {pattern.pattern!r} no longer matches, so it goes unchecked"
         statements += found
-    readme = texts["README.md"]
-    statements.append(_statement("README.md", readme, _newest_release_entry(readme)))
-    history = _feed_history(readme)
+    statements.append(_statement("README.md", texts["README.md"], _newest_release_entry(texts["README.md"])))
     for path, text in texts.items():
-        skipped = history if path == "README.md" else range(0)
-        statements += [_statement(path, text, m) for m in IMAGE_PIN.finditer(text) if m.start() not in skipped]
+        statements += [_statement(path, text, match) for match in IMAGE_PIN.finditer(text)]
     return statements
 
 
@@ -206,17 +194,12 @@ def test_both_pin_shapes_are_read_and_a_bare_engine_tag_is_not(texts):
     assert reported == [f"human-docs/planted.md:{line} states {bumped}" for line in (1, 2, 3, 4)]
 
 
-def test_a_pin_in_an_older_release_entry_is_history(texts):
-    """The README feed keeps past releases and their pins; only the newest entry and the rest of the
-    README are held to the declared release."""
-    readme, older = texts["README.md"], "0.9.0"
-    feed_end = SECTION.search(readme, _newest_release_entry(readme).end()).start()
-    entry = f"- **2000-01-01 — Halo {older}.** Pinned as `:hopper-{older}`.\n\n"
-    assert disagreements({**texts, "README.md": readme[:feed_end] + entry + readme[feed_end:]}) == []
-
-    outside = f"{readme}\nPull `:hopper-{older}`.\n"
-    line = outside.count("\n", 0, outside.rindex(older)) + 1
-    assert disagreements({**texts, "README.md": outside}) == [f"README.md:{line} states {older}"]
+def test_every_dockerfile_must_state_the_release(texts):
+    """A Dockerfile whose ``ARG VERSION`` goes missing fails loud instead of dropping out of the gate."""
+    assert DOCKERFILES, "no Dockerfile* at the repo root: the glob no longer finds the image build files"
+    for name in DOCKERFILES:
+        with pytest.raises(AssertionError, match=f"^{re.escape(name)} states no release version"):
+            release_statements({**texts, name: ARG_VERSION.sub("", texts[name])})
 
 
 def test_a_newest_release_entry_dated_off_the_citation_is_reported(texts):
