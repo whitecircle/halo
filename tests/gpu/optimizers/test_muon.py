@@ -6,7 +6,9 @@ Verifies that create_muon_optimizer:
 1. Correctly splits 2D+ params (Muon) vs 1D params (AdamW scalar)
 2. Achieves loss descent on a simple regression task
 3. Handles models with only 2D params (no scalar optimizer)
-4. Applies weight decay correctly
+4. Applies weight decay correctly, and only to the named decay params
+5. Round-trips its state dict
+6. Writes an orthogonalized update for every matrix the fused step batches
 
 Usage (single GPU, no torchrun needed):
     python tests/gpu/optimizers/test_muon.py
@@ -18,8 +20,8 @@ import math
 import torch
 import torch.nn as nn
 
-from src.optimizers.muon import create_muon_optimizer
-from tests.common.utils import assert_optimizer_state_bit_exact
+from src.optimizers.muon import _GNS_CHUNK_SIZE, create_muon_optimizer
+from tests.common.utils import assert_optimizer_state_bit_exact, assert_orthogonalized, matrix_with_spectrum
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 
@@ -27,6 +29,8 @@ HIDDEN = 256
 BATCH = 32
 SEQ = 64
 NUM_STEPS = 50
+# Same-shape matrices one past the orthogonalization chunk, so the step stacks them in two chunks.
+LAYERS_PAST_CHUNK = _GNS_CHUNK_SIZE + 1
 
 
 class FFNModel(nn.Module):
@@ -57,6 +61,24 @@ class NoBiasModel(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class ZeroMatrices(nn.Module):
+    """Zero bf16 matrices in the shapes the fused step batches differently.
+
+    ``wide`` has a smaller side above 256, so it takes the CUDA Newton-Schulz kernels when the kernel
+    backend is available; the ``LAYERS_PAST_CHUNK`` same-shape ``layers`` span two orthogonalization
+    chunks; ``experts`` is a 3-D stack behind 2-D params, the order the factory sorts a MoE model's
+    matrices into, so it reaches Newton-Schulz whole as a batch of per-expert matrices.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.wide = nn.Parameter(torch.zeros(320, 640, dtype=torch.bfloat16))
+        self.layers = nn.ParameterList(
+            nn.Parameter(torch.zeros(64, 96, dtype=torch.bfloat16)) for _ in range(LAYERS_PAST_CHUNK)
+        )
+        self.experts = nn.Parameter(torch.zeros(8, 96, 64, dtype=torch.bfloat16))
 
 
 def run_training(model, optimizer, num_steps=NUM_STEPS, hidden=HIDDEN):
@@ -159,27 +181,34 @@ def test_weight_decay():
 
 
 def test_decay_parameter_names():
-    """Only named decay params should receive weight decay in Muon groups."""
+    """The fused step decays exactly the named Muon matrices.
+
+    A zero-gradient step isolates the decay term, since Newton-Schulz maps a zero matrix to zero: the
+    named matrix shrinks by ``1 - lr * weight_decay`` (within one stochastic-rounding bf16 step) and
+    the unnamed one is written back bit-identical.
+    """
     print("\nTEST 5: Decay parameter name filtering")
-    model = FFNModel(hidden=64, layers=1).cuda().to(torch.bfloat16)
-    decay_names = {n for n, _ in model.named_parameters() if "weight" in n and "norm" not in n}
+    torch.manual_seed(42)
+    model = NoBiasModel(hidden=64, layers=1).cuda().to(torch.bfloat16)
+    decayed, undecayed = model.net[0].weight, model.net[2].weight
+    lr, weight_decay = 0.1, 0.5
+    optimizer = create_muon_optimizer(model, lr=lr, weight_decay=weight_decay, decay_parameters={"net.0.weight"})
 
-    optimizer = create_muon_optimizer(
-        model,
-        lr=3e-4,
-        weight_decay=0.1,
-        decay_parameters=decay_names,
+    groups = {id(p): g["weight_decay"] for g in optimizer._muon_param_groups for p in g["params"]}
+    assert groups == {id(decayed): weight_decay, id(undecayed): 0.0}, f"Muon groups misrouted decay: {groups}"
+
+    before = {name: p.detach().clone() for name, p in model.named_parameters()}
+    for p in model.parameters():
+        p.grad = torch.zeros_like(p)
+    optimizer.step()
+
+    assert torch.equal(undecayed, before["net.2.weight"]), "an undecayed matrix moved on a zero-gradient step"
+    # bf16 keeps 8 significant bits, so one stochastic-rounding step is below 2**-7 relative.
+    expected = before["net.0.weight"].float() * (1 - lr * weight_decay)
+    assert torch.allclose(decayed.float(), expected, rtol=2**-7, atol=0), (
+        f"decayed matrix off 1 - lr*wd = {1 - lr * weight_decay}: max relative error "
+        f"{((decayed.float() - expected).abs() / expected.abs().clamp_min(1e-30)).max().item():.3e}"
     )
-
-    # Verify no-decay groups have weight_decay=0
-    for g in optimizer._muon_param_groups:
-        for p in g["params"]:
-            name = next(n for n, param in model.named_parameters() if param is p)
-            if name not in decay_names:
-                assert g["weight_decay"] == 0.0, f"{name} should have wd=0, got {g['weight_decay']}"
-
-    # Run a few steps to make sure it doesn't crash
-    run_training(model, optimizer, num_steps=5, hidden=64)
     print("  PASSED")
 
 
@@ -222,6 +251,43 @@ def test_state_dict_roundtrip():
     print("  PASSED")
 
 
+def test_step_writes_orthogonalized_update():
+    """One step from zero weights writes ``-adjusted_lr * NS(grad)``, orthogonal per matrix.
+
+    With zero weights and no decay the fused write leaves ``-p = adjusted_lr * NS(u)``, where the
+    first step's Nesterov input ``u`` is ``(1 + momentum) * grad`` (Newton-Schulz ignores the scale)
+    and the rms-norm scale is ``0.2 * sqrt(max(fan_out, fan_in))``. Each matrix of ``-p / adjusted_lr``
+    must sit in the Newton-Schulz band and point along its own gradient's polar factor, which a
+    mis-ordered restack across chunks or a dropped learning-rate scale breaks.
+    tests/cpu/optimizers/test_muon_orthogonalization.py covers the orthogonalizer alone on CPU.
+    """
+    print("\nTEST 7: Orthogonalized update")
+    generator = torch.Generator().manual_seed(0)
+    model = ZeroMatrices().cuda()
+    lr = 1e-2
+    optimizer = create_muon_optimizer(model, lr=lr, weight_decay=0.0)
+    print(f"  Newton-Schulz CUDA kernels: {optimizer.newton_schulz._kernel_backend is not None}")
+
+    for p in model.parameters():
+        rows, cols = p.shape[-2:]
+        spectrum = torch.logspace(0, -1, min(rows, cols), dtype=torch.float64)
+        matrices = [matrix_with_spectrum(rows, cols, spectrum, generator) for _ in range(math.prod(p.shape[:-2]))]
+        p.grad = torch.stack(matrices).view(p.shape).to(device=p.device, dtype=p.dtype)
+    optimizer.step()
+
+    checked = 0
+    for name, p in model.named_parameters():
+        rows, cols = p.shape[-2:]
+        update = -p.detach().double() / (lr * 0.2 * math.sqrt(max(rows, cols)))
+        for index, (matrix, grad) in enumerate(
+            zip(update.view(-1, rows, cols), p.grad.view(-1, rows, cols), strict=True)
+        ):
+            assert_orthogonalized(matrix, grad, f"{name}[{index}]")
+            checked += 1
+    print(f"  {checked} matrices orthogonal")
+    print("  PASSED")
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -239,6 +305,7 @@ if __name__ == "__main__":
     test_weight_decay()
     test_decay_parameter_names()
     test_state_dict_roundtrip()
+    test_step_writes_orthogonalized_update()
 
     print("\n" + "=" * 50)
     print("ALL TESTS PASSED")

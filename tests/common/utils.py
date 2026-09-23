@@ -21,6 +21,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimi
 
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.models.structure import unwrap_model
+from tests.common.tolerances import TOL
 
 # Repository root for tests that read source files (drift pins, AST sweeps). Self-locating rather
 # than cwd-derived: the training images bake a repo copy at /workspace, so a relative path can
@@ -164,6 +165,42 @@ def cos_sim(a: torch.Tensor, b: torch.Tensor, label: str = "tensor") -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         raise ValueError(f"{label}: cosine of a zero-norm tensor has no direction (norms {norm_a}, {norm_b})")
     return torch.dot(a, b).item() / (norm_a * norm_b)
+
+
+def matrix_with_spectrum(
+    rows: int, cols: int, singular_values: torch.Tensor, generator: torch.Generator
+) -> torch.Tensor:
+    """A random fp64 ``rows x cols`` matrix whose singular values are exactly ``singular_values``.
+
+    Random orthonormal factors around a prescribed spectrum, so a test controls the conditioning an
+    iterative method sees instead of inheriting a Gaussian matrix's near-zero tail.
+    """
+    rank = min(rows, cols)
+    if singular_values.numel() != rank:
+        raise ValueError(f"a {rows}x{cols} matrix has {rank} singular values, got {singular_values.numel()}")
+    left, _ = torch.linalg.qr(torch.randn(rows, rank, generator=generator, dtype=torch.float64))
+    right, _ = torch.linalg.qr(torch.randn(cols, rank, generator=generator, dtype=torch.float64))
+    return (left * singular_values.to(torch.float64)) @ right.T
+
+
+def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str) -> None:
+    """Assert ``update`` is Muon's orthogonalization of the matrix ``source``.
+
+    Two independent properties: every singular value sits in the Newton-Schulz band, and the update
+    points along ``source``'s own polar factor ``U V^T``. The band alone passes an update
+    orthogonalized from the wrong matrix, which is the failure a batched step's restack produces.
+    """
+    singular_values = torch.linalg.svdvals(update.double())
+    low, high = singular_values.min().item(), singular_values.max().item()
+    assert TOL.muon_orthogonal_sv_min <= low and high <= TOL.muon_orthogonal_sv_max, (
+        f"{label}: singular values span [{low:.4f}, {high:.4f}], outside the Newton-Schulz band "
+        f"[{TOL.muon_orthogonal_sv_min}, {TOL.muon_orthogonal_sv_max}]"
+    )
+    u, _, vh = torch.linalg.svd(source.double(), full_matrices=False)
+    cosine = cos_sim(update, u @ vh, label)
+    assert cosine >= TOL.muon_polar_cosine_min(), (
+        f"{label}: cosine to the source's polar factor is {cosine:.4f} (min {TOL.muon_polar_cosine_min():.4f})"
+    )
 
 
 def local_optimizer_state(model, optimizer) -> dict:

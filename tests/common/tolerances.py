@@ -14,6 +14,7 @@ the bug signal it must stay under, rather than stretching a shared value to fit.
     assert abs(ep_loss - fsdp_loss) < TOL.parallel_vs_baseline_loss_abs
 """
 
+import math
 from dataclasses import dataclass
 
 
@@ -85,6 +86,25 @@ class _Tolerances:
     # ── Generic finite-difference / numerical kernels ───────────────────────
     kernel_atol: float = 1e-2
     kernel_rtol: float = 1e-2
+
+    # ── Muon orthogonalization ──────────────────────────────────────────────
+    # Singular values of the Newton-Schulz output for an input whose every singular value is at least
+    # 1.4e-3 of its Frobenius norm. The five quintic steps map that domain into [0.846, 1.124] exactly;
+    # the fp16 iteration and bf16 in/out add under 1e-3 on both the torch and the CUDA-kernel backend.
+    # A dropped step lands at [0.44, 1.56]; without their safety factor the coefficients overshoot to
+    # 1.25 in a rectangular matrix's fp16 Gram iteration.
+    muon_orthogonal_sv_min: float = 0.84
+    muon_orthogonal_sv_max: float = 1.13
+
+    def muon_polar_cosine_min(self) -> float:
+        """Smallest cosine between an orthogonalized update and its source's polar factor ``U V^T``.
+
+        Derived from the singular-value band (the Kantorovich bound over spectra inside it), so the
+        two checks cannot drift apart. An update orthogonalized from another matrix's momentum sits
+        near 0.
+        """
+        low, high = self.muon_orthogonal_sv_min, self.muon_orthogonal_sv_max
+        return 2 * math.sqrt(low * high) / (low + high)
 
     def control_min_loss_shift(self, bound: float | None = None) -> float:
         """Minimum loss shift a negative control must produce for a match to be meaningful.
