@@ -30,7 +30,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_30B_A3B
-from tests.common.utils import log
+from tests.common.utils import cos_sim, log
 
 MODEL_NAME = QWEN3_30B_A3B
 EP_SIZE = 2
@@ -101,16 +101,15 @@ def forward_backward(model, batch):
     return out.loss.item(), grads
 
 
-def cosine(a, b):
-    return torch.nn.functional.cosine_similarity(a.flatten().unsqueeze(0), b.flatten().unsqueeze(0)).item()
-
-
 def worst_cosine(left, right):
-    """The least-correlated gradient between two runs, as (name, cosine)."""
+    """The least-correlated gradient between two runs, as (name, cosine).
+
+    ``cos_sim`` raises on a NaN gradient, the corrupted-arena signature a ``<`` tracker would skip.
+    """
     assert set(left) == set(right), "gradient key sets differ"
     worst_name, worst = None, 1.0
     for name, g in left.items():
-        c = cosine(g, right[name])
+        c = cos_sim(g, right[name], name)
         if c < worst:
             worst_name, worst = name, c
     return worst_name, worst

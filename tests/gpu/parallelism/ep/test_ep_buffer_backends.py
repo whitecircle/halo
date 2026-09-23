@@ -126,7 +126,9 @@ def run(ctx) -> dict:
     barrier()
 
     expert_cos = cos_sim(v1["expert_grad"], v2["expert_grad"])
-    router_cos = cos_sim(v1["router_grad"], v2["router_grad"]) if v1["router_grad"] is not None else 1.0
+    # A backend that severs the router's gradient leaves it None, which must fail rather than skip.
+    routers_present = v1["router_grad"] is not None and v2["router_grad"] is not None
+    router_cos = cos_sim(v1["router_grad"], v2["router_grad"]) if routers_present else -1.0
     loss_diff = abs(v1["loss"] - v2["loss"])
 
     log(f"\n{'=' * 70}\nRESULTS\n{'=' * 70}")
@@ -142,6 +144,7 @@ def run(ctx) -> dict:
             "legacy_buffer_shared_by_all_layers": v1["shared_ok"],
             "loss_match": loss_diff <= LOSS_ABS_TOL,
             "expert_grad_match": expert_cos >= GRAD_COSINE_MIN,
+            "router_grads_present": routers_present,
             "router_grad_match": router_cos >= GRAD_COSINE_MIN,
         }
     }

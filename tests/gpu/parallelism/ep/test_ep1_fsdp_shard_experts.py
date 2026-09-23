@@ -54,7 +54,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import full_grad
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log, log_all
+from tests.common.utils import cleanup_memory, cos_sim, log, log_all
 
 MODEL_NAME = GPT_OSS_20B
 SEQ_LEN = 128
@@ -204,9 +204,7 @@ def run(ctx) -> dict:
     ctx.barrier()
 
     # ---- compare on rank 0 ----
-    cos = torch.nn.functional.cosine_similarity(
-        off["grad"].flatten().unsqueeze(0), on["grad"].flatten().unsqueeze(0)
-    ).item()
+    cos = cos_sim(off["grad"], on["grad"])
     rel_l2 = ((on["grad"] - off["grad"]).norm() / (off["grad"].norm() + 1e-12)).item()
     loss_diff = abs(on["loss"] - off["loss"])
 
