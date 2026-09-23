@@ -228,6 +228,7 @@ below. The cross-suite ones:
 | Var | Meaning |
 |---|---|
 | `HALO_TEST_EP` / `HALO_TEST_CP` / `HALO_TEST_TP` / `HALO_TEST_ETP` | Parallel size a sweep-capable suite builds its `ParallelismConfig` with; unset = the suite's own default (often `world_size` for EP). The suffix is the parallelism axis as the rest of the toolkit spells it (`ep_size` / `cp_size` / `tp_size` / `expert_tp_size`), so the knob and the config field it feeds read the same. |
+| `HALO_TEST_REQUIRE_HUB_CACHE` | Set by the hosted CPU tier, which runs offline over the seed `tests/common/hub_seed.py` derives: a CPU test whose Hub repo is not in the local HF cache fails instead of skipping. Gated repos (`GATED_REPOS`) and local checkpoint paths still skip. Load a tokenizer, processor, config or template through the `tests/common/tokenizers.py` helpers, and name its repo in `tests/common/models.py` so the seed carries it. |
 | `HALO_TEST_ATTN` / `HALO_TEST_GC` / `HALO_TEST_REVISION` | Attention implementation, gradient checkpointing (default **on**), hub revision for the suites that sweep them. The per-family `HALO_TEST_ZAYA_GC` defaults the other way — see the per-suite table. |
 | `HALO_TEST_OFFGRPO_PARALLEL` | `tp` (default, dense Qwen3) or `ep` (gpt-oss MoE) leg of `trainers/grpo/test_offline_grpo_tp_resume.py`. |
 | `HALO_TEST_MAX_STEPS`, `HALO_TEST_BATCH_SIZE`, `HALO_TEST_GRAD_ACCUM`, `HALO_TEST_NUM_GENERATIONS`, `HALO_TEST_NUM_WORKERS`, `HALO_TEST_MAX_CONCURRENT`, `HALO_TEST_ROLLOUT_MAX_TOKENS`, `HALO_TEST_MAX_COMPLETION` | Step count and rollout sizing for `trainers/grpo/test_environmental_grpo_benchmarks.py`, whose defaults are sized for one vLLM server. |
@@ -363,10 +364,10 @@ first-class content — report it with the reason.
    7 days later.
 2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged;
    signed commits (SSH or GPG) are required only on branches of this repository, not in a fork.
-3. **Pass the gates.** `make lint`, `make format`, `make test-cpu` (plus `make test-gpu-core` for
-   GPU-affecting changes), `make docs`. Hosted CI runs `ruff`, `actionlint`, the docs checks and the
-   CPU tier ([what it does not cover](../infrastructure/ci.md#cpu-tests)); the GPU tiers run
-   locally, so report their result in the PR.
+3. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` once, then `make test-cpu`
+   (plus `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs `ruff`,
+   `actionlint`, the docs checks and the CPU tier ([what it does not cover](../infrastructure/ci.md#cpu-tests));
+   the GPU tiers run locally, so report their result in the PR.
 4. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
 5. **No secrets.** Never add `keys/`, `.env`, `*.pem`, or any credential.
 

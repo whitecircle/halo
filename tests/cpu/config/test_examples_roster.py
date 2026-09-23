@@ -34,6 +34,7 @@ from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, nati
 from src.models.patches.attention import model_has_sinks, validate_attn_implementation
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.parallelism import make_parallelism_config
+from tests.common.tokenizers import skip_uncached
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
     EXAMPLES_ROOT,
@@ -184,7 +185,7 @@ def model_config_for(config: Path, parsed: tuple):
     reference = parsed_field(parsed, "model_name_or_path")
     resolved = cached_model_config(reference)
     if resolved is None:
-        pytest.skip(f"model {reference!r} is not in the local HF cache; config-dependent checks need it")
+        skip_uncached(reference, "model config of")
     return resolved
 
 

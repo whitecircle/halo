@@ -35,6 +35,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from tests.common.models import GEMMA3_4B_IT, GPT_OSS_20B_OPENAI
 from tests.common.tokenizers import try_cached_tokenizer
 
 # Distinctive, non-overlapping markers so a decode-based assertion names exactly one message.
@@ -102,13 +103,13 @@ EXPECTED_SPAN_BOUNDARIES = {
     ("Qwen/Qwen3-0.6B", "whitespace"): (("\n\n\n", "\n"), ("<think>", "\n")),
     ("Qwen/Qwen3-0.6B", "truncated"): (("<think>", "\n"), ("<think>", "\n")),
     # harmony: the mid-episode terminator is <|call|> / <|end|>, and <|return|> only ends the episode.
-    ("openai/gpt-oss-20b", "tool"): ((" to", "<|call|>"), ("<|channel|>", "<|return|>")),
-    ("openai/gpt-oss-20b", "chat"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
-    ("openai/gpt-oss-20b", "whitespace"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
-    ("openai/gpt-oss-20b", "truncated"): (("<|channel|>", "<|call|>"), ("<|channel|>", "<|call|>")),
+    (GPT_OSS_20B_OPENAI, "tool"): ((" to", "<|call|>"), ("<|channel|>", "<|return|>")),
+    (GPT_OSS_20B_OPENAI, "chat"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
+    (GPT_OSS_20B_OPENAI, "whitespace"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
+    (GPT_OSS_20B_OPENAI, "truncated"): (("<|channel|>", "<|call|>"), ("<|channel|>", "<|call|>")),
     # Monotone control: its header absorbs the leading newlines, the opposite of Qwen3 on this convo.
-    ("google/gemma-3-4b-it", "chat"): (("I", "\n"), ("It", "\n")),
-    ("google/gemma-3-4b-it", "whitespace"): (("RE", "\n"), ("RE", "\n")),
+    (GEMMA3_4B_IT, "chat"): (("I", "\n"), ("It", "\n")),
+    (GEMMA3_4B_IT, "whitespace"): (("RE", "\n"), ("RE", "\n")),
 }
 CASES = sorted(EXPECTED_SPAN_BOUNDARIES)
 MODELS = sorted({model for model, _ in CASES})
@@ -473,7 +474,7 @@ def test_sampled_token_path_falls_back_to_the_identical_render_row():
     """With no captured ids the turns path falls back to the single re-rendered row, and that row is
     identical to the one ``_tokenize_trajectory`` builds — the two paths cannot disagree about what the
     trajectory is."""
-    stub, messages, full = _case("openai/gpt-oss-20b", "tool")
+    stub, messages, full = _case(GPT_OSS_20B_OPENAI, "tool")
     result = RolloutResult(prompt="task", trajectory=_trajectory(messages))
 
     rows = stub._tokenize_trajectory_turns(result)
@@ -511,7 +512,7 @@ def test_consecutive_assistant_turns_are_reported_not_guessed(caplog):
     last token with the turn's first content token differently per turn — so it must be reported rather
     than carried over from another turn.
     """
-    stub = _load("openai/gpt-oss-20b")
+    stub = _load(GPT_OSS_20B_OPENAI)
     if stub is None:
         pytest.skip("gpt-oss tokenizer unavailable")
     messages = [

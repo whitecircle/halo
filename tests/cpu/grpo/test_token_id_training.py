@@ -19,6 +19,8 @@ import types
 import pytest
 
 from src.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
+from tests.common.models import GPT_OSS_20B
+from tests.common.tokenizers import load_cached_tokenizer
 
 
 def _choice(tokens):
@@ -134,15 +136,12 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
 
 def test_per_turn_assembly_uses_sampled_ids_verbatim():
     try:
-        from transformers import AutoTokenizer
-
         from src.environments.base import Message, Trajectory
         from src.environments.episode import RolloutResult
         from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer  # noqa: F401
-
-        tok = AutoTokenizer.from_pretrained("unsloth/gpt-oss-20b-BF16")
     except Exception as e:
-        pytest.skip(f"gpt-oss tokenizer / trainer import unavailable: {e}")
+        pytest.skip(f"trainer import unavailable: {e}")
+    tok = load_cached_tokenizer(GPT_OSS_20B)
 
     # Distinct sampled-id sequences per turn; assembly must reproduce each without re-tokenizing.
     turn1 = tok(
@@ -183,17 +182,14 @@ def test_prompt_render_includes_tool_schema():
     Omitting it drops ~2/3 of the prompt (the harmony tool block) and mis-conditions every completion
     token — the mechanism behind is_ratio≈0.47. This fails if the render stops passing tools."""
     try:
-        from transformers import AutoTokenizer
-
         from src.environments.base import Message, Trajectory
         from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-
-        tok = AutoTokenizer.from_pretrained("unsloth/gpt-oss-20b-BF16")
-        # Production pins this harmony template on both the trainer and the vLLM server; mirror it.
-        with open("jinja-templates/gpt-oss/gpt-oss-harmony.jinja") as f:
-            tok.chat_template = f.read()
     except Exception as e:
-        pytest.skip(f"gpt-oss tokenizer unavailable: {e}")
+        pytest.skip(f"trainer import unavailable: {e}")
+    tok = load_cached_tokenizer(GPT_OSS_20B)
+    # Production pins this harmony template on both the trainer and the vLLM server; mirror it.
+    with open("jinja-templates/gpt-oss/gpt-oss-harmony.jinja") as f:
+        tok.chat_template = f.read()
 
     tools = [
         {

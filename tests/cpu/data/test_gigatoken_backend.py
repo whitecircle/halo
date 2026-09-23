@@ -10,7 +10,6 @@ import sys
 
 import pytest
 from datasets import Dataset
-from transformers import AutoTokenizer
 
 from src.data.pipeline import tokenizer_backend as tb
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
@@ -20,10 +19,12 @@ from src.data.pipeline.tokenizer_backend import (
     resolve_processor_backend,
     resolve_tokenizer_backend,
 )
+from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_0_6B
+from tests.common.tokenizers import load_cached_processor, load_cached_tokenizer
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
-VLM_MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
-VLM_MODEL_REVISION = "66285546d2b821cf421d4f5eb2576359d3770cd3"  # pin: hub main can drift
+MODEL_NAME = QWEN3_0_6B
+VLM_MODEL_NAME = QWEN2_5_VL_3B
+VLM_MODEL_REVISION = PINNED_REVISIONS[QWEN2_5_VL_3B]
 
 
 class PreprocessingArgsStub:
@@ -48,15 +49,6 @@ CONVERSATIONS = [
 ]
 
 
-def _load_tokenizer():
-    from transformers import AutoTokenizer
-
-    try:
-        return AutoTokenizer.from_pretrained(MODEL_NAME)
-    except Exception as e:  # offline / no cached snapshot
-        pytest.skip(f"tokenizer unavailable offline: {e}")
-
-
 def test_unknown_backend_rejected():
     """An unknown backend name must fail loud, listing the valid choices."""
     with pytest.raises(ValueError, match="tokenizer_backend"):
@@ -75,12 +67,8 @@ def test_vlm_processor_backend_parity():
     pytest.importorskip("gigatoken")
     import numpy as np
     from PIL import Image
-    from transformers import AutoProcessor
 
-    try:
-        processor = AutoProcessor.from_pretrained(VLM_MODEL_NAME, revision=VLM_MODEL_REVISION)
-    except Exception as e:  # offline / no cached snapshot
-        pytest.skip(f"VLM processor unavailable offline: {e}")
+    processor = load_cached_processor(VLM_MODEL_NAME, revision=VLM_MODEL_REVISION)
 
     img = Image.fromarray(np.full((64, 64, 3), [100, 150, 200], dtype=np.uint8))
     conv = [
@@ -102,7 +90,7 @@ def test_proxy_matches_hf_tokenizer():
     """Proxy token IDs must equal the HF tokenizer's on chat-rendered text (special tokens
     included), plain text, and under truncation; fingerprinted metadata must delegate."""
     pytest.importorskip("gigatoken")
-    tokenizer = _load_tokenizer()
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
 
     rendered = tokenizer.apply_chat_template(CONVERSATIONS[0], tokenize=False)
@@ -130,7 +118,7 @@ def test_verifier_catches_truncation_only_divergence(monkeypatch):
     pytest.importorskip("gigatoken")
     from src.data.pipeline import tokenizer_backend as tb
 
-    tokenizer = _load_tokenizer()
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     real_call = tb.GigatokenTokenizerProxy.__call__
 
     def diverge_when_truncating(self, text=None, **kwargs):
@@ -148,7 +136,7 @@ def test_proxy_pickle_roundtrip():
     """datasets.map workers pickle the processor closure; the proxy must survive and re-encode
     identically (the Rust backend is dropped and rebuilt lazily)."""
     pytest.importorskip("gigatoken")
-    tokenizer = _load_tokenizer()
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
 
     restored = pickle.loads(pickle.dumps(proxy))
@@ -161,7 +149,7 @@ def test_proxy_transparency():
     attribute writes must reach the wrapped tokenizer (so its bound methods see them), and
     re-resolving must be a no-op."""
     pytest.importorskip("gigatoken")
-    tokenizer = _load_tokenizer()
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
 
     assert isinstance(proxy, type(tokenizer))
@@ -181,7 +169,7 @@ def test_setup_model_and_tokenizer_resolves_backend():
     from src.data.pipeline.tokenizer_backend import GigatokenTokenizerProxy
     from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
 
-    tokenizer = _load_tokenizer()
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     hf_args = PreprocessingArgsStub("hf")
     assert setup_model_and_tokenizer(hf_args, None, tokenizer, 512) is tokenizer
 
@@ -197,7 +185,7 @@ def test_reward_preprocess_backend_parity():
     pytest.importorskip("gigatoken")
     from src.data.pipeline.preferences import build_reward_preprocess_fn
 
-    tokenizer = _load_tokenizer()
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
     examples = {
         "prompt": [[{"role": "user", "content": "Best emoji? 🚀"}]],
@@ -213,7 +201,7 @@ def test_reward_preprocess_backend_parity():
 def test_tokenize_dataset_backend_parity(mode):
     """tokenize_dataset must produce identical rows under both backends, chat and text mode."""
     pytest.importorskip("gigatoken")
-    tokenizer = _load_tokenizer()
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
 
     if mode == "chat":
         dataset = Dataset.from_dict({"conversation": CONVERSATIONS})
@@ -274,7 +262,7 @@ def test_a_faithful_backend_is_accepted_without_the_package(monkeypatch):
     """Anti-vacuity for the divergence test below: with an id-identical fake backend the verifier
     must ACCEPT, so a verifier that rejected everything could not pass both tests."""
     monkeypatch.setattr(tb, "gigatoken", _FakeGigatoken())
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     resolved = tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
     assert type(resolved) is tb.GigatokenTokenizerProxy
 
@@ -289,7 +277,7 @@ def test_a_backend_that_diverges_only_under_truncation_is_rejected(monkeypatch):
     monkeypatch.setattr(
         tb, "gigatoken", _FakeGigatoken(corrupt=lambda ids, kw: ids[:-1] if kw.get("truncation") and ids else ids)
     )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     with pytest.raises(ValueError, match="diverges"):
         tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
 
@@ -302,6 +290,6 @@ def test_a_backend_that_diverges_on_special_tokens_is_rejected(monkeypatch):
         "gigatoken",
         _FakeGigatoken(corrupt=lambda ids, kw: ([0] + ids) if kw.get("add_special_tokens") else ids),
     )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
     with pytest.raises(ValueError, match="diverges"):
         tb.resolve_tokenizer_backend(tokenizer, "gigatoken")

@@ -25,6 +25,7 @@ from src.data.pipeline.preprocessed_metadata import (
 )
 from src.data.pipeline.preprocessing import _warn_on_shard_count_ceiling, shard_dataset, tokenize_dataset
 from src.data.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo
+from tests.common.tokenizers import load_cached_tokenizer
 
 
 def test_shard_info_and_index():
@@ -92,12 +93,7 @@ def test_tokenize_dataset():
         conversation_field="conversation",
     )
 
-    from transformers import AutoTokenizer
-
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
-    except Exception as e:  # offline / no cached snapshot
-        pytest.skip(f"tokenizer unavailable offline: {e}")
+    tokenizer = load_cached_tokenizer(config.model_name_or_path)
     tokenized = tokenize_dataset(dataset, tokenizer, config)
 
     assert "input_ids" in tokenized.column_names
@@ -121,8 +117,6 @@ def test_tokenize_dataset_completion_only():
     """
     print("Testing tokenize_dataset completion-only...")
 
-    from transformers import AutoTokenizer
-
     dataset = Dataset.from_dict(
         {
             "conversation": [
@@ -141,10 +135,7 @@ def test_tokenize_dataset_completion_only():
         train_on_completions_only=True,
         assistant_message_template="<|im_start|>assistant\n",
     )
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
-    except Exception as e:  # offline / no cached snapshot
-        pytest.skip(f"tokenizer unavailable offline: {e}")
+    tokenizer = load_cached_tokenizer(config.model_name_or_path)
 
     tokenized = tokenize_dataset(dataset, tokenizer, config)
     row = tokenized[0]
@@ -166,8 +157,6 @@ def test_never_matching_template_raises_at_preprocessing_time():
 
     Regression: running the all-masked guard before the completion bake, where the chat processor
     has not emitted labels yet, leaves it dead on the exact path it exists for."""
-    from transformers import AutoTokenizer
-
     dataset = Dataset.from_dict(
         {
             "conversation": [
@@ -186,10 +175,7 @@ def test_never_matching_template_raises_at_preprocessing_time():
         train_on_completions_only=True,
         assistant_message_template="<|NEVER_MATCHES|>assistant:",
     )
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
-    except Exception as e:  # offline / no cached snapshot
-        pytest.skip(f"tokenizer unavailable offline: {e}")
+    tokenizer = load_cached_tokenizer(config.model_name_or_path)
 
     with pytest.raises(ValueError, match="ignore index"):
         tokenize_dataset(dataset, tokenizer, config)
@@ -610,8 +596,6 @@ def test_source_labels_column_is_not_baked_as_loss_targets():
     """A source column named `labels` (classification/reward corpora carry one) survived the
     tokenization map, and the labels step only fills in a MISSING column — so those source values
     were baked as this dataset's loss targets."""
-    from transformers import AutoTokenizer
-
     dataset = Dataset.from_dict(
         {
             "conversation": [[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]],
@@ -624,10 +608,7 @@ def test_source_labels_column_is_not_baked_as_loss_targets():
         pack_sequences=False,
         conversation_field="conversation",
     )
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
-    except Exception as e:
-        pytest.skip(f"tokenizer unavailable offline: {e}")
+    tokenizer = load_cached_tokenizer(config.model_name_or_path)
 
     tokenized = tokenize_dataset(dataset, tokenizer, config)
     row = tokenized[0]

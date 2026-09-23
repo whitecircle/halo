@@ -177,6 +177,10 @@ those, kept separate only so the manifest can attach its family markers, timeout
   `net.ipv4.ip_local_port_range`, so a host whose range starts at or below 20000 raises
   `... leaves N test worker(s) no port`: move the range up to `32768 60999`
   ([Troubleshooting](../../agent-docs/reference/troubleshooting.md) has the commands).
+- **Hub files** (`tests/common/tokenizers.py`) — load a real tokenizer, processor, config or
+  chat template through these helpers, and name its repo in `tests/common/models.py`. The hosted
+  CPU tier runs offline over a seed derived from that module and fails a cache miss
+  (`HALO_TEST_REQUIRE_HUB_CACHE`), so a repo named only inline fails there.
 - **Tolerances** (`tests/common/tolerances.py`) — `from tests.common.tolerances import TOL`,
   then use the named constant: `TOL.rank_loss_consistency_abs`, `TOL.tp_grad_norm_spread_abs`,
   `TOL.parallel_vs_baseline_loss_abs`, `TOL.parallel_vs_baseline_train_loss_abs`,

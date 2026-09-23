@@ -22,7 +22,6 @@ import pytest
 import torch
 from datasets import Dataset, DatasetDict
 from PIL import Image
-from transformers import AutoProcessor
 
 from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
@@ -30,6 +29,8 @@ from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dat
 from src.data.vlm import VLM_IMAGE_COLUMNS
 from src.models import modality
 from src.models.modality import is_vlm_model
+from tests.common.models import QWEN2_5_VL_3B
+from tests.common.tokenizers import load_cached_processor
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
 logging.basicConfig(
@@ -45,12 +46,8 @@ def test_vlm_preprocessing_without_images():
     logger.info("Testing VLM Preprocessing (text-only conversations)")
     logger.info("=" * 60)
 
-    model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
-
-    try:
-        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-    except Exception as e:  # offline / uncached
-        pytest.skip(f"VLM processor unavailable offline: {e}")
+    model_name = QWEN2_5_VL_3B
+    processor = load_cached_processor(model_name, trust_remote_code=True)
 
     examples = [
         {

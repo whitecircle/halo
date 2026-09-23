@@ -74,7 +74,7 @@ The CPU targets mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
 read-write, because many CPU tests load a real tokenizer. A test calling `from_pretrained` directly
 hard-fails when the cache is missing and the Hub is unreachable; one going through
 `tests/common/tokenizers.py` skips instead. `make seed-hf-cache` fetches the configs, tokenizers and
-chat templates of the repos those tests read (`HF_SEED_REPOS`, about 0.6 GB, no weights) anonymously.
+chat templates those tests read, anonymously and without weights ([what the seed holds](../infrastructure/ci.md#cpu-tests)).
 
 Secrets live in the repo-root `.env`. Cache and path redirects are `-e` flags pointed at a **verified**
 large volume: the root filesystem is small, and a path named `/mnt` is not guaranteed to be a separate

@@ -11,11 +11,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from accelerate import PartialState
-from transformers import AutoTokenizer
 
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorForCausalLMWithPadding
 from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS
+from tests.common.models import QWEN3_0_6B
+from tests.common.tokenizers import load_cached_tokenizer
 
 
 def _make_tokenizer():
@@ -117,7 +118,7 @@ def test_cp_completions_routing():
 def test_cp_collator_produces_and_preserves_labels():
     """Real-tokenizer check: labels built from input_ids when absent, precomputed (ragged,
     prompt-masked) labels padded with -100 — not crashed on, not discarded."""
-    tok = AutoTokenizer.from_pretrained("gpt2")
+    tok = load_cached_tokenizer(QWEN3_0_6B)
     tok.pad_token = tok.eos_token
     collator = DataCollatorForCausalLMWithPadding(tokenizer=tok, mlm=False, pad_to_multiple_of=4)
 
@@ -146,8 +147,8 @@ def test_cp_collator_restores_real_eos_when_pad_equals_eos():
 
     Without the restore, labels at the real EOS positions are -100.
     """
-    tok = AutoTokenizer.from_pretrained("gpt2")
-    tok.pad_token = tok.eos_token  # gpt2 has no pad → the pad=eos fallback layout
+    tok = load_cached_tokenizer(QWEN3_0_6B)
+    tok.pad_token = tok.eos_token  # the pad=eos fallback layout
     eos = tok.eos_token_id
     collator = DataCollatorForCausalLMWithPadding(tokenizer=tok, mlm=False)
 
