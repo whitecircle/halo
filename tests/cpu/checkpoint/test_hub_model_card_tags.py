@@ -6,13 +6,15 @@ cards list under ``trl`` and ``peft``. The tag rides two carriers: the loaded mo
 (which PEFT's adapter card and ``push_to_hub`` read), and the ``README.md`` card the two export
 finalizers tag — the config finalizer every full-model writer ends with, and the non-weight copy every
 tool that builds an export from a source directory runs. The two tools that pass through neither tag
-their own output. An existing card (PEFT's, TRL's, the source model's) keeps its body, metadata and
+their own output, and the embedding script tags the card data sentence-transformers writes its own
+card from. An existing card (PEFT's, TRL's, the source model's) keeps its body, metadata and
 tags; only the Halo tag is added, and a fresh card claims no ``library_name``.
 
     python tests/cpu/checkpoint/test_hub_model_card_tags.py
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -21,14 +23,17 @@ from huggingface_hub import ModelCard
 from peft import LoraConfig, get_peft_model
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import GptOssConfig, GptOssForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from trl import ModelConfig
 from trl.trainer.utils import generate_model_card
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks
+from scripts.training.embedding import build_sentence_transformer
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
 from src.checkpoint.format import copy_checkpoint_aux_files
 from src.checkpoint.model_card import tag_model_card
+from src.configs.embedding_config import EmbeddingConfig
 from src.models.loading.model_preparation import finalize_run_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 
@@ -206,6 +211,31 @@ def test_the_unmerged_adapter_conversion_tags_its_output(tmp_path):
     card = _card(output)
     assert card.data.library_name == "peft"
     assert HALO_TAG in card.data.tags
+
+
+def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
+    """sentence-transformers writes its card from ``model_card_data`` and never reads ``model_tags``."""
+    base = tmp_path / "base"
+    _tiny_qwen3().save_pretrained(base)
+    _tiny_tokenizer().save_pretrained(base)
+    runtime = SimpleNamespace(
+        parallelism_config=SimpleNamespace(is_ep_mode=False, is_tp_mode=False), model_source=str(base)
+    )
+    embedding_config = EmbeddingConfig(
+        output_dir=str(tmp_path / "run"), bf16=False, pooling_mode="mean", normalize_embeddings=False, max_length=32
+    )
+    st_model = build_sentence_transformer(
+        runtime,
+        embedding_config,
+        ModelConfig(model_name_or_path=str(base)),
+        SimpleNamespace(reset_sinks=True, train_sinks=False),
+    )
+
+    st_model.save(str(tmp_path / "embedding"))
+    card = _card(tmp_path / "embedding")
+    assert card.data.library_name == "sentence-transformers"
+    assert HALO_TAG in card.data.tags
+    assert "sentence-transformers" in card.data.tags
 
 
 if __name__ == "__main__":

@@ -221,6 +221,8 @@ alone.
   `unfuse_moe_experts`, the GLM-5 and Mistral 4 fp8 → bf16 converters).
 - **The loaded policy** carries the tag on `model_tags` (`finalize_run_model`), which the card of
   PEFT's own `save_pretrained` (the single-process / DDP adapter save) and `push_to_hub` read.
+- **Embedding runs** carry it on the SentenceTransformer's `model_card_data`
+  (`scripts/training/embedding.py`), the source of the card sentence-transformers writes.
 
 `reset_sinks`' single-file branch and an unmerged `convert_to_bf16 --peft` tag their own output.
 Adapter directories written by hand (FSDP2, CP and EP adapters) carry no card, and the
