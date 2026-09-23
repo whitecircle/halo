@@ -20,8 +20,11 @@ from src.environments.base import Trajectory
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, _await_with_deadline
 
-_TIMEOUT_S = 0.2
-_EPISODE_S = 0.3
+# The episode overruns the deadline by half a second, and a credit equal to the timeout clears it by
+# another half: a stalled event loop on a loaded runner must not flip either verdict.
+_TIMEOUT_S = 1.0
+_EPISODE_S = 1.5
+_OVERRUN_S = _EPISODE_S - _TIMEOUT_S
 
 
 class _SlowRef:
@@ -59,7 +62,7 @@ def test_without_a_pause_the_same_episode_expires():
 
 def test_a_pause_shorter_than_the_overrun_still_expires():
     with pytest.raises(TimeoutError):
-        asyncio.run(_await_with_deadline(_SlowRef(_EPISODE_S), _TIMEOUT_S, _PausedClock(credit=0.02)))
+        asyncio.run(_await_with_deadline(_SlowRef(_EPISODE_S), _TIMEOUT_S, _PausedClock(credit=_OVERRUN_S / 5)))
 
 
 def test_the_episodes_own_timeout_error_is_not_mistaken_for_the_deadline():
