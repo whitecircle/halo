@@ -149,8 +149,6 @@ def run(ctx):
 
     # Noise floor: a second identical run. Any spread here is EP's own nondeterminism.
     _, grads_repeat = forward_backward(model, batch)
-    floor_name, floor_cos = worst_cosine(grads_shared, grads_repeat)
-    log(f"noise floor from two identical shared runs: {floor_cos:.6f} ({floor_name})")
 
     # ---- private arenas (pre-sharing behaviour) --------------------------
     # Capacity dedup is what pins one capacity per forward; without it a later layer may grow the
@@ -176,6 +174,10 @@ def run(ctx):
     checks["sharing_divides_the_arena_by_layer_count"] = private_arena_bytes == num_layers * shared_arena_bytes
 
     # ---- equivalence ------------------------------------------------------
+    # Every cosine runs after the last collective: cos_sim raises on a NaN or zero gradient, and a
+    # rank raising before the private run would leave its peers inside a DeepEP dispatch.
+    floor_name, floor_cos = worst_cosine(grads_shared, grads_repeat)
+    log(f"noise floor from two identical shared runs: {floor_cos:.6f} ({floor_name})")
     checks["loss_matches_private_arena"] = abs(loss_shared - loss_private) < LOSS_ABS_TOL
     worst_name, worst_cos = worst_cosine(grads_shared, grads_private)
     log(f"worst gradient cosine shared-vs-private {worst_cos:.6f} ({worst_name}) over {len(grads_shared)} tensors")

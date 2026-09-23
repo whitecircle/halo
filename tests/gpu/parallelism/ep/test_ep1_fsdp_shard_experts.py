@@ -204,7 +204,7 @@ def run(ctx) -> dict:
     ctx.barrier()
 
     # ---- compare on rank 0 ----
-    cos = cos_sim(off["grad"], on["grad"])
+    cos = cos_sim(off["grad"], on["grad"], "first EP expert weight grad")
     rel_l2 = ((on["grad"] - off["grad"]).norm() / (off["grad"].norm() + 1e-12)).item()
     loss_diff = abs(on["loss"] - off["loss"])
 

@@ -293,9 +293,10 @@ def run(ctx):
         ref_sq += reference.float().pow(2).sum().item()
         if not finite:
             continue  # reported through all_finite, which fails the check below
-        if not reference.any() and not grad.any():
-            # An expert no token reached: the remote code still calls it on an empty slice, so both
-            # sides hold an exactly-zero gradient, which has no direction to compare.
+        if ".experts." in name and not reference.any() and not grad.any():
+            # A routed expert no token reached: the remote code still calls it on an empty slice, so
+            # both sides hold an exactly-zero gradient, which has no direction to compare. Any other
+            # parameter always carries gradient, so a zero there reaches cos_sim and fails.
             unrouted += 1
             continue
         cosine = cos_sim(grad, reference, name)

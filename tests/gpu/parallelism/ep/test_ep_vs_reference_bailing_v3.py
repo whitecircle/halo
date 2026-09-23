@@ -39,7 +39,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_LING_3_TINY
-from tests.common.utils import cos_sim, log
+from tests.common.utils import cos_sim, log, log_all
 
 SEED = 42
 BATCH, SEQ = 2, 16
@@ -123,7 +123,7 @@ def run(ctx):
     ep_out.sum().backward()
 
     max_abs = (ep_out.detach().float() - ref_out.float()).abs().max().item()
-    cosine = cos_sim(ep_out.detach(), ref_out)
+    cosine = cos_sim(ep_out.detach(), ref_out, "MoE block output")
     metrics["out_max_abs_diff"] = max_abs
     metrics["out_cosine"] = cosine
     checks["ep_output_finite"] = bool(torch.isfinite(ep_out).all())
@@ -140,7 +140,14 @@ def run(ctx):
         "gate_grad": (ep_layer.gate.weight.grad, ref_grads["gate"]),
     }
     for name, (got, want) in pairs.items():
-        cos = cos_sim(got, want)
+        if got is None or got.shape != want.shape:
+            # A bank no token reached, or a severed backward: this rank's comparison has nothing to test.
+            log_all(
+                f"  {name}: EP grad {'missing' if got is None else tuple(got.shape)} vs reference {tuple(want.shape)}"
+            )
+            checks[name] = False
+            continue
+        cos = cos_sim(got, want, name)
         metrics[f"{name}_cos"] = cos
         checks[name] = cos > GRAD_COS_TOL
 

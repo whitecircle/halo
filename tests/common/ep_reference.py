@@ -91,8 +91,8 @@ def full_grad(param: torch.nn.Parameter) -> torch.Tensor:
     return grad.detach().float().clone()
 
 
-def compare_grad(got: torch.Tensor, reference: torch.Tensor) -> tuple[float, float]:
-    """Compare a gradient to its single-GPU reference as (norm ratio, cosine similarity).
+def compare_grad(got: torch.Tensor, reference: torch.Tensor, label: str) -> tuple[float, float]:
+    """Compare ``label``'s gradient to its single-GPU reference as (norm ratio, cosine similarity).
 
     Split rather than collapsed into one relative error because the two bug classes are independent:
     a mis-scaled cross-rank reduction moves the ratio and leaves the cosine at 1, while a
@@ -102,7 +102,7 @@ def compare_grad(got: torch.Tensor, reference: torch.Tensor) -> tuple[float, flo
     ref_norm = reference.norm().item()
     got_norm = got.norm().item()
     ratio = got_norm / max(ref_norm, 1e-12)
-    return ratio, cos_sim(got, reference)
+    return ratio, cos_sim(got, reference, label)
 
 
 def fixed_chat_batch(

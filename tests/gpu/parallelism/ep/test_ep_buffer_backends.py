@@ -30,7 +30,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from tests.common.distributed import ensure_model_downloaded
-from tests.common.ep_reference import fixed_chat_batch
+from tests.common.ep_reference import ep_layers, find_router_weight, fixed_chat_batch, full_grad
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, cos_sim, log, log_all
@@ -44,21 +44,19 @@ LOSS_ABS_TOL = 5e-3  # same routing + transport → loss matches to bf16 reducti
 GRAD_COSINE_MIN = 0.999
 
 
-def named_grads(model):
-    """Gather the first EP layer's expert weight grad and a router grad (this rank's local copies)."""
-    expert_grad = router_grad = None
-    for _, module in model.named_modules():
-        if hasattr(module, "expert_named_params"):
-            for _, p in module.expert_named_params():
-                if p.grad is not None:
-                    expert_grad = p.grad.detach().float().flatten()
-                    break
-            break
-    for name, p in model.named_parameters():
-        if ("router" in name or "gate" in name) and "weight" in name and p.grad is not None:
-            router_grad = p.grad.detach().float().flatten()
-            break
-    return expert_grad, router_grad
+def named_grads(model) -> tuple[torch.Tensor, torch.Tensor]:
+    """This rank's first local expert weight grad and the first router weight grad, flattened fp32.
+
+    Each parameter is chosen by name before its gradient is read, so one whose gradient was severed
+    fails here instead of falling through to the next layer's.
+    """
+    layers = ep_layers(model)
+    assert layers, "the model has no EP layer"
+    expert_name, expert_weight = layers[0].expert_named_params()[0]
+    router_name, router_weight = find_router_weight(model)
+    for name, param in ((expert_name, expert_weight), (router_name, router_weight)):
+        assert param.grad is not None, f"{name} has no gradient: backward did not reach it"
+    return full_grad(expert_weight).flatten(), full_grad(router_weight).flatten()
 
 
 def run_backend(backend, tokenizer, local_rank):
@@ -125,10 +123,8 @@ def run(ctx) -> dict:
     v1 = run_backend("legacy", tokenizer, ctx.local_rank)
     barrier()
 
-    expert_cos = cos_sim(v1["expert_grad"], v2["expert_grad"])
-    # A backend that severs the router's gradient leaves it None, which must fail rather than skip.
-    routers_present = v1["router_grad"] is not None and v2["router_grad"] is not None
-    router_cos = cos_sim(v1["router_grad"], v2["router_grad"]) if routers_present else -1.0
+    expert_cos = cos_sim(v1["expert_grad"], v2["expert_grad"], "first local expert weight grad")
+    router_cos = cos_sim(v1["router_grad"], v2["router_grad"], "router weight grad")
     loss_diff = abs(v1["loss"] - v2["loss"])
 
     log(f"\n{'=' * 70}\nRESULTS\n{'=' * 70}")
@@ -144,7 +140,6 @@ def run(ctx) -> dict:
             "legacy_buffer_shared_by_all_layers": v1["shared_ok"],
             "loss_match": loss_diff <= LOSS_ABS_TOL,
             "expert_grad_match": expert_cos >= GRAD_COSINE_MIN,
-            "router_grads_present": routers_present,
             "router_grad_match": router_cos >= GRAD_COSINE_MIN,
         }
     }

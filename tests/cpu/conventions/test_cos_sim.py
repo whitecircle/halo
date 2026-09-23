@@ -17,18 +17,20 @@ import torch
 
 from tests.common.utils import cos_sim
 
+SEED = 0
+
 
 @pytest.mark.parametrize("pair", ["dead_vs_live", "live_vs_dead", "both_dead"])
 def test_a_zero_norm_operand_raises(pair):
-    live, dead = torch.randn(64), torch.zeros(64)
+    live, dead = torch.randn(64, generator=torch.Generator().manual_seed(SEED)), torch.zeros(64)
     a, b = {"dead_vs_live": (dead, live), "live_vs_dead": (live, dead), "both_dead": (dead, dead)}[pair]
-    with pytest.raises(ValueError, match="zero-norm"):
-        cos_sim(a, b)
+    with pytest.raises(ValueError, match="^layers.0.router.weight: cosine of a zero-norm"):
+        cos_sim(a, b, "layers.0.router.weight")
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
 def test_a_non_finite_operand_raises(bad):
-    live = torch.randn(64)
+    live = torch.randn(64, generator=torch.Generator().manual_seed(SEED))
     corrupted = live.clone()
     corrupted[3] = bad
     with pytest.raises(ValueError, match="non-finite"):
@@ -38,7 +40,7 @@ def test_a_non_finite_operand_raises(bad):
 @pytest.mark.parametrize("scale", [1.0, 1e-7, 1e-12])
 def test_small_live_tensors_keep_their_direction(scale):
     """No epsilon floor: a norm product under 1e-12, or a norm under 1e-8, still compares by direction."""
-    a = torch.randn(4, 16) * scale
+    a = torch.randn(4, 16, generator=torch.Generator().manual_seed(SEED)) * scale
     assert math.isclose(cos_sim(a, a), 1.0, rel_tol=1e-5)
     assert math.isclose(cos_sim(a, -a), -1.0, rel_tol=1e-5)
 

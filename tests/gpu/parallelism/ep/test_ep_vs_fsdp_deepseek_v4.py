@@ -145,7 +145,7 @@ def run(ctx):
         }
         for name, (got, want) in pairs.items():
             ok = got is not None and got.shape == want.shape
-            cos = cos_sim(got, want) if ok else -1.0
+            cos = cos_sim(got, want, name) if ok else -1.0
             ratio = (got.float().norm() / want.float().norm().clamp_min(1e-12)).item() if ok else -1.0
             metrics[f"{name}_cos"] = cos
             metrics[f"{name}_norm_ratio"] = ratio
