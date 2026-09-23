@@ -211,8 +211,10 @@ resume demands of the topology, is the
 A model directory Halo writes carries a `README.md` card tagged `halo` (`HALO_HUB_TAGS` in
 `src/checkpoint/model_card.py`), so an upload lists under that Hub tag. `tag_model_card` changes only
 the `tags` entry of a card already present — TRL's, PEFT's, sentence-transformers', or one an export
-copies from its source — and writes a fresh card holding the tag alone. A card whose metadata is not
-a YAML mapping fails the write, naming the file to repair.
+copies from its source. A fresh card holds the tag alone, except in a directory whose
+`adapter_config.json` names a `peft_type` stock PEFT loads, where it also carries `library_name: peft`
+and a Hub `base_model`, as PEFT's own card does. A card whose metadata is not a YAML mapping fails
+the write, naming the file to repair.
 
 - **Full-model writes** tag in `finalize_exported_config`, which every parallel saver, the
   single-GPU / DDP fallback and the export tools' `save_full_checkpoint` end with.

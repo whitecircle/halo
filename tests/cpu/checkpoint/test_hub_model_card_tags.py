@@ -7,8 +7,9 @@ cards list under ``trl`` and ``peft``. The tag rides two carriers: the loaded mo
 config finalizer every full-model writer ends with, and the non-weight copy every tool that builds an
 export from a source directory runs. The writers that reach neither tag their own output, and the
 embedding script tags the card data sentence-transformers writes its card from. An existing card
-(PEFT's, TRL's, the source model's) changes in its ``tags`` entry only; a fresh card holds the tag
-alone, and a card whose metadata is not YAML fails naming the file to repair.
+(PEFT's, TRL's, the source model's) changes in its ``tags`` entry only. A fresh card holds the tag,
+plus ``library_name: peft`` and the base model in a stock PEFT adapter directory, and a card whose
+metadata is not YAML fails naming the file to repair.
 
     python tests/cpu/checkpoint/test_hub_model_card_tags.py
 """
@@ -35,6 +36,7 @@ from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.training.embedding import build_sentence_transformer
 from src.checkpoint import model_card
+from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
 from src.checkpoint.format import copy_checkpoint_aux_files
 from src.checkpoint.model_card import tag_model_card
@@ -122,6 +124,47 @@ def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
     assert _card(tmp_path).data.to_dict() == {"tags": [HALO_TAG]}
     assert sorted(os.listdir(tmp_path)) == [CARD], "the staged card was left beside the real one"
     assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) & 0o044 == 0o044, "the card is not readable by others"
+
+
+def test_a_fresh_card_for_a_stock_peft_adapter_names_peft_and_its_base(tmp_path):
+    """An adapter the toolkit writes by hand gets what PEFT's own card would carry."""
+    (tmp_path / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": "Qwen/Qwen3-0.6B"})
+    )
+    tag_model_card(str(tmp_path))
+    assert metadata_load(tmp_path / CARD) == {
+        "library_name": "peft",
+        "base_model": "Qwen/Qwen3-0.6B",
+        "tags": [HALO_TAG],
+    }
+
+
+def test_a_local_base_model_path_stays_out_of_the_card(tmp_path):
+    """The Hub refuses a card whose base_model is not a repo id."""
+    (tmp_path / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": "/mnt/models/Qwen3-0.6B"})
+    )
+    tag_model_card(str(tmp_path))
+    assert metadata_load(tmp_path / CARD) == {"library_name": "peft", "tags": [HALO_TAG]}
+
+
+@pytest.mark.parametrize("peft_type", sorted(EXPERT_LORA_PEFT_TYPES))
+def test_a_native_expert_adapter_card_claims_no_library(tmp_path, peft_type):
+    """Stock PEFT refuses these adapters, so the card must not name it."""
+    (tmp_path / "adapter_config.json").write_text(
+        json.dumps({"peft_type": peft_type, "base_model_name_or_path": "Qwen/Qwen3-0.6B"})
+    )
+    tag_model_card(str(tmp_path))
+    assert metadata_load(tmp_path / CARD) == {"tags": [HALO_TAG]}
+
+
+def test_an_existing_adapter_card_gains_only_the_tag(tmp_path):
+    (tmp_path / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": "Qwen/Qwen3-0.6B"})
+    )
+    (tmp_path / CARD).write_text("---\ntags:\n- lora\n---\nbody\n")
+    tag_model_card(str(tmp_path))
+    assert metadata_load(tmp_path / CARD) == {"tags": ["lora", HALO_TAG]}
 
 
 def test_an_existing_card_keeps_its_metadata_tags_body_and_mode(tmp_path):

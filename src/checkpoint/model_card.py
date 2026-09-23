@@ -5,6 +5,7 @@ run: the config finalizer every full-model writer ends with, and the non-weight 
 builds an export from a source directory runs. A writer that reaches neither calls it directly.
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -13,6 +14,9 @@ from pathlib import Path
 import yaml
 from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.repocard import metadata_load, metadata_save
+from huggingface_hub.utils import HFValidationError, validate_repo_id
+from peft import PeftType
+from peft.utils import CONFIG_NAME as ADAPTER_CONFIG_NAME
 
 HALO_HUB_TAGS = ("halo",)
 
@@ -23,6 +27,8 @@ CARD_STAGING_SUFFIX = ".tmp"
 # A fresh card's mode: the staging file is created owner-only, which would hide the card from the
 # other readers of a shared output filesystem.
 _FRESH_CARD_MODE = 0o644
+# The adapter types stock PEFT loads; the toolkit's native expert-LoRA types are outside it.
+_STOCK_PEFT_TYPES = frozenset(peft_type.value for peft_type in PeftType)
 
 
 def is_staged_card(name: str) -> bool:
@@ -41,23 +47,26 @@ def tag_model_card(output_dir: str) -> None:
 
     Only the ``tags`` entry of an existing card changes: its other metadata round-trips as the raw
     mapping (``model-index`` included), and its body, line endings and mode are kept. A card that
-    already carries every tag is not rewritten, and a fresh card holds the tags alone, so
-    ``library_name`` stays the owning library's. The write goes to a uniquely named file beside the
-    card and is swapped in, which also replaces a symlinked card (a Hub-cache snapshot) instead of
-    writing through it into the blob.
+    already carries every tag is not rewritten. A fresh card holds the tags, plus what
+    :func:`_fresh_card_metadata` derives for an adapter directory. The write goes to a uniquely named
+    file beside the card and is swapped in, which also replaces a symlinked card (a Hub-cache
+    snapshot) instead of writing through it into the blob.
 
     Raises:
         ValueError: the card's metadata block is not a YAML mapping.
     """
     path = Path(output_dir) / REPOCARD_NAME
     exists = path.is_file()
-    try:
-        metadata = (metadata_load(path) if exists else None) or {}
-    except (yaml.YAMLError, ValueError) as error:
-        raise ValueError(
-            f"The model card {path} has a metadata block that is not a YAML mapping ({error}). Repair or "
-            f"remove it, then re-run."
-        ) from error
+    if exists:
+        try:
+            metadata = metadata_load(path) or {}
+        except (yaml.YAMLError, ValueError) as error:
+            raise ValueError(
+                f"The model card {path} has a metadata block that is not a YAML mapping ({error}). Repair "
+                f"or remove it, then re-run."
+            ) from error
+    else:
+        metadata = _fresh_card_metadata(path.parent)
     tags = with_halo_tags(metadata.get("tags"))
     if exists and tags == metadata.get("tags"):
         return
@@ -77,3 +86,34 @@ def tag_model_card(output_dir: str) -> None:
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
+
+
+def _fresh_card_metadata(directory: Path) -> dict:
+    """What a new card declares besides the tags: the stock-PEFT identity of an adapter directory.
+
+    An adapter stock PEFT loads gets the ``library_name: peft`` and ``base_model`` PEFT's own card
+    carries. A ``peft_type`` outside PEFT's registry (the native EP expert adapters) and a full-model
+    directory declare no library, so the card claims no loader that would refuse the files.
+    """
+    adapter_config = directory / ADAPTER_CONFIG_NAME
+    if not adapter_config.is_file():
+        return {}
+    config = json.loads(adapter_config.read_text())
+    if config.get("peft_type") not in _STOCK_PEFT_TYPES:
+        return {}
+    metadata = {"library_name": "peft"}
+    base_model = config.get("base_model_name_or_path")
+    if base_model and _is_hub_repo_id(base_model):
+        metadata["base_model"] = base_model
+    return metadata
+
+
+def _is_hub_repo_id(name: str) -> bool:
+    """Whether ``name`` names a Hub repo: the Hub rejects a card whose ``base_model`` is a local path."""
+    if os.path.isdir(name):
+        return False
+    try:
+        validate_repo_id(name)
+    except HFValidationError:
+        return False
+    return True
