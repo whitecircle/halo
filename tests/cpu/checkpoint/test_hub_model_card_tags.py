@@ -57,8 +57,9 @@ _TINY_QWEN3 = {
     "max_position_embeddings": 64,
     "tie_word_embeddings": False,
 }
-# A card's metadata beyond ``tags`` must survive verbatim: two model-index entries, one carrying
-# fields ModelCardData's EvalResult has no slot for, and keys it would reorder.
+# A card's metadata beyond ``tags`` must survive as a mapping: two model-index entries, one carrying
+# fields ModelCardData's EvalResult has no slot for, and keys it would reorder. YAML comments and flow
+# style are re-dumped.
 _EVAL_CARD = """---
 license: mit
 model-index:
@@ -123,8 +124,9 @@ def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
     assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) & 0o044 == 0o044, "the card is not readable by others"
 
 
-def test_an_existing_card_keeps_its_metadata_tags_and_body(tmp_path):
+def test_an_existing_card_keeps_its_metadata_tags_body_and_mode(tmp_path):
     (tmp_path / CARD).write_text(_SOURCE_CARD)
+    (tmp_path / CARD).chmod(0o640)
     body = ModelCard(_SOURCE_CARD).text
 
     tag_model_card(str(tmp_path))
@@ -134,13 +136,21 @@ def test_an_existing_card_keeps_its_metadata_tags_and_body(tmp_path):
     assert card.data.base_model == "Qwen/Qwen3-0.6B"
     assert card.data.tags == ["text-generation", HALO_TAG]
     assert card.text == body
+    assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) == 0o640
 
-    tagged = (tmp_path / CARD).read_bytes()
+
+def test_a_card_already_carrying_the_tag_is_not_rewritten(tmp_path):
+    """Flow style, which a rewrite would re-dump in block style: the bytes show whether it was touched."""
+    already = "---\ntags: [a, halo]\n---\nbody\n"
+    (tmp_path / CARD).write_text(already)
+    inode = (tmp_path / CARD).stat().st_ino
+
     tag_model_card(str(tmp_path))
-    assert (tmp_path / CARD).read_bytes() == tagged, "a card that already carries the tag is rewritten"
+    assert (tmp_path / CARD).read_text() == already
+    assert (tmp_path / CARD).stat().st_ino == inode
 
 
-def test_metadata_beyond_the_tags_round_trips_verbatim(tmp_path):
+def test_metadata_beyond_the_tags_round_trips_as_a_mapping(tmp_path):
     (tmp_path / CARD).write_text(_EVAL_CARD)
     before = metadata_load(tmp_path / CARD)
 

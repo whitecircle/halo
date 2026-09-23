@@ -420,9 +420,9 @@ def copy_checkpoint_aux_files(
 
     Subdirectories are copied whole, weight files included: a SentenceTransformer module directory
     carries weights no caller rewrites, and filtering them out leaves ``modules.json`` pointing at
-    modules that no longer exist. Three kinds stay behind: a nested ``checkpoint-N`` (resume state
-    rather than the artifact), a vendor weight dump, and anything hidden. A card a crashed tagging
-    write left staged stays behind too.
+    modules that no longer exist. Three kinds of directory stay behind: a nested ``checkpoint-N``
+    (resume state rather than the artifact), a vendor weight dump, and a hidden one. So does a card a
+    crashed tagging write left staged.
 
     ``output_dir`` nested inside ``input_dir`` raises: the walk would copy the destination into
     itself until the disk fills.
