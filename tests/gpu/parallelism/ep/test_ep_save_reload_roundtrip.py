@@ -14,13 +14,14 @@ This guards the Gemma4 layout class, where the EP wrapper replaces the experts
 ``...experts.experts.gate_up_proj``, which never reloads.
 
 Usage:
-    HALO_TEST_EP_RT_MODEL=/mnt/models/gemma-4-26B-A4B-it-patched HALO_TEST_EP_RT_ATTN=sdpa \
+    HALO_TEST_EP_RT_MODEL=$HALO_DATA_ROOT/models/gemma-4-26B-A4B-it-patched HALO_TEST_EP_RT_ATTN=sdpa \
         torchrun --nproc_per_node=2 \
         tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py
 
     # Cross-node EP=16 (2×8): each node's local rank 0 writes a complete gathered
     # checkpoint, so the round-trip exercises the cross-node gather + non-shared-FS save.
-    HALO_TEST_EP_RT_MODEL=/mnt/models/gpt-oss-20b HALO_TEST_EP_RT_ATTN=flash_attention_2 HALO_TEST_EP=16 \
+    HALO_TEST_EP_RT_MODEL=$HALO_DATA_ROOT/models/gpt-oss-20b-BF16-patched \
+    HALO_TEST_EP_RT_ATTN=flash_attention_2 HALO_TEST_EP=16 \
         torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 ... \
         tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py
 

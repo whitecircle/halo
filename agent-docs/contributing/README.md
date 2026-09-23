@@ -218,7 +218,21 @@ infrastructure sets:
 | `VLLM_SERVER_URL` / `SGLANG_SERVER_URL` | `http://localhost:8000` / `:30000` | Live rollout server the `vllm_server` / `sglang_server` tiers probe and drive. Both are set by the shipped infrastructure itself (`Makefile`, `docker-compose.vllm.yml`), which is why they carry no `HALO_TEST_` prefix — every other test knob does. |
 | `HALO_TEST_LAUNCH_ID` | per launch | Set BY the launcher, not for it: a unique id stamped into every torchrun launch's environment so the orphan sweep can identify surviving workers from `/proc` without matching on a script name a co-tenant might also be running. Do not export it. |
 | `HALO_TEST_REQUIRE_SERVER` | unset | The **engine name** (`vllm` / `sglang`, set by the `make` server tiers) whose tests must not be skipped: a node carrying the `<value>_server` marker raises a `UsageError` instead of skipping when the endpoint is unreachable, so a dead container cannot pass as a skip. Any other engine's tests still skip. |
-| `HALO_TEST_MODEL` and the per-suite `HALO_TEST_<SUITE>_MODEL` overrides | per suite | Swap the checkpoint a suite loads without editing it. One spelling for every per-suite checkpoint override: `HALO_TEST_<SUITE>_MODEL`, so a global override cannot point a family test at a checkpoint of another family. Per family (`HALO_TEST_ZAYA_MODEL`, `HALO_TEST_GLM4_MODEL`, `HALO_TEST_GEMMA4_MODEL`, `HALO_TEST_QWEN3_5_MODEL`, …) and per phase: `HALO_TEST_EP_RT_MODEL` (EP round-trip, default a local vocab-patched Gemma4-26B-A4B — `scripts/before_training/patch_vocab.py` output, path in `tests/common/models.py`), `HALO_TEST_EP_CP_RT_MODEL` (EP+CP round-trip, the same for gpt-oss-20b), `HALO_TEST_EP1_KNOB_MODEL` (ep1 weight-sync, default gpt-oss), `HALO_TEST_RESUME_MODEL` / `HALO_TEST_RESUME_EP_MODEL` (SFT resume: dense default Qwen3-0.6B, and the MoE the `ep` mode needs), `HALO_TEST_LORA_CP_MODEL` / `HALO_TEST_LORA_SAVE_LOAD_MODEL` (both default Qwen3-0.6B; point them at a 4B for a scale check), `HALO_TEST_STEP3P7_MODEL` (**required** — the Step-3.7 vLLM sync suite serves its own `--write-checkpoint` tree and has no default). A suite whose local default checkpoint is absent skips rather than failing. |
+| `HALO_TEST_MODEL` and the per-suite `HALO_TEST_<SUITE>_MODEL` overrides | per suite | Swap the checkpoint a suite loads without editing it. One spelling for every per-suite checkpoint override: `HALO_TEST_<SUITE>_MODEL`, so a global override cannot point a family test at a checkpoint of another family. Per family (`HALO_TEST_ZAYA_MODEL`, `HALO_TEST_GLM4_MODEL`, `HALO_TEST_GEMMA4_MODEL`, `HALO_TEST_QWEN3_5_MODEL`, …) and per phase: `HALO_TEST_EP_RT_MODEL` (EP round-trip, default a local Gemma4-26B-A4B checkpoint, built as shown below the table), `HALO_TEST_EP_CP_RT_MODEL` (EP+CP round-trip, the same for gpt-oss-20b), `HALO_TEST_EP1_KNOB_MODEL` (ep1 weight-sync, default gpt-oss), `HALO_TEST_RESUME_MODEL` / `HALO_TEST_RESUME_EP_MODEL` (SFT resume: dense default Qwen3-0.6B, and the MoE the `ep` mode needs), `HALO_TEST_LORA_CP_MODEL` / `HALO_TEST_LORA_SAVE_LOAD_MODEL` (both default Qwen3-0.6B; point them at a 4B for a scale check), `HALO_TEST_STEP3P7_MODEL` (**required** — the Step-3.7 vLLM sync suite serves its own `--write-checkpoint` tree and has no default). A suite whose local default checkpoint is absent skips rather than failing. |
+
+The two local checkpoints those suites default to, Gemma4-26B-A4B (`HALO_TEST_GEMMA4_MODEL`,
+`HALO_TEST_EP_RT_MODEL`) and gpt-oss-20b (`HALO_TEST_EP_CP_RT_MODEL`), are
+`scripts/before_training/patch_vocab.py` outputs under `$HALO_DATA_ROOT/models/`
+(`tests/common/models.py`), which the `make` tiers put at `$(HALO_SCRATCH)/models/`. The suites need
+a local checkpoint directory, not added tokens, so the tool runs without `--patterns` and re-saves the
+source vocabulary unchanged:
+
+```bash
+python scripts/before_training/patch_vocab.py --model_id google/gemma-4-26B-A4B-it \
+    --output_dir "$HALO_DATA_ROOT/models/gemma-4-26B-A4B-it-patched"
+python scripts/before_training/patch_vocab.py --model_id unsloth/gpt-oss-20b-BF16 \
+    --output_dir "$HALO_DATA_ROOT/models/gpt-oss-20b-BF16-patched"
+```
 
 Test scripts read their own knobs through `src/env.py`, `HALO_TEST_`-prefixed so a stray `export` or
 a co-tenant compose file cannot collide with them — the one exception is the server-side `VLLM_MODEL`
