@@ -52,21 +52,23 @@ Code runs in a subprocess through a `SandboxExecutor` — rlimits only on `local
 
 A shell command has the same exposure as `run_code`: the `local` backend bounds CPU, memory and
 disk, but does not namespace the network or the host filesystem — other episodes' workspaces
-included. Run untrusted shell on `bubblewrap` or `remote`.
+included, and `swe` [warns](sandbox.md#choosing-a-backend) when built on it. Run untrusted shell on
+`bubblewrap` without network, or `remote`.
 
 ## Reward
 
-An episode that never completed grades 0. A completed one is graded in this order:
+An episode that never completed grades 0. A completed one is graded by:
 
 1. A `test_function` passed to the constructor: its verdict, 1 or 0. A grader that raises grades 0 and marks the episode invalid, keeping it out of the GRPO group baseline.
-2. A `validator` or `answer` in the row's context: the protocol's answer grading.
-3. Otherwise completion itself: one *successful* tool call grades 1, zero grades 0.
+2. Else the row's `validator` (a callable) or `answer`: the protocol's answer grading, which matches the final reply against `answer` (`validate_answer`: exact match, then numeric). The workspace is never inspected. A null `answer` cell marks the episode invalid.
+
+There is no completion fallback. Without a `test_function`, `requires_answer` defaults on, so the trainer, `run_env.py` and the playground refuse a dataset with no `answer` column; `requires_answer: false` without a `test_function` raises at construction, and a driver that hands in a row carrying neither raises at grading. A judge-only reward (no `environment` term) prices no grade of the environment's own and needs neither.
 
 The reward's `environment` term prices the grade as `reward/objective` ([Reward Terms](../rewards.md#environment-arm)); the protocol's per-call and episode-level shaping add on top ([shared knobs](README.md#configuration)).
 
 ## Dataset
 
-`{"prompt": ...}`, plus `{"answer": ...}` where the episode is graded against an expected answer.
+`{"prompt": ..., "answer": ...}`; the `answer` column is optional only under a `test_function` or a judge-only reward ([Reward](#reward)).
 
 ## Evaluation
 

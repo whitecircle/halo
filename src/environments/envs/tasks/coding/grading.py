@@ -41,8 +41,9 @@ _OUTPUT_EXCERPT_CHARS = 100
 _MAX_FAILURE_DETAILS = 5
 # Tests named on one folded verdict line before the rest are counted.
 _MAX_FOLDED_TESTS_NAMED = 6
-# What a non-passing test's detail line shows the policy. ``full`` adds the expected and produced
-# output to a wrong answer; ``outcome`` states the verdict alone, the Codeforces contract.
+# What a non-passing test's detail line shows the policy. ``outcome`` states the verdict alone, the
+# Codeforces contract and the default; ``full`` adds the expected and produced output to a wrong
+# answer, which turns every resubmission into a probe of the hidden tests.
 VERDICT_DETAIL_FULL = "full"
 VERDICT_DETAIL_OUTCOME = "outcome"
 VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
@@ -269,7 +270,7 @@ def run_solution_against_tests(
     verdict_fn: VerdictFn | None = None,
     stop_on_first_failure: bool = False,
     max_grading_seconds: float | None = None,
-    verdict_detail: str = VERDICT_DETAIL_FULL,
+    verdict_detail: str = VERDICT_DETAIL_OUTCOME,
 ) -> GradeResult:
     """Run a solution against test cases through a :class:`SandboxExecutor` -> :class:`GradeResult`.
 
@@ -438,7 +439,7 @@ class GradingSpec:
     # Multiplies a compiled language's per-test limit; the interpreted floor and the clamp stay unscaled.
     compiled_time_limit_scale: float = 1.0
     max_grading_seconds: float | None = None
-    verdict_detail: str = VERDICT_DETAIL_FULL
+    verdict_detail: str = VERDICT_DETAIL_OUTCOME
 
     # The live executor: rebuilt from the run's env kwargs offline, never carried through a JSON dump.
     _META_EXCLUDED = frozenset({"sandbox"})

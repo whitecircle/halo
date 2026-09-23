@@ -59,6 +59,7 @@ from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
     report,
+    require_answers,
 )
 from src.environments.registry import resolve_environment
 from src.inference.openai_client import create_openai_client
@@ -183,6 +184,7 @@ def main() -> None:
     # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
     env.verify_backend()
     examples = build_examples(args)
+    require_answers(env, examples, f"the {args.answer_field!r} field of {args.dataset} (--answer_field)")
     client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
     rollout = rollout_config_from_args(
         args, contract, default_temperature=DEFAULT_ROLLOUT_TEMPERATURE, default_max_tokens=DEFAULT_ROLLOUT_MAX_TOKENS

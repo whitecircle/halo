@@ -23,7 +23,6 @@ environment_kwargs:
   language: python           # or cpp / c, or a list ([python, cpp]) the model picks from
   timeout_per_test: 5
   max_grading_seconds: 150
-  verdict_detail: outcome
   reasoning_effort: random
   reasoning_effort_profiles:   # thinking_tokens is the episode's total under the scope below
     low: {thinking_tokens: 24576, max_submissions: 1, max_test_calls: 2}
@@ -37,7 +36,7 @@ rollout_thinking_budget_scope: episode
 |---|---|---|
 | `language` | `python` | `python`, `cpp`, `c`, or a list the model picks from |
 | `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed equality reading `\r\n` and `\r` as `\n` on both sides, `tokens` whitespace-token equality |
-| `verdict_detail` | `full` | `full` shows a failed test's expected and produced output; `outcome` the verdict alone |
+| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict alone; `full` adds its expected and produced output |
 | `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor. It and `max_time_limit` must be finite and > 0 |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit; a non-finite or non-positive value raises at construction |
@@ -50,6 +49,8 @@ rollout_thinking_budget_scope: episode
 | `eval_protocol` | `harness` | Evaluation contract; `leaderboard` pins both tool budgets ([Evaluation protocols](#evaluation-protocols)) |
 
 The objective's shape is the `environment` term's `exponent` in the top-level `rewards:` — above 1 it is convex, so half-right earns under half a solve ([Reward Terms](../rewards.md)).
+
+`sandbox_backend` / `sandbox_url` pick the [sandbox](sandbox.md#choosing-a-backend) both tools and the grader run on; one that does not confine the program, `local` included, [warns](sandbox.md#choosing-a-backend).
 
 ### Reasoning effort
 
@@ -105,7 +106,7 @@ submission builds once, reset after every test. A compile failure is graded once
 pool.
 
 - **Comparison.** `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within a 1e-6 relative tolerance, gated on a float-looking *expected* token, so integer answers stay exact.
-- **Verdict detail.** Under `full`, a second submission turns the judge into a free test oracle — probing out-earns scratchpad testing within a group. The recipes use `outcome`.
+- **Verdict detail.** Under `full`, a second submission turns the judge into a free test oracle — probing out-earns scratchpad testing within a group.
 - **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language.
 - **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests and keeps the full pool as denominator — an ungraded test counts as failed, so size it for an honest solution (the recipes: 150 s). `episode/tests_graded_frac` shows a partial grade.
 - **Special judges.** A per-problem `checker` (Python) in the payload overrides comparison: `python checker.py input.txt correct_output.txt solution_output.txt`, accepted only when it exits cleanly and its last stdout token is `1`. It runs at the 15 s infra default, never the solution's limit.

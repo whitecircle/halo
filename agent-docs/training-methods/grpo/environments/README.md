@@ -66,7 +66,7 @@ Knobs every environment accepts (the first two are top-level fields):
 | `reasoning_effort` | `None` (code contests `medium`) | `low` / `medium` / `high` / `random` CoT steer |
 | `carry_reasoning` | `false` | sends the last assistant turn's reasoning back to the engine; vLLM only |
 | `max_length_cutoff_recoveries` | `null` | unproductive turns — engine-cut, or ended with no visible content and no tool call — one episode may retry; `null` = every one within `max_turns` |
-| `requires_answer` | class default: `false`; `true` for code contests, `exam_qa`, `qa_search` and the ReAct presets | the reward grades against the dataset's `answer` column, so a dataset without one is refused at trainer construction |
+| `requires_answer` | class default: `false`; `true` for code contests, `exam_qa`, `qa_search`, the ReAct presets and [`swe`](swe-environment.md#reward) (unless judge-only) | the reward grades against the dataset's `answer` column, so a dataset without one is refused at trainer construction |
 
 ## Pages
 

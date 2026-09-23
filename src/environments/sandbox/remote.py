@@ -61,6 +61,9 @@ class RemoteSandbox(SandboxExecutor):
     connection pool across rollout workers (or a fake one in tests).
     """
 
+    # The program runs in the service, never in this process.
+    isolated = True
+
     def __init__(self, url: str, *, session: requests.Session | None = None):
         base = url.rstrip("/")
         self.endpoint = base if base.endswith("run_code") else base + "/run_code"

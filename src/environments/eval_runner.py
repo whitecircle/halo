@@ -146,6 +146,17 @@ def serialize_tool_calls(tool_calls) -> list[dict[str, Any]]:
     return out
 
 
+def require_answers(env: BaseEnvironment, examples: list[dict[str, Any]], source: str) -> None:
+    """Refuse examples an answer-graded environment cannot grade, before any episode runs: the
+    trainer's dataset gate (``requires_answer``) for the eval drivers, which would otherwise generate
+    every episode in full and then fail to grade it. ``source`` names where the answer was read from."""
+    if env.requires_answer and any("answer" not in example["context"] for example in examples):
+        raise ValueError(
+            f"{type(env).__name__} grades each episode against an expected answer (requires_answer), but "
+            f"{source} carries none."
+        )
+
+
 async def run_episode(
     env: BaseEnvironment,
     prompt: str | list[dict[str, Any]],

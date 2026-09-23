@@ -57,6 +57,11 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         self.extra_ro_binds = tuple(extra_ro_binds or ())
         self._verify_can_sandbox()
 
+    @property
+    def isolated(self) -> bool:
+        """Confined only while the jail keeps its own network namespace (``--share-net`` does not)."""
+        return not self.allow_network
+
     def _verify_can_sandbox(self) -> None:
         """Raise at construction if bwrap cannot create a sandbox in this environment.
 

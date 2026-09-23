@@ -27,7 +27,7 @@ Each step pushes weights, collects a round of episodes, turns the sampled tokens
 | `native_math`, `native_coding`, `native_combined` | the same tools as native function calls; grades the row's `answer` when there is one, otherwise finishing the episode | no |
 | `qa_search` | factual question answering with a web-search tool | yes |
 | `exam_qa` | multiple-choice and open exams, closed-book unless `open_book: true` | yes |
-| `swe` | edit-run-test loop over a workspace that survives across turns | no |
+| `swe` | edit-run-test loop over a workspace that survives across turns | yes (unless judge-only) |
 | `code_contests`, `codeforces` | write a program, try it in a scratchpad, submit it against hidden tests | yes |
 | `mcp` | whatever tools an MCP server advertises | no |
 

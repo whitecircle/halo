@@ -305,13 +305,13 @@ def test_grade_solution_gives_checker_infra_timeout_not_solution_limit():
 
 
 def test_outcome_verdict_hides_expected_and_produced_output():
-    """``verdict_detail="outcome"`` is the Codeforces contract: a wrong answer is a verdict, not a diff.
-    With the expected output shown, the graded channel doubled as a free test oracle and submit-first
-    out-earned test-first within a GRPO group."""
+    """``verdict_detail="outcome"`` — the default — is the Codeforces contract: a wrong answer is a
+    verdict, not a diff. With the expected output shown, the graded channel doubles as a free test
+    oracle and submit-first out-earns test-first within a GRPO group."""
     sandbox = StubSandbox(SandboxResult(stdout="X\n", returncode=0))
     tests = [{"input": "1", "output": "Y"}, {"input": "2", "output": "X"}]
-    full = run_solution_against_tests("code", tests, sandbox=sandbox)
-    outcome = run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="outcome")
+    full = run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="full")
+    outcome = run_solution_against_tests("code", tests, sandbox=sandbox)
     assert "Expected: Y" in full.details and "Got:      X" in full.details
     assert "Test 1: FAIL" in outcome.details
     assert "Expected" not in outcome.details and "Got:" not in outcome.details

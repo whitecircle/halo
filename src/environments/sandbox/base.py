@@ -289,6 +289,10 @@ class SandboxExecutor(ABC):
     :class:`LanguageSpec` registry, so multi-language and session semantics are identical.
     """
 
+    # Whether a program is confined away from the host's filesystem and network. Only a backend that
+    # confines it declares True: a coding environment warns on every other one.
+    isolated: bool = False
+
     @abstractmethod
     def open_session(self) -> SandboxSession:
         """Open a persistent :class:`SandboxSession` (one per episode for multi-turn rollouts)."""

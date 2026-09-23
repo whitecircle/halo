@@ -24,6 +24,8 @@ environment_kwargs:
 
 `bubblewrap` needs the `bwrap` binary (the `bubblewrap` apt package, in the training image) **and** the right to create user and mount namespaces, which Docker's default seccomp denies — run the container `--privileged` on a host allowing them (`kernel.unprivileged_userns_clone=1`). Its constructor probes once, so a blocked jail fails at construction, not per run.
 
+An executor declares whether it confines the program (`SandboxExecutor.isolated`, `False` unless declared): `remote` does, `bubblewrap` does unless `allow_network`, `local` does not. On `local` the program has this process's filesystem and network, where a policy can read or rewrite what grades it and fetch a solution. `swe` and `code_contests` log one warning per process per backend class when built on an executor that does not confine it. Use `bubblewrap` without network, or `remote`, for RL on untrusted code.
+
 ## Using it from Python
 
 ```python

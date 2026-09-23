@@ -24,7 +24,11 @@ from src.environments.base import (
     TOOL_CALL_COUNTS_KEY,
 )
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.grading import _MAX_FAILURE_DETAILS, run_solution_against_tests
+from src.environments.envs.tasks.coding.grading import (
+    _MAX_FAILURE_DETAILS,
+    VERDICT_DETAIL_FULL,
+    run_solution_against_tests,
+)
 from src.environments.episode import (
     TurnGeneration,
     bind_episode_effort,
@@ -47,12 +51,13 @@ def _make_env(**kwargs):
 
 
 def test_verdict_lists_failures_only_and_caps_them():
-    # Distinct expected outputs make every failure its own verdict; identical ones would fold into one entry.
+    # Distinct expected outputs make every failure its own verdict under ``full``; identical ones, or
+    # the ``outcome`` default, fold into one entry.
     sandbox = StubSandbox()
     tests = [{"input": "", "output": "X"}] * 2 + [
         {"input": "", "output": f"Y{k}"} for k in range(_MAX_FAILURE_DETAILS + 3)
     ]
-    grade = run_solution_against_tests("code", tests, sandbox=sandbox)
+    grade = run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail=VERDICT_DETAIL_FULL)
     assert grade.passed == 2
     assert ": PASS" not in grade.details
     assert grade.details.count("Test ") == _MAX_FAILURE_DETAILS
@@ -145,10 +150,11 @@ def test_a_refused_over_cap_call_logs_no_traceback(caplog):
     def call(i: int) -> NativeToolCall:
         return NativeToolCall(id=f"c{i}", name="python_repl", arguments={"code": "print(1)"})
 
-    with caplog.at_level(logging.DEBUG, logger="src.environments.envs.protocols.native"):
+    native = "src.environments.envs.protocols.native"
+    with caplog.at_level(logging.DEBUG, logger=native):
         env._execute_tool_calls([call(0), call(1), call(2)], traj)
 
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert [r.getMessage() for r in caplog.records if r.name == native and r.levelno >= logging.WARNING] == []
     assert any("refused the call" in r.getMessage() for r in caplog.records)
 
 

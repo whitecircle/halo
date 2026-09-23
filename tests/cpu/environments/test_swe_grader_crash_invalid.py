@@ -57,11 +57,5 @@ def test_real_verdicts_stay_in_the_baseline():
     assert failed.total_reward == pytest.approx(0.0)
 
 
-def test_ungraded_episode_stays_in_the_baseline():
-    # No grader at all is a configuration, not a fault: those episodes are graded by completion.
-    traj = _finished_episode(None)
-    assert traj.episode_invalid is False
-
-
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

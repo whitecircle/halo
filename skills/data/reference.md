@@ -21,11 +21,12 @@ Authoritative: `agent-docs/data/dataset-formats.md`. Messages are OpenAI ChatML
   the environment builds the conversation itself. `answer: Any` (expected) is required only where
   the environment declares `requires_answer` — `code_contests` / `codeforces` take a hidden-test
   payload, `exam_qa` / `qa_search` / `react_*` the expected answer — refused at trainer construction
-  when missing, over the train split and every eval split. `native_*`, `swe` and `mcp` need none; a
-  ReAct preset given an `answer_validator` clears the requirement, and an explicit
-  `environment_kwargs.requires_answer` overrides either way. Rename the columns with
-  `prompt_field` / `answer_field` (a renamed answer still lands in the row as `answer`); an unknown
-  name raises at startup.
+  when missing, over the train split and every eval split. `swe` needs it unless judge-only
+  ([rule](../../agent-docs/training-methods/grpo/environments/swe-environment.md#reward)); `native_*`
+  and `mcp` need none. A ReAct preset given an `answer_validator` clears the requirement, and an
+  explicit `environment_kwargs.requires_answer` overrides it, except that `swe` refuses `false`
+  without a grader. Rename the columns with `prompt_field` / `answer_field` (a renamed answer still
+  lands in the row as `answer`); an unknown name raises at startup.
 - **Reward** — `chosen`, `rejected` (`List[Dict]`), optional `prompt` (implicit-prompt sets like
   Skywork-Reward keep the shared turns inside chosen/rejected) and `images`. There is **no
   pre-tokenization pass**: TRL's `RewardTrainer` chat-templates and tokenizes the raw columns.

@@ -45,7 +45,7 @@ _CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "e
 # without one (the native protocol and its presets grade against an answer where a row carries one).
 # Written out for the same reason as the table above: it is the roster the docs and the trainer's
 # dataset gate are held to, and deriving it from the classes would make the check agree with itself.
-_REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search"}
+_REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search", "swe"}
 
 
 def _base_default_max_turns() -> int:

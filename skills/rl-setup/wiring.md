@@ -202,13 +202,14 @@ server, `make ... EFA=1` on the trainer, `scripts/profiling/weight_sync_transpor
 
 Per-env `environment_kwargs`: `search_backend` (qa_search/exam_qa only — `react_search` builds its
 tools with the default backend and refuses the key; `mock` needs `HALO_ALLOW_MOCK_SEARCH=1`),
-`open_book` (exam_qa), `mcp_server` (mcp), `timeout_per_test`, `max_grading_seconds` and
-`compiled_time_limit_scale` (code_contests), `include_python_tools` (qa_search). Every environment
+`open_book` (exam_qa), `mcp_server` (mcp), `timeout_per_test`, `max_grading_seconds`,
+`compiled_time_limit_scale` and `verdict_detail` (code_contests), `include_python_tools` (qa_search),
+`sandbox_backend` / `sandbox_url` (swe, code_contests). Every environment
 also takes the `BaseEnvironment` knobs (`src/environments/base.py`): `reasoning_effort` /
 `reasoning_effort_profiles`, `carry_reasoning` (refused under `rollout_backend: sglang`),
 `requires_answer`, `max_observation_chars`, `max_length_cutoff_recoveries` and the
-`tool_success_reward` / `tool_error_penalty` / `tool_reward_cap` turn shaping — the shipped
-`examples/grpo/environmental/environmental-grpo-template.yaml` enumerates them. Custom env: pass `environment_cls`
+`tool_success_reward` / `tool_error_penalty` / `tool_reward_cap` turn shaping. The full list is the
+EnvironmentConfig section of `agent-docs/reference/configuration-reference.md`. Custom env: pass `environment_cls`
 (a `src.environments.base.BaseEnvironment` subclass) + `environment_kwargs`
 instead of `environment_config`.
 
