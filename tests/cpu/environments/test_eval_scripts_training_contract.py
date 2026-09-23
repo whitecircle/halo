@@ -23,9 +23,16 @@ from scripts.environments._common import (
     write_eval_outputs,
 )
 from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P
+from src.env import resolve_nccl_timeout_minutes
 from src.environments.eval_runner import DEFAULT_REQUEST_TIMEOUT_S
+from tests.common.utils import REPO_ROOT
 
 _CALL_TOKEN_ID = 200012
+# A shipped recipe whose episode_timeout needs the raised NCCL watchdog its launch line exports.
+_CODEFORCES_RECIPE = (
+    REPO_ROOT
+    / "examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep1-stage1-codeforces.yaml"
+)
 
 _TRAINING_YAML = """\
 model_name_or_path: dummy/model
@@ -108,6 +115,26 @@ def test_the_yaml_environment_config_reaches_the_eval(contract):
         "language": "cpp",
         "timeout_per_test": 3,
     }
+
+
+@pytest.fixture
+def default_watchdog_recipe(monkeypatch):
+    """The codeforces recipe's contract under the default watchdog, which its episode_timeout exceeds."""
+    monkeypatch.delenv("DIST_NCCL_TIMEOUT_MINUTES", raising=False)
+    contract = TrainingContract.load(str(_CODEFORCES_RECIPE))
+    assert contract.async_config.episode_timeout > resolve_nccl_timeout_minutes() * 60
+    return contract
+
+
+def test_a_shipped_recipe_evaluates_without_the_training_watchdog(default_watchdog_recipe):
+    """The eval joins no process group, so the recipe's contract builds on the default watchdog."""
+    rollout = default_watchdog_recipe.rollout_config()
+    assert rollout.episode_timeout == default_watchdog_recipe.async_config.episode_timeout
+
+
+def test_training_still_refuses_the_recipe_on_the_default_watchdog(default_watchdog_recipe):
+    with pytest.raises(ValueError, match="NCCL collective watchdog"):
+        default_watchdog_recipe.async_config.get_rollout_config()
 
 
 def test_an_unresolvable_stop_token_is_refused(tmp_path, monkeypatch):

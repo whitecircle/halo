@@ -41,10 +41,9 @@ refused in `--env_kwargs`, which would otherwise override the flag.
 (rewards, `max_turns`, `environment_kwargs`, `environment_type`) become the eval's. An explicit flag
 wins over the YAML, the YAML over the default.
 
-A YAML whose `episode_timeout` exceeds the 30-min NCCL watchdog — the code-contests recipes'
-`2700` — needs `DIST_NCCL_TIMEOUT_MINUTES=60` exported for the eval too: the contract builds the
-run's `RolloutConfig`, and `get_rollout_config` runs the watchdog check even though the eval
-forms no process group.
+The training run's check of `episode_timeout` against the NCCL watchdog stays with training: the
+eval joins no process group, so a recipe whose budget needs a raised `DIST_NCCL_TIMEOUT_MINUTES`
+(the code-contests recipes' `2700`) evaluates without it.
 
 To compare a checkpoint with its base, serve each in turn under the same `--served-model-name` and
 run one command with `--training_config`, dataset, split and `--num_samples` fixed, so only the

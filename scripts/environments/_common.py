@@ -155,9 +155,12 @@ class TrainingContract:
     def rollout_config(self) -> RolloutConfig:
         """The training run's own ``RolloutConfig``, minus the engine captures the eval transport never
         requests (ids, logprobs, routing) — recorded as off so the meta line does not claim them. The
-        episode thinking scope still gets the ids it counts with: its own request flag asks for them."""
+        episode thinking scope still gets the ids it counts with: its own request flag asks for them. The
+        eval joins no process group, so the NCCL watchdog bound on the run's timeouts does not apply."""
         rollout = self.async_config.get_rollout_config(
-            stop_token_ids=self.stop_token_ids, reasoning_end_token_id=self.reasoning_end_token_id
+            stop_token_ids=self.stop_token_ids,
+            reasoning_end_token_id=self.reasoning_end_token_id,
+            in_process_group=False,
         )
         return replace(rollout, capture_token_ids=False, capture_routed_experts=False)
 

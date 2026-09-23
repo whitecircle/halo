@@ -696,11 +696,21 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             variables[REASONING_SCOPE_TEMPLATE_VAR] = THINKING_SCOPE_EPISODE
         return variables
 
-    def get_rollout_config(self, stop_token_ids: list[int] | None = None, reasoning_end_token_id: int | None = None):
+    def get_rollout_config(
+        self,
+        stop_token_ids: list[int] | None = None,
+        reasoning_end_token_id: int | None = None,
+        *,
+        in_process_group: bool = True,
+    ):
         """Build RolloutConfig from this config. ``stop_token_ids`` (from ``rollout_stop_tokens``) and
         ``reasoning_end_token_id`` (from ``rollout_reasoning_end_token``) are resolved by the caller that
-        owns the tokenizer; the episode thinking scope refuses to count reasoning without the latter."""
-        self._validate_timeouts_against_nccl_watchdog()
+        owns the tokenizer; the episode thinking scope refuses to count reasoning without the latter.
+        ``in_process_group`` says the rollout runs inside a training process group, whose NCCL collective
+        watchdog its timeouts must stay under (the trainer, the default); an eval sampling under a
+        training contract joins none and passes False."""
+        if in_process_group:
+            self._validate_timeouts_against_nccl_watchdog()
         mirrored = {target: getattr(self, source) for target, source in rollout_field_sources(type(self)).items()}
         mirrored["chat_template_kwargs"] = self.rollout_template_variables()
         return RolloutConfig(
