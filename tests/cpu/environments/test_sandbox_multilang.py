@@ -347,6 +347,9 @@ def test_staging_never_writes_through_a_link_the_program_planted(tmp_path):
         assert result.error is None, "tampering must not read as an infra fault"
         assert result.returncode == TAMPERED_WORKDIR_RETURNCODE and not result.ok
         assert "main.py" in result.stderr
+        # A verdict the model can recover from (a link at a staged name may be a benign in-workspace
+        # one), not an agent fault that ends the episode.
+        assert result.agent_fault is None
 
 
 def test_reset_to_staged_drops_a_staged_entry_whose_type_changed(tmp_path):

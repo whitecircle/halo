@@ -115,9 +115,9 @@ def test_local_timeout_kills_forked_grandchildren():
 
 
 def test_local_timeout_drain_bounded_when_child_escapes_group():
-    """A grandchild that setsid()s OUT of the process group survives the group kill and keeps the
-    stdout pipe's write end open — the post-kill communicate() must be bounded (KILL_DRAIN_TIMEOUT),
-    not hang the grading worker until the escapee exits."""
+    """A grandchild that setsid()s OUT of the process group survives the group kill and keeps its copy
+    of the child's output handles — the timed-out run must still return within the post-kill bound
+    (KILL_DRAIN_TIMEOUT), not hang the grading worker until the escapee exits."""
     original = local_backend.KILL_DRAIN_TIMEOUT
     local_backend.KILL_DRAIN_TIMEOUT = 1.0
     try:
@@ -404,9 +404,10 @@ def test_remote_success_without_a_run_result_is_a_backend_error():
         assert res.error is not None and not res.ok, payload
 
 
-def test_remote_compile_time_limit_is_backend_error():
-    """A compile that hit the service's compile time limit is a limit failure (``error``), like the
-    local backend's compile timeout — not a verdict on the source and not a run timeout."""
+def test_remote_compile_time_limit_is_a_compile_verdict():
+    """A compile that hit the service's compile time limit is the source's verdict (an ``#include``
+    bomb), like the local backend's compile timeout — never ``error``, which would let a program void
+    its own episode, and not a run timeout."""
     payload = {
         "status": "Failed",
         "message": "",
@@ -415,9 +416,10 @@ def test_remote_compile_time_limit_is_backend_error():
     }
     sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
     res = sb.run("int main(){}", language="cpp")
-    assert res.error is not None
-    assert not res.compile_failed
+    assert res.error is None
+    assert res.compile_failed and not res.timed_out
     assert not res.ok
+    assert format_sandbox_repl_output(res, timeout=5).startswith("Error:"), "the REPL shows it as a failed build"
 
 
 def test_remote_clean_compile_step_reads_run_result():

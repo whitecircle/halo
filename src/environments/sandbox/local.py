@@ -26,9 +26,11 @@ from src.environments.sandbox.base import (
     SANDBOX_DEFAULT_TIMEOUT,
     SANDBOX_EXECUTION_GATE,
     LanguageSpec,
+    SandboxAgentFault,
     SandboxExecutor,
     SandboxResult,
     SandboxSession,
+    compile_limit_verdict,
     require_language,
 )
 
@@ -36,13 +38,14 @@ from src.environments.sandbox.base import (
 # Python program runs on the same interpreter as the toolkit.
 PYTHON_INTERPRETER = sys.executable or "python"
 
-# Post-kill drain bound: a setsid-escaped child holds the pipe open, hanging an unbounded communicate().
+# Post-kill wait bound, for a child the group kill cannot reap at once.
 KILL_DRAIN_TIMEOUT = 10.0
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
 
-# The exit code a run is booked with when the program replaced a staged entry with a link: its own
-# runtime error, never an infra fault that would void the episode it belongs to.
+# The exit code a run is booked with when the program tampered with its working directory (a staged
+# entry or the directory itself replaced): its own runtime error, never an infra fault that would void
+# the episode it belongs to.
 TAMPERED_WORKDIR_RETURNCODE = 1
 
 # What a session's staged build was made from: language, source text, auxiliary file contents.
@@ -52,8 +55,8 @@ _EntryKinds = set[tuple[str, int]]
 
 
 class SessionPathError(ValueError):
-    """A session path the host must not touch: an entry the program replaced with a link, or one
-    whose resolution leaves the working directory."""
+    """A session path the host must not touch: an entry the program replaced with a link or a
+    non-regular file, or one whose resolution leaves the working directory."""
 
 
 def _safe_member_name(name: str) -> bool:
@@ -68,7 +71,9 @@ def _open_member(workdir: str, name: str, flags: int) -> int:
     (``main.py -> /root/.aws/credentials``); the host — staging the next run's source, reading a file
     for the model — would otherwise write or read through it. Refused (:class:`SessionPathError`) when
     the path does not resolve to itself under the real working directory; ``O_NOFOLLOW`` closes the
-    window on the final component between that check and the open.
+    window on the final component between that check and the open. A FIFO or device in its place is
+    refused too: ``O_NONBLOCK`` keeps the open from blocking the host on it, and only a regular file
+    passes the ``fstat``.
     """
     dest = os.path.normpath(os.path.join(os.path.realpath(workdir), name))
     if os.path.realpath(dest) != dest:
@@ -76,12 +81,25 @@ def _open_member(workdir: str, name: str, flags: int) -> int:
     if flags & os.O_CREAT:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
-        return os.open(dest, flags | os.O_NOFOLLOW, 0o644)
+        fd = os.open(dest, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
     except OSError as exc:
-        # ELOOP: a link raced in at the final component; EISDIR: a write met a directory in its place.
-        if exc.errno in (errno.ELOOP, errno.EISDIR):
+        # ELOOP: a link raced in at the final component; EISDIR: a write met a directory in its place;
+        # ENXIO: a write met a FIFO with no reader.
+        if exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
             raise SessionPathError(f"session path {name!r} is not a regular file") from exc
         raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise SessionPathError(f"session path {name!r} is not a regular file")
+    return fd
+
+
+def _captured_text(capture) -> str:
+    """A run's captured output stream as text. Decoded with replacement: a program that emits bytes
+    that are not UTF-8 (C++ undefined behavior, a binary dump) is judged on the replaced text, never
+    lost to a decode error."""
+    capture.seek(0)
+    return capture.read(LOCAL_FSIZE_LIMIT).decode("utf-8", errors="replace")
 
 
 def _entry_kinds(workdir: str) -> _EntryKinds:
@@ -146,8 +164,8 @@ class LocalSubprocessSandbox(SandboxExecutor):
         caps process/thread count so a fork bomb cannot outrun the timeout's process-group kill; the
         compile step omits it, since the compiler's fork tree is trusted.
         """
-        # ulimit units: -t seconds (CPU), -f 512-byte blocks (file size), -v KiB (address space), -u processes.
-        limits = [f"ulimit -t {cpu_seconds}", f"ulimit -f {LOCAL_FSIZE_LIMIT // 512}"]
+        # bash ulimit units (outside POSIX mode): -t seconds (CPU), -f and -v KiB, -u processes.
+        limits = [f"ulimit -t {cpu_seconds}", f"ulimit -f {LOCAL_FSIZE_LIMIT // 1024}"]
         if memory_mb:
             limits.append(f"ulimit -v {memory_mb * 1024}")
         if nproc:
@@ -162,35 +180,34 @@ class LocalSubprocessSandbox(SandboxExecutor):
         """Run ``argv`` in its own session; returns ``(stdout, stderr, returncode, timed_out)``.
 
         ``start_new_session`` puts the child in a fresh process group, so a timeout SIGKILLs the whole
-        group; killing only the child would leave forked grandchildren running.
+        group; killing only the child would leave forked grandchildren running. Output is captured in
+        temp files rather than pipes, so the child's ``RLIMIT_FSIZE`` bounds it: an output flood ends
+        as the program's own failure at the file-size limit, never as host memory the grader runs out
+        of.
         """
-        # Decoded with replacement: a program that emits bytes that are not UTF-8 (C++ undefined
-        # behavior, a binary dump) is judged on the replaced text, never lost to a decode error.
-        with subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd,
-            env=env,
-            start_new_session=True,
-        ) as proc:
-            try:
-                stdout, stderr = proc.communicate(input=stdin, timeout=timeout)
-                return stdout, stderr, proc.returncode, False
-            except subprocess.TimeoutExpired:
-                # The group may already be gone (leader exited between timeout and kill).
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            with subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=out,
+                stderr=err,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+            ) as proc:
                 try:
-                    stdout, stderr = proc.communicate(timeout=KILL_DRAIN_TIMEOUT)
-                except subprocess.TimeoutExpired as e:
-                    proc.kill()
-                    stdout, stderr = e.stdout or "", e.stderr or ""
-                return stdout, stderr, proc.returncode, True
+                    proc.communicate(input=stdin.encode("utf-8"), timeout=timeout)
+                    timed_out = False
+                except subprocess.TimeoutExpired:
+                    # The group may already be gone (leader exited between timeout and kill).
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    try:
+                        proc.wait(timeout=KILL_DRAIN_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    timed_out = True
+            return _captured_text(out), _captured_text(err), proc.returncode, timed_out
 
     @staticmethod
     def _child_env(workdir: str) -> dict[str, str]:
@@ -224,8 +241,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
     def _compile(self, workdir: str, spec: LanguageSpec, *, allow_network: bool) -> SandboxResult | None:
         """Build a compiled language's staged source. Returns None on success, a failure result otherwise.
 
-        A non-zero compiler exit is the source's fault (``compile_failed``, ``returncode``/``stderr``,
-        ``error`` unset); a missing compiler or compile timeout is a backend/limit failure (``error`` set).
+        A non-zero compiler exit or a build past ``compile_timeout`` is the source's fault
+        (``compile_failed``, ``returncode``/``stderr``, ``error`` unset); a missing compiler is a
+        backend failure (``error`` set).
         """
         compile_argv = self._wrap_command(list(spec.compile_argv), workdir, allow_network=allow_network)
         compile_argv = self._limit_wrap(
@@ -238,10 +256,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
                 compile_argv, stdin="", timeout=self.compile_timeout, cwd=workdir, env=self._child_env(workdir)
             )
         if timed_out:
-            return SandboxResult(
-                stderr=f"compilation exceeded {self.compile_timeout:g}s",
-                error=f"compilation exceeded {self.compile_timeout:g}s",
-            )
+            return compile_limit_verdict(f"compilation exceeded {self.compile_timeout:g}s")
         # 127 = the wrapper shell could not exec the compiler: a backend failure, not a bad-source verdict.
         if returncode == 127:
             return SandboxResult(error=f"compiler not found: {spec.compile_argv[0]!r}", stderr=stderr.strip())
@@ -288,6 +303,10 @@ class LocalSession(SandboxSession):
 
     Source and compiled artifacts written into ``workdir`` survive between turns. A compiled program
     is built once and rerun from its binary while language, source and ``files`` stay the same.
+
+    A removed ``workdir`` is recreated empty on the next use. One the program replaced with a link or
+    a file has broken the session (:class:`SandboxAgentFault`): every later run reports it instead of
+    staging and the file operations raise it, since any path under it could resolve to a host file.
     """
 
     def __init__(self, workdir: str, executor: LocalSubprocessSandbox, *, allow_network: bool = False):
@@ -313,12 +332,37 @@ class LocalSession(SandboxSession):
             spec = require_language(language)
         except ValueError as exc:
             return SandboxResult(error=str(exc))
+        broken = self._ensure_workspace()
+        if broken is not None:
+            return broken
         failure = self._prepare(spec, code, files)
         if failure is not None:
             return failure
-        return self._executor._run_program(
+        result = self._executor._run_program(
             self.workdir, spec, stdin=stdin, timeout=timeout, allow_network=self._allow_network
         )
+        return self._ensure_workspace() or result
+
+    def _ensure_workspace(self) -> SandboxResult | None:
+        """None once the working directory is usable — recreated empty, with nothing staged, when the
+        program removed it — or the agent fault when the program put a link or file at its path."""
+        try:
+            mode = os.lstat(self.workdir).st_mode
+        except FileNotFoundError:
+            os.makedirs(self.workdir, mode=0o700, exist_ok=True)
+            self._build = None
+            self._staged_entries = None
+            return None
+        if stat.S_ISDIR(mode):
+            return None
+        message = "the program replaced its working directory"
+        return SandboxResult(stderr=message, returncode=TAMPERED_WORKDIR_RETURNCODE, agent_fault=message)
+
+    def _require_intact(self) -> None:
+        """Raise :class:`SandboxAgentFault` when the program replaced the working directory."""
+        broken = self._ensure_workspace()
+        if broken is not None:
+            raise SandboxAgentFault(broken.agent_fault)
 
     def _prepare(self, spec: LanguageSpec, code: str, files: dict[str, str] | None) -> SandboxResult | None:
         """Stage ``code`` + ``files`` and build them when ``spec`` compiles; None once the program is runnable.
@@ -345,7 +389,8 @@ class LocalSession(SandboxSession):
         return failure
 
     def reset_to_staged(self) -> None:
-        if self._staged_entries is None:
+        # A replaced working directory lists whatever it now points at; the next run reports the fault.
+        if self._ensure_workspace() is not None or self._staged_entries is None:
             return
         for name, kind in _entry_kinds(self.workdir) - self._staged_entries:
             path = os.path.join(self.workdir, name)
@@ -358,6 +403,7 @@ class LocalSession(SandboxSession):
     def write_file(self, path: str, content: str) -> None:
         if not _safe_member_name(path):
             raise ValueError(f"unsafe session file path: {path!r}")
+        self._require_intact()
         self._build = None
         self._staged_entries = None
         LocalSubprocessSandbox._write_member(self.workdir, path, content)
@@ -367,17 +413,16 @@ class LocalSession(SandboxSession):
         planted included, so a host file never reaches the trajectory through it."""
         if not _safe_member_name(path):
             raise ValueError(f"unsafe session file path: {path!r}")
+        self._require_intact()
         try:
             fd = _open_member(self.workdir, path, os.O_RDONLY)
         except (SessionPathError, FileNotFoundError, NotADirectoryError):
-            return None
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
             return None
         with os.fdopen(fd) as fh:
             return fh.read()
 
     def list_files(self) -> list[str]:
+        self._require_intact()
         out: list[str] = []
         for root, _dirs, names in os.walk(self.workdir):
             for n in names:
@@ -385,4 +430,12 @@ class LocalSession(SandboxSession):
         return sorted(out)
 
     def close(self) -> None:
-        shutil.rmtree(self.workdir, ignore_errors=True)
+        try:
+            mode = os.lstat(self.workdir).st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(mode):
+            shutil.rmtree(self.workdir, ignore_errors=True)
+        else:
+            # A link or file the program put in the directory's place: rmtree refuses a link.
+            os.unlink(self.workdir)

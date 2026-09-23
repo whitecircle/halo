@@ -1,6 +1,6 @@
 # Code Execution Sandboxes
 
-`SandboxExecutor` (`src/environments/sandbox/`) runs a complete untrusted program — Python, bash, C, or C++ — against stdin in OS isolation. It backs `submit_solution` hidden-test grading and the scratchpad test tool (`python_repl` for a Python-only run, else `run_code`) in `code_contests` / `codeforces`, the `swe` environment's `run_code`, `run_bash_command` and file tools, and checker verification in `scripts/environments/preparation/prepare_code_dataset.py`.
+`SandboxExecutor` (`src/environments/sandbox/`) runs a complete untrusted program — Python, bash, C, or C++ — against stdin in a subprocess: under rlimits only on `local`, confined on `bubblewrap` and `remote`. It backs `submit_solution` hidden-test grading and the scratchpad test tool (`python_repl` for a Python-only run, else `run_code`) in `code_contests` / `codeforces`, the `swe` environment's `run_code`, `run_bash_command` and file tools, and checker verification in `scripts/environments/preparation/prepare_code_dataset.py`.
 
 The in-process restricted REPL (`inprocess.py`) — restricted builtins, no imports, no OS isolation — is the other path, behind `calculate` and a standalone `python` / `python_repl` tool with no `sandbox=` executor.
 
@@ -47,22 +47,46 @@ with sandbox.open_session() as session:
 
 The host never follows a link into the session: every staged or read path must resolve to itself
 under the real working directory, and the open carries `O_NOFOLLOW`, so a name that escapes or is
-a link is refused (`SessionPathError`) — `read_file` returns `None` for anything but a regular
-file, `write_file` raises on an unsafe name. A program that swaps a staged entry for a link is
-booked as its **own** runtime error (`returncode` set, `working directory tampered`), never an
-infra fault it could void its episode with.
+a link is refused (`SessionPathError`), as is a FIFO or device, which the host opens non-blocking —
+`read_file` returns `None` for anything but a regular file, `write_file` raises on an unsafe name.
+A program that swaps a staged entry for a link is booked as its **own** runtime error (`returncode`
+set, `working directory tampered`), never an infra fault it could void its episode with. A working
+directory the program removed is recreated empty on the next use. One it replaced with a link or a
+file breaks the session: the run's result carries `agent_fault` with a non-zero `returncode`, every
+later run reports the same without staging, the file operations raise `SandboxAgentFault`, and
+`close()` unlinks what took its place. On `local` another episode's program can do the same to a
+session, so the attribution holds only where the backend isolates episodes.
 
 Read the result in this order:
 
-- `error` — a backend or transport fault (missing compiler, compile timeout, HTTP failure, a remote request timeout). Never a verdict on the code.
-- `compile_failed` — the compiler rejected the source; `returncode` is the compiler's, `stderr` its diagnostics.
-- `timed_out`, then a non-zero `returncode` — the program's own failure, `error` unset. `ok` is True only when it built and exited zero.
+- `error` — a backend or transport fault (missing compiler, HTTP failure, a remote request timeout, a SandboxFusion `SandboxError`). Never a verdict on the code.
+- `agent_fault` — the program replaced its working directory, as above; grading reads it as a runtime error.
+- `compile_failed` — the source never built: the compiler rejected it (`returncode` is the compiler's, `stderr` its diagnostics) or the build ran past the compile limit (an `#include` bomb).
+- `timed_out`, then a non-zero `returncode` — the program's own failure, `error` unset; `remote` reads a SandboxFusion `Failed` response off its run block the same way. `ok` is True only when it built and exited zero.
 
 `environment_kwargs` carries only `sandbox_backend` and `sandbox_url`, so `sandbox=` is the only way to set the executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`):
 
 ```python
 env = SweEnvironment(sandbox=resolve_sandbox("bubblewrap", memory_limit_mb=2048, allow_network=True))
 ```
+
+## Sandbox faults
+
+`run_code_via_sandbox` raises the two non-verdict results as typed exceptions, and every protocol's tool dispatch (native, async native, ReAct) books them by type:
+
+| Exception | Raised for | Price | GRPO baseline |
+|---|---|---|---|
+| `SandboxInfraError` | `error` | none: the call is unpriced | out: the episode is marked `episode_invalid`, the fault as its `episode_invalid_reason` |
+| `SandboxAgentFault` | `agent_fault` | a failed call (`tool_error_penalty`) | in: scored against its group like any other episode |
+
+A sandbox-backed tool of your own raises them the same way (a missing session is a `SandboxInfraError`). Either fault ends the episode uncompleted and not truncated (so `mask_truncated_completions` keeps an agent fault in the loss): a completion-graded environment grades it 0, while `code_contests` keeps an earlier graded submission. The episode is never sent to an external scorer and logs no `episode/reward_scored`. `info["sandbox_fault"]` names the class (`infra` or `agent`); `episode/sandbox_infra_fault` and `episode/sandbox_agent_fault` log the per-episode rates, and both count toward `episode/natural_termination_rate`. Any other exception a tool raises is an ordinary tool error, priced `tool_error_penalty`.
+
+Voiding is only as sound as the backend's containment of the program: whatever the program can drive into an `error` voids its own episode. The routes left to it:
+
+- `remote`: a response the service fails to produce (a huge output, the service's own OOM) or one past the client deadline, `run_timeout` + 30 s.
+- Grading on `local` / `bubblewrap`: any host-side exception during a test is an infra error for that test (`_run_in_sandbox`) — on `local`, the `EAGAIN` of a process table the program's leftover processes filled; on either, the `ENOSPC` of a `TMPDIR` it filled.
+
+An output flood is not one: output is captured in files under the child's `RLIMIT_FSIZE`, so it ends as the program's own failure at the file-size limit. Where faults are frequent, dropping them is a selection — the episodes that call the sandbox most drop most. Watch `episode/sandbox_infra_fault`; `remote` retries nothing.
 
 ## Languages
 
@@ -86,7 +110,7 @@ Per-run rlimits bound each `local` / `bubblewrap` execution; `remote` enforces i
 | Wall-clock | 15 s | 30 s | `SANDBOX_DEFAULT_TIMEOUT` / `SANDBOX_DEFAULT_COMPILE_TIMEOUT` |
 | CPU (`RLIMIT_CPU`) | wall-clock + 1 s | compile timeout + 1 s | `RLIMIT_CPU_SLACK_SECONDS` |
 | Address space (`RLIMIT_AS`) | 1024 MiB | 2048 MiB | `SANDBOX_DEFAULT_MEMORY_MB` / `SANDBOX_DEFAULT_COMPILE_MEMORY_MB` |
-| File size (`RLIMIT_FSIZE`) | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
+| File size (`RLIMIT_FSIZE`), captured stdout / stderr included | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
 | Processes (`RLIMIT_NPROC`) | 4096 | not applied | `LOCAL_NPROC_LIMIT` |
 
 The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense.

@@ -75,9 +75,25 @@ class SandboxInfraError(RuntimeError):
 
     Distinct from the program's own non-zero exit, compile error, or timeout; those are verdicts on
     the submitted code and stay ordinary string results. The REPL layer raises this so an
-    infrastructure outage surfaces as a failed tool call rather than a string the protocol would
-    score as successful.
+    infrastructure outage reaches the tool layer by type: the protocols end the episode and drop it
+    from the GRPO group baseline instead of pricing the fault as the policy's.
     """
+
+
+class SandboxAgentFault(RuntimeError):
+    """The program's own action broke its sandbox beyond what the host can safely repair: it put a link
+    or a file in its working directory's place (the ``local`` backend), or a sandbox-backed tool
+    attributes a crash of its environment to the agent.
+
+    The fault is the policy's, not the backend's, so it must never read as :class:`SandboxInfraError`
+    (an episode could otherwise void itself out of the baseline). Grading judges it as the program's
+    runtime error; the REPL layer raises it, and the protocols price the call as a failed one and end
+    the episode uncompleted, inside the baseline.
+    """
+
+
+# The typed faults a tool call can end on; the protocols catch them ahead of any other exception.
+SANDBOX_FAULTS = (SandboxInfraError, SandboxAgentFault)
 
 
 @dataclass
@@ -88,16 +104,32 @@ class SandboxResult:
     stderr: str = ""
     returncode: int | None = None
     timed_out: bool = False
-    # The compiler rejected the program's own source (non-zero exit; ``returncode`` is the compiler's).
-    # A missing compiler or a compile timeout is a backend/limit failure and sets ``error`` instead.
+    # The program's source never built: the compiler rejected it (``returncode`` is the compiler's) or
+    # the build ran past the compile limit. A missing compiler is a backend failure and sets ``error``.
     compile_failed: bool = False
     # Backend/transport failure, distinct from the program's own non-zero exit or a compile error.
     error: str | None = None
+    # What the program did to its own sandbox (:class:`SandboxAgentFault`); set with a non-zero
+    # ``returncode`` so grading reads it as a runtime error, never as ``error``.
+    agent_fault: str | None = None
 
     @property
     def ok(self) -> bool:
         """True only when the program built and ran to completion with a zero exit code."""
-        return self.returncode == 0 and not self.timed_out and not self.compile_failed and self.error is None
+        return (
+            self.returncode == 0
+            and not self.timed_out
+            and not self.compile_failed
+            and self.error is None
+            and self.agent_fault is None
+        )
+
+
+def compile_limit_verdict(message: str) -> SandboxResult:
+    """A build killed at its compile limit: the source's verdict (an ``#include`` bomb, a template
+    blow-up), judged like a compiler rejection and never as a backend failure, which would let a
+    program void its own episode."""
+    return SandboxResult(stderr=message, compile_failed=True)
 
 
 @dataclass(frozen=True)

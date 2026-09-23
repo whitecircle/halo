@@ -15,6 +15,7 @@ from src.environments.sandbox.base import (
     SandboxExecutor,
     SandboxResult,
     SandboxSession,
+    compile_limit_verdict,
 )
 
 # HTTP budget on top of the program's own timeout: the service still has to queue, provision and
@@ -23,6 +24,9 @@ _REQUEST_OVERHEAD_SECONDS = 30.0
 
 # SandboxFusion ``CommandRunStatus`` values that mean the step ran to completion (lower-cased).
 _STEP_FINISHED_STATUSES = ("finished", "success", "")
+# The response ``status`` SandboxFusion reports when a step exited non-zero or hit its time limit: the
+# program's verdict, read off the step blocks. Any other non-success status is the service's failure.
+_PROGRAM_FAILED_STATUS = "failed"
 # The shell's exit code for a command it could not exec: a missing compiler, not a source verdict.
 _COMMAND_NOT_FOUND = 127
 
@@ -100,14 +104,15 @@ class RemoteSandbox(SandboxExecutor):
     def _parse(data: dict[str, object]) -> SandboxResult:
         """Map a SandboxFusion response into a :class:`SandboxResult` (tolerant of partial bodies).
 
-        A ``compile_result`` the compiler rejected is the program's verdict (``compile_failed``); a
-        compile time limit is a backend/limit failure (``error``) — the local backend's split.
+        A ``compile_result`` the compiler rejected or that hit the compile time limit is the program's
+        verdict (``compile_failed``), and a ``Failed`` response whose run step exited non-zero or timed
+        out is its runtime verdict — the local backend's split. Only the service's own failure sets
+        ``error``.
         """
         compile_step = _command_result(data.get("compile_result"))
         compile_status = str(compile_step.get("status", "")).lower()
         if _is_time_limit(compile_status):
-            message = "remote compilation exceeded the service's compile time limit"
-            return SandboxResult(stderr=message, error=message)
+            return compile_limit_verdict("remote compilation exceeded the service's compile time limit")
         compile_rc = _return_code(compile_step.get("return_code"))
         if compile_step and (compile_status not in _STEP_FINISHED_STATUSES or compile_rc == _COMMAND_NOT_FOUND):
             # The compiler step did not run to completion (or the compiler is absent): the service's
@@ -122,10 +127,12 @@ class RemoteSandbox(SandboxExecutor):
 
         run = _command_result(data.get("run_result"))
         timed_out = _is_time_limit(str(run.get("status", "")).lower())
+        returncode = _return_code(run.get("return_code"))
 
         status = str(data.get("status", "")).lower()
+        program_failed = status == _PROGRAM_FAILED_STATUS and (timed_out or returncode not in (0, None))
         error: str | None = None
-        if status not in ("success", "") and not timed_out:
+        if status not in ("success", "") and not timed_out and not program_failed:
             error = str(data.get("message") or data.get("status"))
         elif not run and not timed_out:
             # A body with no run block carries no program output: reporting it as an empty clean run
@@ -135,7 +142,7 @@ class RemoteSandbox(SandboxExecutor):
         return SandboxResult(
             stdout=str(run.get("stdout", "") or ""),
             stderr=str(run.get("stderr", "") or ""),
-            returncode=_return_code(run.get("return_code")),
+            returncode=returncode,
             timed_out=timed_out,
             error=error,
         )

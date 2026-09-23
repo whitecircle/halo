@@ -325,13 +325,16 @@ async def collect_results(
 
 
 def summarize(rows: list[dict[str, Any]], num_samples: int) -> dict[str, float]:
-    """Mean reward, ``success@1`` (first sample), and ``success@k`` (any sample) over ``rows``."""
+    """Mean reward, ``success@1`` (first sample), ``success@k`` (any sample) and the ``invalid`` sample
+    count over ``rows``."""
     if not rows:
         # Raise with the actual cause; the bare StatisticsError from mean([]) does not name it.
         raise ValueError("summarize() got no results — the eval produced zero episodes (empty dataset or all failed)")
     mean_reward = statistics.mean(statistics.mean(s["reward"] for s in r["samples"]) for r in rows)
     pass1 = statistics.mean(float(r["samples"][0]["success"]) for r in rows)
-    out = {"n": len(rows), "mean_reward": mean_reward, "success@1": pass1}
+    # Samples scored 0 with no signal (an invalid grade, a lost episode): kept in the means, counted apart.
+    invalid = sum(1 for r in rows for s in r["samples"] if "error" in s)
+    out = {"n": len(rows), "mean_reward": mean_reward, "success@1": pass1, "invalid": invalid}
     if num_samples > 1:
         out[f"success@{num_samples}"] = statistics.mean(float(any(s["success"] for s in r["samples"])) for r in rows)
     return out
@@ -347,7 +350,7 @@ def report(results: list[dict[str, Any]], *, num_samples: int, title: str, group
     line = f"overall: n={overall['n']}  mean_reward={overall['mean_reward']:.3f}  success@1={overall['success@1']:.3f}"
     if k > 1:
         line += f"  success@{k}={overall[f'success@{k}']:.3f}"
-    lines.append(line)
+    lines.append(f"{line}  invalid={overall['invalid']}")
 
     stats = [s["stats"] for r in results for s in r["samples"] if s.get("stats")]
     if stats:

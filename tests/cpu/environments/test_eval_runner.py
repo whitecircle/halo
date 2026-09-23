@@ -468,5 +468,17 @@ def test_summarize_empty_results_fails_loud():
         summarize([], num_samples=1)
 
 
+def test_summarize_counts_the_samples_that_carry_no_signal():
+    """An invalid grade or a lost episode scores 0 and stays in the means; the report counts them apart,
+    so a sandbox outage does not read as a weak model."""
+    rows = [
+        {"samples": [{"reward": 1.0, "success": True}, {"reward": 0.0, "success": False, "error": "outage"}]},
+        {"samples": [{"reward": 0.0, "success": False}, {"reward": 0.0, "success": False, "error": "lost"}]},
+    ]
+    summary = summarize(rows, num_samples=2)
+    assert summary["invalid"] == 2
+    assert summary["mean_reward"] == pytest.approx(0.25)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

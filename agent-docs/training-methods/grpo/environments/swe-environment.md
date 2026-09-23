@@ -38,12 +38,16 @@ Reward knobs are the native protocol's ([Native Tool-Use](native-tool-use.md)).
   `code_timeout`. A zero exit returns **stdout only** — stderr is discarded, and empty output
   comes back as `Code executed successfully (no output)`, so diagnostics need an explicit `2>&1`.
   A non-zero exit returns stdout plus `Error: <last stderr line>`: an observation, not a tool
-  error. Only a sandbox backend failure is booked as a failed tool call.
+  error. A sandbox fault on any tool ends the episode instead
+  ([Sandbox faults](sandbox.md#sandbox-faults)): a backend failure drops it from the baseline; a
+  workspace the command replaced with a link or file keeps it in the baseline, graded 0. A removed
+  workspace is recreated empty.
 - `write_file` — writes a file later turns and `run_code` see.
 - `read_file` — reads one back; a missing file is a message, not a tool error.
 - `list_files` — lists the workspace, optionally filtered by a path prefix.
 
-Code runs in OS isolation through a `SandboxExecutor`, so imports and the standard library work
+Code runs in a subprocess through a `SandboxExecutor` — rlimits only on `local`, confined on
+`bubblewrap` and `remote` — so imports and the standard library work
 ([Sandboxes](sandbox.md#choosing-a-backend)). Files a command creates persist in the workspace on
 `local` and `bubblewrap`; the `remote` service is stateless per call, so a run there sees only what
 `write_file` wrote.

@@ -35,11 +35,11 @@ The knobs every environment shares — turn cap, per-call tool pay, observation 
 - `web_search` — `query` and optional `max_results` (default 5).
 - `read_file`, `write_file`, `list_files` — a simulated per-episode file store, for tests and closed-world demos.
 
-Registries are built by the factories in `src/environments/tools/factories.py` and composed with `NativeToolRegistry.combine(a, b)`. The `create_native_*` set is stateless; `create_session_*` binds the episode's persistent [sandbox session](sandbox.md) so files survive across turns. Pass `sandbox=` a `SandboxExecutor` to run code in a real isolated interpreter with imports, or `allow_imports=True` to lift the ban inside the in-process REPL — safe only when the whole process is already isolated.
+Registries are built by the factories in `src/environments/tools/factories.py` and composed with `NativeToolRegistry.combine(a, b)`. The `create_native_*` set is stateless; `create_session_*` binds the episode's persistent [sandbox session](sandbox.md) so files survive across turns. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports, in a subprocess ([confined on `bubblewrap` / `remote`, rlimits only on `local`](sandbox.md#choosing-a-backend)), or `allow_imports=True` to lift the ban inside the in-process REPL — safe only when the whole process is already isolated.
 
 ## Reward
 
-Per call: `+tool_success_reward` for a successful call, `-tool_error_penalty` for a failed one, paid up to `tool_reward_cap` per episode (default one paid call per turn of the budget, so call spam cannot out-earn the objective). A call refused over its `tool_budgets` cap, or one whose arguments cannot bind to the handler, books as a tool error without spending the budget.
+Per call: `+tool_success_reward` for a successful call, `-tool_error_penalty` for a failed one, paid up to `tool_reward_cap` per episode (default one paid call per turn of the budget, so call spam cannot out-earn the objective). A call refused over its `tool_budgets` cap, or one whose arguments cannot bind to the handler, books as a tool error without spending the budget. A call that ends on a sandbox fault is booked by its class and ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)).
 
 The grade, in order: an episode that never completed grades 0; a `validator` callable in the row's context decides, 1 or 0; else the row's `answer` is graded all-or-nothing (exact match, then numeric); else completing the episode grades 1. The reward's `environment` term prices the grade as `weight × grade ^ exponent`, logged as `reward/objective` ([Reward Terms](../rewards.md#environment-arm)).
 

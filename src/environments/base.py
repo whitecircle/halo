@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.composer import RewardComposer
 from src.rewards.samples import ScoringSample
@@ -31,11 +32,12 @@ logger = logging.getLogger(__name__)
 # Reasoning-effort levels for the chat template ("Reasoning: <level>"). "random" resolves per episode.
 VALID_REASONING_EFFORTS = ("low", "medium", "high")
 
-# Set in ``info`` when an episode completed but its reward carries no learning signal (a failed grading
-# backend forced the failure reward); the trainer excludes it from the GRPO group baseline.
+# Set in ``info`` when an episode's reward carries no learning signal — a grading or sandbox backend
+# failed, a scorer returned nothing, a null ``answer`` cell; the trainer excludes it from the GRPO group
+# baseline.
 EPISODE_INVALID_KEY = "episode_invalid"
-# Why the trainer dropped an episode as untrainable (a chat-template re-render failure); read by the
-# all-invalid step halt so its message names the cause.
+# Why an episode is invalid (a sandbox or scorer fault, a failed chat-template re-render); read by the
+# trainer's all-invalid step halt so its message names the cause.
 EPISODE_INVALID_REASON_KEY = "episode_invalid_reason"
 # The cause on an episode its driver lost (a generation that raised), the spelling the Ray actor
 # stamps on the row it hands back for one. A driver stamps it before closing the episode through
@@ -44,6 +46,13 @@ EPISODE_ERROR_KEY = "error"
 # Stamped by the rollout driver under the episode thinking scope: whether the episode's reasoning budget
 # ran down to the per-turn reserve (a later turn would have reasoned only its reserve).
 THINKING_BUDGET_EXHAUSTED_KEY = "thinking_budget_exhausted"
+# Set in ``info`` when a sandbox fault ended the episode, naming its class: ``SANDBOX_FAULT_INFRA`` for
+# a backend/transport failure (the episode is also marked invalid and leaves the GRPO group baseline),
+# ``SANDBOX_FAULT_AGENT`` for a sandbox the program's own action broke (the episode stays in the
+# baseline, ended uncompleted, the call priced as a failed one).
+SANDBOX_FAULT_KEY = "sandbox_fault"
+SANDBOX_FAULT_INFRA = "infra"
+SANDBOX_FAULT_AGENT = "agent"
 
 # The environment's own grade, priced by the reward's environment term, in ``reward_components``: the
 # term advantage shaping gates on (it falls back to the total reward when absent).
@@ -585,6 +594,30 @@ class BaseEnvironment(ABC):
         trajectory.info[TOOL_REWARD_PAID_KEY] = paid + credit
         return credit
 
+    def _book_sandbox_fault(
+        self, trajectory: Trajectory, tool: str, fault: SandboxInfraError | SandboxAgentFault
+    ) -> float:
+        """Book one tool call a sandbox fault ended and return its reward delta; the protocol then ends
+        the episode on :data:`SANDBOX_FAULT_KEY`, uncompleted.
+
+        An infrastructure fault says nothing about the policy: the call goes unpriced and the episode
+        leaves the GRPO group baseline, the fault stamped as the reason the trainer's all-invalid halt
+        names. An agent-caused one is the policy's: a failed call, and the episode, ended uncompleted,
+        stays in the baseline.
+        """
+        if isinstance(fault, SandboxInfraError):
+            logger.warning("Tool %r lost to a sandbox infrastructure fault; the episode is dropped: %s", tool, fault)
+            trajectory.info["total_tool_calls"] += 1
+            trajectory.info[SANDBOX_FAULT_KEY] = SANDBOX_FAULT_INFRA
+            trajectory.info[EPISODE_INVALID_KEY] = True
+            trajectory.info.setdefault(
+                EPISODE_INVALID_REASON_KEY, f"sandbox infrastructure fault in tool {tool!r}: {fault}"
+            )
+            return 0.0
+        logger.debug("Tool %r ended the episode on an agent-caused sandbox fault: %s", tool, fault)
+        trajectory.info.setdefault(SANDBOX_FAULT_KEY, SANDBOX_FAULT_AGENT)
+        return self._credit_tool_call(trajectory, False)
+
     @staticmethod
     def _last_assistant_message(trajectory: Trajectory) -> Message:
         """The turn just taken: every step appends the model's message before it is handled."""
@@ -641,6 +674,9 @@ class BaseEnvironment(ABC):
         metrics: dict[str, float] = {}
         if "total_tool_calls" in trajectory.info:
             metrics["episode/tool_calls"] = float(trajectory.info["total_tool_calls"])
+            fault = trajectory.info.get(SANDBOX_FAULT_KEY)
+            metrics["episode/sandbox_infra_fault"] = 1.0 if fault == SANDBOX_FAULT_INFRA else 0.0
+            metrics["episode/sandbox_agent_fault"] = 1.0 if fault == SANDBOX_FAULT_AGENT else 0.0
         # Tracked separately: a termination-rate metric cannot tell a cut-off turn, or one that
         # stopped inside its reasoning, from an answer.
         metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
@@ -658,7 +694,11 @@ class BaseEnvironment(ABC):
         )
         metrics.update(trajectory.info.get(REWARD_COMPONENTS_KEY, {}))
         metrics.update(trajectory.info.get(REWARD_METRICS_KEY, {}))
-        if self._rewards.external_terms and REWARD_COMPONENTS_KEY in trajectory.info:
+        if (
+            self._rewards.external_terms
+            and REWARD_COMPONENTS_KEY in trajectory.info
+            and not self._cut_short(trajectory)
+        ):
             metrics["episode/reward_scored"] = 0.0 if trajectory.info.get(REWARD_ERRORS_KEY) else 1.0
         return metrics
 
@@ -833,9 +873,7 @@ class BaseEnvironment(ABC):
 
         if done:
             self._settle_grade(trajectory, context)
-            # An episode its driver lost is graded on what it earned, never sent to a scorer: the
-            # fragment is the driver's fault, and a verdict on it would be paid for and taught.
-            if self._rewards.external_terms and EPISODE_ERROR_KEY not in trajectory.info:
+            if self._rewards.external_terms and not self._cut_short(trajectory):
                 trajectory.info[REWARD_PENDING_KEY] = True
             else:
                 self._drop_grading_payload(trajectory)
@@ -864,6 +902,12 @@ class BaseEnvironment(ABC):
     @abstractmethod
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
         """Grade a finished episode: the objective in ``[0, 1]`` and the environment's own shaping terms."""
+
+    @staticmethod
+    def _cut_short(trajectory: Trajectory) -> bool:
+        """An episode its driver lost, or one a sandbox fault ended: graded on what it earned and never
+        sent to an external scorer, since a verdict on the fragment would be paid for and taught."""
+        return EPISODE_ERROR_KEY in trajectory.info or SANDBOX_FAULT_KEY in trajectory.info
 
     def _episode_shaping(self, trajectory: Trajectory) -> dict[str, float]:
         """The protocol's episode-level shaping terms by bare name; the base has none."""

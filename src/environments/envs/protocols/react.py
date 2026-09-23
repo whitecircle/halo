@@ -14,6 +14,7 @@ from typing import Any
 from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
+    SANDBOX_FAULT_KEY,
     TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
     EpisodeGrade,
@@ -22,6 +23,7 @@ from src.environments.base import (
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import validate_tool_budgets
+from src.environments.sandbox.base import SANDBOX_FAULTS
 from src.environments.tools.definitions import NativeToolRegistry, ToolArgumentError, ToolBudgetExhausted
 from src.environments.tools.factories import (
     create_native_math_tools,
@@ -304,6 +306,7 @@ Always think before acting, and provide a Final Answer when you're done."""
         if step.has_action:
             tool = self.registry.get(step.action)
             success = False
+            fault = None
 
             if not tool:
                 observation = self.registry.unknown_tool_message(step.action)
@@ -327,6 +330,11 @@ Always think before acting, and provide a Final Answer when you're done."""
                     logger.debug("Tool %r refused the call: %s", step.action, e)
                     observation = f"Error: {e}"
                     info["tool_error"] = str(e)
+                except SANDBOX_FAULTS as e:
+                    # Booked by type (the native protocol's contract), and it ends the episode below.
+                    fault = e
+                    observation = f"Error: {e}"
+                    info["tool_error"] = str(e)
                 except Exception as e:
                     # Without this line the episode just grades 0 with nothing anywhere
                     # saying why: the observation carries the message, but the trajectory is not where
@@ -335,10 +343,13 @@ Always think before acting, and provide a Final Answer when you're done."""
                     observation = f"Error: {str(e)}"
                     info["tool_error"] = str(e)
 
-            reward += self._credit_tool_call(trajectory, success)
+            if fault is not None:
+                reward += self._book_sandbox_fault(trajectory, step.action, fault)
+            else:
+                reward += self._credit_tool_call(trajectory, success)
             observation = self._truncate_observation(observation)
             trajectory.add_message(Message.user(f"Observation: {observation}"))
-            return trajectory, reward, False, False, info
+            return trajectory, reward, SANDBOX_FAULT_KEY in trajectory.info, False, info
 
         hint = (
             "Please provide either:\n"
