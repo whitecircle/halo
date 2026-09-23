@@ -8,7 +8,7 @@ enforces, and stated in the task message. The grading verdict lists only non-pas
 per distinct verdict, capped at ``_MAX_FAILURE_DETAILS``.
 
 These drive ``CodeContestsEnvironment`` against a stub sandbox whose ``run`` returns a canned
-:class:`SandboxResult` (no subprocesses, no network), through the protocol's tool dispatch.
+result (no subprocesses, no network), through the protocol's tool dispatch.
 
 Run: python tests/cpu/environments/test_effort_interaction_budgets.py  (or pytest)
 """
@@ -31,22 +31,8 @@ from src.environments.episode import (
     reasoning_tokens_of,
     resolve_reasoning_end_token_id,
 )
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.tools.definitions import NativeToolCall
-
-
-class _StubSandbox(SandboxExecutor):
-    """Always returns the same canned result."""
-
-    def __init__(self, result: SandboxResult):
-        self._result = result
-
-    def open_session(self):  # pragma: no cover
-        raise NotImplementedError
-
-    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
-        return self._result
-
+from tests.common.code_contests import SINGLE_TEST_ANSWER, StubSandbox, call_tool, reset_episode
 
 _PROFILES = {
     "low": {"max_submissions": 2, "max_test_calls": 2},
@@ -55,28 +41,14 @@ _PROFILES = {
 
 
 def _make_env(**kwargs):
-    kwargs.setdefault("sandbox", _StubSandbox(SandboxResult(stdout="X\n", returncode=0)))
+    kwargs.setdefault("sandbox", StubSandbox())
     kwargs.setdefault("reasoning_effort_profiles", _PROFILES)
     return CodeContestsEnvironment(**kwargs)
 
 
-def _reset(env, context):
-    ids, _ = env.reset(["solve it"], [context])
-    return env.get_trajectories(ids)[0]
-
-
-def _call(env, traj, name, code="print('X')"):
-    """Dispatch one tool call through the protocol; returns the observation text."""
-    results, _ = env._execute_tool_calls([NativeToolCall(id="c", name=name, arguments={"code": code})], traj)
-    return results[0].content
-
-
-_TESTS = {"answer": {"tests": [{"input": "", "output": "X"}]}}
-
-
 def test_verdict_lists_failures_only_and_caps_them():
     # Distinct expected outputs make every failure its own verdict; identical ones would fold into one entry.
-    sandbox = _StubSandbox(SandboxResult(stdout="X\n", returncode=0))
+    sandbox = StubSandbox()
     tests = [{"input": "", "output": "X"}] * 2 + [
         {"input": "", "output": f"Y{k}"} for k in range(_MAX_FAILURE_DETAILS + 3)
     ]
@@ -88,7 +60,7 @@ def test_verdict_lists_failures_only_and_caps_them():
 
 
 def test_all_pass_verdict_is_summary_only():
-    sandbox = _StubSandbox(SandboxResult(stdout="X\n", returncode=0))
+    sandbox = StubSandbox()
     grade = run_solution_against_tests("code", [{"input": "", "output": "X"}] * 4, sandbox=sandbox)
     assert grade.passed == 4
     assert grade.details.strip() == "Passed 4/4 test cases."
@@ -96,15 +68,15 @@ def test_all_pass_verdict_is_summary_only():
 
 def test_budgets_stamp_from_context_level_and_enforce_submission_cap():
     env = _make_env()
-    traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 6, "submit_solution": 1}
     assert env.thinking_budget_for_effort("high") == 16384  # interaction-only override keeps default tokens
     user = next(m for m in reversed(traj.messages) if m.role == "user")
     assert "Budgets for this task: 1 graded submission" in user.content
     assert "6 scratchpad runs" in user.content
 
-    first = _call(env, traj, "submit_solution")
-    second = _call(env, traj, "submit_solution")
+    first = call_tool(env, traj, "submit_solution")
+    second = call_tool(env, traj, "submit_solution")
     assert "Passed 1/1" in first
     assert "Submission limit reached (1); this submission is not graded." in second
     assert traj.info[TOOL_CALL_COUNTS_KEY]["submit_solution"] == 1, "a refused call spends nothing"
@@ -112,11 +84,11 @@ def test_budgets_stamp_from_context_level_and_enforce_submission_cap():
 
 def test_scratchpad_cap_reads_episode_budget():
     env = _make_env()
-    traj = _reset(env, {"reasoning_effort": "low", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY]["python_repl"] == 2
-    _call(env, traj, "python_repl")
-    _call(env, traj, "python_repl")
-    third = _call(env, traj, "python_repl")
+    call_tool(env, traj, "python_repl")
+    call_tool(env, traj, "python_repl")
+    third = call_tool(env, traj, "python_repl")
     assert "Test limit reached (2); the scratchpad is exhausted. Submit your solution with submit_solution." in third
     assert traj.info[TOOL_CALL_COUNTS_KEY]["python_repl"] == 2
 
@@ -127,17 +99,17 @@ def test_resubmission_penalty_prices_each_graded_submission_after_the_first():
     stays inside the decomposition the trainer's residue check sums."""
     profiles = {"high": {"max_submissions": 3, "max_test_calls": 6}}
     env = _make_env(reasoning_effort_profiles=profiles, resubmission_penalty=0.1)
-    traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     for _ in range(3):
-        _call(env, traj, "submit_solution")
+        call_tool(env, traj, "submit_solution")
     env._settle_grade(traj, None)
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert components["reward/resubmission"] == pytest.approx(-0.2)
     assert traj.total_reward == pytest.approx(sum(components.values()))
 
     once = _make_env(reasoning_effort_profiles=profiles, resubmission_penalty=0.1)
-    traj_once = _reset(once, {"reasoning_effort": "high", **_TESTS})
-    _call(once, traj_once, "submit_solution")
+    traj_once = reset_episode(once, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
+    call_tool(once, traj_once, "submit_solution")
     once._settle_grade(traj_once, None)
     assert traj_once.info[REWARD_COMPONENTS_KEY]["reward/resubmission"] == 0.0
 
@@ -150,7 +122,7 @@ def test_resubmission_penalty_prices_each_graded_submission_after_the_first():
 def test_over_cap_call_classifies_as_tool_error_not_paid_success():
     # A refused call must charge tool_error_penalty, never pay the model for an exhausted budget.
     env = _make_env(tool_success_reward=0.02, tool_error_penalty=0.05)
-    traj = _reset(env, {"reasoning_effort": "low", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
 
     def call(i: int) -> NativeToolCall:
         return NativeToolCall(id=f"c{i}", name="python_repl", arguments={"code": "print(1)"})
@@ -168,7 +140,7 @@ def test_a_refused_over_cap_call_logs_no_traceback(caplog):
     """An exhausted budget is expected control flow (2 submissions / 5 test calls in a 15-turn
     episode), so it must not emit the WARNING+traceback that marks a tool which actually broke."""
     env = _make_env()
-    traj = _reset(env, {"reasoning_effort": "low", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
 
     def call(i: int) -> NativeToolCall:
         return NativeToolCall(id=f"c{i}", name="python_repl", arguments={"code": "print(1)"})
@@ -183,7 +155,7 @@ def test_a_refused_over_cap_call_logs_no_traceback(caplog):
 def test_undetermined_level_stamps_class_caps_and_states_them():
     # Tool descriptions defer to the task message here, so an undetermined level still owes a contract.
     env = _make_env(reasoning_effort="random")
-    traj = _reset(env, dict(_TESTS))
+    traj = reset_episode(env, dict(SINGLE_TEST_ANSWER))
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 5, "submit_solution": 2}
     user = next(m for m in reversed(traj.messages) if m.role == "user")
     assert "Budgets for this task: 2 graded submissions" in user.content
@@ -192,7 +164,7 @@ def test_undetermined_level_stamps_class_caps_and_states_them():
 
 def test_level_without_interaction_keys_states_class_caps():
     env = _make_env(reasoning_effort="medium")
-    traj = _reset(env, dict(_TESTS))
+    traj = reset_episode(env, dict(SINGLE_TEST_ANSWER))
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 5, "submit_solution": 2}
     user = next(m for m in reversed(traj.messages) if m.role == "user")
     assert "Budgets for this task: 2 graded submissions" in user.content
@@ -203,7 +175,7 @@ def test_thinking_only_profiles_do_not_defer_descriptions():
     assert env.thinking_budget_for_effort("high") == 24000
     assert env.thinking_budget_for_effort("low") == 4096
     assert "You get up to 2 graded submissions" in env.registry.get("submit_solution").description
-    traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 5, "submit_solution": 2}, "class caps still bind"
     user = next(m for m in reversed(traj.messages) if m.role == "user")
     assert "Budgets for this task" not in user.content
@@ -219,13 +191,13 @@ def test_reset_effort_level_contract():
 
 def test_context_level_overrides_env_level():
     env = _make_env(reasoning_effort="low")
-    traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY]["submit_solution"] == 1
 
 
 def test_concrete_env_level_applies_without_context():
     env = _make_env(reasoning_effort="low")
-    traj = _reset(env, dict(_TESTS))
+    traj = reset_episode(env, dict(SINGLE_TEST_ANSWER))
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 2, "submit_solution": 2}
 
 
@@ -234,7 +206,7 @@ def test_tool_descriptions_defer_when_profiles_bind_interaction():
     submit = env.registry.get("submit_solution")
     assert "stated in the task message" in submit.description
     plain = CodeContestsEnvironment(
-        sandbox=_StubSandbox(SandboxResult(stdout="X\n", returncode=0)),
+        sandbox=StubSandbox(),
         reasoning_effort_profiles=None,
     )
     assert "You get up to 2 graded submissions" in plain.registry.get("submit_solution").description
@@ -245,12 +217,12 @@ def test_tested_submission_bonus_pays_only_on_test_then_submit():
     env = _make_env(reasoning_effort_profiles=profiles)
 
     def run_episode(test_first: bool) -> tuple[float, dict]:
-        traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+        traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
         if test_first:
-            _call(env, traj, "python_repl")
-        _call(env, traj, "submit_solution")
+            call_tool(env, traj, "python_repl")
+        call_tool(env, traj, "submit_solution")
         if not test_first:
-            _call(env, traj, "python_repl")
+            call_tool(env, traj, "python_repl")
         env._settle_grade(traj, None)
         return traj.total_reward, traj.info[REWARD_COMPONENTS_KEY]
 
@@ -269,8 +241,8 @@ def test_bonus_only_profile_still_binds_and_scales_by_effort():
     }
     env = _make_env(reasoning_effort_profiles=profiles)
     assert env._profiles_bind_interaction
-    med = _reset(env, {"reasoning_effort": "medium", **_TESTS})
-    low = _reset(env, {"reasoning_effort": "low", **_TESTS})
+    med = reset_episode(env, {"reasoning_effort": "medium", **SINGLE_TEST_ANSWER})
+    low = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
     assert med.info["episode_tested_submission_reward"] == 0.05
     assert (
         med.info[EPISODE_TOOL_BUDGETS_KEY]["submit_solution"] == 2
@@ -397,7 +369,7 @@ def test_stamp_records_budget_exhaustion_only_under_the_episode_scope():
     env = _make_env(reasoning_effort_profiles=_SCOPED_PROFILES)
 
     def stamped(scope, reasoning_spent):
-        traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+        traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
         _bind_scoped("high", scope).stamp(traj, reasoning_spent=reasoning_spent)
         return traj
 
@@ -435,9 +407,9 @@ def test_recovery_cap_tightens_per_level_and_never_exceeds_the_env_cap():
             "low": {"max_submissions": 2, "max_test_calls": 2, "max_length_cutoff_recoveries": 1}
         },
     )
-    low = _reset(env, {"reasoning_effort": "low", **_TESTS})
+    low = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
     assert low.info["episode_max_length_cutoff_recoveries"] == 1
-    high = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    high = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert "episode_max_length_cutoff_recoveries" not in high.info, "a level without the key runs under the env cap"
     with pytest.raises(
         ValueError, match=r"max_length_cutoff_recoveries \(4\) exceeds the env's max_length_cutoff_recoveries \(3\)"
