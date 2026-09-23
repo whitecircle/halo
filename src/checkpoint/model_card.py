@@ -7,6 +7,7 @@ builds an export from a source directory runs. A writer that reaches neither cal
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -14,6 +15,19 @@ from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.repocard import metadata_load, metadata_save
 
 HALO_HUB_TAGS = ("halo",)
+
+# The staged card's name pattern: unique per write, and skipped by the non-weight copy should a
+# crash leave one behind.
+CARD_STAGING_PREFIX = f".{REPOCARD_NAME}."
+CARD_STAGING_SUFFIX = ".tmp"
+# A fresh card's mode: the staging file is created owner-only, which would hide the card from the
+# other readers of a shared output filesystem.
+_FRESH_CARD_MODE = 0o644
+
+
+def is_staged_card(name: str) -> bool:
+    """Whether ``name`` is a card :func:`tag_model_card` staged and never swapped in."""
+    return name.startswith(CARD_STAGING_PREFIX) and name.endswith(CARD_STAGING_SUFFIX)
 
 
 def with_halo_tags(tags: str | list[str] | None) -> list[str]:
@@ -26,10 +40,11 @@ def tag_model_card(output_dir: str) -> None:
     """Add :data:`HALO_HUB_TAGS` to the ``README.md`` card in ``output_dir``, creating it if absent.
 
     Only the ``tags`` entry of an existing card changes: its other metadata round-trips as the raw
-    mapping (``model-index`` included), and its body and line endings are kept. A card that already
-    carries every tag is not rewritten, and a fresh card holds the tags alone, so ``library_name``
-    stays the owning library's. The write is staged beside the card and swapped in, which also
-    replaces a symlinked card (a Hub-cache snapshot) instead of writing through it into the blob.
+    mapping (``model-index`` included), and its body, line endings and mode are kept. A card that
+    already carries every tag is not rewritten, and a fresh card holds the tags alone, so
+    ``library_name`` stays the owning library's. The write goes to a uniquely named file beside the
+    card and is swapped in, which also replaces a symlinked card (a Hub-cache snapshot) instead of
+    writing through it into the blob.
 
     Raises:
         ValueError: the card's metadata block is not a YAML mapping.
@@ -47,10 +62,16 @@ def tag_model_card(output_dir: str) -> None:
     if exists and tags == metadata.get("tags"):
         return
     metadata["tags"] = tags
-    staged = path.with_name(f".{REPOCARD_NAME}.halo-staging")
+    with tempfile.NamedTemporaryFile(
+        dir=output_dir, prefix=CARD_STAGING_PREFIX, suffix=CARD_STAGING_SUFFIX, delete=False
+    ) as handle:
+        staged = Path(handle.name)
     try:
         if exists:
             shutil.copyfile(path, staged)
+            shutil.copymode(path, staged)
+        else:
+            staged.chmod(_FRESH_CARD_MODE)
         metadata_save(staged, metadata)
         os.replace(staged, path)
     except BaseException:

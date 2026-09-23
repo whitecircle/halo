@@ -14,7 +14,9 @@ alone, and a card whose metadata is not YAML fails naming the file to repair.
 """
 
 import json
+import os
 import re
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +34,7 @@ import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers th
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.training.embedding import build_sentence_transformer
+from src.checkpoint import model_card
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
 from src.checkpoint.format import copy_checkpoint_aux_files
 from src.checkpoint.model_card import tag_model_card
@@ -116,6 +119,8 @@ def _card(directory) -> ModelCard:
 def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
     tag_model_card(str(tmp_path))
     assert _card(tmp_path).data.to_dict() == {"tags": [HALO_TAG]}
+    assert sorted(os.listdir(tmp_path)) == [CARD], "the staged card was left beside the real one"
+    assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) & 0o044 == 0o044, "the card is not readable by others"
 
 
 def test_an_existing_card_keeps_its_metadata_tags_and_body(tmp_path):
@@ -177,6 +182,19 @@ def test_a_symlinked_card_is_replaced_not_written_through(tmp_path):
     assert blob.read_text() == _SOURCE_CARD
     assert not (tmp_path / "export" / CARD).is_symlink()
     assert metadata_load(tmp_path / "export" / CARD)["tags"] == ["text-generation", HALO_TAG]
+
+
+def test_a_failed_write_leaves_the_card_and_no_staged_copy(tmp_path, monkeypatch):
+    (tmp_path / CARD).write_text(_SOURCE_CARD)
+
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(model_card, "metadata_save", fail)
+    with pytest.raises(OSError, match="disk full"):
+        tag_model_card(str(tmp_path))
+    assert sorted(os.listdir(tmp_path)) == [CARD]
+    assert (tmp_path / CARD).read_text() == _SOURCE_CARD
 
 
 @pytest.mark.parametrize("metadata", ["tags: [a, b\n", "- a\n- b\n"], ids=["bad-yaml", "not-a-mapping"])
