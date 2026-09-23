@@ -41,11 +41,15 @@ def worker_port_block() -> range:
     workers = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
     # A restarted worker gets a fresh id past the count; wrap it back into the pool.
     index = int(os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")) % workers
-    size = (ephemeral_floor() - POOL_FLOOR) // workers
+    floor = ephemeral_floor()
+    size = (floor - POOL_FLOOR) // workers
     if size < 1:
         raise RuntimeError(
-            f"no port pool for {workers} workers between {POOL_FLOOR} and the ephemeral floor "
-            f"{ephemeral_floor()}; raise the floor of net.ipv4.ip_local_port_range"
+            f"net.ipv4.ip_local_port_range starts at {floor}, which leaves {workers} test worker(s) no port "
+            f"between {POOL_FLOOR} and the range. Move the range up to the Linux default: "
+            f'`sysctl -w net.ipv4.ip_local_port_range="32768 60999"` on the host (a --network host '
+            "container shares it), or "
+            '`docker run --sysctl net.ipv4.ip_local_port_range="32768 60999"` for a container of its own.'
         )
     start = POOL_FLOOR + index * size
     return range(start, start + size)

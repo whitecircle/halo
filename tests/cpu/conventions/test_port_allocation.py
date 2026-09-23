@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.common import ports
 from tests.common.ports import POOL_FLOOR, ephemeral_floor, free_port, worker_port_block
 from tests.common.utils import REPO_ROOT
 
@@ -113,6 +114,14 @@ def test_a_port_in_time_wait_is_never_handed_out():
             accepted.close()  # the side that closes first holds TIME_WAIT
     result = _allocate_only(port)
     assert result.returncode != 0, f"free_port() handed out {result.stdout.strip()}, still in TIME_WAIT"
+    assert "issued or held" in result.stderr, result.stderr
+
+
+def test_an_ephemeral_range_that_covers_the_pool_names_the_fix(monkeypatch):
+    """A host whose ephemeral range starts at or below the pool has nowhere safe to draw from."""
+    monkeypatch.setattr(ports, "ephemeral_floor", lambda: POOL_FLOOR)
+    with pytest.raises(RuntimeError, match=r'ip_local_port_range="32768 60999"'):
+        free_port()
 
 
 if __name__ == "__main__":

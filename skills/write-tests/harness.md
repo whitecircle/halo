@@ -173,7 +173,10 @@ those, kept separate only so the manifest can attach its family markers, timeout
   `free_port()` (a port below the kernel's ephemeral range, from this xdist worker's own slice
   of the pool) and passes it via env; your script's `init_distributed()` reads it. A
   CPU test that spawns ranks or starts a server takes its port from `free_port()` too. Hardcoded
-  ports race across CI shards (`Errno 98`).
+  ports race across CI shards (`Errno 98`). The pool runs from 20000 up to
+  `net.ipv4.ip_local_port_range`, so a host whose range starts at or below 20000 raises
+  `... leaves N test worker(s) no port`: move the range up to `32768 60999`
+  ([Troubleshooting](../../agent-docs/reference/troubleshooting.md) has the commands).
 - **Tolerances** (`tests/common/tolerances.py`) — `from tests.common.tolerances import TOL`,
   then use the named constant: `TOL.rank_loss_consistency_abs`, `TOL.tp_grad_norm_spread_abs`,
   `TOL.parallel_vs_baseline_loss_abs`, `TOL.parallel_vs_baseline_train_loss_abs`,
