@@ -88,13 +88,19 @@ class _Tolerances:
     kernel_rtol: float = 1e-2
 
     # ── Muon orthogonalization ──────────────────────────────────────────────
-    # Singular values of the Newton-Schulz output for an input whose every singular value is at least
-    # 1.4e-3 of its Frobenius norm. The five quintic steps map that domain into [0.846, 1.124] exactly;
-    # the fp16 iteration and bf16 in/out add under 1e-3 on both the torch and the CUDA-kernel backend.
-    # A dropped step lands at [0.44, 1.56]; without their safety factor the coefficients overshoot to
-    # 1.25 in a rectangular matrix's fp16 Gram iteration.
+    # Singular values of the Newton-Schulz output. The five composed Polar Express quintics map every
+    # input singular value of at least 1.20e-3 of the Frobenius norm into [0.846, 1.124], and the bf16
+    # output moves those extremes by under 1e-3 on the torch and the CUDA-kernel backends. Measured,
+    # the band holds on the square (standard) path from 1.4e-3; on the rectangular path the fp16 Gram
+    # matrix breaks it below ~4e-3 (out at 2.7e-3, in at 3.7e-3). Dropping step 4 or 5 lands at
+    # [0.40, 2.14] or [0.44, 1.56]; steps 1-3 only lift inputs below ~1e-2. Without their safety factor
+    # the coefficients stay inside the band in exact arithmetic ([0.876, 1.124]) and overshoot it
+    # (1.15-1.40) only through the fp16 iteration.
     muon_orthogonal_sv_min: float = 0.84
     muon_orthogonal_sv_max: float = 1.13
+    # The smallest input singular value, relative to the Frobenius norm, each path holds the band from.
+    muon_band_domain_square: float = 1.4e-3
+    muon_band_domain_rectangular: float = 4e-3
 
     def muon_polar_cosine_min(self) -> float:
         """Smallest cosine between an orthogonalized update and its source's polar factor ``U V^T``.

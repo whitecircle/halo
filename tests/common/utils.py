@@ -167,20 +167,19 @@ def cos_sim(a: torch.Tensor, b: torch.Tensor, label: str = "tensor") -> float:
     return torch.dot(a, b).item() / (norm_a * norm_b)
 
 
-def matrix_with_spectrum(
-    rows: int, cols: int, singular_values: torch.Tensor, generator: torch.Generator
-) -> torch.Tensor:
-    """A random fp64 ``rows x cols`` matrix whose singular values are exactly ``singular_values``.
+def log_spectrum_matrix(rows: int, cols: int, generator: torch.Generator, decades: float = 1.0) -> torch.Tensor:
+    """A random fp64 ``rows x cols`` matrix whose singular values are log-spaced from 1 down ``decades``.
 
     Random orthonormal factors around a prescribed spectrum, so a test controls the conditioning an
-    iterative method sees instead of inheriting a Gaussian matrix's near-zero tail.
+    iterative method sees instead of inheriting a Gaussian matrix's near-zero tail. At one decade and
+    a few hundred singular values the smallest stays above 1e-2 of the Frobenius norm, inside the Muon
+    band's domain on either Newton-Schulz path (``TOL.muon_band_domain_*``).
     """
     rank = min(rows, cols)
-    if singular_values.numel() != rank:
-        raise ValueError(f"a {rows}x{cols} matrix has {rank} singular values, got {singular_values.numel()}")
+    spectrum = torch.logspace(0, -decades, rank, dtype=torch.float64)
     left, _ = torch.linalg.qr(torch.randn(rows, rank, generator=generator, dtype=torch.float64))
     right, _ = torch.linalg.qr(torch.randn(cols, rank, generator=generator, dtype=torch.float64))
-    return (left * singular_values.to(torch.float64)) @ right.T
+    return (left * spectrum) @ right.T
 
 
 def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str) -> None:
@@ -189,14 +188,23 @@ def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str
     Two independent properties: every singular value sits in the Newton-Schulz band, and the update
     points along ``source``'s own polar factor ``U V^T``. The band alone passes an update
     orthogonalized from the wrong matrix, which is the failure a batched step's restack produces.
+    A ``source`` whose spectrum leaves the band's domain for its path (the standard iteration for a
+    square matrix, the Gram one otherwise) is a broken fixture and fails as such.
     """
+    rows, cols = source.shape[-2:]
+    domain = TOL.muon_band_domain_square if rows == cols else TOL.muon_band_domain_rectangular
+    u, source_singular_values, vh = torch.linalg.svd(source.double(), full_matrices=False)
+    relative_min = (source_singular_values.min() / source_singular_values.norm()).item()
+    assert relative_min >= domain, (
+        f"{label}: premise: the source's smallest singular value is {relative_min:.2e} of its Frobenius "
+        f"norm, below the {domain:.1e} the Newton-Schulz band holds from on a {rows}x{cols} matrix"
+    )
     singular_values = torch.linalg.svdvals(update.double())
     low, high = singular_values.min().item(), singular_values.max().item()
     assert TOL.muon_orthogonal_sv_min <= low and high <= TOL.muon_orthogonal_sv_max, (
         f"{label}: singular values span [{low:.4f}, {high:.4f}], outside the Newton-Schulz band "
         f"[{TOL.muon_orthogonal_sv_min}, {TOL.muon_orthogonal_sv_max}]"
     )
-    u, _, vh = torch.linalg.svd(source.double(), full_matrices=False)
     cosine = cos_sim(update, u @ vh, label)
     assert cosine >= TOL.muon_polar_cosine_min(), (
         f"{label}: cosine to the source's polar factor is {cosine:.4f} (min {TOL.muon_polar_cosine_min():.4f})"
