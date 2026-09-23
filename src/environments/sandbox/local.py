@@ -125,6 +125,31 @@ def _entry_kinds(workdir: str) -> _EntryKinds:
     return kinds
 
 
+def _grant_owner(name: str, bits: int, dir_fd: int | None = None) -> None:
+    """Add ``bits`` to the owner permissions of the directory or regular file ``name`` (relative to
+    ``dir_fd`` when given). A link is never followed: ``AT_SYMLINK_NOFOLLOW`` refuses one
+    (``NotImplementedError``), including one raced in after the ``lstat``."""
+    with contextlib.suppress(FileNotFoundError, NotImplementedError):
+        mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+        if (stat.S_ISDIR(mode) or stat.S_ISREG(mode)) and mode & bits != bits:
+            os.chmod(name, stat.S_IMODE(mode) | bits, dir_fd=dir_fd, follow_symlinks=False)
+
+
+def _restore_owner_access(workdir: str) -> None:
+    """Give the owner back read, write and search on ``workdir`` and every directory under it, and
+    read and write on every regular file. A program running as the host's own uid (a grader that is
+    not root) can take them away, and the host's next staging, reset or removal would then fail on
+    the program's files. Top-down, so a directory is searchable before it is opened; walked by
+    descriptor, so no link is descended or followed."""
+    _grant_owner(workdir, stat.S_IRWXU)
+    with contextlib.suppress(FileNotFoundError):
+        for _path, dirs, files, dir_fd in os.fwalk(workdir):
+            for name in dirs:
+                _grant_owner(name, stat.S_IRWXU, dir_fd)
+            for name in files:
+                _grant_owner(name, stat.S_IRUSR | stat.S_IWUSR, dir_fd)
+
+
 def _build_key(spec: LanguageSpec, code: str, files: dict[str, str] | None) -> _BuildKey:
     """Identity of a compiled program's inputs; runs with equal keys share one build."""
     return (spec.name, code, tuple(sorted((files or {}).items())))
@@ -383,6 +408,7 @@ class LocalSession(SandboxSession):
         if spec.is_compiled and self._build is not None and self._build[0] == key:
             return self._build[1]
         self._build = None
+        _restore_owner_access(self.workdir)
         staged = self._executor._stage_sources(self.workdir, spec, code, files)
         if staged is not None:
             return staged
@@ -398,6 +424,7 @@ class LocalSession(SandboxSession):
         # A replaced working directory lists whatever it now points at; the next run reports the fault.
         if self._ensure_workspace() is not None or self._staged_entries is None:
             return
+        _restore_owner_access(self.workdir)
         for name, kind in _entry_kinds(self.workdir) - self._staged_entries:
             path = os.path.join(self.workdir, name)
             if kind == stat.S_IFDIR:
@@ -443,6 +470,7 @@ class LocalSession(SandboxSession):
         except FileNotFoundError:
             return
         if stat.S_ISDIR(mode):
+            _restore_owner_access(self.workdir)
             shutil.rmtree(self.workdir, ignore_errors=True)
         else:
             # A link or file the program put in the directory's place: rmtree refuses a link.

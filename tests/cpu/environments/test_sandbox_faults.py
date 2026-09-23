@@ -21,6 +21,8 @@ import logging
 import os
 import resource
 import shutil
+import subprocess
+import sys
 import threading
 import time
 
@@ -46,7 +48,7 @@ from src.environments.sandbox.base import (
     SandboxResult,
 )
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
-from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
+from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox, _restore_owner_access
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
@@ -56,6 +58,7 @@ from src.rewards.scoring import Scorer, ScoreResult
 from src.rewards.spec import JudgeTerm
 from src.trainers.grpo.environmental import rollout_valid_mask
 from src.trainers.grpo.objective.advantages import group_relative_advantages
+from tests.common.utils import REPO_ROOT
 
 _TOOL_ERROR_PENALTY = 0.1
 _REMOVE_OWN_WORKDIR = "import os, shutil\nprint('hello')\nshutil.rmtree(os.getcwd())\n"
@@ -440,6 +443,84 @@ def _completes_promptly(fn) -> bool:
     worker.start()
     worker.join(_HOST_OPEN_TIMEOUT_S)
     return not worker.is_alive()
+
+
+# Takes back the owner's access to everything it wrote and to what the host staged.
+_LOCK_THE_WORKDIR = (
+    "import os\n"
+    "os.makedirs('sub/deeper', exist_ok=True)\n"
+    "open('sub/deeper/kept.txt', 'w').close()\n"
+    "open('left.txt', 'w').close()\n"
+    "os.chmod('sub/deeper/kept.txt', 0o000)\n"
+    "os.chmod('sub/deeper', 0o500)\n"
+    "os.chmod('sub', 0o000)\n"
+    "os.chmod('main.py', 0o000)\n"
+    "os.chmod('.', 0o500)\n"
+    "print('wrong')\n"
+)
+_GRADE_AND_REPORT = f"""
+import json, os, tempfile
+from src.environments.envs.tasks.coding.grading import run_solution_against_tests
+from src.environments.sandbox.local import LocalSubprocessSandbox
+tempfile.tempdir = tempfile.mkdtemp()
+tests = [{{"input": "", "output": "right"}}] * 3
+grade = run_solution_against_tests({_LOCK_THE_WORKDIR!r}, tests, sandbox=LocalSubprocessSandbox())
+report = {{"uid": os.getuid(), "grade": grade._asdict(), "left": os.listdir(tempfile.tempdir)}}
+print(json.dumps(report))
+"""
+# The uid a grader that is not root runs the program as, when the suite itself runs as root.
+_UNPRIVILEGED_UID = "65534"
+
+
+def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
+    """Graded by a user that is not root, which the program shares: every test is judged, its
+    working directory is removed at the end, and nothing it locked reads as a grading outage."""
+    command = [sys.executable, "-c", _GRADE_AND_REPORT]
+    if os.geteuid() == 0:
+        if shutil.which("setpriv") is None:
+            pytest.skip("running as root without setpriv to drop to an unprivileged uid")
+        command = [
+            "setpriv",
+            f"--reuid={_UNPRIVILEGED_UID}",
+            f"--regid={_UNPRIVILEGED_UID}",
+            "--clear-groups",
+            *command,
+        ]
+    proc = subprocess.run(
+        command, capture_output=True, text=True, cwd=REPO_ROOT, check=False, env={**os.environ, "HOME": "/tmp"}
+    )
+    assert proc.returncode == 0, proc.stderr
+    report = json.loads(proc.stdout.splitlines()[-1])
+    assert report["uid"] != 0
+    grade = report["grade"]
+    assert (grade["graded"], grade["infra_errors"], grade["passed"]) == (3, 0, 0), grade["details"]
+    assert "FAIL" in grade["details"] and "ERROR --" not in grade["details"], grade["details"]
+    assert report["left"] == [], "the session removes the working directory the program locked"
+
+
+def test_restoring_owner_access_reaches_nested_entries_and_never_follows_a_link(tmp_path):
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "secret").write_text("host data")
+    (host / "secret").chmod(0o400)
+    workdir = tmp_path / "work"
+    (workdir / "sub").mkdir(parents=True)
+    (workdir / "sub" / "kept.txt").write_text("x")
+    (workdir / "file_link").symlink_to(host / "secret")
+    (workdir / "sub" / "dir_link").symlink_to(host)
+    (workdir / "sub" / "kept.txt").chmod(0o000)
+    (workdir / "sub").chmod(0o000)
+    workdir.chmod(0o500)
+    host.chmod(0o500)
+    try:
+        _restore_owner_access(str(workdir))
+        assert workdir.stat().st_mode & 0o700 == 0o700
+        assert (workdir / "sub").stat().st_mode & 0o700 == 0o700
+        assert (workdir / "sub" / "kept.txt").stat().st_mode & 0o700 == 0o600
+        assert host.stat().st_mode & 0o777 == 0o500, "a link to a directory is never followed"
+        assert (host / "secret").stat().st_mode & 0o777 == 0o400, "a link to a file is never followed"
+    finally:
+        host.chmod(0o700)
 
 
 def test_a_fifo_where_the_host_stages_or_reads_never_blocks_it():
