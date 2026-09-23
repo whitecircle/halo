@@ -24,7 +24,6 @@ import pytest
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.sandbox import local as local_backend
 from src.environments.sandbox.base import LOCAL_NPROC_LIMIT, ExecutionGate, SandboxInfraError, SandboxResult
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
@@ -114,31 +113,24 @@ def test_local_timeout_kills_forked_grandchildren():
     assert _proc_state(grandchild) in (None, "Z"), f"grandchild {grandchild} survived the group kill"
 
 
-def test_local_timeout_drain_bounded_when_child_escapes_group():
+def test_a_child_that_escapes_the_group_does_not_hold_the_run_open():
     """A grandchild that setsid()s OUT of the process group survives the group kill and keeps its copy
-    of the child's output handles — the timed-out run must still return within the post-kill bound
-    (POST_KILL_WAIT_TIMEOUT), not hang the grading worker until the escapee exits."""
-    original = local_backend.POST_KILL_WAIT_TIMEOUT
-    local_backend.POST_KILL_WAIT_TIMEOUT = 1.0
-    try:
-        sb = LocalSubprocessSandbox()
-        code = (
-            "import os, time\n"
-            "pid = os.fork()\n"
-            "if pid == 0:\n"
-            "    os.setsid()\n"  # escape the process group: the killpg misses this one
-            "    time.sleep(15)\n"
-            "    os._exit(0)\n"
-            "print('parent alive', flush=True)\n"
-            "time.sleep(15)\n"
-        )
-        start = time.monotonic()
-        res = sb.run(code, timeout=1.0)
-        elapsed = time.monotonic() - start
-        assert res.timed_out
-        assert elapsed < 10.0, f"post-kill drain not bounded: took {elapsed:.1f}s (escapee held the pipe)"
-    finally:
-        local_backend.POST_KILL_WAIT_TIMEOUT = original
+    of the run's stdin and output files; the timed-out run returns without waiting for it."""
+    code = (
+        "import os, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setsid()\n"  # escape the process group: the killpg misses this one
+        "    time.sleep(15)\n"
+        "    os._exit(0)\n"
+        "print('parent alive', flush=True)\n"
+        "time.sleep(15)\n"
+    )
+    start = time.monotonic()
+    res = LocalSubprocessSandbox().run(code, timeout=1.0)
+    elapsed = time.monotonic() - start
+    assert res.timed_out
+    assert elapsed < 10.0, f"the run waited {elapsed:.1f}s for a child outside its group"
 
 
 def test_limit_wrap_caps_process_count_for_run_step():

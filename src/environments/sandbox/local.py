@@ -9,6 +9,7 @@ import contextlib
 import errno
 import math
 import os
+import select
 import shutil
 import signal
 import stat
@@ -31,6 +32,7 @@ from src.environments.sandbox.base import (
     SandboxResult,
     SandboxSession,
     compile_limit_verdict,
+    require_encodable_path,
     require_language,
     utf8_encodable,
 )
@@ -39,8 +41,6 @@ from src.environments.sandbox.base import (
 # Python program runs on the same interpreter as the toolkit.
 PYTHON_INTERPRETER = sys.executable or "python"
 
-# Bound on the wait for the leader after its group is killed, for one the kill cannot reap at once.
-POST_KILL_WAIT_TIMEOUT = 10.0
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
 
@@ -96,13 +96,24 @@ def _open_member(workdir: str, name: str, flags: int) -> int:
 
 
 def _captured_text(capture) -> str:
-    """A run's captured output stream as text, read as a text-mode pipe would: decoded with
-    replacement, so bytes that are not UTF-8 (C++ undefined behavior, a binary dump) are judged on the
-    replaced text rather than lost to a decode error, and with ``\r\n`` / ``\r`` read as ``\n``, so a
-    program ending lines the Windows way is compared on its lines."""
+    """A run's captured output stream as text, decoded with replacement: bytes that are not UTF-8 (C++
+    undefined behavior, a binary dump) are judged on the replaced text, never lost to a decode error."""
     capture.seek(0)
-    text = capture.read(LOCAL_FSIZE_LIMIT).decode("utf-8", errors="replace")
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return capture.read(LOCAL_FSIZE_LIMIT).decode("utf-8", errors="replace")
+
+
+def _exited_within(pid: int, timeout: float) -> bool:
+    """Whether process ``pid`` exits within ``timeout`` seconds, without reaping it: its pidfd polls
+    readable once it has exited, and until it is reaped its zombie keeps the pid, and so the id of the
+    process group it leads, taken."""
+    pidfd = os.pidfd_open(pid)
+    try:
+        # poll, not select: a busy host hands out descriptors past select's FD_SETSIZE.
+        poller = select.poll()
+        poller.register(pidfd, select.POLLIN)
+        return bool(poller.poll(math.ceil(timeout * 1000)))
+    finally:
+        os.close(pidfd)
 
 
 def _entry_kinds(workdir: str) -> _EntryKinds:
@@ -184,38 +195,22 @@ class LocalSubprocessSandbox(SandboxExecutor):
 
         ``start_new_session`` puts the child in a fresh process group, which is SIGKILLed whenever the
         run ends: on a timeout, and also after the leader exits, since a child left in the group would
-        outlive the run (the run is judged on the leader's exit and output). Output is captured in
-        temp files rather than pipes, so the child's ``RLIMIT_FSIZE`` bounds it: an output flood ends
-        as the program's own failure at the file-size limit, never as host memory the grader runs out
-        of.
+        outlive the run (the run is judged on the leader's exit and output). The kill lands before the
+        leader is reaped, while its zombie still holds the group's id. Stdin, stdout and stderr are temp
+        files rather than pipes: nothing the child leaves running can hold the run open, and the
+        child's ``RLIMIT_FSIZE`` bounds its output, so a flood ends as the program's own failure at the
+        file-size limit, never as host memory the grader runs out of.
         """
-        # Encoded before the child starts, as a text-mode pipe took it: no input for ``None`` (a null
-        # test input), and what UTF-8 cannot carry replaced.
-        payload = utf8_encodable(stdin or "").encode("utf-8")
-        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-            with subprocess.Popen(
-                argv,
-                stdin=subprocess.PIPE,
-                stdout=out,
-                stderr=err,
-                cwd=cwd,
-                env=env,
-                start_new_session=True,
-            ) as proc:
-                timed_out = False
-                try:
-                    proc.communicate(input=payload, timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                finally:
-                    # Every exit path, so no group member outlives the run and ``__exit__`` never
-                    # waits unbounded; the group may already be gone.
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    try:
-                        proc.wait(timeout=POST_KILL_WAIT_TIMEOUT)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
+        with tempfile.TemporaryFile() as feed, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            # What UTF-8 cannot carry (a lone surrogate in a model-written stdin) is replaced.
+            feed.write(utf8_encodable(stdin).encode("utf-8"))
+            feed.seek(0)
+            proc = subprocess.Popen(argv, stdin=feed, stdout=out, stderr=err, cwd=cwd, env=env, start_new_session=True)
+            try:
+                timed_out = not _exited_within(proc.pid, timeout)
+            finally:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
             return _captured_text(out), _captured_text(err), proc.returncode, timed_out
 
     @staticmethod
@@ -412,6 +407,7 @@ class LocalSession(SandboxSession):
                     os.remove(path)
 
     def write_file(self, path: str, content: str) -> None:
+        require_encodable_path(path)
         if not _safe_member_name(path):
             raise ValueError(f"unsafe session file path: {path!r}")
         self._require_intact()
@@ -422,6 +418,7 @@ class LocalSession(SandboxSession):
     def read_file(self, path: str) -> str | None:
         """The file's text, or ``None`` when there is no regular file at ``path`` — a link the program
         planted included, so a host file never reaches the trajectory through it."""
+        require_encodable_path(path)
         if not _safe_member_name(path):
             raise ValueError(f"unsafe session file path: {path!r}")
         self._require_intact()

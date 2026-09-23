@@ -109,11 +109,18 @@ def compare_tokens(expected: str, actual: str) -> bool:
     return all(_tokens_equal(e, a) for e, a in zip(et, at, strict=False))
 
 
+def _lf_lines(text: str) -> str:
+    """``text`` stripped, with ``\r\n`` and ``\r`` read as ``\n``."""
+    return text.strip().replace("\r\n", "\n").replace("\r", "\n")
+
+
 def exact_output_match(expected: str, actual: str) -> bool:
     """Exact comparison of a program's OUTPUT after stripping leading/trailing whitespace from both
-    sides (legacy CodeContests). Distinct from :func:`src.rewards.matching.exact_match`, which
-    normalizes a free-text answer."""
-    return expected.strip() == actual.strip()
+    sides (legacy CodeContests), reading ``\r\n`` and ``\r`` as ``\n``: a judge compares lines, not
+    line endings, so neither a CRLF test file nor a program ending lines the Windows way flips the
+    verdict, whichever backend captured the output. Distinct from
+    :func:`src.rewards.matching.exact_match`, which normalizes a free-text answer."""
+    return _lf_lines(expected) == _lf_lines(actual)
 
 
 def as_verdict(comparator: Callable[[str, str], bool]) -> VerdictFn:
@@ -318,7 +325,8 @@ def run_solution_against_tests(
             if deadline is not None and graded and time.monotonic() >= deadline:
                 budget_hit = True
                 break
-            test_input = tc.get("input", "")
+            # A null input is no input: the program reads end-of-file and a checker an empty input.txt.
+            test_input = tc.get("input") or ""
             expected_output = tc.get("output", "")
 
             result = run_test(test_input)

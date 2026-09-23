@@ -36,7 +36,7 @@ rollout_thinking_budget_scope: episode
 | Knob | Default | Effect |
 |---|---|---|
 | `language` | `python` | `python`, `cpp`, `c`, or a list the model picks from |
-| `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed byte equality, `tokens` whitespace-token equality |
+| `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed equality reading `\r\n` and `\r` as `\n` on both sides, `tokens` whitespace-token equality |
 | `verdict_detail` | `full` | `full` shows a failed test's expected and produced output; `outcome` the verdict alone |
 | `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |

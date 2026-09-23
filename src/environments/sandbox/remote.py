@@ -16,6 +16,7 @@ from src.environments.sandbox.base import (
     SandboxResult,
     SandboxSession,
     compile_limit_verdict,
+    require_encodable_path,
     utf8_encodable,
 )
 
@@ -174,9 +175,11 @@ class RemoteSession(SandboxSession):
         return self._executor.run(code, stdin=stdin, timeout=timeout, language=language, files=merged)
 
     def write_file(self, path: str, content: str) -> None:
+        require_encodable_path(path)
         self._files[path] = content
 
     def read_file(self, path: str) -> str | None:
+        require_encodable_path(path)
         return self._files.get(path)
 
     def list_files(self) -> list[str]:

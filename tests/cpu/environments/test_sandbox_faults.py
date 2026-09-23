@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import resource
 import shutil
 import threading
 import time
@@ -34,10 +35,16 @@ from src.environments.base import (
 )
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.coding.grading import run_solution_against_tests
+from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.episode import RolloutResult
-from src.environments.sandbox.base import LOCAL_FSIZE_LIMIT, SandboxAgentFault, SandboxInfraError, SandboxResult
+from src.environments.sandbox.base import (
+    LOCAL_FSIZE_LIMIT,
+    SandboxAgentFault,
+    SandboxExecutor,
+    SandboxInfraError,
+    SandboxResult,
+)
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
@@ -339,6 +346,58 @@ def test_a_remote_payload_carries_no_lone_surrogate():
     assert (sent["code"], sent["stdin"], sent["files"]["h.py"]) == ("print(1)  # ?", "a?", "?")
 
 
+class _StubRun(SandboxExecutor):
+    """Every run returns one canned result, the way a remote service hands back raw output."""
+
+    def __init__(self, result: SandboxResult):
+        self._result = result
+
+    def open_session(self):
+        raise NotImplementedError
+
+    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
+        return self._result
+
+
+_CHECKER_WANTS_EMPTY_INPUT = (
+    "import sys\n"
+    "given = open(sys.argv[1]).read()\n"
+    "produced = open(sys.argv[3]).read().split()\n"
+    "print(1 if given == '' and produced == ['ok'] else 0)\n"
+)
+
+
+def test_a_null_test_input_reaches_a_checker_as_an_empty_input():
+    spec = GradingSpec(sandbox=LocalSubprocessSandbox())
+    grade = grade_solution("print('ok')", [{"input": None, "output": "ok"}], spec, checker=_CHECKER_WANTS_EMPTY_INPUT)
+    assert grade.infra_errors == 0 and grade.passed == 1, grade.details
+
+
+@pytest.mark.parametrize("backend", ["local", "remote"])
+def test_a_session_path_utf8_cannot_encode_is_refused_as_an_argument(backend):
+    """A priced tool error on every backend, never a name the backend fails on (an infra error)."""
+    if backend == "local":
+        session = LocalSubprocessSandbox().open_session()
+    else:
+        sent = {}
+
+        class _Recording(_Session):
+            def post(self, url, json=None, timeout=None):
+                sent.update(json)
+                return super().post(url, json=json, timeout=timeout)
+
+        finished = {"status": "Success", "run_result": {"status": "Finished", "stdout": "", "return_code": 0}}
+        session = RemoteSandbox("http://sandbox:8080", session=_Recording(finished)).open_session()
+    with session:
+        for operation in (lambda: session.write_file("a\ud83d.py", "x"), lambda: session.read_file("a\ud83d.py")):
+            with pytest.raises(ValueError, match="not valid UTF-8"):
+                operation()
+        session.write_file("ok.py", "x")
+        assert session.run("print(1)").error is None
+    if backend == "remote":
+        assert list(sent["files"]) == ["ok.py"], "no refused name reaches the service"
+
+
 def test_a_null_test_input_is_no_input_not_an_infra_error():
     tests = [{"input": None, "output": "ok"}]
     grade = run_solution_against_tests("print('ok')", tests, sandbox=LocalSubprocessSandbox())
@@ -395,8 +454,8 @@ def test_a_fifo_where_the_host_stages_or_reads_never_blocks_it():
 
 
 def test_a_lone_surrogate_in_stdin_is_replaced_not_a_host_hang():
-    """A model-written stdin can carry a lone surrogate UTF-8 cannot encode: it is replaced, as a
-    text-mode pipe did, and never raises after the child started, which left the host waiting on it."""
+    """A model-written stdin can carry a lone surrogate UTF-8 cannot encode: it reaches the program as
+    ``?`` and never raises once the child has started, where the host would wait on it unbounded."""
     sandbox = LocalSubprocessSandbox()
     results = {}
     echo = "import sys\nprint(repr(sys.stdin.read()))"
@@ -437,12 +496,38 @@ def test_a_forked_child_the_program_leaves_behind_dies_with_the_run():
     assert not _live_group_members(pgid), "a forked child outlived the run"
 
 
-def test_crlf_output_reads_as_a_text_mode_pipe_did():
-    """Windows line endings read as ``\n``, so an exact comparison judges the lines, not the endings."""
+def test_a_run_waits_on_its_child_past_select_s_descriptor_limit():
+    """A busy host (many sandbox slots, Ray) hands the run descriptors past ``FD_SETSIZE``."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = 2048
+    if hard != resource.RLIM_INFINITY and hard < wanted:
+        pytest.skip(f"RLIMIT_NOFILE hard limit {hard} is below {wanted}")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, wanted), hard))
+    held = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+    try:
+        assert max(held) >= 1024
+        result = LocalSubprocessSandbox().run("print(1)")
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert result.ok and result.stdout.strip() == "1"
+
+
+@pytest.mark.parametrize(
+    ("expected", "produced"), [("1\n2\n", "1\r\n2\r\n"), ("1\r\n2\r\n", "1\n2\n"), ("1\r2", "1\n2")]
+)
+def test_crlf_and_lf_output_compare_equal_on_every_backend(expected, produced):
+    """An exact comparison judges lines, not line endings: raw CRLF output (as a remote service returns
+    it, or a CRLF test file) grades like LF."""
+    raw = _StubRun(SandboxResult(stdout=produced, returncode=0))
+    assert run_solution_against_tests("code", [{"input": "", "output": expected}], sandbox=raw).passed == 1
+    assert not run_solution_against_tests("code", [{"input": "", "output": "1 2"}], sandbox=raw).passed
+
+
+def test_a_local_program_writing_crlf_passes_an_lf_test():
     program = "import sys\nsys.stdout.buffer.write(b'1\\r\\n2\\r\\n')\n"
-    sandbox = LocalSubprocessSandbox()
-    assert sandbox.run(program).stdout == "1\n2\n"
-    grade = run_solution_against_tests(program, [{"input": "", "output": "1\n2\n"}], sandbox=sandbox)
+    grade = run_solution_against_tests(program, [{"input": "", "output": "1\n2\n"}], sandbox=LocalSubprocessSandbox())
     assert grade.passed == 1, grade.details
 
 

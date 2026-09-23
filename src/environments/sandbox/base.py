@@ -41,6 +41,17 @@ def utf8_encodable(text: str) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
+def require_encodable_path(path: str) -> None:
+    """Refuse a session file path UTF-8 cannot encode (a lone surrogate from model-written JSON) with
+    ``ValueError``, a priced tool error: no backend can create or send such a name, and one that failed
+    there would read as the backend's fault. Refused rather than renamed, so the program never finds
+    its file under a name it did not write."""
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"session file path {path!r} is not valid UTF-8") from None
+
+
 def repl_timeout_message(timeout: float) -> str:
     """The REPL observation for a run killed by its wall-clock ``timeout``."""
     return f"Error: execution exceeded {timeout:g}s timeout"

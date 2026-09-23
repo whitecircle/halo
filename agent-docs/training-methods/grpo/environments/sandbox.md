@@ -86,7 +86,7 @@ Voiding is only as sound as the backend's containment of the program: whatever t
 - `remote`: a response the service fails to produce (a huge output, the service's own OOM) or one past the client deadline, `run_timeout` + 30 s.
 - Grading on `local` / `bubblewrap`: any host-side exception during a test is an infra error for that test (`_run_in_sandbox`) — on `local`, the `EAGAIN` of a process table the program's leftover processes filled; on either, the `ENOSPC` of a `TMPDIR` it filled.
 
-An output flood is not one: output is captured in files under the child's `RLIMIT_FSIZE`, so it ends as the program's own failure at the file-size limit. Nor is a lone surrogate in the program's source, stdin or files: every backend replaces it with `?`, as a text-mode pipe writes it. Where faults are frequent, dropping them is a selection — the episodes that call the sandbox most drop most. Watch `episode/sandbox_infra_fault`; `remote` retries nothing.
+An output flood is not one: output is captured in files under the child's `RLIMIT_FSIZE`, so it ends as the program's own failure at the file-size limit. Nor is a lone surrogate in the program's source, stdin or files: every backend replaces it with `?`, as a text-mode pipe writes it, and refuses a session file name UTF-8 cannot encode as a bad argument (`ValueError`, a priced tool error). Where faults are frequent, dropping them is a selection — the episodes that call the sandbox most drop most. Watch `episode/sandbox_infra_fault`; `remote` retries nothing.
 
 ## Languages
 
@@ -113,7 +113,7 @@ Per-run rlimits bound each `local` / `bubblewrap` execution; `remote` enforces i
 | File size (`RLIMIT_FSIZE`), captured stdout / stderr included | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
 | Processes (`RLIMIT_NPROC`) | 4096 | not applied | `LOCAL_NPROC_LIMIT` |
 
-The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense. The group is killed when the leader exits too, so a run is judged on the leader's exit and output, and a child left in its process group neither outlives it nor holds it open; one that `setsid()`s out of the group escapes on `local`.
+The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense. The group is killed when the leader exits too, before the leader is reaped, so a run is judged on the leader's exit and output and a child left in its process group does not outlive it; one that `setsid()`s out of the group escapes on `local`, without holding the run open.
 
 ## Concurrency and sizing
 
@@ -121,7 +121,7 @@ Every `local` / `bubblewrap` execution takes a process-global `ExecutionGate` sl
 
 The gate is **per process**, its slot count fixed at import: set the variable before the process starts, and when several processes share a host size the slots so they **sum** to the core count.
 
-One execution is a child process in a working directory under `TMPDIR`, its stdout and stderr captured in two more files there (up to 64 MiB each, so 2 × 64 MiB per concurrent run). Point `TMPDIR` at a large volume: a `swe` session's whole tree lives there for the episode. Several file descriptors go with each execution, so a high slot count exhausts the default 1024-fd limit (`docker run --ulimit nofile=1048576`).
+One execution is a child process in a working directory under `TMPDIR`, with its stdin, stdout and stderr in three more files there (the output ones up to 64 MiB each, so 2 × 64 MiB per concurrent run on top of its stdin). Point `TMPDIR` at a large volume: a `swe` session's whole tree lives there for the episode. Several file descriptors go with each execution, so a high slot count exhausts the default 1024-fd limit (`docker run --ulimit nofile=1048576`).
 
 Under Ray the backend resolves inside each `EnvironmentActor`'s own process, so these variables must be in the *actor's* environment ([actor runtime](README.md#actor-runtime)). `env.cleanup([episode_id])` runs in a `finally` after every episode, so no session leaks across a long-lived actor.
 
