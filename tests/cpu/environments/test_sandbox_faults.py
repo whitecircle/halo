@@ -17,6 +17,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import threading
@@ -37,6 +38,7 @@ from src.environments.envs.tasks.coding.grading import run_solution_against_test
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.episode import RolloutResult
 from src.environments.sandbox.base import LOCAL_FSIZE_LIMIT, SandboxAgentFault, SandboxInfraError, SandboxResult
+from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output
@@ -146,6 +148,18 @@ def test_an_ordinary_raising_tool_stays_a_priced_tool_error():
     assert step.trajectory.total_reward == pytest.approx(-_TOOL_ERROR_PENALTY)
     metrics = env.rollout_metrics(step.trajectory)
     assert (metrics["episode/sandbox_infra_fault"], metrics["episode/sandbox_agent_fault"]) == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
+def test_a_typed_sandbox_fault_logs_no_tool_traceback(cls, caplog):
+    """A sandbox fault is booked by its class, not reported as a tool that broke: the traceback the
+    protocol logs for any other raising tool stays off it."""
+    caplog.set_level(logging.DEBUG)
+    for mode in ("infra", "agent"):
+        _native_episode(mode, cls=cls)
+    assert not [record for record in caplog.records if record.exc_info]
+    _native_episode("crash", cls=cls)
+    assert [record for record in caplog.records if record.exc_info], "a tool that broke keeps its traceback"
 
 
 def test_react_books_the_faults_the_same_way():
@@ -290,6 +304,45 @@ def test_an_output_flood_is_the_programs_failure_at_the_file_size_limit():
     assert result.error is None and not result.timed_out
     assert not result.ok, "the flood must fail at the file-size limit, not complete"
     assert len(result.stdout) <= LOCAL_FSIZE_LIMIT
+
+
+def _executor(backend: str):
+    if backend == "local":
+        return LocalSubprocessSandbox()
+    try:
+        return BubblewrapSandbox()
+    except RuntimeError as exc:
+        pytest.skip(f"bubblewrap cannot sandbox here: {exc}")
+
+
+@pytest.mark.parametrize("backend", ["local", "bubblewrap"])
+def test_a_lone_surrogate_in_submitted_code_is_graded_not_voided(backend):
+    """What UTF-8 cannot carry in the program's source is replaced, as in its stdin, so staging it can
+    never fail into an infra error the policy controls."""
+    tests = [{"input": "", "output": "ok"}]
+    grade = run_solution_against_tests("print('ok')  # \ud83d\n", tests, sandbox=_executor(backend))
+    assert grade.infra_errors == 0 and grade.passed == 1, grade.details
+
+
+def test_a_remote_payload_carries_no_lone_surrogate():
+    sent = {}
+
+    class _Recording(_Session):
+        def post(self, url, json=None, timeout=None):
+            sent.update(json)
+            return super().post(url, json=json, timeout=timeout)
+
+    finished = {"status": "Success", "run_result": {"status": "Finished", "stdout": "", "return_code": 0}}
+    RemoteSandbox("http://sandbox:8080", session=_Recording(finished)).run(
+        "print(1)  # \ud83d", stdin="a\ud83d", files={"h.py": "\ud83d"}
+    )
+    assert (sent["code"], sent["stdin"], sent["files"]["h.py"]) == ("print(1)  # ?", "a?", "?")
+
+
+def test_a_null_test_input_is_no_input_not_an_infra_error():
+    tests = [{"input": None, "output": "ok"}]
+    grade = run_solution_against_tests("print('ok')", tests, sandbox=LocalSubprocessSandbox())
+    assert grade.infra_errors == 0 and grade.passed == 1, grade.details
 
 
 def test_a_removed_working_directory_is_recreated_not_a_fault():

@@ -54,9 +54,10 @@ starvation reads differently from wrong answers. `success@1` is the first sample
 benchmark's pass@1 reports. Reasoning models need a large `--max_tokens`: too low cuts the chain of
 thought before any answer, scoring 0.
 
-`invalid` counts the samples scored 0 with no signal — an invalid grade (a grading or sandbox
-outage, a failed scorer) or a lost episode, each carrying `error`. They stay in the means, unlike in
-training, where the baseline drops them.
+`invalid` counts the samples scored 0 with no signal, each carrying `error`: an invalid grade (a
+grading or sandbox outage, a failed scorer, a null `answer`) or an episode whose run raised. An
+episode that lost a generation is graded on what it earned and is not one. Invalid samples stay in
+the means, unlike in training, where the baseline drops them.
 
 ## Output files
 

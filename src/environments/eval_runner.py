@@ -332,7 +332,7 @@ def summarize(rows: list[dict[str, Any]], num_samples: int) -> dict[str, float]:
         raise ValueError("summarize() got no results — the eval produced zero episodes (empty dataset or all failed)")
     mean_reward = statistics.mean(statistics.mean(s["reward"] for s in r["samples"]) for r in rows)
     pass1 = statistics.mean(float(r["samples"][0]["success"]) for r in rows)
-    # Samples scored 0 with no signal (an invalid grade, a lost episode): kept in the means, counted apart.
+    # Samples scored 0 with no signal (an invalid grade, a run that raised): kept in the means, counted apart.
     invalid = sum(1 for r in rows for s in r["samples"] if "error" in s)
     out = {"n": len(rows), "mean_reward": mean_reward, "success@1": pass1, "invalid": invalid}
     if num_samples > 1:

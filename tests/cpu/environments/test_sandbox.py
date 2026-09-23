@@ -117,9 +117,9 @@ def test_local_timeout_kills_forked_grandchildren():
 def test_local_timeout_drain_bounded_when_child_escapes_group():
     """A grandchild that setsid()s OUT of the process group survives the group kill and keeps its copy
     of the child's output handles — the timed-out run must still return within the post-kill bound
-    (KILL_DRAIN_TIMEOUT), not hang the grading worker until the escapee exits."""
-    original = local_backend.KILL_DRAIN_TIMEOUT
-    local_backend.KILL_DRAIN_TIMEOUT = 1.0
+    (POST_KILL_WAIT_TIMEOUT), not hang the grading worker until the escapee exits."""
+    original = local_backend.POST_KILL_WAIT_TIMEOUT
+    local_backend.POST_KILL_WAIT_TIMEOUT = 1.0
     try:
         sb = LocalSubprocessSandbox()
         code = (
@@ -138,7 +138,7 @@ def test_local_timeout_drain_bounded_when_child_escapes_group():
         assert res.timed_out
         assert elapsed < 10.0, f"post-kill drain not bounded: took {elapsed:.1f}s (escapee held the pipe)"
     finally:
-        local_backend.KILL_DRAIN_TIMEOUT = original
+        local_backend.POST_KILL_WAIT_TIMEOUT = original
 
 
 def test_limit_wrap_caps_process_count_for_run_step():

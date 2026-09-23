@@ -34,6 +34,13 @@ INTERPRETER_PLACEHOLDER = "$INTERPRETER"
 REPL_NO_OUTPUT_MESSAGE = "Code executed successfully (no output)"
 
 
+def utf8_encodable(text: str) -> str:
+    """``text`` with what UTF-8 cannot carry (a lone surrogate in model-written code or stdin) replaced
+    by ``?``, as a text-mode pipe writes it: the program sees the replacement, and the host never fails
+    to hand its input over (a failure the grader books as infra, voiding the episode)."""
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def repl_timeout_message(timeout: float) -> str:
     """The REPL observation for a run killed by its wall-clock ``timeout``."""
     return f"Error: execution exceeded {timeout:g}s timeout"

@@ -16,6 +16,7 @@ from src.environments.sandbox.base import (
     SandboxResult,
     SandboxSession,
     compile_limit_verdict,
+    utf8_encodable,
 )
 
 # HTTP budget on top of the program's own timeout: the service still has to queue, provision and
@@ -77,15 +78,17 @@ class RemoteSandbox(SandboxExecutor):
         language: str = "python",
         files: dict[str, str] | None = None,
     ) -> SandboxResult:
+        # The service decodes the JSON back into text it must write out: a lone surrogate would fail it
+        # there, a service error that voids the episode.
         payload: dict[str, object] = {
-            "code": code,
+            "code": utf8_encodable(code),
             "language": language,
             "run_timeout": int(math.ceil(timeout)),
         }
         if stdin:
-            payload["stdin"] = stdin
+            payload["stdin"] = utf8_encodable(stdin)
         if files:
-            payload["files"] = files
+            payload["files"] = {name: utf8_encodable(content) for name, content in files.items()}
 
         try:
             resp = self._session.post(self.endpoint, json=payload, timeout=timeout + _REQUEST_OVERHEAD_SECONDS)

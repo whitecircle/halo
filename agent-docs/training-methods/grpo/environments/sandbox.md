@@ -86,7 +86,7 @@ Voiding is only as sound as the backend's containment of the program: whatever t
 - `remote`: a response the service fails to produce (a huge output, the service's own OOM) or one past the client deadline, `run_timeout` + 30 s.
 - Grading on `local` / `bubblewrap`: any host-side exception during a test is an infra error for that test (`_run_in_sandbox`) — on `local`, the `EAGAIN` of a process table the program's leftover processes filled; on either, the `ENOSPC` of a `TMPDIR` it filled.
 
-An output flood is not one: output is captured in files under the child's `RLIMIT_FSIZE`, so it ends as the program's own failure at the file-size limit. Where faults are frequent, dropping them is a selection — the episodes that call the sandbox most drop most. Watch `episode/sandbox_infra_fault`; `remote` retries nothing.
+An output flood is not one: output is captured in files under the child's `RLIMIT_FSIZE`, so it ends as the program's own failure at the file-size limit. Nor is a lone surrogate in the program's source, stdin or files: every backend replaces it with `?`, as a text-mode pipe writes it. Where faults are frequent, dropping them is a selection — the episodes that call the sandbox most drop most. Watch `episode/sandbox_infra_fault`; `remote` retries nothing.
 
 ## Languages
 
@@ -113,7 +113,7 @@ Per-run rlimits bound each `local` / `bubblewrap` execution; `remote` enforces i
 | File size (`RLIMIT_FSIZE`), captured stdout / stderr included | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
 | Processes (`RLIMIT_NPROC`) | 4096 | not applied | `LOCAL_NPROC_LIMIT` |
 
-The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense. The group is killed when the leader exits too, so a run is judged on the leader's exit and output, and a child it forked neither outlives it nor holds it open.
+The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense. The group is killed when the leader exits too, so a run is judged on the leader's exit and output, and a child left in its process group neither outlives it nor holds it open; one that `setsid()`s out of the group escapes on `local`.
 
 ## Concurrency and sizing
 

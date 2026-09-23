@@ -32,14 +32,15 @@ from src.environments.sandbox.base import (
     SandboxSession,
     compile_limit_verdict,
     require_language,
+    utf8_encodable,
 )
 
 # The interpreter :data:`INTERPRETER_PLACEHOLDER` resolves to: this process's own, so a sandboxed
 # Python program runs on the same interpreter as the toolkit.
 PYTHON_INTERPRETER = sys.executable or "python"
 
-# Post-kill wait bound, for a child the group kill cannot reap at once.
-KILL_DRAIN_TIMEOUT = 10.0
+# Bound on the wait for the leader after its group is killed, for one the kill cannot reap at once.
+POST_KILL_WAIT_TIMEOUT = 10.0
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
 
@@ -182,15 +183,15 @@ class LocalSubprocessSandbox(SandboxExecutor):
         """Run ``argv`` in its own session; returns ``(stdout, stderr, returncode, timed_out)``.
 
         ``start_new_session`` puts the child in a fresh process group, which is SIGKILLed whenever the
-        run ends: on a timeout, and also after the leader exits, since a forked child it left behind
-        would outlive the run (the run is judged on the leader's exit and output). Output is captured in
+        run ends: on a timeout, and also after the leader exits, since a child left in the group would
+        outlive the run (the run is judged on the leader's exit and output). Output is captured in
         temp files rather than pipes, so the child's ``RLIMIT_FSIZE`` bounds it: an output flood ends
         as the program's own failure at the file-size limit, never as host memory the grader runs out
         of.
         """
-        # Encoded before the child starts, replacing what UTF-8 cannot carry (a lone surrogate in a
-        # model-written stdin) as a text-mode pipe did.
-        payload = stdin.encode("utf-8", errors="replace")
+        # Encoded before the child starts, as a text-mode pipe took it: no input for ``None`` (a null
+        # test input), and what UTF-8 cannot carry replaced.
+        payload = utf8_encodable(stdin or "").encode("utf-8")
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             with subprocess.Popen(
                 argv,
@@ -212,7 +213,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(proc.pid, signal.SIGKILL)
                     try:
-                        proc.wait(timeout=KILL_DRAIN_TIMEOUT)
+                        proc.wait(timeout=POST_KILL_WAIT_TIMEOUT)
                     except subprocess.TimeoutExpired:
                         proc.kill()
             return _captured_text(out), _captured_text(err), proc.returncode, timed_out
@@ -302,8 +303,10 @@ class LocalSubprocessSandbox(SandboxExecutor):
 
     @staticmethod
     def _write_member(workdir: str, name: str, content: str) -> None:
-        with os.fdopen(_open_member(workdir, name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC), "w") as fh:
-            fh.write(content)
+        with os.fdopen(
+            _open_member(workdir, name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC), "w", encoding="utf-8"
+        ) as fh:
+            fh.write(utf8_encodable(content))
 
 
 class LocalSession(SandboxSession):
