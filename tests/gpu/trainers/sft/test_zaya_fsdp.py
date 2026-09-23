@@ -11,7 +11,7 @@ Verifies the full distributed loading pipeline:
   3. A handful of synthetic SFT steps run without OOM / NaN, and the loss
      is finite + monotone-ish.
 
-Designed for 2x B300 (275 GB HBM each). FSDP shards the ~17 GB of bf16
+Designed for 2x B300 (288 GB HBM each). FSDP shards the ~17 GB of bf16
 weights ~2× → 8.4 GB / rank for params; with adamw fp32 master + state
 and bf16 activations the total stays well below 60 GB / rank.
 

@@ -157,9 +157,9 @@ def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, 
 def _load_sdpg_reference(*, args, model_config, sft_config, dist_args, is_vlm: bool) -> PreTrainedModel | None:
     """Load the frozen reference for the ``L_ref`` KL anchor, or ``None`` when the anchor is off.
 
-    A dense unparallelized replica is accepted under EP/TP (unlike DPO/KTO's ref_model rejection): the
-    SDPG reference is only scored — frozen, never trained or synced — so each rank holds a full copy
-    with no sharding-consistency requirement (same shape as offline-GRPO's dense KL reload).
+    The reference is a dense unparallelized replica, so the trainer refuses it under EP/TP
+    (``_validate_reference_model``, as for DPO/KTO's ref_model): it would run the unpatched dense
+    path and its log-probs would not match the policy's.
 
     It goes through the shared frozen loader because ``L_ref`` is a divergence between this model's
     distribution and the policy's: a reference on a different attention backend, or carrying live

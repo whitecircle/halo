@@ -168,7 +168,7 @@ Method-specific fields (`beta`, `loss_type`, `advantage_method`, `environment_ty
 
 ## Config file locations
 
-Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`.
+Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `grpo/{offline,online,environmental}/`, `reward/`, `classification/`, `embedding/`, `distillation/`. SFT families are `cohere2_moe, deepseek_v4, gemma4, glm4, glm5_next, gptoss, inkling, laguna, lfm2, ling_mini_2, mistral4, qwen3, qwen3_5, step3p7, zaya`.
 
 Async GRPO with Environments adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` files for gpt-oss, Qwen3.5/3.6 and Gemma 4. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
 
