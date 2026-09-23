@@ -146,8 +146,9 @@ models, `--t`), `task_arithmetic` (`--base_model` + Σ wᵢ·task vector), `ties
 `--lambda`, arXiv:2306.01708). Flags: `--models path[:weight] …` (local dirs only), `--output_dir`,
 `--base_model`, `--dtype` (`bfloat16`), `--tokenizer_source` (config/tokenizer/remote-code source;
 default base or first model, a Hub id is downloaded weights-excluded), `--max_shard_size`,
-`--quiet`, `--allow_missing_tokenizer`, `--trust_remote_code`. Streams one tensor at a time across the inputs, so peak extra memory is a layer, not N
-models. Deliberately copies **no** resume sidecars (`rng_state*`, `scheduler.pt`,
+`--quiet`, `--allow_missing_tokenizer`, `--trust_remote_code`. Streams one tensor at a time across the inputs, so peak host memory scales with the largest
+tensor, not N models (per-method working set: `agent-docs/reference/model-merging.md`, Memory and
+output). `--t` outside `[0, 1]` and `--density` outside `(0, 1]` are refused. Deliberately copies **no** resume sidecars (`rng_state*`, `scheduler.pt`,
 `router_balancing_biases.pt`) — they describe one run, not the merge.
 
 ### `reattach_vision_tower.py`
