@@ -7,6 +7,7 @@ primitives share the ``(test_input, expected, actual) -> bool`` signature.
 ``python checker.py input.txt correct_output.txt solution_output.txt`` printing ``1``/``0`` to stdout.
 """
 
+import errno
 import logging
 import time
 from collections.abc import Callable, Iterator
@@ -41,9 +42,10 @@ _OUTPUT_EXCERPT_CHARS = 100
 _MAX_FAILURE_DETAILS = 5
 # Tests named on one folded verdict line before the rest are counted.
 _MAX_FOLDED_TESTS_NAMED = 6
-# What a non-passing test's detail line shows the policy. ``outcome`` states the verdict alone, the
-# Codeforces contract and the default; ``full`` adds the expected and produced output to a wrong
-# answer, which turns every resubmission into a probe of the hidden tests.
+# What a non-passing test's detail line shows the policy. ``outcome``, the Codeforces contract and the
+# default, states the verdict class alone and nothing the program controls: its stderr, exit code or
+# output size can each carry the hidden input it read. ``full`` adds them, and the expected and
+# produced output of a wrong answer, which turns every resubmission into a probe of the hidden tests.
 VERDICT_DETAIL_FULL = "full"
 VERDICT_DETAIL_OUTCOME = "outcome"
 VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
@@ -58,11 +60,20 @@ _CHECKER_DRIVER = (
 )
 
 
-def _stderr_tail(stderr: str) -> str:
-    """The end of a program's stderr: a traceback names the exception on its last line, so a head
-    excerpt of a long one shows the frames and drops the error."""
+def _stderr_line(stderr: str) -> str:
+    """A detail line quoting the end of a program's stderr, empty for none: a traceback names the
+    exception on its last line, so a head excerpt of a long one shows the frames and drops the error."""
     text = stderr.strip()
-    return text if len(text) <= _STDERR_EXCERPT_CHARS else "…" + text[-_STDERR_EXCERPT_CHARS:]
+    if len(text) > _STDERR_EXCERPT_CHARS:
+        text = "…" + text[-_STDERR_EXCERPT_CHARS:]
+    return f"\n  Stderr: {text}" if text else ""
+
+
+def _host_fault(exc: Exception) -> str:
+    """A grading-side exception named by its type and errno, never its text, which can quote a path
+    the program chose; the logged traceback has it."""
+    code = errno.errorcode.get(exc.errno) if isinstance(exc, OSError) else None
+    return f"{type(exc).__name__} ({code})" if code else type(exc).__name__
 
 
 @dataclass
@@ -147,7 +158,7 @@ def _run_in_sandbox(sandbox: SandboxExecutor | SandboxSession, code: str, **kwar
         return sandbox.run(code, **kwargs)
     except Exception as exc:  # anything raised on the grading side is infra, not a verdict
         logger.warning("Sandbox run failed during grading; scoring the test as an infra error", exc_info=True)
-        return SandboxResult(error=f"sandbox backend failure: {type(exc).__name__}: {exc}")
+        return SandboxResult(error=f"sandbox backend failure: {_host_fault(exc)}")
 
 
 @contextmanager
@@ -182,7 +193,7 @@ def _grading_runner(
             logger.warning(
                 "Sandbox session reset failed during grading; scoring the test as an infra error", exc_info=True
             )
-            return SandboxResult(error=f"sandbox reset failure: {type(exc).__name__}: {exc}")
+            return SandboxResult(error=f"sandbox reset failure: {_host_fault(exc)}")
         return result
 
     try:
@@ -277,9 +288,10 @@ def run_solution_against_tests(
     Each test feeds ``input`` to stdin and compares stdout to expected ``output`` via ``verdict_fn``
     (default: trimmed exact match) in an independent sandbox run. Details list only non-passing tests,
     one entry per distinct verdict (tests failing the same way are folded into it), capped at
-    ``_MAX_FAILURE_DETAILS`` distinct entries; ``verdict_detail`` decides whether a wrong answer shows
-    the expected and produced output (``full``) or the verdict alone (``outcome``). A runtime error
-    shows the tail of stderr, where a traceback names the exception.
+    ``_MAX_FAILURE_DETAILS`` distinct entries. ``verdict_detail`` decides what an entry shows: the
+    verdict class alone (``outcome``), or also a wrong answer's expected and produced output, a
+    runtime error's exit code, an output-limit overrun's size and the tail of stderr, where a traceback
+    names the exception (``full``). A compile error shows the compiler's first error in both.
 
     ``max_grading_seconds`` bounds one grade's total wall clock, since tests run sequentially and a
     several-hundred-test problem would otherwise stall the whole rollout round. It is checked between
@@ -304,6 +316,7 @@ def run_solution_against_tests(
     failures: list[_Failure] = []
     notes: list[str] = []
     suppressed = 0
+    full_detail = verdict_detail == VERDICT_DETAIL_FULL
     deadline = None if max_grading_seconds is None else time.monotonic() + max_grading_seconds
     graded = 0
     budget_hit = False
@@ -334,8 +347,9 @@ def run_solution_against_tests(
 
             if result.compile_failed:
                 # The source never built, so every test fails the same way: judged once, the whole
-                # pool counted, with the compiler's diagnostics as the verdict.
-                # The compiler names the first error first, so the head of its output is the excerpt.
+                # pool counted, with the compiler's diagnostics as the verdict. Shown in both modes: the
+                # build runs before any test and without stdin on every backend, so it can quote only
+                # the submission. The compiler names the first error first, so the head is the excerpt.
                 line = "COMPILATION ERROR (every test fails)"
                 if result.stderr:
                     line += f"\n  {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
@@ -352,13 +366,14 @@ def run_solution_against_tests(
                 add_detail(i, f"ERROR -- {result.error}")
             elif result.returncode not in (0, None):
                 # Non-zero exit is a Runtime Error on every judge, never a pass even if stdout matches.
-                body = f"RUNTIME ERROR (exit {result.returncode})"
-                if result.stderr:
-                    body += f"\n  Stderr: {_stderr_tail(result.stderr)}"
+                body = "RUNTIME ERROR"
+                if full_detail:
+                    body += f" (exit {result.returncode}){_stderr_line(result.stderr)}"
                 add_detail(i, body)
             elif len(result.stdout) > max_output_size:
                 # Over-cap output is its own verdict: truncate-and-compare would grade a correct-but-long answer wrong.
-                add_detail(i, f"OUTPUT LIMIT EXCEEDED ({len(result.stdout)} > {max_output_size} bytes)")
+                size = f"{len(result.stdout)} " if full_detail else ""
+                add_detail(i, f"OUTPUT LIMIT EXCEEDED ({size}> {max_output_size} bytes)")
             else:
                 actual_output = result.stdout
                 try:
@@ -375,13 +390,12 @@ def run_solution_against_tests(
                         passed += 1
                     else:
                         body = "FAIL"
-                        if verdict_detail == VERDICT_DETAIL_FULL:
+                        if full_detail:
                             body += (
                                 f"\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
                                 f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
+                                f"{_stderr_line(result.stderr)}"
                             )
-                        if result.stderr:
-                            body += f"\n  Stderr: {_stderr_tail(result.stderr)}"
                         add_detail(i, body)
 
             graded = i

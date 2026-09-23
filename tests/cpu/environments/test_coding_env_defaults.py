@@ -4,8 +4,9 @@
 - ``swe`` has no completion fallback: without a ``test_function`` it grades against the row's answer
   (``requires_answer`` on), refuses ``requires_answer=False`` at construction, and raises on an episode
   it has nothing to grade against — one successful tool call earns nothing.
-- ``code_contests`` shows a wrong answer as its verdict alone (``verdict_detail="outcome"``) unless a
-  run opts into ``full``: the expected output would turn every resubmission into a test oracle.
+- ``code_contests`` shows a failed test as its verdict class alone (``verdict_detail="outcome"``)
+  unless a run opts into ``full``: the expected output would turn every resubmission into a test
+  oracle, and the program's stderr, exit code or output size would carry a hidden input back.
 - A coding environment on a sandbox that does not confine the program warns, once per process and
   backend class: ``local``, ``bubblewrap`` with network, and an executor that declares nothing.
 
@@ -21,7 +22,12 @@ import pytest
 from scripts.environments.inference import run_env
 from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.grading import VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME, GradingSpec
+from src.environments.envs.tasks.coding.grading import (
+    VERDICT_DETAIL_FULL,
+    VERDICT_DETAIL_OUTCOME,
+    GradingSpec,
+    run_solution_against_tests,
+)
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.sandbox import resolve as resolve_module
 from src.environments.sandbox.base import SandboxExecutor, SandboxResult
@@ -190,6 +196,34 @@ def test_full_verdict_detail_stays_an_explicit_opt_in():
     ids, _ = env.reset(["print 42"], [{"answer": {"tests": [{"input": "", "output": "SECRET42\n"}]}}])
     traj = env.step(ids, [""], [{"tool_calls": [_tool_call("submit_solution", code="print(7)")]}])[0].trajectory
     assert "Expected: SECRET42" in traj.info["submission_result"]
+
+
+# Each program writes the hidden input it read into a channel of its own.
+_ECHO_TO_STDERR_WRONG = "import sys\nsys.stderr.write(sys.stdin.read())\nprint('wrong')\n"
+_ECHO_TO_STDERR_CRASH = "import sys\nsys.stderr.write(sys.stdin.read())\nsys.exit(1)\n"
+_INPUT_AS_EXIT_CODE = "import sys\nsys.exit(ord(sys.stdin.read()[0]))\n"
+_INPUT_AS_OUTPUT_SIZE = "import sys\nprint('x' * (10 + ord(sys.stdin.read()[0])))\n"
+
+
+@pytest.mark.parametrize(
+    ("program", "hidden_input", "leak", "verdict"),
+    [
+        (_ECHO_TO_STDERR_WRONG, "HIDDEN-4217", "HIDDEN-4217", "Test 1: FAIL"),
+        (_ECHO_TO_STDERR_CRASH, "HIDDEN-4217", "HIDDEN-4217", "Test 1: RUNTIME ERROR"),
+        (_INPUT_AS_EXIT_CODE, "S", "exit 83", "Test 1: RUNTIME ERROR"),
+        (_INPUT_AS_OUTPUT_SIZE, "S", "94", "Test 1: OUTPUT LIMIT EXCEEDED (> 10 bytes)"),
+    ],
+    ids=["stderr-on-a-wrong-answer", "stderr-on-a-crash", "exit-code", "output-size"],
+)
+def test_a_graded_program_cannot_read_a_hidden_input_back_by_default(program, hidden_input, leak, verdict):
+    """Under ``outcome`` a submission learns its verdict class, never what it wrote itself: stderr,
+    an exit code and an output size each carry the input it read, and ``full`` shows them."""
+    tests = [{"input": hidden_input, "output": "right"}]
+    sandbox = LocalSubprocessSandbox()
+    full = run_solution_against_tests(program, tests, sandbox=sandbox, max_output_size=10, verdict_detail="full")
+    outcome = run_solution_against_tests(program, tests, sandbox=sandbox, max_output_size=10)
+    assert leak in full.details, full.details
+    assert outcome.details.splitlines()[1:] == [verdict], outcome.details
 
 
 # a sandbox that does not confine the program warns once

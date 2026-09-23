@@ -5,6 +5,7 @@ once, and a compile failure grades the whole pool once.
 Run: python tests/cpu/environments/test_grading_session.py  (or pytest)
 """
 
+import errno
 import logging
 
 import pytest
@@ -59,6 +60,34 @@ class _SessionSandbox(SandboxExecutor):
         return self.result
 
 
+class _DeniedSession(_Session):
+    """Fails at ``stage`` with a host-side exception whose text quotes a name the program chose."""
+
+    def __init__(self, stage):
+        super().__init__(None, _OK)
+        self.stage = stage
+
+    def _deny(self, stage):
+        if stage == self.stage:
+            raise PermissionError(errno.EACCES, "Permission denied", "/tmp/work/HIDDEN-4217")
+
+    def run(self, code, **kwargs):
+        self._deny("run")
+        return super().run(code, **kwargs)
+
+    def reset_to_staged(self):
+        self._deny("reset")
+
+
+class _DeniedSandbox(_SessionSandbox):
+    def __init__(self, stage):
+        super().__init__()
+        self.stage = stage
+
+    def open_session(self):
+        return _DeniedSession(self.stage)
+
+
 def test_a_grade_runs_every_test_through_one_session_and_closes_it():
     sandbox = _SessionSandbox()
     grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox, language="cpp")
@@ -68,6 +97,20 @@ def test_a_grade_runs_every_test_through_one_session_and_closes_it():
     assert session.runs == [("cpp", "0\n"), ("cpp", "1\n"), ("cpp", "2\n")]
     assert session.resets == 3, "the session is reset to its staged state after every test"
     assert session.closed
+
+
+@pytest.mark.parametrize(
+    ("stage", "fault"),
+    [
+        ("run", "sandbox backend failure: PermissionError (EACCES)"),
+        ("reset", "sandbox reset failure: PermissionError (EACCES)"),
+    ],
+)
+def test_a_host_fault_is_named_by_its_errno_never_by_a_path_the_program_chose(stage, fault, caplog):
+    grade = run_solution_against_tests("code", _TESTS[:1], sandbox=_DeniedSandbox(stage))
+    assert grade.infra_errors == 1
+    assert grade.details.splitlines()[1:] == [f"Test 1: ERROR -- {fault}"], grade.details
+    assert "HIDDEN-4217" in caplog.text, "the log keeps what the verdict leaves out"
 
 
 def test_garbage_output_is_a_wrong_answer_not_an_infra_error():

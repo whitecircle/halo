@@ -129,7 +129,7 @@ def test_checker_executor_exception_raises_checker_infra_error():
     """The checker leg honours the same contract: a raising backend surfaces as CheckerInfraError
     (bucketed into infra_errors), never as a raw OSError escaping the grade."""
     checker = CheckerVerdict("# unused", _RaisingSandbox(OSError(28, "No space left on device")))
-    with pytest.raises(CheckerInfraError, match="No space left on device"):
+    with pytest.raises(CheckerInfraError, match=r"OSError \(ENOSPC\)"):
         checker("input", "expected", "actual")
 
 
@@ -317,13 +317,6 @@ def test_outcome_verdict_hides_expected_and_produced_output():
     assert "Expected" not in outcome.details and "Got:" not in outcome.details
     assert "Y" not in outcome.details, outcome.details
     assert (outcome.passed, outcome.total) == (full.passed, full.total) == (1, 2)
-    crash = run_solution_against_tests(
-        "code",
-        tests[:1],
-        sandbox=StubSandbox(SandboxResult(stdout="", stderr="boom", returncode=1)),
-        verdict_detail="outcome",
-    )
-    assert "RUNTIME ERROR (exit 1)" in crash.details and "boom" in crash.details
     with pytest.raises(ValueError, match="verdict_detail"):
         run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="diff")
 
@@ -339,6 +332,16 @@ def test_the_grading_contract_refuses_a_time_limit_that_is_not_positive(field, s
 def test_a_negative_timeout_per_test_is_refused_at_construction():
     with pytest.raises(ValueError, match="timeout_per_test"):
         CodeContestsEnvironment(language="python", sandbox=StubSandbox(), timeout_per_test=-1.0)
+
+
+def test_runtime_errors_fold_across_exit_codes_under_outcome():
+    """Each exit code is its own verdict under ``full``; under ``outcome`` every crash is one."""
+    crashes = [SandboxResult(stdout="", returncode=code) for code in (65, 66, 67)]
+    tests = [{"input": str(k), "output": "1"} for k in range(3)]
+    outcome = run_solution_against_tests("code", tests, sandbox=_ScriptedSandbox(crashes))
+    full = run_solution_against_tests("code", tests, sandbox=_ScriptedSandbox(crashes), verdict_detail="full")
+    assert outcome.details.splitlines()[1:] == ["Tests 1, 2, 3: RUNTIME ERROR"], outcome.details
+    assert full.details.count("RUNTIME ERROR (exit") == 3, full.details
 
 
 def test_verdict_detail_travels_with_the_grading_contract():
@@ -373,7 +376,7 @@ def test_a_runtime_error_excerpt_ends_with_the_exception_line():
     )
     assert len(stderr) > 2 * _STDERR_EXCERPT_CHARS
     crash = StubSandbox(SandboxResult(stdout="", stderr=stderr, returncode=1))
-    grade = run_solution_against_tests("code", [{"input": "1", "output": "1"}], sandbox=crash)
+    grade = run_solution_against_tests("code", [{"input": "1", "output": "1"}], sandbox=crash, verdict_detail="full")
     assert "AttributeError: module 'math' has no attribute 'gamma2'" in grade.details
     assert "Traceback (most recent call last)" not in grade.details
     assert "Stderr: …" in grade.details
@@ -386,7 +389,7 @@ def test_tests_failing_identically_fold_into_one_verdict_outside_the_cap():
     n = _MAX_FAILURE_DETAILS + 3
     sandbox = _ScriptedSandbox([crash] * n + [SandboxResult(stdout="X\n", returncode=0)])
     tests = [{"input": str(k), "output": "1"} for k in range(n)] + [{"input": "z", "output": "Y"}]
-    grade = run_solution_against_tests("code", tests, sandbox=sandbox)
+    grade = run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="full")
     assert (grade.passed, grade.total) == (0, n + 1)
     assert grade.details.count("RUNTIME ERROR") == 1
     assert f"Tests 1, 2, 3, 4, 5, 6 and {n - 6} more: RUNTIME ERROR (exit 1)" in grade.details

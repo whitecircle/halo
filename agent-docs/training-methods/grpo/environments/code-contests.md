@@ -36,7 +36,7 @@ rollout_thinking_budget_scope: episode
 |---|---|---|
 | `language` | `python` | `python`, `cpp`, `c`, or a list the model picks from |
 | `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed equality reading `\r\n` and `\r` as `\n` on both sides, `tokens` whitespace-token equality |
-| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict alone; `full` adds its expected and produced output |
+| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict class alone; `full` adds its expected and produced output, exit code, output size and stderr |
 | `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor. It and `max_time_limit` must be finite and > 0 |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit; a non-finite or non-positive value raises at construction |
@@ -100,13 +100,13 @@ records the last language as its `language` slice, which the trainer slices metr
 Grading goes through `grade_solution` (`src/environments/envs/tasks/coding/grading.py`), shared with
 the offline re-grader, so a checkpoint scores identically online and offline. The verdict lists
 non-passing tests only, one entry per distinct verdict with the tests that failed the same way folded
-into it, capped at five; a runtime error shows the tail of stderr, where a traceback names the
-exception. One sandbox session serves the whole grade, so a compiled
-submission builds once, reset after every test. A compile failure is graded once against the whole
-pool.
+into it, capped at five. One sandbox session serves the whole grade, so a compiled submission builds
+once, reset after every test. A compile failure is graded once against the whole pool and shows the
+compiler's first error in both `verdict_detail` modes: the build runs before any test, without stdin,
+so it quotes only the submission.
 
 - **Comparison.** `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within a 1e-6 relative tolerance, gated on a float-looking *expected* token, so integer answers stay exact.
-- **Verdict detail.** Under `full`, a second submission turns the judge into a free test oracle — probing out-earns scratchpad testing within a group.
+- **Verdict detail.** `outcome` shows the verdict class (`FAIL`, `RUNTIME ERROR`, `TIME LIMIT EXCEEDED`, `OUTPUT LIMIT EXCEEDED`, `COMPILATION ERROR`) and nothing the program controls: its stderr, exit code and output size can each carry the hidden input it read. `full` adds them (stderr as its tail, where a traceback names the exception) and a wrong answer's expected and produced output; a second submission then turns the judge into a free test oracle, and probing out-earns scratchpad testing within a group. Scratchpad runs on the model's own inputs show their output in both modes.
 - **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language.
 - **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests and keeps the full pool as denominator — an ungraded test counts as failed, so size it for an honest solution (the recipes: 150 s). `episode/tests_graded_frac` shows a partial grade.
 - **Special judges.** A per-problem `checker` (Python) in the payload overrides comparison: `python checker.py input.txt correct_output.txt solution_output.txt`, accepted only when it exits cleanly and its last stdout token is `1`. It runs at the 15 s infra default, never the solution's limit.
