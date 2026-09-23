@@ -222,8 +222,9 @@ infrastructure sets:
 
 The two local checkpoints those suites default to, Gemma4-26B-A4B (`HALO_TEST_GEMMA4_MODEL`,
 `HALO_TEST_EP_RT_MODEL`) and gpt-oss-20b (`HALO_TEST_EP_CP_RT_MODEL`), are
-`scripts/before_training/patch_vocab.py` outputs under `$HALO_DATA_ROOT/models/`
-(`tests/common/models.py`), which the `make` tiers put at `$(HALO_SCRATCH)/models/`. The suites need
+`scripts/before_training/patch_vocab.py` outputs at `$HALO_DATA_ROOT/models/<repo name>-patched`
+(`patched_checkpoint_dir` in `tests/common/models.py`), which the `make` tiers put under
+`$(HALO_SCRATCH)/models/`. The suites need
 a local checkpoint directory, not added tokens, so the tool runs without `--patterns` and re-saves the
 source vocabulary unchanged:
 

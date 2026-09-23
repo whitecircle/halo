@@ -36,8 +36,14 @@ ZAYA_8B = "Zyphra/ZAYA1-8B"
 # agent-docs/contributing/README.md gives the command that writes each one. A suite defaulting to one
 # skips when the directory is absent.
 
-GEMMA4_26B_A4B_PATCHED = data_path("models", "gemma-4-26B-A4B-it-patched")
-GPT_OSS_20B_PATCHED = data_path("models", "gpt-oss-20b-BF16-patched")
+
+def patched_checkpoint_dir(hub_id: str) -> str:
+    """``$HALO_DATA_ROOT/models/<repo name>-patched``, where the documented command writes ``hub_id``."""
+    return data_path("models", f"{hub_id.rsplit('/', 1)[-1]}-patched")
+
+
+GEMMA4_26B_A4B_PATCHED = patched_checkpoint_dir(GEMMA4_26B_A4B)
+GPT_OSS_20B_PATCHED = patched_checkpoint_dir(GPT_OSS_20B)
 
 # Tiny random-init configs (no hub checkpoint exists at test scale)
 
