@@ -2,7 +2,7 @@
 
 The repos are derived, not listed: every Hub id a shipped example trains (``model_name_or_path``
 under ``examples/``), every checkpoint constant in :mod:`tests.common.models` (where a test names what
-it loads), and the snapshots ``PINNED_REVISIONS`` pins. A test that reads a repo outside that set
+it loads), and the snapshots its ``PINNED_REVISIONS`` pins. A test that reads a repo outside that set
 skips, and fails under ``HALO_TEST_REQUIRE_HUB_CACHE`` (:mod:`tests.common.tokenizers`).
 
     python -m tests.common.hub_seed          # download the seed into HF_HOME
@@ -17,12 +17,12 @@ import yaml
 from huggingface_hub import snapshot_download
 
 from tests.common import models
-from tests.common.models import GEMMA3_4B_IT, PINNED_REVISIONS
 from tests.common.utils import REPO_ROOT
 
 ALLOW_PATTERNS = ["*.json", "*.jinja", "*.txt", "*.model", "*.py", "*.tiktoken"]
-# The Hub refuses these to an anonymous client, so the seed leaves them out and their tests skip.
-GATED_REPOS = frozenset({GEMMA3_4B_IT})
+# The Hub refuses these to an anonymous client, so the seed leaves them out and their tests skip. A
+# repo that stops being gated leaves this set, or its tests go on skipping where they could run.
+GATED_REPOS = frozenset({models.GEMMA3_4B_IT})
 # ``namespace/name``; an absolute path or a deeper directory tree never matches.
 _HUB_ID = re.compile(r"[A-Za-z0-9][\w.-]*/[\w.-]+")
 
@@ -53,15 +53,19 @@ def roster_repos() -> set[str]:
 def seed() -> list[tuple[str, str | None]]:
     """Every ``(repo, revision)`` to fetch; ``None`` is the repo's main."""
     latest = sorted((example_repos() | roster_repos()) - GATED_REPOS)
-    return [(repo, None) for repo in latest] + sorted(PINNED_REVISIONS.items())
+    return [(repo, None) for repo in latest] + sorted(models.PINNED_REVISIONS.items())
 
 
 def download() -> None:
+    """Fetch the whole seed, then exit naming every repo that could not be fetched."""
+    failures = []
     for repo, revision in seed():
         try:
             snapshot_download(repo, revision=revision, allow_patterns=ALLOW_PATTERNS)
         except Exception as e:
-            raise SystemExit(f"hub seed: cannot fetch {repo}@{revision or 'main'}: {type(e).__name__}: {e}") from e
+            failures.append(f"  {repo}@{revision or 'main'}: {type(e).__name__}: {e}")
+    if failures:
+        raise SystemExit("hub seed: cannot fetch\n" + "\n".join(failures))
 
 
 def main() -> None:
