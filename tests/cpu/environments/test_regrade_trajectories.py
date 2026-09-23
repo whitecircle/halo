@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from scripts.environments.inference import regrade_trajectories
+from scripts.environments.inference.run_code_contests import contest_meta
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.envs.tasks.coding.datasets import ContestSelection
 from src.environments.envs.tasks.coding.grading import GradingSpec
 
 # What run_code_contests.py stamps (generic eval meta + its meta_extra).
@@ -174,6 +176,24 @@ def test_episode_submission_budget_reads_the_stamped_tool_budget():
     stamped = {"info": {"episode_tool_budgets": {"submit_solution": 3, "python_repl": 6}}}
     assert regrade_trajectories.episode_submission_budget(stamped, env) == 3
     assert regrade_trajectories.episode_submission_budget({"info": {}}, env) == 2
+
+
+def test_the_regrader_rebuilds_the_run_s_protocol_from_the_meta_line_the_eval_writes():
+    """Written by ``contest_meta``, read by ``rebuild_environment``: a leaderboard run re-grades at one
+    submission even where an episode stamped no budget, over a trained ladder that bound three. A meta
+    line naming no protocol ran the harness."""
+    profiles = {"high": {"thinking_tokens": 16384, "max_submissions": 3, "max_test_calls": 6}}
+    env = CodeContestsEnvironment(
+        language="python", sandbox_backend="local", eval_protocol="leaderboard", reasoning_effort_profiles=profiles
+    )
+    written = contest_meta("livecodebench", ContestSelection(), env, "high", {"reasoning_effort_profiles": profiles})
+    meta = json.loads(json.dumps({"env_type": "codeforces", **written}))
+
+    rebuilt = regrade_trajectories.rebuild_environment(meta)
+    assert (rebuilt.eval_protocol, rebuilt.max_submissions, rebuilt.max_test_calls) == ("leaderboard", 1, 0)
+    assert regrade_trajectories.episode_submission_budget({"info": {}}, rebuilt) == 1
+    unnamed = {key: value for key, value in meta.items() if key != "eval_protocol"}
+    assert regrade_trajectories.rebuild_environment(unnamed).eval_protocol == "harness"
 
 
 def test_a_language_list_in_the_meta_rebuilds_the_choosing_environment():

@@ -21,12 +21,13 @@ from typing import Any
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 
-# Cumulative releases (test.jsonl = v1, each later appends); read newest-first for least-contaminated contests.
+# Cumulative releases (test.jsonl = v1, each later appends); the newest file is read first.
 _LCB_RELEASE_FILES: dict[str, list[str]] = {
     f"release_v{v}": [f"test{'' if i == 1 else i}.jsonl" for i in range(1, v + 1)] for v in range(1, 7)
 }
-# The ``platform`` spellings LiveCodeBench rows carry.
-_LCB_PLATFORMS = ("atcoder", "codeforces", "leetcode")
+# The LiveCodeBench platforms whose rows carry stdin tests, as the rows spell them. Its ``leetcode``
+# rows are functional, which ``keep_livecodebench`` drops, so a selection naming it would score nothing.
+_LCB_GRADABLE_PLATFORMS = ("atcoder", "codeforces")
 
 # HardTests difficulty on the Codeforces rating scale. A Codeforces rating is used as is; Luogu's
 # seven levels and the coarse AtCoder/TACO labels map to a representative rating, so one rating
@@ -268,7 +269,9 @@ def keep_livecodebench(row: dict[str, Any]) -> bool:
 
 
 def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
-    """Yield raw LiveCodeBench rows from a release's ``test*.jsonl`` files, newest contests first.
+    """Yield raw LiveCodeBench rows from a release's ``test*.jsonl`` files: the newest file first, each
+    file in its stored row order, which is not newest-first (``test6.jsonl`` opens on its 2025-01-04
+    contests). The eval's example indices, and the re-grader's, are this order.
 
     ``config`` is the release tag (default ``release_v6``); ``split`` ignored. Bypasses ``load_dataset``,
     whose loading script datasets 4.x does not execute. A release is cumulative, so a contamination-clean
@@ -534,10 +537,15 @@ class CodeDatasetAdapter:
     # preparation script before its filters run; ``None`` => the raw row already carries them.
     normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     # What a ContestSelection selects on: a row's contest day, and the field naming its platform with
-    # every spelling the source uses. Undeclared => a selection bounding that axis is refused.
+    # the platforms whose rows ``keep`` can grade, as the source spells them. Undeclared => a selection
+    # bounding that axis is refused.
     contest_date: Callable[[dict[str, Any]], date] | None = None
     platform_field: str | None = None
     platforms: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.platforms and self.platform_field is None:
+            raise ValueError(f"an adapter declaring platforms {self.platforms} must name the platform_field")
 
     @property
     def scores_raw_rows(self) -> bool:
@@ -547,14 +555,16 @@ class CodeDatasetAdapter:
 
     def require_selectable(self, selection: ContestSelection) -> None:
         """Raise unless this source can apply ``selection``: a date window needs a stamped contest date,
-        a platform filter the source's own spellings."""
+        a platform filter a platform this adapter grades, spelled as the source spells it."""
         if selection.dated and self.contest_date is None:
             raise ValueError("this dataset stamps no contest date, so a start_date/end_date window cannot apply")
         unknown = sorted(set(selection.platforms) - set(self.platforms))
         if unknown and not self.platforms:
             raise ValueError("this dataset records no platform, so a platform filter cannot apply")
         if unknown:
-            raise ValueError(f"unknown platform(s) {unknown}; this dataset spells them {list(self.platforms)}")
+            raise ValueError(
+                f"platform(s) {unknown} are not ones this adapter grades; it grades {list(self.platforms)}"
+            )
 
     def scored_rows(self, rows: Iterable[dict[str, Any]], selection: ContestSelection) -> Iterator[dict[str, Any]]:
         """The rows a run scores, in source order: inside ``selection`` and gradable (``keep``). The eval
@@ -591,7 +601,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         load=load_livecodebench,
         contest_date=livecodebench_contest_date,
         platform_field="platform",
-        platforms=_LCB_PLATFORMS,
+        platforms=_LCB_GRADABLE_PLATFORMS,
     ),
     "icpc": CodeDatasetAdapter(
         format_icpc_prompt,

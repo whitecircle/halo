@@ -127,8 +127,14 @@ def test_the_platform_filter_takes_the_dataset_spellings(release):
         "ac_2025_01_04",
         "ac_2025_04_06",
     ]
-    # LeetCode rows are functional; the stdin/stdout env grades none of them.
-    assert _scored(ContestSelection.parse(platforms=["leetcode"])) == []
+
+
+def test_a_platform_the_adapter_cannot_grade_is_refused():
+    """LeetCode rows are functional, which the stdin/stdout env drops: selecting them would download the
+    whole release to score nothing."""
+    assert "leetcode" not in _LCB.platforms
+    with pytest.raises(ValueError, match=r"platform\(s\) \['leetcode'\] are not ones this adapter grades"):
+        _scored(ContestSelection.parse(platforms=["leetcode"]))
 
 
 # --- Validation ---
@@ -158,7 +164,7 @@ def test_a_selection_the_dataset_cannot_apply_is_refused_before_any_row_is_read(
         raise AssertionError("the selection must be validated before the rows are read")
         yield
 
-    with pytest.raises(ValueError, match=r"unknown platform\(s\) \['AtCoder'\]"):
+    with pytest.raises(ValueError, match=r"platform\(s\) \['AtCoder'\] are not ones this adapter grades"):
         _LCB.scored_rows(unreadable(), ContestSelection.parse(platforms=["AtCoder"]))
     codeforces = CODE_DATASET_ADAPTERS["codeforces"]
     with pytest.raises(ValueError, match="stamps no contest date"):
@@ -178,11 +184,12 @@ def test_a_row_without_a_contest_date_is_refused_under_a_window_only():
 
 
 def test_the_eval_flags_exit_on_a_selection_the_adapter_refuses():
-    assert resolve_selection(_args(start_date="2025-01-04", platform="atcoder, leetcode"), _LCB) == (
-        ContestSelection.parse("2025-01-04", None, ["atcoder", "leetcode"])
+    assert resolve_selection(_args(start_date="2025-01-04", platform="codeforces, atcoder"), _LCB) == (
+        ContestSelection.parse("2025-01-04", None, ["atcoder", "codeforces"])
     )
-    with pytest.raises(SystemExit, match="--platform on --adapter livecodebench: unknown platform"):
-        resolve_selection(_args(platform="LeetCode"), _LCB)
+    for platform in ("LeetCode", "leetcode"):
+        with pytest.raises(SystemExit, match="--platform on --adapter livecodebench: platform"):
+            resolve_selection(_args(platform=platform), _LCB)
     with pytest.raises(SystemExit, match="--platform names no platform"):
         resolve_selection(_args(platform=" , "), _LCB)
     with pytest.raises(SystemExit, match="--start_date/--end_date/--platform on --adapter livecodebench: start_date"):
@@ -195,11 +202,11 @@ def test_the_eval_flags_exit_on_a_selection_the_adapter_refuses():
 
 
 def test_the_selection_round_trips_through_the_meta_line():
-    selection = ContestSelection.parse("2025-01-04", "2025-04-06", ["leetcode", "atcoder"])
+    selection = ContestSelection.parse("2025-01-04", "2025-04-06", ["codeforces", "atcoder"])
     meta = json.loads(json.dumps(selection.to_meta()))
-    assert meta == {"start_date": "2025-01-04", "end_date": "2025-04-06", "platforms": ["atcoder", "leetcode"]}
+    assert meta == {"start_date": "2025-01-04", "end_date": "2025-04-06", "platforms": ["atcoder", "codeforces"]}
     assert ContestSelection.from_meta(meta) == selection
-    assert selection.label == "2025-01-04..2025-04-06_atcoder+leetcode"
+    assert selection.label == "2025-01-04..2025-04-06_atcoder+codeforces"
     # A meta line recording no selection scored every row.
     assert ContestSelection.from_meta(None) == ContestSelection()
     assert ContestSelection().label == ""
@@ -207,18 +214,23 @@ def test_the_selection_round_trips_through_the_meta_line():
 
 def test_a_selection_has_one_spelling_however_it_is_built():
     """It keys the re-grader's payload cache: a list or an unsorted tuple would fail to hash or miss."""
-    built = ContestSelection(platforms=["leetcode", "atcoder", "atcoder"])
-    assert built == ContestSelection.parse(platforms=("atcoder", "leetcode"))
-    assert built.platforms == ("atcoder", "leetcode") and hash(built) == hash(
-        ContestSelection.parse(platforms=["atcoder", "leetcode"])
+    built = ContestSelection(platforms=["codeforces", "atcoder", "atcoder"])
+    assert built == ContestSelection.parse(platforms=("atcoder", "codeforces"))
+    assert built.platforms == ("atcoder", "codeforces") and hash(built) == hash(
+        ContestSelection.parse(platforms=["atcoder", "codeforces"])
     )
 
 
-def test_the_regrader_rebuilds_the_run_from_the_meta_line_the_eval_writes(release):
-    """Round trip through the writer (``contest_meta``) and the reader: same problems in the same order,
-    same protocol."""
+def test_an_adapter_declaring_platforms_must_name_their_field():
+    with pytest.raises(ValueError, match="must name the platform_field"):
+        CodeDatasetAdapter(str, dict, lambda row: True, platforms=("atcoder",))
+
+
+def test_the_regrader_rebuilds_the_windowed_examples_from_the_meta_line_the_eval_writes(release):
+    """Round trip through the writer (``contest_meta``) and the reader: the same problems in the same
+    order, so every episode's index still names its own problem."""
     selection = ContestSelection.parse("2025-01-04", "2025-04-06", ["atcoder"])
-    env = resolve_environment("codeforces", {"eval_protocol": "leaderboard"})
+    env = resolve_environment("codeforces", {})
     generic = {"env_type": "codeforces", "model": "m", "dataset": _DATASET, "config": "release_v2", "split": "test"}
     meta = json.loads(json.dumps({**generic, **contest_meta("livecodebench", selection, env, "medium", {})}))
     regrade_trajectories.validate_meta("f.jsonl", meta)
@@ -228,8 +240,6 @@ def test_the_regrader_rebuilds_the_run_from_the_meta_line_the_eval_writes(releas
 
     assert [json.loads(example["context"]["answer"]) for example in examples] == list(payloads)
     assert [example["id"] for example in examples] == ["ac_2025_01_04", "ac_2025_04_06"]
-    rebuilt = regrade_trajectories.rebuild_environment(meta)
-    assert (rebuilt.eval_protocol, rebuilt.max_submissions, rebuilt.max_test_calls) == ("leaderboard", 1, 0)
     # Without the recorded selection, episode 1 would be graded against another problem's tests.
     unselected = regrade_trajectories.build_payloads({k: v for k, v in meta.items() if k != "selection"})
     assert unselected[1] != payloads[1]

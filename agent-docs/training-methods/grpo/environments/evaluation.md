@@ -45,8 +45,10 @@ run one command with `--training_config`, dataset, split and `--num_samples` fix
 weights differ.
 
 The report logs mean reward, `success@1`, `success@k` and aggregate telemetry, so token
-starvation reads differently from wrong answers. Reasoning models need a large `--max_tokens`: too
-low cuts the chain of thought before any answer, scoring 0.
+starvation reads differently from wrong answers. `success@1` is the first sample's outcome and
+`success@k` whether any of the `--num_samples` succeeded; neither is the mean over samples a
+benchmark's pass@1 reports. Reasoning models need a large `--max_tokens`: too low cuts the chain of
+thought before any answer, scoring 0.
 
 ## Output files
 
@@ -83,8 +85,9 @@ python scripts/environments/inference/regrade_trajectories.py \
 
 It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection`, and
 replays every recorded `submit_solution`, up to that episode's own budget, through `grade_solution`
-under the meta line's `env_grading` contract and `eval_protocol`. Grading stops at the first failing test and `max_grading_seconds`
-does not apply. Reports `s@1` / `s@2` and the protocol per file; keep `--workers` at or below the core count.
+under the meta line's `env_grading` contract and `eval_protocol`. Grading stops at the first failing
+test and `max_grading_seconds` does not apply. Reports `s@1` / `s@2` and the protocol per file; keep
+`--workers` at or below the core count.
 
 Only `run_code_contests.py` stamps the meta a re-grade needs (`env_type`, `adapter`, `dataset`,
 `model`, `language`); a `run_env.py` dump is refused.

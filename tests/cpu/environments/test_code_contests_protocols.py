@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """CPU tests for the code-contests evaluation protocols (``eval_protocol``).
 
-``leaderboard`` runs a benchmark's own contract inside the harness: one graded program, no scratchpad
-run, the verdict alone. A leaderboard-labelled run that kept a second submission or a scratchpad would
-report attempts-until-accept as pass@k, so the protocol pins those knobs at every effort level and
-refuses a config that contradicts it. ``harness`` pins nothing.
+``leaderboard`` grades one program per sample with no scratchpad run. A leaderboard-labelled run that
+kept a second submission or a scratchpad would report attempts-until-accept as pass@k, so the protocol
+pins those budgets at every effort level: a config written for this run that contradicts it is
+refused, while a training config's budgets, written under another protocol, give way. ``harness``
+pins nothing.
 
 The environments run against a stub sandbox that echoes a canned result (no subprocesses, no network).
 
@@ -15,8 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.environments.inference import regrade_trajectories
-from scripts.environments.inference.run_code_contests import refuse_flag_owned_env_kwargs, run_trajectory_path
+from scripts.environments.inference.run_code_contests import (
+    refuse_flag_owned_env_kwargs,
+    resolve_eval_protocol,
+    run_trajectory_path,
+)
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -26,19 +30,7 @@ from src.environments.envs.tasks.coding.code_contests import (
 )
 from src.environments.envs.tasks.coding.datasets import ContestSelection
 from src.environments.registry import resolve_environment
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
-from src.environments.tools.definitions import NativeToolCall
-
-
-class _EchoSandbox(SandboxExecutor):
-    """Every run prints ``X`` and exits cleanly."""
-
-    def open_session(self):  # pragma: no cover
-        raise NotImplementedError
-
-    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
-        return SandboxResult(stdout="X\n", returncode=0)
-
+from tests.common.code_contests import SINGLE_TEST_ANSWER, StubSandbox, call_tool, reset_episode
 
 # The shipped recipes' ladder: effort buys submissions and scratchpad runs as well as thinking.
 _RECIPE_PROFILES = {
@@ -46,31 +38,21 @@ _RECIPE_PROFILES = {
     "medium": {"thinking_tokens": 12288, "max_submissions": 2, "max_test_calls": 4},
     "high": {"thinking_tokens": 16384, "max_submissions": 3, "max_test_calls": 6},
 }
-_TESTS = {"answer": {"tests": [{"input": "", "output": "X"}]}}
 
 
 def _env(**kwargs) -> CodeContestsEnvironment:
-    return CodeContestsEnvironment(language="python", sandbox=_EchoSandbox(), **kwargs)
+    return CodeContestsEnvironment(language="python", sandbox=StubSandbox(), **kwargs)
 
 
-def _reset(env, context):
-    ids, _ = env.reset(["solve it"], [context])
-    return env.get_trajectories(ids)[0]
+def _budgets(env) -> tuple[int, int]:
+    return env.max_submissions, env.max_test_calls
 
 
-def _call(env, traj, name):
-    results, _ = env._execute_tool_calls([NativeToolCall(id="c", name=name, arguments={"code": "print('X')"})], traj)
-    return results[0].content
-
-
-def _knobs(env) -> tuple:
-    return env.max_submissions, env.max_test_calls, env.grading_spec.verdict_detail
-
-
-def test_leaderboard_pins_one_submission_no_scratchpad_and_outcome_verdicts():
+def test_leaderboard_pins_one_submission_and_no_scratchpad():
     env = _env(eval_protocol="leaderboard")
     assert env.eval_protocol == "leaderboard"
-    assert _knobs(env) == (1, 0, "outcome")
+    assert _budgets(env) == (1, 0)
+    assert env.grading_spec.verdict_detail == "full", "the verdict detail is the config's, not the protocol's"
     schemas = {tool["function"]["name"]: tool["function"]["description"] for tool in env.get_tools_schema()}
     assert "This tool is disabled for this task." in schemas["python_repl"]
     assert "This is your only graded submission" in schemas["submit_solution"]
@@ -79,20 +61,18 @@ def test_leaderboard_pins_one_submission_no_scratchpad_and_outcome_verdicts():
 def test_the_harness_is_the_default_and_pins_nothing():
     default = _env()
     assert default.eval_protocol == DEFAULT_EVAL_PROTOCOL == "harness"
-    assert _knobs(default) == (2, 5, "full")
-    configured = _env(eval_protocol="harness", max_submissions=3, max_test_calls=0, verdict_detail="outcome")
-    assert _knobs(configured) == (3, 0, "outcome")
+    assert _budgets(default) == (2, 5)
+    assert _budgets(_env(eval_protocol="harness", max_submissions=3, max_test_calls=0)) == (3, 0)
 
 
-@pytest.mark.parametrize("contradiction", [{"max_submissions": 3}, {"max_test_calls": 2}, {"verdict_detail": "full"}])
+@pytest.mark.parametrize("contradiction", [{"max_submissions": 3}, {"max_test_calls": 2}])
 def test_a_config_contradicting_a_pin_is_refused(contradiction):
     with pytest.raises(ValueError, match="eval_protocol 'leaderboard' pins"):
         _env(eval_protocol="leaderboard", **contradiction)
 
 
 def test_a_config_agreeing_with_the_pins_is_accepted():
-    env = _env(eval_protocol="leaderboard", max_submissions=1, max_test_calls=0, verdict_detail="outcome")
-    assert _knobs(env) == (1, 0, "outcome")
+    assert _budgets(_env(eval_protocol="leaderboard", max_submissions=1, max_test_calls=0)) == (1, 0)
 
 
 def test_an_unknown_protocol_is_refused():
@@ -105,24 +85,23 @@ def test_every_protocol_pins_only_knobs_the_environment_resolves():
     it does not follow."""
     for name, pins in EVAL_PROTOCOLS.items():
         assert set(pins) <= set(EVAL_PROTOCOL_KNOB_DEFAULTS), name
-        resolved = dict(zip(EVAL_PROTOCOL_KNOB_DEFAULTS, _knobs(_env(eval_protocol=name)), strict=True))
-        assert resolved == {**EVAL_PROTOCOL_KNOB_DEFAULTS, **pins}, name
 
 
 def test_the_leaderboard_pins_hold_at_every_effort_level():
     """A training config's ladder binds three submissions at ``high``; under the leaderboard the
-    episode still gets one and no scratchpad, while the level keeps its thinking budget."""
+    episode still gets one and no scratchpad, the level keeps its thinking budget, and the task
+    message states the budgets where the trained ladder put them."""
     harness = _env(reasoning_effort_profiles=_RECIPE_PROFILES)
-    traj = _reset(harness, {"reasoning_effort": "high", **_TESTS})
+    traj = reset_episode(harness, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 6, "submit_solution": 3}
 
     leaderboard = _env(eval_protocol="leaderboard", reasoning_effort_profiles=_RECIPE_PROFILES)
     for level in _RECIPE_PROFILES:
-        traj = _reset(leaderboard, {"reasoning_effort": level, **_TESTS})
+        traj = reset_episode(leaderboard, {"reasoning_effort": level, **SINGLE_TEST_ANSWER})
         assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 0, "submit_solution": 1}, level
         assert leaderboard.thinking_budget_for_effort(level) == _RECIPE_PROFILES[level]["thinking_tokens"]
-        # Uniform budgets need no per-episode contract in the task message.
-        assert "Budgets for this task" not in traj.messages[-1].content
+        user = next(m for m in reversed(traj.messages) if m.role == "user")
+        assert "Budgets for this task: 1 graded submission, 0 scratchpad runs." in user.content, level
 
 
 def test_a_pinned_profile_key_is_still_validated():
@@ -133,11 +112,11 @@ def test_a_pinned_profile_key_is_still_validated():
 
 def test_a_leaderboard_episode_grades_one_program_and_refuses_the_scratchpad():
     env = _env(eval_protocol="leaderboard", reasoning_effort_profiles=_RECIPE_PROFILES)
-    traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+    traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
 
-    assert "Test limit reached (0)" in _call(env, traj, "python_repl")
-    _call(env, traj, "submit_solution")
-    assert "Submission limit reached (1)" in _call(env, traj, "submit_solution")
+    assert "Test limit reached (0)" in call_tool(env, traj, "python_repl")
+    call_tool(env, traj, "submit_solution")
+    assert "Submission limit reached (1)" in call_tool(env, traj, "submit_solution")
 
     assert traj.info[TOOL_CALL_COUNTS_KEY].get("python_repl", 0) == 0
     assert traj.info[TOOL_CALL_COUNTS_KEY]["submit_solution"] == 1
@@ -146,22 +125,35 @@ def test_a_leaderboard_episode_grades_one_program_and_refuses_the_scratchpad():
 
 
 def test_the_registry_presets_take_the_protocol():
-    env = resolve_environment("codeforces", {"eval_protocol": "leaderboard", "sandbox": _EchoSandbox()})
+    env = resolve_environment("codeforces", {"eval_protocol": "leaderboard", "sandbox": StubSandbox()})
     assert env.grading_spec.comparison == "tokens"
-    assert (env.eval_protocol, env.max_submissions, env.max_test_calls) == ("leaderboard", 1, 0)
+    assert (env.eval_protocol, *_budgets(env)) == ("leaderboard", 1, 0)
 
 
-def test_the_regrader_rebuilds_the_run_s_protocol():
-    """The re-grade counts submissions up to the rebuilt env's budget where an episode stamped none."""
-    meta = {
-        "env_type": "codeforces",
-        "language": "python",
-        "env_kwargs": {"reasoning_effort_profiles": _RECIPE_PROFILES},
-    }
-    rebuilt = regrade_trajectories.rebuild_environment({**meta, "eval_protocol": "leaderboard"})
-    assert (rebuilt.eval_protocol, rebuilt.max_submissions) == ("leaderboard", 1)
-    # A meta line naming no protocol ran the harness.
-    assert regrade_trajectories.rebuild_environment(meta).eval_protocol == "harness"
+# --- The eval script's side: the protocol flag over a training config ---
+
+
+def test_a_training_config_s_budgets_give_way_to_the_flag_s_protocol():
+    """Top-level budgets are the trained contract as much as the profile ones: both give way."""
+    trained = {"max_submissions": 3, "max_test_calls": 6, "reasoning_effort_profiles": _RECIPE_PROFILES}
+    eval_protocol, contract = resolve_eval_protocol("leaderboard", trained)
+    assert eval_protocol == "leaderboard"
+    assert "max_submissions" not in contract and "max_test_calls" not in contract
+    assert _budgets(_env(**contract, eval_protocol=eval_protocol)) == (1, 0)
+    # Without the flag the trained contract stands whole under the harness.
+    assert resolve_eval_protocol(None, trained) == ("harness", trained)
+
+
+def test_a_contradiction_stated_for_this_run_is_refused():
+    """A config that names the protocol itself, or ``--env_kwargs`` laid over it, contradicts the pin."""
+    own = {"eval_protocol": "leaderboard", "max_submissions": 3}
+    eval_protocol, contract = resolve_eval_protocol(None, own)
+    assert (eval_protocol, contract) == ("leaderboard", own)
+    with pytest.raises(ValueError, match="eval_protocol 'leaderboard' pins"):
+        _env(**contract)
+    _, contract = resolve_eval_protocol("leaderboard", {"max_submissions": 3})
+    with pytest.raises(ValueError, match="eval_protocol 'leaderboard' pins"):
+        _env(**{**contract, "eval_protocol": "leaderboard", "max_submissions": 3})
 
 
 def test_the_eval_script_takes_the_protocol_from_its_flag_only():

@@ -12,9 +12,10 @@ dedicated core and the wall-clock limit is real.
 
 This reads the JSONL files written by ``write_trajectories_jsonl`` (a ``{"type": "meta", ...}`` line
 then one episode per line), rebuilds each problem's hidden tests from its dataset by index — the same
-order and contest selection ``build_examples`` used — and re-runs every recorded ``submit_solution`` through the *same*
-``grade_solution`` the environment uses, reproducing the env's comparison / checker / time-limit
-exactly. It reports first-submission and within-budget solve rates (``s@1`` / ``s@2``).
+order and contest selection ``build_examples`` used — and re-runs every recorded ``submit_solution``
+through the *same* ``grade_solution`` the environment uses, reproducing the env's comparison /
+checker / time-limit exactly. It reports first-submission and within-budget solve rates
+(``s@1`` / ``s@2``).
 
 Usage::
 

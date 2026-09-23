@@ -8,7 +8,7 @@ Specific to the coding-contest task: it applies a dataset adapter that scores ra
 solution `language`, and reports `success@1` / `success@k` bucketed by problem rating. The rollout loop
 and reward aggregation are shared with the other eval scripts via :mod:`src.environments.eval_runner`.
 `--eval_protocol` names the evaluation contract (`harness`: the configured budgets; `leaderboard`: one
-graded program, no scratchpad, verdict only), and on a benchmark that stamps contest dates
+graded program, no scratchpad), and on a benchmark that stamps contest dates
 `--start_date` / `--end_date` / `--platform` select the problems scored.
 
 The server must serve the model with tool calling enabled (e.g. vLLM
@@ -56,6 +56,7 @@ from src.environments.envs.tasks.coding.code_contests import (
     EVAL_PROTOCOLS,
     REASONING_EFFORT_PROFILES,
     CodeContestsEnvironment,
+    without_eval_protocol_pins,
 )
 from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from src.environments.eval_runner import (
@@ -118,6 +119,17 @@ def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> 
     except ValueError as exc:
         raise SystemExit(f"--start_date/--end_date/--platform on --adapter {args.adapter}: {exc}") from exc
     return selection
+
+
+def resolve_eval_protocol(flag: str | None, trained_env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The run's protocol (the flag, else the training config's, else the default) and the training
+    config's env options under it. A config written under another protocol gives way to this run's
+    pins, as its effort profiles do; one that names this protocol itself keeps its values, so a
+    contradiction there raises in the env, as one in ``--env_kwargs`` does."""
+    eval_protocol = resolve_setting(flag, trained_env.get("eval_protocol"), DEFAULT_EVAL_PROTOCOL)
+    if trained_env.get("eval_protocol") == eval_protocol:
+        return eval_protocol, trained_env
+    return eval_protocol, without_eval_protocol_pins(trained_env, eval_protocol, "the training config")
 
 
 def run_trajectory_path(
@@ -197,8 +209,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         choices=sorted(EVAL_PROTOCOLS),
         help="Evaluation protocol: harness runs the configured budgets (the agentic loop); leaderboard pins "
-        "one graded submission, no scratchpad runs and verdict-only feedback at every effort level, the "
-        "one-program-per-sample counterpart of pass@k. Default: the training config's under "
+        "one graded submission and no scratchpad runs at every effort level. Either way success@1 is the "
+        "first sample's outcome, not a mean over --num_samples. Default: the training config's under "
         "--training_config, else harness.",
     )
     p.add_argument(
@@ -316,16 +328,17 @@ def main() -> None:
         args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
     )
     max_turns = resolve_setting(args.max_turns, trained_env.get("max_turns"), None)
+    eval_protocol, trained_env = resolve_eval_protocol(args.eval_protocol, trained_env)
     # The training run's env config first, the resolved settings and flags over it: an eval under a
-    # contract grades as the run did. An unset language, turn budget or protocol is left out entirely,
-    # so the env class's own default applies.
+    # contract grades as the run did. An unset language or turn budget is left out entirely, so the env
+    # class's own default applies.
     env = resolve_environment(
         env_type,
         {
             **trained_env,
             "max_turns": max_turns,
             **({"language": parse_language_flag(args.language)} if args.language else {}),
-            **({"eval_protocol": args.eval_protocol} if args.eval_protocol else {}),
+            "eval_protocol": eval_protocol,
             "reasoning_effort": reasoning_effort,
             **env_kwargs,
         },

@@ -25,7 +25,6 @@ from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
     VERDICT_DETAIL_FULL,
-    VERDICT_DETAIL_OUTCOME,
     VERDICT_DETAILS,
     GradeResult,
     GradingSpec,
@@ -57,18 +56,13 @@ DEFAULT_REASONING_EFFORT = "medium"
 
 # The knobs an evaluation protocol may pin, at the value a run takes when neither its config nor its
 # protocol sets one.
-EVAL_PROTOCOL_KNOB_DEFAULTS: dict[str, int | str] = {
-    "max_submissions": 2,
-    "max_test_calls": 5,
-    "verdict_detail": VERDICT_DETAIL_FULL,
-}
+EVAL_PROTOCOL_KNOB_DEFAULTS: dict[str, int] = {"max_submissions": 2, "max_test_calls": 5}
 # Evaluation protocol -> the knobs it pins. ``harness`` pins none: the configured budgets stand, the
-# agentic loop the environment trains, scored as attempts-until-accept. ``leaderboard`` is a
-# benchmark's own contract run inside the harness — one graded program per sample, no scratchpad, the
-# verdict alone — the one-program-per-sample counterpart of a benchmark's pass@k.
-EVAL_PROTOCOLS: dict[str, dict[str, int | str]] = {
+# agentic loop the environment trains, scored as attempts-until-accept. ``leaderboard`` grades one
+# program per sample with no scratchpad, the setting a benchmark's pass@k is measured in.
+EVAL_PROTOCOLS: dict[str, dict[str, int]] = {
     "harness": {},
-    "leaderboard": {"max_submissions": 1, "max_test_calls": 0, "verdict_detail": VERDICT_DETAIL_OUTCOME},
+    "leaderboard": {"max_submissions": 1, "max_test_calls": 0},
 }
 DEFAULT_EVAL_PROTOCOL = "harness"
 
@@ -76,6 +70,24 @@ SUBMIT_TOOL = "submit_solution"
 # Pass fraction of each graded submission, in order: what the resubmission price reads improvement off.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 NO_STDIN_NOTE = "(No stdin was passed to this run; give the program its input in the `stdin` argument.)"
+
+
+def eval_protocol_pins(eval_protocol: str) -> dict[str, int]:
+    """The knobs ``eval_protocol`` pins; an unknown protocol raises."""
+    if eval_protocol not in EVAL_PROTOCOLS:
+        raise ValueError(f"eval_protocol must be one of {sorted(EVAL_PROTOCOLS)}, got {eval_protocol!r}")
+    return EVAL_PROTOCOLS[eval_protocol]
+
+
+def without_eval_protocol_pins(config: dict[str, Any], eval_protocol: str, source: str) -> dict[str, Any]:
+    """``config`` without the knobs ``eval_protocol`` pins, each dropped one logged. For a contract
+    written under another protocol (a training config's env options, an effort profile's budgets):
+    its values give way to the pins instead of contradicting them."""
+    pins = eval_protocol_pins(eval_protocol)
+    dropped = sorted(pins.keys() & config.keys())
+    if dropped:
+        logger.info("eval_protocol %r pins %s; the values %s sets give way", eval_protocol, dropped, source)
+    return {key: value for key, value in config.items() if key not in pins}
 
 
 class CodeContestsEnvironment(NativeToolUseEnvironment):
@@ -139,7 +151,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         sandbox_url: str | None = None,
         language: str | Sequence[str] = "python",
         output_comparison: str = "exact",
-        verdict_detail: str | None = None,
+        verdict_detail: str = VERDICT_DETAIL_FULL,
         stop_on_first_failure: bool = False,
         max_time_limit: float = SANDBOX_DEFAULT_TIMEOUT,
         compiled_time_limit_scale: float = 1.0,
@@ -156,18 +168,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         **kwargs,
     ):
         knobs = self._resolve_eval_protocol_knobs(
-            eval_protocol,
-            max_submissions=max_submissions,
-            max_test_calls=max_test_calls,
-            verdict_detail=verdict_detail,
+            eval_protocol, max_submissions=max_submissions, max_test_calls=max_test_calls
         )
-        max_submissions, max_test_calls, verdict_detail = (
-            knobs["max_submissions"],
-            knobs["max_test_calls"],
-            knobs["verdict_detail"],
-        )
+        max_submissions, max_test_calls = knobs["max_submissions"], knobs["max_test_calls"]
         self.eval_protocol = eval_protocol
-        pinned = set(EVAL_PROTOCOLS[eval_protocol])
         specs = self._resolve_languages(language)
         if output_comparison not in ("exact", "tokens"):
             raise ValueError(f"output_comparison must be 'exact' or 'tokens', got {output_comparison!r}")
@@ -217,10 +221,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         self.repl_timeout = repl_timeout
         # Without the interaction half, the strategy collapses to submit-and-fix at every effort level.
         # Read off the overrides (the class profiles carry only thinking budgets) because the tool
-        # descriptions built below defer to the task message whenever a level binds interaction. A key
-        # the evaluation protocol pins binds nothing: it gives way at every level.
+        # descriptions built below defer to the task message whenever a level binds interaction.
         self._profiles_bind_interaction = any(
-            set(p) - {"thinking_tokens"} - pinned for p in (reasoning_effort_profiles or {}).values()
+            set(p) - {"thinking_tokens"} for p in (reasoning_effort_profiles or {}).values()
         )
         self.sandbox = sandbox or resolve_sandbox(backend=sandbox_backend, url=sandbox_url)
         # Built once and the single reader of these knobs: every submission of the run is graded under
@@ -288,19 +291,20 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             reasoning_effort_profiles=reasoning_effort_profiles,
             **kwargs,
         )
-        # After the base has validated every profile key, pinned ones included.
-        self.reasoning_effort_profiles = self._profiles_under_eval_protocol(
-            eval_protocol, self.reasoning_effort_profiles
-        )
+        # After the base has validated every profile key, pinned ones included. A profile's interaction
+        # budgets make effort buy iteration; a protocol pinning them fixes the budget at every level,
+        # so effort buys thinking alone there (a training config's ladder keeps its thinking budgets).
+        self.reasoning_effort_profiles = {
+            level: without_eval_protocol_pins(entry, eval_protocol, f"reasoning_effort_profiles[{level!r}]")
+            for level, entry in self.reasoning_effort_profiles.items()
+        }
 
     @staticmethod
-    def _resolve_eval_protocol_knobs(eval_protocol: str, **configured: Any) -> dict[str, Any]:
+    def _resolve_eval_protocol_knobs(eval_protocol: str, **configured: int | None) -> dict[str, int]:
         """Each :data:`EVAL_PROTOCOL_KNOB_DEFAULTS` knob under ``eval_protocol``: its pin, else the
         configured value, else the default. A configured value contradicting a pin raises — the run
         would carry the protocol's name without following it."""
-        if eval_protocol not in EVAL_PROTOCOLS:
-            raise ValueError(f"eval_protocol must be one of {sorted(EVAL_PROTOCOLS)}, got {eval_protocol!r}")
-        pins = EVAL_PROTOCOLS[eval_protocol]
+        pins = eval_protocol_pins(eval_protocol)
         conflicts = {k: v for k, v in configured.items() if v is not None and k in pins and v != pins[k]}
         if conflicts:
             raise ValueError(
@@ -310,25 +314,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             knob: pins.get(knob, default if configured.get(knob) is None else configured[knob])
             for knob, default in EVAL_PROTOCOL_KNOB_DEFAULTS.items()
         }
-
-    @staticmethod
-    def _profiles_under_eval_protocol(
-        eval_protocol: str, profiles: dict[str, dict[str, int | float]]
-    ) -> dict[str, dict[str, int | float]]:
-        """``profiles`` without the keys ``eval_protocol`` pins. A profile's interaction budgets make
-        effort buy iteration; a protocol pinning them fixes the budget at every level, so effort buys
-        thinking alone there (a training config's ladder keeps its thinking budgets)."""
-        pinned = set(EVAL_PROTOCOLS[eval_protocol])
-        superseded = {level: sorted(pinned & set(entry)) for level, entry in profiles.items() if pinned & set(entry)}
-        if not superseded:
-            return profiles
-        logger.info(
-            "eval_protocol %r pins %s at every effort level; the profiles' %s give way",
-            eval_protocol,
-            sorted(pinned),
-            superseded,
-        )
-        return {level: {k: v for k, v in entry.items() if k not in pinned} for level, entry in profiles.items()}
 
     @staticmethod
     def _resolve_languages(language: str | Sequence[str]) -> list[LanguageSpec]:
