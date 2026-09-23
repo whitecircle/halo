@@ -51,6 +51,7 @@ from scripts.environments._common import (
     write_eval_outputs,
 )
 from src.environments.envs.tasks.coding.code_contests import (
+    DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
     EVAL_PROTOCOLS,
     REASONING_EFFORT_PROFILES,
@@ -117,6 +118,16 @@ def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> 
     except ValueError as exc:
         raise SystemExit(f"--start_date/--end_date/--platform on --adapter {args.adapter}: {exc}") from exc
     return selection
+
+
+def run_trajectory_path(
+    args: argparse.Namespace, env: CodeContestsEnvironment, selection: ContestSelection
+) -> str | None:
+    """The run's trajectory file: ``<model>__<adapter>__<split>__<language>``, plus the protocol and the
+    selection only where they depart from the defaults, so a default run keeps its name. The meta line
+    records both either way."""
+    protocol = env.eval_protocol if env.eval_protocol != DEFAULT_EVAL_PROTOCOL else ""
+    return resolve_trajectory_path(args, args.adapter, args.split, ",".join(env.languages), protocol, selection.label)
 
 
 def contest_meta(
@@ -265,7 +276,8 @@ def build_examples(
                 "prompt": adapter.format_prompt(row),
                 "context": {"answer": json.dumps(adapter.pack_verification(row))},
                 "group": row.get(adapter.group_field),
-                "id": row.get("id") or row.get("problem_id") or row.get("name"),
+                # ``question_id`` last: LiveCodeBench and HLCE rows carry no other id.
+                "id": row.get("id") or row.get("problem_id") or row.get("name") or row.get("question_id"),
             }
         )
         if args.num_examples and len(examples) >= args.num_examples:
@@ -318,7 +330,6 @@ def main() -> None:
             **env_kwargs,
         },
     )
-    language_label = ",".join(env.languages)
     # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
     env.verify_backend()
     examples = build_examples(args, adapter, selection)
@@ -336,9 +347,7 @@ def main() -> None:
     )
     logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
 
-    traj_path = resolve_trajectory_path(
-        args, args.adapter, args.split, language_label, env.eval_protocol, selection.label
-    )
+    traj_path = run_trajectory_path(args, env, selection)
 
     results = asyncio.run(
         collect_results(

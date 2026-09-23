@@ -21,7 +21,7 @@ import pytest
 from scripts.environments.inference import regrade_trajectories
 from scripts.environments.inference.run_code_contests import build_examples, contest_meta, resolve_selection
 from src.environments.envs.tasks.coding import datasets as coding_datasets
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, ContestSelection
+from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from src.environments.registry import resolve_environment
 
 _DATASET = "livecodebench/code_generation_lite"
@@ -227,12 +227,24 @@ def test_the_regrader_rebuilds_the_run_from_the_meta_line_the_eval_writes(releas
     payloads = regrade_trajectories.build_payloads(meta)
 
     assert [json.loads(example["context"]["answer"]) for example in examples] == list(payloads)
-    assert [example["prompt"].splitlines()[0] for example in examples] == ["# ac_2025_01_04", "# ac_2025_04_06"]
+    assert [example["id"] for example in examples] == ["ac_2025_01_04", "ac_2025_04_06"]
     rebuilt = regrade_trajectories.rebuild_environment(meta)
     assert (rebuilt.eval_protocol, rebuilt.max_submissions, rebuilt.max_test_calls) == ("leaderboard", 1, 0)
     # Without the recorded selection, episode 1 would be graded against another problem's tests.
     unselected = regrade_trajectories.build_payloads({k: v for k, v in meta.items() if k != "selection"})
     assert unselected[1] != payloads[1]
+
+
+def test_question_id_names_an_example_only_when_the_row_carries_no_other_id():
+    rows = [
+        {"id": "own", "question_id": "q1"},
+        {"problem_id": "prob", "question_id": "q2"},
+        {"name": "named", "question_id": "q3"},
+        {"question_id": "q4"},
+    ]
+    adapter = CodeDatasetAdapter(str, dict, lambda row: True, load=lambda dataset, config, split: rows)
+    examples = build_examples(_args(adapter="stub"), adapter, ContestSelection())
+    assert [example["id"] for example in examples] == ["own", "prob", "named", "q4"]
 
 
 if __name__ == "__main__":

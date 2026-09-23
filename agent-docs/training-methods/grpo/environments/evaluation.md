@@ -56,8 +56,9 @@ recorded.
 
 `--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>` auto-names one
 file per run instead (`<model>__<env_type>__<split>.jsonl`, or
-`<model>__<adapter>__<split>__<language>__<eval_protocol>.jsonl` for the coding script, plus a part
-naming a contest selection, e.g. `__2025-01-01..2025-04-30_atcoder-codeforces`).
+`<model>__<adapter>__<split>__<language>.jsonl` for the coding script). The coding name adds
+`__<eval_protocol>` for a protocol other than `harness` and a part naming a contest selection when
+one is set, e.g. `__leaderboard__2025-01-01..2025-04-30_atcoder-codeforces`.
 
 Line 1 is a `meta` record: model, env type, dataset/config/split, effective `max_turns`, the
 generation contract (`rollout`), the `training_config`, `system_prompt` and tool schemas — for

@@ -11,10 +11,12 @@ The environments run against a stub sandbox that echoes a canned result (no subp
 Run: python tests/cpu/environments/test_code_contests_protocols.py  (or pytest)
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from scripts.environments.inference import regrade_trajectories
-from scripts.environments.inference.run_code_contests import refuse_flag_owned_env_kwargs
+from scripts.environments.inference.run_code_contests import refuse_flag_owned_env_kwargs, run_trajectory_path
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -22,6 +24,7 @@ from src.environments.envs.tasks.coding.code_contests import (
     EVAL_PROTOCOLS,
     CodeContestsEnvironment,
 )
+from src.environments.envs.tasks.coding.datasets import ContestSelection
 from src.environments.registry import resolve_environment
 from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.tools.definitions import NativeToolCall
@@ -164,6 +167,22 @@ def test_the_regrader_rebuilds_the_run_s_protocol():
 def test_the_eval_script_takes_the_protocol_from_its_flag_only():
     with pytest.raises(SystemExit, match="--eval_protocol, not --env_kwargs"):
         refuse_flag_owned_env_kwargs({"eval_protocol": "leaderboard"})
+
+
+def test_a_default_run_keeps_its_trajectory_file_name():
+    """The protocol and the selection name the file only where they depart from the defaults, so an
+    existing harness run lands where it always did."""
+    args = SimpleNamespace(
+        save_trajectories=None, trajectory_dir="/runs", model="org/m", adapter="livecodebench", split="test"
+    )
+    assert run_trajectory_path(args, _env(), ContestSelection()) == "/runs/org-m__livecodebench__test__python.jsonl"
+    window = ContestSelection.parse("2025-01-04", "2025-04-06", ["atcoder"])
+    assert run_trajectory_path(args, _env(eval_protocol="leaderboard"), window) == (
+        "/runs/org-m__livecodebench__test__python__leaderboard__2025-01-04..2025-04-06_atcoder.jsonl"
+    )
+    assert run_trajectory_path(args, _env(), window) == (
+        "/runs/org-m__livecodebench__test__python__2025-01-04..2025-04-06_atcoder.jsonl"
+    )
 
 
 if __name__ == "__main__":
