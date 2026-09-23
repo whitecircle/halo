@@ -467,7 +467,7 @@ Common `environment_kwargs` keys:
 
 - `search_backend` (`qa_search` / open-book `exam_qa`): `duckduckgo`, `serper`, `brave`, `tavily`; `mock` only with `HALO_ALLOW_MOCK_SEARCH=1`. Setting it with `open_book: false` is refused at construction.
 - `open_book` (`exam_qa`, default `false`).
-- `timeout_per_test` (`code_contests`, seconds per test, default `15`).
+- `timeout_per_test` (`code_contests`, seconds per test, default `15`; a value that is not finite and > 0 raises at construction, as does such a `max_time_limit`).
 - `compiled_time_limit_scale` (`code_contests`, multiplier on a compiled language's per-test limit, default `1`; the interpreted floor and the `max_time_limit` clamp are unchanged; see [Code Contests → Grading rules](../training-methods/grpo/environments/code-contests.md#grading-rules)).
 - `max_grading_seconds` (`code_contests`, wall-clock budget per submission grade, default `None` = unbounded; see [Code Contests → Grading rules](../training-methods/grpo/environments/code-contests.md#grading-rules)).
 - `verdict_detail` (`code_contests`, `full` default / `outcome`): `outcome` omits the expected and produced output of a wrong answer, leaving `Test i: FAIL`; stderr, crash, time-limit and output-limit diagnostics stay in both modes.

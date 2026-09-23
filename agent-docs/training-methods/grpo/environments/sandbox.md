@@ -8,8 +8,8 @@ The in-process restricted REPL (`inprocess.py`) — restricted builtins, no impo
 
 | Backend | Isolation | Languages | Needs |
 |---|---|---|---|
-| `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `gcc` / `g++` for C/C++ |
-| `bubblewrap` | that core in a `bwrap` jail (`--unshare-all`): read-only system, only the working dir writable | python, bash, cpp, c | `bwrap` plus user-namespace rights |
+| `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `pidfd_open` (Linux 5.3+, allowed by the seccomp profile; checked at construction); `gcc` / `g++` for C/C++ |
+| `bubblewrap` | that core in a `bwrap` jail (`--unshare-all`): read-only system, only the working dir writable | python, bash, cpp, c | what `local` needs, plus `bwrap` and user-namespace rights |
 | `remote` | in the service, behind a SandboxFusion-compatible `/run_code` endpoint | whatever it exposes | network to it |
 
 Coding environments select it in `environment_kwargs`:
@@ -84,9 +84,9 @@ A sandbox-backed tool of your own raises them the same way (a missing session is
 Voiding is only as sound as the backend's containment of the program: whatever the program can drive into an `error` voids its own episode. The routes left to it:
 
 - `remote`: a response the service fails to produce (a huge output, the service's own OOM) or one past the client deadline, `run_timeout` + 30 s.
-- Grading on `local` / `bubblewrap`: any host-side exception during a test is an infra error for that test (`_run_in_sandbox`) — on `local`, the `EAGAIN` of a process table the program's leftover processes filled; on either, the `ENOSPC` of a `TMPDIR` it filled.
+- Grading on `local` / `bubblewrap`: any host-side exception during a test is an infra error for that test (`_run_in_sandbox`) — on `local`, the `EAGAIN` of a process table the program's leftover processes filled; on either, the `ENOSPC` of a `TMPDIR` it filled, and, under a grader that is not root, a child that escaped the process group locking the working directory again just before the host enters or lists it.
 
-An output flood is not one: output is captured in files under the child's `RLIMIT_FSIZE`, so it ends as the program's own failure at the file-size limit. Nor is a lone surrogate in the program's source, stdin or files: every backend replaces it with `?`, as a text-mode pipe writes it, and refuses a session file name UTF-8 cannot encode as a bad argument (`ValueError`, a priced tool error). Nor, on `local` / `bubblewrap`, are permissions the program took away: under a grader that is not root the program shares its uid and can make its working directory, a directory in it or a staged file read-only, so before staging, before each reset and before removing the directory the host gives the owner back access to the whole tree, walked by descriptor so no link is followed. Where faults are frequent, dropping them is a selection — the episodes that call the sandbox most drop most. Watch `episode/sandbox_infra_fault`; `remote` retries nothing.
+An output flood is not one: output is captured in files under the child's `RLIMIT_FSIZE`, so it ends as the program's own failure at the file-size limit. Nor is a lone surrogate in the program's source, stdin or files: every backend replaces it with `?`, as a text-mode pipe writes it, and refuses a session file name UTF-8 cannot encode as a bad argument (`ValueError`, a priced tool error). Nor, on `local` / `bubblewrap`, are permissions the program took away: under a grader that is not root the program shares its uid and can make its working directory, a directory in it or a staged file read-only, so before staging, before each reset and before removing the directory the host gives the owner back access to the whole tree, walked by descriptor so no link is followed. Only a child that escaped the process group can take it again after that: a staging write it refuses is the program's own runtime error, and an entry it keeps the reset from removing stays. Where faults are frequent, dropping them is a selection — the episodes that call the sandbox most drop most. Watch `episode/sandbox_infra_fault`; `remote` retries nothing.
 
 ## Languages
 

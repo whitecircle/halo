@@ -102,6 +102,20 @@ def _captured_text(capture) -> str:
     return capture.read(LOCAL_FSIZE_LIMIT).decode("utf-8", errors="replace")
 
 
+def _require_pidfd() -> None:
+    """Raise unless this process may open a pidfd: every run waits on its program through one
+    (:func:`_exited_within`), and a refused ``pidfd_open`` (Linux before 5.3, a seccomp profile that
+    blocks it) would otherwise fail each run as a backend error and void every graded episode."""
+    try:
+        os.close(os.pidfd_open(os.getpid()))
+    except OSError as exc:
+        raise RuntimeError(
+            f"the local sandbox waits on its programs through pidfd_open, which this environment refuses "
+            f"({exc}); it needs Linux 5.3+ and a seccomp profile that allows pidfd_open. Otherwise use the "
+            "'remote' sandbox backend."
+        ) from exc
+
+
 def _exited_within(pid: int, timeout: float) -> bool:
     """Whether process ``pid`` exits within ``timeout`` seconds, without reaping it: its pidfd polls
     readable once it has exited, and until it is reaped its zombie keeps the pid, and so the id of the
@@ -127,9 +141,10 @@ def _entry_kinds(workdir: str) -> _EntryKinds:
 
 def _grant_owner(name: str, bits: int, dir_fd: int | None = None) -> None:
     """Add ``bits`` to the owner permissions of the directory or regular file ``name`` (relative to
-    ``dir_fd`` when given). A link is never followed: ``AT_SYMLINK_NOFOLLOW`` refuses one
-    (``NotImplementedError``), including one raced in after the ``lstat``."""
-    with contextlib.suppress(FileNotFoundError, NotImplementedError):
+    ``dir_fd`` when given). A link is never followed: one raced in after the type check is refused by
+    ``fchmodat`` with ``AT_SYMLINK_NOFOLLOW`` and left alone, which CPython raises as
+    ``NotImplementedError``, or as ``ValueError`` relative to a directory descriptor."""
+    with contextlib.suppress(FileNotFoundError, NotImplementedError, ValueError):
         mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
         if (stat.S_ISDIR(mode) or stat.S_ISREG(mode)) and mode & bits != bits:
             os.chmod(name, stat.S_IMODE(mode) | bits, dir_fd=dir_fd, follow_symlinks=False)
@@ -178,6 +193,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
         self.memory_limit_mb = memory_limit_mb
         self.compile_timeout = compile_timeout
         self.compile_memory_limit_mb = compile_memory_limit_mb
+        _require_pidfd()
 
     def open_session(self) -> "LocalSession":
         """Open a persistent session backed by a fresh temp working directory."""
@@ -226,6 +242,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
         child's ``RLIMIT_FSIZE`` bounds its output, so a flood ends as the program's own failure at the
         file-size limit, never as host memory the grader runs out of.
         """
+        # poll() reads a negative timeout as none: the host would wait as long as the program runs.
+        if not (math.isfinite(timeout) and timeout > 0):
+            raise ValueError(f"a run's timeout must be a finite number of seconds > 0, got {timeout!r}")
         with tempfile.TemporaryFile() as feed, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             # What UTF-8 cannot carry (a lone surrogate in a model-written stdin) is replaced.
             feed.write(utf8_encodable(stdin).encode("utf-8"))
@@ -254,7 +273,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
     ) -> SandboxResult | None:
         """Write ``files`` and the source into ``workdir``. Returns None, an error result for an unsafe
         path (the caller's fault), or a runtime-error verdict when the program replaced a staged entry
-        with a link (its own fault, so never an infra error it could void its episode with)."""
+        with a link or locked one (its own fault, so never an infra error it could void its episode
+        with). A write refused just after :func:`_restore_owner_access` gave the owner its access back
+        can only come from a child that escaped the program's process group taking it again."""
         files = files or {}
         for name in files:
             if not _safe_member_name(name):
@@ -263,7 +284,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
             for name, content in files.items():
                 self._write_member(workdir, name, content)
             self._write_member(workdir, spec.source_name, code)
-        except SessionPathError as exc:
+        except (SessionPathError, PermissionError) as exc:
             return SandboxResult(stderr=f"working directory tampered: {exc}", returncode=TAMPERED_WORKDIR_RETURNCODE)
         return None
 
@@ -430,7 +451,9 @@ class LocalSession(SandboxSession):
             if kind == stat.S_IFDIR:
                 shutil.rmtree(path, ignore_errors=True)
             else:
-                with contextlib.suppress(FileNotFoundError):
+                # Refused just after the restore, only an escaped child can have locked it: it stays,
+                # as a directory ``rmtree`` cannot empty does.
+                with contextlib.suppress(FileNotFoundError, PermissionError):
                     os.remove(path)
 
     def write_file(self, path: str, content: str) -> None:

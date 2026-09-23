@@ -38,7 +38,7 @@ rollout_thinking_budget_scope: episode
 | `language` | `python` | `python`, `cpp`, `c`, or a list the model picks from |
 | `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed equality reading `\r\n` and `\r` as `\n` on both sides, `tokens` whitespace-token equality |
 | `verdict_detail` | `full` | `full` shows a failed test's expected and produced output; `outcome` the verdict alone |
-| `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor |
+| `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor. It and `max_time_limit` must be finite and > 0 |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit; a non-finite or non-positive value raises at construction |
 | `max_grading_seconds` | `None` | Wall-clock budget for one grade; a non-positive value raises at construction |

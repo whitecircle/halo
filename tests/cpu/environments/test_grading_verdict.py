@@ -328,6 +328,19 @@ def test_outcome_verdict_hides_expected_and_produced_output():
         run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="diff")
 
 
+@pytest.mark.parametrize("seconds", [0.0, -1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("field", ["default_timeout", "max_time_limit"])
+def test_the_grading_contract_refuses_a_time_limit_that_is_not_positive(field, seconds):
+    """A run's wait on its program cannot be bounded by a negative or non-finite limit."""
+    with pytest.raises(ValueError, match=field):
+        GradingSpec(sandbox=StubSandbox(), **{field: seconds})
+
+
+def test_a_negative_timeout_per_test_is_refused_at_construction():
+    with pytest.raises(ValueError, match="timeout_per_test"):
+        CodeContestsEnvironment(language="python", sandbox=StubSandbox(), timeout_per_test=-1.0)
+
+
 def test_verdict_detail_travels_with_the_grading_contract():
     """The env builds the spec once and the offline re-grader takes it back through ``to_meta``."""
     sandbox = StubSandbox(SandboxResult(stdout="X\n", returncode=0))

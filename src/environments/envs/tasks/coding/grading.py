@@ -445,6 +445,12 @@ class GradingSpec:
 
     def __post_init__(self) -> None:
         # ``replace`` re-runs this, so a restored meta block is held to the same contract.
+        for name, seconds in (
+            ("default_timeout (timeout_per_test)", self.default_timeout),
+            ("max_time_limit", self.max_time_limit),
+        ):
+            if not (isfinite(seconds) and seconds > 0):
+                raise ValueError(f"{name} must be a finite number of seconds > 0, got {seconds!r}")
         if not (isfinite(self.compiled_time_limit_scale) and self.compiled_time_limit_scale > 0):
             raise ValueError(
                 f"compiled_time_limit_scale must be a finite number > 0, got {self.compiled_time_limit_scale}"

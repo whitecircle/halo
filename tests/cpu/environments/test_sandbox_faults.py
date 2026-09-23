@@ -16,11 +16,14 @@
 """
 
 import asyncio
+import errno
 import json
 import logging
 import os
+import pathlib
 import resource
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -43,12 +46,16 @@ from src.environments.episode import RolloutResult
 from src.environments.sandbox.base import (
     LOCAL_FSIZE_LIMIT,
     SandboxAgentFault,
-    SandboxExecutor,
     SandboxInfraError,
     SandboxResult,
 )
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
-from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox, _restore_owner_access
+from src.environments.sandbox.local import (
+    TAMPERED_WORKDIR_RETURNCODE,
+    LocalSubprocessSandbox,
+    _grant_owner,
+    _restore_owner_access,
+)
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
@@ -58,6 +65,7 @@ from src.rewards.scoring import Scorer, ScoreResult
 from src.rewards.spec import JudgeTerm
 from src.trainers.grpo.environmental import rollout_valid_mask
 from src.trainers.grpo.objective.advantages import group_relative_advantages
+from tests.common.code_contests import StubSandbox
 from tests.common.utils import REPO_ROOT
 
 _TOOL_ERROR_PENALTY = 0.1
@@ -349,19 +357,6 @@ def test_a_remote_payload_carries_no_lone_surrogate():
     assert (sent["code"], sent["stdin"], sent["files"]["h.py"]) == ("print(1)  # ?", "a?", "?")
 
 
-class _StubRun(SandboxExecutor):
-    """Every run returns one canned result, the way a remote service hands back raw output."""
-
-    def __init__(self, result: SandboxResult):
-        self._result = result
-
-    def open_session(self):
-        raise NotImplementedError
-
-    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
-        return self._result
-
-
 _CHECKER_WANTS_EMPTY_INPUT = (
     "import sys\n"
     "given = open(sys.argv[1]).read()\n"
@@ -472,6 +467,12 @@ print(json.dumps(report))
 _UNPRIVILEGED_UID = "65534"
 
 
+def _readable_by_others(root: pathlib.Path) -> bool:
+    """Whether a uid that owns nothing on the host can import the toolkit from ``root``."""
+    listable = stat.S_IROTH | stat.S_IXOTH
+    return root.stat().st_mode & listable == listable and all(p.stat().st_mode & stat.S_IXOTH for p in root.parents)
+
+
 def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
     """Graded by a user that is not root, which the program shares: every test is judged, its
     working directory is removed at the end, and nothing it locked reads as a grading outage."""
@@ -479,6 +480,8 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
     if os.geteuid() == 0:
         if shutil.which("setpriv") is None:
             pytest.skip("running as root without setpriv to drop to an unprivileged uid")
+        if not _readable_by_others(REPO_ROOT):
+            pytest.skip(f"uid {_UNPRIVILEGED_UID} cannot read the checkout at {REPO_ROOT}")
         command = [
             "setpriv",
             f"--reuid={_UNPRIVILEGED_UID}",
@@ -496,6 +499,96 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
     assert (grade["graded"], grade["infra_errors"], grade["passed"]) == (3, 0, 0), grade["details"]
     assert "FAIL" in grade["details"] and "ERROR --" not in grade["details"], grade["details"]
     assert report["left"] == [], "the session removes the working directory the program locked"
+
+
+def test_a_link_raced_in_after_the_type_check_is_left_alone(tmp_path, monkeypatch):
+    """The walk checks an entry's type, then changes its mode without following a link: one swapped in
+    between is refused and left alone, relative to a directory descriptor or not, never raised."""
+    host = tmp_path / "host"
+    host.mkdir()
+    host.chmod(0o500)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "entry").symlink_to(host)
+    real_stat = os.stat
+
+    def a_directory_when_checked(path, *args, **kwargs):
+        found = real_stat(path, *args, **kwargs)
+        if os.path.basename(path) == "entry":
+            return os.stat_result((stat.S_IFDIR | 0o500, *found[1:10]))
+        return found
+
+    dir_fd = os.open(workdir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "stat", a_directory_when_checked)
+            _grant_owner("entry", stat.S_IRWXU, dir_fd)
+            _grant_owner(str(workdir / "entry"), stat.S_IRWXU)
+    finally:
+        os.close(dir_fd)
+    assert host.stat().st_mode & 0o777 == 0o500
+
+
+def test_a_staging_write_refused_after_the_restore_is_the_programs_runtime_error(monkeypatch):
+    """A child that escaped the process group can lock a staged file again between the host's restore
+    and its write: the refusal is the program's runtime error, never an infra error."""
+
+    def locked(workdir, name, content):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(workdir, name))
+
+    monkeypatch.setattr(LocalSubprocessSandbox, "_write_member", staticmethod(locked))
+    tests = [{"input": "", "output": "1"}] * 2
+    grade = run_solution_against_tests("print(1)", tests, sandbox=LocalSubprocessSandbox())
+    assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 0), grade.details
+    assert "RUNTIME ERROR" in grade.details
+
+
+def test_a_reset_refused_after_the_restore_leaves_the_entry(monkeypatch):
+    def locked(path, *args, **kwargs):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+
+    with LocalSubprocessSandbox().open_session() as session:
+        assert session.run("open('left.txt', 'w').close()").ok
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "remove", locked)
+            session.reset_to_staged()
+        assert "left.txt" in session.list_files()
+
+
+@pytest.mark.parametrize("denial", [errno.EPERM, errno.ENOSYS])
+def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(denial, monkeypatch):
+    """Every run waits on its program through a pidfd; refused, each would fail as a backend error and
+    void its episode, so construction raises instead."""
+
+    def refused(pid, flags=0):
+        raise OSError(denial, os.strerror(denial))
+
+    monkeypatch.setattr(os, "pidfd_open", refused)
+    with pytest.raises(RuntimeError, match="pidfd_open"):
+        LocalSubprocessSandbox()
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf")])
+def test_a_run_refuses_a_timeout_poll_cannot_bound(timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        LocalSubprocessSandbox._run_in_new_session(["true"], stdin="", timeout=timeout, cwd="/", env={})
+
+
+def test_the_group_is_killed_before_its_leader_is_reaped(monkeypatch):
+    """Until it is reaped, the leader's zombie holds the process group's id; a kill after the reap
+    could land on a group that reused it."""
+    states = []
+    real_killpg = os.killpg
+
+    def recording(pgid, sig):
+        with open(f"/proc/{pgid}/stat") as fh:
+            record = fh.read()
+        states.append(record[record.rindex(")") + 2])
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording)
+    assert LocalSubprocessSandbox().run("print(1)").ok
+    assert states == ["Z"]
 
 
 def test_restoring_owner_access_reaches_nested_entries_and_never_follows_a_link(tmp_path):
@@ -601,7 +694,7 @@ def test_a_run_waits_on_its_child_past_select_s_descriptor_limit():
 def test_crlf_and_lf_output_compare_equal_on_every_backend(expected, produced):
     """An exact comparison judges lines, not line endings: raw CRLF output (as a remote service returns
     it, or a CRLF test file) grades like LF."""
-    raw = _StubRun(SandboxResult(stdout=produced, returncode=0))
+    raw = StubSandbox(SandboxResult(stdout=produced, returncode=0))
     assert run_solution_against_tests("code", [{"input": "", "output": expected}], sandbox=raw).passed == 1
     assert not run_solution_against_tests("code", [{"input": "", "output": "1 2"}], sandbox=raw).passed
 
