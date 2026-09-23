@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.environments.inference.run_code_contests import (
+    contest_meta,
     refuse_flag_owned_env_kwargs,
     resolve_eval_protocol,
     run_trajectory_path,
@@ -139,9 +140,19 @@ def test_a_training_config_s_budgets_give_way_to_the_flag_s_protocol():
     eval_protocol, contract = resolve_eval_protocol("leaderboard", trained)
     assert eval_protocol == "leaderboard"
     assert "max_submissions" not in contract and "max_test_calls" not in contract
-    assert _budgets(_env(**contract, eval_protocol=eval_protocol)) == (1, 0)
+    assert contract["eval_protocol"] == eval_protocol
+    assert _budgets(_env(**contract)) == (1, 0)
     # Without the flag the trained contract stands whole under the harness.
-    assert resolve_eval_protocol(None, trained) == ("harness", trained)
+    assert resolve_eval_protocol(None, trained) == ("harness", {**trained, "eval_protocol": "harness"})
+
+
+def test_the_recorded_contract_names_the_protocol_the_run_used():
+    """The options the meta line records name the resolved protocol, not the training config's."""
+    trained = {"eval_protocol": "harness", "max_submissions": 3}
+    eval_protocol, contract = resolve_eval_protocol("leaderboard", trained)
+    assert contract == {"eval_protocol": "leaderboard"}
+    written = contest_meta("livecodebench", ContestSelection(), _env(**contract), "high", contract)
+    assert written["env_kwargs"]["eval_protocol"] == written["eval_protocol"] == eval_protocol
 
 
 def test_a_contradiction_stated_for_this_run_is_refused():

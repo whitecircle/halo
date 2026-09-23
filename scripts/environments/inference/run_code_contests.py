@@ -123,13 +123,13 @@ def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> 
 
 def resolve_eval_protocol(flag: str | None, trained_env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """The run's protocol (the flag, else the training config's, else the default) and the training
-    config's env options under it. A config written under another protocol gives way to this run's
-    pins, as its effort profiles do; one that names this protocol itself keeps its values, so a
-    contradiction there raises in the env, as one in ``--env_kwargs`` does."""
+    config's env options under it, naming that protocol. A config written under another protocol gives
+    way to this run's pins, as its effort profiles do; one that names this protocol itself keeps its
+    values, so a contradiction there raises in the env, as one in ``--env_kwargs`` does."""
     eval_protocol = resolve_setting(flag, trained_env.get("eval_protocol"), DEFAULT_EVAL_PROTOCOL)
-    if trained_env.get("eval_protocol") == eval_protocol:
-        return eval_protocol, trained_env
-    return eval_protocol, without_eval_protocol_pins(trained_env, eval_protocol, "the training config")
+    if trained_env.get("eval_protocol") != eval_protocol:
+        trained_env = without_eval_protocol_pins(trained_env, eval_protocol, "the training config")
+    return eval_protocol, {**trained_env, "eval_protocol": eval_protocol}
 
 
 def run_trajectory_path(
@@ -209,14 +209,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         choices=sorted(EVAL_PROTOCOLS),
         help="Evaluation protocol: harness runs the configured budgets (the agentic loop); leaderboard pins "
-        "one graded submission and no scratchpad runs at every effort level. Either way success@1 is the "
-        "first sample's outcome, not a mean over --num_samples. Default: the training config's under "
-        "--training_config, else harness.",
+        "one graded submission and no scratchpad runs at every effort level. Default: the training "
+        "config's under --training_config, else harness.",
     )
     p.add_argument(
         "--num_examples", type=int, default=50, help="Cap on problems, taken in the adapter's order (0 = all)."
     )
-    p.add_argument("--num_samples", type=int, default=1, help="Samples per problem (success@k).")
+    p.add_argument(
+        "--num_samples", type=int, default=1, help="Samples per problem (success@k; success@1 counts the first)."
+    )
     p.add_argument(
         "--language",
         default=None,
@@ -328,7 +329,7 @@ def main() -> None:
         args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
     )
     max_turns = resolve_setting(args.max_turns, trained_env.get("max_turns"), None)
-    eval_protocol, trained_env = resolve_eval_protocol(args.eval_protocol, trained_env)
+    _, trained_env = resolve_eval_protocol(args.eval_protocol, trained_env)
     # The training run's env config first, the resolved settings and flags over it: an eval under a
     # contract grades as the run did. An unset language or turn budget is left out entirely, so the env
     # class's own default applies.
@@ -338,7 +339,6 @@ def main() -> None:
             **trained_env,
             "max_turns": max_turns,
             **({"language": parse_language_flag(args.language)} if args.language else {}),
-            "eval_protocol": eval_protocol,
             "reasoning_effort": reasoning_effort,
             **env_kwargs,
         },

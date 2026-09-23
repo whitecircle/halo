@@ -213,10 +213,9 @@ python scripts/environments/inference/run_code_contests.py --adapter codeforces 
     --num_examples 100 --num_samples 4 --reasoning_effort high
 ```
 
-It buckets `success@1` / `success@k` by the adapter's field (rating here); at the default
-`--success_threshold` a problem counts solved only when every test in the pool passes (`success@1` is
-the first sample's outcome, not a benchmark's mean-over-samples pass@1:
-[Evaluating on an Environment](evaluation.md#running-an-evaluation)). The threshold reads the
+It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a
+benchmark's mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation));
+at the default `--success_threshold` a problem counts solved only when every test in the pool passes. The threshold reads the
 episode's total reward, so under
 `--training_config` the recipe's shaping enters it: a solved episode charged `tool_error_penalty`
 (every scratchpad call under `leaderboard` is refused) or `length_cutoff_penalty` can land below it.
