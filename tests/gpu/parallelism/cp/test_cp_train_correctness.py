@@ -198,7 +198,7 @@ def test_loss_and_gradient_equivalence(device, cp_size):
         if bg.shape != cg.shape:
             low_cosine_params.append((name, "shape mismatch"))
             continue
-        cos = cos_sim(bg, cg, name)
+        cos = cos_sim(bg, cg, label=name)
         cosine_sims.append(cos)
         if cos < GRAD_COSINE_MIN:
             low_cosine_params.append((name, f"cos={cos:.6f}"))
@@ -331,9 +331,11 @@ def test_training_equivalence(device, cp_size):
     if len(base_losses) >= 2:
         base_t = torch.tensor(base_losses, dtype=torch.float)
         cp_t = torch.tensor(cp_avg_losses, dtype=torch.float)
-        # Constant losses → same trend (corr = 1.0)
-        corr = torch.corrcoef(torch.stack([base_t, cp_t]))[0, 1].item() if base_t.std() > 0 and cp_t.std() > 0 else 1.0
-        corr_ok = corr > 0.90
+        # A constant trajectory has no trend to correlate; five optimizer steps that leave the loss
+        # flat mean the updates were never applied, so it fails.
+        degenerate = not (base_t.std() > 0 and cp_t.std() > 0)
+        corr = float("nan") if degenerate else torch.corrcoef(torch.stack([base_t, cp_t]))[0, 1].item()
+        corr_ok = not degenerate and corr > 0.90
         checks["loss_correlation"] = corr_ok
         log(f"      Loss correlation: {corr:.4f} ({'PASS' if corr_ok else 'FAIL'})")
     else:
@@ -346,7 +348,7 @@ def test_training_equivalence(device, cp_size):
         wb = base_weights[name]
         wc = cp_weights[name]
         if wb.shape == wc.shape:
-            weight_cosines.append(cos_sim(wb, wc, name))
+            weight_cosines.append(cos_sim(wb, wc, label=name))
     # Every parameter compared: a missing name or a shape mismatch is a failure, not a skip.
     weights_covered = base_weights.keys() == cp_weights.keys() and len(weight_cosines) == len(common_params)
 

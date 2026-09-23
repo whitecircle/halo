@@ -23,7 +23,7 @@ from transformers.models.inkling.configuration_inkling import InklingTextConfig
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.ep_reference import compare_ep_grad
+from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG
 from tests.common.utils import log
@@ -112,10 +112,7 @@ def run(ctx):
             f"l{i}_down_grad": (ep.down_proj.grad, refs["down"][s:e].transpose(1, 2)),
             f"l{i}_gate_grad": (ep.gate.weight.grad, refs["gate"]),
         }
-        for name, (got, want) in pairs.items():
-            _, cos = compare_ep_grad(got, want, name)
-            metrics[f"{name}_cos"] = cos
-            checks[name] = cos > GRAD_COS_TOL
+        score_ep_grad_pairs(pairs, checks, metrics, cos_min=GRAD_COS_TOL)
 
     checks["shared_grads_nonzero"] = all(
         ep.shared_experts.gate_proj.grad is not None and ep.shared_experts.gate_proj.grad.abs().sum().item() > 0

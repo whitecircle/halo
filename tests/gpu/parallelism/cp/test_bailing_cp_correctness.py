@@ -196,7 +196,7 @@ def check_attention_equivalence(model: nn.Module, cp_group, rank: int, cp_size: 
     cp_out = torch.cat(gathered, dim=1)
 
     max_abs = (cp_out.float() - reference.float()).abs().max().item()
-    cosine = cos_sim(cp_out, reference, "attention output")
+    cosine = cos_sim(cp_out, reference, label="attention output")
     log(f"  attention: max|Δ|={max_abs:.3e} (tol {ATTN_ATOL:.1e})  cosine={cosine:.6f} (min {ATTN_COSINE_MIN})")
 
     return all(structural.values()) and max_abs <= ATTN_ATOL and cosine >= ATTN_COSINE_MIN
@@ -299,7 +299,7 @@ def run(ctx):
             # parameter always carries gradient, so a zero there reaches cos_sim and fails.
             unrouted += 1
             continue
-        cosine = cos_sim(grad, reference, name)
+        cosine = cos_sim(grad, reference, label=name)
         if cosine < min_cosine:
             min_cosine, worst_name = cosine, name
 

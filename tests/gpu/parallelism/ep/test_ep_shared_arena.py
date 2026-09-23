@@ -106,13 +106,11 @@ def worst_cosine(left, right):
 
     ``cos_sim`` raises on a NaN gradient, the corrupted-arena signature a ``<`` tracker would skip.
     """
+    assert left, "no gradients to compare"
     assert set(left) == set(right), "gradient key sets differ"
-    worst_name, worst = None, 1.0
-    for name, g in left.items():
-        c = cos_sim(g, right[name], name)
-        if c < worst:
-            worst_name, worst = name, c
-    return worst_name, worst
+    cosines = {name: cos_sim(g, right[name], label=name) for name, g in left.items()}
+    worst_name = min(cosines, key=cosines.get)
+    return worst_name, cosines[worst_name]
 
 
 def run(ctx):

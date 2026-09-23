@@ -123,8 +123,8 @@ def run(ctx) -> dict:
             assert grad is not None, f"[{backend}] {name} has no gradient: backward did not reach it"
     expert_name, v1_expert = v1["grads"]["expert"]
     router_name, v1_router = v1["grads"]["router"]
-    expert_cos = cos_sim(v1_expert, v2["grads"]["expert"][1], expert_name)
-    router_cos = cos_sim(v1_router, v2["grads"]["router"][1], router_name)
+    expert_cos = cos_sim(v1_expert, v2["grads"]["expert"][1], label=expert_name)
+    router_cos = cos_sim(v1_router, v2["grads"]["router"][1], label=router_name)
     loss_diff = abs(v1["loss"] - v2["loss"])
 
     log(f"\n{'=' * 70}\nRESULTS\n{'=' * 70}")

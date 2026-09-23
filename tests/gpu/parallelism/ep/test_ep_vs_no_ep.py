@@ -86,12 +86,16 @@ def cosine_sim(a, b):
 
 
 def extract_router_grads(model):
-    """Extract router/gate weight gradients from a model."""
-    grads = {}
-    for name, param in model.named_parameters():
-        if ("router" in name or "gate" in name) and "weight" in name and param.grad is not None:
-            grads[name] = param.grad.data.clone().float()
-    return grads
+    """Every router/gate weight's gradient by name, None where backward never reached it.
+
+    A missing gradient is kept as None rather than dropped, so the comparison sees the severed router
+    instead of a shorter key set.
+    """
+    return {
+        name: None if param.grad is None else param.grad.data.clone().float()
+        for name, param in model.named_parameters()
+        if ("router" in name or "gate" in name) and "weight" in name
+    }
 
 
 def run_baseline_forward(batch):
@@ -338,76 +342,80 @@ def compare_results(
     if rank == 0:
         log("\n  --- Router Gradient Comparison (pass/fail: norm ratio + cosine) ---")
 
-        if not baseline_router_grads or not ep_router_grads:
-            # A severed router is the regression this exists to catch — must fail, not skip.
-            log("  FAIL: no router grads captured on one or both sides")
+        # A severed router is the regression this exists to catch, so a missing gradient or a
+        # router present on one side only fails rather than dropping out of the comparison. Rank 0
+        # alone reaches this, so it records the verdict instead of raising before the broadcast.
+        severed = sorted(
+            f"{side}:{name}"
+            for side, grads in (("baseline", baseline_router_grads), ("ep", ep_router_grads))
+            for name, grad in grads.items()
+            if grad is None
+        )
+        keys_differ = baseline_router_grads.keys() != ep_router_grads.keys()
+        if not baseline_router_grads or keys_differ or severed:
+            log(f"  FAIL: router grads missing {severed}")
+            log(f"  FAIL: only in baseline {sorted(baseline_router_grads.keys() - ep_router_grads.keys())}")
+            log(f"  FAIL: only in EP {sorted(ep_router_grads.keys() - baseline_router_grads.keys())}")
             results["router_grad_cosine"] = None
             passed = False
         else:
             baseline_keys = sorted(baseline_router_grads.keys())
-            ep_keys = sorted(ep_router_grads.keys())
-            log(f"  Baseline router grad keys ({len(baseline_keys)} layers): {baseline_keys[:3]}...")
-            log(f"  EP router grad keys ({len(ep_keys)} layers): {ep_keys[:3]}...")
+            log(f"  Router grad keys ({len(baseline_keys)} layers): {baseline_keys[:3]}...")
 
-            if len(baseline_keys) == len(ep_keys):
-                all_baseline_grads = torch.cat([baseline_router_grads[k].flatten() for k in baseline_keys])
-                all_ep_grads = torch.cat([ep_router_grads[k].flatten() for k in ep_keys])
+            all_baseline_grads = torch.cat([baseline_router_grads[k].flatten() for k in baseline_keys])
+            all_ep_grads = torch.cat([ep_router_grads[k].flatten() for k in baseline_keys])
 
-                grad_cos = cosine_sim(all_baseline_grads, all_ep_grads)
-                results["router_grad_cosine"] = grad_cos
-                # DIRECTION gate: bf16 reassociation alone leaves this at 0.978 over pretrained sinks.
-                grad_cos_ok = grad_cos > ROUTER_GRAD_COSINE_MIN
-                results["router_grad_cosine_ok"] = grad_cos_ok
-                log(
-                    f"  Router grad cosine similarity: {grad_cos:.6f} "
-                    f"(min={ROUTER_GRAD_COSINE_MIN}): {'PASS' if grad_cos_ok else 'FAIL'}"
-                )
-                if not grad_cos_ok:
-                    passed = False
+            grad_cos = cosine_sim(all_baseline_grads, all_ep_grads)
+            results["router_grad_cosine"] = grad_cos
+            # DIRECTION gate: bf16 reassociation alone leaves this at 0.978 over pretrained sinks.
+            grad_cos_ok = grad_cos > ROUTER_GRAD_COSINE_MIN
+            results["router_grad_cosine_ok"] = grad_cos_ok
+            log(
+                f"  Router grad cosine similarity: {grad_cos:.6f} "
+                f"(min={ROUTER_GRAD_COSINE_MIN}): {'PASS' if grad_cos_ok else 'FAIL'}"
+            )
+            if not grad_cos_ok:
+                passed = False
 
-                # SCALE gate: the band admits 1.25x, so a 2x reduction error cannot hide (measures 0.9965).
-                baseline_norm = all_baseline_grads.norm().item()
-                ep_norm = all_ep_grads.norm().item()
-                norm_ratio = ep_norm / baseline_norm if baseline_norm > 0 else float("inf")
-                results["router_grad_norm_ratio"] = norm_ratio
-                norm_ratio_ok = 1 / TOL.grad_norm_ratio_max < norm_ratio < TOL.grad_norm_ratio_max
-                results["router_grad_norm_ratio_ok"] = norm_ratio_ok
-                log(f"  Baseline grad norm: {baseline_norm:.6f}")
-                log(f"  EP grad norm: {ep_norm:.6f}")
-                log(
-                    f"  Norm ratio (EP/baseline): {norm_ratio:.4f} "
-                    f"(band {1 / TOL.grad_norm_ratio_max:.2f}–{TOL.grad_norm_ratio_max}): "
-                    f"{'PASS' if norm_ratio_ok else 'FAIL'}"
-                )
-                if not norm_ratio_ok:
-                    passed = False
+            # SCALE gate: the band admits 1.25x, so a 2x reduction error cannot hide (measures 0.9965).
+            baseline_norm = all_baseline_grads.norm().item()
+            ep_norm = all_ep_grads.norm().item()
+            norm_ratio = ep_norm / baseline_norm if baseline_norm > 0 else float("inf")
+            results["router_grad_norm_ratio"] = norm_ratio
+            norm_ratio_ok = 1 / TOL.grad_norm_ratio_max < norm_ratio < TOL.grad_norm_ratio_max
+            results["router_grad_norm_ratio_ok"] = norm_ratio_ok
+            log(f"  Baseline grad norm: {baseline_norm:.6f}")
+            log(f"  EP grad norm: {ep_norm:.6f}")
+            log(
+                f"  Norm ratio (EP/baseline): {norm_ratio:.4f} "
+                f"(band {1 / TOL.grad_norm_ratio_max:.2f}–{TOL.grad_norm_ratio_max}): "
+                f"{'PASS' if norm_ratio_ok else 'FAIL'}"
+            )
+            if not norm_ratio_ok:
+                passed = False
 
-                layer_cosines = []
-                for bk, ek in zip(baseline_keys, ep_keys, strict=False):
-                    lcos = cosine_sim(baseline_router_grads[bk], ep_router_grads[ek])
-                    layer_cosines.append(lcos)
-                log(
-                    f"  Per-layer grad cosine: min={min(layer_cosines):.4f}, "
-                    f"max={max(layer_cosines):.4f}, avg={sum(layer_cosines) / len(layer_cosines):.4f}"
-                )
+            layer_cosines = []
+            for key in baseline_keys:
+                lcos = cosine_sim(baseline_router_grads[key], ep_router_grads[key])
+                layer_cosines.append(lcos)
+            log(
+                f"  Per-layer grad cosine: min={min(layer_cosines):.4f}, "
+                f"max={max(layer_cosines):.4f}, avg={sum(layer_cosines) / len(layer_cosines):.4f}"
+            )
 
-                worst_layer = layer_cosines.index(min(layer_cosines))
-                best_layer = layer_cosines.index(max(layer_cosines))
-                log(f"  Best layer: {baseline_keys[best_layer]} (cos={layer_cosines[best_layer]:.4f})")
-                log(f"  Worst layer: {baseline_keys[worst_layer]} (cos={layer_cosines[worst_layer]:.4f})")
+            worst_layer = layer_cosines.index(min(layer_cosines))
+            best_layer = layer_cosines.index(max(layer_cosines))
+            log(f"  Best layer: {baseline_keys[best_layer]} (cos={layer_cosines[best_layer]:.4f})")
+            log(f"  Worst layer: {baseline_keys[worst_layer]} (cos={layer_cosines[worst_layer]:.4f})")
 
-                baseline_nonzero = (all_baseline_grads.abs() > 1e-8).float().mean().item()
-                ep_nonzero = (all_ep_grads.abs() > 1e-8).float().mean().item()
-                grads_alive = baseline_nonzero > 0.5 and ep_nonzero > 0.5
-                results["grads_alive"] = grads_alive
-                log(f"  Baseline grad non-zero fraction: {baseline_nonzero:.4f}")
-                log(f"  EP grad non-zero fraction: {ep_nonzero:.4f}")
-                log(f"  Gradients alive (both >50% non-zero): {'PASS' if grads_alive else 'FAIL'}")
-                if not grads_alive:
-                    passed = False
-            else:
-                log(f"  FAIL: key count mismatch: baseline={len(baseline_keys)}, ep={len(ep_keys)}")
-                results["router_grad_cosine"] = None
+            baseline_nonzero = (all_baseline_grads.abs() > 1e-8).float().mean().item()
+            ep_nonzero = (all_ep_grads.abs() > 1e-8).float().mean().item()
+            grads_alive = baseline_nonzero > 0.5 and ep_nonzero > 0.5
+            results["grads_alive"] = grads_alive
+            log(f"  Baseline grad non-zero fraction: {baseline_nonzero:.4f}")
+            log(f"  EP grad non-zero fraction: {ep_nonzero:.4f}")
+            log(f"  Gradients alive (both >50% non-zero): {'PASS' if grads_alive else 'FAIL'}")
+            if not grads_alive:
                 passed = False
 
     pass_tensor = torch.tensor([1 if passed else 0], device=device, dtype=torch.int32)

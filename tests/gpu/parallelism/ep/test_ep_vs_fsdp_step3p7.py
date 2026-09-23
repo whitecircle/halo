@@ -34,21 +34,16 @@ from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe_balancing import resolve_balancing_mode
-from tests.common.ep_reference import compare_ep_grad
+from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
+from tests.common.tolerances import TOL
 from tests.common.utils import log
 
 SEED = 42
 BATCH, SEQ = 2, 64
 LOSS_TOL = 5e-2  # bf16 dispatch/accumulation-order noise on a tiny model
 RANK_LOSS_TOL = 1e-3  # EP is orthogonal to DP: identical input → identical loss
-# Grad equivalence: bf16 grads on a 128-token tiny model carry real rounding noise and the two
-# paths accumulate in different orders — so direction is checked loosely (cos) while MAGNITUDE is
-# checked tightly enough that a missing or doubled /world_size grad-sync divide (ratio 2.0 / 0.5)
-# fails.
-GRAD_COS_MIN = 0.9
-GRAD_NORM_RATIO = (0.67, 1.5)
 
 _SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
 _DENSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "dense"]
@@ -148,19 +143,7 @@ def run(ctx):
             f"l{i}_gate_grad": (ep.gate.weight.grad, refs["gate"]),
             f"l{i}_shared_grad": (ep.shared_experts.gate_proj.weight.grad, refs["shared_gate"]),
         }
-        for name, (got, want) in pairs.items():
-            ratio, cos = compare_ep_grad(got, want, name)
-            metrics[f"{name}_cos"] = cos
-            metrics[f"{name}_norm_ratio"] = ratio
-            checks[f"{name}_matches"] = cos > GRAD_COS_MIN and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
-            if not checks[f"{name}_matches"]:
-                log(
-                    f"  GRAD MISMATCH {name}: cos={cos:.5f} norm_ratio={ratio:.4f} "
-                    f"shape={None if got is None else tuple(got.shape)}"
-                )
-    checks["shared_grads_nonzero"] = all(
-        ep.shared_experts.gate_proj.weight.grad.abs().sum().item() > 0 for ep in ep_layers
-    )
+        score_ep_grad_pairs(pairs, checks, metrics, cos_min=TOL.ep_grad_cosine_min)
 
     # ── 5. Bias balancing: native buffer adopted + bias shifts selection ──────
     layer = ep_layers[0]

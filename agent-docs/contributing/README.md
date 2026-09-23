@@ -229,9 +229,9 @@ runs without `--patterns` and re-saves the source vocabulary unchanged:
 
 ```bash
 python scripts/before_training/patch_vocab.py --model_id google/gemma-4-26B-A4B-it \
-    --output_dir "$HALO_DATA_ROOT/models/gemma-4-26B-A4B-it-patched"
+    --output_dir "${HALO_DATA_ROOT:?}/models/gemma-4-26B-A4B-it-patched"
 python scripts/before_training/patch_vocab.py --model_id unsloth/gpt-oss-20b-BF16 \
-    --output_dir "$HALO_DATA_ROOT/models/gpt-oss-20b-BF16-patched"
+    --output_dir "${HALO_DATA_ROOT:?}/models/gpt-oss-20b-BF16-patched"
 ```
 
 Test scripts read their own knobs through `src/env.py`, `HALO_TEST_`-prefixed so a stray `export` or

@@ -7,7 +7,6 @@ probes, and the shared state-snapshot and assertion helpers.
 import ast
 import gc
 import importlib.util
-import math
 import os
 import pathlib
 import subprocess
@@ -144,13 +143,14 @@ def gpu_peak_mem_gb(device=None) -> float:
     return torch.cuda.max_memory_allocated(device) / 1e9
 
 
-def cos_sim(a: torch.Tensor, b: torch.Tensor, label: str = "tensor") -> float:
-    """Cosine similarity of two tensors, compared as flat fp32 vectors.
+def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:
+    """Cosine similarity of two tensors, compared as flat fp64 vectors.
 
     The direction half of a correctness comparison: a norm-preserving corruption (a wrong expert
     bank, a permuted dispatch) reorients the vector while an absolute-difference bound on bf16
-    tensors has to be loose enough to absorb accumulation noise. fp32 because the cosine of two
-    bf16 vectors rounds its own accumulation.
+    tensors has to be loose enough to absorb accumulation noise. fp64 because the cosine of two
+    bf16 vectors rounds its own accumulation, and a finite tensor near the bf16 range limit would
+    overflow an fp32 norm.
 
     A zero-norm or non-finite operand raises, naming ``label``. A zero vector has no direction, and
     any number returned for it passes one side of a threshold: 1.0 matches a dead gradient against a
@@ -158,10 +158,10 @@ def cos_sim(a: torch.Tensor, b: torch.Tensor, label: str = "tensor") -> float:
     past every ``<`` and ``min`` tracker. A pair that is legitimately all-zero is the caller's to
     handle explicitly.
     """
-    a, b = a.float().flatten(), b.float().flatten()
+    if not (torch.isfinite(a).all() and torch.isfinite(b).all()):
+        raise ValueError(f"{label}: cosine of a non-finite tensor")
+    a, b = a.double().flatten(), b.double().flatten()
     norm_a, norm_b = a.norm().item(), b.norm().item()
-    if not (math.isfinite(norm_a) and math.isfinite(norm_b)):
-        raise ValueError(f"{label}: cosine of a non-finite tensor (norms {norm_a}, {norm_b})")
     if norm_a == 0.0 or norm_b == 0.0:
         raise ValueError(f"{label}: cosine of a zero-norm tensor has no direction (norms {norm_a}, {norm_b})")
     return torch.dot(a, b).item() / (norm_a * norm_b)
@@ -207,7 +207,7 @@ def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str
         f"{label}: singular values span [{low:.4f}, {high:.4f}], outside the Newton-Schulz band "
         f"[{TOL.muon_orthogonal_sv_min}, {TOL.muon_orthogonal_sv_max}]"
     )
-    cosine = cos_sim(update, u @ vh, label)
+    cosine = cos_sim(update, u @ vh, label=label)
     assert cosine >= TOL.muon_polar_cosine_min(), (
         f"{label}: cosine to the source's polar factor is {cosine:.4f} (min {TOL.muon_polar_cosine_min():.4f})"
     )

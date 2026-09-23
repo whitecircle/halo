@@ -457,7 +457,7 @@ def _check_fused_head(model_type, tiny_config, device) -> None:
         f"{sorted(reference_grads.keys() - fused_grads.keys())}, "
         f"only fused {sorted(fused_grads.keys() - reference_grads.keys())}"
     )
-    cosines = {name: cos_sim(grad, reference_grads[name], name) for name, grad in fused_grads.items()}
+    cosines = {name: cos_sim(grad, reference_grads[name], label=name) for name, grad in fused_grads.items()}
     worst_name = min(cosines, key=cosines.get)
     worst_cos = cosines[worst_name]
     log(f"  {model_type}: worst gradient cosine {worst_cos:.5f} at {worst_name} over {len(cosines)} tensors")

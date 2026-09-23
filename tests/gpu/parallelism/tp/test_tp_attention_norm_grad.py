@@ -26,6 +26,7 @@ Run:
         tests/gpu/parallelism/tp/test_tp_attention_norm_grad.py
 """
 
+import math
 from pathlib import Path
 
 import torch
@@ -172,7 +173,8 @@ def run(ctx):
         grad = live[name].grad
         local = grad.to_local() if hasattr(grad, "to_local") else grad
         rel = (local.detach().float() - ref[name]).norm().item() / max(ref[name].norm().item(), 1e-12)
-        worst = max(worst, rel)
+        # max() keeps its first argument over a NaN, so a non-finite error is made the worst outright.
+        worst = max(worst, rel) if math.isfinite(rel) else math.inf
         log_all(f"  {name}: rel_err={rel:.4e}")
     metrics["worst_norm_grad_rel_err"] = worst
     checks["norm_grads_match_reference"] = worst < NORM_GRAD_TOL

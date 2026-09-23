@@ -76,6 +76,13 @@ class _Tolerances:
     grad_norm_ratio_max: float = 1.25
     grad_direction_cosine_min: float = 0.90
 
+    # ── EP gradients vs a replicated reference, tiny random-init MoE ─────────
+    # bf16 grads on a ~128-token model carry real rounding noise, the paths accumulate in different
+    # orders and fp32 EP routing flips occasional bf16 near-ties, so direction is checked loosely while
+    # the norm ratio stays tight enough that a missing or doubled /world_size divide (2.0 / 0.5) fails.
+    ep_grad_cosine_min: float = 0.9
+    ep_grad_norm_ratio_band: tuple[float, float] = (0.67, 1.5)
+
     # ── Exact-objective pins ────────────────────────────────────────────────
     # Independent reimplementation vs the logged loss. The residual is dtype rather than objective:
     # an fp32 reference of a preference objective over bf16 sequence log-prob sums lands 4e-3 relative
