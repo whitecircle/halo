@@ -31,6 +31,7 @@ from transformers.core_model_loading import PrefixChange, revert_weight_conversi
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from src.checkpoint.config_export import save_model_config
+from src.checkpoint.model_card import tag_model_card
 from src.models.moe_balancing import balancing_param_keys
 from src.models.structure import fp32_pinned_param_names, norm_param_keys, strip_peft_adapter_segment
 
@@ -405,7 +406,11 @@ def copy_checkpoint_aux_files(
     input_dir: str, output_dir: str, *, include_resume_sidecars: bool = True, verbose: bool = False
 ) -> None:
     """Copy a checkpoint's non-weight files (config, tokenizer, chat template, remote-code .py, …)
-    from ``input_dir`` to ``output_dir`` verbatim.
+    from ``input_dir`` to ``output_dir`` verbatim, then tag the output's Hub model card.
+
+    Every tool that builds an export out of a source directory runs this copy, including the ones
+    that carry ``config.json`` across as-is and so never reach the config finalizer; the source's
+    card rides along and gets the Halo tag (:func:`~src.checkpoint.model_card.tag_model_card`).
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
     preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``, ``rng_state_*``)
@@ -450,6 +455,7 @@ def copy_checkpoint_aux_files(
             shutil.copy2(src, os.path.join(output_dir, name))
             if verbose:
                 print(f"Copied: {name}")  # noqa: T201 - CLI-facing helper; the merge scripts report via print
+    tag_model_card(output_dir)
 
 
 def read_checkpoint_index(checkpoint_dir: str, *, missing_ok: bool = False) -> dict:

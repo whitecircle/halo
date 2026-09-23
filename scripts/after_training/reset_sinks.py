@@ -27,6 +27,7 @@ from transformers import AutoTokenizer
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_WEIGHTS_FILE, sweep_after_full_save
+from src.checkpoint.model_card import tag_model_card
 from src.checkpoint.tool_io import (
     STAGING_SUFFIX,
     clear_staging_path,
@@ -168,6 +169,9 @@ def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: 
         raise
     tmp_path.replace(output_safetensors)
     logger.info(f"All {len(sink_keys)} sink tensors verified — reset to dtype min.")
+    # The copytree carries the source's card over untagged; the from_pretrained branch gets its tag
+    # from save_full_checkpoint.
+    tag_model_card(str(output_dir))
 
     return len(sink_keys)
 

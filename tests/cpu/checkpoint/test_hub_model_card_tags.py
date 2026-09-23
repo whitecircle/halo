@@ -1,0 +1,212 @@
+#!/usr/bin/env python
+"""Every model card Halo writes carries the ``halo`` Hugging Face Hub tag.
+
+A model uploaded from a Halo output lists under ``halo`` on the Hub, the way TRL- and PEFT-written
+cards list under ``trl`` and ``peft``. The tag rides two carriers: the loaded model's ``model_tags``
+(which PEFT's adapter card and ``push_to_hub`` read), and the ``README.md`` card the two export
+finalizers tag — the config finalizer every full-model writer ends with, and the non-weight copy every
+tool that builds an export from a source directory runs. The two tools that pass through neither tag
+their own output. An existing card (PEFT's, TRL's, the source model's) keeps its body, metadata and
+tags; only the Halo tag is added, and a fresh card claims no ``library_name``.
+
+    python tests/cpu/checkpoint/test_hub_model_card_tags.py
+"""
+
+import json
+
+import pytest
+import torch
+from accelerate import PartialState
+from huggingface_hub import ModelCard
+from peft import LoraConfig, get_peft_model
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import GptOssConfig, GptOssForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from trl.trainer.utils import generate_model_card
+
+import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
+from scripts.after_training.convert_to_bf16 import convert_to_bf16
+from scripts.after_training.reset_sinks import reset_sinks
+from src.checkpoint.config_export import finalize_exported_config, save_model_config
+from src.checkpoint.format import copy_checkpoint_aux_files
+from src.checkpoint.model_card import tag_model_card
+from src.models.loading.model_preparation import finalize_run_model
+from src.models.patches.gpt_oss_sinks import SinksPolicy
+
+PartialState()  # the tools' loads log through accelerate's rank-aware logger
+
+HALO_TAG = "halo"
+CARD = "README.md"
+_TINY_QWEN3 = {
+    "vocab_size": 64,
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 8,
+    "max_position_embeddings": 64,
+    "tie_word_embeddings": False,
+}
+# A source model's own card: every field and the body must survive the export untouched.
+_SOURCE_CARD = """---
+library_name: transformers
+license: apache-2.0
+base_model: Qwen/Qwen3-0.6B
+tags:
+- text-generation
+---
+
+# Source model
+
+Card body written by the model's authors.
+"""
+
+
+def _tiny_qwen3() -> Qwen3ForCausalLM:
+    torch.manual_seed(0)
+    return Qwen3ForCausalLM(Qwen3Config(**_TINY_QWEN3))
+
+
+def _tiny_tokenizer() -> PreTrainedTokenizerFast:
+    """Built in-process, so the adapter conversion resolves a processing class without the network."""
+    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2}, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
+
+
+def _card(directory) -> ModelCard:
+    return ModelCard.load(directory / CARD)
+
+
+def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
+    tag_model_card(str(tmp_path))
+    assert _card(tmp_path).data.to_dict() == {"tags": [HALO_TAG]}
+
+
+def test_an_existing_card_keeps_its_metadata_tags_and_body(tmp_path):
+    (tmp_path / CARD).write_text(_SOURCE_CARD)
+    body = ModelCard(_SOURCE_CARD).text
+
+    tag_model_card(str(tmp_path))
+    card = _card(tmp_path)
+    assert card.data.library_name == "transformers"
+    assert card.data.license == "apache-2.0"
+    assert card.data.base_model == "Qwen/Qwen3-0.6B"
+    assert card.data.tags == ["text-generation", HALO_TAG]
+    assert card.text == body
+
+    tagged = (tmp_path / CARD).read_bytes()
+    tag_model_card(str(tmp_path))
+    assert (tmp_path / CARD).read_bytes() == tagged, "a card that already carries the tag is rewritten"
+
+
+def test_the_parallel_writers_config_step_tags_the_checkpoint_card(tmp_path):
+    """``save_model_config`` is the config write of every gathered/EP/PP saver: none writes a card itself."""
+    save_model_config(_tiny_qwen3(), str(tmp_path))
+    assert _card(tmp_path).data.tags == [HALO_TAG]
+
+
+def test_the_config_finalizer_adds_the_tag_to_a_trainer_written_card(tmp_path):
+    """A library card already in the directory — TRL's here — keeps its own tags beside Halo's."""
+    model = _tiny_qwen3()
+    model.config.save_pretrained(tmp_path)
+    generate_model_card(
+        base_model="Qwen/Qwen3-0.6B",
+        model_name="run",
+        hub_model_id=None,
+        dataset_name=None,
+        tags=["trl", "sft"],
+        wandb_url=None,
+        trackio_url=None,
+        trainer_name="SFT",
+    ).save(tmp_path / CARD)
+    trl_body = _card(tmp_path).text
+
+    finalize_exported_config(model.config, str(tmp_path), source=None)
+    card = _card(tmp_path)
+    assert card.data.library_name == "transformers"
+    assert card.data.tags == ["generated_from_trainer", "trl", "sft", HALO_TAG]
+    assert card.text == trl_body
+
+
+def test_a_peft_adapter_of_a_loaded_model_carries_the_tag(tmp_path):
+    """PEFT's card replaces its tags with the base model's ``model_tags``: the load stamps them there."""
+    model = _tiny_qwen3()
+    finalize_run_model(model, model.config, sinks_policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
+    get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])).save_pretrained(tmp_path)
+
+    card = _card(tmp_path)
+    assert card.data.library_name == "peft"
+    assert HALO_TAG in card.data.tags
+    assert "lora" in card.data.tags
+
+
+def test_an_export_carries_the_source_card_tagged_and_leaves_the_source_alone(tmp_path):
+    source, output = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    output.mkdir()
+    (source / CARD).write_text(_SOURCE_CARD)
+    (source / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+
+    copy_checkpoint_aux_files(str(source), str(output))
+    assert (source / CARD).read_text() == _SOURCE_CARD
+    card = _card(output)
+    assert card.data.tags == ["text-generation", HALO_TAG]
+    assert card.data.license == "apache-2.0"
+    assert card.text == ModelCard(_SOURCE_CARD).text
+
+
+def test_an_export_of_a_cardless_source_gets_a_tagged_card(tmp_path):
+    source, output = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    output.mkdir()
+    (source / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+
+    copy_checkpoint_aux_files(str(source), str(output))
+    assert not (source / CARD).exists()
+    assert _card(output).data.tags == [HALO_TAG]
+
+
+def test_the_single_file_sinks_reset_tags_its_output(tmp_path):
+    """That branch copies the source tree and rewrites one file, reaching neither finalizer."""
+    source, output = tmp_path / "source", tmp_path / "reset"
+    torch.manual_seed(0)
+    config = GptOssConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_local_experts=2,
+        num_experts_per_tok=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        sliding_window=32,
+        tie_word_embeddings=False,
+    )
+    GptOssForCausalLM(config).to(torch.bfloat16).save_pretrained(source)
+    assert (source / "model.safetensors").is_file(), "premise: the single-file branch is the one exercised"
+
+    assert reset_sinks(str(source), output_dir=str(output)) > 0
+    assert _card(output).data.tags == [HALO_TAG]
+
+
+def test_the_unmerged_adapter_conversion_tags_its_output(tmp_path):
+    """The tool loads its base untagged, so PEFT's card for the converted adapter has no Halo tag of its own."""
+    base, adapter, output = tmp_path / "base", tmp_path / "adapter", tmp_path / "converted"
+    _tiny_qwen3().save_pretrained(base)
+    _tiny_tokenizer().save_pretrained(base)
+    peft_model = get_peft_model(
+        Qwen3ForCausalLM.from_pretrained(base), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
+    )
+    peft_model.peft_config["default"].base_model_name_or_path = str(base)
+    peft_model.save_pretrained(adapter)
+
+    convert_to_bf16(str(adapter), str(output), "causal_lm", is_peft=True)
+    card = _card(output)
+    assert card.data.library_name == "peft"
+    assert HALO_TAG in card.data.tags
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -103,7 +103,8 @@ def test_weight_files_skipped_and_aux_kept(checkpoint_dir, tmp_path):
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
     copied = {p.name for p in out.iterdir()}
-    assert copied == set(KEPT) | set(SIDECARS) | set(MODULE_DIRS) | {"modules.json"}, (
+    # README.md is the export's Hub card, written tagged even though this source ships none.
+    assert copied == set(KEPT) | set(SIDECARS) | set(MODULE_DIRS) | {"modules.json", "README.md"}, (
         f"unexpected copy set: {sorted(copied)}"
     )
 
