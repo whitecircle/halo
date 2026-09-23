@@ -1,9 +1,9 @@
 name: cpu-tests-hosted
 
-# The CPU test tier on GitHub-hosted runners, on every PR and push to main. The tests import torch,
-# so they run inside the published `halo:blackwell` image, pulled anonymously from ECR Public, with
-# the checkout mounted over the source baked into it. The image is built at a release, so a PR that
-# changes dependencies is tested against the released ones.
+# The CPU test tier on GitHub-hosted runners, on every ready PR and push to main. The tests import
+# torch, so they run inside the published `halo:blackwell` image, pulled anonymously from ECR Public,
+# with the checkout mounted over the source baked into it. The image is built at a release, so a PR
+# that changes dependencies is tested against the released ones.
 # `pull_request`, never `pull_request_target`: contributor code gets a read-only token, no secrets and
 # a throwaway VM. The self-hosted path is cpu-tests.yml; setup and scope: agent-docs/infrastructure/ci.md.
 
@@ -11,6 +11,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   # One group per PR, where a new push cancels the run it supersedes, and one per commit on main: a
@@ -24,9 +25,13 @@ permissions:
 env:
   IMAGE: public.ecr.aws/whitecircle/halo:blackwell
   HF_CACHE: /mnt/hf
+  # The image extracts to 30.3 GB from a 14.2 GB download, and a containerd image store keeps both.
+  PULL_NEEDS_GB: 45
 
 jobs:
   shard:
+    # Drafts wait for ready_for_review: each shard pulls the 14.2 GB image.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # The tier takes ~1.5 h in one process, so the matrix splits it by test id (pytest-shard), and each
     # shard runs one pytest-xdist worker per vCPU of the 4-vCPU runner. Both plugins come with the NGC
     # base image, not uv.lock.
@@ -42,9 +47,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Not a job `container:`: that pulls before any step can make room. The image extracts to
-      # ~30 GB and the root disk keeps about 20 GB free, so both image stores move to the /mnt
-      # scratch disk (the daemon uses one of them, depending on its version).
+      # Not a job `container:`: that pulls before any step can make room. The root disk keeps about
+      # 20 GB free, so both image stores move to the /mnt scratch disk (the daemon uses one of them,
+      # depending on its version).
       - name: Move docker storage to the scratch disk
         run: |
           sudo systemctl stop docker.socket docker.service containerd.service
@@ -53,25 +58,56 @@ jobs:
             sudo mount --bind "/mnt/$store" "/var/lib/$store"
           done
           sudo systemctl start containerd.service docker.service
+          sudo install -d -o "$USER" "$HF_CACHE"
           df -h / /mnt
+          free_gb=$(df --output=avail -BG /mnt | tail -1 | tr -dc 0-9)
+          [ "$free_gb" -ge "$PULL_NEEDS_GB" ] || {
+            echo "::error::/mnt has ${free_gb} GB free; pulling $IMAGE needs ${PULL_NEEDS_GB} GB"
+            exit 1
+          }
 
       - name: Pull the image
         run: |
           docker pull --quiet "$IMAGE" || { sleep 30; docker pull --quiet "$IMAGE"; }
           echo "Testing in $IMAGE built from $(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")"
-          df -h /mnt
+
+      - name: Hash the Hub seed
+        id: seed
+        run: |
+          docker run --rm --entrypoint python -e PYTHONPATH=/workspace -v "$PWD":/workspace -w /workspace \
+            "$IMAGE" -m tests.common.hub_seed --list > "$RUNNER_TEMP/hub-seed.txt"
+          echo "key=hub-seed-$(sha256sum "$RUNNER_TEMP/hub-seed.txt" tests/common/hub_seed.py | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the HF cache
+        id: hf-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.HF_CACHE }}
+          key: ${{ steps.seed.outputs.key }}
 
       - name: Seed the HF cache (configs and tokenizers, no weights)
+        if: steps.hf-cache.outputs.cache-hit != 'true'
         run: make seed-hf-cache IMAGE="$IMAGE" HF_CACHE="$HF_CACHE"
 
+      # Saved before the tests, so a red shard does not send the next run back to the Hub.
+      - name: Save the HF cache
+        if: steps.hf-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.HF_CACHE }}
+          key: ${{ steps.seed.outputs.key }}
+
+      # Offline, and a cache miss fails: a test reading a repo outside the seed cannot pass as a skip.
       - name: CPU tests (shard ${{ matrix.shard }})
         run: >-
           make test-cpu IMAGE="$IMAGE" HF_CACHE="$HF_CACHE"
+          EXTRA_DOCKER_ENV="-e HF_HUB_OFFLINE=1 -e HALO_TEST_REQUIRE_HUB_CACHE=1"
           PYTEST_ARGS="-n 4 --num-shards ${{ strategy.job-total }} --shard-id ${{ matrix.shard }} -ra"
 
   cpu-tier:
-    # One check name over every shard, whatever the matrix size, for a required-status rule.
-    if: ${{ !cancelled() }}
+    # One check name over every shard, whatever the matrix size, for a required-status rule. It runs
+    # even when the run is cancelled, so a cancelled or skipped shard reads as a failure, not a pass.
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: shard
     runs-on: ubuntu-latest
     steps:

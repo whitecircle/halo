@@ -4,7 +4,7 @@ Halo's CI is GitHub Actions (`.github/workflows/`), split into tiers by where th
 
 | Tier | Runner | Workflows | Triggers | Status |
 |------|--------|-----------|----------|--------|
-| Hosted | GitHub `ubuntu-latest` | `.github/workflows/lint.yml`, `.github/workflows/docs.yml`, `.github/workflows/cpu-tests-hosted.yml` | every PR + push `main` | active |
+| Hosted | GitHub `ubuntu-latest` | `.github/workflows/lint.yml`, `.github/workflows/docs.yml`, `.github/workflows/cpu-tests-hosted.yml` | every PR + push `main` (CPU tests: non-draft PRs) | active |
 | Self-hosted | GPU box `[self-hosted, halo]` | `.github/workflows/cpu-tests.yml`, `.github/workflows/gpu-tests.yml` | `workflow_dispatch` | dispatch-only |
 
 The lint and docs jobs need no image. The CPU tests import torch, so both CPU workflows run them inside the image: the hosted one pulls the published image, the self-hosted one uses the image built on the box. GPU tests need Blackwell (SM100) or Hopper (SM90) for FA3/FA4 + DeepEP, which no hosted runner provides. CodeQL (the default code-scanning setup) and the GitGuardian app also check every PR; neither lives in `.github/workflows/`.
@@ -23,25 +23,28 @@ A `diagrams` job re-runs `scripts/diagrams/` in a `python:3.12-slim` container a
 
 ### CPU tests
 
-`.github/workflows/cpu-tests-hosted.yml` splits the CPU tier across four `ubuntu-latest` runners (4 vCPU, 16 GB RAM). Each shard job:
+`.github/workflows/cpu-tests-hosted.yml` splits the CPU tier across four `ubuntu-latest` runners (4 vCPU, 16 GB RAM) on every push to `main` and every non-draft PR; a draft runs once it is marked ready for review. Each shard job:
 
-1. Moves Docker's storage to the runner's `/mnt` scratch disk. The image extracts to ~30 GB, and the root disk keeps about 20 GB free.
+1. Moves Docker's storage to the runner's `/mnt` scratch disk, and fails unless 45 GB are free there. The image extracts to 30.3 GB from a 14.2 GB download, and the root disk keeps about 20 GB free.
 2. Pulls `public.ecr.aws/whitecircle/halo:blackwell` anonymously.
-3. Runs `make seed-hf-cache`, which fetches the configs and tokenizers the CPU tests read ([Dev Environment](../contributing/development-environment.md#environment-variables)).
-4. Runs `make test-cpu` on its quarter of the tests (`pytest-shard`, split by test id) with four `pytest-xdist` workers. The target mounts the checkout over the source baked into the image.
+3. Restores the HF cache from the Actions cache, keyed on the seed list (`python -m tests.common.hub_seed --list`) and `tests/common/hub_seed.py`. On a miss it runs `make seed-hf-cache`, which fetches the seed from the Hub and names any repo it cannot fetch, and saves the cache before testing.
+4. Runs `make test-cpu` on its quarter of the tests (`pytest-shard`, split by test id) with four `pytest-xdist` workers, offline (`HF_HUB_OFFLINE=1`) and with `HALO_TEST_REQUIRE_HUB_CACHE=1`, so a test that reads a Hub repo outside the seed fails instead of skipping. The target mounts the checkout over the source baked into the image.
 
-The `cpu-tier` job fails unless every shard passed, so a required-check rule can name that one job. A shard's tests take 2.5–4.5 minutes pinned to 4 cores and 16 GB of a B300 node, with container memory (page cache included) peaking under 12 GB; the runner's pull and extract come on top. Reproduce one shard:
+The seed is every Hub id an `examples/` config trains plus every checkpoint constant in `tests/common/models.py`, configs and tokenizers only (about 0.6 GB). A test that loads a new repo names it there; the tier then fetches it.
+
+The `cpu-tier` job fails unless every shard passed, including when the run was cancelled, so a required-check rule can name that one job. A shard's tests take 3–4.5 minutes pinned to 4 cores and 16 GB of a B300 node, with container memory (page cache included) peaking under 12 GB; the runner's pull and extract come on top. Reproduce one shard:
 
 ```bash
 make seed-hf-cache
-make test-cpu PYTEST_ARGS="-n 4 --num-shards 4 --shard-id 0"
+make test-cpu EXTRA_DOCKER_ENV="-e HF_HUB_OFFLINE=1 -e HALO_TEST_REQUIRE_HUB_CACHE=1" \
+    PYTEST_ARGS="-n 4 --num-shards 4 --shard-id 0"
 ```
 
 Limits:
 
 - **It tests the released dependencies.** A PR that changes `pyproject.toml`, `uv.lock` or a `Dockerfile` also needs `make test-cpu` on a rebuilt image, locally or on the self-hosted tier.
-- **A repo outside the seed skips.** A test that reads its tokenizer through `tests/common/tokenizers.py` skips when the repo is missing from `HF_SEED_REPOS`; add a public repo to the list with the test. A gated repo (`google/gemma-3-4b-it`) cannot be fetched anonymously, so its cases always skip here.
-- **Anonymous pull quota.** ECR Public serves an anonymous client up to 500 GB a month per source IP and refuses pulls past it; each shard pulls 14.2 GB. A refused pull fails the `Pull the image` step; re-run the job.
+- **Some checks skip under a config-only seed.** Gated repos (`GATED_REPOS` in `tests/common/hub_seed.py`) cannot be fetched anonymously, so their cases skip. The Liger coverage checks for the remote-code Bailing V2/V3 norms skip too: they need the family's modeling module imported, which a config load never does.
+- **Anonymous pull quota.** AWS limits anonymous ECR Public pulls to 500 GB a month per source IP, and GitHub-hosted runners share IPs; each shard pulls 14.2 GB. A pull past the limit fails the `Pull the image` step. Re-run the job; a registry without a per-IP quota (such as a GHCR mirror) would remove the limit, and none is configured.
 
 ## Self-hosted tier
 
