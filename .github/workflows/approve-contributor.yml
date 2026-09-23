@@ -109,9 +109,9 @@ jobs:
             let failed = false;
             for (const user of users) {
               const result = await approveOne(user);
-              if (result === 'present') { await say(`@${user} is already approved. ✅`); await assign(user); continue; }
+              if (result === 'present') { await say(`@${user}, you're already on the contributor allowlist. ✅`); await assign(user); continue; }
               if (result === 'approved') {
-                await say(`@${user} is now on the contributor allowlist, so the PR gate lets your PRs through; keep each change tied to an accepted issue. 🎉 Welcome aboard!`);
+                await say(`@${user}, you're now on the contributor allowlist, so the PR gate lets your PRs through (reopen any it already closed); keep each one tied to an accepted issue. 🎉 Welcome aboard!`);
                 await assign(user);
                 core.info(`approved ${user}`);
                 continue;
