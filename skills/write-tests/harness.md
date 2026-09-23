@@ -170,8 +170,10 @@ those, kept separate only so the manifest can attach its family markers, timeout
 ## Ports, tolerances, reporting
 
 - **Ports** (`tests/common/ports.py`) — never hardcode `--master_port`. The launcher calls
-  `free_port()` (bind `:0`, dedup per process) and passes it via env; your script's
-  `init_distributed()` reads it. Hardcoded ports race across CI shards (`Errno 98`).
+  `free_port()` (a port below the kernel's ephemeral range, from this xdist worker's own slice
+  of the pool) and passes it via env; your script's `init_distributed()` reads it. A
+  CPU test that spawns ranks or starts a server takes its port from `free_port()` too. Hardcoded
+  ports race across CI shards (`Errno 98`).
 - **Tolerances** (`tests/common/tolerances.py`) — `from tests.common.tolerances import TOL`,
   then use the named constant: `TOL.rank_loss_consistency_abs`, `TOL.tp_grad_norm_spread_abs`,
   `TOL.parallel_vs_baseline_loss_abs`, `TOL.parallel_vs_baseline_train_loss_abs`,

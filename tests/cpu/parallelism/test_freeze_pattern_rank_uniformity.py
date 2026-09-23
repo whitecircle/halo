@@ -31,12 +31,9 @@ import torch.multiprocessing as mp
 from torch import nn
 
 from src.distributed.loading.peft_setup import freeze_modules_by_patterns, unfreeze_modules_by_patterns
+from tests.common.ports import free_port
 
 WORLD_SIZE = 2
-# One port per test — a reused port collides with the previous run's lingering TCPStore.
-FREEZE_MISS_PORT = "29771"
-UNFREEZE_MISS_PORT = "29772"
-UNIFORM_HIT_PORT = "29773"
 # Far below any plausible real wait: with a stage-local raise the surviving rank can only end in a
 # gloo timeout at the modelled next collective, and the suite must not sit on it.
 PG_TIMEOUT_SEC = 15
@@ -81,9 +78,13 @@ def _worker(rank: int, tmp_dir: str, which: str, pattern: str, port: str) -> Non
         dist.destroy_process_group()
 
 
-def _results(tmp_path, which: str, pattern: str, port: str) -> list[tuple[bool, str]]:
+def _results(tmp_path, which: str, pattern: str) -> list[tuple[bool, str]]:
     mp.start_processes(
-        _worker, args=(str(tmp_path), which, pattern, port), nprocs=WORLD_SIZE, join=True, start_method="spawn"
+        _worker,
+        args=(str(tmp_path), which, pattern, str(free_port())),
+        nprocs=WORLD_SIZE,
+        join=True,
+        start_method="spawn",
     )
     out = []
     for rank in range(WORLD_SIZE):
@@ -96,7 +97,7 @@ def _results(tmp_path, which: str, pattern: str, port: str) -> list[tuple[bool, 
 def test_a_freeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_path):
     """``block_0.*`` names a parameter only rank 0 holds. Rank 0's own verdict is clean, so it is the
     rank a stage-local raise would strand — it must raise too, with rank 1's real reason."""
-    results = _results(tmp_path, which="freeze", pattern="block_0.*", port=FREEZE_MISS_PORT)
+    results = _results(tmp_path, which="freeze", pattern="block_0.*")
 
     for rank, (reached, outcome) in enumerate(results):
         assert outcome != "NO RAISE", f"rank {rank} sailed past a pattern that trains the wrong parameters"
@@ -113,7 +114,7 @@ def test_a_freeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_path):
 def test_an_unfreeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_path):
     """Its counterpart: ``block_0`` leaves rank 1 with nothing trainable, and that rank's stage —
     not the world — is what the predicate can see."""
-    results = _results(tmp_path, which="unfreeze", pattern="block_0", port=UNFREEZE_MISS_PORT)
+    results = _results(tmp_path, which="unfreeze", pattern="block_0")
 
     for rank, (reached, outcome) in enumerate(results):
         assert outcome != "NO RAISE", f"rank {rank} sailed past a stage that would train nothing"
@@ -127,7 +128,7 @@ def test_an_unfreeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_pat
 def test_a_pattern_every_stage_carries_raises_on_nobody(tmp_path):
     """Anti-vacuity: the seam must not be a raise-always. ``block_*`` matches on both stages, so both
     ranks proceed through the next collective."""
-    results = _results(tmp_path, which="freeze", pattern="block_*", port=UNIFORM_HIT_PORT)
+    results = _results(tmp_path, which="freeze", pattern="block_*")
     for rank, (reached, outcome) in enumerate(results):
         assert outcome == "NO RAISE", f"rank {rank} raised on a pattern its stage carries: {outcome}"
         assert reached, f"rank {rank} did not reach the next collective"
