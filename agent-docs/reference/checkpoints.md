@@ -206,6 +206,26 @@ config still gets normalized weights in safetensors.
 resume demands of the topology, is the
 [warm vs exact matrix](#warm-restart-vs-exact-resume-torchrun).
 
+## Hub model card
+
+A model directory Halo writes carries a `README.md` card tagged `halo` (`HALO_HUB_TAGS` in
+`src/checkpoint/model_card.py`), so an upload lists under that Hub tag. `tag_model_card` appends the
+tag to a card already present — TRL's, PEFT's, sentence-transformers', or the one an export copies
+from its source — and keeps its body, `library_name` and other tags. A fresh card holds the tag
+alone.
+
+- **Full-model writes** tag in `finalize_exported_config`: every parallel saver, the single-GPU / DDP
+  fallback, `save_full_checkpoint`, `merge_models`, `reattach_vision_tower`.
+- **Exports built from a source directory** tag in `copy_checkpoint_aux_files`, the only seam the
+  tools that carry `config.json` across as-is reach (`merge_ep_shards`, `quantize_to_lowp`,
+  `unfuse_moe_experts`, the GLM-5 and Mistral 4 fp8 → bf16 converters).
+- **The loaded policy** carries the tag on `model_tags` (`finalize_run_model`), which the card of
+  PEFT's own `save_pretrained` (the single-process / DDP adapter save) and `push_to_hub` read.
+
+`reset_sinks`' single-file branch and an unmerged `convert_to_bf16 --peft` tag their own output.
+Adapter directories written by hand (FSDP2, CP and EP adapters) carry no card, and the
+`output_dir/README.md` TRL writes at each checkpoint lists TRL's tags only.
+
 ## Serving on vLLM / SGLang
 
 A gathered checkpoint is a standard HF checkpoint — stock `from_pretrained` loads it as-is.

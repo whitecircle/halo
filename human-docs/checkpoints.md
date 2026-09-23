@@ -103,6 +103,11 @@ shards and the training state (`optimizer_*`, `rng_state_*`, `scheduler.pt`,
 `trainer_state.json`) — exclude them, or they go public with the weights. For a
 LoRA run, upload the adapter directory, or merge first for a standalone model.
 
+Gathered checkpoints and the post-processing tools' outputs hold a `README.md`
+model card tagged `halo`, so the upload lists under that Hub tag; fill in its
+body before you publish. Adapters saved under torchrun (FSDP2, CP, EP) have no
+card — merge them, or add the tag to your own card.
+
 Shard layouts, merge flags, and the full resume mechanics:
 [Checkpoints](../agent-docs/reference/checkpoints.md) ↗ ·
 [Model Merging](../agent-docs/reference/model-merging.md) ↗.
