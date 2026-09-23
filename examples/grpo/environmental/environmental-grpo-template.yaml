@@ -62,7 +62,7 @@ rollout_max_tokens: 8192
 # rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
 # rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
 # train_on_sampled_tokens: true       # the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
-# max_train_row_tokens: null          # longest training row a rank takes; null = the model's context window
+# max_train_row_tokens: null          # longest training row a rank takes; null = no cap beyond the context check
 
 # --- Effort-length reward economy (agent-docs/training-methods/grpo/async-grpo/rollouts.md#effort-length-reward) ---
 # effort_length_penalty_k0: null      # capped, effort-conditioned price on reasoning tokens (null = off)

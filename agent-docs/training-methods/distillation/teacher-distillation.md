@@ -4,7 +4,7 @@ Fit a student to a separate, frozen teacher's token-level distribution over a fi
 
 Trainer `DistributedDistillationTrainer`, script `scripts/training/distillation/teacher_distill.py` (text or VLM). EP, TP and ETP apply to the **student**; CP and PP are rejected, since every loss reads the teacher's whole `[tokens, vocab]` plane and no stage or sequence shard holds it ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
-Both models sit on every rank — the student with its optimizer states, the teacher weights-only under `torch.no_grad()` in `eval()` mode. Their `vocab_size` must match, or construction raises. That is the only check: a teacher from another tokenizer family with the same `vocab_size` passes and distills over misaligned token ids, so pick the teacher by tokenizer, not by size.
+Both models sit on every rank — the student with its optimizer states, the teacher weights-only under `torch.no_grad()` in `eval()` mode. Their `vocab_size` must match, or construction raises. That is the only check: a teacher from another tokenizer family with the same `vocab_size` passes and distills over misaligned token ids, so pick the teacher by tokenizer, not by `vocab_size`.
 
 ## Configuration
 
