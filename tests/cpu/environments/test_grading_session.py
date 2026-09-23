@@ -99,18 +99,14 @@ def test_a_grade_runs_every_test_through_one_session_and_closes_it():
     assert session.closed
 
 
-@pytest.mark.parametrize(
-    ("stage", "fault"),
-    [
-        ("run", "sandbox backend failure: PermissionError (EACCES)"),
-        ("reset", "sandbox reset failure: PermissionError (EACCES)"),
-    ],
-)
-def test_a_host_fault_is_named_by_its_errno_never_by_a_path_the_program_chose(stage, fault, caplog):
+@pytest.mark.parametrize("stage", ["run", "reset"])
+def test_a_host_fault_shows_its_class_alone_under_outcome(stage, caplog):
     grade = run_solution_against_tests("code", _TESTS[:1], sandbox=_DeniedSandbox(stage))
     assert grade.infra_errors == 1
-    assert grade.details.splitlines()[1:] == [f"Test 1: ERROR -- {fault}"], grade.details
+    assert grade.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], grade.details
     assert "HIDDEN-4217" in caplog.text, "the log keeps what the verdict leaves out"
+    full = run_solution_against_tests("code", _TESTS[:1], sandbox=_DeniedSandbox(stage), verdict_detail="full")
+    assert "HIDDEN-4217" in full.details
 
 
 def test_garbage_output_is_a_wrong_answer_not_an_infra_error():
@@ -140,7 +136,7 @@ def test_an_executor_without_sessions_grades_one_shot_without_a_warning(caplog):
 def test_a_compile_failure_grades_the_whole_pool_once():
     failure = SandboxResult(compile_failed=True, returncode=1, stderr="main.cpp:1:11: error: expected ';'")
     sandbox = _SessionSandbox(result=failure)
-    grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox, language="cpp")
+    grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox, language="cpp", verdict_detail="full")
     assert (grade.passed, grade.total, grade.ran_ok, grade.graded, grade.infra_errors) == (0, 3, 0, 3, 0)
     assert not grade.budget_hit
     assert "COMPILATION ERROR (every test fails)" in grade.details

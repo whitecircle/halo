@@ -119,6 +119,7 @@ def test_executor_exception_counts_as_infra_error_not_a_failed_test():
         "print(42)",
         [{"input": "a", "output": "42"}, {"input": "b", "output": "42"}],
         sandbox=sandbox,
+        verdict_detail="full",
     )
     assert sandbox.calls == 2
     assert (grade.infra_errors, grade.passed, grade.ran_ok, grade.total) == (2, 0, 0, 2)
@@ -129,7 +130,7 @@ def test_checker_executor_exception_raises_checker_infra_error():
     """The checker leg honours the same contract: a raising backend surfaces as CheckerInfraError
     (bucketed into infra_errors), never as a raw OSError escaping the grade."""
     checker = CheckerVerdict("# unused", _RaisingSandbox(OSError(28, "No space left on device")))
-    with pytest.raises(CheckerInfraError, match=r"OSError \(ENOSPC\)"):
+    with pytest.raises(CheckerInfraError, match="No space left on device"):
         checker("input", "expected", "actual")
 
 

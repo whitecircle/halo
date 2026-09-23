@@ -15,6 +15,7 @@
 
 import json
 import logging
+import shutil
 import sys
 
 import pytest
@@ -34,23 +35,9 @@ from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
+from tests.common.code_contests import StubSandbox
 
 _JUDGE = {"source": "judge", "name": "quality", "requirements": [{"name": "done", "description": "Done."}]}
-
-
-class _FixedSandbox(SandboxExecutor):
-    """Every run returns one canned result; sessions are unsupported, so grading runs one-shot."""
-
-    isolated = True
-
-    def __init__(self, result: SandboxResult):
-        self._result = result
-
-    def open_session(self):
-        raise NotImplementedError
-
-    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
-        return self._result
 
 
 class _Undeclared(SandboxExecutor):
@@ -179,8 +166,8 @@ def test_swe_null_answer_leaves_the_baseline_instead_of_paying():
 
 
 def test_wrong_answer_verdict_hides_the_expected_output_by_default():
-    assert GradingSpec(sandbox=_FixedSandbox(SandboxResult())).verdict_detail == VERDICT_DETAIL_OUTCOME
-    env = CodeContestsEnvironment(sandbox=_FixedSandbox(SandboxResult(stdout="7\n", returncode=0)))
+    assert GradingSpec(sandbox=StubSandbox(SandboxResult())).verdict_detail == VERDICT_DETAIL_OUTCOME
+    env = CodeContestsEnvironment(sandbox=StubSandbox(SandboxResult(stdout="7\n", returncode=0)))
     assert env.grading_spec.verdict_detail == VERDICT_DETAIL_OUTCOME
     ids, _ = env.reset(["print 42"], [{"answer": {"tests": [{"input": "", "output": "SECRET42\n"}]}}])
     traj = env.step(ids, [""], [{"tool_calls": [_tool_call("submit_solution", code="print(7)")]}])[0].trajectory
@@ -191,7 +178,7 @@ def test_wrong_answer_verdict_hides_the_expected_output_by_default():
 
 def test_full_verdict_detail_stays_an_explicit_opt_in():
     env = CodeContestsEnvironment(
-        sandbox=_FixedSandbox(SandboxResult(stdout="7\n", returncode=0)), verdict_detail=VERDICT_DETAIL_FULL
+        sandbox=StubSandbox(SandboxResult(stdout="7\n", returncode=0)), verdict_detail=VERDICT_DETAIL_FULL
     )
     ids, _ = env.reset(["print 42"], [{"answer": {"tests": [{"input": "", "output": "SECRET42\n"}]}}])
     traj = env.step(ids, [""], [{"tool_calls": [_tool_call("submit_solution", code="print(7)")]}])[0].trajectory
@@ -226,6 +213,71 @@ def test_a_graded_program_cannot_read_a_hidden_input_back_by_default(program, hi
     assert outcome.details.splitlines()[1:] == [verdict], outcome.details
 
 
+class _Answering:
+    """A requests session that answers every ``/run_code`` POST with one SandboxFusion body."""
+
+    def __init__(self, body: dict):
+        self._body = body
+
+    def post(self, url, json=None, timeout=None):
+        return self
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"status": "SandboxError", "message": "HIDDEN-4217"},
+        {"status": "Failed", "compile_result": {"status": "Error", "stderr": "HIDDEN-4217"}},
+    ],
+    ids=["service-message", "unfinished-compile-step"],
+)
+def test_a_remote_error_shows_its_class_alone_by_default(body, caplog):
+    """A service's error text can quote what the program wrote: the verdict shows the class, the log
+    the text."""
+    remote = RemoteSandbox("http://sandbox:8080", session=_Answering(body))
+    tests = [{"input": "", "output": "right"}]
+    outcome = run_solution_against_tests("code", tests, sandbox=remote, language="cpp")
+    assert outcome.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], outcome.details
+    assert "HIDDEN-4217" in caplog.text
+    full = run_solution_against_tests("code", tests, sandbox=remote, language="cpp", verdict_detail="full")
+    assert "HIDDEN-4217" in full.details
+
+
+_REMOTE_COMPILE_ERROR = {
+    "status": "Failed",
+    "compile_result": {"status": "Finished", "return_code": 1, "stderr": "main.cpp:1:1: error: HIDDEN-4217"},
+}
+
+
+def test_a_remote_compile_message_shows_under_full_only():
+    """A remote build shares each test's request with its stdin, so its message may quote it."""
+    remote = RemoteSandbox("http://sandbox:8080", session=_Answering(_REMOTE_COMPILE_ERROR))
+    tests = [{"input": "HIDDEN-4217", "output": "right"}]
+    outcome = run_solution_against_tests("code", tests, sandbox=remote, language="cpp")
+    assert outcome.details.splitlines()[1:] == ["COMPILATION ERROR (every test fails)"], outcome.details
+    full = run_solution_against_tests("code", tests, sandbox=remote, language="cpp", verdict_detail="full")
+    assert "HIDDEN-4217" in full.details
+
+
+def test_a_local_compile_message_shows_under_outcome():
+    """The local build runs once, before any test and without stdin: its message quotes the source only."""
+    if shutil.which("g++") is None:
+        pytest.skip("g++ not installed")
+    grade = run_solution_against_tests(
+        "int main() { return undeclared_name; }",
+        [{"input": "", "output": ""}],
+        sandbox=LocalSubprocessSandbox(),
+        language="cpp",
+    )
+    assert "COMPILATION ERROR" in grade.details and "undeclared_name" in grade.details, grade.details
+
+
 # a sandbox that does not confine the program warns once
 
 
@@ -241,8 +293,8 @@ def fresh_warnings(monkeypatch, caplog):
 
 
 def test_coding_envs_warn_once_per_process_on_the_local_backend(fresh_warnings):
-    CodeContestsEnvironment(sandbox=_FixedSandbox(SandboxResult()))
-    SweEnvironment(sandbox=_FixedSandbox(SandboxResult()))
+    CodeContestsEnvironment(sandbox=StubSandbox(SandboxResult()))
+    SweEnvironment(sandbox=StubSandbox(SandboxResult()))
     SweEnvironment(sandbox=RemoteSandbox("http://sandbox:8080"))
     assert not _unconfined_warnings(fresh_warnings), "a confining backend must not warn"
 
