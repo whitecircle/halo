@@ -10,6 +10,7 @@ QWEN3_0_6B = "Qwen/Qwen3-0.6B"
 QWEN3_4B_INSTRUCT = "Qwen/Qwen3-4B-Instruct-2507"
 QWEN3_8B = "Qwen/Qwen3-8B"
 QWEN3_5_2B = "Qwen/Qwen3.5-2B"
+QWEN3_5_9B = "Qwen/Qwen3.5-9B"
 
 # MoE Models
 

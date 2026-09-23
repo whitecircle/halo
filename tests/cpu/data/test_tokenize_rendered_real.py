@@ -23,7 +23,7 @@ import pytest
 
 from src.data.pipeline.rendered import probe_tokenizer_specials, tokenize_rendered
 from src.data.pipeline.row_processors import create_llm_processor
-from tests.common.models import GEMMA3_4B_IT, GEMMA4_31B_QAT, GPT_OSS_20B_OPENAI, ZAYA_8B
+from tests.common.models import GEMMA3_4B_IT, GEMMA4_31B_QAT, GLM4_FLASH, GPT_OSS_20B_OPENAI, QWEN3_0_6B, ZAYA_8B
 from tests.common.tokenizers import load_cached_tokenizer
 
 MESSAGES = [
@@ -62,7 +62,7 @@ def test_gemma4_template_bos_survives():
         assert ids.count(tok.bos_token_id) == 1
 
 
-@pytest.mark.parametrize("name", ["Qwen/Qwen3-0.6B", "zai-org/GLM-4.7-Flash"])
+@pytest.mark.parametrize("name", [QWEN3_0_6B, GLM4_FLASH])
 def test_no_specials_families_verbatim(name):
     tok = load_cached_tokenizer(name)
     specials = probe_tokenizer_specials(tok)

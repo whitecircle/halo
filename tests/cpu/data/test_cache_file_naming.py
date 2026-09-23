@@ -18,7 +18,7 @@ from datasets import Dataset
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.processors import TemplateProcessing
-from transformers import AutoTokenizer, ProcessorMixin
+from transformers import ProcessorMixin
 
 from src.data.collators.self_distill import SelfDistillTextCollator
 from src.data.pipeline import processing
@@ -32,6 +32,8 @@ from src.data.pipeline.processing import (
     get_function_identifier,
 )
 from src.data.spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY
+from tests.common.models import QWEN3_0_6B
+from tests.common.tokenizers import load_cached_tokenizer
 
 # Helper functions & datasets
 
@@ -399,7 +401,7 @@ def test_tokenizer_content_sig_ignores_per_call_padding_and_truncation():
     tokenized last: at ``num_proc <= 1`` only the writer rank runs a map's fn, so after the truncating
     tokenize map the writer's key diverges from its peers' and every peer re-runs the next map,
     writing the same arrow file concurrently — the shared-FS race this module exists to prevent."""
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     assert tokenizer.is_fast and tokenizer.backend_tokenizer is not None, "the probe needs a fast tokenizer"
 
     pristine = _tokenizer_content_sig(tokenizer)
@@ -414,7 +416,7 @@ def test_tokenizer_content_sig_ignores_per_call_padding_and_truncation():
     # The whole identity moves with it, not just the content term.
     tokenizer("halo halo", truncation=True, max_length=2, padding="max_length")
     assert _get_kwargs_fingerprint({"tokenizer": tokenizer}) == _get_kwargs_fingerprint(
-        {"tokenizer": AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")}
+        {"tokenizer": load_cached_tokenizer(QWEN3_0_6B)}
     ), "a used tokenizer keyed a different cache than a freshly loaded one"
 
 

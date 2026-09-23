@@ -31,10 +31,11 @@ import torch
 import torch.nn as nn
 from datasets import Dataset
 from PIL import Image
-from transformers import AutoProcessor
 
 from src.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO
 from src.trainers.preference.smpo import SmoothMarginPOTrainer, tokenize_vlm_preference_row
+from tests.common.models import QWEN3_5_9B
+from tests.common.tokenizers import load_cached_processor
 
 IMAGE_TOKEN = "<image>"
 IMAGE_PAD_TOKEN = "<imgpad>"
@@ -534,9 +535,7 @@ def test_dataset_map_arrow_roundtrip():
 
 
 def test_real_qwen35_processor_end_to_end():
-    # The CPU tier mounts the HF cache (Makefile DOCKER_RUN_CPU), so an unavailable processor is a
-    # broken environment, not a reason to report this check green as a skip.
-    processor = AutoProcessor.from_pretrained("Qwen/Qwen3.5-9B")
+    processor = load_cached_processor(QWEN3_5_9B)
     assert hasattr(processor, "tokenizer"), "AutoProcessor resolved to a bare tokenizer (no vision processor)"
 
     trainer = make_trainer(max_completion_length=128)
