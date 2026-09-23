@@ -111,7 +111,7 @@ jobs:
               const result = await approveOne(user);
               if (result === 'present') { await say(`@${user} is already approved. ✅`); await assign(user); continue; }
               if (result === 'approved') {
-                await say(`@${user} is now approved to open a PR for this issue. 🎉 Welcome aboard!`);
+                await say(`@${user} is now on the contributor allowlist, so the PR gate lets your PRs through; keep each change tied to an accepted issue. 🎉 Welcome aboard!`);
                 await assign(user);
                 core.info(`approved ${user}`);
                 continue;
