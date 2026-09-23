@@ -165,7 +165,7 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 | **MoE — EP / pure ETP** ([Gemma 4](../models/gemma4.md), [Laguna](../models/laguna.md) ⁷) | EP | EP at max single-GPU seq | pure ETP ⁷ | **No** ³ |
 | **MoE w/ CCA** ([Zaya](../models/zaya.md)) | EP (no GC) ⁴ or pure ETP (no GC) | — | Plain FSDP2 (no GC) | **No** ⁴ |
 | **MoE — EP/ETP, no CP/TP** ([DeepSeek-V4](../models/deepseek-v4.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md)) | EP | EP at max single-GPU seq | pure ETP | **No** |
-| **VLM** ([Qwen3-VL](../models/qwen3.md#qwen3-vl)) | Standard | CP | CP ⁹ | Yes |
+| **VLM** ([Qwen3-VL](../models/qwen3.md#qwen3-vl)) | Standard | Standard at max single-GPU seq ⁹ | ZeRO-3 FSDP2 ⁹ | Text-only runs ⁹ |
 
 ¹ Qwen3.5/3.6 — CP blocked by interleaved linear-attention layers; see [qwen3_5.md](../models/qwen3_5.md).
 
@@ -183,7 +183,7 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 
 ⁸ Inkling — CP blocked by the sequence-axis short convolutions, TP by the RoPE-free relative-logits attention. See [inkling.md](../models/inkling.md).
 
-⁹ Qwen3-VL — a dense checkpoint ships no `base_model_tp_plan`, so `tp_plan="auto"` shards nothing and the loader raises; see [Supported Models](../models/README.md).
+⁹ Qwen3-VL — the CP wrapper raises at the first forward carrying `pixel_values`, so CP covers text-only runs on the dense checkpoint; the check is per batch, so a dataset that mixes in images fails mid-run. A dense checkpoint ships no `base_model_tp_plan`, so `tp_plan="auto"` shards nothing and the loader raises. That leaves ZeRO-3 (`fsdp_reshard_after_forward: true`) as the memory lever. See [Supported Models](../models/README.md) and [SFT — VLMs](../training-methods/sft.md#vision-language-models).
 
 Per-family configs and EP wrapper internals: [Supported Models](../models/README.md).
 

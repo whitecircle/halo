@@ -71,7 +71,7 @@ accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
 ```
-Training is YAML-driven; override any field on the CLI (`--learning_rate=1e-5 --max_length=32000`). Redirect `HF_DATASETS_CACHE`/`TMPDIR` to `/mnt` and detach with `nohup ... > /mnt/<job>.log 2>&1 &` for production runs.
+Training is YAML-driven; override any field on the CLI (`--learning_rate=1e-5 --max_length=32000`). For production runs, redirect `HF_DATASETS_CACHE`/`TMPDIR` to the verified large volume (`$D`, resolved as in the launch recipe above) and detach with `nohup ... > "$D/<job>.log" 2>&1 &`.
 
 ### Tests
 

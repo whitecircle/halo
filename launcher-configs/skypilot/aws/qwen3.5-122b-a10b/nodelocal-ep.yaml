@@ -1,4 +1,4 @@
-# Qwen3.5-122B-A10B — node-local EP=8 on a single Blackwell node (8 x B200, AWS p6). No cross-node fabric.
+# Qwen3.5-122B-A10B — node-local EP=8 on a single Blackwell node (8 x B200, AWS). No cross-node fabric.
 # 122B fits one B200 node via EP=8 with gradient checkpointing (B300 is more comfortable).
 # Launch: sky launch -c qwen35-122b-nl launcher-configs/skypilot/aws/qwen3.5-122b-a10b/nodelocal-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
 

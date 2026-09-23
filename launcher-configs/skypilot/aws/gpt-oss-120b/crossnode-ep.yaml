@@ -1,4 +1,4 @@
-# GPT-OSS 120B — cross-node EP=16 on AWS (2 x 8 H200 / p5e, EFA). Experts shard across all 16 GPUs.
+# GPT-OSS 120B — cross-node EP=16 on AWS (2 x 8 H200, EFA). Experts shard across all 16 GPUs.
 # Launch: sky launch -c oss-120b launcher-configs/skypilot/aws/gpt-oss-120b/crossnode-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
 
 name: oss-120b-crossnode-ep-aws
