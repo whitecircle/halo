@@ -41,8 +41,8 @@ nccl_pin = load_script_module("docker/nccl_pin.py")
 # docstrings under src/, the pinned-behaviour comments in tests/ and scripts/, the launch comments
 # in examples/, the agent skills, and the pin sources themselves — a Dockerfile's ``ARG`` agrees
 # with itself, but the paragraph of comment explaining why it says that number does not. Left out:
-# ``uv.lock`` (generated), ``Makefile`` (tags only — checked below), and ``plans/``, whose history
-# is deliberately dated. Data files under agent-docs/assets record third-party baseline environments.
+# ``uv.lock`` (generated) and ``Makefile`` (tags only — checked below). Data files under
+# agent-docs/assets record third-party baseline environments.
 SCANNED_TREES = (
     "CLAUDE.md",
     "README.md",

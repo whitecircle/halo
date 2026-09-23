@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """Every place that states the Halo release version must state the one ``pyproject.toml`` declares.
 
-A release bumps one number in files nothing links: the package metadata and its ``uv.lock`` entry,
-the ``Makefile`` default every image build and push passes on, each Dockerfile's ``ARG VERSION``
-default (the label a bare ``docker build`` or a compose-triggered build stamps), the citation
-metadata, the README's newest release entry, and every documented ``-X.Y.Z`` image pin a reader
-copies into ``docker pull``. A bump that misses one labels an image, cites a release, or points a
-reader at a pin that disagrees with what was published. This gate reads each statement and fails on
-any that disagrees with ``[project] version``, and on a newest release entry whose date is not the
-citation's ``date-released``.
+A release bumps the same number in files that do not refer to one another: the package metadata and
+its ``uv.lock`` entry, the ``Makefile`` default every image build and push passes on, each
+Dockerfile's ``ARG VERSION`` default (the label a bare ``docker build`` or a compose-triggered build
+stamps), the citation metadata, the README's newest release entry, and every documented ``-X.Y.Z``
+image pin a reader copies into ``docker pull``. A bump that misses one labels an image, cites a
+release, or points a reader at a pin that disagrees with what was published. This gate reads each
+statement and fails on any that disagrees with ``[project] version``, and on a newest release entry
+whose date is not the citation's ``date-released``.
 
     python tests/cpu/config/test_release_version_in_sync.py
 """
@@ -35,15 +35,20 @@ FIXED_STATEMENTS: dict[str, re.Pattern[str]] = {
 }
 
 # The README feed is newest first, so only its first release entry states the current release; the
-# entries below it are history.
+# entries below it, up to the next section, are history, and so are the pins they name.
 RELEASE_ENTRY = re.compile(r"^- \*\*(?P<date>\d{4}-\d{2}-\d{2}) — Halo (?P<version>\d+(?:\.\d+)+)\.\*\*", re.MULTILINE)
+FEED_ENTRY = re.compile(r"^- \*\*\d{4}-\d{2}-\d{2} — ", re.MULTILINE)
+SECTION = re.compile(r"^## ", re.MULTILINE)
 DATE_RELEASED = re.compile(r'^date-released:\s*"?(?P<date>\d{4}-\d{2}-\d{2})"?\s*$', re.MULTILINE)
 
 # A published pin: ``blackwell-X.Y.Z`` / ``hopper-X.Y.Z``, or a rollout image's
-# ``vllm-<engine>-X.Y.Z``. A bare engine tag (``sglang-<engine>``) names no Halo release.
-IMAGE_PIN = re.compile(r"\b(?:blackwell|hopper|(?:vllm|sglang)-\d+\.\d+\.\d+)-(?P<version>\d+(?:\.\d+)+)\b")
+# ``vllm-<engine>-X.Y.Z``, whose engine version may carry a ``.post1`` / ``rc1`` / ``.dev0`` suffix.
+# A bare engine tag (``sglang-<engine>``) names no Halo release.
+IMAGE_PIN = re.compile(
+    r"\b(?:blackwell|hopper|(?:vllm|sglang)-\d+(?:\.\d+)+(?:\.?(?:post|rc|dev)\d+)?)-(?P<version>\d+(?:\.\d+)+)\b"
+)
 
-# Every tree a reader copies an image pin from. ``plans/`` is left out: its history is dated.
+# Every tree a reader copies an image pin from.
 PIN_TREES = (
     "README.md",
     "CLAUDE.md",
@@ -57,7 +62,10 @@ PIN_TREES = (
     "human-docs/**/*.md",
     "skills/**/*.md",
     "examples/**/*.yaml",
+    "launcher-configs/**/*.yaml",
+    "launcher-configs/**/*.hcl",
     "docker/**/*.sh",
+    "docker/**/*.py",
     "src/**/*.py",
     "scripts/**/*.py",
     "tests/**/*.py",
@@ -94,10 +102,19 @@ def _statement(path: str, text: str, match: re.Match[str]) -> Statement:
     return Statement(path, text.count("\n", 0, start) + 1, start, end, match["version"])
 
 
-def _newest_release_entry(texts: Mapping[str, str]) -> re.Match[str]:
-    entry = RELEASE_ENTRY.search(texts["README.md"])
+def _newest_release_entry(readme: str) -> re.Match[str]:
+    entry = RELEASE_ENTRY.search(readme)
     assert entry, f"README.md has no release entry matching {RELEASE_ENTRY.pattern!r}"
     return entry
+
+
+def _feed_history(readme: str) -> range:
+    """The README span holding the feed entries older than the newest release entry."""
+    newest = _newest_release_entry(readme)
+    section = SECTION.search(readme, newest.end())
+    feed_end = section.start() if section else len(readme)
+    older = FEED_ENTRY.search(readme, newest.end(), feed_end)
+    return range(older.start(), feed_end) if older else range(0)
 
 
 def release_statements(texts: Mapping[str, str]) -> list[Statement]:
@@ -107,9 +124,12 @@ def release_statements(texts: Mapping[str, str]) -> list[Statement]:
         found = [_statement(path, texts[path], match) for match in pattern.finditer(texts[path])]
         assert found, f"{path} states no release version: {pattern.pattern!r} no longer matches, so it goes unchecked"
         statements += found
-    statements.append(_statement("README.md", texts["README.md"], _newest_release_entry(texts)))
+    readme = texts["README.md"]
+    statements.append(_statement("README.md", readme, _newest_release_entry(readme)))
+    history = _feed_history(readme)
     for path, text in texts.items():
-        statements += [_statement(path, text, match) for match in IMAGE_PIN.finditer(text)]
+        skipped = history if path == "README.md" else range(0)
+        statements += [_statement(path, text, m) for m in IMAGE_PIN.finditer(text) if m.start() not in skipped]
     return statements
 
 
@@ -123,7 +143,7 @@ def disagreements(texts: Mapping[str, str]) -> list[str]:
     ]
     released = DATE_RELEASED.search(texts["CITATION.cff"])
     assert released, f"CITATION.cff has no date-released matching {DATE_RELEASED.pattern!r}"
-    entry = _newest_release_entry(texts)
+    entry = _newest_release_entry(texts["README.md"])
     if entry["date"] != released["date"]:
         line = texts["README.md"].count("\n", 0, entry.start()) + 1
         reported.append(f"README.md:{line} dates {entry['date']}, CITATION.cff date-released {released['date']}")
@@ -178,10 +198,25 @@ def test_both_pin_shapes_are_read_and_a_bare_engine_tag_is_not(texts):
     doc = (
         f"docker pull public.ecr.aws/whitecircle/halo:hopper-{bumped}\n"
         f"docker pull public.ecr.aws/whitecircle/halo:vllm-{engine}-{bumped}\n"
+        f"docker pull public.ecr.aws/whitecircle/halo:sglang-{engine}.post1-{bumped}\n"
+        f"docker pull public.ecr.aws/whitecircle/halo:vllm-{engine}rc1-{bumped}\n"
         f"docker pull public.ecr.aws/whitecircle/halo:sglang-{engine}\n"
     )
     reported = disagreements({**texts, "human-docs/planted.md": doc})
-    assert reported == [f"human-docs/planted.md:1 states {bumped}", f"human-docs/planted.md:2 states {bumped}"]
+    assert reported == [f"human-docs/planted.md:{line} states {bumped}" for line in (1, 2, 3, 4)]
+
+
+def test_a_pin_in_an_older_release_entry_is_history(texts):
+    """The README feed keeps past releases and their pins; only the newest entry and the rest of the
+    README are held to the declared release."""
+    readme, older = texts["README.md"], "0.9.0"
+    feed_end = SECTION.search(readme, _newest_release_entry(readme).end()).start()
+    entry = f"- **2000-01-01 — Halo {older}.** Pinned as `:hopper-{older}`.\n\n"
+    assert disagreements({**texts, "README.md": readme[:feed_end] + entry + readme[feed_end:]}) == []
+
+    outside = f"{readme}\nPull `:hopper-{older}`.\n"
+    line = outside.count("\n", 0, outside.rindex(older)) + 1
+    assert disagreements({**texts, "README.md": outside}) == [f"README.md:{line} states {older}"]
 
 
 def test_a_newest_release_entry_dated_off_the_citation_is_reported(texts):

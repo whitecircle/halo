@@ -11,7 +11,7 @@ Built on HuggingFace Transformers, Accelerate, and TRL — every distributed tra
 
 ## Framework comparison
 
-Compared as of the pinned stack: the TRL and Accelerate columns describe TRL 1.6.0 and Accelerate 1.11.0, the releases this toolkit pins, not the latest upstream ones. The other columns describe Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend) and Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
+The TRL and Accelerate columns describe the feature sets of the pinned TRL 1.6.0 and Accelerate 1.11.0, not the latest upstream releases; the others describe Unsloth, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend) and Megatron-LM/Core. TRL's TP and CP need a newer Accelerate than the pinned one (see below). "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
 
 | Feature | This Toolkit | HF TRL | Accelerate | Unsloth | Axolotl | MS-SWIFT | veRL | Megatron-LM |
 |---------|:------------:|:------:|:----------:|:-------:|:-------:|:--------:|:----:|:-----------:|
@@ -28,7 +28,7 @@ Compared as of the pinned stack: the TRL and Accelerate columns describe TRL 1.6
 | Native `s3://` datasets | **Yes** | No | No | No | Yes | No | No | Via MSC |
 | Multi-node | **Tested** | Via Accelerate | Yes | Paid tiers | Yes | Yes | Yes | Yes |
 
-Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself has an expert-parallel path (`DistributedConfig(enable_expert_parallel=True)`) whose router all-reduces the full MoE output on every rank instead of dispatching tokens. Training it through the transformers `Trainer` with a `ParallelismConfig` needs a newer release than the pinned Accelerate 1.11.0.
+Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself has an expert-parallel path (`DistributedConfig(enable_expert_parallel=True)`) whose router all-reduces the full MoE output on every rank instead of dispatching tokens. On the pinned transformers 5.16.1 and Accelerate 1.11.0, the transformers `Trainer`, and TRL's trainers that subclass it, run neither TP, CP nor that EP path: each needs Accelerate's `ParallelismConfig` (`TrainingArguments.parallelism_config`), and that `Trainer` fails at construction on any `ParallelismConfig` under this Accelerate release.
 
 ### When to use which
 
