@@ -51,8 +51,10 @@ Once your PR path is approved, the normal bar applies (full detail in
   `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (a pure link check)
   run on the host. `make test-cpu` needs Docker, not a GPU.
 - **Pass the gates.** `make lint`, `make format`, `make test-cpu` (and `make test-gpu-core` for
-  GPU-affecting changes), `make docs`. Hosted CI runs only `ruff`, `actionlint` and the docs link
-  check on a PR; the test tiers run on your machine, so state their result in the PR.
+  GPU-affecting changes), `make docs`. Hosted CI runs `ruff`, `actionlint`, the docs checks and the
+  CPU tier on every PR; its CPU tier uses the published image, so a dependency change still needs
+  `make test-cpu` on a rebuilt image. The GPU tiers run on your machine, so state their result in
+  the PR.
 - **Tests ship with behavior — and must not be slop.** A test must *fail when the behavior breaks*; no
   tautologies, smoke-only "didn't raise" checks, vacuous `assert x is not None`, or mock-the-thing-under-test.
   See the anti-slop test guide in [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md).

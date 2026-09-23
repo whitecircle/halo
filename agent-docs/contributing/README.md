@@ -45,6 +45,7 @@ docker pull public.ecr.aws/whitecircle/halo:blackwell && docker tag public.ecr.a
 # ... or build it: B200 (SM100) / B300 (SM103); build-hopper for H100/H200 (SM90)
 make build-blackwell
 make install                  # uv install inside the image (a pulled image already has it)
+make seed-hf-cache            # configs + tokenizers the CPU tests read into HF_CACHE (no weights)
 make test-cpu                 # sanity check; needs Docker, not a GPU
 ```
 
@@ -363,8 +364,9 @@ first-class content — report it with the reason.
 2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged;
    signed commits (SSH or GPG) are required only on branches of this repository, not in a fork.
 3. **Pass the gates.** `make lint`, `make format`, `make test-cpu` (plus `make test-gpu-core` for
-   GPU-affecting changes), `make docs`. Hosted CI runs `ruff`, `actionlint` and the docs link
-   check; the test tiers run locally, so report their result in the PR.
+   GPU-affecting changes), `make docs`. Hosted CI runs `ruff`, `actionlint`, the docs checks and the
+   CPU tier ([what it does not cover](../infrastructure/ci.md#cpu-tests)); the GPU tiers run
+   locally, so report their result in the PR.
 4. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
 5. **No secrets.** Never add `keys/`, `.env`, `*.pem`, or any credential.
 

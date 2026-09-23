@@ -73,9 +73,23 @@ HF_CACHE ?= $(HALO_SCRATCH)/hf
 DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) \
   $(if $(strip $(HF_CACHE)),-e HF_HOME=$(HF_CACHE) -v $(HF_CACHE):$(HF_CACHE),) \
   -e PYTHONPATH=/workspace -v $(CURDIR):/workspace -w /workspace $(IMAGE)
+# The Hub repos whose configs, tokenizers and chat templates the CPU tier reads. Without them those
+# tests skip, and the guards that refuse an all-skipped file fail; `make seed-hf-cache` fetches them.
+HF_SEED_REPOS ?= \
+  CohereLabs/command-a-plus-05-2026-bf16 LiquidAI/LFM2-24B-A2B LiquidAI/LFM2.5-8B-A1B \
+  LiquidAI/LFM2.5-VL-1.6B Qwen/Qwen2.5-VL-3B-Instruct Qwen/Qwen3-0.6B Qwen/Qwen3-4B-Instruct-2507 \
+  Qwen/Qwen3-8B Qwen/Qwen3-Embedding-4B Qwen/Qwen3-VL-2B-Instruct Qwen/Qwen3.5-122B-A10B \
+  Qwen/Qwen3.5-2B Qwen/Qwen3.5-35B-A3B Qwen/Qwen3.5-9B Qwen/Qwen3.6-35B-A3B Zyphra/ZAYA1-8B \
+  google/gemma-4-26B-A4B-it google/gemma-4-31B-it-qat-w4a16-ct inclusionAI/Ling-mini-2.0 \
+  inclusionAI/Ring-mini-linear-2.0 mistralai/Mistral-Small-4-119B-2603 openai/gpt-oss-20b \
+  poolside/Laguna-S-2.1 poolside/Laguna-XS-2.1 stepfun-ai/Step-3.7-Flash thinkingmachines/Inkling-Small \
+  unsloth/gpt-oss-120b-BF16 unsloth/gpt-oss-20b-BF16 zai-org/GLM-4.7-Flash
+# Everything but weights: remote-code configs and tokenizers need their .py files.
+HF_SEED_FILES = --include "*.json" --include "*.jinja" --include "*.txt" --include "*.model" \
+  --include "*.py" --include "*.tiktoken"
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format precommit test-cpu test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench \
+.PHONY: help install lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench \
         docs diagrams build-blackwell build-hopper build-vllm build-sglang build-all \
         ecr-public-login push-public-blackwell push-public-hopper push-public-vllm \
         push-public-sglang push-public-all train clean
@@ -99,6 +113,11 @@ precommit: lint ## format-check + lint (CI gate)
 
 test-cpu: ## pytest CPU tier inside the image
 	$(DOCKER_RUN_CPU) bash -lc "pytest -m cpu tests/cpu $(PYTEST_ARGS)"
+
+seed-hf-cache: ## fetch the configs and tokenizers the CPU tier reads into HF_CACHE (no weights; anonymous)
+	@test -n "$(strip $(HF_CACHE))" || { echo "HF_CACHE is empty: there is no cache to seed"; exit 1; }
+	$(DOCKER_RUN_CPU) bash -lc 'set -e; export HF_HUB_DISABLE_PROGRESS_BARS=1; \
+	  for repo in $(HF_SEED_REPOS); do hf download "$$repo" $(HF_SEED_FILES) >/dev/null; done'
 
 # Both entrypoints are named explicitly: pointing pytest at `tests/gpu/` would collect the manifest
 # scripts as modules (executing their top-level torchrun code), which the launcher design avoids.
