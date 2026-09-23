@@ -95,11 +95,13 @@ def _open_member(workdir: str, name: str, flags: int) -> int:
 
 
 def _captured_text(capture) -> str:
-    """A run's captured output stream as text. Decoded with replacement: a program that emits bytes
-    that are not UTF-8 (C++ undefined behavior, a binary dump) is judged on the replaced text, never
-    lost to a decode error."""
+    """A run's captured output stream as text, read as a text-mode pipe would: decoded with
+    replacement, so bytes that are not UTF-8 (C++ undefined behavior, a binary dump) are judged on the
+    replaced text rather than lost to a decode error, and with ``\r\n`` / ``\r`` read as ``\n``, so a
+    program ending lines the Windows way is compared on its lines."""
     capture.seek(0)
-    return capture.read(LOCAL_FSIZE_LIMIT).decode("utf-8", errors="replace")
+    text = capture.read(LOCAL_FSIZE_LIMIT).decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _entry_kinds(workdir: str) -> _EntryKinds:
@@ -179,12 +181,16 @@ class LocalSubprocessSandbox(SandboxExecutor):
     ) -> tuple[str, str, int | None, bool]:
         """Run ``argv`` in its own session; returns ``(stdout, stderr, returncode, timed_out)``.
 
-        ``start_new_session`` puts the child in a fresh process group, so a timeout SIGKILLs the whole
-        group; killing only the child would leave forked grandchildren running. Output is captured in
+        ``start_new_session`` puts the child in a fresh process group, which is SIGKILLed whenever the
+        run ends: on a timeout, and also after the leader exits, since a forked child it left behind
+        would outlive the run (the run is judged on the leader's exit and output). Output is captured in
         temp files rather than pipes, so the child's ``RLIMIT_FSIZE`` bounds it: an output flood ends
         as the program's own failure at the file-size limit, never as host memory the grader runs out
         of.
         """
+        # Encoded before the child starts, replacing what UTF-8 cannot carry (a lone surrogate in a
+        # model-written stdin) as a text-mode pipe did.
+        payload = stdin.encode("utf-8", errors="replace")
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             with subprocess.Popen(
                 argv,
@@ -195,18 +201,20 @@ class LocalSubprocessSandbox(SandboxExecutor):
                 env=env,
                 start_new_session=True,
             ) as proc:
+                timed_out = False
                 try:
-                    proc.communicate(input=stdin.encode("utf-8"), timeout=timeout)
-                    timed_out = False
+                    proc.communicate(input=payload, timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    # The group may already be gone (leader exited between timeout and kill).
+                    timed_out = True
+                finally:
+                    # Every exit path, so no group member outlives the run and ``__exit__`` never
+                    # waits unbounded; the group may already be gone.
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(proc.pid, signal.SIGKILL)
                     try:
                         proc.wait(timeout=KILL_DRAIN_TIMEOUT)
                     except subprocess.TimeoutExpired:
                         proc.kill()
-                    timed_out = True
             return _captured_text(out), _captured_text(err), proc.returncode, timed_out
 
     @staticmethod

@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import threading
+import time
 
 import pytest
 import torch
@@ -338,6 +339,58 @@ def test_a_fifo_where_the_host_stages_or_reads_never_blocks_it():
     staged = results["staged"]
     assert staged.error is None and staged.returncode == TAMPERED_WORKDIR_RETURNCODE, staged
     assert results["read"] is None
+
+
+def test_a_lone_surrogate_in_stdin_is_replaced_not_a_host_hang():
+    """A model-written stdin can carry a lone surrogate UTF-8 cannot encode: it is replaced, as a
+    text-mode pipe did, and never raises after the child started, which left the host waiting on it."""
+    sandbox = LocalSubprocessSandbox()
+    results = {}
+    echo = "import sys\nprint(repr(sys.stdin.read()))"
+    assert _completes_promptly(lambda: results.update(echo=sandbox.run(echo, stdin="a\ud83db")))
+    sleeper = "import time\ntime.sleep(60)"
+    assert _completes_promptly(lambda: results.update(slept=sandbox.run(sleeper, stdin="\ud83d", timeout=1)))
+    assert results["echo"].stdout.strip() == "'a?b'"
+    assert results["slept"].timed_out
+
+
+def _live_group_members(pgid: int) -> list[int]:
+    """Processes of group ``pgid`` still alive (a zombie awaiting its reaper is not)."""
+    members = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as fh:
+                state, _ppid, pgrp = fh.read().rsplit(")", 1)[1].split()[:3]
+        except OSError:
+            continue
+        if int(pgrp) == pgid and state != "Z":
+            members.append(int(entry))
+    return members
+
+
+def test_a_forked_child_the_program_leaves_behind_dies_with_the_run():
+    """The run is judged on the leader's exit and output, and no process of its group outlives it."""
+    program = "import os, time\nif os.fork() == 0:\n    time.sleep(60)\n    os._exit(0)\nprint(os.getpgrp())\n"
+    start = time.monotonic()
+    result = LocalSubprocessSandbox().run(program, timeout=30)
+    assert result.ok and not result.timed_out
+    assert time.monotonic() - start < 10, "judged on the leader's exit, not on the child it left behind"
+    pgid = int(result.stdout)
+    deadline = time.monotonic() + 5
+    while _live_group_members(pgid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _live_group_members(pgid), "a forked child outlived the run"
+
+
+def test_crlf_output_reads_as_a_text_mode_pipe_did():
+    """Windows line endings read as ``\n``, so an exact comparison judges the lines, not the endings."""
+    program = "import sys\nsys.stdout.buffer.write(b'1\\r\\n2\\r\\n')\n"
+    sandbox = LocalSubprocessSandbox()
+    assert sandbox.run(program).stdout == "1\n2\n"
+    grade = run_solution_against_tests(program, [{"input": "", "output": "1\n2\n"}], sandbox=sandbox)
+    assert grade.passed == 1, grade.details
 
 
 def test_grading_judges_a_workdir_removing_program_instead_of_voiding_it():

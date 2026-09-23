@@ -113,7 +113,7 @@ Per-run rlimits bound each `local` / `bubblewrap` execution; `remote` enforces i
 | File size (`RLIMIT_FSIZE`), captured stdout / stderr included | 64 MiB | 64 MiB | `LOCAL_FSIZE_LIMIT` |
 | Processes (`RLIMIT_NPROC`) | 4096 | not applied | `LOCAL_NPROC_LIMIT` |
 
-The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense.
+The `RLIMIT_CPU` backstop kills a busy loop that outruns timeout delivery, reporting `SIGXCPU` as `timed_out=True` — a spin still reads as a time limit. `RLIMIT_NPROC` does not bind a root process (how the containers run), so the process-group kill is `local`'s real fork-bomb defense. The group is killed when the leader exits too, so a run is judged on the leader's exit and output, and a child it forked neither outlives it nor holds it open.
 
 ## Concurrency and sizing
 
@@ -121,7 +121,7 @@ Every `local` / `bubblewrap` execution takes a process-global `ExecutionGate` sl
 
 The gate is **per process**, its slot count fixed at import: set the variable before the process starts, and when several processes share a host size the slots so they **sum** to the core count.
 
-One execution is a child process in a working directory under `TMPDIR`. Point `TMPDIR` at a large volume: a `swe` session's whole tree lives there for the episode. Several file descriptors go with each execution, so a high slot count exhausts the default 1024-fd limit (`docker run --ulimit nofile=1048576`).
+One execution is a child process in a working directory under `TMPDIR`, its stdout and stderr captured in two more files there (up to 64 MiB each, so 2 × 64 MiB per concurrent run). Point `TMPDIR` at a large volume: a `swe` session's whole tree lives there for the episode. Several file descriptors go with each execution, so a high slot count exhausts the default 1024-fd limit (`docker run --ulimit nofile=1048576`).
 
 Under Ray the backend resolves inside each `EnvironmentActor`'s own process, so these variables must be in the *actor's* environment ([actor runtime](README.md#actor-runtime)). `env.cleanup([episode_id])` runs in a `finally` after every episode, so no session leaks across a long-lived actor.
 
