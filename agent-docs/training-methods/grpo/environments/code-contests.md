@@ -226,9 +226,17 @@ directly.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
 level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window
-must exceed. `--eval_protocol` picks the [evaluation protocol](#evaluation-protocols), else the
-training config's, else `harness`; the report title and the trajectory meta name it. A training
-config written under another protocol gives up the `max_submissions` / `max_test_calls` the flag's
+must exceed. Every episode sends its level's thinking budget, so the vLLM server needs what the
+[reasoning budget](../async-grpo/rollouts.md#reasoning-budget) needs, a reasoning parser among it;
+without one vLLM rejects the request. A non-thinking model served with a think-tag parser gets its
+whole answer back as reasoning (no end marker reads as all reasoning), so evaluate one with
+`--env_kwargs '{"reasoning_effort": null}'`: no level, no budget, no parser needed. The eval knows
+the server is SGLang only from a `--training_config` naming `rollout_backend: sglang`; the toolkit
+(`engine_wire.generation_control_fields`) then warns and drops the budget.
+
+`--eval_protocol` picks the [evaluation protocol](#evaluation-protocols), else the training
+config's, else `harness`; the report title and the trajectory meta name it. A training config
+written under another protocol gives up the `max_submissions` / `max_test_calls` the flag's
 protocol pins (logged); a config that names the protocol itself, or `--env_kwargs`, contradicting a
 pin raises. Grading knobs with no flag go through `--env_kwargs`, recorded in the trajectory meta.
 Flags, output files and re-grading: [Evaluating on an Environment](evaluation.md).
