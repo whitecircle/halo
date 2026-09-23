@@ -90,14 +90,15 @@ class _Tolerances:
     # ── Muon orthogonalization ──────────────────────────────────────────────
     # Singular values of the Newton-Schulz output. In exact arithmetic the five composed Polar Express
     # quintics map an input singular value of at least 1.22e-3 of the Frobenius norm into
-    # [0.846, 1.124] (the 0.84 floor at 1.20e-3); the bf16 output moves those extremes by under 1e-3.
-    # Steps 1-3 only act on inputs below ~1e-2, so a dropped one shows only there. The coefficients'
-    # safety factor matters only on the fp16 Gram path: without it that path overshoots to 1.2-1.4.
+    # [0.846, 1.124]; inside each path's domain the bf16 output moves those extremes by under 3e-3,
+    # within the band's margin. Steps 1-3 only act on inputs below ~1e-2, so a dropped one shows only
+    # there. Without the safety factor, fp16 rounding overshoots the band on either path (to 1.2-1.4
+    # on the Gram path), which the rectangular cases catch.
     muon_orthogonal_sv_min: float = 0.84
     muon_orthogonal_sv_max: float = 1.13
     # The smallest input singular value, relative to the Frobenius norm, each path holds the band from:
-    # a round margin over 1.22e-3 on the square (standard) path, and a measured one on the rectangular
-    # path, whose fp16 Gram matrix breaks the band below ~4e-3.
+    # a round margin over 1.22e-3 on the square (standard iteration) path, and a measured one on the
+    # rectangular (Gram iteration) path, which loses the band below ~4e-3.
     muon_band_domain_square: float = 1.4e-3
     muon_band_domain_rectangular: float = 4e-3
 

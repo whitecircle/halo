@@ -44,19 +44,20 @@ LOSS_ABS_TOL = 5e-3  # same routing + transport → loss matches to bf16 reducti
 GRAD_COSINE_MIN = 0.999
 
 
-def named_grads(model) -> tuple[torch.Tensor, torch.Tensor]:
+def named_grads(model) -> dict[str, tuple[str, torch.Tensor | None]]:
     """This rank's first local expert weight grad and the first router weight grad, flattened fp32.
 
-    Each parameter is chosen by name before its gradient is read, so one whose gradient was severed
-    fails here instead of falling through to the next layer's.
+    Each parameter is chosen by name before its gradient is read, so a severed one stays None here
+    instead of falling through to the next layer's. The caller fails it after the last collective:
+    a missing gradient can be rank-specific (an expert bank no token reached), and an assert here
+    would leave the peer rank inside the other backend's run.
     """
-    layers = ep_layers(model)
-    assert layers, "the model has no EP layer"
-    expert_name, expert_weight = layers[0].expert_named_params()[0]
+    expert_name, expert_weight = ep_layers(model)[0].expert_named_params()[0]
     router_name, router_weight = find_router_weight(model)
-    for name, param in ((expert_name, expert_weight), (router_name, router_weight)):
-        assert param.grad is not None, f"{name} has no gradient: backward did not reach it"
-    return full_grad(expert_weight).flatten(), full_grad(router_weight).flatten()
+    return {
+        role: (name, None if param.grad is None else full_grad(param).flatten())
+        for role, (name, param) in (("expert", (expert_name, expert_weight)), ("router", (router_name, router_weight)))
+    }
 
 
 def run_backend(backend, tokenizer, local_rank):
@@ -79,8 +80,8 @@ def run_backend(backend, tokenizer, local_rank):
     loss = outputs.loss
     loss.backward()
     loss_val = loss.item()
-    expert_grad, router_grad = named_grads(model)
-    log_all(f"  [{backend}] loss={loss_val:.6f} expert_grad_norm={expert_grad.norm().item():.4f}")
+    grads = named_grads(model)
+    log_all(f"  [{backend}] loss={loss_val:.6f}")
 
     # confirm the dispatcher actually selected the requested backend
     want = _LegacyBackend if backend == "legacy" else _ElasticBackend
@@ -103,13 +104,7 @@ def run_backend(backend, tokenizer, local_rank):
 
     del model, outputs, loss
     cleanup_memory()
-    return {
-        "loss": loss_val,
-        "expert_grad": expert_grad,
-        "router_grad": router_grad,
-        "backend_ok": backend_ok,
-        "shared_ok": shared_ok,
-    }
+    return {"loss": loss_val, "grads": grads, "backend_ok": backend_ok, "shared_ok": shared_ok}
 
 
 def run(ctx) -> dict:
@@ -123,8 +118,13 @@ def run(ctx) -> dict:
     v1 = run_backend("legacy", tokenizer, ctx.local_rank)
     barrier()
 
-    expert_cos = cos_sim(v1["expert_grad"], v2["expert_grad"], "first local expert weight grad")
-    router_cos = cos_sim(v1["router_grad"], v2["router_grad"], "router weight grad")
+    for backend, result in (("elastic", v2), ("legacy", v1)):
+        for name, grad in result["grads"].values():
+            assert grad is not None, f"[{backend}] {name} has no gradient: backward did not reach it"
+    expert_name, v1_expert = v1["grads"]["expert"]
+    router_name, v1_router = v1["grads"]["router"]
+    expert_cos = cos_sim(v1_expert, v2["grads"]["expert"][1], expert_name)
+    router_cos = cos_sim(v1_router, v2["grads"]["router"][1], router_name)
     loss_diff = abs(v1["loss"] - v2["loss"])
 
     log(f"\n{'=' * 70}\nRESULTS\n{'=' * 70}")

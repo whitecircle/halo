@@ -189,7 +189,8 @@ def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str
     points along ``source``'s own polar factor ``U V^T``. The band alone passes an update
     orthogonalized from the wrong matrix, which is the failure a batched step's restack produces.
     A ``source`` whose spectrum leaves the band's domain for its path (the standard iteration for a
-    square matrix, the Gram one otherwise) is a broken fixture and fails as such.
+    square matrix, the Gram iteration otherwise, under the default ``ns_algorithm``) is a broken
+    fixture and fails as such.
     """
     rows, cols = source.shape[-2:]
     domain = TOL.muon_band_domain_square if rows == cols else TOL.muon_band_domain_rectangular
@@ -199,6 +200,7 @@ def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str
         f"{label}: premise: the source's smallest singular value is {relative_min:.2e} of its Frobenius "
         f"norm, below the {domain:.1e} the Newton-Schulz band holds from on a {rows}x{cols} matrix"
     )
+    assert torch.isfinite(update).all(), f"{label}: the update is not finite"
     singular_values = torch.linalg.svdvals(update.double())
     low, high = singular_values.min().item(), singular_values.max().item()
     assert TOL.muon_orthogonal_sv_min <= low and high <= TOL.muon_orthogonal_sv_max, (

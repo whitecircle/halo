@@ -5,9 +5,10 @@ Verifies that create_muon_optimizer:
 1. Correctly splits 2D+ params (Muon) vs 1D params (AdamW scalar)
 2. Achieves loss descent on a simple regression task
 3. Handles models with only 2D params (no scalar optimizer)
-4. Applies weight decay correctly, and only to the named decay params
+4. Applies weight decay exactly, and only to the named decay params
 5. Round-trips its state dict
-6. Writes an orthogonalized update for every matrix the fused step batches
+6. Writes an orthogonalized update for every matrix the fused step batches, from the Nesterov
+   momentum input on the step after
 
 Each property is recorded as its own check, so one failure does not hide the others.
 
@@ -33,9 +34,9 @@ SEQ = 64
 NUM_STEPS = 50
 # Same-shape matrices one past the orthogonalization chunk, so the step stacks them in two chunks.
 LAYERS_PAST_CHUNK = _GNS_CHUNK_SIZE + 1
-# One stochastic-rounding bf16 write lands on a neighbour of the exact value: under one ULP, and a
-# bf16 ULP is at most eps of the value.
-SR_WRITE_RTOL = torch.finfo(torch.bfloat16).eps
+# One bf16 write (stochastic or nearest rounding) lands within one ULP of the exact value, and a bf16
+# ULP is at most eps of the value.
+BF16_WRITE_RTOL = torch.finfo(torch.bfloat16).eps
 # gram_newton_schulz runs its CUDA kernels from compute capability 9.0.
 KERNEL_MIN_MAJOR = 9
 
@@ -107,6 +108,31 @@ def run_training(model, optimizer, num_steps=NUM_STEPS, hidden=HIDDEN):
     return losses
 
 
+def _fill_log_spectrum_grads(model: nn.Module, generator: torch.Generator) -> dict[str, torch.Tensor]:
+    """Give every matrix a fresh log-spectrum gradient; return them by parameter name, in fp64."""
+    grads = {}
+    for name, p in model.named_parameters():
+        rows, cols = p.shape[-2:]
+        matrices = [log_spectrum_matrix(rows, cols, generator) for _ in range(math.prod(p.shape[:-2]))]
+        p.grad = torch.stack(matrices).view(p.shape).to(device=p.device, dtype=p.dtype)
+        grads[name] = p.grad.double()
+    return grads
+
+
+def _assert_updates_from_zero(model: nn.Module, lr: float, sources: dict[str, torch.Tensor], step: int) -> int:
+    """Each matrix a step wrote from zero weights is ``-adjusted_lr`` times the orthogonalized source."""
+    checked = 0
+    for name, p in model.named_parameters():
+        rows, cols = p.shape[-2:]
+        update = -p.detach().double() / adjust_lr_rms_norm(lr, p.shape)
+        for index, (matrix, source) in enumerate(
+            zip(update.view(-1, rows, cols), sources[name].view(-1, rows, cols), strict=True)
+        ):
+            assert_orthogonalized(matrix, source, f"step {step} {name}[{index}]")
+            checked += 1
+    return checked
+
+
 # ─── Checks ──────────────────────────────────────────────────────────────────
 
 
@@ -166,20 +192,6 @@ def check_loss_descends_no_bias():
     log(f"  Loss: {losses[0]:.4f} -> {losses[-1]:.4f} ({reduction * 100:.1f}% reduction)")
 
 
-def check_weight_decay():
-    """Weight decay should shrink parameter norms."""
-    torch.manual_seed(42)
-    model = NoBiasModel(hidden=128, layers=2).cuda().to(torch.bfloat16)
-    optimizer = create_muon_optimizer(model, lr=1e-4, weight_decay=0.5)
-
-    initial_norm = sum(p.data.norm().item() ** 2 for p in model.parameters()) ** 0.5
-    run_training(model, optimizer, num_steps=30, hidden=128)
-    final_norm = sum(p.data.norm().item() ** 2 for p in model.parameters()) ** 0.5
-
-    log(f"  Param norm: {initial_norm:.4f} -> {final_norm:.4f}")
-    assert final_norm < initial_norm, f"Weight decay should reduce norm: {initial_norm:.4f} -> {final_norm:.4f}"
-
-
 def check_decay_parameter_names():
     """The fused step decays exactly the named Muon matrices.
 
@@ -203,7 +215,7 @@ def check_decay_parameter_names():
 
     assert torch.equal(undecayed, before["net.2.weight"]), "an undecayed matrix moved on a zero-gradient step"
     expected = before["net.0.weight"].float() * (1 - lr * weight_decay)
-    assert torch.allclose(decayed.float(), expected, rtol=SR_WRITE_RTOL, atol=0), (
+    assert torch.allclose(decayed.float(), expected, rtol=BF16_WRITE_RTOL, atol=0), (
         f"decayed matrix off 1 - lr*wd = {1 - lr * weight_decay}: max relative error "
         f"{((decayed.float() - expected).abs() / expected.abs().clamp_min(1e-30)).max().item():.3e}"
     )
@@ -247,27 +259,26 @@ def check_state_dict_roundtrip():
 
 
 def check_step_writes_orthogonalized_update():
-    """One step from zero weights writes ``-adjusted_lr * NS(grad)``, orthogonal per matrix.
+    """Two steps from zero weights each write ``-adjusted_lr * NS(u)``, orthogonal per matrix.
 
-    With zero weights and no decay the fused write leaves ``-p = adjusted_lr * NS(u)``, where the
-    first step's Nesterov input ``u`` is ``(1 + momentum) * grad`` (Newton-Schulz ignores the scale)
-    and ``adjusted_lr`` is the rms-norm scale the step applies. Each matrix of ``-p / adjusted_lr``
-    must sit in the Newton-Schulz band and point along its own gradient's polar factor, which a
-    mis-ordered restack across chunks or a dropped learning-rate scale breaks. On SM90+ the step must
-    run ``wide`` through the CUDA kernels, so this covers the kernel backend rather than only the
-    torch one. tests/cpu/optimizers/test_muon_orthogonalization.py covers the orthogonalizer alone on
-    CPU.
+    With zero weights and no decay the fused write leaves ``-p = adjusted_lr * NS(u)``, with
+    ``adjusted_lr`` the rms-norm scale the step applies and ``u`` the Nesterov input
+    ``momentum * m + g`` (Newton-Schulz ignores its scale). On the first step the buffer ``m`` is
+    ``g1``; the second step, from zeroed weights on a fresh ``g2``, reads ``m = momentum * g1 + g2``.
+    Each matrix of ``-p / adjusted_lr`` must sit in the Newton-Schulz band and point along its own
+    ``u``'s polar factor, which a mis-ordered restack across chunks or a dropped learning-rate scale
+    breaks on either step, and a dropped Nesterov term (cosine at most 0.94) or momentum (0.83) on the
+    second. The buffer itself pins the momentum decay. On SM90+ the step must run ``wide`` through the
+    CUDA kernels, so this covers the kernel backend rather than only the torch one.
+    tests/cpu/optimizers/test_muon_orthogonalization.py covers the orthogonalizer alone on CPU.
     """
     generator = torch.Generator().manual_seed(0)
     model = ZeroMatrices().cuda()
     lr = 1e-2
     optimizer = create_muon_optimizer(model, lr=lr, weight_decay=0.0)
+    momentum = optimizer.param_groups[0]["momentum"]
 
-    for p in model.parameters():
-        rows, cols = p.shape[-2:]
-        matrices = [log_spectrum_matrix(rows, cols, generator) for _ in range(math.prod(p.shape[:-2]))]
-        p.grad = torch.stack(matrices).view(p.shape).to(device=p.device, dtype=p.dtype)
-
+    first = _fill_log_spectrum_grads(model, generator)
     kernel_backend = optimizer.newton_schulz._kernel_backend
     if torch.cuda.get_device_capability()[0] < KERNEL_MIN_MAJOR:
         log("  Newton-Schulz: no CUDA kernels below SM90, torch backend only")
@@ -290,17 +301,21 @@ def check_step_writes_orthogonalized_update():
             kernel_backend.sym_mm = kernel_sym_mm
         assert kernel_inputs, "no matrix reached the CUDA Newton-Schulz kernels during the step"
         log(f"  Newton-Schulz CUDA kernels ran on {sorted(set(kernel_inputs))}")
+    checked = _assert_updates_from_zero(model, lr, first, step=1)
 
-    checked = 0
+    with torch.no_grad():
+        for p in model.parameters():
+            p.zero_()
+    second = _fill_log_spectrum_grads(model, generator)
+    optimizer.step()
     for name, p in model.named_parameters():
-        rows, cols = p.shape[-2:]
-        update = -p.detach().double() / adjust_lr_rms_norm(lr, p.shape)
-        for index, (matrix, grad) in enumerate(
-            zip(update.view(-1, rows, cols), p.grad.view(-1, rows, cols), strict=True)
-        ):
-            assert_orthogonalized(matrix, grad, f"{name}[{index}]")
-            checked += 1
-    log(f"  {checked} matrices orthogonal")
+        buffer = optimizer.state[p]["momentum"].double()
+        error = (buffer - (momentum * first[name] + second[name])).abs()
+        bound = BF16_WRITE_RTOL * (momentum * first[name].abs() + second[name].abs())
+        assert (error <= bound).all(), f"{name}: the momentum buffer is not momentum * g1 + g2"
+    nesterov = {name: momentum * (momentum * first[name] + second[name]) + second[name] for name in first}
+    checked += _assert_updates_from_zero(model, lr, nesterov, step=2)
+    log(f"  {checked} matrix updates orthogonal over two steps")
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
@@ -313,7 +328,6 @@ def run(ctx) -> dict:
     record_check(checks, "param_split", check_param_split)
     record_check(checks, "loss_descends", check_loss_descends)
     record_check(checks, "loss_descends_no_bias", check_loss_descends_no_bias)
-    record_check(checks, "weight_decay", check_weight_decay)
     record_check(checks, "decay_parameter_names", check_decay_parameter_names)
     record_check(checks, "state_dict_roundtrip", check_state_dict_roundtrip)
     record_check(checks, "step_writes_orthogonalized_update", check_step_writes_orthogonalized_update)

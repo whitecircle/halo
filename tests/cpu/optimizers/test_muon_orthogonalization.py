@@ -4,10 +4,11 @@
 Muon replaces a matrix's momentum with an approximation of its polar factor ``U V^T``: five quintic
 Newton-Schulz steps after a Frobenius normalization push every singular value into the band
 ``TOL.muon_orthogonal_sv_*``. The band holds only for inputs whose smallest singular value clears a
-fraction of the Frobenius norm that depends on the path (``TOL.muon_band_domain_*``): square matrices
-take the standard iteration, rectangular ones the fp16 Gram iteration, which needs a larger margin. A
-raw gradient's smallest singular values sit below either, where the iteration is not meant to
-converge, so every input here carries a prescribed spectrum inside its path's domain.
+fraction of the Frobenius norm that depends on the path (``TOL.muon_band_domain_*``): under the
+default ``ns_algorithm`` square matrices take the standard iteration and rectangular ones the Gram
+iteration, which needs a larger margin. A raw gradient's smallest singular values sit below either,
+where the iteration is not meant to converge, so every input here carries a prescribed spectrum
+inside its path's domain.
 
 The square case also runs at two decades: the first three steps only lift singular values below
 ~1e-2 of the Frobenius norm, so a one-decade input passes with any of them dropped.
