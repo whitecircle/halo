@@ -3,6 +3,8 @@
 Stateless row transforms into the env's ``{prompt, answer}`` shape, plus a ``keep`` predicate dropping
 rows the stdin/stdout env cannot grade. Each dataset registers a :class:`CodeDatasetAdapter` in
 :data:`CODE_DATASET_ADAPTERS` via a ``format_*`` / ``pack_*`` / ``keep_*`` trio (+ optional ``load_*``).
+A benchmark that stamps its rows' contest date and platform also declares them, so a run can score a
+:class:`ContestSelection` of it.
 """
 
 import base64
@@ -13,6 +15,7 @@ import re
 import zlib
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 from datasets import load_dataset
@@ -22,6 +25,8 @@ from huggingface_hub import hf_hub_download
 _LCB_RELEASE_FILES: dict[str, list[str]] = {
     f"release_v{v}": [f"test{'' if i == 1 else i}.jsonl" for i in range(1, v + 1)] for v in range(1, 7)
 }
+# The ``platform`` spellings LiveCodeBench rows carry.
+_LCB_PLATFORMS = ("atcoder", "codeforces", "leetcode")
 
 # HardTests difficulty on the Codeforces rating scale. A Codeforces rating is used as is; Luogu's
 # seven levels and the coarse AtCoder/TACO labels map to a representative rating, so one rating
@@ -266,7 +271,8 @@ def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator
     """Yield raw LiveCodeBench rows from a release's ``test*.jsonl`` files, newest contests first.
 
     ``config`` is the release tag (default ``release_v6``); ``split`` ignored. Bypasses ``load_dataset``,
-    whose loading script datasets 4.x does not execute.
+    whose loading script datasets 4.x does not execute. A release is cumulative, so a contamination-clean
+    subset is a :class:`ContestSelection` window over it, not a release tag.
     """
     files = _LCB_RELEASE_FILES.get(config or "release_v6")
     if files is None:
@@ -277,6 +283,18 @@ def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator
             for line in fh:
                 if line.strip():
                     yield json.loads(line)
+
+
+def livecodebench_contest_date(row: dict[str, Any]) -> date:
+    """The calendar day of a LiveCodeBench row's ``contest_date`` (an ISO datetime). A row without one
+    raises: a date window cannot place it, and dropping it would shrink the window unannounced."""
+    raw = row.get("contest_date")
+    try:
+        return datetime.fromisoformat(raw).date()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"LiveCodeBench row {row.get('question_id')!r} carries no ISO contest_date (got {raw!r})"
+        ) from exc
 
 
 def _icpc_time_limit_s(row: dict[str, Any]) -> float | None:
@@ -435,6 +453,68 @@ def load_hlce(dataset: str, config: str | None, split: str) -> Iterator[dict[str
     yield from load_dataset(dataset, config, split="train", streaming=True)
 
 
+def _parse_day(name: str, value: str | None) -> date | None:
+    """``value`` as a calendar day, spelled ``YYYY-MM-DD``; ``None`` stays open. Any other spelling
+    raises, the other ISO forms :meth:`date.fromisoformat` accepts (``20250104``, week dates) included."""
+    if value is None:
+        return None
+    try:
+        day = date.fromisoformat(value)
+    except (TypeError, ValueError):
+        day = None
+    if day is None or day.isoformat() != value:
+        raise ValueError(f"{name} must be a YYYY-MM-DD day, got {value!r}")
+    return day
+
+
+@dataclass(frozen=True)
+class ContestSelection:
+    """The rows of a benchmark a run scores: contests dated ``start_date`` through ``end_date``, both
+    ends inclusive and compared by calendar day (either may be open), on ``platforms`` as the source
+    spells them (every platform when empty). The empty selection scores every row."""
+
+    start_date: date | None = None
+    end_date: date | None = None
+    platforms: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.start_date is not None and self.end_date is not None and self.start_date > self.end_date:
+            raise ValueError(f"start_date {self.start_date} is after end_date {self.end_date}; the window is empty")
+        # One spelling per selection: it keys the re-grader's payload cache and names the run's files.
+        object.__setattr__(self, "platforms", tuple(sorted(set(self.platforms))))
+
+    @classmethod
+    def parse(
+        cls, start_date: str | None = None, end_date: str | None = None, platforms: Iterable[str] = ()
+    ) -> "ContestSelection":
+        """A selection from its spelled form (the CLI flags, a trajectory meta line)."""
+        return cls(_parse_day("start_date", start_date), _parse_day("end_date", end_date), tuple(platforms))
+
+    @classmethod
+    def from_meta(cls, meta: dict[str, Any] | None) -> "ContestSelection":
+        """The selection a trajectory meta line records; a line recording none selected every row."""
+        return cls.parse(**(meta or {}))
+
+    def to_meta(self) -> dict[str, Any]:
+        """The spelled form :meth:`from_meta` reads back."""
+        return {
+            "start_date": self.start_date.isoformat() if self.start_date else None,
+            "end_date": self.end_date.isoformat() if self.end_date else None,
+            "platforms": list(self.platforms),
+        }
+
+    @property
+    def dated(self) -> bool:
+        """Whether the selection bounds the contest date on either end."""
+        return self.start_date is not None or self.end_date is not None
+
+    @property
+    def label(self) -> str:
+        """A short name for the selection (``2025-01-04..2025-04-06_atcoder``); empty when it selects everything."""
+        window = f"{self.start_date or ''}..{self.end_date or ''}" if self.dated else ""
+        return "_".join(part for part in (window, "+".join(self.platforms)) if part)
+
+
 @dataclass(frozen=True)
 class CodeDatasetAdapter:
     """How to turn a contest dataset's rows into the env's ``{prompt, answer}`` shape.
@@ -453,12 +533,46 @@ class CodeDatasetAdapter:
     # Prepared-row fields a source spells differently (``id``/``rating``/``tags``), added by the
     # preparation script before its filters run; ``None`` => the raw row already carries them.
     normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    # What a ContestSelection selects on: a row's contest day, and the field naming its platform with
+    # every spelling the source uses. Undeclared => a selection bounding that axis is refused.
+    contest_date: Callable[[dict[str, Any]], date] | None = None
+    platform_field: str | None = None
+    platforms: tuple[str, ...] = ()
 
     @property
     def scores_raw_rows(self) -> bool:
         """Whether the eval scripts can score the source's raw rows. A source whose prepared fields need
         ``normalize`` (and a joined tests table) is scored from its prepared pool instead."""
         return self.normalize is None
+
+    def require_selectable(self, selection: ContestSelection) -> None:
+        """Raise unless this source can apply ``selection``: a date window needs a stamped contest date,
+        a platform filter the source's own spellings."""
+        if selection.dated and self.contest_date is None:
+            raise ValueError("this dataset stamps no contest date, so a start_date/end_date window cannot apply")
+        unknown = sorted(set(selection.platforms) - set(self.platforms))
+        if unknown and not self.platforms:
+            raise ValueError("this dataset records no platform, so a platform filter cannot apply")
+        if unknown:
+            raise ValueError(f"unknown platform(s) {unknown}; this dataset spells them {list(self.platforms)}")
+
+    def scored_rows(self, rows: Iterable[dict[str, Any]], selection: ContestSelection) -> Iterator[dict[str, Any]]:
+        """The rows a run scores, in source order: inside ``selection`` and gradable (``keep``). The eval
+        builds its examples and the offline re-grader rebuilds their payloads by index from this one
+        sequence. The selection is validated here, before a row is read."""
+        self.require_selectable(selection)
+        return (row for row in rows if self._selects(row, selection) and self.keep(row))
+
+    def _selects(self, row: dict[str, Any], selection: ContestSelection) -> bool:
+        """Whether ``row`` falls inside ``selection``; the contest date is read only under a window."""
+        if selection.platforms and row.get(self.platform_field) not in selection.platforms:
+            return False
+        if not selection.dated:
+            return True
+        day = self.contest_date(row)
+        if selection.start_date is not None and day < selection.start_date:
+            return False
+        return selection.end_date is None or day <= selection.end_date
 
 
 CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
@@ -475,6 +589,9 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         group_field="difficulty",
         group_label="difficulty",
         load=load_livecodebench,
+        contest_date=livecodebench_contest_date,
+        platform_field="platform",
+        platforms=_LCB_PLATFORMS,
     ),
     "icpc": CodeDatasetAdapter(
         format_icpc_prompt,

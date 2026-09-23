@@ -26,8 +26,9 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 
 `run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through
 `--context_fields` and buckets by `--group_by`; `run_code_contests.py` instead takes `--adapter`,
-`--language` and `--reasoning_effort`, which also sets the default `--max_tokens`
-([Code Contests](code-contests.md)).
+`--language`, `--reasoning_effort` (which also sets the default `--max_tokens`), `--eval_protocol`, and
+`--start_date` / `--end_date` / `--platform` on a benchmark that stamps contest dates
+([Code Contests](code-contests.md#evaluation)).
 
 `--training_config <yaml>` parses the YAML with the training script's own config classes: its
 `RolloutConfig` (template variables, stop tokens, thinking budget, sampling) and environment config
@@ -55,11 +56,13 @@ recorded.
 
 `--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>` auto-names one
 file per run instead (`<model>__<env_type>__<split>.jsonl`, or
-`<model>__<adapter>__<split>__<language>.jsonl` for the coding script).
+`<model>__<adapter>__<split>__<language>__<eval_protocol>.jsonl` for the coding script, plus a part
+naming a contest selection, e.g. `__2025-01-01..2025-04-30_atcoder-codeforces`).
 
 Line 1 is a `meta` record: model, env type, dataset/config/split, effective `max_turns`, the
 generation contract (`rollout`), the `training_config`, `system_prompt` and tool schemas — for
-coding, also the adapter, language, effort and the `GradingSpec` (`env_grading`).
+coding, also the adapter, contest `selection`, language, `eval_protocol`, effort and the `GradingSpec`
+(`env_grading`).
 
 Each later line is an `episode`, addressed by `index` and `id`: `reward`, `success`, `stats`, the
 messages, `reasoning_effort` / `reasoning_budget`, `info`. The answer key (`_`-prefixed `info`
@@ -77,9 +80,10 @@ python scripts/environments/inference/regrade_trajectories.py \
     "$HALO_DATA_ROOT/eval/trajectories"/*.jsonl --workers 64 --output regraded.jsonl
 ```
 
-It rebuilds each problem's hidden tests by `index` and replays every recorded `submit_solution`, up
-to that episode's own budget, through `grade_solution` under the meta line's `env_grading` contract. Grading stops at the first failing test and `max_grading_seconds`
-does not apply. Reports `s@1` / `s@2` per file; keep `--workers` at or below the core count.
+It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection`, and
+replays every recorded `submit_solution`, up to that episode's own budget, through `grade_solution`
+under the meta line's `env_grading` contract and `eval_protocol`. Grading stops at the first failing test and `max_grading_seconds`
+does not apply. Reports `s@1` / `s@2` and the protocol per file; keep `--workers` at or below the core count.
 
 Only `run_code_contests.py` stamps the meta a re-grade needs (`env_type`, `adapter`, `dataset`,
 `model`, `language`); a `run_env.py` dump is refused.
