@@ -123,13 +123,31 @@ def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> 
 
 def resolve_eval_protocol(flag: str | None, trained_env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """The run's protocol (the flag, else the training config's, else the default) and the training
-    config's env options under it, naming that protocol. A config written under another protocol gives
-    way to this run's pins, as its effort profiles do; one that names this protocol itself keeps its
-    values, so a contradiction there raises in the env, as one in ``--env_kwargs`` does."""
+    config's env options under it. A config written under another protocol gives way to this run's
+    pins, as its effort profiles do; one that names this protocol itself keeps its values, so a
+    contradiction there raises in the env, as one in ``--env_kwargs`` does."""
     eval_protocol = resolve_setting(flag, trained_env.get("eval_protocol"), DEFAULT_EVAL_PROTOCOL)
-    if trained_env.get("eval_protocol") != eval_protocol:
-        trained_env = without_eval_protocol_pins(trained_env, eval_protocol, "the training config")
-    return eval_protocol, {**trained_env, "eval_protocol": eval_protocol}
+    if trained_env.get("eval_protocol") == eval_protocol:
+        return eval_protocol, trained_env
+    return eval_protocol, without_eval_protocol_pins(trained_env, eval_protocol, "the training config")
+
+
+def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], env_kwargs: dict) -> dict[str, Any]:
+    """The run's environment config, built once: the environment is made from it and the meta line
+    records it, so the two cannot disagree. The training config's options come first (under the
+    resolved protocol), the resolved settings and flags over them: an eval under a contract grades as
+    the run did. An unset language is left out entirely, so the env class's own default applies."""
+    eval_protocol, trained_env = resolve_eval_protocol(args.eval_protocol, trained_env)
+    return {
+        **trained_env,
+        "max_turns": resolve_setting(args.max_turns, trained_env.get("max_turns"), None),
+        **({"language": parse_language_flag(args.language)} if args.language else {}),
+        "eval_protocol": eval_protocol,
+        "reasoning_effort": resolve_setting(
+            args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
+        ),
+        **env_kwargs,
+    }
 
 
 def run_trajectory_path(
@@ -325,24 +343,9 @@ def main() -> None:
         raise SystemExit(
             f"{args.training_config} trains environment_type={env_type!r}, not a coding env {CODING_ENV_TYPES}"
         )
-    reasoning_effort = resolve_setting(
-        args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
-    )
-    max_turns = resolve_setting(args.max_turns, trained_env.get("max_turns"), None)
-    _, trained_env = resolve_eval_protocol(args.eval_protocol, trained_env)
-    # The training run's env config first, the resolved settings and flags over it: an eval under a
-    # contract grades as the run did. An unset language or turn budget is left out entirely, so the env
-    # class's own default applies.
-    env = resolve_environment(
-        env_type,
-        {
-            **trained_env,
-            "max_turns": max_turns,
-            **({"language": parse_language_flag(args.language)} if args.language else {}),
-            "reasoning_effort": reasoning_effort,
-            **env_kwargs,
-        },
-    )
+    env_config = resolve_env_config(args, trained_env, env_kwargs)
+    reasoning_effort, max_turns = env_config["reasoning_effort"], env_config["max_turns"]
+    env = resolve_environment(env_type, env_config)
     # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
     env.verify_backend()
     examples = build_examples(args, adapter, selection)
@@ -391,7 +394,7 @@ def main() -> None:
         max_turns=max_turns,
         rollout=rollout,
         num_samples=args.num_samples,
-        meta_extra=contest_meta(args.adapter, selection, env, reasoning_effort, {**trained_env, **env_kwargs}),
+        meta_extra=contest_meta(args.adapter, selection, env, reasoning_effort, env_config),
     )
 
 
