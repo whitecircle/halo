@@ -11,6 +11,7 @@ Run: python tests/cpu/conventions/test_cos_sim.py
 """
 
 import math
+import re
 
 import pytest
 import torch
@@ -18,14 +19,15 @@ import torch
 from tests.common.utils import cos_sim
 
 SEED = 0
+LABEL = "model.layers.0.mlp.router.weight"
 
 
 @pytest.mark.parametrize("pair", ["dead_vs_live", "live_vs_dead", "both_dead"])
 def test_a_zero_norm_operand_raises(pair):
     live, dead = torch.randn(64, generator=torch.Generator().manual_seed(SEED)), torch.zeros(64)
     a, b = {"dead_vs_live": (dead, live), "live_vs_dead": (live, dead), "both_dead": (dead, dead)}[pair]
-    with pytest.raises(ValueError, match="^layers.0.router.weight: cosine of a zero-norm"):
-        cos_sim(a, b, "layers.0.router.weight")
+    with pytest.raises(ValueError, match="^" + re.escape(f"{LABEL}: cosine of a zero-norm")):
+        cos_sim(a, b, LABEL)
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf")])

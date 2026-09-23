@@ -25,7 +25,7 @@ from src.distributed.expert_parallel.patching import create_ep_buffers, patch_mo
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG
-from tests.common.utils import cos_sim, log, log_all
+from tests.common.utils import cos_sim, log
 
 SEED = 42
 BATCH, SEQ = 2, 64
@@ -112,16 +112,11 @@ def run(ctx):
             f"l{i}_gate_grad": (ep.gate.weight.grad, refs["gate"]),
         }
         for name, (got, want) in pairs.items():
-            if got is None or got.shape != want.shape:
-                # A bank no token reached, or a severed backward: this rank's comparison has nothing to test.
-                log_all(
-                    f"  {name}: EP grad {'missing' if got is None else tuple(got.shape)} vs reference {tuple(want.shape)}"
-                )
-                checks[name] = False
-                continue
-            cos = cos_sim(got, want, name)
+            # A missing or misshapen EP gradient (severed backward, layout drift) fails this pair by name.
+            ok = got is not None and got.shape == want.shape
+            cos = cos_sim(got, want, name) if ok else -1.0
             metrics[f"{name}_cos"] = cos
-            checks[name] = cos > GRAD_COS_TOL
+            checks[name] = ok and cos > GRAD_COS_TOL
 
     checks["shared_grads_nonzero"] = all(
         ep.shared_experts.gate_proj.grad is not None and ep.shared_experts.gate_proj.grad.abs().sum().item() > 0

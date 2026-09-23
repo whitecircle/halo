@@ -454,7 +454,8 @@ def _check_fused_head(model_type, tiny_config, device) -> None:
     # A parameter the fused head leaves without a gradient would otherwise drop out of the comparison.
     assert fused_grads.keys() == reference_grads.keys(), (
         f"{model_type} gradient coverage differs: only in the reference "
-        f"{sorted(reference_grads.keys() - fused_grads.keys())}, only fused {sorted(fused_grads.keys() - reference_grads.keys())}"
+        f"{sorted(reference_grads.keys() - fused_grads.keys())}, "
+        f"only fused {sorted(fused_grads.keys() - reference_grads.keys())}"
     )
     cosines = {name: cos_sim(grad, reference_grads[name], name) for name, grad in fused_grads.items()}
     worst_name = min(cosines, key=cosines.get)

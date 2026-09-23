@@ -2,8 +2,7 @@
 """
 Focused SFT test for Qwen3.5/Qwen3.6 MoE with Expert Parallelism.
 
-Single mode (EP only), env-configurable model path and EP size, 4-GPU
-friendly.
+Single mode (EP only), env-configurable model path and EP size, 4-GPU friendly.
 
 Note: Qwen3.5/3.6 attention uses M-RoPE whose varlen path crashes Flash
 Attention 2 (cudaErrorIllegalAddress). Use attn_implementation=sdpa.
