@@ -117,6 +117,7 @@ def _passthrough_copy(checkpoint_dir: Path, output_dir: Path, dry_run: bool) -> 
         )
     logger.info(f"No sinks to reset — copying the checkpoint to {output_dir} unchanged...")
     shutil.copytree(str(checkpoint_dir), str(output_dir), dirs_exist_ok=True)
+    tag_model_card(str(output_dir))
 
 
 def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: bool) -> int:
@@ -169,8 +170,8 @@ def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: 
         raise
     tmp_path.replace(output_safetensors)
     logger.info(f"All {len(sink_keys)} sink tensors verified — reset to dtype min.")
-    # The copytree carries the source's card over untagged; the from_pretrained branch gets its tag
-    # from save_full_checkpoint.
+    # The copytree carries the source's card over untagged; save_full_checkpoint tags the
+    # from_pretrained branch's.
     tag_model_card(str(output_dir))
 
     return len(sink_keys)

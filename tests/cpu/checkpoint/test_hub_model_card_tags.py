@@ -3,23 +3,25 @@
 
 A model uploaded from a Halo output lists under ``halo`` on the Hub, the way TRL- and PEFT-written
 cards list under ``trl`` and ``peft``. The tag rides two carriers: the loaded model's ``model_tags``
-(which PEFT's adapter card and ``push_to_hub`` read), and the ``README.md`` card the two export
-finalizers tag — the config finalizer every full-model writer ends with, and the non-weight copy every
-tool that builds an export from a source directory runs. The two tools that pass through neither tag
-their own output, and the embedding script tags the card data sentence-transformers writes its own
-card from. An existing card (PEFT's, TRL's, the source model's) keeps its body, metadata and
-tags; only the Halo tag is added, and a fresh card claims no ``library_name``.
+(which PEFT's own adapter card reads), and the ``README.md`` card the two export finalizers tag — the
+config finalizer every full-model writer ends with, and the non-weight copy every tool that builds an
+export from a source directory runs. The writers that reach neither tag their own output, and the
+embedding script tags the card data sentence-transformers writes its card from. An existing card
+(PEFT's, TRL's, the source model's) changes in its ``tags`` entry only; a fresh card holds the tag
+alone, and a card whose metadata is not YAML fails naming the file to repair.
 
     python tests/cpu/checkpoint/test_hub_model_card_tags.py
 """
 
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
 import torch
 from accelerate import PartialState
 from huggingface_hub import ModelCard
+from huggingface_hub.repocard import metadata_load
 from peft import LoraConfig, get_peft_model
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import GptOssConfig, GptOssForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
@@ -52,6 +54,34 @@ _TINY_QWEN3 = {
     "max_position_embeddings": 64,
     "tie_word_embeddings": False,
 }
+# A card's metadata beyond ``tags`` must survive verbatim: two model-index entries, one carrying
+# fields ModelCardData's EvalResult has no slot for, and keys it would reorder.
+_EVAL_CARD = """---
+license: mit
+model-index:
+- name: model-a
+  results:
+  - task: {type: text-generation, name: Text Generation}
+    dataset: {name: ARC, type: ai2_arc, config: ARC-Challenge, split: test}
+    metrics:
+    - {type: acc_norm, value: 0.5, name: normalized accuracy}
+    source: {url: 'https://a', name: Leaderboard A}
+  - task: {type: text-generation, name: Other Name}
+    dataset: {name: ARC second name, type: ai2_arc, config: ARC-Challenge, split: test}
+    metrics:
+    - {type: acc, value: 0.4, name: accuracy, custom_key: 7}
+    source: {url: 'https://b', name: Leaderboard B}
+- name: model-b
+  results:
+  - task: {type: text-generation}
+    dataset: {name: HS, type: hellaswag}
+    metrics:
+    - {type: acc, value: 0.9}
+language:
+- en
+---
+# body
+"""
 # A source model's own card: every field and the body must survive the export untouched.
 _SOURCE_CARD = """---
 library_name: transformers
@@ -103,6 +133,57 @@ def test_an_existing_card_keeps_its_metadata_tags_and_body(tmp_path):
     tagged = (tmp_path / CARD).read_bytes()
     tag_model_card(str(tmp_path))
     assert (tmp_path / CARD).read_bytes() == tagged, "a card that already carries the tag is rewritten"
+
+
+def test_metadata_beyond_the_tags_round_trips_verbatim(tmp_path):
+    (tmp_path / CARD).write_text(_EVAL_CARD)
+    before = metadata_load(tmp_path / CARD)
+
+    tag_model_card(str(tmp_path))
+    after = metadata_load(tmp_path / CARD)
+    assert after.pop("tags") == [HALO_TAG]
+    assert after == before
+    assert list(after) == list(before)
+
+
+def test_a_scalar_tags_entry_becomes_a_list_beside_the_halo_tag(tmp_path):
+    (tmp_path / CARD).write_text("---\ntags: foo\n---\nbody\n")
+    tag_model_card(str(tmp_path))
+    assert metadata_load(tmp_path / CARD)["tags"] == ["foo", HALO_TAG]
+
+
+def test_crlf_line_endings_and_the_body_are_kept(tmp_path):
+    (tmp_path / CARD).write_bytes(b"---\r\nlicense: mit\r\n---\r\nbody line\r\nsecond line\r\n")
+    tag_model_card(str(tmp_path))
+    assert (tmp_path / CARD).read_bytes() == (
+        b"---\r\nlicense: mit\r\ntags:\r\n- halo\r\n---\r\nbody line\r\nsecond line\r\n"
+    )
+
+
+def test_a_card_without_metadata_keeps_its_body_under_a_new_block(tmp_path):
+    (tmp_path / CARD).write_text("# Title\n\nSome body\n")
+    tag_model_card(str(tmp_path))
+    assert (tmp_path / CARD).read_text() == "---\ntags:\n- halo\n---\n# Title\n\nSome body\n"
+
+
+def test_a_symlinked_card_is_replaced_not_written_through(tmp_path):
+    """A Hub-cache snapshot links README.md into a blob shared by every snapshot of that repo."""
+    blob = tmp_path / "blob"
+    blob.write_text(_SOURCE_CARD)
+    (tmp_path / "export").mkdir()
+    (tmp_path / "export" / CARD).symlink_to(blob)
+
+    tag_model_card(str(tmp_path / "export"))
+    assert blob.read_text() == _SOURCE_CARD
+    assert not (tmp_path / "export" / CARD).is_symlink()
+    assert metadata_load(tmp_path / "export" / CARD)["tags"] == ["text-generation", HALO_TAG]
+
+
+@pytest.mark.parametrize("metadata", ["tags: [a, b\n", "- a\n- b\n"], ids=["bad-yaml", "not-a-mapping"])
+def test_a_card_whose_metadata_is_not_a_yaml_mapping_names_the_file(tmp_path, metadata):
+    (tmp_path / CARD).write_text(f"---\n{metadata}---\nbody\n")
+    with pytest.raises(ValueError, match=rf"(?s){re.escape(str(tmp_path / CARD))}.*Repair or remove it"):
+        tag_model_card(str(tmp_path))
 
 
 def test_the_parallel_writers_config_step_tags_the_checkpoint_card(tmp_path):
@@ -161,6 +242,17 @@ def test_an_export_carries_the_source_card_tagged_and_leaves_the_source_alone(tm
     assert card.text == ModelCard(_SOURCE_CARD).text
 
 
+def test_an_export_names_the_source_card_it_cannot_tag(tmp_path):
+    """The weights are already written by then; the re-run recopies the source, so that is the file to fix."""
+    source, output = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    output.mkdir()
+    (source / CARD).write_text("---\ntags: [a, b\n---\nbody\n")
+
+    with pytest.raises(ValueError, match=rf"Repair or remove {re.escape(str(source / CARD))}, then re-run"):
+        copy_checkpoint_aux_files(str(source), str(output))
+
+
 def test_an_export_of_a_cardless_source_gets_a_tagged_card(tmp_path):
     source, output = tmp_path / "source", tmp_path / "export"
     source.mkdir()
@@ -193,6 +285,16 @@ def test_the_single_file_sinks_reset_tags_its_output(tmp_path):
     assert (source / "model.safetensors").is_file(), "premise: the single-file branch is the one exercised"
 
     assert reset_sinks(str(source), output_dir=str(output)) > 0
+    assert _card(output).data.tags == [HALO_TAG]
+
+
+def test_the_sinks_reset_passthrough_tags_its_output(tmp_path):
+    """A checkpoint with no sinks is copied through unchanged, and that copy is still an export."""
+    source, output = tmp_path / "source", tmp_path / "copy"
+    _tiny_qwen3().save_pretrained(source)
+    assert (source / "model.safetensors").is_file(), "premise: the single-file branch is the one exercised"
+
+    assert reset_sinks(str(source), output_dir=str(output)) == 0
     assert _card(output).data.tags == [HALO_TAG]
 
 

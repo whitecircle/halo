@@ -209,24 +209,24 @@ resume demands of the topology, is the
 ## Hub model card
 
 A model directory Halo writes carries a `README.md` card tagged `halo` (`HALO_HUB_TAGS` in
-`src/checkpoint/model_card.py`), so an upload lists under that Hub tag. `tag_model_card` appends the
-tag to a card already present — TRL's, PEFT's, sentence-transformers', or the one an export copies
-from its source — and keeps its body, `library_name` and other tags. A fresh card holds the tag
-alone.
+`src/checkpoint/model_card.py`), so an upload lists under that Hub tag. `tag_model_card` changes only
+the `tags` entry of a card already present — TRL's, PEFT's, sentence-transformers', or one an export
+copies from its source — and writes a fresh card holding the tag alone. A card whose metadata is not
+a YAML mapping fails the write, naming the file to repair.
 
-- **Full-model writes** tag in `finalize_exported_config`: every parallel saver, the single-GPU / DDP
-  fallback, `save_full_checkpoint`, `merge_models`, `reattach_vision_tower`.
-- **Exports built from a source directory** tag in `copy_checkpoint_aux_files`, the only seam the
-  tools that carry `config.json` across as-is reach (`merge_ep_shards`, `quantize_to_lowp`,
-  `unfuse_moe_experts`, the GLM-5 and Mistral 4 fp8 → bf16 converters).
-- **The loaded policy** carries the tag on `model_tags` (`finalize_run_model`), which the card of
-  PEFT's own `save_pretrained` (the single-process / DDP adapter save) and `push_to_hub` read.
-- **Embedding runs** carry it on the SentenceTransformer's `model_card_data`
-  (`scripts/training/embedding.py`), the source of the card sentence-transformers writes.
+- **Full-model writes** tag in `finalize_exported_config`, which every parallel saver, the
+  single-GPU / DDP fallback and the export tools' `save_full_checkpoint` end with.
+- **Exports built from a source directory** tag in `copy_checkpoint_aux_files`, which also covers the
+  tools that carry `config.json` across as-is.
+- **PEFT's own `save_pretrained`** (the single-process / DDP adapter save) builds its card from the
+  base model's `model_tags`, which `finalize_run_model` stamps.
+- **Embedding runs** carry the tag on the SentenceTransformer's `model_card_data`, the source of the
+  card sentence-transformers writes.
 
-`reset_sinks`' single-file branch and an unmerged `convert_to_bf16 --peft` tag their own output.
-Adapter directories written by hand (FSDP2, CP and EP adapters) carry no card, and the
-`output_dir/README.md` TRL writes at each checkpoint lists TRL's tags only.
+A new writer ends in `finalize_exported_config` or `copy_checkpoint_aux_files`, or calls
+`tag_model_card` itself, as `reset_sinks` and an unmerged `convert_to_bf16 --peft` do. Adapter
+directories written by hand (FSDP2, CP and EP adapters) carry no card, and the `output_dir/README.md`
+TRL writes at each checkpoint lists TRL's tags only.
 
 ## Serving on vLLM / SGLang
 

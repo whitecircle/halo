@@ -23,6 +23,7 @@ from typing import Any
 
 import torch
 from huggingface_hub import split_torch_state_dict_into_shards
+from huggingface_hub.constants import REPOCARD_NAME
 from safetensors import safe_open
 from safetensors.torch import load_file as _safetensors_load_file
 from safetensors.torch import save_file as _safetensors_save_file
@@ -455,7 +456,17 @@ def copy_checkpoint_aux_files(
             shutil.copy2(src, os.path.join(output_dir, name))
             if verbose:
                 print(f"Copied: {name}")  # noqa: T201 - CLI-facing helper; the merge scripts report via print
-    tag_model_card(output_dir)
+    try:
+        tag_model_card(output_dir)
+    except ValueError as error:
+        # Name the source: repairing only the copy would not survive the re-run that recopies it.
+        source_card = os.path.join(input_dir, REPOCARD_NAME)
+        if not os.path.isfile(source_card):
+            raise
+        raise ValueError(
+            f"The model card {source_card}, copied into {output_dir}, has a metadata block that is not "
+            f"a YAML mapping ({error.__cause__ or error}). Repair or remove {source_card}, then re-run."
+        ) from error
 
 
 def read_checkpoint_index(checkpoint_dir: str, *, missing_ok: bool = False) -> dict:

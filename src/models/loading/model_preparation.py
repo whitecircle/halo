@@ -186,8 +186,8 @@ def finalize_run_model(
     ``sinks_pretrained=False`` (a from-scratch build) skips only the neutralized policy: there are
     no pretrained sinks to neutralize, and the live policies still apply.
 
-    The Halo Hub tags go on ``model_tags`` here, where PEFT's adapter card and ``push_to_hub`` read
-    them; the directory writers tag their own cards.
+    The Halo Hub tags go on ``model_tags`` for the card writers that read nothing else: PEFT's own
+    adapter ``save_pretrained`` and a user's ``model.push_to_hub()``. Directory writers tag their cards.
     """
     model.add_model_tags(list(HALO_HUB_TAGS))
     sanitize_generation_config(model)
