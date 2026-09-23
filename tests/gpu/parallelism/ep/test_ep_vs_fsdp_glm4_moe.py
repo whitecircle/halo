@@ -24,9 +24,10 @@ from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLite
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.ep_reference import compare_ep_grad
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
-from tests.common.utils import cos_sim, log
+from tests.common.utils import log
 
 SEED = 42
 BATCH, SEQ = 2, 64
@@ -139,12 +140,10 @@ def run(ctx):
             f"l{i}_shared_grad": (ep.shared_experts.gate_proj.weight.grad, refs["shared_gate"]),
         }
         for name, (got, want) in pairs.items():
-            ok = got is not None and got.shape == want.shape
-            cos = cos_sim(got, want, name) if ok else -1.0
-            ratio = (got.float().norm() / want.float().norm().clamp_min(1e-12)).item() if ok else -1.0
+            ratio, cos = compare_ep_grad(got, want, name)
             metrics[f"{name}_cos"] = cos
             metrics[f"{name}_norm_ratio"] = ratio
-            checks[f"{name}_matches"] = ok and cos > GRAD_COS_MIN and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
+            checks[f"{name}_matches"] = cos > GRAD_COS_MIN and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
             if not checks[f"{name}_matches"]:
                 log(
                     f"  GRAD MISMATCH {name}: cos={cos:.5f} norm_ratio={ratio:.4f} "

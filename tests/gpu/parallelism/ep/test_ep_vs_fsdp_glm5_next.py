@@ -27,9 +27,10 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from src.distributed.expert_parallel.layers.glm5_next import EPGlm5NextMoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.ep_reference import compare_ep_grad
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
-from tests.common.utils import cos_sim, log
+from tests.common.utils import log
 
 SEED = 42
 BATCH, SEQ = 2, 64
@@ -142,12 +143,10 @@ def run(ctx):
             f"l{i}_shared_grad": (ep.shared_experts.gate_proj.weight.grad, refs["shared_gate"]),
         }
         for name, (got, want) in pairs.items():
-            ok = got is not None and got.shape == want.shape
-            cos = cos_sim(got, want, name) if ok else -1.0
-            ratio = (got.float().norm() / want.float().norm().clamp_min(1e-12)).item() if ok else -1.0
+            ratio, cos = compare_ep_grad(got, want, name)
             metrics[f"{name}_cos"] = cos
             metrics[f"{name}_norm_ratio"] = ratio
-            checks[f"{name}_matches"] = ok and cos > GRAD_COS_MIN and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
+            checks[f"{name}_matches"] = cos > GRAD_COS_MIN and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
             if not checks[f"{name}_matches"]:
                 log(
                     f"  GRAD MISMATCH {name}: cos={cos:.5f} norm_ratio={ratio:.4f} "

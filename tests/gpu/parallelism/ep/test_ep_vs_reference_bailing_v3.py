@@ -37,6 +37,7 @@ from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from tests.common.ep_reference import compare_ep_grad
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_LING_3_TINY
 from tests.common.utils import cos_sim, log
@@ -140,11 +141,9 @@ def run(ctx):
         "gate_grad": (ep_layer.gate.weight.grad, ref_grads["gate"]),
     }
     for name, (got, want) in pairs.items():
-        # A missing or misshapen EP gradient (severed backward, layout drift) fails this pair by name.
-        ok = got is not None and got.shape == want.shape
-        cos = cos_sim(got, want, name) if ok else -1.0
+        _, cos = compare_ep_grad(got, want, name)
         metrics[f"{name}_cos"] = cos
-        checks[name] = ok and cos > GRAD_COS_TOL
+        checks[name] = cos > GRAD_COS_TOL
 
     checks["shared_expert_grad_live"] = (
         ep_layer.shared_experts.gate_proj.weight.grad is not None

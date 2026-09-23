@@ -29,6 +29,9 @@ from tests.common.utils import cleanup_memory, cos_sim
 # the dense model, which makes the two directly comparable.
 _ROUTER_SUFFIXES = ("router.weight", "gate.weight")
 
+# Norm ratio and cosine reported for an EP gradient with nothing to compare; no tolerance accepts it.
+MISSING_GRAD_SCORE = -1.0
+
 # The clock every fixed batch is rendered against. gpt-oss's harmony template stamps
 # ``strftime_now("%Y-%m-%d")`` into its system message, so an unpinned batch, and every loss threshold
 # measured against it, drifts with the calendar date. The value matters: it moves the rotated-expert
@@ -103,6 +106,17 @@ def compare_grad(got: torch.Tensor, reference: torch.Tensor, label: str) -> tupl
     got_norm = got.norm().item()
     ratio = got_norm / max(ref_norm, 1e-12)
     return ratio, cos_sim(got, reference, label)
+
+
+def compare_ep_grad(got: torch.Tensor | None, reference: torch.Tensor, label: str) -> tuple[float, float]:
+    """:func:`compare_grad` in fp32 for an EP-side gradient that may be missing or misshapen.
+
+    A severed backward leaves ``got`` None and layout drift changes its shape; either returns
+    ``MISSING_GRAD_SCORE`` for both scores, so the pair fails under its own name instead of raising.
+    """
+    if got is None or got.shape != reference.shape:
+        return MISSING_GRAD_SCORE, MISSING_GRAD_SCORE
+    return compare_grad(got.float(), reference.float(), label)
 
 
 def fixed_chat_batch(
