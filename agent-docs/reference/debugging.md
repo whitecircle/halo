@@ -158,7 +158,7 @@ Or wrap any region manually:
 ```python
 from src.diagnostics.profiling import cuda_memory_history
 
-with cuda_memory_history("/mnt/profiling/oom", ranks="all"):
+with cuda_memory_history(ranks="all"):  # → $HALO_DATA_ROOT/profiling/memory/snapshot-rankNN.pickle
     trainer.train()      # or the step that OOMs
 ```
 

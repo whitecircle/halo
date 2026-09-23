@@ -148,7 +148,7 @@ AWS account, no registry login).
 
 Each task's `setup:` block fails fast when `flash_attn` / `deep_ep` are not importable, so a from-source
 build on a bare node is not a fallback; the prebuilt image is required. The `hopper` image serves
-H100/H200 (Nebius and AWS p5/p5e) and `blackwell` the B200 single-node tasks. To run your own build
+the H100/H200 tasks (Nebius and AWS) and `blackwell` the B200 single-node tasks. To run your own build
 instead, push it to a registry the nodes can reach and point `image_id` there ([Docker](docker.md)).
 
 ```yaml
