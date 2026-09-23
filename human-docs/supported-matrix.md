@@ -9,7 +9,10 @@ truth; this is the summary, and it wins over any recipe that disagrees with it.
 | --- | --- |
 | Python | `>=3.12,<3.13`, installed with uv into the image |
 | PyTorch | 2.11.x, `cu130` wheel (CUDA 13.2 toolkit in the image) |
-| Transformers / TRL / Accelerate / PEFT | 5.16.x / 1.6.x / 1.11.x / 0.18.x |
+| Transformers | 5.16.x |
+| TRL | 1.6.x |
+| Accelerate | 1.11.x |
+| PEFT | 0.18.x |
 | vLLM | 0.26.0, separate container — rollouts for both online RL methods |
 | SGLang | 0.5.17, separate container — rollouts for async GRPO with environments |
 
