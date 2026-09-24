@@ -44,7 +44,7 @@ def load_frozen_auxiliary_model(
     device_map: dict | str | int | torch.device | None = None,
     download_tag: str | None = None,
 ) -> PreTrainedModel:
-    """Load an unparallelized frozen model that scores the policy: a preference reference or a distillation teacher.
+    """Load an unparallelized frozen model that scores the policy: a reference or a distillation teacher.
 
     Each logprob here is one half of the objective (a DPO logratio, a distillation target), so a
     mismatch against the policy biases the loss rather than raising. Hence:
@@ -115,6 +115,44 @@ def place_and_freeze(auxiliary: PreTrainedModel, policy: torch.nn.Module) -> tor
     return device
 
 
+def load_frozen_reference_model(
+    args,
+    model_config: ModelConfig,
+    training_config,
+    tokenizer,
+    model_name_or_path: str,
+    *,
+    is_vlm: bool,
+    reset_sinks: bool,
+    attn_default: str | None,
+) -> PreTrainedModel:
+    """Load the frozen reference a policy is scored against, from ``model_name_or_path``, as the policy loaded.
+
+    The policy's revision pin, remote-code flag, attention request and sinks policy, then the same
+    tokenizer-driven vocabulary and special-token ids. ``model_name_or_path`` is the weights the
+    reference anchors to: the base checkpoint for a preference reference, the policy's own weights
+    source for a KL reference that follows a resume.
+    """
+    model_ref = load_frozen_auxiliary_model(
+        model_name_or_path,
+        dtype=resolve_training_dtype(training_config),
+        # Unpinned, the reference loads hub main and shifts every logratio.
+        revision=getattr(model_config, "model_revision", None),
+        trust_remote_code=model_config.trust_remote_code,
+        # The policy's own request, resolved against the reference's config: a logratio is a
+        # difference of two logprobs, so a kernel differing between them biases the objective. The
+        # fallback must be the policy's too, or an unset config auto-detects against a pinned policy.
+        attn_implementation=model_config.attn_implementation or attn_default,
+        reset_sinks=reset_sinks,
+        is_vlm=is_vlm,
+        # When the reference loads before the policy's snapshot this is the repo's first hub contact,
+        # so every rank would otherwise fetch at once.
+        download_tag="reference_model",
+    )
+    setup_model_and_tokenizer(args, model_ref, tokenizer, embeddings_sharded=input_embeddings_tp_sharded)
+    return model_ref
+
+
 def load_reference_model_for_preference(
     args,
     model_config: ModelConfig,
@@ -156,21 +194,13 @@ def load_reference_model_for_preference(
             f"Set precompute_ref_log_probs: true (reference log-probs are computed from the "
             f"untrained policy before the first step), or use PEFT (--use_peft)."
         )
-    model_ref = load_frozen_auxiliary_model(
+    return load_frozen_reference_model(
+        args,
+        model_config,
+        training_config,
+        tokenizer,
         model_config.model_name_or_path,
-        dtype=resolve_training_dtype(training_config),
-        # Unpinned, the reference loads hub main and shifts every logratio.
-        revision=getattr(model_config, "model_revision", None),
-        trust_remote_code=model_config.trust_remote_code,
-        # The policy's own request, resolved against the reference's config: a logratio is a
-        # difference of two logprobs, so a kernel differing between them biases the objective. The
-        # fallback must be the policy's too, or an unset config auto-detects against a pinned policy.
-        attn_implementation=model_config.attn_implementation or attn_default,
-        reset_sinks=reset_sinks,
         is_vlm=is_vlm,
-        # When the reference loads before the policy's snapshot this is the repo's first hub contact,
-        # so every rank would otherwise fetch at once.
-        download_tag="reference_model",
+        reset_sinks=reset_sinks,
+        attn_default=attn_default,
     )
-    setup_model_and_tokenizer(args, model_ref, tokenizer, embeddings_sharded=input_embeddings_tp_sharded)
-    return model_ref
