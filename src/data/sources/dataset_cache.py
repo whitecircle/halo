@@ -151,8 +151,11 @@ def publish_cached_download(
         superseded = f"{cache_path}.tmp-{uuid.uuid4().hex}"
         try:
             os.rename(cache_path, superseded)
-        except OSError:  # nothing to replace
+        except FileNotFoundError:  # nothing to replace
             superseded = None
+        except OSError:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+            raise
         try:
             os.rename(tmp_path, cache_path)
         except OSError:  # another writer (possibly another node) published first; keep theirs
