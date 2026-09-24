@@ -168,7 +168,9 @@ def _kill_launch(proc: subprocess.Popen, launch_id: str) -> list[int]:
 
 
 def _socket_safe_tmpdir(tmp_path: Path) -> Path:
-    """``tmp_path``, or a short unique sibling when it leaves no room for an AF_UNIX socket.
+    """``tmp_path``, or a short unique sibling when it leaves no room for an AF_UNIX socket; a usage
+    error when even the sibling leaves none (``datasets`` would otherwise fail every map with a bare
+    ``EOFError``).
 
     Keeps the scratch dir on whatever volume pytest's basetemp lives on (never the small root FS),
     and stays per-run isolated either way.
@@ -176,7 +178,15 @@ def _socket_safe_tmpdir(tmp_path: Path) -> Path:
     if len(str(tmp_path)) + _SOCKET_SUFFIX_BUDGET <= _AF_UNIX_MAX:
         return tmp_path
     # Sibling of the nodeid-named dir: still inside basetemp, so the retention policy reclaims it.
-    return Path(tempfile.mkdtemp(prefix="h", dir=tmp_path.parent))
+    short = Path(tempfile.mkdtemp(prefix="h", dir=tmp_path.parent))
+    if len(str(short)) + _SOCKET_SUFFIX_BUDGET > _AF_UNIX_MAX:
+        short.rmdir()
+        raise pytest.UsageError(
+            f"pytest's basetemp is too deep for the AF_UNIX sockets the GPU tests bind: {short} leaves "
+            f"{_AF_UNIX_MAX - len(str(short))} of the {_SOCKET_SUFFIX_BUDGET} bytes they need. Point TMPDIR "
+            f"(or --basetemp) at a shorter path (agent-docs/reference/troubleshooting.md, AF_UNIX path too long)."
+        )
+    return short
 
 
 class GPUCase:
