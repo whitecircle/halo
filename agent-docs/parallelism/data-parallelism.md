@@ -97,9 +97,13 @@ SHARD_GRAD_OP, FSDP2 reshards each module after its backward and re-all-gathers 
 microstep's forward: one full param re-gather per grad-accum microstep for weights that did not
 change in between.
 
-Over NVLink that traffic is negligible. With the trainer's NCCL on TCP sockets (the no-fabric compose
-recipe, `NCCL_NET=Socket`) it measures ~15 s per re-gather at gpt-oss-20b scale, ~6 minutes of every
-optimizer step at `gradient_accumulation_steps: 24`.
+Over NVLink the re-gathers still cost 4–10% of the step: on 8× B300, dense Qwen3-8B SFT runs +3.7%
+(packed `sft.py`, batch 2, `gradient_accumulation_steps: 8`) to +9.7% (4k tokens, batch 1, GA 8) faster
+with `false`, and gpt-oss-20b EP8 +3.6%. Under the default ZeRO-2 wrap (`reshard_after_forward=False`)
+the parameters are already unsharded through each forward and backward, so peak memory is unchanged.
+With the trainer's NCCL on TCP sockets (the no-fabric compose recipe, `NCCL_NET=Socket`) it measures
+~15 s per re-gather at gpt-oss-20b scale, ~6 minutes of every optimizer step at
+`gradient_accumulation_steps: 24`.
 
 The window's **last** backward still reshards: the trainer arms the flag per microstep from
 `accelerator.sync_gradients` in `src/trainers/mixins/base.py`. That leaves one re-gather per
