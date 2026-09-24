@@ -25,14 +25,10 @@ from src.distributed.nccl.clients.base import (
     starts_new_chunk,
     validate_syncable_param,
 )
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import broadcast_from_rank0, is_global_main_process
 
 logger = logging.getLogger(__name__)
-
-# First trainer-side NCCL group port; server N without an explicit ``group_port`` takes this + N.
-DEFAULT_WEIGHT_SYNC_GROUP_PORT = 51216
 
 
 def _fetch_served_max_model_len(client_cls: type[BaseWeightSyncClient], url: str) -> int | None:
@@ -198,9 +194,10 @@ class InferenceClientManager:
     def __init__(
         self,
         server_configs: list[dict[str, Any]],
-        connection_timeout: float = 120.0,
-        client_cls: type[BaseWeightSyncClient] = VLLMClient,
-        base_group_port: int = DEFAULT_WEIGHT_SYNC_GROUP_PORT,
+        *,
+        connection_timeout: float,
+        client_cls: type[BaseWeightSyncClient],
+        base_group_port: int,
     ):
         """``server_configs`` is a list of ``{"url", "group_port", "group_host"}`` dicts, one client
         per server (only ``url`` is required).
@@ -218,8 +215,10 @@ class InferenceClientManager:
         self._clients = []
         self._initialized = False
         self._device = None
-        # The served model's module names, applied to every client built (rebuilt ones included).
-        self._co_load_module_names: tuple[str, ...] = ()
+        # The pushed model's module names, applied to every client built (rebuilt ones included).
+        # None until a push scopes them, so a client built before then keeps the engine's full groups
+        # and refuses an incomplete one rather than sending its halves apart.
+        self._co_load_module_names: tuple[str, ...] | None = None
         # Bytes buffered since the last chunk went out. The manager makes the chunk decision because
         # only it can tell when every server is done with the shared snapshots.
         self._buffered_bytes = 0
@@ -242,19 +241,17 @@ class InferenceClientManager:
             f"InferenceClientManager created for {len(server_configs)} servers: {[c['url'] for c in server_configs]}"
         )
 
-    @property
-    def clients(self) -> list[BaseWeightSyncClient]:
-        """The per-server clients, in ``server_configs`` order (read-only view for request fan-out)."""
-        return list(self._clients)
-
     def _group_port(self, index: int) -> int:
         """The trainer-side NCCL group port for one server: its configured value, else the base + index."""
         return self.server_configs[index].get("group_port", self.base_group_port + index)
 
     def init_communicators(self, device: torch.device | str | int):
         """Create a separate NCCL process group per server (sequentially — groups can't init
-        concurrently). ``device`` is the trainer's GPU and must differ from every server's GPU
-        (raises RuntimeError otherwise, cleaning up already-initialized clients)."""
+        concurrently). ``device`` is the trainer's GPU, which must differ from every server's.
+
+        A server that fails to connect raises with its own error, after the clients already
+        connected are closed.
+        """
         if self._initialized:
             logger.warning("InferenceClientManager already initialized, skipping")
             return
@@ -273,26 +270,25 @@ class InferenceClientManager:
                 f"{i + 1}/{len(self.server_configs)}: {url} (port {port})"
             )
 
-            client = self._client_factory(
-                base_url=url,
-                group_port=port,
-                connection_timeout=self.connection_timeout,
-                group_host=group_host,
-            )
-
             try:
+                client = self._client_factory(
+                    base_url=url,
+                    group_port=port,
+                    connection_timeout=self.connection_timeout,
+                    group_host=group_host,
+                )
                 client.init_communicator(device=device)
-                client.scope_co_load_groups(self._co_load_module_names)
-                self._clients.append(client)
-                logger.info(f"  Connected to {url}")
             except Exception as e:
                 # Else the already-initialized clients hold their TCPStore listeners until atexit.
                 self.close_communicators()
                 raise RuntimeError(
-                    f"Failed to initialize client for {url}: {e}\n"
-                    f"Ensure the {self._client_factory.BACKEND_NAME} server is on a different GPU "
-                    f"than the trainer (device={device})"
+                    f"{self._client_factory.BACKEND_NAME} weight-sync client {i + 1}/{len(self.server_configs)} "
+                    f"for {url} (group_port {port}) failed to initialize: {type(e).__name__}: {e}"
                 ) from e
+            if self._co_load_module_names is not None:
+                client.scope_co_load_groups(self._co_load_module_names)
+            self._clients.append(client)
+            logger.info(f"  Connected to {url}")
 
         self._device = device  # reconnect_client re-forms NCCL groups on the same trainer device
         self._initialized = True
@@ -305,6 +301,8 @@ class InferenceClientManager:
         if not self._initialized:
             raise RuntimeError("InferenceClientManager not initialized. Call init_communicators() first.")
 
+        # Scoped to the model this push sends, as the streamed path is in ``sync_weights_to_client``.
+        self.scope_co_load_groups(name for name, _ in model.named_modules())
         for i, client in enumerate(self._clients):
             url = self.server_configs[i]["url"]
             logger.debug(f"Rolling sync: updating server {i + 1}/{len(self._clients)} ({url})")
@@ -484,7 +482,8 @@ class InferenceClientManager:
             group_host=config.get("group_host"),
         )
         client.init_communicator(device=self._device)
-        client.scope_co_load_groups(self._co_load_module_names)
+        if self._co_load_module_names is not None:
+            client.scope_co_load_groups(self._co_load_module_names)
         for name, snapshot in buffered:
             client.buffer_param(name, snapshot)
         self._clients[index] = client
