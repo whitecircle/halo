@@ -285,7 +285,7 @@ Every other field below keeps its name, except `world_size` / `gpus_per_node` (a
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `world_size` / `gpus_per_node` | `int` | `0` | `0` = auto-detect from the launcher environment. |
-| `ep_size` | `int` | `1` | Expert-parallel **dispatch** size: the ranks one DeepEP all-to-all spans, each holding `num_experts / ep_size` experts. >1 enables EP for MoE. The full EP process group is `ep_group_size = ep_size × expert_tp_size`. |
+| `ep_size` | `int` | `1` | Expert-parallel **dispatch** size: the ranks one DeepEP all-to-all spans, each holding `num_experts / ep_size` experts. >1 enables EP for MoE. With `expert_tp_size` it forms the [`ep_group_size`](glossary.md#parallelism) group. |
 | `cp_size` | `int` | `1` | Context parallel group size. >1 enables sequence splitting. |
 | `tp_size` | `int` | `1` | Tensor parallel size. >1 shards model weights. |
 | `expert_tp_size` | `int` | `1` | Expert Tensor Parallel size. Shards expert FFN weights within EP groups (MoE-only, experimental). |
