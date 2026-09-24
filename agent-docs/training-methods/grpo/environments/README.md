@@ -52,7 +52,7 @@ environment_kwargs:
 
 The factory forwards the merged dict whole, so any constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds — a typo, or an option of another `environment_type` — raises `TypeError` at construction. Two keys the factories consume themselves: the ReAct presets drop `system_prompt`, and `mcp` reads `mcp_server`. `rewards` reaches the constructor as `reward_terms`.
 
-The episode reward is the environment's grade priced by the `rewards:` terms, plus the environment's own shaping ([Reward Terms](../rewards.md#environment-arm)).
+How the episode reward is composed: [Reward Terms](../rewards.md#environment-arm).
 
 Knobs every environment accepts (the first two are top-level fields):
 

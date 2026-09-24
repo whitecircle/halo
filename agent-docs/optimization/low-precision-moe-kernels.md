@@ -115,7 +115,7 @@ That bit-identity holds for any block whose amax is within `2^-16` of the tensor
 
 `lowp_precision` exposes three formats: **`fp8`** = mxfp8; **`fp4`** = nvfp4 (the accurate fp4; validate an nvfp4 deployment); **`mxfp4`** = OCP fp4, whose power-of-two scale lets its cached weight quant compile bit-identically (~6× cheaper than nvfp4's eager weight quant, helps at low gradient-accumulation). All three converge; pick by deployment target.
 
-In the cache-hit steady state both fp4 formats are bounded by the eager activation quant, so their per-microbatch cost is similar; fp8 is cheaper because its activation quant is lighter. DeepGEMM's native recipes (UE8M0 1×128) are coarser still; use the simulated path when you need exact mx/nv numerics.
+In the cache-hit steady state both fp4 formats are bounded by the eager activation quant, so their per-microbatch cost is similar; fp8 is cheaper because its activation quant is lighter. DeepGEMM's native recipes (UE8M0 scales over 1×128 activation groups, and 128×128 blocks for the fp8 weight) are coarser still; use the simulated path when you need exact mx/nv numerics.
 
 The literature agrees: published fp8 wins on fine-grained MoE are single-digit-% e2e at these widths (N ≤ 4096), the larger ones landing at N ≥ 8192 or folding in precision-orthogonal communication speedups, and NVFP4 pretraining reports no e2e speedup plus a late-training quality gap needing a bf16 tail.
 
