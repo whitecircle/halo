@@ -32,20 +32,6 @@ MISTRAL3_119B_MOE = "mistralai/Mistral-Small-4-119B-2603"
 COMMAND_A_PLUS = "CohereLabs/command-a-plus-05-2026-bf16"
 ZAYA_8B = "Zyphra/ZAYA1-8B"
 
-# Checkpoints the CPU tests read only a tokenizer, processor or chat template from
-
-GPT_OSS_20B_OPENAI = "openai/gpt-oss-20b"
-GEMMA4_31B_QAT = "google/gemma-4-31B-it-qat-w4a16-ct"
-GEMMA3_4B_IT = "google/gemma-3-4b-it"  # gated: anonymous downloads are refused
-QWEN2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
-QWEN3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
-
-# Snapshots a test pins because hub main can drift a chat template out from under it.
-PINNED_REVISIONS = {
-    QWEN2_5_VL_3B: "66285546d2b821cf421d4f5eb2576359d3770cd3",
-    QWEN3_VL_2B: "89644892e4d85e24eaac8bacfd4f463576704203",
-}
-
 # Vocab-patched local checkpoints (scripts/before_training/patch_vocab.py output). The hub copies
 # carry a vocab the toolkit's tokenizer alignment rejects, so these tests need the patched dir.
 
@@ -503,6 +489,20 @@ TINY_STEP3P7_VISION_CONFIG = {
 
 QWEN3_5_VLM_4B = "Qwen/Qwen3.5-4B"  # Natively multimodal (Image-Text-to-Text)
 PARAPHRASE_MINILM = "sentence-transformers/paraphrase-MiniLM-L3-v2"
+
+# Checkpoints the CPU tests read only a tokenizer, processor or chat template from
+
+GPT_OSS_20B_OPENAI = "openai/gpt-oss-20b"
+GEMMA4_31B_QAT = "google/gemma-4-31B-it-qat-w4a16-ct"
+GEMMA3_4B_IT = "google/gemma-3-4b-it"  # gated: anonymous downloads are refused
+QWEN2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
+QWEN3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
+
+# Snapshots a test pins because hub main can drift a chat template out from under it.
+PINNED_REVISIONS = {
+    QWEN2_5_VL_3B: "66285546d2b821cf421d4f5eb2576359d3770cd3",
+    QWEN3_VL_2B: "89644892e4d85e24eaac8bacfd4f463576704203",
+}
 
 # Profiling Benchmark Configs
 
