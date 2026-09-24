@@ -36,7 +36,7 @@ rollout_thinking_budget_scope: episode
 |---|---|---|
 | `language` | `python` | `python`, `cpp`, `c`, or a list the model picks from |
 | `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed equality reading `\r\n` and `\r` as `\n` on both sides, `tokens` whitespace-token equality |
-| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict class alone; `full` adds its expected and produced output, exit code, output size and stderr |
+| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict class alone (the compiler's first error too, on `bubblewrap`); `full` adds its expected and produced output, exit code, output size and stderr |
 | `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor. It and `max_time_limit` must be finite and > 0 |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit; a non-finite or non-positive value raises at construction |
@@ -102,12 +102,14 @@ the offline re-grader, so a checkpoint scores identically online and offline. Th
 non-passing tests only, one entry per distinct verdict with the tests that failed the same way folded
 into it, capped at five. One sandbox session serves the whole grade, so a compiled submission builds
 once, reset after every test. A compile failure is graded once against the whole pool and shows the
-compiler's first error under `full`. Under `outcome` it shows it only on `local` / `bubblewrap`, whose
-build runs once before any test and without stdin, so it quotes only the submission; a `remote`
-build shares each test's request with its stdin, so there it shows the class alone.
+compiler's first error under `full`. Under `outcome` it shows it only on `bubblewrap`, whose build
+runs once before any test, on an empty stdin, and whose program can force no rebuild. On `local` and
+`remote` it shows the class alone: a `local` program can write a test's input to a host file and
+remove its working directory, forcing a rebuild that includes the file, and a `remote` build shares
+each test's request with its stdin.
 
 - **Comparison.** `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within a 1e-6 relative tolerance, gated on a float-looking *expected* token, so integer answers stay exact.
-- **Verdict detail.** `outcome` shows each failed test's verdict class (`FAIL`, `RUNTIME ERROR`, `TIME LIMIT EXCEEDED`, `OUTPUT LIMIT EXCEEDED`, `COMPILATION ERROR`, and `ERROR` for a test lost to infra, whose text goes to the log) and nothing beyond it: stderr, an exit code and an output size can each carry the hidden input the program read. Which tests fail, and with which class, still reaches the policy; `stop_on_first_failure` narrows that to the first failing test, the Codeforces contract. `full` adds them (stderr as its tail, where a traceback names the exception), an infra error's text and a wrong answer's expected and produced output; a second submission then turns the judge into a free test oracle, and probing out-earns scratchpad testing within a group. Scratchpad runs on the model's own inputs show their output in both modes.
+- **Verdict detail.** `outcome` shows each failed test's verdict class (`FAIL`, `RUNTIME ERROR`, `TIME LIMIT EXCEEDED`, `OUTPUT LIMIT EXCEEDED`, `COMPILATION ERROR`, and `ERROR` for a test lost to infra, whose text goes to the log) and, save the compiler's first error on `bubblewrap`, nothing beyond it: stderr, an exit code and an output size can each carry the hidden input the program read. Which tests fail, and with which class, still reaches the policy; `stop_on_first_failure` narrows that to the first failing test, the Codeforces contract. `full` adds them (stderr as its tail, where a traceback names the exception), an infra error's text and a wrong answer's expected and produced output; a second submission then turns the judge into a free test oracle, and probing out-earns scratchpad testing within a group. Scratchpad runs on the model's own inputs show their output in both modes.
 - **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language.
 - **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests and keeps the full pool as denominator — an ungraded test counts as failed, so size it for an honest solution (the recipes: 150 s). `episode/tests_graded_frac` shows a partial grade.
 - **Special judges.** A per-problem `checker` (Python) in the payload overrides comparison: `python checker.py input.txt correct_output.txt solution_output.txt`, accepted only when it exits cleanly and its last stdout token is `1`. It runs at the 15 s infra default, never the solution's limit.
@@ -232,8 +234,8 @@ must exceed. Every episode sends its level's thinking budget, so the vLLM server
 without one vLLM rejects the request. A non-thinking model served with a think-tag parser gets its
 whole answer back as reasoning (no end marker reads as all reasoning), so evaluate one with
 `--env_kwargs '{"reasoning_effort": null}'`: no level, no budget, no parser needed. The eval knows
-the server is SGLang only from a `--training_config` naming `rollout_backend: sglang`; the toolkit
-(`engine_wire.generation_control_fields`) then warns and drops the budget.
+the server is SGLang only from a `--training_config` naming `rollout_backend: sglang`, which drops
+the budget as [training does](../async-grpo/rollouts.md#reasoning-budget).
 
 `--eval_protocol` picks the [evaluation protocol](#evaluation-protocols), else the training
 config's, else `harness`; the report title and the trajectory meta name it. A training config

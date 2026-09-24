@@ -208,8 +208,8 @@ tools with the default backend and refuses the key; `mock` needs `HALO_ALLOW_MOC
 also takes the `BaseEnvironment` knobs (`src/environments/base.py`): `reasoning_effort` /
 `reasoning_effort_profiles`, `carry_reasoning` (refused under `rollout_backend: sglang`),
 `requires_answer`, `max_observation_chars`, `max_length_cutoff_recoveries` and the
-`tool_success_reward` / `tool_error_penalty` / `tool_reward_cap` turn shaping. The full list is the
-EnvironmentConfig section of `agent-docs/reference/configuration-reference.md`. Custom env: pass `environment_cls`
+`tool_success_reward` / `tool_error_penalty` / `tool_reward_cap` turn shaping. The common keys are listed
+under EnvironmentConfig in `agent-docs/reference/configuration-reference.md`; each environment's page lists its own. Custom env: pass `environment_cls`
 (a `src.environments.base.BaseEnvironment` subclass) + `environment_kwargs`
 instead of `environment_config`.
 

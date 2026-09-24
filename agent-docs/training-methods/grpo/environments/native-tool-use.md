@@ -35,7 +35,7 @@ The knobs every environment shares — turn cap, per-call tool pay, observation 
 - `web_search` — `query` and optional `max_results` (default 5).
 - `read_file`, `write_file`, `list_files` — a simulated per-episode file store, for tests and closed-world demos.
 
-Registries are built by the factories in `src/environments/tools/factories.py` and composed with `NativeToolRegistry.combine(a, b)`. The `create_native_*` set is stateless; `create_session_*` binds the episode's persistent [sandbox session](sandbox.md) so files survive across turns. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports, in a subprocess ([confined on `bubblewrap` / `remote`, rlimits only on `local`](sandbox.md#choosing-a-backend)), or `allow_imports=True` to lift the ban inside the in-process REPL — safe only when the whole process is already isolated.
+Registries are built by the factories in `src/environments/tools/factories.py` and composed with `NativeToolRegistry.combine(a, b)`. The `create_native_*` set is stateless; `create_session_*` binds the episode's persistent [sandbox session](sandbox.md) so files survive across turns. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports, in a subprocess ([confined on `remote` and on `bubblewrap` without `allow_network`, rlimits only on `local`](sandbox.md#choosing-a-backend)), or `allow_imports=True` to lift the ban inside the in-process REPL — safe only when the whole process is already isolated.
 
 ## Reward
 
