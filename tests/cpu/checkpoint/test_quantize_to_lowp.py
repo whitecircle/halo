@@ -446,6 +446,22 @@ def test_verify_refuses_a_non_finite_weight(fmt, poison):
             quantize_checkpoint(src, out, fmt, verify=True)
 
 
+def test_verify_fails_past_the_format_tolerance(monkeypatch, tmp_path):
+    """A relerr past the format's own block-scaled error is structural (usually the contraction axis):
+    ``--verify`` must fail the run, not log a WARN at INFO under a success exit."""
+    monkeypatch.setattr(_quantize_to_lowp, "_VERIFY_RELERR_TOL", {"mxfp8": 0.0})
+    src = tmp_path / "src"
+    src.mkdir()
+    weight = torch.randn(64, 128, dtype=torch.bfloat16) * 0.02
+    save_file({"model.layers.0.mlp.down_proj.weight": weight}, os.path.join(src, "model.safetensors"))
+    (src / "config.json").write_text('{"model_type": "qwen3"}')
+
+    with pytest.raises(ValueError, match="down_proj.weight.*past the mxfp8 tolerance"):
+        quantize_checkpoint(str(src), str(tmp_path / "out"), "mxfp8", verify=True)
+    written = {path.name for path in (tmp_path / "out").iterdir()}
+    assert not written & {"config.json", "quantization_config.json"}, f"a refused export must not load: {written}"
+
+
 def _plant_previous_run(out_dir: str, *, single: bool, index_shards: tuple[str, ...] = ()) -> None:
     """Leave a previous quantization run's weight files in the output directory."""
     os.makedirs(out_dir, exist_ok=True)
