@@ -7,7 +7,7 @@ Halo's CI is GitHub Actions (`.github/workflows/`), split into tiers by where th
 | Hosted | GitHub `ubuntu-latest` | `.github/workflows/lint.yml`, `.github/workflows/docs.yml`, `.github/workflows/cpu-tests-hosted.yml` | every PR + push `main` (CPU tests: non-draft PRs) | active |
 | Self-hosted | GPU box `[self-hosted, halo]` | `.github/workflows/cpu-tests.yml`, `.github/workflows/gpu-tests.yml` | `workflow_dispatch` | dispatch-only |
 
-The lint and docs jobs need no image. The CPU tests import torch, so both CPU workflows run them inside the image: the hosted one pulls the published image, the self-hosted one uses the image built on the box. GPU tests need Blackwell (SM100) or Hopper (SM90) for FA3/FA4 + DeepEP, which no hosted runner provides. CodeQL (the default code-scanning setup) and the GitGuardian app also check every PR; neither lives in `.github/workflows/`.
+The lint and docs jobs need no image. The CPU tests import torch, so both CPU workflows run them inside the image: the hosted one pulls the published image, the self-hosted one uses the image built on the box. GPU tests need Blackwell (SM100) or Hopper (SM90) for FA3/FA4 + DeepEP, which no hosted runner provides. CodeQL (the default code-scanning setup) checks every PR to `main`, and the GitGuardian and CodeRabbit apps report on every PR; none of them lives in `.github/workflows/`.
 
 ## Hosted tier
 
@@ -48,7 +48,7 @@ Limits:
 
 ## Self-hosted tier
 
-`.github/workflows/cpu-tests.yml` asserts the image is present, then runs `make test-cpu` — the image without `--gpus`, so it does not contend with GPU jobs sharing the runner — in one pytest process (about 1.5 hours) under a 120-minute cap, and uploads its JUnit XML. It tests the image built on the box, so it covers a dependency change the hosted tier cannot.
+`.github/workflows/cpu-tests.yml` asserts the image is present, then runs `make test-cpu` — the image without `--gpus`, so it does not contend with GPU jobs sharing the runner — in one pytest process (about 1.5 hours) under a 120-minute cap, and uploads its JUnit XML.
 
 `.github/workflows/gpu-tests.yml` asserts the image is present (`halo:blackwell` by default, never rebuilt by CI), then runs `make test-gpu-core ENV_FILE= AWS_DIR=` — creds-free, `-m "gpu and core"` — and uploads the JUnit XML as an artifact. Once its `pull_request` trigger is enabled a PR run requires **both** a non-draft PR and the `run-ci-gpu` label. It deliberately has no `push` trigger: that would fire the tier on every merge with no label gate; post-merge runs go through `workflow_dispatch`.
 
@@ -86,7 +86,7 @@ The self-hosted runner executes contributor code on your hardware, beside traini
 
     `HALO_SCRATCH` is the one home for that volume: the bind mount and the in-container `HF_HOME` / `HF_DATASETS_CACHE` / `TMPDIR` / `HALO_DATA_ROOT` all derive from it, so pointing the tier at another disk is one override. Narrowing `MNT_MOUNT` alone is not, since those env vars still resolve under `HALO_SCRATCH`. Inject `HF_TOKEN` from a repo secret only when a gated model is needed.
 
-- **The CPU tier mounts the host's HF cache.** `DOCKER_RUN_CPU` bind-mounts `HF_CACHE` (default `$(HALO_SCRATCH)/hf`) read-write and points `HF_HOME` at it, so PR code can write into the cache every later job reads. CPU tests that call `from_pretrained` directly hard-fail when the cache is missing and the Hub is unreachable — a state a self-hosted runner can be in.
+- **The self-hosted CPU tier mounts the host's HF cache.** `DOCKER_RUN_CPU` bind-mounts `HF_CACHE` (default `$(HALO_SCRATCH)/hf`) read-write and points `HF_HOME` at it, so PR code can write into the cache every later job reads. CPU tests that call `from_pretrained` directly hard-fail when the cache is missing and the Hub is unreachable — a state a self-hosted runner can be in.
 
     Tests going through `tests/common/tokenizers.py` skip instead. `HF_CACHE=` runs cache-less: those tests skip, and the guards that refuse an all-skipped file fail.
 

@@ -183,8 +183,9 @@ manifest.
   tests/gpu/test_launcher_contract.py`). Name the entrypoints: pointed at `tests/gpu/` instead, pytest
   collects the manifest scripts as modules and executes their top-level torchrun code.
 
-    The launcher allocates a free `--master_port` per node and points `TMPDIR` at a per-run dir under
-    pytest's basetemp; never hardcode either. A script run standalone under
+    The launcher allocates a free `--master_port` per node from `tests/common/ports.py` — a pool from
+    20000 up to the kernel's ephemeral range, one slice per pytest-xdist worker — and points `TMPDIR`
+    at a per-run dir under pytest's basetemp; never hardcode either. A script run standalone under
     `torchrun --nproc_per_node=N <script>` lets torchrun pick the port.
 
 - **Scratch goes through the launcher's `TMPDIR`.** `setup_cache_dirs` for per-rank output/cache
@@ -364,8 +365,9 @@ first-class content — report it with the reason.
    7 days later.
 2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged;
    signed commits (SSH or GPG) are required only on branches of this repository, not in a fork.
-3. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` once, then `make test-cpu`
-   (plus `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs `ruff`,
+3. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
+   `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (plus
+   `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs `ruff`,
    `actionlint`, the docs checks and the CPU tier ([what it does not cover](../infrastructure/ci.md#cpu-tests));
    the GPU tiers run locally, so report their result in the PR.
 4. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
