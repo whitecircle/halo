@@ -12,15 +12,62 @@ Tests cover:
 """
 
 import asyncio
+import dataclasses
 import logging
 import sys
+import time
 
 import pytest
 
-from src.environments.base import Trajectory
-from src.environments.envs.protocols.react import ReActEnvironment
+from src.configs.environment_config import EnvironmentConfig
+from src.environments.base import (
+    EPISODE_INVALID_KEY,
+    OBJECTIVE_REWARD_KEY,
+    REWARD_COMPONENTS_KEY,
+    AsyncBaseEnvironment,
+    BaseEnvironment,
+    EpisodeGrade,
+    Message,
+    Trajectory,
+)
+from src.environments.envs.protocols.mcp import (
+    MCP_SERVERS,
+    NativeMCPClientEnvironment,
+    create_native_mcp_environment,
+    get_mcp_server_config,
+)
+from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from src.environments.envs.protocols.react import (
+    ReActEnvironment,
+    create_react_math_environment,
+    create_react_search_environment,
+    parse_react_output,
+)
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.envs.tasks.coding.grading import run_solution_against_tests
+from src.environments.envs.tasks.coding.swe import SweEnvironment
+from src.environments.envs.tasks.qa import ExamQAEnvironment, create_qa_search_environment, multiple_choice_match
+from src.environments.ray_actors import RolloutConfig, RolloutManager
+from src.environments.registry import (
+    create_environment,
+    get_registered_environments,
+    register_environment,
+    resolve_environment,
+)
+from src.environments.sandbox.base import SandboxResult
+from src.environments.tools import web_search as ws
 from src.environments.tools.definitions import NativeTool, NativeToolCall, NativeToolRegistry, ToolParameter
+from src.environments.tools.factories import (
+    create_all_native_tools,
+    create_native_code_tools,
+    create_native_file_tools,
+    create_native_math_tools,
+    create_native_python_tools,
+    create_native_search_tools,
+)
+from src.environments.tools.web_search import _format_results, async_web_search, web_search, web_search_raw
+from src.rewards.matching import exact_match, normalize_text, numeric_match, validate_answer
+from src.rewards.spec import EnvironmentTerm
 
 
 @pytest.fixture
@@ -36,7 +83,6 @@ def allow_mock_search(monkeypatch):
 
 def test_message_creation():
     """Test Message creation and conversion."""
-    from src.environments.base import Message
 
     msg = Message(role="user", content="Hello")
     assert msg.role == "user"
@@ -67,7 +113,6 @@ def test_message_creation():
 
 def test_trajectory():
     """Test Trajectory class."""
-    from src.environments.base import Message, Trajectory
 
     traj = Trajectory()
 
@@ -99,8 +144,6 @@ class SimpleTestEnvironment:
     """Simple test environment implementation."""
 
     def __init__(self, max_turns: int = 5):
-        from src.environments.base import BaseEnvironment, EpisodeGrade, Message, Trajectory
-
         class TestEnv(BaseEnvironment):
             def _reset_single(self, prompt, context=None):
                 traj = Trajectory()
@@ -148,7 +191,6 @@ def test_base_environment_reset():
 
 def test_base_environment_step():
     """Test BaseEnvironment step."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
 
     test_env = SimpleTestEnvironment()
     env = test_env.get_env()
@@ -176,7 +218,6 @@ def test_base_environment_step():
 
 def test_base_environment_max_turns():
     """Test max turns truncation."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
 
     test_env = SimpleTestEnvironment(max_turns=2)
     env = test_env.get_env()
@@ -212,7 +253,6 @@ def test_environment_cleanup():
 
 def test_native_tool():
     """Test NativeTool class."""
-    from src.environments.tools.definitions import NativeTool, ToolParameter
 
     tool = NativeTool(
         name="add",
@@ -236,7 +276,6 @@ def test_native_tool():
 
 def test_native_tool_registry():
     """Test NativeToolRegistry class."""
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry
 
     registry = NativeToolRegistry()
 
@@ -266,7 +305,6 @@ def test_native_tool_registry():
 
 def test_create_native_math_tools():
     """Test math tools factory."""
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
 
@@ -286,7 +324,6 @@ def test_create_native_math_tools():
 
 def test_create_native_python_tools():
     """Test Python REPL tool."""
-    from src.environments.tools.factories import create_native_python_tools
 
     registry = create_native_python_tools()
     python_tool = registry.get("python")
@@ -300,7 +337,6 @@ def test_create_native_python_tools():
 
 def test_create_native_search_tools(allow_mock_search):
     """Test search tools factory."""
-    from src.environments.tools.factories import create_native_search_tools
 
     registry = create_native_search_tools(backend="mock")
 
@@ -314,7 +350,6 @@ def test_create_native_search_tools(allow_mock_search):
 
 def test_create_native_file_tools():
     """Test file system tools factory."""
-    from src.environments.tools.factories import create_native_file_tools
 
     registry = create_native_file_tools()
 
@@ -338,7 +373,6 @@ def test_create_native_file_tools():
 
 def test_create_native_code_tools_named_repl():
     """Test the generic code-tool factory with a custom tool name (what a 'coding' preset covers)."""
-    from src.environments.tools.factories import create_native_code_tools
 
     registry = create_native_code_tools(language="python", tool_name="python_repl")
 
@@ -361,7 +395,6 @@ def test_create_native_code_tools_named_repl():
 
 def test_create_all_native_tools():
     """Test all native tools factory (math + python + search + file)."""
-    from src.environments.tools.factories import create_all_native_tools
 
     registry = create_all_native_tools()
 
@@ -377,8 +410,6 @@ def test_create_all_native_tools():
 
 def test_native_tool_use_environment():
     """Test NativeToolUseEnvironment."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
@@ -399,7 +430,6 @@ def test_native_tool_use_environment():
 
 def test_parse_react_output_thought_action():
     """Test parsing ReAct output with thought and action."""
-    from src.environments.envs.protocols.react import parse_react_output
 
     text = """Thought: I need to calculate 2 + 2
 Action: calculate(expression="2 + 2")"""
@@ -414,7 +444,6 @@ Action: calculate(expression="2 + 2")"""
 
 def test_parse_react_output_final_answer():
     """Test parsing ReAct output with final answer."""
-    from src.environments.envs.protocols.react import parse_react_output
 
     text = """Thought: I have the answer now
 Final Answer: 42"""
@@ -428,7 +457,6 @@ Final Answer: 42"""
 
 def test_parse_react_output_json_action():
     """Test parsing JSON format action."""
-    from src.environments.envs.protocols.react import parse_react_output
 
     text = """Thought: Let me search
 Action: {"name": "web_search", "arguments": {"query": "python tutorials"}}"""
@@ -448,7 +476,6 @@ def test_parse_react_output_malformed_json_degrades_instead_of_raising():
     unknown-tool call), which the protocol answers with a retry hint. The types matter too: a non-str
     name is unhashable in the registry lookup, and non-dict arguments break the ``**`` splat.
     """
-    from src.environments.envs.protocols.react import parse_react_output
 
     malformed = [
         '{"function": "calculate"}',  # `function` a string, not an object
@@ -464,7 +491,6 @@ def test_parse_react_output_malformed_json_degrades_instead_of_raising():
 
 def test_parse_react_output_numeric_args():
     """Test parsing action with numeric arguments."""
-    from src.environments.envs.protocols.react import parse_react_output
 
     text = """Thought: Calculate
 Action: multiply(a=5, b=3.14)"""
@@ -478,8 +504,6 @@ Action: multiply(a=5, b=3.14)"""
 
 def test_react_environment_basic():
     """Test ReActEnvironment basic flow."""
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = ReActEnvironment(tool_registry=registry, max_turns=5)
@@ -511,9 +535,6 @@ Final Answer: 100"""
 def test_react_environment_reward():
     """A correct Final Answer earns the thought credit plus the objective at weight 1; ReAct has no
     protocol shaping component of its own."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = ReActEnvironment(tool_registry=registry, max_turns=5, thought_reward=0.02)
@@ -537,8 +558,6 @@ def test_react_environment_unknown_tool():
     itself, so the model reads a Python list repr (``Available: ['calculate']``) in registration
     order instead of the sorted prose the native protocol sends.
     """
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = ReActEnvironment(
@@ -571,10 +590,6 @@ def test_react_tool_that_raises_is_logged_and_charged(caplog):
     observation is trained on, not read by an operator, and a submit/grading handler dying on a
     malformed payload looks exactly like a model that used the tool wrong.
     """
-    import logging
-
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
     def _explode(**_kwargs):
         raise RuntimeError("tool backend is down")
@@ -604,7 +619,6 @@ def test_react_tool_that_raises_is_logged_and_charged(caplog):
 def test_react_math_factory():
     """ReAct advertises its tools in the system prompt, never as a native ``tools=`` schema: the
     action is parsed out of plain text, so a server-side parser would strip it into a burnt turn."""
-    from src.environments.envs.protocols.react import create_react_math_environment
 
     env = create_react_math_environment(max_turns=10, reward_terms=[{"source": "environment", "weight": 2.0}])
 
@@ -616,7 +630,6 @@ def test_react_math_factory():
 
 def test_rollout_manager_round_robin():
     """Test RolloutManager round-robin actor selection logic."""
-    from src.environments.ray_actors import RolloutConfig, RolloutManager
 
     manager = RolloutManager(
         num_workers=2,
@@ -636,9 +649,6 @@ def test_rollout_manager_round_robin():
 
 def test_create_environment_class_tuple():
     """Test create_environment with (class, kwargs) tuple."""
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.registry import create_environment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = create_environment(
@@ -651,7 +661,6 @@ def test_create_environment_class_tuple():
 
 def test_registry_resolve_unknown():
     """Test resolve_environment raises for unknown type."""
-    from src.environments.registry import resolve_environment
 
     try:
         resolve_environment("nonexistent_env", {})
@@ -664,7 +673,6 @@ def test_registry_resolve_unknown():
 def test_registry_forwards_environment_kwargs():
     """environment_kwargs must reach the env — a dropped sandbox_backend is a silent isolation
     downgrade, a dropped max_submissions silently keeps the default contest budget."""
-    from src.environments.registry import resolve_environment
 
     env = resolve_environment(
         "code_contests",
@@ -682,8 +690,6 @@ def test_registry_forwards_environment_kwargs():
 
 def test_registry_register_custom(isolated_registry):
     """Test registering a custom environment type."""
-    from src.environments.base import BaseEnvironment, EpisodeGrade, Message, Trajectory
-    from src.environments.registry import register_environment, resolve_environment
 
     class TestCustomEnv(BaseEnvironment):
         def _reset_single(self, prompt, context=None):
@@ -709,7 +715,6 @@ def test_registry_register_custom(isolated_registry):
 
 def test_registry_override(isolated_registry):
     """Test overriding a registered environment type."""
-    from src.environments.registry import register_environment, resolve_environment
 
     def factory1(config):
         return "factory1"
@@ -735,8 +740,6 @@ def test_registry_override(isolated_registry):
 
 def test_registry_resolve_swe():
     """Test resolve_environment for 'swe' type (SweEnvironment)."""
-    from src.environments.envs.tasks.coding.swe import SweEnvironment
-    from src.environments.registry import resolve_environment
 
     env = resolve_environment("swe", {"max_turns": 5})
     assert env is not None
@@ -745,7 +748,6 @@ def test_registry_resolve_swe():
 
 def test_code_environment_init():
     """Test SweEnvironment initialization."""
-    from src.environments.envs.tasks.coding.swe import SweEnvironment
 
     env = SweEnvironment(max_turns=10)
 
@@ -760,7 +762,6 @@ def test_code_environment_init():
 
 def test_code_environment_reset_step():
     """Test SweEnvironment reset and step."""
-    from src.environments.envs.tasks.coding.swe import SweEnvironment
 
     env = SweEnvironment(max_turns=5)
 
@@ -781,7 +782,6 @@ def test_code_environment_reset_step():
 
 async def test_async_base_environment():
     """Test AsyncBaseEnvironment."""
-    from src.environments.base import AsyncBaseEnvironment, EpisodeGrade, Message, Trajectory
 
     class TestAsyncEnv(AsyncBaseEnvironment):
         def _reset_single(self, prompt, context=None):
@@ -822,8 +822,6 @@ async def test_async_base_environment():
 
 async def test_async_native_tool_use():
     """Test AsyncNativeToolUseEnvironment."""
-    from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
     async def async_handler(query: str) -> str:
         await asyncio.sleep(0.01)
@@ -856,7 +854,6 @@ async def test_async_native_tool_use():
 
 def test_mcp_server_presets():
     """Test MCP server preset configurations."""
-    from src.environments.envs.protocols.mcp import MCP_SERVERS
 
     expected_servers = ["brave_search", "filesystem", "fetch", "memory", "github", "slack"]
     for server_name in expected_servers:
@@ -874,7 +871,6 @@ def test_mcp_server_presets():
 
 def test_get_mcp_server_config():
     """Test get_mcp_server_config function."""
-    from src.environments.envs.protocols.mcp import get_mcp_server_config
 
     config = get_mcp_server_config("filesystem")
     assert config["command"] == "npx"
@@ -896,7 +892,6 @@ def test_get_mcp_server_config():
 
 def test_create_native_mcp_environment():
     """Test create_native_mcp_environment factory."""
-    from src.environments.envs.protocols.mcp import create_native_mcp_environment
 
     env = create_native_mcp_environment(
         "filesystem",
@@ -919,7 +914,6 @@ def test_create_native_mcp_environment():
 
 def test_native_mcp_client_environment_init():
     """Test NativeMCPClientEnvironment initialization."""
-    from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment
 
     env = NativeMCPClientEnvironment(
         server_command="npx",
@@ -947,8 +941,6 @@ def test_native_mcp_client_environment_init():
 
 def test_multi_tool_environment_with_all_tools():
     """Test NativeToolUseEnvironment with all tools."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_all_native_tools
 
     registry = create_all_native_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=10)
@@ -985,8 +977,6 @@ def test_multi_tool_environment_with_all_tools():
 
 def test_multi_tool_parallel_calls():
     """Test environment with multiple parallel tool calls in one step."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_all_native_tools
 
     registry = create_all_native_tools()
     env = NativeToolUseEnvironment(
@@ -1016,8 +1006,6 @@ def test_multi_tool_parallel_calls():
 
 def test_tool_error_handling():
     """Test error handling when tool execution fails."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
     def failing_tool(param: str) -> str:
         raise ValueError("Tool execution failed!")
@@ -1056,8 +1044,6 @@ def test_tool_error_handling():
 
 def test_unknown_tool_handling():
     """Test handling of calls to unknown tools."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = NativeToolUseEnvironment(
@@ -1082,8 +1068,6 @@ def test_unknown_tool_handling():
 
 def test_react_search_environment():
     """Test create_react_search_environment factory."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-    from src.environments.envs.protocols.react import create_react_search_environment
 
     env = create_react_search_environment(max_turns=8, reward_terms=[{"source": "environment", "weight": 1.5}])
 
@@ -1113,7 +1097,6 @@ Final Answer: Paris"""
 
 def test_react_environment_with_python_tool():
     """Test ReAct environment using Python tool for complex calculations."""
-    from src.environments.envs.protocols.react import create_react_math_environment
 
     env = create_react_math_environment(max_turns=10)
 
@@ -1137,7 +1120,6 @@ Action: python(code="factorial(10)")"""
 
 def test_create_environment_native_coding():
     """Test create_environment for native_coding type."""
-    from src.environments.registry import create_environment
 
     env = create_environment("native_coding", {"max_turns": 5})
     assert env is not None
@@ -1149,7 +1131,6 @@ def test_create_environment_native_coding():
 
 def test_create_environment_native_combined():
     """Test create_environment for native_combined type."""
-    from src.environments.registry import create_environment
 
     env = create_environment("native_combined", {"max_turns": 10})
     assert env is not None
@@ -1164,7 +1145,6 @@ def test_create_environment_native_combined():
 
 def test_create_environment_react_search():
     """Test create_environment for react_search type."""
-    from src.environments.registry import create_environment
 
     env = create_environment("react_search", {"max_turns": 5})
     assert env is not None
@@ -1176,7 +1156,6 @@ def test_create_environment_react_search():
 
 def test_tool_openai_schema_complex():
     """Test complex tool schema generation."""
-    from src.environments.tools.definitions import NativeTool, ToolParameter
 
     tool = NativeTool(
         name="complex_tool",
@@ -1215,8 +1194,6 @@ def test_tool_openai_schema_complex():
 
 async def test_async_concurrent_tool_execution():
     """Test concurrent tool execution in async environment."""
-    from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
     # Create tools with varying delays
     async def slow_tool(x: str) -> str:
@@ -1254,7 +1231,6 @@ async def test_async_concurrent_tool_execution():
     episode_ids, _ = await env.reset_async(["Test concurrent"])
 
     # Call both tools concurrently
-    import time
 
     start = time.time()
 
@@ -1282,7 +1258,6 @@ async def test_async_concurrent_tool_execution():
 
 def test_web_search_mock_backend(monkeypatch):
     """Test web_search with mock backend (no network)."""
-    from src.environments.tools.web_search import web_search, web_search_raw
 
     monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
 
@@ -1304,7 +1279,6 @@ def test_web_search_mock_backend(monkeypatch):
 
 async def test_web_search_async_mock(monkeypatch):
     """Test async_web_search with mock backend."""
-    from src.environments.tools.web_search import async_web_search
 
     monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
 
@@ -1320,9 +1294,6 @@ def test_web_search_raises_on_backend_failure_no_mock_fabrication():
     tool success in the RL envs. The error must propagate so the tool layer records a real
     failure.
     """
-    import dataclasses
-
-    from src.environments.tools import web_search as ws
 
     def _boom(**kwargs):
         raise RuntimeError("network down")
@@ -1340,7 +1311,6 @@ def test_web_search_raises_on_backend_failure_no_mock_fabrication():
 
 def test_web_search_format_results():
     """Test result formatting."""
-    from src.environments.tools.web_search import _format_results
 
     # Empty results
     assert _format_results([]) == "No results found."
@@ -1363,7 +1333,6 @@ def test_web_search_format_results():
 
 def test_web_search_invalid_backend():
     """Test error on invalid backend."""
-    from src.environments.tools.web_search import web_search
 
     try:
         web_search("test", backend="nonexistent")
@@ -1375,7 +1344,6 @@ def test_web_search_invalid_backend():
 def test_mock_search_backend_is_not_selectable_from_a_config(monkeypatch):
     """Fabricated snippets pay ``tool_success_reward`` like a real search, so a training YAML naming
     ``mock`` must fail loudly instead of teaching the policy that invented evidence works."""
-    from src.environments.tools.web_search import web_search
 
     monkeypatch.delenv("HALO_ALLOW_MOCK_SEARCH", raising=False)
     with pytest.raises(ValueError, match="HALO_ALLOW_MOCK_SEARCH"):
@@ -1383,8 +1351,6 @@ def test_mock_search_backend_is_not_selectable_from_a_config(monkeypatch):
 
 
 def test_mock_search_backend_is_available_to_an_opted_in_demo(monkeypatch):
-    from src.environments.tools.web_search import web_search
-
     monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
     assert "Wikipedia: pytest" in web_search("pytest", backend="mock")
 
@@ -1397,8 +1363,6 @@ def test_an_unselectable_search_backend_is_refused_when_the_ENV_IS_BUILT(monkeyp
     and charging ``tool_error_penalty`` — a broken environment measured to completion instead of a
     refused config.
     """
-    from src.environments.envs.tasks.qa import create_qa_search_environment
-    from src.environments.tools.factories import create_native_search_tools
 
     monkeypatch.delenv("HALO_ALLOW_MOCK_SEARCH", raising=False)
     with pytest.raises(ValueError, match="HALO_ALLOW_MOCK_SEARCH"):
@@ -1412,7 +1376,6 @@ def test_an_unselectable_search_backend_is_refused_when_the_ENV_IS_BUILT(monkeyp
 
 def test_normalize_text():
     """Test text normalization."""
-    from src.rewards.matching import normalize_text
 
     assert normalize_text("  The Answer is 42  ") == "42"
     assert normalize_text("\\boxed{42}") == "42"
@@ -1423,7 +1386,6 @@ def test_normalize_text():
 
 def test_exact_match():
     """Test exact match."""
-    from src.rewards.matching import exact_match
 
     assert exact_match("Paris", "paris")
     assert exact_match("42", "42")
@@ -1433,7 +1395,6 @@ def test_exact_match():
 
 def test_numeric_match():
     """Test numeric match with tolerance."""
-    from src.rewards.matching import numeric_match
 
     assert numeric_match("42", "42")
     assert numeric_match("42.001", "42", rtol=0.01)
@@ -1446,7 +1407,6 @@ def test_numeric_match():
 
 def test_multiple_choice_match():
     """Test multiple-choice answer extraction."""
-    from src.environments.envs.tasks.qa import multiple_choice_match
 
     assert multiple_choice_match("The answer is B", "B")
     assert multiple_choice_match("(A)", "A")
@@ -1471,7 +1431,6 @@ def test_multiple_choice_match():
 
 def test_validate_answer():
     """Test composite validation."""
-    from src.rewards.matching import validate_answer
 
     assert validate_answer("42", "42")
     assert not validate_answer("wrong", "42")
@@ -1490,10 +1449,6 @@ def test_validate_answer():
 def test_answer_grading_is_all_or_nothing():
     """A near-miss validates as wrong, and the environment prices the verdict at the objective term's
     full weight or at 0 — never a similarity-scaled credit in between."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.definitions import NativeToolRegistry
-    from src.rewards.matching import validate_answer
 
     assert validate_answer("42", "42")
     assert not validate_answer("wrong", "42")
@@ -1511,9 +1466,6 @@ def test_answer_grading_is_all_or_nothing():
 
 def test_native_tool_use_reward_with_answer():
     """A final answer that validates against ``context["answer"]`` grades 1, priced at the term's weight."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
@@ -1536,9 +1488,6 @@ def test_native_tool_use_reward_with_answer():
 
 def test_native_tool_use_reward_wrong_answer():
     """A final answer that fails validation grades 0."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
@@ -1557,8 +1506,6 @@ def test_native_tool_use_reward_wrong_answer():
 
 def test_native_tool_use_reward_no_answer():
     """With no ``answer`` in the context, completing IS the objective: the episode grades 1."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     registry = create_native_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
@@ -1575,8 +1522,6 @@ def test_native_tool_use_null_answer_is_invalid_not_a_free_success():
     """A row that IS answer-graded but whose ``answer`` cell is null must not take the completion
     fallback above: that pays the full objective to any episode that merely finished, and every
     sibling in its GRPO group finishes just as easily, so the whole group learns nothing but "stop"."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.factories import create_native_math_tools
 
     env = NativeToolUseEnvironment(tool_registry=create_native_math_tools(), max_turns=5)
 
@@ -1595,8 +1540,6 @@ def test_react_null_answer_is_invalid_not_a_free_success():
     completion fallback: that pays the full objective to any episode that reached a Final Answer,
     and every sibling in its GRPO group reaches one just as easily. Same contract as the native
     protocol's null cell — dropped from the baseline, never taught as a success."""
-    from src.environments.base import EPISODE_INVALID_KEY
-    from src.environments.envs.protocols.react import create_react_math_environment
 
     env = create_react_math_environment(thought_reward=0.0)
 
@@ -1613,7 +1556,6 @@ def test_react_null_answer_is_invalid_not_a_free_success():
 def test_react_missing_answer_key_still_pays_for_finishing():
     """Guards the invalid path above from swallowing the ungraded mode: with NO ``answer`` key at all
     there is nothing to verify, and reaching a Final Answer is the objective."""
-    from src.environments.envs.protocols.react import create_react_math_environment
 
     env = create_react_math_environment(thought_reward=0.0)
 
@@ -1631,7 +1573,6 @@ def test_react_missing_answer_key_still_pays_for_finishing():
 
 def test_qa_search_environment_init(allow_mock_search):
     """Test the create_qa_search_environment factory (preset over NativeToolUseEnvironment)."""
-    from src.environments.envs.tasks.qa import create_qa_search_environment
 
     env = create_qa_search_environment(max_turns=10, search_backend="mock")
     tools = env.get_tools_schema()
@@ -1641,7 +1582,6 @@ def test_qa_search_environment_init(allow_mock_search):
 
 def test_qa_search_environment_correct_answer(allow_mock_search):
     """Test SearchQA rewards correct answer."""
-    from src.environments.envs.tasks.qa import create_qa_search_environment
 
     env = create_qa_search_environment(max_turns=5, search_backend="mock")
 
@@ -1668,8 +1608,6 @@ def test_no_tool_use_is_charged_once_by_the_dedicated_knob(allow_mock_search):
     ``require_tool_use`` and ``_tool_use_shaping`` both fire on that condition; the terminal step must
     not add a second (per-call) charge on top of the episode-level one.
     """
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-    from src.environments.envs.tasks.qa import create_qa_search_environment
 
     env = create_qa_search_environment(max_turns=5, search_backend="mock", no_tool_use_penalty=0.3)
     episode_ids, _ = env.reset(["Q?"], [{"answer": "A"}])
@@ -1686,8 +1624,6 @@ def test_no_tool_use_is_charged_once_by_the_dedicated_knob(allow_mock_search):
 
 def test_qa_search_environment_wrong_answer(allow_mock_search):
     """Test SearchQA grades a wrong answer 0."""
-    from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
-    from src.environments.envs.tasks.qa import create_qa_search_environment
 
     env = create_qa_search_environment(max_turns=5, search_backend="mock")
 
@@ -1707,7 +1643,6 @@ def test_qa_search_environment_wrong_answer(allow_mock_search):
 
 def test_qa_search_registry(allow_mock_search):
     """Test qa_search resolves from registry."""
-    from src.environments.registry import resolve_environment
 
     env = resolve_environment("qa_search", {"search_backend": "mock"})
     assert env is not None
@@ -1720,7 +1655,6 @@ def test_qa_search_registry(allow_mock_search):
 
 def test_code_contests_environment_init():
     """Test CodeContestsEnvironment initialization."""
-    from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 
     env = CodeContestsEnvironment(max_turns=10)
     tools = env.get_tools_schema()
@@ -1731,7 +1665,6 @@ def test_code_contests_environment_init():
 
 def test_code_contests_run_tests():
     """Test run_solution_against_tests directly."""
-    from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 
     code = "n = int(input())\nprint(n * 2)"
     test_cases = [
@@ -1748,7 +1681,6 @@ def test_code_contests_run_tests():
 
 def test_code_contests_registry():
     """Test code_contests resolves from registry."""
-    from src.environments.registry import resolve_environment
 
     env = resolve_environment("code_contests", {})
     assert env is not None
@@ -1766,7 +1698,6 @@ def test_exam_qa_closed_book_refuses_a_search_backend():
     unselectable backend name — refused at construction everywhere else — would launch a whole run
     that trains closed-book with no error and no warning.
     """
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
 
     with pytest.raises(ValueError, match="search_backend"):
         ExamQAEnvironment(max_turns=3, search_backend="duckduckgo")
@@ -1779,7 +1710,6 @@ def test_exam_qa_closed_book_refuses_a_search_backend():
 
 def test_exam_qa_multiple_choice_correct():
     """Test correct multiple-choice answer."""
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
 
     env = ExamQAEnvironment(max_turns=3)
 
@@ -1798,7 +1728,6 @@ def test_exam_qa_multiple_choice_correct():
 
 def test_exam_qa_multiple_choice_wrong():
     """Test wrong multiple-choice answer."""
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
 
     env = ExamQAEnvironment(max_turns=3)
 
@@ -1821,7 +1750,6 @@ def test_exam_qa_index_answer_is_graded_as_its_choice_letter():
     ``multiple_choice_match`` scores anything that is not a single letter as wrong, so an unconverted
     index grades EVERY completion 0: a GRPO group with zero variance, no gradient, and nothing in the
     logs saying the rows were never gradable."""
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
 
     env = ExamQAEnvironment(max_turns=3)
     choices = ["Mars", "Jupiter", "Saturn", "Neptune"]
@@ -1843,7 +1771,6 @@ def test_exam_qa_index_answer_is_graded_as_its_choice_letter():
 def test_exam_qa_letter_answers_pass_through_and_bad_shapes_fail_loud():
     """A real letter keeps grading unchanged; any shape the grader cannot score raises at episode
     start, because a constant-reward run costs far more than a refused one."""
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
 
     env = ExamQAEnvironment(max_turns=3)
     choices = ["Mars", "Jupiter", "Saturn", "Neptune"]
@@ -1868,7 +1795,6 @@ def test_exam_qa_letter_answers_pass_through_and_bad_shapes_fail_loud():
 
 def test_exam_qa_open_ended():
     """Test open-ended exam question."""
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
 
     env = ExamQAEnvironment(max_turns=3)
 
@@ -1887,7 +1813,6 @@ def test_exam_qa_open_ended():
 
 def test_exam_qa_open_book(allow_mock_search):
     """Test open-book exam has search tools."""
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
 
     env = ExamQAEnvironment(max_turns=5, open_book=True, search_backend="mock")
     tools = env.get_tools_schema()
@@ -1900,8 +1825,6 @@ def test_exam_qa_open_book(allow_mock_search):
 
 def test_environment_config_defaults():
     """Test EnvironmentConfig default values."""
-    from src.configs.environment_config import EnvironmentConfig
-    from src.rewards.spec import EnvironmentTerm
 
     config = EnvironmentConfig()
     assert config.environment_type == "react_math"
@@ -1915,7 +1838,6 @@ def test_environment_config_defaults():
 
 def test_environment_config_to_env_config():
     """Test to_env_config() outputs correct dict with defaults."""
-    from src.configs.environment_config import EnvironmentConfig
 
     config = EnvironmentConfig()
     env_dict = config.to_env_config()
@@ -1929,7 +1851,6 @@ def test_environment_config_to_env_config():
 
 def test_environment_config_env_specific_kwargs():
     """Test to_env_config() merges environment_kwargs."""
-    from src.configs.environment_config import EnvironmentConfig
 
     config = EnvironmentConfig(
         environment_type="qa_search",
@@ -1951,9 +1872,6 @@ def test_all_registered_envs_resolvable():
     A factory that ignored ``env_config`` — or returned a stray non-environment object — would keep
     a plain ``is not None`` check green while every rollout ran the class default number of turns.
     """
-    from src.configs.environment_config import EnvironmentConfig
-    from src.environments.base import BaseEnvironment
-    from src.environments.registry import get_registered_environments, resolve_environment
 
     registered = [name for name in get_registered_environments() if name != "mcp"]  # MCP needs a server
     assert len(registered) >= 5, f"the registry went (nearly) empty — the loop below tests nothing: {registered}"
@@ -1970,8 +1888,6 @@ def test_all_registered_envs_resolvable():
 def test_react_step_does_not_double_add_assistant_message():
     """BaseEnvironment.step already appends the assistant action message, so ReAct's _step_single
     must NOT append it again: a double-add corrupts the history and halves max_turns."""
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.definitions import NativeToolRegistry
 
     env = ReActEnvironment(tool_registry=NativeToolRegistry(), require_thought=False)
     episode_ids, _ = env.reset(["Solve: 1+1"])
@@ -1990,8 +1906,6 @@ def test_react_step_does_not_double_add_assistant_message():
 def test_grading_nonzero_exit_is_runtime_error_not_pass():
     """A solution that prints the correct answer but exits non-zero is a Runtime Error — it must fail
     even though stdout matches (reward-leakage regression)."""
-    from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-    from src.environments.sandbox.base import SandboxResult
 
     class _FakeSandbox:
         def __init__(self, result):
@@ -2012,7 +1926,6 @@ def test_grading_nonzero_exit_is_runtime_error_not_pass():
 def test_react_parse_empty_string_argument_preserved():
     """A quoted empty argument (expression=\"\") must parse to "" — truthiness-based group selection
     turned it into None, so the tool then executed with a None argument."""
-    from src.environments.envs.protocols.react import parse_react_output
 
     step = parse_react_output('Thought: try it\nAction: calculate(expression="")')
     assert step.action == "calculate"
@@ -2025,8 +1938,6 @@ def test_react_parse_empty_string_argument_preserved():
 def test_native_step_tool_calls_counts_executed_not_requested():
     """step_tool_calls must count EXECUTED calls (post per-turn cap), matching total_tool_calls —
     counting the requested list made the two metrics disagree on a capped turn."""
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry
 
     registry = NativeToolRegistry()
     registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: "ok"))

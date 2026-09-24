@@ -11,8 +11,8 @@ the same failure at 1/n scale: every earlier assistant turn is masked, silently.
 in a parse-only check: every one of these configs parses clean.
 
 Only pairings pinning a repo-owned ``jinja-templates/*.jinja`` are covered — a hub-bundled template
-is not on disk here. The scan reads the ``examples/`` YAML **and** the ```yaml fences of the two doc
-trees, so a doc recipe that pairs a marker with a template is held to the same contract as a shipped
+is not on disk here. The scan reads the ``examples/`` YAML **and** the ```yaml fences of the doc and
+skill trees, so a doc recipe that pairs a marker with a template is held to the same contract as a shipped
 config. Rendering is real (the same Jinja environment transformers uses), so a marker the template
 assembles from parts is matched exactly as the collator would match it.
 
@@ -30,7 +30,7 @@ from transformers.utils.chat_template_utils import _compile_jinja_template
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # Doc trees whose ```yaml fences are held to the same pairing contract as examples/.
-_DOC_TREES = ("human-docs", "agent-docs")
+_DOC_TREES = ("human-docs", "agent-docs", "skills")
 _YAML_FENCE = re.compile(r"^```ya?ml\n(.*?)^```", re.M | re.S)
 
 # Single turn: every shipped template accepts it, including the ``*-instruct`` ones whose own guard

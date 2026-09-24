@@ -30,7 +30,7 @@ inside `halo:blackwell` (B200/B300, SM100/SM103, FA2+FA4) and `halo:hopper`
 | Rewards | Config-parsed reward terms, the generative judge and served reward-model scorers, the composer and TRL adapters, RLVR graders, answer matching | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards.md) |
 | Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/grpo/environments/README.md) |
 | Entry-script plumbing | Environment setup (output dir, HF caches, seed, resume detection), the `scripts/training/**` backbone, the `run.log` tee, root/CLI logging, and the `halo launch` / `halo run` surface | `src/training/`, `src/cli.py`, `src/log.py` | [Scripts](scripts-reference.md) |
-| Served endpoints | The OpenAI-compatible client every rollout and batch-generation script talks through, its finish-reason contract, and resumable request logs | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
+| Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through, its finish-reason contract, and resumable request logs | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 
 Leaf modules keep those imports one-way, each holding a contract several layers share:
 

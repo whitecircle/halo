@@ -64,6 +64,9 @@ file and the devcontainer read, so exporting `HALO_SCRATCH` once points the whol
 host's large volume. `/mnt` is **not a guaranteed large volume**: on some hosts it shares the small root
 device. Confirm with `findmnt` / `df -h` before any multi-GB write.
 
+On a host whose docker default runtime rejects `--gpus` (sysbox-runc, for one), set
+`DOCKER_RUNTIME=nvidia` on any `make` target; empty — the default — leaves the host default in place.
+
 ## Image matrix
 
 | Component | Hopper | Blackwell |
