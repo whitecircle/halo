@@ -350,7 +350,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
                 )
             require_segment_aware_kernels(model.config, "padding_free")
         # position_ids alone keep the padding-free row's documents apart in attention; these are the
-        # boundaries this family's conv / linear-attention mixers read on top.
+        # segment markers this family's conv / linear-attention mixers read on top.
         self._segment_markers = segment_markers_for(model.config)
 
         # The model rides through the distributed seam so PP can split it into this rank's stage.
@@ -881,7 +881,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         Each row becomes one document of the flattened row: its ``position_ids`` restart at 0, and
         the family's segment markers (``self._segment_markers``) ride along for the mixers that
-        read boundaries from kwargs instead.
+        read their document boundaries from kwargs instead.
         """
         flat_input_ids = input_ids[attention_mask.bool()].unsqueeze(0)
         flat_labels = labels[attention_mask.bool()].unsqueeze(0)

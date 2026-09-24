@@ -57,7 +57,7 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 
 `padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` included. It is also incompatible with CP, VLM runs and PP — the shipped PP gates additionally reject PEFT, a non-null clip percentile and a `label_pad_token_id` other than `-100`.
 
-Each row of the flattened batch stays its own document: attention isolates it through `position_ids`, and the LFM-2 and GatedDeltaNet (Qwen3.5/3.6, Qwen3-Next) conv / linear-attention mixers through the segment markers the SFT collators emit. A GatedDeltaNet model is refused without the `causal_conv1d` / `fla` kernels that read them — see [Document isolation under packing](../../data/collators.md#document-isolation-under-packing).
+Attention isolates each row of the flattened batch through `position_ids`; the LFM-2 and GatedDeltaNet (Qwen3.5/3.6, Qwen3-Next) conv / linear-attention mixers get the segment markers the SFT collators emit, and a GatedDeltaNet model is refused without the `causal_conv1d` / `fla` kernels that read them. Zaya's CCA has no per-document boundary parameter and carries state from each row into the next, across the chosen / rejected split too, so keep `padding_free` off for Zaya. See [Document isolation under packing](../../data/collators.md#document-isolation-under-packing).
 
 ## Launch
 

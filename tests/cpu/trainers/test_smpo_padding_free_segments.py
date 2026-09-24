@@ -25,7 +25,7 @@ from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarker
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.segment_isolation import (
     FAMILIES,
-    MARKER_FAMILIES,
+    LEAK_CONTROLS,
     PAD_ID,
     lone_document_logps,
     preference_batch,
@@ -87,15 +87,17 @@ def test_padding_free_documents_match_their_lone_forward(family):
     )
 
 
-@pytest.mark.parametrize("family", MARKER_FAMILIES)
-def test_without_markers_the_mixers_leak(family):
+@pytest.mark.parametrize(
+    ("family", "control"), [(family, control) for family, controls in LEAK_CONTROLS.items() for control in controls]
+)
+def test_without_markers_the_mixers_leak(family, control):
     """Anti-vacuity: the isolation above is the markers' doing, not a model that ignores its context."""
     model = _model(family)
-    logps, _ = _padding_free_logps(model, SegmentMarkers())
+    logps, _ = _padding_free_logps(model, LEAK_CONTROLS[family][control])
     drift = (logps - lone_document_logps(model)).abs().max().item()
     assert drift > LEAK_FLOOR, (
-        f"{family}: the unmarked flattened row stayed isolated (drift {drift:.3e}) — this model does "
-        f"not exercise the conv / linear-attention crossing the markers exist to stop"
+        f"{family} ({control}): the flattened row stayed isolated (drift {drift:.3e}) — this model does "
+        f"not exercise the conv / linear-attention crossing the missing markers exist to stop"
     )
 
 

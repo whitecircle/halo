@@ -4,8 +4,8 @@ Attention isolates the documents of a packed or flattened row from its ``positio
 restart at 0 at every document. Some families' conv and linear-attention mixers read their document
 boundaries from forward kwargs instead, and carry state across documents when those are absent. This
 module holds which families read which markers, the refusal for the families whose torch fallbacks
-drop them, and the markers themselves — shared by the SFT packing collators and SMPO's padding-free
-forward. Per-family isolation matrix: ``agent-docs/data/collators.md``.
+drop them, and the markers themselves — shared by the SFT packing / padding-free collators and SMPO's
+padding-free forward. Per-family isolation matrix: ``agent-docs/data/collators.md``.
 """
 
 from dataclasses import dataclass
@@ -27,7 +27,7 @@ GDN_SEGMENT_AWARE_BACKENDS = (
 
 @dataclass(frozen=True)
 class SegmentMarkers:
-    """Which document markers a family's forward reads.
+    """Which segment markers a family's forward reads.
 
     ``seq_idx`` is the per-token document index (LFM2 ShortConv, the GatedDeltaNet conv).
     ``cu_seq_lens`` is the varlen set ``cu_seq_lens_q/k`` + ``max_length_q/k``: GatedDeltaNet's chunked
@@ -68,7 +68,7 @@ def require_segment_aware_kernels(model_config, mode: str) -> None:
             f"model_type={getattr(model_config, 'model_type', None)!r}: {missing} unavailable. "
             f"transformers selects its segment-aware linear-attention kernels on exactly these "
             f"checks (package installed, at the version floor, CUDA-capable torch), and the torch "
-            f"fallbacks it takes instead IGNORE the document markers a {mode} row carries — the "
+            f"fallbacks it takes instead IGNORE the segment markers a {mode} row carries — the "
             f"conv drops seq_idx, the chunked delta rule drops cu_seq_lens_q — so conv and "
             f"recurrent state cross document boundaries silently, while attention stays "
             f"isolated. Install {missing} (the production images pin both), or disable {mode} for "

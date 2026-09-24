@@ -415,28 +415,6 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         return new_labels
 
 
-def _convert_flattened_batch_to_tensors(batch: dict[str, Any]) -> dict[str, Any]:
-    """Convert a flattened/packed batch to tensors with the proper per-key dtypes.
-
-    Shared by the flattening collators: labels/position_ids/input_ids/seq_idx gain
-    a batch dimension (int64 for the first three, int32 for seq_idx);
-    max_length_q/max_length_k stay Python ints.
-    """
-    int_64_keys = {"labels", "position_ids", "input_ids"}
-    batch_dim_keys = {"labels", "position_ids", "input_ids", "seq_idx"}
-    py_int_keys = {"max_length_q", "max_length_k"}
-
-    for k, v in batch.items():
-        if k in py_int_keys:
-            continue
-        if k in batch_dim_keys:
-            v = [v]
-        dtype = torch.int64 if k in int_64_keys else torch.int32
-        batch[k] = torch.tensor(v, dtype=dtype)
-
-    return batch
-
-
 @dataclass
 class DataCollatorWithFlattening(DefaultDataCollator):
     """Padding-free Flash Attention collator (no completion masking): flattens the
@@ -461,13 +439,8 @@ class DataCollatorWithFlattening(DefaultDataCollator):
         is_labels_provided = "labels" in features[0]
 
         batch = {"input_ids": [], "labels": [], "position_ids": []}
-        if self.return_seq_idx:
-            batch["seq_idx"] = []
-        if self.return_flash_attn_kwargs:
-            cu_seq_lens = [0]
-            max_length = 0
 
-        for seq_idx, sample in enumerate(features):
+        for sample in features:
             input_ids = sample["input_ids"]
             if isinstance(input_ids, torch.Tensor):
                 input_ids = input_ids.tolist()
@@ -489,20 +462,10 @@ class DataCollatorWithFlattening(DefaultDataCollator):
 
             batch["position_ids"] += list(range(len(input_ids)))
 
-            if self.return_seq_idx:
-                batch["seq_idx"] += [seq_idx] * len(input_ids)
-
-            if self.return_flash_attn_kwargs:
-                cu_seq_lens.append(cu_seq_lens[-1] + len(input_ids))
-                max_length = max(max_length, len(input_ids))
-
-        if self.return_flash_attn_kwargs:
-            batch["cu_seq_lens_q"] = cu_seq_lens
-            batch["cu_seq_lens_k"] = cu_seq_lens
-            batch["max_length_q"] = max_length
-            batch["max_length_k"] = max_length
-
-        return _convert_flattened_batch_to_tensors(batch)
+        batch = {key: torch.tensor([value], dtype=torch.int64) for key, value in batch.items()}
+        markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=self.return_flash_attn_kwargs)
+        batch.update(segment_marker_kwargs(batch["position_ids"], markers))
+        return batch
 
 
 @dataclass

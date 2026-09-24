@@ -150,8 +150,8 @@ The GPT-OSS leak is the one case the toolkit refuses outright: `select_data_coll
 non-varlen backend. Pin `flash_attention_2` or turn packing off. The refusal reads the text
 sub-config too, so a composite (VLM) wrapper around a leaking family is covered.
 
-Which families get which markers, and the kernel refusal below, live in
-`src/models/segment_markers.py`, shared by the collator factory and SMPO's padding-free forward.
+Which families get which segment markers, and the kernel refusal below, live in
+`src/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward.
 
 The GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) carry two more refusals, both about markers
 that would be emitted but not read:

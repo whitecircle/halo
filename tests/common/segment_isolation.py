@@ -22,6 +22,7 @@ from transformers import (
 )
 
 from src.data.collators.smpo import DataCollatorForSMPO
+from src.models.segment_markers import SegmentMarkers
 from tests.common.models import TINY_LFM2_MOE_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
 
 PAD_ID = 0
@@ -41,8 +42,14 @@ FAMILIES = {
     "qwen3_5": (Qwen3_5ForCausalLM, Qwen3_5TextConfig, TINY_QWEN35_CONFIG),
     "qwen3": (Qwen3ForCausalLM, Qwen3Config, TINY_QWEN3_CONFIG),
 }
-# The families whose conv / linear-attention mixers read segment markers.
-MARKER_FAMILIES = ("lfm2", "qwen3_5")
+# Marker subsets under which a family's row must leak, proving the isolation is the markers' doing.
+# GatedDeltaNet's conv-only subset leaves the delta rule crossing, so a kernel that ignored
+# cu_seq_lens could not hide under the isolation tolerance. Dense Qwen3 reads no marker.
+LEAK_CONTROLS = {
+    "lfm2": {"unmarked": SegmentMarkers()},
+    "qwen3_5": {"unmarked": SegmentMarkers(), "conv_only": SegmentMarkers(seq_idx=True)},
+    "qwen3": {},
+}
 
 
 def tiny_model(family: str, attn_implementation: str, *, dtype=torch.float32, device="cpu", **overrides):

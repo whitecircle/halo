@@ -2,7 +2,7 @@
 
 Concatenates variable-length sequences into one flattened tensor and emits `cu_seq_lens` so a varlen Flash Attention kernel skips padding compute. These collators are SFT-only: `select_data_collator` (`src/data/collators/factory.py`) picks them when `padding_free: true`. Mutually exclusive with `packing`. Incompatible with Context Parallelism.
 
-SMPO also supports `padding_free`, but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators: attention isolates its documents through `position_ids`, and LFM-2 and GatedDeltaNet get the same `seq_idx` / `cu_seq_lens` segment markers the packing collators emit. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline-arithmetic-intensity-and-the-ridge-point).
+SMPO also supports `padding_free`, but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators: attention isolates its documents through `position_ids`, and LFM-2 and GatedDeltaNet get their `seq_idx` / `cu_seq_lens` segment markers from the same gate as these collators (`src/models/segment_markers.py`). Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline-arithmetic-intensity-and-the-ridge-point).
 
 Implementations live in `src/data/collators/packing.py`:
 
