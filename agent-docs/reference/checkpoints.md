@@ -217,11 +217,12 @@ lost. A fresh card holds the tag alone, except in a directory whose `adapter_con
 `peft_type` stock PEFT loads, where it also carries `library_name: peft` and a Hub `base_model`, as
 PEFT's own card does.
 
-On a card whose metadata is not a YAML mapping, `tag_model_card` raises, naming the file to repair,
-and fails the adapter save or unmerged `convert_to_bf16 --peft` that called it. The export finalizers
-and `reset_sinks` call `tag_exported_model_card` instead, which leaves such a card verbatim and
-untagged with a warning naming the source card: no loader reads the card, and most exports reach it
-only after their weights are on disk.
+On a card with malformed metadata (not a YAML mapping, or a `tags` entry that is neither a list nor a
+string), `tag_model_card` raises, naming the file to repair, and fails the adapter save or unmerged
+`convert_to_bf16 --peft` that called it. The export finalizers and `reset_sinks` call
+`tag_exported_model_card` instead, which leaves such a card verbatim and untagged with a warning
+naming the card to repair, the source card when the export copied it: no loader reads the card, and
+most exports reach it only after their weights are on disk.
 
 - **Full-model writes** tag in `finalize_exported_config`, which every parallel saver, the
   single-GPU / DDP fallback and the export tools' `save_full_checkpoint` end with.
@@ -238,9 +239,11 @@ A new writer ends in `finalize_exported_config` or `copy_checkpoint_aux_files`, 
 itself: `tag_exported_model_card` after copying a source tree, as `reset_sinks` does, and
 `tag_model_card` otherwise, as an unmerged `convert_to_bf16 --peft` does.
 
-Under `push_to_hub: true`, the four `transformers.Trainer`-based trainers (SMPO, offline GRPO,
-classification, teacher distillation) upload no card at all: `Trainer._push_from_checkpoint` copies
-only the model files into `output_dir`, and nothing writes `output_dir/README.md` for them.
+Under `push_to_hub: true`, the four trainers that extend `transformers.Trainer` directly (SMPO,
+offline GRPO, classification, teacher distillation) upload no card to the repo root, the one the Hub
+reads tags from: `Trainer._push_from_checkpoint` copies only the model files into `output_dir`, and
+nothing writes `output_dir/README.md` for them. A `hub_strategy` of `checkpoint` or `all_checkpoints`
+also uploads the checkpoint directory, whose tagged card lands under that subfolder only.
 
 ## Serving on vLLM / SGLang
 

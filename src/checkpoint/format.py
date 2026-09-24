@@ -410,10 +410,9 @@ def copy_checkpoint_aux_files(
 
     Every tool that builds an export out of a source directory runs this copy, including the ones
     that carry ``config.json`` across as-is and so never reach the config finalizer; the source's
-    card rides along and gets the Halo tag. A source card whose metadata is not a YAML mapping stays
-    verbatim and untagged, with a warning
-    (:func:`~src.checkpoint.model_card.tag_exported_model_card`): no loader reads the card, and most
-    callers run this copy after their weight pass.
+    card rides along and gets the Halo tag. A source card with malformed metadata stays verbatim and
+    untagged, with a warning (:func:`~src.checkpoint.model_card.tag_exported_model_card`): no loader
+    reads the card, and most callers run this copy after their weight pass.
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
     preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``, ``rng_state_*``)

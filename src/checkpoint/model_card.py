@@ -40,7 +40,8 @@ _WARNED_EXPORT_CARDS: set[str] = set()
 
 
 class MalformedModelCardError(ValueError):
-    """A ``README.md`` whose metadata block is not a YAML mapping, so its tags cannot be rewritten."""
+    """A ``README.md`` whose tags cannot be rewritten: its metadata block is not a YAML mapping, or
+    its ``tags`` entry is neither a list nor a string."""
 
     def __init__(self, card: Path, reason: Exception):
         self.card = card
@@ -71,7 +72,8 @@ def tag_model_card(output_dir: str) -> None:
     replaces a symlinked card (a Hub-cache snapshot) instead of writing through it into the blob.
 
     Raises:
-        MalformedModelCardError: the card's metadata block is not a YAML mapping.
+        MalformedModelCardError: the card's metadata block is not a YAML mapping, or its ``tags``
+            entry is neither a list nor a string.
     """
     path = Path(output_dir) / REPOCARD_NAME
     exists = path.is_file()
@@ -80,6 +82,9 @@ def tag_model_card(output_dir: str) -> None:
             metadata = metadata_load(path) or {}
         except (yaml.YAMLError, ValueError) as error:
             raise MalformedModelCardError(path, error) from error
+        if not isinstance(metadata.get("tags"), str | list | None):
+            reason = TypeError(f"tags is a {type(metadata['tags']).__name__}, not a list or a string")
+            raise MalformedModelCardError(path, reason)
     else:
         metadata = _fresh_card_metadata(path.parent)
     tags = with_halo_tags(metadata.get("tags"))
@@ -101,8 +106,8 @@ def tag_model_card(output_dir: str) -> None:
 def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -> None:
     """:func:`tag_model_card` for an export, whose card nothing that loads the checkpoint reads.
 
-    A card whose metadata is not a YAML mapping must not fail an export whose weights are already on
-    disk: it stays verbatim and untagged, and a warning names the file to repair, which is the card in
+    A card with malformed metadata must not fail an export whose weights are already on disk: it
+    stays verbatim and untagged, and a warning names the file to repair, which is the card in
     ``source_dir`` when the export copied it from there (a re-run copies it again).
     """
     try:
@@ -114,13 +119,13 @@ def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -
             logger,
             _WARNED_EXPORT_CARDS,
             os.path.realpath(error.card),
-            f"{_malformed_card_message(card, error.reason)} {output_dir} keeps it verbatim, without the "
-            f"Halo Hub tag; repair or remove {card}, then re-run to tag the export.",
+            f"{_malformed_card_message(card, error.reason)} The export keeps it verbatim, without the Halo "
+            f"Hub tag; repair or remove {card}, then re-run to tag it.",
         )
 
 
 def _malformed_card_message(card: Path, reason: Exception) -> str:
-    return f"The model card {card} has a metadata block that is not a YAML mapping ({reason})."
+    return f"The model card {card} has malformed metadata ({reason})."
 
 
 def _create_staged_card(directory: Path) -> Path:

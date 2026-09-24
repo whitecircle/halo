@@ -9,9 +9,9 @@ neither finalizer. The cards libraries build from their own tag lists get it at 
 list: the loaded model's ``model_tags`` (PEFT's adapter card), the trainer's ``create_model_card``
 (TRL's per-checkpoint card), and the embedding pipeline's card data. An existing card changes in its
 ``tags`` entry only. A fresh card holds the tag, plus ``library_name: peft`` and the base model in a
-stock PEFT adapter directory, under the mode the umask gives any new file. A card whose metadata is
-not a YAML mapping fails a direct write naming the file to repair; an export, whose weights are
-already on disk by then, carries it verbatim and untagged with a warning naming the source card.
+stock PEFT adapter directory, under the mode the umask gives any new file. A card with malformed
+metadata fails an adapter save naming the file to repair; an export, whose weights are already on
+disk by then, carries it verbatim and untagged with a warning naming the card it copied.
 
     python tests/cpu/checkpoint/test_hub_model_card_tags.py
 """
@@ -100,6 +100,8 @@ language:
 """
 # Flow sequence left open: not YAML.
 _MALFORMED_CARD = "---\ntags: [x, y\n---\nbody\n"
+# Valid YAML whose tags entry the tagger cannot extend.
+_SCALAR_TAGS_CARD = "---\ntags: 1\n---\nbody\n"
 # A source model's own card: every field and the body must survive the export untouched.
 _SOURCE_CARD = """---
 library_name: transformers
@@ -137,9 +139,9 @@ def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
     assert sorted(os.listdir(tmp_path)) == [CARD], "the staged card was left beside the real one"
 
 
-@pytest.mark.parametrize("umask", [0o022, 0o077])
+@pytest.mark.parametrize("umask", [0o002, 0o022, 0o077])
 def test_a_fresh_card_takes_the_mode_the_umask_gives_any_new_file(tmp_path, umask):
-    """A 022 umask shares the card with the other readers of the output filesystem; a 077 one does not."""
+    """``0o666`` under the umask, as ``open(path, "w")`` gives: three umasks pin all three digits."""
     previous = os.umask(umask)
     try:
         tag_model_card(str(tmp_path))
@@ -272,8 +274,12 @@ def test_a_failed_write_leaves_the_card_and_no_staged_copy(tmp_path, monkeypatch
     assert (tmp_path / CARD).read_text() == _SOURCE_CARD
 
 
-@pytest.mark.parametrize("metadata", ["tags: [a, b\n", "- a\n- b\n"], ids=["bad-yaml", "not-a-mapping"])
-def test_a_card_whose_metadata_is_not_a_yaml_mapping_names_the_file(tmp_path, metadata):
+@pytest.mark.parametrize(
+    "metadata",
+    ["tags: [a, b\n", "- a\n- b\n", "tags: 1\n", "tags: {a: b}\n"],
+    ids=["bad-yaml", "not-a-mapping", "scalar-tags", "mapping-tags"],
+)
+def test_a_card_with_malformed_metadata_names_the_file(tmp_path, metadata):
     (tmp_path / CARD).write_text(f"---\n{metadata}---\nbody\n")
     with pytest.raises(MalformedModelCardError, match=rf"(?s){re.escape(str(tmp_path / CARD))}.*Repair or remove it"):
         tag_model_card(str(tmp_path))
@@ -339,16 +345,17 @@ def _card_warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.name == model_card.__name__ and r.levelno == logging.WARNING]
 
 
-def test_an_export_carries_a_malformed_source_card_verbatim_and_names_it(tmp_path, caplog):
+@pytest.mark.parametrize("malformed", [_MALFORMED_CARD, _SCALAR_TAGS_CARD], ids=["bad-yaml", "scalar-tags"])
+def test_an_export_carries_a_malformed_source_card_verbatim_and_names_it(tmp_path, caplog, malformed):
     """The weights are already written by then; the re-run recopies the source, so that is the file to fix."""
     source, output = tmp_path / "source", tmp_path / "export"
     source.mkdir()
     output.mkdir()
-    (source / CARD).write_text(_MALFORMED_CARD)
+    (source / CARD).write_text(malformed)
 
     with caplog.at_level(logging.WARNING, logger=model_card.__name__):
         copy_checkpoint_aux_files(str(source), str(output))
-    assert (output / CARD).read_text() == _MALFORMED_CARD
+    assert (output / CARD).read_text() == malformed
     assert len(warnings := _card_warnings(caplog)) == 1, warnings
     assert f"repair or remove {source / CARD}, then re-run" in warnings[0]
 
@@ -484,10 +491,9 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     assert "sentence-transformers" in card.data.tags
 
 
-def test_a_hand_written_adapter_save_carries_the_tag(tmp_path):
-    """The CP / DTensor / expert-LoRA branches write the adapter files themselves, so no PEFT card."""
-    peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
-    ctx = CheckpointContext(
+def _cp_adapter_save_context(peft_model) -> CheckpointContext:
+    """The save rank of a CP LoRA run: the adapter saver writes the files itself."""
+    return CheckpointContext(
         model=peft_model,
         parallelism_config=None,
         is_pp_mode=False,
@@ -505,9 +511,22 @@ def test_a_hand_written_adapter_save_carries_the_tag(tmp_path):
         cp_wrapper=None,
         tokenizer=None,
     )
-    assert PeftAdapterSaver().save(ctx, peft_model, str(tmp_path))
+
+
+def test_a_hand_written_adapter_save_carries_the_tag(tmp_path):
+    """The CP / DTensor / expert-LoRA branches write the adapter files themselves, so no PEFT card."""
+    peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
+    assert PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the hand-written branch wrote the adapter"
     assert metadata_load(tmp_path / CARD) == {"library_name": "peft", "tags": [HALO_TAG]}
+
+
+def test_an_adapter_save_onto_a_malformed_card_fails_naming_it(tmp_path):
+    """The adapter savers tag strictly: only an export, past its weight pass, carries such a card on."""
+    peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
+    (tmp_path / CARD).write_text(_MALFORMED_CARD)
+    with pytest.raises(MalformedModelCardError, match=re.escape(str(tmp_path / CARD))):
+        PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
 
 
 def test_the_expert_adapter_writer_tags_its_output(tmp_path):
