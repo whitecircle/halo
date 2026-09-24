@@ -36,23 +36,24 @@ update the owning doc page). This skill does both, to the house voice.
    they earn their space, present-state only, banned register removed.
 4. **Keep the indexes and cross-links in sync.** A new or renamed page must be
    wired into its section `README.md` **and** the Documentation index in `CLAUDE.md`;
-   a removed page comes out of both. Cross-links stay valid — GitHub slugifies a
-   heading by lowercasing, dropping punctuation like `&`/`+`, and collapsing
-   separators, so `## EP+TP mode` → `#eptp-mode` and
-   `## Checkpointing & state dict` → `#checkpointing--state-dict` on GitHub
-   (note the double hyphen where a symbol sat between spaces), and a
-   `**bold line**` is not a heading and has no anchor. Renaming or trimming a
-   heading breaks every page that links to it — the link check (step 6) catches
-   broken paths, but anchors need a by-hand check.
+   a removed page comes out of both. Link a heading by the slug GitHub generates:
+   lowercased, punctuation like `&`/`+`/`/` dropped, each space a hyphen, so
+   `## EP+TP mode` → `#eptp-mode` and `## Checkpointing & state dict` →
+   `#checkpointing--state-dict` (a double hyphen where a symbol sat between
+   spaces); a repeated heading gets `-1`, `-2`. A `{#custom-id}` suffix is not an
+   anchor on GitHub (it renders as heading text), and a `**bold line**` is not a
+   heading. Renaming a heading breaks every link to it — the link check (step 6)
+   catches it.
 5. **Reconcile a changed fact across the tree.** When you change a fact that
    appears on more than one page (a support-matrix cell, a default, a migration
    like DeepEP V1→V2), `grep` the whole `agent-docs/` tree for the old wording and fix
    every copy — fixing only the owning page leaves the siblings stale. This is the
    `style.md` "one home per fact" rule enforced after the fact.
 6. **Run the link check.** `./scripts/docs/check_links.sh` resolves every relative
-   markdown link in `agent-docs/`, `human-docs/`, `skills/` and the root markdown
-   and fails on a broken target (CI runs the same script in `docs.yml`). It runs
-   on the bare host — no image needed. It must be green before the work is done.
+   markdown link and heading anchor in `agent-docs/`, `human-docs/`, `skills/` and
+   the root markdown and fails on a broken target, a missing anchor or a `{#id}`
+   heading (CI runs the same script in `docs.yml`). It runs on the bare host with
+   stdlib `python3` — no image needed. It must be green before the work is done.
 
 ## Citing repo paths
 
