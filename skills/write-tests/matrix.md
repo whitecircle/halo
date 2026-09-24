@@ -124,7 +124,8 @@ Every MoE family on the roster (`agent-docs/models/README.md`) needs one. New fa
 - A cosine that scores a zero-norm tensor: 1.0 reads a dead gradient as matching, 0.0 reads a
   vanished negative-control gradient as decorrelated. Use `tests.common.utils.cos_sim`, which raises
   on a zero-norm or non-finite operand; a pair that is legitimately all-zero (an expert no token
-  reached) is handled explicitly at the call site.
+  reached) is handled explicitly at the call site. An EP-vs-reference gradient test gets this check
+  and the norm ratio from `score_ep_grad_pairs` ([harness](harness.md#ports-tolerances-reporting)).
 - Tolerances so loose they can't fail (e.g. `0 < loss < 100`, `LOSS_TOLERANCE=0.5` on a 2–10
   loss). Use the named `TOL.*` registry.
 - Trivial pass when `len(losses) < 2` (a `MAX_STEPS=1` run skips the decrease check). Require
