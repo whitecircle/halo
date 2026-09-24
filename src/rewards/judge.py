@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 from src.env import env_str
 from src.inference.openai_client import create_openai_client, resolve_external_api_key
 from src.rewards.samples import ScoringSample, final_assistant_text, render_transcript, task_text, truncate_text
-from src.rewards.scoring import Scorer, ScoreResult
+from src.rewards.scoring import PROBE_SAMPLE, Scorer, ScoreResult
 from src.rewards.spec import JudgeTerm
 
 logger = logging.getLogger(__name__)
@@ -29,11 +29,6 @@ _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 _RETRYABLE_UPSTREAM_CODES = (408, 429, 500, 502, 503, 504)
 _UPSTREAM_RETRIES = 4
 _UPSTREAM_BACKOFF_SECONDS = 2.0
-# The sample the launch probe grades: tiny, so the probe costs nothing, yet in the run's exact shape.
-_PROBE_SAMPLE = ScoringSample(
-    prompt=[{"role": "user", "content": "Reply with the single word: ready"}],
-    completion=[{"role": "assistant", "content": "ready"}],
-)
 
 
 def judge_api_key(term: JudgeTerm) -> str:
@@ -211,7 +206,7 @@ class GenerativeJudge(Scorer):
         """Grade a one-line probe through a fresh client; a request or parse failure raises."""
         client = self._create_client()
         try:
-            result = await self._grade(client, _PROBE_SAMPLE, self.term.max_tokens)
+            result = await self._grade(client, PROBE_SAMPLE, self.term.max_tokens)
         finally:
             await client.close()
         if result.score is None:

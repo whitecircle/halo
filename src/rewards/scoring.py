@@ -8,6 +8,12 @@ from dataclasses import dataclass, field
 from src.rewards.samples import ScoringSample
 from src.rewards.spec import RewardTerm
 
+# The sample a scorer's launch probe grades: tiny, so the probe costs nothing, yet in the run's exact shape.
+PROBE_SAMPLE = ScoringSample(
+    prompt=[{"role": "user", "content": "Reply with the single word: ready"}],
+    completion=[{"role": "assistant", "content": "ready"}],
+)
+
 
 @dataclass(frozen=True)
 class ScoreResult:

@@ -44,7 +44,9 @@ from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
+from accelerate import PartialState
 
+from src.callbacks.efficiency import EfficiencyCallback
 from tests.common.distributed import (
     cleanup_dirs,
     init_distributed,
@@ -124,8 +126,6 @@ class Ctx:
         Returns ``{}`` if no ``EfficiencyCallback`` is attached; metrics are
         optional and correctness tests can omit them.
         """
-        from src.callbacks.efficiency import EfficiencyCallback
-
         cb = (
             trainer_or_cb
             if isinstance(trainer_or_cb, EfficiencyCallback)
@@ -190,8 +190,6 @@ def gpu_test_main(
             rank, world_size, local_rank = init_distributed()
 
             if partial_state:
-                from accelerate import PartialState
-
                 PartialState()
 
             # ── Validate the launch before allocating anything ──────────────

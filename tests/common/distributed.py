@@ -17,6 +17,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeStore
 from transformers import AutoConfig, AutoTokenizer
 
+from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
 from src.distributed.runtime import barrier
 from src.models.patches.attention import ensure_fa4_kernel_cache_env
 
@@ -293,11 +294,6 @@ def eval_loss_over_examples(
 def teardown_distributed():
     """Clean up distributed process group."""
     if dist.is_initialized():
-        # Free DeepEP ElasticBuffers before the group (see destroy_all_dispatchers for why order
-        # matters). No-op without EP; the lazy import keeps this helper usable where deep_ep isn't
-        # installed (CPU-only / IDE envs).
-        with contextlib.suppress(ImportError):
-            from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
-
-            destroy_all_dispatchers()
+        # Free DeepEP ElasticBuffers before the group (see destroy_all_dispatchers for why order matters).
+        destroy_all_dispatchers()
         dist.destroy_process_group()
