@@ -8,7 +8,22 @@ constructor.
 """
 
 from src.trainers.grpo.mixins.chunked_logprobs import LogitsWidth
-from src.trainers.mixins.validation import ctor_config, disable_trl_liger_grpo_loss
+from src.trainers.mixins.validation import ctor_config, disable_trl_liger
+
+
+def disable_trl_liger_grpo_loss(training_args) -> None:
+    """Keep TRL's ``use_liger_kernel`` off for the on-policy GRPO trainers.
+
+    On GRPO the flag swaps the loss for ``LigerFusedLinearGRPOLoss``, which breaks the global
+    ``num_items_in_batch`` normalizer, bypasses chunked-logprobs OOM protection, and drops the
+    entropy path. Halo's toolkit default sets it True, so force it off before TRL caches it.
+    """
+    disable_trl_liger(
+        training_args,
+        "Disabling TRL's use_liger_kernel for GRPO: it swaps the loss for the fused Liger GRPO "
+        "loss (breaks global token normalization and chunked logprobs). Model-level Liger "
+        "kernels are still applied by load_distributed_model.",
+    )
 
 
 class OnPolicyGRPOInitMixin:

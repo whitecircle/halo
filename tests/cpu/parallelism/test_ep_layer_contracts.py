@@ -89,6 +89,9 @@ class _Trainer(EpIntrospectionMixin):
             gradient_checkpointing=gradient_checkpointing, gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
         )
 
+    def _get_unwrapped_model(self) -> nn.Module:
+        return self.model
+
 
 def test_zaya_declares_gc_unsupported_and_base_default_is_supported():
     assert EPZayaMoELayer._supports_gradient_checkpointing is False

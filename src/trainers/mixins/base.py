@@ -9,7 +9,6 @@ class below.
 import logging
 import os
 import time
-from abc import ABC
 from collections.abc import Iterable
 from dataclasses import fields
 from typing import Any
@@ -63,7 +62,7 @@ from src.kernels.liger.orchestrator import (
     warn_if_flce_unreachable,
 )
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
-from src.models.moe_balancing import config_has_experts, ep_wraps_experts
+from src.models.moe_balancing import ep_wraps_experts
 from src.models.structure import model_has_quantized_params, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
@@ -75,7 +74,11 @@ from src.optimizers.registry import (
 )
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
-from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from src.trainers.mixins.ep_introspection import (
+    EpIntrospectionMixin,
+    forces_reentrant_checkpointing,
+    require_ep_config,
+)
 from src.trainers.mixins.grad_sync import GradientSyncMixin
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
@@ -153,21 +156,6 @@ def _knobs_set_by_user(config, names: Iterable[str]) -> list[str]:
     return [name for name in names if getattr(config, name) != defaults[name]]
 
 
-def forces_reentrant_checkpointing(parallelism_config, model_config) -> bool:
-    """Whether gradient checkpointing has to run reentrant for this run.
-
-    CP's sequence all-to-alls do not survive non-reentrant recompute, and EP's DeepEP barriers desync
-    ranks under its lazy recompute. A MoE routes in its recompute too: the router re-runs on a
-    recomputed (nondeterministically, on most attention kernels) hidden state and a near-tie pick can
-    flip, so the routing tensors change shape, which non-reentrant checkpointing rejects as a metadata
-    mismatch — with or without EP wrappers. Pipeline parallelism is the exception: reentrant runs the
-    original forward in no_grad, so FSDP2 registers no pre-backward hooks there.
-    """
-    if parallelism_config.is_pp_mode:
-        return False
-    return parallelism_config.is_ep_mode or parallelism_config.is_cp_mode or config_has_experts(model_config)
-
-
 class DistributedTrainerMixin(
     CheckpointingMixin,
     DataParallelDataLoaderMixin,
@@ -176,8 +164,7 @@ class DistributedTrainerMixin(
     ParallelismValidationMixin,
     PipelineTrainerMixin,
     TokenMetricsMixin,
-    ABC,
-):  # base mixin: not directly instantiable, but has no abstract methods
+):
     """Distributed training infrastructure (EP/CP/TP) for a Trainer subclass.
 
     Lifecycle: subclasses call ``_init_distributed_config()`` to extract parallelism
@@ -470,6 +457,8 @@ class DistributedTrainerMixin(
         if config.fp32_non_ep_params:
             self._upcast_non_ep_params_to_fp32()
 
+        self._capture_ep_config()
+
         # TP/CP before needs_ep_wrappers (defaults True), else a TP-only dense model shards FSDP2 over world.
         if config.is_pp_mode:
             self._setup_pipeline_parallel()
@@ -631,7 +620,7 @@ class DistributedTrainerMixin(
         if peft_model is None:
             return
         # EP params: FSDP-ignored and deliberately fp32; downcasting breaks the router forward.
-        ep_param_ids = {id(p) for module in self._find_ep_modules() for p in module.parameters()}
+        ep_param_ids = self._get_ep_param_ids()
         cast = 0
         for param in peft_model.parameters():
             if id(param) in ep_param_ids:
@@ -1039,8 +1028,8 @@ class DistributedTrainerMixin(
         expert-TP group (ETP mode), or None."""
         if self.parallelism_config.is_tp_mode:
             return self._get_tp_process_group()
-        if self.parallelism_config.is_expert_tp_mode and self._ep_config is not None:
-            return self._ep_config.expert_tp_group
+        if self.parallelism_config.is_expert_tp_mode:
+            return require_ep_config(self._ep_config).expert_tp_group
         return None
 
     def _get_tp_group_src_rank(self) -> int:
@@ -1048,8 +1037,8 @@ class DistributedTrainerMixin(
         results so all group ranks process identical inputs."""
         if self.parallelism_config.is_tp_mode:
             return get_global_rank() - self._get_tp_rank()
-        if self.parallelism_config.is_expert_tp_mode and self._ep_config is not None:
-            group = self._ep_config.expert_tp_group
+        if self.parallelism_config.is_expert_tp_mode:
+            group = require_ep_config(self._ep_config).expert_tp_group
             if group is not None:
                 return dist.get_process_group_ranks(group)[0]
         return get_global_rank()
@@ -1313,7 +1302,7 @@ class DistributedTrainerMixin(
         self._accumulate_attention_flops(inputs)
         if self._pp_runtime is not None:
             # The schedule drives forward and backward, so the inherited step must not also run them.
-            return self._pp_training_step(inputs, num_items_in_batch)
+            return self._pp_training_step(inputs)
         self._warn_once_on_thin_memory_margin()
         # HF sets sync_gradients before every training_step, so this is the window's last microbatch.
         self._set_backward_reshard(self.accelerator.sync_gradients)
@@ -1454,7 +1443,7 @@ class DistributedTrainerMixin(
 
         self.is_deepspeed_enabled = False
         # Runs before any FSDP2 wrapping, so _fsdp_wrapped is False — the checkpoint path relies on it.
-        self.is_fsdp_enabled = getattr(self, "is_fsdp_enabled", False)
+        self.is_fsdp_enabled = False
 
         logger.info(f"Created Accelerator with distributed_type: {self.accelerator.state.distributed_type}")
 

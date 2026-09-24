@@ -17,7 +17,7 @@ from accelerate.logging import get_logger
 from peft import PeftModel
 
 from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.models.loading.config_levels import config_sources, set_config_field_run_scoped
@@ -121,21 +121,6 @@ def disable_trl_liger(training_args, reason: str | None = None) -> bool:
     return True
 
 
-def disable_trl_liger_grpo_loss(training_args) -> None:
-    """Keep TRL's ``use_liger_kernel`` off for the GRPO trainers (shared by online + environmental).
-
-    On GRPO the flag swaps the loss for ``LigerFusedLinearGRPOLoss``, which breaks the global
-    ``num_items_in_batch`` normalizer, bypasses chunked-logprobs OOM protection, and drops the
-    entropy path. Halo's toolkit default sets it True, so force it off before TRL caches it.
-    """
-    disable_trl_liger(
-        training_args,
-        "Disabling TRL's use_liger_kernel for GRPO: it swaps the loss for the fused Liger GRPO "
-        "loss (breaks global token normalization and chunked logprobs). Model-level Liger "
-        "kernels are still applied by load_distributed_model.",
-    )
-
-
 def has_non_expert_lora(model) -> bool:
     """Whether ``model`` carries LoRA weights outside the EP expert layers.
 
@@ -145,7 +130,7 @@ def has_non_expert_lora(model) -> bool:
     grouped expert adapters are excluded: they live on FSDP-ignored expert weights, not on the
     TP-sharded backbone.
     """
-    ep_param_ids = {id(p) for m in model.modules() if isinstance(m, EPMoELayerBase) for p in m.parameters()}
+    ep_param_ids = {id(p) for _name, m in find_ep_layers(model) for p in m.parameters()}
     return any("lora_" in name and id(param) not in ep_param_ids for name, param in model.named_parameters())
 
 
@@ -260,9 +245,7 @@ class ParallelismValidationMixin:
             return
 
         offending = []
-        for name, module in model.named_modules():
-            if not isinstance(module, EPMoELayerBase):
-                continue
+        for name, module in find_ep_layers(model):
             native = {f"{attr}_lora_{w}" for attr in module._expert_lora_attrs for w in ("A", "B")}
             for param_name, _ in module.named_parameters():
                 if "lora_" in param_name and param_name not in native:

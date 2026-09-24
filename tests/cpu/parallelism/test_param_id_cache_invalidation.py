@@ -73,6 +73,17 @@ def _live_ep_ids(model: nn.Module) -> set:
     return {id(p) for m in model.modules() if isinstance(m, EPMoELayerBase) for p in m.parameters()}
 
 
+def test_the_ep_config_is_captured_explicitly_and_only_there():
+    """Discovery has no side effect; the capture reads the first EP layer's config, or ``None``."""
+    trainer = _StubTrainer()
+    assert trainer._find_ep_modules() and trainer._ep_config is None
+    trainer._capture_ep_config()
+    assert trainer._ep_config is trainer.model[1].ep_config
+    trainer.model = nn.Sequential(nn.Linear(H, H))
+    trainer._capture_ep_config()
+    assert trainer._ep_config is None
+
+
 def test_stale_ids_would_misclassify_every_ep_param():
     """The failure this guards against, pinned: without invalidation the memo names dead objects."""
     trainer = _StubTrainer()

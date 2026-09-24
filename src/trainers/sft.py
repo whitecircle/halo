@@ -71,7 +71,7 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         full-sequence labels (metrics are computed on the local chunk)."""
         self._validate_inputs(inputs)
 
-        if self.is_cp_mode and self.cp_config is not None:
+        if self.is_cp_mode:
             full_labels = inputs.get("labels")
             full_attention_mask = inputs.get("attention_mask")
 
@@ -155,8 +155,6 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         mode = "train" if self.model.training else "eval"
 
         if full_labels is None or outputs.logits is None:
-            return
-        if self.cp_config is None:
             return
 
         seq_len = full_labels.shape[1]
