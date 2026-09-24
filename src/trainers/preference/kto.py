@@ -77,7 +77,7 @@ class DistributedKTOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsi
     def __init__(self, *args, **kwargs):
         # TRL's fused KTO Liger path NPEs when ref_model is None; must precede _init_distributed_config.
         disable_trl_liger(
-            ctor_config(args, kwargs),
+            ctor_config(type(self), args, kwargs),
             "Disabling TRL's use_liger_kernel for KTO: the experimental KTO Liger loss path is "
             "broken in TRL 1.6. Liger kernels are still applied at the model level by "
             "load_distributed_model.",

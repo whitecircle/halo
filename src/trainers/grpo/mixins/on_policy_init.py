@@ -17,13 +17,13 @@ class OnPolicyGRPOInitMixin:
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Resolve the training config and extract the distributed kwargs; ``(config, kwargs)``.
 
-        The config may arrive positionally, which ``_init_distributed_config``'s ``kwargs["args"]``
-        fallback cannot see; its Liger EP/TP/CP filter, non-shared-FS ``save_on_each_node`` forcing
-        and EP/CP reentrant override would then no-op.
+        The config is resolved here, positionally or by keyword, because TRL's Liger GRPO loss has to
+        be switched off on it before ``_init_distributed_config`` runs; the positionals are forwarded
+        so that a positional model reaches the mixin's MoE gates too.
         """
-        training_args = ctor_config(args, kwargs)
+        training_args = ctor_config(type(self), args, kwargs)
         disable_trl_liger_grpo_loss(training_args)
-        return training_args, self._init_distributed_config(kwargs, training_args=training_args)
+        return training_args, self._init_distributed_config(kwargs, training_args=training_args, ctor_args=args)
 
     def _finish_on_policy_init(self) -> None:
         """Realize the parallel modes, gate the reference model, the chunked head path and the

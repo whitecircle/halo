@@ -79,7 +79,7 @@ from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from src.trainers.mixins.grad_sync import GradientSyncMixin
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
-from src.trainers.mixins.validation import ParallelismValidationMixin, disable_trl_liger
+from src.trainers.mixins.validation import ParallelismValidationMixin, ctor_model_and_config, disable_trl_liger
 
 register_custom_optimizers()
 
@@ -218,11 +218,12 @@ class DistributedTrainerMixin(
         """Extract ParallelismConfig from kwargs and set up distributed state.
 
         Call before super().__init__() to extract/validate parallelism args (modifies kwargs
-        in-place, removing them). training_args defaults to kwargs["args"]; trainers with an
+        in-place, removing them). training_args defaults to the ctor's ``args``; trainers with an
         explicit `args` param (Classification, SMPO) should pass it. Trainers whose signatures name
         the distributed params explicitly pass them via ``**explicit``; kwargs-style values win over
-        explicit ones. ``ctor_args`` are the trainer's own ctor positionals, forwarded to the
-        ``_validate_pp_mode`` hook.
+        explicit ones. A ``(*args, **kwargs)`` trainer passes its positionals as ``ctor_args``: a
+        positional ``model``/``args`` is read out of them by this trainer's signature, since every
+        setup step below reads one of the two, and they are forwarded to the ``_validate_pp_mode`` hook.
         """
         if explicit:
             kwargs = {**explicit, **kwargs}
@@ -248,8 +249,10 @@ class DistributedTrainerMixin(
         # Declared here so every trainer's eval path caches the same object under the same key.
         self._eval_dataloaders: dict[str, Any] = {}
 
+        model, ctor_training_args = ctor_model_and_config(type(self), ctor_args, kwargs)
         if training_args is None:
-            training_args = kwargs.get("args")
+            training_args = ctor_training_args
+        model_config = getattr(model, "config", None)
         self._configure_mixed_precision(kwargs, training_args)
 
         # Non-shared FS: without a per-node write, nodes 1..N resume at global_step=0 and desync the step.
@@ -272,9 +275,7 @@ class DistributedTrainerMixin(
             if "fused_linear_cross_entropy" not in safe_config:
                 safe_config["fused_linear_cross_entropy"] = False
             forced_off = liger_parallelism_overrides(
-                has_ep_wrapped_experts=liger_ep_disables_fused_glu(
-                    parallelism_config.needs_ep_wrappers, getattr(kwargs.get("model"), "config", None)
-                ),
+                has_ep_wrapped_experts=liger_ep_disables_fused_glu(parallelism_config.needs_ep_wrappers, model_config),
                 tp_size=parallelism_config.tp_size,
                 cp_size=parallelism_config.cp_size,
                 pp_size=parallelism_config.pp_size,
@@ -303,7 +304,7 @@ class DistributedTrainerMixin(
         if (
             training_args is not None
             and getattr(training_args, "gradient_checkpointing", False)
-            and forces_reentrant_checkpointing(parallelism_config, getattr(kwargs.get("model"), "config", None))
+            and forces_reentrant_checkpointing(parallelism_config, model_config)
         ):
             gc_kwargs = dict(getattr(training_args, "gradient_checkpointing_kwargs", None) or {})
             if gc_kwargs.get("use_reentrant") is False:
@@ -907,11 +908,12 @@ class DistributedTrainerMixin(
         logger.info("✓ CP configured (NVLink-domain-local)")
 
     def _find_cp_wrapper(self) -> UlyssesCPModelWrapper | None:
-        """Find the CP wrapper in the model hierarchy."""
-        if isinstance(self.model, UlyssesCPModelWrapper):
-            return self.model
+        """Find the CP wrapper in the model hierarchy, beneath any ``torch.compile`` wrapper."""
+        model = self._top_level_model()
+        if isinstance(model, UlyssesCPModelWrapper):
+            return model
 
-        inner = getattr(self.model, "base_model", None)
+        inner = getattr(model, "base_model", None)
         if inner is not None:
             inner_model = getattr(inner, "model", inner)
             if isinstance(inner_model, UlyssesCPModelWrapper):

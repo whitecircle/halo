@@ -111,7 +111,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, RewardTrainer):
                 # paired by hand.
                 kwargs["data_collator"] = DataCollatorForVLMPreference(
                     processor=processing_class,
-                    max_length=getattr(ctor_config(args, kwargs, position=1), "max_length", None),
+                    max_length=getattr(ctor_config(type(self), args, kwargs), "max_length", None),
                 )
             # TRL's reward ctor settles the pad token through the tokenizer api (``pad_token``,
             # ``get_vocab``), none of which a ProcessorMixin carries — handed a processor it raises
@@ -119,7 +119,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, RewardTrainer):
             # and the processor is reinstated below because ``save_pretrained`` writes
             # ``processing_class``: without it the export carries no processor_config.json.
             kwargs["processing_class"] = resolve_tokenizer(processing_class)
-        kwargs = self._init_distributed_config(kwargs)
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args)
         super().__init__(*args, **kwargs)
         if self._is_vlm:
             self.processing_class = self._processor

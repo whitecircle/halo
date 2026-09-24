@@ -1,23 +1,15 @@
 #!/usr/bin/env python
 """Every training script must construct its trainer with ``model=`` as a KEYWORD.
 
-Most trainers take ``(self, *args, **kwargs)`` and hand ``kwargs`` to ``_init_distributed_config``,
-where two seams in ``src/trainers/mixins/base.py`` read ``kwargs.get("model")``:
+The pipeline seam in ``src/trainers/mixins/base.py`` must SPLIT the model into this rank's stage
+before ``super().__init__`` ever sees it, and it rewrites ``kwargs["model"]`` to do so. A positional
+model lands in ``*args`` instead, so pipeline parallelism raises "Pipeline parallelism requires the
+model to be passed as the `model` keyword" no matter how the run is configured, leaving the shipped
+script PP-unreachable. (The other setup steps read a positional model through ``ctor_args``; see
+``tests/cpu/trainers/test_positional_ctor_setup.py``.)
 
-* the pipeline seam, which must SPLIT the model into this rank's stage before ``super().__init__``
-  ever sees it — with a positional model it finds nothing and pipeline parallelism raises "Pipeline
-  parallelism requires the model to be passed as the `model` keyword" no matter how the run is
-  configured, leaving the shipped script PP-unreachable;
-* the Liger override, which forces the fused SwiGLU/GeGLU kernels off when the model actually
-  carries experts (``ep_wraps_experts``) and the run wraps them for EP.
-
-(The stock-optimizer refusal is not one of them: it reads ``self.model`` inside ``create_optimizer``,
-which ``Trainer.__init__`` sets from either calling convention.)
-
-A positional model lands in ``*args`` instead, so ``kwargs.get("model")`` is ``None``,
-``config_has_experts(None)`` is ``False``, and the MoE gates silently take the non-MoE branch. There
-is no in-code symptom: the trainer, the config validation and every GPU test (which build trainers
-directly with ``model=``) stay green, and only the shipped script is degraded. This test reads the
+The trainer, the config validation and every GPU test (which build trainers directly with
+``model=``) stay green either way, and only the shipped script is degraded. This test reads the
 scripts themselves rather than trusting review.
 
 Run: ``pytest -m cpu tests/cpu/parallelism/test_scripts_pass_model_as_kwarg.py``
@@ -37,9 +29,8 @@ _SCRIPTS = _REPO_ROOT / "scripts" / "training"
 # Every trainer a shipped script constructs — the PP-capable roster (agent-docs/parallelism/
 # pipeline-parallelism.md) and the rest alike. Kept explicit rather than imported so the test reads
 # the scripts as text and cannot be satisfied by a runtime alias; a new trainer belongs here. The
-# distillation trainers name their model ``student_model``, so the MoE gates above never see it
-# either way — they are listed because "no positional arguments" is the same contract for every
-# trainer.
+# teacher-distillation trainer names its model ``student_model``, so the pipeline seam never sees it
+# either way — it is listed because "no positional arguments" is the same contract for every trainer.
 TRAINERS = {
     "DistributedSFTTrainer",
     "SmoothMarginPOTrainer",
@@ -81,8 +72,7 @@ def test_no_script_passes_the_model_positionally():
             offenders.append(f"{path.relative_to(_REPO_ROOT)}:{call.lineno} {trainer}(<positional>, ...)")
     assert not offenders, (
         "These scripts pass the model positionally, so it never reaches the kwargs the pipeline "
-        "seam and the MoE gates in src/trainers/mixins/base.py read — PP becomes unreachable and both "
-        "gates silently take the non-MoE branch:\n  " + "\n  ".join(offenders)
+        "seam in src/trainers/mixins/base.py splits — PP becomes unreachable:\n  " + "\n  ".join(offenders)
     )
 
 

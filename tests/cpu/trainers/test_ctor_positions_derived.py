@@ -8,7 +8,8 @@ the parameter disappears from it.
 The per-trainer slots below are pinned as LITERALS read off TRL 1.6.0's signatures — recomputing
 ``params.index(...)`` here would assert the derivation against itself. A TRL bump that moves one of
 these parameters fails this test, which is the point: the gates that read them (SFT's CP collator
-rejection, DPO/KTO's EP/TP reference rejection) would otherwise gate on the wrong argument.
+rejection, DPO/KTO's EP/TP reference rejection, the mixin's positional model/config) would otherwise
+gate on the wrong argument.
 
 Run: ``python tests/cpu/trainers/test_ctor_positions_derived.py`` (or ``pytest -m cpu``).
 """
@@ -18,10 +19,15 @@ import sys
 import pytest
 from trl import DPOTrainer, GRPOTrainer, RewardTrainer
 
+from src.trainers.distillation.sdpg import DistributedSDPGTrainer
+from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value
 from src.trainers.preference.dpo import _CTOR_POSITIONS as DPO_CTOR_POSITIONS
 from src.trainers.preference.kto import _CTOR_POSITIONS as KTO_CTOR_POSITIONS
+from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from src.trainers.sft import _CTOR_POSITIONS as SFT_CTOR_POSITIONS
+from src.trainers.sft import DistributedSFTTrainer
 
 
 def test_sft_data_collator_slot_matches_installed_trl():
@@ -41,27 +47,44 @@ def test_kto_ref_model_slot_matches_installed_trl():
     assert KTO_CTOR_POSITIONS == {"ref_model": 1}
 
 
-def test_ctor_config_slots_match_the_installed_trl_signatures():
-    """``ctor_config``'s positional slots are hardcoded; this is what keeps them honest.
-
-    Eight call sites pass ``position=2`` (default) or ``position=1`` (``RewardTrainer``). The slot
-    cannot be derived at the call site without changing ``ctor_config``'s truthiness fall-through —
-    ``ctor_value`` returns ``None`` for an explicit ``args=None`` where ``ctor_config`` falls through
-    to the positional slot, which ``_require_vllm_server_mode`` relies on. So the derivation runs
-    here instead: a TRL release that reorders these parameters fails this test.
-    """
+def test_config_slots_match_the_installed_trl_signatures():
+    """TRL 1.6.0: ``args`` sits after ``(model, ref/reward)`` except on ``RewardTrainer``."""
     assert ctor_positions(DPOTrainer, "args") == {"args": 2}
     assert ctor_positions(GRPOTrainer, "args") == {"args": 2}
     assert ctor_positions(RewardTrainer, "args") == {"args": 1}
 
 
+@pytest.mark.parametrize(
+    ("trainer_cls", "slots"),
+    [
+        (DistributedSFTTrainer, {"model": 0, "args": 1}),
+        (DistributedSelfDistillationTrainer, {"model": 0, "args": 1}),
+        (DistributedRewardTrainer, {"model": 0, "args": 1}),
+        (DistributedGRPOTrainer, {"model": 0, "args": 2}),
+        (DistributedSDPGTrainer, {"model": 0, "args": 2}),
+    ],
+)
+def test_toolkit_trainers_resolve_to_the_base_they_forward_to(trainer_cls, slots):
+    """The mixin reads a positional model/config off the trainer's own class. A toolkit ctor that
+    adds only keyword-only parameters after ``*args`` fills no slot, so the walk must pass through it
+    to the TRL base the ``*args`` are forwarded to rather than stop at it and find no ``model``."""
+    assert ctor_positions(trainer_cls, "model", "args") == slots
+
+
+def test_ctor_config_reads_the_slot_off_the_signature():
+    """``RewardTrainer`` takes its config one slot earlier than the GRPO/DPO shape; the class decides."""
+    config = object()
+    assert ctor_config(RewardTrainer, (None, config), {}) is config
+    assert ctor_config(GRPOTrainer, (None, None, config), {}) is config
+    assert ctor_config(GRPOTrainer, (None, config), {}) is None
+
+
 def test_ctor_config_falls_through_an_explicit_none_keyword():
     """Load-bearing at ``_require_vllm_server_mode``: ``args=None`` must not mask a positional config."""
     config = object()
-    assert ctor_config((None, None, config), {"args": None}) is config
-    assert ctor_config((), {"args": config}) is config
-    assert ctor_config((None, config), {}, position=1) is config
-    assert ctor_config((), {}) is None
+    assert ctor_config(GRPOTrainer, (None, None, config), {"args": None}) is config
+    assert ctor_config(GRPOTrainer, (), {"args": config}) is config
+    assert ctor_config(GRPOTrainer, (), {}) is None
 
 
 def test_gate_extracts_the_passed_collator():

@@ -66,7 +66,7 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
         self._warned_missing_answer: set = set()
 
         disable_trl_liger(
-            ctor_config(args, kwargs),
+            ctor_config(type(self), args, kwargs),
             "Disabling use_liger_kernel for SDPG: the fused GRPO-Liger loss bypasses the OPD term.",
         )
 

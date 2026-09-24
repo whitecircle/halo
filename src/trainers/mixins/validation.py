@@ -2,13 +2,15 @@
 
 Read-only checks run once during setup: inspect ``self.parallelism_config`` / ``self.model`` and
 raise with an actionable message, or return. :func:`ctor_positions` / :func:`ctor_value` /
-:func:`ctor_config` read the argument a gate validates out of a trainer ``__init__``'s ``*args``,
-before the checks below run, and :func:`disable_trl_liger` clears the TRL flag a gate rejects.
+:func:`ctor_config` / :func:`ctor_model_and_config` read the argument a gate validates out of a
+trainer ``__init__``'s ``*args``, before the checks below run, and :func:`disable_trl_liger` clears
+the TRL flag a gate rejects.
 """
 
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 import torch.nn as nn
 from accelerate.logging import get_logger
@@ -29,12 +31,13 @@ logger = get_logger(__name__)
 
 
 def _declared_ctor_parameters(trainer_cls: type) -> list[str]:
-    """The named ctor parameters ``trainer_cls`` really takes, ``self`` dropped.
+    """The positional ctor parameters ``trainer_cls`` really takes, ``self`` dropped.
 
-    TRL wraps some trainers in a ``(*args, **kwargs)`` deprecation shim that forwards to the class
-    holding the real signature (``KTOTrainer`` → ``trl.experimental.kto``). A shim declares no slots,
-    so the positions its callers must fill are those of the next informative signature up the MRO,
-    which is what the shim forwards its ``*args`` to.
+    A ``(*args, **kwargs)`` ctor declares no slots, so the positions its callers fill are those of the
+    next informative signature up the MRO, which is what it forwards its ``*args`` to: TRL's
+    deprecation shims (``KTOTrainer`` → ``trl.experimental.kto``) and the toolkit trainers alike.
+    Keyword-only parameters occupy no slot, so a toolkit ctor that only adds those after ``*args``
+    resolves to the base it forwards to.
     """
     for cls in trainer_cls.__mro__:
         init = cls.__dict__.get("__init__")
@@ -43,7 +46,7 @@ def _declared_ctor_parameters(trainer_cls: type) -> list[str]:
         named = [
             name
             for name, param in inspect.signature(init).parameters.items()
-            if name != "self" and param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
+            if name != "self" and param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
         ]
         if named:
             return named
@@ -82,17 +85,28 @@ def ctor_value(ctor_args: tuple, kwargs: dict, name: str, positions: dict[str, i
     return ctor_args[position] if len(ctor_args) > position else None
 
 
-def ctor_config(args: tuple, kwargs: dict, position: int = 2):
-    """Extract the training config from HF/TRL trainer ctor args: ``kwargs['args']`` or the
-    conventional positional slot (2 for ``(model, ref/reward, args, ...)`` signatures, 1 for
-    ``RewardTrainer``).
+def ctor_config(trainer_cls: type, ctor_args: tuple, kwargs: dict):
+    """The training config a trainer ctor was handed: ``kwargs['args']``, else ``trainer_cls``'s
+    ``args`` slot read off its signature (:func:`ctor_positions`).
 
     Truthiness, not membership: an explicit ``args=None`` keyword falls through to the positional
-    slot, which lets ``_require_vllm_server_mode`` see a positionally-passed config. Every caller's
-    slot is pinned against the installed TRL signatures by
-    ``tests/cpu/trainers/test_ctor_positions_derived.py``.
+    slot, which lets ``_require_vllm_server_mode`` see a positionally-passed config.
     """
-    return kwargs.get("args") or (args[position] if len(args) > position else None)
+    if kwargs.get("args"):
+        return kwargs["args"]
+    return ctor_value(ctor_args, {}, "args", ctor_positions(trainer_cls, "args"))
+
+
+def ctor_model_and_config(trainer_cls: type, ctor_args: tuple, kwargs: dict) -> tuple[Any, Any]:
+    """``(model, args)`` a trainer ctor was handed, by keyword or by ``trainer_cls``'s positional slots.
+
+    With no positionals both come from ``kwargs`` and the signature is not consulted, so a trainer
+    whose ctor names neither parameter still resolves.
+    """
+    if not ctor_args:
+        return kwargs.get("model"), kwargs.get("args")
+    model = ctor_value(ctor_args, kwargs, "model", ctor_positions(trainer_cls, "model"))
+    return model, ctor_config(trainer_cls, ctor_args, kwargs)
 
 
 def disable_trl_liger(training_args, reason: str | None = None) -> bool:

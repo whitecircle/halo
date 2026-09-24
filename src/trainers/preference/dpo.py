@@ -120,7 +120,7 @@ class DistributedDPOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsi
         if config is not None and config.is_pp_mode:
             # Must run before _init_distributed_config, which drives the PP gate and the split.
             disable_trl_liger(
-                ctor_config(args, kwargs),
+                ctor_config(type(self), args, kwargs),
                 "DPO under pipeline parallelism: disabling use_liger_kernel — TRL's Liger DPO loss "
                 "has no precompute_ref_log_probs branch, and the PP last-stage loss replaces TRL's "
                 "loss path entirely.",

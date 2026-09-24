@@ -58,7 +58,7 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         return self.is_cp_mode
 
     def __init__(self, *args, **kwargs):
-        kwargs = self._init_distributed_config(kwargs)
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args)
         self._reject_cp_incompatible_collator(ctor_value(args, kwargs, "data_collator", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)
         self._setup_distributed_modes()
