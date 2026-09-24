@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Tests for EfficiencyCallback. Run: python tests/cpu/callbacks/test_efficiency_callback.py"""
 
+import logging
 import sys
 
 import pytest
@@ -214,6 +215,22 @@ def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_pre
     assert callback.state.precision == expected
     assert callback.mfu.precision == expected
     assert callback.state.gpu_peak_flops == GPU_PEAK_FLOPS["B300"].flops[expected]
+
+
+def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, caplog):
+    """A detected SKU whose table entry lacks the run's precision zeroes MFU, S-MFU and TFLOP/s for
+    the whole run; the INFO line naming the GPU must not be the only trace of it."""
+    from src.callbacks import efficiency
+
+    monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "A100")
+    callback = efficiency.EfficiencyCallback(
+        make_parallelism_config(world_size=1, gpus_per_node=1, lowp_precision="fp8")
+    )
+    with caplog.at_level(logging.WARNING, logger=efficiency.__name__):
+        callback._initialize_metrics(MockTrainingArgs(bf16=True))
+
+    assert callback.state.gpu_peak_flops is None, "test premise: A100 has no fp8 peak"
+    assert [r for r in caplog.records if "has no fp8 peak for A100" in r.getMessage()]
 
 
 def test_get_gpu_peak_flops():

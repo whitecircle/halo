@@ -45,7 +45,7 @@ class GpuPeak:
     flops: dict[str, float]
 
 
-# Dense Tensor Core TFLOPS (no structured sparsity). FP8: Hopper+; FP4: Blackwell only.
+# Dense Tensor Core peaks in FLOP/s (no structured sparsity). FP8: Hopper+; FP4: Blackwell only.
 GPU_PEAK_FLOPS = {
     "H100_SXM": GpuPeak(
         aliases=("H100",),

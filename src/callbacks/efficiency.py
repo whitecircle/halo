@@ -669,8 +669,13 @@ class EfficiencyCallback(transformers.TrainerCallback):
             logger.info(f"Detected GPU: {self.state.gpu_model}, Precision: {self.state.precision}")
             if self.state.gpu_peak_flops:
                 logger.info(f"GPU Peak FLOPS: {self.state.gpu_peak_flops / _TERA:.1f} TFLOPS")
+            else:
+                logger.warning(
+                    f"GPU_PEAK_FLOPS has no {self.state.precision} peak for {self.state.gpu_model}, so MFU, "
+                    f"S-MFU and TFLOP/s are reported as 0. Add the dense peak to src/hardware.py."
+                )
         else:
-            logger.warning("Could not detect GPU model, MFU calculation may be inaccurate")
+            logger.warning("Could not detect the GPU model, so MFU, S-MFU and TFLOP/s are reported as 0.")
 
         if self.state.model_flops_per_token:
             logger.info(f"Model FLOPS/token: {self.state.model_flops_per_token / 1e12:.4f} TFLOPS")
