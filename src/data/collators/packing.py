@@ -22,6 +22,7 @@ from src.data.spans import (
     LABEL_IGNORE_INDEX,
     PACKED_SPAN_POLICY,
     mask_batch_to_completion_spans,
+    require_response_marker,
     resolve_eos_token_ids,
     resolve_spans_or_warn,
     tokenize_response_template,
@@ -527,11 +528,8 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
     def __post_init__(self):
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
-
-        if self.response_prompt_template is not None:
-            self.response_token_ids = tokenize_response_template(self.response_prompt_template, self.tokenizer)
-        else:
-            self.response_token_ids = None
+        require_response_marker(self.response_prompt_template, True, type(self).__name__)
+        self.response_token_ids = tokenize_response_template(self.response_prompt_template, self.tokenizer)
 
         if self.eos_token_ids is None:
             self.eos_token_ids = resolve_eos_token_ids(self.tokenizer)
@@ -539,8 +537,6 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
         warn_if_pad_equals_eos(self.tokenizer)
 
     def _sample_labels(self, labels: list[int], input_ids: list[int]) -> list[int]:
-        if self.response_token_ids is None:
-            return labels
         return self._apply_completion_mask(labels, input_ids)
 
     def _apply_completion_mask(self, labels: list[int], input_ids: list[int]) -> list[int]:
