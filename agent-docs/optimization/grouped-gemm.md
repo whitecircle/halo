@@ -135,7 +135,7 @@ Families whose activation is a standard SiLU gate fuse the activation and the mu
 > [!NOTE]
 > **Expert Tensor Parallelism**
 >
-> When `expert_tp_size > 1`, GptOss falls back to the loop path (interleaved weights cannot be pre-de-interleaved once TP-sharded). The other families use grouped GEMM regardless of ETP, on the 3-call separate-projection path (`gate_up_proj` is split into `gate_proj`/`up_proj` before the intermediate dim is sharded).
+> When `expert_tp_size > 1`, GptOss runs the loop path: ETP stores its de-interleaved gate/up pair under the plain `gate_proj`/`up_proj` names the loop reads, not the `gate_proj_gmm`/`up_proj_gmm` pair the grouped path reads (the layer's init summary reports `grouped_mm=False`). The other families use grouped GEMM regardless of ETP, on the 3-call separate-projection path (`gate_up_proj` is split into `gate_proj`/`up_proj` before the intermediate dim is sharded).
 
 ## Standalone grouped GEMM mode
 

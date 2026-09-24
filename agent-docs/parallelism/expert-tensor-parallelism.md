@@ -220,7 +220,7 @@ are [not yet available in this release](pipeline-parallelism.md).
 | `save_sharded_ep` | rejected — the merge script cannot reconstruct TP-sharded expert weights | `validate_ep_sharded_save` |
 | `use_hsdp` | rejected — ETP builds its own `(dp, tp)` mesh | `_validate_hsdp` |
 | `use_peft` / attention LoRA | supported — pure ETP leaves attention unsharded, so the adapter is a genuine replica | — |
-| `use_grouped_gemm` on GptOss | silently falls back to the per-expert loop — once TP-sharded, the interleaved `gate_up_proj` cannot be de-interleaved | `EPGptOssMoELayer._grouped_mm_enabled` |
+| `use_grouped_gemm` on GptOss | runs the per-expert loop, reported in the layer's init summary (`grouped_mm=False`) — ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads | `EPGptOssMoELayer._grouped_mm_enabled` |
 
 The same-token invariant ETP depends on — partners must hold identical batches, since
 `ReduceFromExpertTP` sums element-wise in token space — is maintained by the rank layout, the
