@@ -1081,9 +1081,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                         self._world_metrics.fraction(f"routing/rollout_{key}_frac", count, total)
                     if coverage["unresolved"] == total and self._batch_build_error is None:
                         self._batch_build_error = (
-                            f"routing_replay='rollout': none of this batch's {total} routed rows "
-                            f"matched a known engine coverage convention, so every position would "
-                            f"replay natural routing and R3 would be inert. The engine's "
+                            f"routing_replay='rollout': no routed row on this rank ({total} in the "
+                            f"batch) matched a known engine coverage convention, so every position "
+                            f"would replay natural routing and R3 would be inert. The engine's "
                             f"routed_experts token count no longer lines up with the trainer's "
                             f"prompt + completion lengths — check the engine version against the "
                             f"conventions in assemble_rollout_masks."

@@ -112,18 +112,16 @@ def group_relative_advantages(
 def _require_finite(rewards: torch.Tensor, advantages: torch.Tensor) -> None:
     """Raise on every rank when any rank's rewards or advantages are non-finite.
 
-    Zeroing them would hide a broken reward, and under ``scale_rewards="batch"`` one bad reward
-    turns the shared std non-finite, so the whole step's advantages would be zeroed with it. The
-    verdict is agreed across ranks: a rank raising alone leaves its peers in the next collective.
+    The verdict is agreed across ranks: a rank raising alone leaves its peers in the next collective.
     """
     if rank_consensus(bool(torch.isfinite(rewards).all() & torch.isfinite(advantages).all()))[0]:
         return
-    bad_rewards = int((~torch.isfinite(rewards)).sum())
     raise ValueError(
-        f"Non-finite GRPO advantages on at least one rank (this rank: {bad_rewards} non-finite of "
-        f"{rewards.numel()} rewards, {int((~torch.isfinite(advantages)).sum())} non-finite "
-        f"advantages). A reward function or environment returned NaN/Inf; fix it at the source "
-        f"rather than training on zeroed advantages."
+        f"Non-finite GRPO rewards or advantages on at least one rank (this rank: "
+        f"{int((~torch.isfinite(rewards)).sum())} of {rewards.numel()} rewards and "
+        f"{int((~torch.isfinite(advantages)).sum())} advantages non-finite). Fix the reward function or "
+        f"environment returning NaN/Inf; under scale_rewards='batch' a single one makes every advantage "
+        f"of the step non-finite."
     )
 
 

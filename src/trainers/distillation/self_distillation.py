@@ -188,7 +188,8 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
             raise RuntimeError(
                 f"sdpg_beta_base={self.sdpg_beta_base} needs the privileged teacher branch (teacher_* "
                 f"keys) in every rank's batch, and at least one rank's batch carries none. The "
-                f"SelfDistill collators build it; check the data_collator."
+                f"SelfDistill collators build it; check the data_collator, or set sdpg_beta_base: 0 "
+                f"to drop the term."
             )
         if run_teacher:
             # Every per-token tensor must come from the teacher branch: its sequence is longer (the hint).

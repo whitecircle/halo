@@ -109,7 +109,8 @@ class EpIntrospectionMixin:
         """Drop every memoized ``id(param)`` set. Called once wrapping is complete.
 
         The ids are only meaningful against the Parameter objects that survive wrapping. Anything
-        cached earlier (the fp32 upcast populates :meth:`_get_ep_param_ids` before FSDP runs) names
+        cached earlier (the PEFT dtype alignment and the fp32 upcast populate
+        :meth:`_get_ep_param_ids` before FSDP runs) names
         replaced objects and would classify every EP param as non-EP, and every hand-sliced sink as
         replicated.
         """
@@ -186,7 +187,7 @@ class EpIntrospectionMixin:
         # Combine and cross-replica grad-sync are different-membership collectives, hence deferred averaging.
         if config.num_ep_groups > 1 and not config.is_expert_tp_mode and is_global_main_process():
             scope = "node-local across domains" if config.is_node_local_ep else "cross-node"
-            if self._ep_config.is_deferred_dp:
+            if require_ep_config(self._ep_config).is_deferred_dp:
                 logger.info(
                     f"Multi-group EP ({scope}, {config.num_ep_groups} EP groups, "
                     f"ep_group_size={config.ep_group_size}): cross-replica DP average deferred to a "
@@ -214,8 +215,7 @@ class EpIntrospectionMixin:
             )
 
         gc_kwargs = getattr(self.args, "gradient_checkpointing_kwargs", None) or {}
-        # The backbone's config: it is what the embedding trainer's SentenceTransformer and the CP
-        # wrapper hold, neither of which carries a config of its own.
+        # The backbone's config: the embedding trainer's top-level SentenceTransformer carries none.
         use_reentrant = forces_reentrant_checkpointing(config, getattr(self._get_unwrapped_model(), "config", None))
         if gc_kwargs.get("use_reentrant") not in (None, use_reentrant) and is_global_main_process():
             logger.warning(

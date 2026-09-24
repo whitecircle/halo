@@ -172,7 +172,7 @@ def test_non_finite_rewards_raise_instead_of_zeroing(scale, bad):
     """Zeroing would train on a silently broken reward, and under ``batch`` scaling the one bad value
     makes the shared std non-finite, so every advantage of the step would be zeroed with it."""
     rewards = torch.tensor([0.0, 1.0, 0.5, bad])
-    with pytest.raises(ValueError, match="Non-finite GRPO advantages"):
+    with pytest.raises(ValueError, match="Non-finite GRPO rewards or advantages"):
         group_relative_advantages(rewards, 2, scale)
 
 
@@ -180,7 +180,7 @@ def test_a_peer_ranks_non_finite_reward_raises_here_too(monkeypatch):
     """The verdict is agreed across ranks: a rank whose own rewards are finite must raise with the one
     whose are not, or it heads into the next collective alone."""
     monkeypatch.setattr(advantages_module, "rank_consensus", lambda ok: (False, True))
-    with pytest.raises(ValueError, match="Non-finite GRPO advantages"):
+    with pytest.raises(ValueError, match="Non-finite GRPO rewards or advantages"):
         group_relative_advantages(torch.tensor([0.0, 1.0]), 2, "group")
 
 

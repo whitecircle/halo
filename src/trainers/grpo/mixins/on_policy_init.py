@@ -7,8 +7,14 @@ disable dropout. The closing order is load-bearing, so it is defined here rather
 constructor.
 """
 
+from trl import GRPOTrainer
+
 from src.trainers.grpo.mixins.chunked_logprobs import LogitsWidth
-from src.trainers.mixins.validation import ctor_config, disable_trl_liger
+from src.trainers.mixins.validation import ctor_config, ctor_positions, disable_trl_liger
+
+# TRL GRPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
+# Shared with SDPG, whose *args reach GRPOTrainer through the online trainer.
+GRPO_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "model", "args")
 
 
 def disable_trl_liger_grpo_loss(training_args) -> None:
@@ -36,9 +42,11 @@ class OnPolicyGRPOInitMixin:
         be switched off on it before ``_init_distributed_config`` runs; the positionals are forwarded
         so that a positional model reaches the mixin's MoE gates too.
         """
-        training_args = ctor_config(type(self), args, kwargs)
+        training_args = ctor_config(args, kwargs, GRPO_CTOR_POSITIONS)
         disable_trl_liger_grpo_loss(training_args)
-        return training_args, self._init_distributed_config(kwargs, training_args=training_args, ctor_args=args)
+        return training_args, self._init_distributed_config(
+            kwargs, training_args=training_args, ctor_args=args, ctor_positions=GRPO_CTOR_POSITIONS
+        )
 
     def _finish_on_policy_init(self) -> None:
         """Realize the parallel modes, gate the reference model, the chunked head path and the

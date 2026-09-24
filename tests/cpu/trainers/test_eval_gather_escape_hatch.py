@@ -158,7 +158,7 @@ def test_the_hatch_warns_that_the_logged_metrics_are_one_ranks_shard(distributed
     with patch.object(mixin_module.logger, "warning") as warning:
         trainer.evaluate(metric_key_prefix="test")
     (message,), _ = warning.call_args
-    assert "'test_*'" in message and "rank 0's own shard" in message
+    assert "'test_loss'" in message and "rank 0's own shard" in message
 
 
 def test_the_equal_batch_path_does_not_warn(distributed):

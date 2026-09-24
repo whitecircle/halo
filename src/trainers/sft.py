@@ -18,7 +18,7 @@ from src.trainers.mixins.validation import ctor_positions, ctor_value
 logger = get_logger(__name__, log_level="info")
 
 # TRL SFTTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = ctor_positions(SFTTrainer, "data_collator")
+_CTOR_POSITIONS = ctor_positions(SFTTrainer, "model", "args", "data_collator")
 
 # CP metric row deferred to log time: every column is a sum, so one reduce per log gives the same
 # totals as one reduce per micro-batch. Fixed width, so the collective's shape does not depend on
@@ -58,7 +58,7 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         return self.is_cp_mode
 
     def __init__(self, *args, **kwargs):
-        kwargs = self._init_distributed_config(kwargs, ctor_args=args)
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         self._reject_cp_incompatible_collator(ctor_value(args, kwargs, "data_collator", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)
         self._setup_distributed_modes()

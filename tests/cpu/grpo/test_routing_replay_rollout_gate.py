@@ -167,7 +167,7 @@ def test_gate_raises_when_every_routed_row_is_unresolved():
     R3 would train inert with only a coverage metric to show it."""
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True, routing_tokens=_UNRESOLVED_TOKENS))
-    with pytest.raises(ValueError, match="none of this batch's 1 routed rows"):
+    with pytest.raises(ValueError, match="no routed row on this rank"):
         _gate(host, rows)
 
 

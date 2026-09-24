@@ -117,7 +117,7 @@ def _student_batch():
 
 
 def test_a_batch_without_the_teacher_branch_raises_while_opd_is_on():
-    """No rank carrying ``teacher_*`` keys used to run SFT alone under a self-distillation config."""
+    """With no rank carrying ``teacher_*`` keys the step would train SFT alone under a self-distillation config."""
     with pytest.raises(RuntimeError, match="privileged teacher branch"):
         _self_distill_step(_student_batch())
 

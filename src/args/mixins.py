@@ -145,8 +145,8 @@ class AdvantageShaping:
             raise ValueError(f"advantage mode must be one of {self._MODES}, got {self.mode!r}")
         if not 0.0 < self.quantile < 1.0:
             raise ValueError(f"quantile must be in (0, 1), got {self.quantile}")
-        # Finite as well as signed: the normalizer's trailing ``nan_to_num`` would turn a NaN/inf scale
-        # into all-zero advantages, silently training nothing.
+        # Finite as well as signed: a NaN/inf scale makes every shaped advantage non-finite, which the
+        # normalizer refuses only at the first step.
         for name in ("pos_scale", "neg_scale"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:

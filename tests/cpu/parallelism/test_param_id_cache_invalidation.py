@@ -8,8 +8,9 @@ rather than swapping ``.data``, so any id cached before wrapping names an object
 ever see again — every EP param then reads as non-EP, its grad lands in the wrong bucket, and
 nothing raises.
 
-The memos are documented as lazily populated by step-time consumers only, but the fp32 upcast
-(``_upcast_non_ep_params_to_fp32``) calls ``_get_ep_param_ids`` during setup, BEFORE wrapping. So
+The memos are documented as lazily populated by step-time consumers only, but the PEFT dtype
+alignment and the fp32 upcast (``_upcast_non_ep_params_to_fp32``) call ``_get_ep_param_ids`` during
+setup, BEFORE wrapping. So
 the invariant cannot be left to convention — ``_invalidate_param_id_caches`` has to enforce it.
 
 Usage:

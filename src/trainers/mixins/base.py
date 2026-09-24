@@ -171,8 +171,8 @@ class DistributedTrainerMixin(
     kwargs before ``super().__init__()``, then ``_setup_distributed_modes()`` after it,
     and override the ``_supports_*`` flags to declare supported modes.
 
-    ``parallelism_config`` holds the resolved configuration; ``cp_config`` / ``_ep_config``
-    are set only when CP / EP are enabled.
+    ``parallelism_config`` holds the resolved configuration; ``cp_config`` is set only when CP is
+    enabled, ``_ep_config`` whenever the model carries EP layers.
     """
 
     _supports_ep: bool = True
@@ -204,16 +204,23 @@ class DistributedTrainerMixin(
         """
         return PPLossAdapter(token_loss_fn=causal_lm_token_loss)
 
-    def _init_distributed_config(self, kwargs: dict, training_args=None, ctor_args: tuple = (), **explicit) -> dict:
+    def _init_distributed_config(
+        self,
+        kwargs: dict,
+        training_args=None,
+        ctor_args: tuple = (),
+        ctor_positions: dict[str, int] | None = None,
+        **explicit,
+    ) -> dict:
         """Extract ParallelismConfig from kwargs and set up distributed state.
 
         Call before super().__init__() to extract/validate parallelism args (modifies kwargs
         in-place, removing them). training_args defaults to the ctor's ``args``; trainers with an
         explicit `args` param (Classification, SMPO) should pass it. Trainers whose signatures name
         the distributed params explicitly pass them via ``**explicit``; kwargs-style values win over
-        explicit ones. A ``(*args, **kwargs)`` trainer passes its positionals as ``ctor_args``: a
-        positional ``model``/``args`` is read out of them by this trainer's signature, since every
-        setup step below reads one of the two, and they are forwarded to the ``_validate_pp_mode`` hook.
+        explicit ones. A ``(*args, **kwargs)`` trainer passes its positionals as ``ctor_args`` with
+        ``ctor_positions``, the slot table of the base it forwards them to: every setup step below
+        reads the ``model`` or the ``args`` in them, and they reach the ``_validate_pp_mode`` hook.
         """
         if explicit:
             kwargs = {**explicit, **kwargs}
@@ -239,7 +246,7 @@ class DistributedTrainerMixin(
         # Declared here so every trainer's eval path caches the same object under the same key.
         self._eval_dataloaders: dict[str, Any] = {}
 
-        model, ctor_training_args = ctor_model_and_config(type(self), ctor_args, kwargs)
+        model, ctor_training_args = ctor_model_and_config(ctor_args, kwargs, ctor_positions)
         if training_args is None:
             training_args = ctor_training_args
         model_config = getattr(model, "config", None)
@@ -968,8 +975,8 @@ class DistributedTrainerMixin(
         caller's DP scope (the world without PP, the stage group under PP).
         """
         ep_modules, dtype_incompatible, all_ignored_modules = ignored
-        ep_cfg = self._ep_config
-        if ep_cfg is not None and ep_cfg.is_deferred_dp:
+        ep_cfg = require_ep_config(self._ep_config)
+        if ep_cfg.is_deferred_dp:
             # Sharded over the EP group, not the stage: non-expert memory per rank is `replicas`x
             # the stage-FSDP figure.
             replicas = max(1, ep_cfg.world_size // ep_cfg.ep_group_size)
@@ -1548,10 +1555,10 @@ class DistributedTrainerMixin(
             metric_key_prefix = kwargs.get("metric_key_prefix", args[2] if len(args) > 2 else "eval")
             logger.warning(
                 f"Evaluation batch counts differ across ranks (or cannot be measured), so the "
-                f"cross-rank metric gather is replaced by the identity to avoid a deadlock: every "
-                f"'{metric_key_prefix}_*' metric this evaluation logs is rank 0's own shard, not the "
-                f"global value. An eval dataset that splits evenly across the data-parallel ranks "
-                f"restores global metrics."
+                f"evaluation loop's cross-rank gather is replaced by the identity to avoid a deadlock: "
+                f"'{metric_key_prefix}_loss' and any compute_metrics output this evaluation logs are "
+                f"rank 0's own shard, not the global value. An eval dataset that splits evenly across "
+                f"the data-parallel ranks restores global metrics."
             )
             original_gather = self.gather_function
             self.gather_function = lambda x: x
