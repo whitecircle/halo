@@ -155,8 +155,11 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
    → `check_server()` polls `/health`.
 2. `init_communicator(device=cuda:N)` — GETs `/get_world_size`, computes
    `world_size = inference_ws + 1`, advertises `master_address` (arg →
-   `VLLM_GROUP_HOST` env → default-route NIC) and binds the TCPStore on
-   `0.0.0.0`; POSTs `/init_weight_transfer_engine` (server rank_offset=1) while
+   `VLLM_GROUP_HOST` env → loopback for a local server → default-route NIC)
+   and binds the TCPStore on that address alone (`HALO_WEIGHT_SYNC_BIND_ALL=1`
+   widens it to `0.0.0.0`,
+   [group rendezvous](../../agent-docs/infrastructure/rollout-servers.md#group-rendezvous));
+   POSTs `/init_weight_transfer_engine` (server rank_offset=1) while
    the trainer (rank 0) builds the `StatelessProcessGroup` + `PyNcclCommunicator`
    concurrently. Done once, while vLLM is idle.
 3. Each sync: `sync_model_weights()` → `/pause` → `/start_weight_update` →

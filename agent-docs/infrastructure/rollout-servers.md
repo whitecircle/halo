@@ -59,6 +59,26 @@ The gather **reshards the FSDP2 modules first**. A forward leaves their transien
 registered while the optimizer steps the shards. Reading the registered params would ship a policy
 one optimizer step behind and fold a PEFT merge into a copy the next unshard discards.
 
+### Group rendezvous
+
+Each client hosts its group's rendezvous on the trainer: a TCP store on `group_port` that the
+engine's workers dial at the advertised group address to fetch the NCCL bootstrap. The store is
+unauthenticated, and vLLM's workers unpickle what they read from it, so a host that reaches the port
+while a group forms can run code in the server. **The group port must be reachable only by trusted
+hosts.**
+
+On vLLM the store listens on the advertised address alone, a name resolved once to its IPv4 address:
+`group_host` / `VLLM_GROUP_HOST` when set, else loopback for a server on the same host and the
+default-route NIC for one on another node. An address this host cannot bind alone (a NAT or
+port-mapped address, the `0.0.0.0` wildcard, a name resolving to loopback for a remote server) raises
+before the engine is asked to join. `HALO_WEIGHT_SYNC_BIND_ALL=1` puts the store on every interface
+instead, for a trainer the server reaches through NAT or a port mapping. The mapping must keep the
+port, and the trainer must reach its own advertised address: the store's own client dials it.
+
+SGLang's store is torch's `TCPStore`, whose master listens on every interface whatever address it is
+given; the client does not narrow it. c10d reads the NCCL id from it as raw bytes rather than a
+pickle, but the same trust assumption holds.
+
 ### Streaming and quiesce
 
 The push is **streamed, not buffered**. Both engines take an update as a sequence of declared chunks
@@ -443,7 +463,8 @@ On an EFA host layer `docker-compose.vllm.efa.yml` over it
 left at `Socket` there sends every collective over TCP and breaks DeepEP.
 
 `VLLM_GROUP_HOST` (or an entry's `group_host`, for that one server) names the trainer address the
-server dials back to and touches nothing else; a same-host compose stack needs no value, and the
+server dials back to and the rendezvous store binds ([Group rendezvous](#group-rendezvous)), and
+touches nothing else; a same-host compose stack needs no value, and the
 resolution order is on
 [Online GRPO — Multi-homed nodes](../training-methods/grpo/online-grpo.md#multi-homed-nodes-vllm_group_host).
 `NCCL_SOCKET_IFNAME` is not a transfer-group knob ([NCCL transport](#nccl-transport-sglang)).

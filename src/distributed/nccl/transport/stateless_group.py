@@ -66,8 +66,9 @@ class StatelessProcessGroup:
     ) -> "StatelessProcessGroup":
         """Create a StatelessProcessGroup without polluting global torch.distributed state.
 
-        ``bind_host`` (default ``host``) is the interface rank 0 binds to; pass ``"0.0.0.0"`` on a
-        multi-homed node to accept the peer on any NIC while still advertising a routable ``host``.
+        ``bind_host`` (default ``host``) is the address rank 0's listener binds: ``host`` resolved,
+        or every interface where the caller opted in for an advertised address that is not local
+        (NAT, a port mapping).
         """
         launch_server = rank == 0
         if launch_server:

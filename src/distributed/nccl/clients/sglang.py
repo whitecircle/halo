@@ -33,6 +33,7 @@ from torch.distributed import distributed_c10d as c10d
 
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from src.distributed.nccl.clients.base import (
+    _ALL_INTERFACES,
     _CLEANUP_TIMEOUT_S,
     _GROUP_FORMATION_TIMEOUT_S,
     _HTTP_PROBE_TIMEOUT_S,
@@ -216,14 +217,22 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             )
         return tp_size
 
+    def _rendezvous_bind_address(self, master_address: str) -> str:
+        """Every interface: the group's store is torch's ``TCPStore``, whose master listens there
+        whatever address it is given, so the port is probed where that listener takes it."""
+        return _ALL_INTERFACES
+
     def init_communicator(self, device: torch.device | str | int = 0):
         """Form the weight-update group: trainer rank 0, engine ranks 1..N."""
         engine_ws = self.fetch_engine_world_size()
         world_size = engine_ws + 1
-        master_address, master_port = self._resolve_group_address()
+        master_address, master_port, bind_address = self._resolve_group_address()
         self._resolve_sync_device(device)
 
-        logger.info(f"SGLang NCCL init: engine_ws={engine_ws}, master={master_address}:{master_port}")
+        logger.info(
+            f"SGLang NCCL init: engine_ws={engine_ws}, master={master_address}:{master_port}, "
+            f"listening on {bind_address}"
+        )
 
         # The engine registers the group by name as soon as it is asked to join and rejects any later
         # join under that name, so a trainer that died between the request and a working group leaves
