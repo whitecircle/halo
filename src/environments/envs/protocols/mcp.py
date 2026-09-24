@@ -27,6 +27,51 @@ MCP_DISCONNECT_TIMEOUT_S = 30.0
 # hung call returns as one tool error and the episode continues.
 MCP_REQUEST_TIMEOUT_S = 120.0
 
+MCP_SERVERS = {
+    "brave_search": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+        "env": ["BRAVE_API_KEY"],
+        "description": "Brave web search",
+    },
+    "filesystem": {
+        "command": "npx",
+        # The trailing path is the server's entire access allowlist, so it bounds what a rollout can
+        # reach. Deliberately not HALO_DATA_ROOT, which holds the dataset cache and checkpoints.
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        "env": [],
+        "description": "File system operations",
+    },
+    "fetch": {
+        # Python package (uvx), not npm.
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+        "env": [],
+        "description": "HTTP fetch for web content",
+    },
+    "memory": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "env": [],
+        "description": "Knowledge graph memory",
+    },
+    "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": ["GITHUB_TOKEN"],
+        "description": "GitHub API",
+    },
+    "slack": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-slack"],
+        "env": ["SLACK_TOKEN"],
+        "description": "Slack messaging",
+    },
+}
+
+# Preset used when a config names none: no credentials, no network, restricted to /tmp.
+DEFAULT_MCP_SERVER = "filesystem"
+
 
 class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
     """Environment connecting to MCP servers via the MCP Python SDK, exposing the discovered tools in
@@ -232,53 +277,6 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
                 logger.warning("MCP close(): owning event loop already stopped; connection not unwound")
                 self._conn_task = None
         super().close()
-
-
-MCP_SERVERS = {
-    "brave_search": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
-        "env": ["BRAVE_API_KEY"],
-        "description": "Brave web search",
-    },
-    "filesystem": {
-        "command": "npx",
-        # The trailing path is the server's entire access allowlist, so it bounds what a rollout can
-        # reach. Deliberately not HALO_DATA_ROOT, which holds the dataset cache and checkpoints.
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-        "env": [],
-        "description": "File system operations",
-    },
-    "fetch": {
-        # Python package (uvx), not npm.
-        "command": "uvx",
-        "args": ["mcp-server-fetch"],
-        "env": [],
-        "description": "HTTP fetch for web content",
-    },
-    "memory": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-memory"],
-        "env": [],
-        "description": "Knowledge graph memory",
-    },
-    "github": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-github"],
-        "env": ["GITHUB_TOKEN"],
-        "description": "GitHub API",
-    },
-    "slack": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-slack"],
-        "env": ["SLACK_TOKEN"],
-        "description": "Slack messaging",
-    },
-}
-
-
-# Preset used when a config names none: no credentials, no network, restricted to /tmp.
-DEFAULT_MCP_SERVER = "filesystem"
 
 
 def get_mcp_server_config(name: str) -> dict[str, Any]:

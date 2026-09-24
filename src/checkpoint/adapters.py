@@ -54,6 +54,10 @@ EXPERT_LORA_PEFT_TYPE = "EXPERT_LORA"
 MIXED_EXPERT_LORA_PEFT_TYPE = "LORA_WITH_EP_EXPERT_LORA"
 EXPERT_LORA_PEFT_TYPES = frozenset({EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE})
 
+_ADAPTER_KEY_PREFIX = "base_model.model."
+# What PEFT appends below the adapted module's own path in a saved key.
+_ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
+
 
 def is_expert_lora_key(key: str) -> bool:
     """Whether a saved adapter key is a native EP expert adapter (``<layer>.experts.<attr>.lora_{A,B}``).
@@ -85,11 +89,6 @@ def _adapter_tensor_keys(path: str) -> list[str]:
         with safe_open(path, framework="pt") as handle:
             return list(handle.keys())
     return list(torch.load(path, map_location="cpu", weights_only=True))
-
-
-_ADAPTER_KEY_PREFIX = "base_model.model."
-# What PEFT appends below the adapted module's own path in a saved key.
-_ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
 
 
 def adapter_module_paths(adapter_dir: str) -> set[str]:

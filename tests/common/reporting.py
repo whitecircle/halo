@@ -22,6 +22,7 @@ headline metrics only (``agent-docs/contributing/README.md``).
 import json
 
 RESULT_SENTINEL = "__HALO_TEST_RESULT__"
+BENCH_SENTINEL = "__HALO_BENCH__"
 
 
 def snapshot_efficiency(cb) -> dict:
@@ -74,9 +75,6 @@ def format_table(payload: dict) -> str:
     width = max(len(label) for label, _ in rows)
     lines = ["  " + label.ljust(width) + " : " + str(value) for label, value in rows]
     return "\n".join(lines)
-
-
-BENCH_SENTINEL = "__HALO_BENCH__"
 
 
 def format_benchmark_report(cb) -> str:
