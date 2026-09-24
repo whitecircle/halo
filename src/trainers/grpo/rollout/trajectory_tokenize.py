@@ -48,10 +48,9 @@ def rollout_template_kwargs(
     rollout_kwargs: dict, reasoning_effort: str | None, reasoning_budget: int | None = None
 ) -> dict:
     """Chat-template kwargs a rollout's requests carry: the run's ``rollout_chat_template_kwargs``
-    plus the ``reasoning_effort`` the episode ran under and its per-turn thinking budget, so a
-    trainer-side render reproduces the template's effort-dependent preamble. Either key is absent
-    when the episode carries none. One owner for every render that stands in for the engine's: the
-    training rows and the startup prompt-overhead probe."""
+    plus the ``reasoning_effort`` the episode ran under and its thinking budget, so a trainer-side
+    render reproduces the template's effort-dependent preamble. Either key is absent when the episode
+    carries none. One owner for every render that stands in for the engine's."""
     kwargs = dict(rollout_kwargs)
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort

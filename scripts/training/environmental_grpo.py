@@ -291,7 +291,7 @@ def main():
     # effort level (a 'random' env setting draws one, as an episode does).
     probe_effort = resolve_reasoning_effort(probe_env.reasoning_effort)
     template_kwargs = rollout_template_kwargs(
-        async_config.rollout_chat_template_kwargs,
+        async_config.rollout_template_variables(),
         probe_effort,
         probe_env.thinking_budget_for_effort(probe_effort) if probe_effort is not None else None,
     )

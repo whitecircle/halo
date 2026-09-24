@@ -21,6 +21,7 @@ from trl.extras.profiling import profiling_context
 from trl.trainer.utils import pad
 
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.rollout_config import THINKING_SCOPE_EPISODE
 from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
@@ -31,7 +32,12 @@ from src.environments.base import (
     resolve_reasoning_effort,
 )
 from src.environments.engine_wire import SGLANG_BACKEND
-from src.environments.episode import RolloutResult, effort_length_floor, effort_length_penalty
+from src.environments.episode import (
+    RolloutResult,
+    effort_length_floor,
+    effort_length_penalty,
+    resolve_reasoning_end_token_id,
+)
 from src.models.structure import resolve_tokenizer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, rows_forward_densely
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
@@ -267,12 +273,13 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._force_full_dataset_columns()
         self._reject_answerless_datasets()
         self._validate_effort_length_terms()
+        self._validate_thinking_budget_scope()
 
         self.reward_func_names = ["environment_reward"]
 
         self._train_on_sampled_tokens = self.async_config.train_on_sampled_tokens
         self._rollout_backend = self.async_config.rollout_backend
-        self._rollout_template_kwargs = dict(self.async_config.rollout_chat_template_kwargs)
+        self._rollout_template_kwargs = self.async_config.rollout_template_variables()
         self._max_train_row_tokens = self.async_config.max_train_row_tokens
         self._rows_over_cap = 0
         self._warned_capture_missing = False
@@ -532,6 +539,13 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             return None
         attention_mask = torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1)
         return dense_row_spans(attention_mask)
+
+    def _resolve_reasoning_end_token_id(self) -> int | None:
+        """The id of ``rollout_reasoning_end_token`` under the tokenizer, for the episode thinking scope's
+        per-turn reasoning count; the per-turn scope never reads it."""
+        if self.async_config.rollout_thinking_budget_scope != THINKING_SCOPE_EPISODE:
+            return None
+        return resolve_reasoning_end_token_id(self._tokenizer, self.async_config.rollout_reasoning_end_token)
 
     def _resolve_rollout_stop_token_ids(self) -> list[int] | None:
         """Resolve rollout_stop_tokens (special-token strings) to ids via the tokenizer.
@@ -1310,12 +1324,38 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 "thinking_tokens and rollout_max_thinking_tokens is unset, so the floor would never price an episode."
             )
 
+    def _validate_thinking_budget_scope(self) -> None:
+        """The episode scope shares a budget across turns, so a run must have one, and every level's budget
+        must hold the reserve a spent turn keeps — otherwise the scope is inert or the first turn already
+        exceeds the total the template states."""
+        cfg = self.async_config
+        if cfg.rollout_thinking_budget_scope != THINKING_SCOPE_EPISODE:
+            return
+        level_budgets = {
+            level: budget
+            for level in VALID_REASONING_EFFORTS
+            if (budget := self._rollout_env.thinking_budget_for_effort(level)) is not None
+        }
+        if not level_budgets and cfg.rollout_max_thinking_tokens is None:
+            raise ValueError(
+                "rollout_thinking_budget_scope='episode' with nothing to share: no effort level sets thinking_tokens "
+                "and rollout_max_thinking_tokens is unset, so no turn would be capped."
+            )
+        short = {
+            level: budget for level, budget in level_budgets.items() if budget < cfg.rollout_thinking_turn_reserve
+        }
+        if short:
+            raise ValueError(
+                f"rollout_thinking_turn_reserve ({cfg.rollout_thinking_turn_reserve}) exceeds the thinking_tokens of "
+                f"{short}: a turn's reserve cannot be more than the episode's whole budget."
+            )
+
     def _apply_effort_length_terms(self, rewards: torch.Tensor, rollout_results: list[RolloutResult]) -> None:
         """Charge each episode its level's reasoning-length price and its under-use floor, in place.
 
         :func:`effort_length_penalty` prices the episode's reasoning tokens at its level's coefficient;
         :func:`effort_length_floor` prices a shortfall against ``effort_length_floor_budgets`` times the
-        per-turn thinking budget the episode ran under. An episode with no level is free of the price,
+        thinking budget the episode ran under. An episode with no level is free of the price,
         one with no budget of the floor. Logs the batch means under ``reward/effort_length_penalty``
         and ``reward/effort_length_floor``.
         """

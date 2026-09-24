@@ -145,7 +145,10 @@ class AsyncRolloutMixin:
             env_type=self._environment_spec,
             env_config=self._env_config_dict,
             server_urls=self.async_config.get_server_urls(),
-            rollout_config=self.async_config.get_rollout_config(stop_token_ids=self._resolve_rollout_stop_token_ids()),
+            rollout_config=self.async_config.get_rollout_config(
+                stop_token_ids=self._resolve_rollout_stop_token_ids(),
+                reasoning_end_token_id=self._resolve_reasoning_end_token_id(),
+            ),
             max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
             pool_replicas=self.accelerator.num_processes if self.async_config.ray_address is not None else 1,
         )
