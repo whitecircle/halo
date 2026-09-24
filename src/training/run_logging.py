@@ -47,7 +47,7 @@ def install_log_tee(output_dir: str | None) -> None:
 
     Redirects fds 1 and 2 through a ``tee`` subprocess so logging, ``print``, progress bars, and
     native torch/NCCL writes all land in the file while still showing live. No-op without
-    ``output_dir``, off the writer rank, or with no ``tee``.
+    ``output_dir`` or off the writer rank; a log directory or ``tee`` that cannot be set up is warned.
 
     The writer rank is ``fs_aware_save_rank``: run.log is an output artifact, so it follows the
     checkpoint writers' predicate and their rank-agreed shared-filesystem flags
@@ -72,12 +72,9 @@ def install_log_tee(output_dir: str | None) -> None:
 
     try:
         os.makedirs(log_dir, exist_ok=True)
-    except OSError:
-        return
-
-    try:
         tee = subprocess.Popen(["tee", "-a", log_path], stdin=subprocess.PIPE, close_fds=False)
-    except (FileNotFoundError, OSError):
+    except OSError as exc:
+        logger.warning("Console output is not persisted to %s (%s); the run continues without it.", log_path, exc)
         return
     if tee.stdin is None:
         tee.kill()

@@ -235,5 +235,23 @@ def test_a_second_log_tee_for_the_same_output_dir_is_a_silent_no_op(monkeypatch,
     assert not caplog.text, f"an idempotent re-install warned: {caplog.text}"
 
 
+def test_a_log_tee_that_cannot_start_warns(monkeypatch, caplog, tmp_path):
+    """The writer rank whose run.log cannot be set up (no ``tee``, an unwritable output_dir) loses the
+    run's whole console record; the run goes on, but not in silence."""
+    monkeypatch.setattr(run_logger, "_TEE_LOG_PATH", None)
+    monkeypatch.setattr(run_logger, "fs_aware_save_rank", lambda: True)
+
+    def no_tee(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "tee")
+
+    monkeypatch.setattr(run_logger.subprocess, "Popen", no_tee)
+
+    with caplog.at_level(logging.WARNING, logger=run_logger.__name__):
+        run_logger.install_log_tee(str(tmp_path))
+
+    assert "not persisted" in caplog.text and str(tmp_path) in caplog.text
+    assert run_logger._TEE_LOG_PATH is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
