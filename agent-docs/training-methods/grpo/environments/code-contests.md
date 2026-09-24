@@ -220,12 +220,11 @@ python scripts/environments/inference/run_code_contests.py --adapter codeforces 
 
 It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a benchmark's
 mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation)).
-At the default `--success_threshold` a problem counts solved when every test in the pool passes. The
-threshold reads the episode's total reward, so under `--training_config` the recipe's shaping moves
-it both ways: `submission_reward` or `execution_progress_reward` can lift a partial solve over it,
-and `tool_error_penalty` (every scratchpad call under `leaderboard` is refused) or
-`length_cutoff_penalty` can sink a solve below it. The re-grader's `s@1` counts all-pass solves
-directly.
+A problem counts solved when the submitted program passes every test in the pool — the environment's
+verdict, not the shaped total, so the recipe's shaping under `--training_config` (a
+`tool_error_penalty` on every refused scratchpad call under `leaderboard`, a submission bonus) moves
+it neither way, and the coding CLI takes no `--success_threshold`. The re-grader's `s@1` counts the
+same all-pass solves.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
 level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window

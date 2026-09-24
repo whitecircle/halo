@@ -19,7 +19,7 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 | `--base_url` / `--api_key` / `--model` | local vLLM / `$VLLM_API_KEY`, `$OPENAI_API_KEY`, else a placeholder / — | Endpoint and model name |
 | `--training_config <yaml>` | none | Grade under a run's contract (below) |
 | `--num_examples` / `--num_samples` | 100 (50 coding) / 1 | Rows scored; episodes per row |
-| `--success_threshold` | `1.0` | Reward counting a sample as solved |
+| `--success_threshold` | `1.0` | `run_env.py` only: reward counting a sample as solved, for an environment that reports no solve verdict |
 | `--max_workers` | 32 (16 coding) | Concurrent episodes |
 | `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config |
 | `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding: the effort budget) / 180 s | Sampling, HTTP timeout |
@@ -49,22 +49,36 @@ To compare a checkpoint with its base, serve each in turn under the same `--serv
 run one command with `--training_config`, dataset, split and `--num_samples` fixed, so only the
 weights differ.
 
-The report logs mean reward, `success@1`, `success@k`, `invalid` and aggregate telemetry, so token
-starvation reads differently from wrong answers. `success@1` is the first sample's outcome and
-`success@k` whether any of the `--num_samples` succeeded; neither is the mean over samples a
-benchmark's pass@1 reports. Reasoning models need a large `--max_tokens`: too low cuts the chain of
-thought before any answer, scoring 0.
+The report logs mean reward, `success@1`, `success@k`, `invalid`, `generation_errors` and aggregate
+telemetry, so token starvation reads differently from wrong answers. `success@1` is each row's first
+scored sample and `success@k` whether any of its `--num_samples` succeeded; neither is the mean over
+samples a benchmark's pass@1 reports. Reasoning models need a large `--max_tokens`: too low cuts the
+chain of thought before any answer, scoring 0.
+
+A sample counts as solved on the environment's own verdict where it reports one — the flag training
+averages into `outcome/solve_rate` (code contests: every test in the pool passed) — whatever its shaped
+reward: a tool-error or length-cutoff penalty cannot sink a solve, and a submission bonus cannot lift
+a partial one. `--success_threshold` decides only for an environment without that verdict.
+
+A turn runs under training's retry policy (`max_retries`, `retry_base_wait` from `--training_config`,
+else 3 and 1 s): an engine fault the OpenAI client does not retry (vLLM's `not JSON compliant` 400) is
+retried with backoff, and an engine abort is re-issued, never stepped. The client itself retries
+transport failures. A generation that still fails ends the episode. When the episode's own request
+caused it — a client error such as a conversation over the served context, or a turn that outran
+`--request_timeout` on every client retry — the sample is graded on what it earned, like a miss.
+Any other failure makes it a generation error: `reward` and `success` are null, it leaves every score
+(the telemetry line still counts it), and `generation_errors` counts it. A score left with no sample
+reads `nan`.
 
 `invalid` counts the samples scored 0 with no signal, each carrying `error`: an invalid grade (a
-grading or sandbox outage, a failed scorer, a null `answer`) or an episode whose run raised. An
-episode that lost a generation is graded on what it earned and is not one. Invalid samples stay in
-the means, unlike in training, where the baseline drops them.
+grading or sandbox outage, a failed scorer, a null `answer`) or an episode whose run raised. Invalid
+samples stay in the means, unlike in training, where the baseline drops them.
 
 ## Output files
 
 `--output <path.json>` dumps per-example results: `group`, `id`, and per sample `reward`,
-`success`, `stats`, `error` on a failed or signal-less grade — plus the trajectory when one is
-recorded.
+`success`, `stats`, `error` on a failed or signal-less grade, `generation_error` on a generation error —
+plus the trajectory when one is recorded.
 
 `--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>` auto-names one
 file per run instead (`<model>__<env_type>__<split>.jsonl`, or
