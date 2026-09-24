@@ -116,9 +116,9 @@ def _grpo_config(*, output_dir: str, max_steps: int, group_port: int, save: bool
         logging_steps=1,
         save_strategy="steps" if save else "no",
         save_steps=RESUME_SAVE_STEP,
-        # A full fine-tune's optimizer shards are 6 B/param, 3x the checkpoint's own weights at this
-        # size. The adapter rows carry the optimizer-continuity assertion; here the EP saver still
-        # writes scheduler.pt under save_only_model, which is what this row's continuity check reads.
+        # A full fine-tune's optimizer shards are 4 B/param of AdamWBF16 moments, 2x the checkpoint's
+        # own weights at this size. The adapter rows carry the optimizer-continuity assertion; here the
+        # EP saver still writes scheduler.pt under save_only_model, which this row's continuity check reads.
         save_only_model=save and peft is None,
         # The invariant under test is the train-begin push, not the dataloader's replay: re-walking
         # the consumed batches would re-run generation for steps already in the checkpoint.
@@ -170,7 +170,7 @@ def record_routing_replay(trainer, checks: dict[str, bool]) -> None:
     ]
     checks["routing_replay_masks_assembled"] = bool(coverage)
     checks["routing_replay_placed_every_mask"] = bool(coverage) and all(
-        step.get("routing/rollout_unresolved_frac", 0.0) == 0.0 for step in coverage
+        step["routing/rollout_unresolved_frac"] == 0.0 for step in coverage
     )
     log(f"  routing replay coverage per step: {coverage}")
 

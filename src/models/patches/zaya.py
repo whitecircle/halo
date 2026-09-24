@@ -46,8 +46,8 @@ def patch_zaya_router_load_recording() -> None:
     # exists, so presence cannot gate recording as it does on the EP base: without this flag a
     # moe_balancing=none run would scatter_add_ into a counter nothing consumes on every forward.
     router_cls.balancing_active = False
-    # The callback's exclusion of the discard slot from the bias update keys on this (with the
-    # model-type backstop); the upstream router declares no such flag of its own.
+    # The discard-slot exclusion (bias update and load metrics) keys on this; the upstream router
+    # declares no such flag of its own.
     router_cls._has_discard_expert_slot = True
     original_forward = router_cls.forward
 

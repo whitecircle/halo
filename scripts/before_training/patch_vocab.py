@@ -62,7 +62,7 @@ def parse_args():
         required=True,
         help=(
             "Directory to save the patched model and tokenizer "
-            "(any model*.safetensors/index already there is removed first)"
+            "(every model*.safetensors/index the completed save did not produce is removed afterwards)"
         ),
     )
     parser.add_argument(

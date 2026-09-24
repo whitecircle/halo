@@ -70,8 +70,8 @@ async def generate_and_evaluate(
 
             response, finish_reason = await generate_chat_message(client, base_prompt, args, response_format)
             if finish_reason in ENGINE_CUT_FINISH_REASONS:
-                # Scoring a fragment (token cap or engine abort) as a finished answer would write a reward for text the policy
-                # never finished, so the row is dropped, counted and reported.
+                # Scoring a fragment (token cap or engine abort) as a finished answer would write a
+                # reward for text the policy never finished, so the row is dropped, counted and reported.
                 stats["truncated"] += 1
                 print(f"Truncated at --max_gen_tokens for {row.get(args.id_field, '?')}: dropped")
                 return
@@ -158,11 +158,9 @@ async def main():
 
     client, rm_tokenizer, rm_model, rm_device = boot_scoring_run(args)
 
-    # Output path
     Path(args.output_folder).mkdir(parents=True, exist_ok=True)
     output_path = build_output_path(args.output_folder, args.prompts_source, args.model_name, "rm_scoring")
 
-    # Load prompts
     df = load_prompts_dataframe(args)
 
     responses = []

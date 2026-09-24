@@ -30,8 +30,9 @@ logger = get_logger(__name__)
 # the instance, so the tokenizer stays picklable for the dataset-map fingerprint and the workers.
 _PRISTINE_MODEL_MAX_LENGTH_ATTR = "_halo_pristine_model_max_length"
 
-# HF's "this tokenizer declares no length" sentinel (``VERY_LARGE_INTEGER``): a positive int, so
-# :func:`is_bounded_length` alone would read it as a real 1e9-token context window.
+# Bound below which a ``model_max_length`` is a real context window. HF's "this tokenizer declares no
+# length" sentinel (``VERY_LARGE_INTEGER``, 1e30) sits above it and is a positive int, so
+# :func:`is_bounded_length` alone would read it as one.
 UNSET_MODEL_MAX_LENGTH = int(1e9)
 
 

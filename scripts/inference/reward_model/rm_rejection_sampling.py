@@ -271,12 +271,10 @@ async def main():
 
     client, rm_tokenizer, rm_model, rm_device = boot_scoring_run(args)
 
-    # Output path
     Path(args.output_folder).mkdir(parents=True, exist_ok=True)
     suffix = "offline_grpo" if args.output_format == "offline_grpo" else "rs"
     output_path = build_output_path(args.output_folder, args.prompts_source, args.model_name, suffix)
 
-    # Load prompts
     df = load_prompts_dataframe(args)
 
     processed_ids, _existing = load_local_jsonl_resume(output_path, args.id_field)
@@ -290,7 +288,6 @@ async def main():
 
     print(f"Processing {len(pending)} prompts ({args.n_hypos} hypotheses each)...")
 
-    # Async pipeline
     scoring_queue = asyncio.Queue()
     result_queue = asyncio.Queue()
     semaphore = asyncio.Semaphore(args.n_parallel)

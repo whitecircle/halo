@@ -106,8 +106,8 @@ def log_cuda_memory(tag: str = "") -> dict[str, float]:
 def start_memory_history(max_entries: int = 100_000) -> bool:
     """Begin recording CUDA allocation history (call sites + stacks).
 
-    Returns True if started, False when CUDA or the recorder API is unavailable. Recording has
-    measurable overhead, so scope it to a few steps.
+    Returns True if started, False without CUDA. Recording has measurable overhead, so scope it to
+    a few steps.
     """
     if not torch.cuda.is_available():
         return False

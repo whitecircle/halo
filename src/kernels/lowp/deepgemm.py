@@ -91,8 +91,8 @@ def _warn_fallback_once(shape_key: tuple, detail: str, exc: Exception) -> None:
 @functools.lru_cache(maxsize=1)
 def _deep_gemm():
     """Resolve ``deep_gemm`` once and set the process-global contiguous-layout alignment."""
-    import deep_gemm  # noqa: PLC0415 — opt-in native backend, not in the image
-    from deep_gemm import utils  # noqa: PLC0415 — opt-in native backend, not in the image
+    import deep_gemm  # noqa: PLC0415 — opt-in native backend, Blackwell image only
+    from deep_gemm import utils  # noqa: PLC0415 — opt-in native backend, Blackwell image only
 
     utils.set_mk_alignment_for_contiguous_layout(_ALIGN)
     return deep_gemm, utils

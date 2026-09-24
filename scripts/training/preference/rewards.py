@@ -12,7 +12,8 @@ the rendered-text map in ``src/data/pipeline/preferences.py``, placeholder expan
 Multimodal reward modeling needs a multimodal sequence-classification head, which transformers
 ships for only a few families (Gemma3, dense Qwen3.5, T5Gemma2, ModernVBert); the toolkit registers
 two more itself in src/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6, each in both
-spellings a checkpoint can carry (composite and text tower). Any other multimodal checkpoint is refused up front, before the model load.
+spellings a checkpoint can carry (composite and text tower). Any other multimodal checkpoint is
+refused up front, before the model load.
 
 CP is not supported (the score head pools the complete sequence); use EP and/or TP. PP admits a
 multimodal checkpoint only for a run that feeds no images: the split keeps the text tower and score
