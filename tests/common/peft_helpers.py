@@ -23,11 +23,12 @@ from types import SimpleNamespace
 import torch
 from accelerate.utils import extract_model_from_parallel
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 from trl import ModelConfig, get_quantization_config
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
+from src.checkpoint.format import SAFETENSORS_INDEX_FILE, read_checkpoint_index
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lora_targets
@@ -73,15 +74,20 @@ def attention_target_modules(model_name: str, revision: str | None = None) -> li
     ``TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING`` entry for any MoE model_type in this
     roster, so a fixed ``["q_proj", "v_proj"]`` makes PEFT raise "Target modules not found" on
     everything but the Qwen/GptOss spelling. Reading the shipped weight map means a new family needs
-    no entry anywhere. Falls back when the checkpoint is single-file (no index), as the small dense
-    test models are.
+    no entry anywhere. Falls back only when the checkpoint is single-file (no index), as the small
+    dense test models are. A local directory (a ``HALO_TEST_MODEL`` override) is read in place; on
+    the hub a missing or gated repo or a bad revision raises instead of picking targets, while offline
+    a repo absent from the cache reads as single-file.
     """
-    try:
-        index = hf_hub_download(model_name, SAFETENSORS_INDEX_FILE, revision=revision)
-    except Exception:
-        return list(_DEFAULT_ATTENTION_TARGETS)
-    with open(index) as fh:
-        weight_map = json.load(fh)["weight_map"]
+    if os.path.isdir(model_name):
+        weight_map = read_checkpoint_index(model_name, missing_ok=True).get("weight_map", {})
+    else:
+        try:
+            index = hf_hub_download(model_name, SAFETENSORS_INDEX_FILE, revision=revision)
+        except EntryNotFoundError:
+            return list(_DEFAULT_ATTENTION_TARGETS)
+        with open(index) as fh:
+            weight_map = json.load(fh)["weight_map"]
     found = {m.group(1) for key in weight_map if (m := _ATTENTION_PROJ_RE.search(key))}
     # ``_proj`` only: the same container also holds q/k norms and GptOss's ``sinks``.
     return sorted(name for name in found if name.endswith("_proj")) or list(_DEFAULT_ATTENTION_TARGETS)
