@@ -305,11 +305,12 @@ The image also installs the EFA userspace the training image runs
 ([Servers on other nodes](#servers-on-other-nodes-efa)).
 
 The pinned NCCL wheel installs over newer vLLM bases as well; the engine pin is held by the
-weight-sync contract, and no newer release is validated end to end. Two breaks are known. From 0.28
-the engine reads the packed-transfer fields (`packed`, `packed_buffer_size_bytes`,
-`packed_num_buffers`) off the init request, while this client sends them with each update, so its
-first sync fails. From 0.29 the module the gpt-oss plugins import their protocol types from
-(`vllm.entrypoints.openai.engine.protocol`) is gone, so the image build fails.
+weight-sync contract and what the image patches and asserts at build, and no newer release is
+validated end to end. Two breaks are known. From 0.28 the engine reads the packed-transfer fields
+(`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) off the init request, while this client
+sends them with each update, so its first sync fails. From 0.29 the module the gpt-oss plugins
+import their protocol types from (`vllm.entrypoints.openai.engine.protocol`) is gone, so the image
+build fails.
 
 ### Config-schema parity {#config-schema-parity}
 
@@ -321,7 +322,7 @@ vLLM's Gemma 4 model code before 0.28.0 (the pinned 0.26.0 included) reads the 5
 (flat `global_head_dim` / `num_global_key_value_heads`, a global `num_attention_heads`). 5.16 folds
 those into `per_layer_config` and raises `AmbiguousGlobalPerLayerAttributeError` on vLLM's
 `get_head_size`, so a 5.16 server makes Gemma 4 unservable on those versions. Toolkit exports are
-therefore written in the flat form. 0.28.0 reads the per-layer form.
+therefore written in the flat form. 0.28.0 reads both forms.
 
 **Step-3.7 is a different constraint**, not a dialect: this transformers has no `step3p7` class at
 all and reads the family only through the release's `auto_map` modules, which its release config
