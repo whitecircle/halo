@@ -12,9 +12,15 @@ Tests cover:
 """
 
 import asyncio
+import logging
 import sys
 
 import pytest
+
+from src.environments.base import Trajectory
+from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tools.definitions import NativeTool, NativeToolCall, NativeToolRegistry, ToolParameter
 
 
 @pytest.fixture
@@ -2033,6 +2039,44 @@ def test_native_step_tool_calls_counts_executed_not_requested():
     traj = env.get_trajectories([eid])[0]
     assert steps[0].info["step_tool_calls"] == 2  # executed (capped), not the 5 requested
     assert traj.info["total_tool_calls"] == 2  # and consistent with the per-episode counter
+
+
+def test_native_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog):
+    """A model that calls ``submit_solution`` with no ``code`` is charged the tool error and told which
+    argument it dropped, without the traceback the log reserves for a tool that actually broke."""
+    env = CodeContestsEnvironment(language="python", sandbox_backend="local", tool_error_penalty=0.05)
+    trajectory = Trajectory()
+    trajectory.info.update(total_tool_calls=0, successful_tool_calls=0)
+    call = NativeToolCall(id="1", name="submit_solution", arguments={})
+    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.native"):
+        results, reward = env._execute_tool_calls([call], trajectory)
+
+    assert results[0].success is False
+    assert results[0].content == "Error: submit_solution: missing a required argument: 'code'"
+    assert reward == pytest.approx(-0.05)
+    assert trajectory.info["total_tool_calls"] == 1 and trajectory.info["successful_tool_calls"] == 0
+    assert not caplog.records, "a refused call is control flow, not a tool fault: no warning, no traceback"
+
+
+def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog):
+    """The ReAct twin of the native refusal: charged, told, not traced."""
+    registry = NativeToolRegistry()
+    registry.register(
+        NativeTool(
+            name="calculate",
+            description="calculate",
+            parameters=[ToolParameter("expression", "string", "expr")],
+            handler=lambda expression: "2",
+        )
+    )
+    env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
+    episode_ids, _ = env.reset(["Test"])
+    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.react"):
+        steps = env.step(episode_ids, ["Thought: compute\nAction: calculate()"])
+
+    assert steps[0].reward == pytest.approx(-0.1)
+    assert steps[0].info["tool_error"] == "calculate: missing a required argument: 'expression'"
+    assert not caplog.records, "a refused call is control flow, not a tool fault: no warning, no traceback"
 
 
 if __name__ == "__main__":

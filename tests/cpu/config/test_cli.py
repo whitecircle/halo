@@ -102,6 +102,19 @@ def test_launch_ambiguous_stem_reports_qualified_names(tmp_path):
     assert "nested/reward" in result.output
 
 
+def test_a_stem_whose_candidates_are_one_script_resolves(tmp_path):
+    """The singular/plural fold is what makes a stem ambiguous, and with a single script there is
+    nothing to be ambiguous about: `reward` matches `preference/rewards` and its own `rewards` alias,
+    two names for one file. Reporting that as ambiguous leaves the method unreachable by its stem."""
+    write_script(tmp_path / "scripts/training/preference/rewards.py")
+    write_config(tmp_path / "config.yaml")
+
+    result = runner.invoke(app, ["launch", "reward", "config.yaml", "--dry-run", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert str(tmp_path / "scripts/training/preference/rewards.py") in result.stdout
+
+
 def test_underscored_method_name_resolves_to_the_hyphenated_entry(tmp_path):
     """The index is hyphenated, but `scripts/training/offline_grpo.py`, its examples directory and
     half the docs spell the method `offline_grpo` — that spelling must launch it, not be rejected as
