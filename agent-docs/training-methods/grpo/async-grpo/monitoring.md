@@ -7,7 +7,7 @@ Async GRPO metrics are namespaced by the question they answer. Rollout means are
 | Namespace | Answers | Keys to watch |
 |---|---|---|
 | `async/*` | rollout throughput | `mean_rollout_latency`; job totals `total_rollouts`, `cumulative_mean_rollout_latency`, `total_generation_tokens`; `prefetch_hit_rate`, `prefetch_hits` / `prefetch_misses` |
-| `episode/*` | agent behavior | `turns`, `generation_tokens` (+`_max`, `_p90`), `natural_termination_rate`, `truncation_rate`, `error_rate`, `length_cutoff_turns`, `empty_turns`, `reasoning_cjk_rate`, `tool_calls`, `reward_scored` |
+| `episode/*` | agent behavior | `turns`, `generation_tokens` (+`_max`, `_p90`), `natural_termination_rate`, `truncation_rate`, `error_rate`, `length_cutoff_turns`, `empty_turns`, `thinking_budget_exhausted`, `reasoning_cjk_rate`, `tool_calls`, `reward_scored` |
 | `outcome/*` | task success | `solve_rate`, plus per-env keys such as `test_pass_frac` |
 | `reward/*` | reward and decomposition | bare `reward` / `reward_std`; `within_group_std`; the components `turn_shaping`, `tool_shaping`, `objective`, the environment's own terms (`submission`, …) and each external term's `<name>`; `composition_residue`; the trainer's `effort_length_penalty`, `effort_length_floor` |
 | `judge/*`, `reward_model/*` | external reward terms | `judge/<name>/<requirement>`, `judge/<name>/completion_tokens`, `judge/<name>/cost_usd`; `reward_model/<name>/logit` |
@@ -16,7 +16,7 @@ Async GRPO metrics are namespaced by the question they answer. Rollout means are
 | `routing/*` | MoE routing replay | `replay_flip_rate`; under R3, the shape classes `rollout_full_frac`, `rollout_engine_omits_last_frac`, `rollout_completion_only_frac`, `rollout_unresolved_frac` (the one that says replay is degrading), plus `rollout_prompt_len_mismatch_frac`, which sits outside their denominator |
 | unnamespaced | TRL loss internals | `clip_ratio/*`, `cispo_clip_ratio`, `step_time`, `num_tokens` |
 
-`async/prefetch_*` appears only with multiple servers; `prefetch_input_skips` only once non-zero — a wedged prefetch worker dropped those prompts and they never trained. Task-specific `outcome/*` and `reward/*` components come from the environment's `rollout_metrics` hook.
+`async/prefetch_*` appears only with multiple servers; `prefetch_input_skips` only once non-zero — a wedged prefetch worker dropped those prompts and they never trained. `episode/thinking_budget_exhausted` appears only under `rollout_thinking_budget_scope: episode`: the fraction of episodes whose budget ran down to the per-turn reserve ([Reasoning budget](rollouts.md#reasoning-budget)). Task-specific `outcome/*` and `reward/*` components come from the environment's `rollout_metrics` hook.
 
 Under `sampling/*`, `is_correction_coverage` is the share of loss tokens the engine's sampling log-probs cover, `is_masked_frac` the share of those a mask stage zeroed, `is_ratio_mean` / `is_ratio_max` the surviving ratios, and `sampler_certain_frac` the policy tokens the engine emitted with probability 1, which carry no correction.
 

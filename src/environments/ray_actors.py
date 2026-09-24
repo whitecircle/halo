@@ -219,15 +219,26 @@ class EnvironmentActor:
 
             # Bound once per episode: every turn shares the level and its caps.
             effort = bind_episode_effort(
-                context, env, max_tokens=config.max_tokens, max_thinking_tokens=config.max_thinking_tokens
+                context,
+                env,
+                max_tokens=config.max_tokens,
+                max_thinking_tokens=config.max_thinking_tokens,
+                scope=config.thinking_budget_scope,
+                turn_reserve=config.thinking_turn_reserve,
             )
-            ep_config = replace(config, max_tokens=effort.max_tokens, max_thinking_tokens=effort.thinking_budget)
+            ep_config = replace(config, max_tokens=effort.max_tokens)
+            reasoning_spent = 0
 
             for _ in range(env.max_turns):
                 if step.done:
                     break
 
-                gen = await self._generate_turn(client, server_url, step.observation, ep_config, effort.level)
+                # The engine cap this turn: the level's budget, or under the episode scope what it has left.
+                turn_config = replace(ep_config, max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent))
+                gen = await self._generate_turn(
+                    client, server_url, step.observation, turn_config, effort.level, effort.thinking_budget
+                )
+                reasoning_spent += effort.spend_of(gen, config.reasoning_end_token_id)
                 generation_tokens += gen.tokens
                 if gen.token_logprobs:
                     logp_sum += sum(gen.token_logprobs)
@@ -238,7 +249,7 @@ class EnvironmentActor:
                 length += 1
 
             traj = env.get_trajectories([eid])[0]
-            effort.stamp(traj)
+            effort.stamp(traj, reasoning_spent)
 
             episode_metrics = env.rollout_metrics(traj) if traj else {}
             if logp_count:
@@ -291,6 +302,7 @@ class EnvironmentActor:
         messages: list[dict[str, str]],
         config: RolloutConfig,
         reasoning_effort: str | None = None,
+        reasoning_budget: int | None = None,
     ) -> TurnGeneration:
         """One turn's generation, re-issued for the same observation while the engine aborts it.
 
@@ -300,7 +312,7 @@ class EnvironmentActor:
         past that the episode errors into a masked row.
         """
         for _ in range(config.max_retries + 1):
-            gen = await self._generate(client, server_url, messages, config, reasoning_effort)
+            gen = await self._generate(client, server_url, messages, config, reasoning_effort, reasoning_budget)
             if gen.finish_reason != FINISH_REASON_ABORT:
                 return gen
             logger.warning(f"Actor {self.actor_id}: the {config.backend} engine aborted the turn; re-issuing it")
@@ -316,6 +328,7 @@ class EnvironmentActor:
         messages: list[dict[str, str]],
         config: RolloutConfig,
         reasoning_effort: str | None = None,
+        reasoning_budget: int | None = None,
     ) -> TurnGeneration:
         """Call /v1/chat/completions with backoff-based retry; returns the turn's :class:`TurnGeneration`
         (capture fields populated per the ``RolloutConfig`` flags).
@@ -328,7 +341,7 @@ class EnvironmentActor:
         if not url.startswith("http"):
             url = f"http://{url}"
 
-        payload = self._build_payload(messages, config, reasoning_effort)
+        payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget)
 
         @backoff.on_exception(
             backoff.expo,
@@ -398,10 +411,14 @@ class EnvironmentActor:
         return await _request()
 
     def _build_payload(
-        self, messages: list[dict], config: RolloutConfig, reasoning_effort: str | None = None
+        self,
+        messages: list[dict],
+        config: RolloutConfig,
+        reasoning_effort: str | None = None,
+        reasoning_budget: int | None = None,
     ) -> dict[str, Any]:
         """The turn's request payload, with this actor's env tool schema bound onto the wire format."""
-        return build_payload(messages, config, reasoning_effort, self._tools_schema)
+        return build_payload(messages, config, reasoning_effort, self._tools_schema, reasoning_budget)
 
     async def shutdown(self):
         """Close the HTTP session and the environment (idempotent; called by RolloutManager.shutdown)."""

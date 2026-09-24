@@ -2,15 +2,15 @@
 """Parity between ``AsyncTrainingConfig`` (the env-GRPO YAML surface) and the ``RolloutConfig`` it
 builds for the Ray rollout actors.
 
-``AsyncTrainingConfig.get_rollout_config`` copies ten fields under a mirrored name. Every pair reads
-one module constant; this pins that they still do. Unlinked declarations agree only by coincidence —
+``AsyncTrainingConfig.get_rollout_config`` copies every same-named (or ``rollout_``-prefixed) field
+under a mirrored name. Every pair reads one module constant; this pins that they still do. Unlinked declarations agree only by coincidence —
 and for ``max_tokens`` they do not: a directly built ``RolloutConfig()`` generating 1024 tokens per
 turn where the YAML path allows 32768 is a 32x truncation that reads as the model refusing to finish
 rather than as a config bug.
 
-The other three fields are DERIVED from different knobs, so their defaults are not required to
-agree, and ``capture_token_ids``' does not: off in a hand-built config, on through the YAML path.
-Those derivations are pinned below instead of exempted.
+The other fields are DERIVED from different knobs, so their defaults are not required to agree,
+and ``capture_token_ids``' does not: off in a hand-built config, on through the YAML path. Those
+derivations are pinned below instead of exempted.
 
 Run: pytest tests/cpu/config/test_rollout_config_mirror.py
 """
@@ -31,7 +31,12 @@ _DERIVED = {
     "capture_token_ids": "train_on_sampled_tokens",
     "capture_routed_experts": "routing_replay",
     "stop_token_ids": "rollout_stop_tokens, resolved to ids by the trainer",
+    "reasoning_end_token_id": "rollout_reasoning_end_token, resolved to an id by the caller that owns the tokenizer",
 }
+
+# The one derived field the builder REQUIRES under the episode scope, supplied to every build below so
+# the mirrored knobs, not that derivation, are what those tests exercise (pinned on its own further down).
+_RESOLVED_END_TOKEN_ID = 151668
 
 # A non-default value per mirrored knob. Applied one at a time (an sglang backend and a thinking
 # budget are mutually exclusive), so a knob that stops being copied cannot pass by leaving the
@@ -42,6 +47,8 @@ _NON_DEFAULT_VALUES = {
     "rollout_top_p": 0.5,
     "rollout_max_tokens": 4096,
     "rollout_max_thinking_tokens": 1024,
+    "rollout_thinking_budget_scope": "episode",
+    "rollout_thinking_turn_reserve": 128,
     "model_name": "org/rollout-model",
     "request_timeout": 45.0,
     "episode_timeout": 600.0,
@@ -84,7 +91,9 @@ def test_every_mirrored_knob_reaches_the_built_rollout_config(rollout_field, asy
     YAML sets and every rollout ignores."""
     requested = _NON_DEFAULT_VALUES[async_field]
 
-    built = AsyncTrainingConfig(**{async_field: requested}).get_rollout_config()
+    built = AsyncTrainingConfig(**{async_field: requested}).get_rollout_config(
+        reasoning_end_token_id=_RESOLVED_END_TOKEN_ID
+    )
 
     assert getattr(built, rollout_field) == requested, (
         f"AsyncTrainingConfig.{async_field}={requested!r} never reached RolloutConfig.{rollout_field} "
@@ -112,6 +121,16 @@ def test_capture_token_ids_follows_train_on_sampled_tokens(sampled_tokens):
     mismatch ``train_on_sampled_tokens`` exists to eliminate — with nothing in the logs saying so."""
     built = AsyncTrainingConfig(train_on_sampled_tokens=sampled_tokens).get_rollout_config()
     assert built.capture_token_ids is sampled_tokens
+
+
+def test_reasoning_end_token_id_is_the_id_the_caller_resolved():
+    """The marker is a string knob on the YAML surface and an id on the wire, so no name pairing can
+    carry it: the caller that owns the tokenizer resolves it and the builder passes it through
+    untouched (the episode scope's reasoning count is what refuses to run without it)."""
+    config = AsyncTrainingConfig(rollout_thinking_budget_scope="episode")
+    assert config.get_rollout_config(reasoning_end_token_id=7).reasoning_end_token_id == 7
+    assert config.get_rollout_config().reasoning_end_token_id is None
+    assert AsyncTrainingConfig().get_rollout_config().reasoning_end_token_id is None
 
 
 def test_the_yaml_path_captures_token_ids_where_a_hand_built_config_does_not():

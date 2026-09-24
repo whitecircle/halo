@@ -41,6 +41,9 @@ EPISODE_INVALID_REASON_KEY = "episode_invalid_reason"
 # stamps on the row it hands back for one. A driver stamps it before closing the episode through
 # ``finalize_truncated``, and the turn-overflow price then stays off it: the fault is not the policy's.
 EPISODE_ERROR_KEY = "error"
+# Stamped by the rollout driver under the episode thinking scope: whether the episode's reasoning budget
+# ran down to the per-turn reserve (a later turn would have reasoned only its reserve).
+THINKING_BUDGET_EXHAUSTED_KEY = "thinking_budget_exhausted"
 
 # The environment's own grade, priced by the reward's environment term, in ``reward_components``: the
 # term advantage shaping gates on (it falls back to the total reward when absent).
@@ -239,11 +242,21 @@ class Trajectory:
     info: dict[str, Any] = field(default_factory=dict)
     # Set by the rollout so re-tokenization renders the same steer the model generated under.
     reasoning_effort: str | None = None
-    # Applied per-episode, per-turn CoT budget (min(level budget, global cap)): the template states it,
-    # so a re-render needs it, and the trainer's under-use floor is a multiple of it.
+    # The CoT budget the episode ran under — per turn, or for the whole episode under the episode
+    # scope: the template states it, so a re-render needs it, and the trainer's under-use floor is a
+    # multiple of it.
     reasoning_budget: int | None = None
 
     _assistant_count: int = field(default=0, repr=False)
+
+    def append_to_last_user(self, text: str) -> None:
+        """Append ``text`` to the most recent user message: how an env states per-episode facts (a task's
+        budgets, a question's choices) inside the prompt the model already reads."""
+        for message in reversed(self.messages):
+            if message.role == "user":
+                message.content += text
+                return
+        raise ValueError("the trajectory has no user message to append to")
 
     def add_message(self, message: Message) -> None:
         """Add a message to the trajectory."""
@@ -539,10 +552,15 @@ class BaseEnvironment(ABC):
         effort is undetermined at reset."""
 
     @staticmethod
-    def _tool_budget_exhausted(trajectory: Trajectory, name: str) -> int | None:
+    def _tool_calls_made(trajectory: Trajectory, name: str) -> int:
+        """Admitted calls of tool ``name`` so far in the episode (a call is counted before its handler runs)."""
+        return trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(name, 0)
+
+    @classmethod
+    def _tool_budget_exhausted(cls, trajectory: Trajectory, name: str) -> int | None:
         """The episode cap another call of tool ``name`` would exceed, or ``None`` while within budget."""
         cap = trajectory.info.get(EPISODE_TOOL_BUDGETS_KEY, {}).get(name)
-        if cap is not None and trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(name, 0) >= cap:
+        if cap is not None and cls._tool_calls_made(trajectory, name) >= cap:
             return cap
         return None
 
@@ -596,8 +614,8 @@ class BaseEnvironment(ABC):
         return None
 
     def thinking_budget_for_effort(self, effort: str) -> int | None:
-        """Hard per-turn thinking-token budget for a resolved effort level (the level's profile
-        ``thinking_tokens``), or ``None`` to use the global rollout budget."""
+        """The thinking-token budget for a resolved effort level (the level's profile ``thinking_tokens``;
+        per turn, or the episode's total under the episode scope), or ``None`` to use the global one."""
         return self.reasoning_effort_profiles.get(effort, {}).get("thinking_tokens")
 
     def reset_effort_level(self, context: dict[str, Any] | None) -> str | None:
@@ -627,6 +645,10 @@ class BaseEnvironment(ABC):
         # stopped inside its reasoning, from an answer.
         metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
         metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
+        if THINKING_BUDGET_EXHAUSTED_KEY in trajectory.info:
+            metrics["episode/thinking_budget_exhausted"] = (
+                1.0 if trajectory.info[THINKING_BUDGET_EXHAUSTED_KEY] else 0.0
+            )
         metrics["episode/reasoning_cjk_rate"] = (
             1.0
             if any(

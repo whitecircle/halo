@@ -2,8 +2,9 @@
     reasoning effort stated in the system turn. Thinking is always on (the <|think|> marker opens every system
     turn, so the trainer's renders and the server's agree without an enable_thinking variable); an assistant
     turn renders whatever reasoning it carries; tool declarations, tool calls and tool responses keep the hub
-    spellings. Variables: reasoning_effort (the request's top-level field, merged in by the server) and
-    reasoning_budget (the level's per-turn thinking cap, from chat_template_kwargs); both absent means no
+    spellings. Variables: reasoning_effort (the request's top-level field, merged in by the server),
+    reasoning_budget (the level's thinking budget, from chat_template_kwargs) and reasoning_budget_scope
+    ('episode' when the budget covers the whole task, else per turn); effort and budget both absent means no
     effort line. -#}
 {%- macro format_parameters(properties, required, filter_keys=false) -%}
     {%- set standard_keys = ['description', 'type', 'properties', 'required', 'nullable'] -%}
@@ -203,7 +204,11 @@
     {%- endif -%}
     {{- 'Reasoning effort: ' ~ reasoning_effort ~ '.' -}}
     {%- if reasoning_budget is defined and reasoning_budget -%}
-        {{- ' Think for at most ' ~ reasoning_budget ~ ' tokens per turn; reasoning past that budget is cut off, so finish the turn within it.' -}}
+        {%- if reasoning_budget_scope is defined and reasoning_budget_scope == 'episode' -%}
+            {{- ' Think for at most ' ~ reasoning_budget ~ ' tokens in total across all your turns on this task; reasoning past that budget is cut off, so spend it where it matters.' -}}
+        {%- else -%}
+            {{- ' Think for at most ' ~ reasoning_budget ~ ' tokens per turn; reasoning past that budget is cut off, so finish the turn within it.' -}}
+        {%- endif -%}
     {%- endif -%}
 {%- endif -%}
 {%- if tools -%}

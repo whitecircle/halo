@@ -52,6 +52,10 @@ EFFORT_LINE = (
     "Reasoning effort: high. Think for at most 16384 tokens per turn; reasoning past that budget is cut off, "
     "so finish the turn within it."
 )
+EPISODE_EFFORT_LINE = (
+    "Reasoning effort: high. Think for at most 16384 tokens in total across all your turns on this task; "
+    "reasoning past that budget is cut off, so spend it where it matters."
+)
 
 
 def _render(template_text: str, messages, **kwargs) -> str:
@@ -89,6 +93,18 @@ def test_effort_line_sits_after_the_system_text_before_the_tools(template):
     assert system_turn.index(EFFORT_LINE) < system_turn.index("<|tool>declaration:run_code")
     assert text.count("Reasoning effort") == 1
     assert text.endswith("<|turn>model\n")
+
+
+def test_episode_scope_states_the_budget_for_the_whole_task(template):
+    """``reasoning_budget_scope='episode'`` (the config injects it) swaps the per-turn sentence for the
+    whole-task one and changes nothing else; any other value, or none, keeps the per-turn statement."""
+    kwargs = {"tools": TOOLS, "add_generation_prompt": True, "reasoning_effort": "high", "reasoning_budget": 16384}
+    per_turn = _render(template, CONVERSATION, **kwargs)
+    episode = _render(template, CONVERSATION, reasoning_budget_scope="episode", **kwargs)
+    assert EPISODE_EFFORT_LINE in episode and "per turn" not in episode
+    assert episode == per_turn.replace(EFFORT_LINE, EPISODE_EFFORT_LINE)
+    assert EFFORT_LINE in per_turn and "in total across all your turns" not in per_turn
+    assert _render(template, CONVERSATION, reasoning_budget_scope="turn", **kwargs) == per_turn
 
 
 def test_thinking_is_on_without_a_template_variable(template):

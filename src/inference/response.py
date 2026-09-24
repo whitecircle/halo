@@ -26,6 +26,8 @@ class OpenAIResponse(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    token_ids: list[int] | None = None
+    """The sampled completion ids, when the request asked for them (vLLM ``return_token_ids``)."""
 
 
 def get_finish_reason(

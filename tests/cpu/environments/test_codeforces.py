@@ -297,7 +297,7 @@ def test_env_reset_parses_payload_and_reward_is_fraction():
     traj = env._reset_single("Print a+b.", {"answer": answer})
     assert traj.info["tests_total"] == 2
     assert traj.info["_time_limit"] == 2.0
-    assert traj.info["has_checker"] is False
+    assert traj.info["_checker"] is None
 
     half_right = "a=int(input()); b=int(input()); print(a+b if a==2 else a*b)"
     passed, total, *_ = env._grade_submission(half_right, traj)

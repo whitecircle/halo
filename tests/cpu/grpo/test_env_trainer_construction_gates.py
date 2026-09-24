@@ -9,6 +9,8 @@
 * A dataset with no ``answer`` column under an environment that grades against one scores a single
   constant — zero advantage in every GRPO group, nothing in the logs — so it is refused here, and
   ``remove_unused_columns`` is forced off because the rollout context IS the row's other columns.
+* The episode thinking scope needs a budget for the turns to share (a level's ``thinking_tokens`` or the
+  run's ceiling) and a per-turn reserve no level's budget falls below; either gap is refused.
 
     python tests/cpu/grpo/test_env_trainer_construction_gates.py
 """
@@ -45,6 +47,7 @@ _INIT_GATES = (
     "_force_full_dataset_columns",
     "_reject_answerless_datasets",
     "_validate_effort_length_terms",
+    "_validate_thinking_budget_scope",
     "reject_off_policy_mask_threshold",
 )
 
@@ -139,6 +142,41 @@ def test_the_eval_dataset_is_held_to_the_same_column():
 def test_a_non_grading_environment_accepts_an_answer_less_dataset():
     """native_math pays for completing the task, so prompts alone are a complete dataset for it."""
     _answer_host("native_math", {}, _dataset(), eval_dataset=_dataset())._reject_answerless_datasets()
+
+
+def _scope_host(budgets: dict, **config):
+    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    host.async_config = AsyncTrainingConfig(**config)
+    host._rollout_env = types.SimpleNamespace(thinking_budget_for_effort=budgets.get)
+    return host
+
+
+def test_episode_scope_refuses_a_run_with_no_budget_to_share():
+    """With no level setting ``thinking_tokens`` and no run ceiling the scope has no total: every
+    episode would bind at its first turn instead of here, after the servers are up."""
+    episode = {"rollout_thinking_budget_scope": "episode"}
+    with pytest.raises(ValueError, match="nothing to share"):
+        _scope_host({}, **episode)._validate_thinking_budget_scope()
+    # One budgeted level is enough, and so is the run-wide ceiling.
+    _scope_host({"high": 16384}, **episode)._validate_thinking_budget_scope()
+    _scope_host({}, **episode, rollout_max_thinking_tokens=8000)._validate_thinking_budget_scope()
+    # The per-turn scope shares nothing and runs uncapped as before.
+    _scope_host({})._validate_thinking_budget_scope()
+
+
+def test_episode_scope_refuses_a_reserve_no_level_budget_can_hold():
+    """A level whose whole budget sits below the reserve would be clamped to it silently, so the model
+    would be promised a budget it never gets a turn to spend."""
+    episode = {"rollout_thinking_budget_scope": "episode"}
+    with pytest.raises(ValueError, match="exceeds the thinking_tokens"):
+        _scope_host(
+            {"low": 256, "high": 16384}, **episode, rollout_thinking_turn_reserve=512
+        )._validate_thinking_budget_scope()
+    _scope_host(
+        {"low": 256, "high": 16384}, **episode, rollout_thinking_turn_reserve=256
+    )._validate_thinking_budget_scope()
+    # Not a per-turn-scope concern: there the reserve is never read.
+    _scope_host({"low": 256}, rollout_thinking_turn_reserve=512)._validate_thinking_budget_scope()
 
 
 def test_column_pruning_is_forced_off(tmp_path):

@@ -59,6 +59,7 @@ rollout_temperature: 0.7
 rollout_top_p: 0.95
 rollout_max_tokens: 8192
 # rollout_max_thinking_tokens: null   # per-turn reasoning-token budget; vLLM only
+# rollout_thinking_budget_scope: turn # `episode`: a level's thinking_tokens is the episode's total; vLLM only
 # rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
 # rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
 # train_on_sampled_tokens: true       # the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
@@ -68,7 +69,7 @@ rollout_max_tokens: 8192
 # effort_length_penalty_k0: null      # capped, effort-conditioned price on reasoning tokens (null = off)
 # effort_length_penalty_c_max: 0.1    # that price's cap, in reward units
 # effort_length_floor_weight: 0.0     # weight of the under-use floor (0 = off)
-# effort_length_floor_budgets: 0.75   # the floor's reference, in per-turn thinking budgets
+# effort_length_floor_budgets: 0.75   # the floor's reference, in thinking budgets (the episode's under the episode scope)
 
 # --- Prefetch (AsyncTrainingConfig fields) ---
 enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the

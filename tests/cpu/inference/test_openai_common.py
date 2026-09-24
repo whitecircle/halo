@@ -15,24 +15,27 @@ from src.inference.response import OpenAIResponse
 from src.inference.resume_store import append_openai_checkpoint, load_openai_checkpoint
 
 
-def _fake_completion(content: str = "ok"):
-    """Minimal stand-in for a chat-completion response (choices[0].message + usage)."""
+def _fake_completion(content: str = "ok", **choice_extras):
+    """Minimal stand-in for a chat-completion response (choices[0].message + usage); ``choice_extras``
+    are attributes outside the OpenAI schema that an engine attaches to the choice."""
     message = types.SimpleNamespace(content=content, tool_calls=None, reasoning=None, reasoning_content=None)
-    choice = types.SimpleNamespace(message=message, finish_reason="stop", stop_reason=None)
+    choice = types.SimpleNamespace(message=message, finish_reason="stop", stop_reason=None, **choice_extras)
     usage = types.SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
     return types.SimpleNamespace(choices=[choice], usage=usage)
 
 
 class _RecordingClient:
-    """AsyncOpenAI stand-in that records the create() kwargs it is called with."""
+    """AsyncOpenAI stand-in that records the create() kwargs it is called with and answers with
+    ``completion`` (a plain ``_fake_completion()`` when omitted)."""
 
-    def __init__(self):
+    def __init__(self, completion=None):
         self.captured: dict = {}
+        self._completion = completion
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
 
     async def _create(self, **kwargs):
         self.captured = kwargs
-        return _fake_completion()
+        return self._completion if self._completion is not None else _fake_completion()
 
 
 def test_generate_forwards_extra_body_verbatim():
@@ -53,6 +56,17 @@ def test_generate_omits_extra_body_when_there_is_nothing_to_add():
     assert "extra_body" not in client.captured
     asyncio.run(generate_openai_response("m", "hi", custom_client=client, extra_body={}))
     assert "extra_body" not in client.captured
+
+
+def test_generate_keeps_the_sampled_ids_an_engine_attaches_to_the_choice():
+    """vLLM's ``return_token_ids`` puts the sampled ids on the choice outside the OpenAI schema; the SDK
+    keeps them as an extra attribute and the response carries them (the episode thinking scope reads
+    its reasoning count off them). Anything but a list is not that capture and reads as absent."""
+    with_ids = _RecordingClient(completion=_fake_completion(token_ids=[1, 2, 3]))
+    assert asyncio.run(generate_openai_response("m", "hi", custom_client=with_ids)).token_ids == [1, 2, 3]
+    not_a_list = _RecordingClient(completion=_fake_completion(token_ids="1,2,3"))
+    assert asyncio.run(generate_openai_response("m", "hi", custom_client=not_a_list)).token_ids is None
+    assert asyncio.run(generate_openai_response("m", "hi", custom_client=_RecordingClient())).token_ids is None
 
 
 def test_parallel_requests_forwards_request_timeout_to_each_call():

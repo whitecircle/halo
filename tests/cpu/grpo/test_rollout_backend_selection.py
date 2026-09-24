@@ -150,6 +150,17 @@ def test_sglang_rejects_thinking_budget():
         _sglang_config(rollout_max_thinking_tokens=4096)
 
 
+def test_sglang_rejects_the_episode_thinking_scope():
+    """The scope narrows the per-turn engine cap, which is the vLLM-only ``thinking_token_budget``: on
+    SGLang every turn would reason uncapped while the template promised one shared budget."""
+    with pytest.raises(
+        ValueError, match="rollout_thinking_budget_scope='episode' is not supported with rollout_backend"
+    ):
+        _sglang_config(rollout_thinking_budget_scope="episode")
+    vllm = AsyncTrainingConfig(rollout_backend="vllm", rollout_thinking_budget_scope="episode")
+    assert vllm.get_rollout_config(reasoning_end_token_id=1).thinking_budget_scope == "episode"
+
+
 def test_chat_template_kwargs_refuse_the_effort_key():
     """The level is per episode and travels top-level; a run-wide nested copy would either duplicate
     it or, on a disagreement, override it on SGLang and lose to it on vLLM."""

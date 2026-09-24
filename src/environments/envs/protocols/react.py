@@ -262,13 +262,9 @@ Always think before acting, and provide a Final Answer when you're done."""
                 # key an ungraded episode, and the reward pays them differently. Read off the RESET
                 # context, the only one that carries the row (a lost episode is graded with none).
                 "_answer_in_context": "answer" in context,
-                "thoughts": [],
-                "actions": [],
-                "observations": [],
                 "final_answer": None,
                 "total_tool_calls": 0,
                 "successful_tool_calls": 0,
-                "total_thoughts": 0,
                 TOOL_CALL_COUNTS_KEY: {},
                 EPISODE_TOOL_BUDGETS_KEY: dict(self.tool_budgets),
             },
@@ -293,13 +289,9 @@ Always think before acting, and provide a Final Answer when you're done."""
         step = parse_react_output(action)
 
         if step.thought:
-            trajectory.info["thoughts"].append(step.thought)
-            trajectory.info["total_thoughts"] += 1
             reward += self.thought_reward
-            info["has_thought"] = True
         elif self.require_thought and (step.has_action or step.has_final_answer):
             reward -= self.no_thought_penalty
-            info["missing_thought"] = True
 
         if step.has_final_answer:
             trajectory.info["completed"] = True
@@ -329,7 +321,6 @@ Always think before acting, and provide a Final Answer when you're done."""
                     self._count_tool_call(trajectory, step.action)
                     observation = tool.execute(**args)
                     success = True
-                    info["tool_success"] = True
                 except (ToolBudgetExhausted, ToolArgumentError) as e:
                     # A refusal is expected control flow: charged like any tool error, logged without
                     # the traceback that a tool which actually broke gets below.
@@ -346,18 +337,7 @@ Always think before acting, and provide a Final Answer when you're done."""
 
             reward += self._credit_tool_call(trajectory, success)
             observation = self._truncate_observation(observation)
-            trajectory.info["actions"].append(
-                {
-                    "tool": step.action,
-                    "args": step.action_args,
-                }
-            )
-            trajectory.info["observations"].append(observation)
-
-            observation_msg = f"Observation: {observation}"
-            trajectory.add_message(Message.user(observation_msg))
-
-            info["observation"] = observation
+            trajectory.add_message(Message.user(f"Observation: {observation}"))
             return trajectory, reward, False, False, info
 
         hint = (

@@ -26,6 +26,8 @@ from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.tools.definitions import NativeToolRegistry
 
 _MAX_TOKENS = 20000
+# The reasoning-end marker's id under the episode scope: one no other id in a fake turn carries.
+_END = 151668
 
 
 class _PlainEnv(NativeToolUseEnvironment):
@@ -44,16 +46,42 @@ class _BudgetEnv(_PlainEnv):
         return self.BUDGETS.get(effort)
 
 
-def _text_turn(text="the answer"):
-    return SimpleNamespace(answer=text, finish_reason="stop", completion_tokens=3, tool_calls=None, reasoning=None)
+def _text_turn(text="the answer", token_ids=None):
+    return SimpleNamespace(
+        answer=text, finish_reason="stop", completion_tokens=3, tool_calls=None, reasoning=None, token_ids=token_ids
+    )
 
 
-def _tool_turn():
+def _tool_turn(token_ids=None):
     """A turn that calls a tool no registry has: the step is spent, the episode stays open."""
     call = SimpleNamespace(id="c0", function=SimpleNamespace(name="nonexistent_tool", arguments="{}"))
     return SimpleNamespace(
-        answer="", finish_reason="tool_calls", completion_tokens=3, tool_calls=[call], reasoning=None
+        answer="",
+        finish_reason="tool_calls",
+        completion_tokens=3,
+        tool_calls=[call],
+        reasoning=None,
+        token_ids=token_ids,
     )
+
+
+def _actor_text_turn(token_ids=None):
+    return ray_actors.TurnGeneration(
+        text="the answer", tool_calls=[], reasoning="", tokens=3, finish_reason="stop", token_ids=token_ids
+    )
+
+
+def _actor_tool_turn(token_ids=None):
+    """The actor-side twin of ``_tool_turn``: a call to a tool no registry has keeps the episode open."""
+    call = {"id": "c0", "type": "function", "function": {"name": "nonexistent_tool", "arguments": "{}"}}
+    return ray_actors.TurnGeneration(
+        text="", tool_calls=[call], reasoning="", tokens=3, finish_reason="tool_calls", token_ids=token_ids
+    )
+
+
+def _ids_closing_reasoning_after(reasoning_tokens: int) -> list[int]:
+    """Sampled ids whose reasoning closes with the marker as its ``reasoning_tokens``-th token."""
+    return [7] * (reasoning_tokens - 1) + [_END] + [9] * 5
 
 
 async def _drive_eval(monkeypatch, env, context, *, responses, config=None):
@@ -75,11 +103,14 @@ async def _drive_eval(monkeypatch, env, context, *, responses, config=None):
     return calls, traj
 
 
-async def _drive_actor(env_cls, context, config):
-    """Run the real ``EnvironmentActor`` episode loop off-cluster; return its per-turn config + result.
+async def _drive_actor(env_cls, context, config, generations=None):
+    """Run the real ``EnvironmentActor`` episode loop off-cluster over ``generations`` (one text turn
+    when omitted); return its per-turn ``(config, level, budget, payload)`` records and the result.
 
     ``@ray.remote`` wraps the class and keeps the original at ``__ray_metadata__.modified_class``;
-    ``__init__`` only assigns attributes, so this exercises the genuine ``run_episode`` binding.
+    ``__init__`` only assigns attributes, so this exercises the genuine ``run_episode`` binding. The
+    transport is replaced below the payload builder, so each record's payload is the request the
+    actor would have sent for that turn.
     """
     cls = ray_actors.EnvironmentActor.__ray_metadata__.modified_class
     actor = cls.__new__(cls)
@@ -89,14 +120,14 @@ async def _drive_actor(env_cls, context, config):
     async def fake_client(timeout):
         return None
 
-    async def fake_generate(client, url, messages, cfg, reasoning_effort=None):
-        seen.append((cfg, reasoning_effort))
-        return ray_actors.TurnGeneration(text="the answer", tool_calls=[], reasoning="", tokens=3)
+    async def fake_generate(client, url, messages, cfg, reasoning_effort=None, reasoning_budget=None):
+        payload = actor._build_payload(messages, cfg, reasoning_effort, reasoning_budget)
+        seen.append((cfg, reasoning_effort, reasoning_budget, payload))
+        return generations[len(seen) - 1] if generations else _actor_text_turn()
 
     actor._get_http_client = fake_client
     actor._generate = fake_generate
     result = await actor.run_episode("solve it", dict(context or {}), "http://x", config)
-    assert result.error is None, result.error
     return seen, result
 
 
@@ -106,11 +137,14 @@ async def test_both_drivers_bind_the_same_caps(monkeypatch):
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS)
 
     seen, result = await _drive_actor(_BudgetEnv, context, config)
-    (actor_cfg, actor_level) = seen[0]
+    assert result.error is None, result.error
+    (actor_cfg, actor_level, actor_budget, _) = seen[0]
     calls, eval_traj = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=[_text_turn()], config=config)
 
-    # Actor side: the env's per-level budget replaces the (unset) global CoT cap, turn cap untouched.
+    # Actor side: the env's per-level budget replaces the (unset) global CoT cap, turn cap untouched,
+    # and the template is told the same number the engine enforces.
     assert (actor_level, actor_cfg.max_thinking_tokens, actor_cfg.max_tokens) == ("high", 4000, _MAX_TOKENS)
+    assert actor_budget == 4000
     # Eval side: byte-identical generation-control fields to the ones the actor's payload carries —
     # built from the ACTOR's own per-episode config, so this compares the two drivers, not the helper
     # with itself. The eval must not compute the CoT budget and then drop it from the request.
@@ -134,7 +168,8 @@ async def test_env_without_a_level_budget_keeps_the_global_caps(monkeypatch):
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_thinking_tokens=8192)
 
     seen, result = await _drive_actor(_PlainEnv, context, config)
-    (actor_cfg, _) = seen[0]
+    assert result.error is None, result.error
+    (actor_cfg, _, _, _) = seen[0]
     calls, eval_traj = await _drive_eval(monkeypatch, _PlainEnv(), context, responses=[_text_turn()])
 
     assert (actor_cfg.max_thinking_tokens, actor_cfg.max_tokens) == (8192, _MAX_TOKENS)
@@ -171,6 +206,82 @@ async def test_random_level_is_drawn_once_for_the_whole_episode(monkeypatch):
     assert level in VALID_REASONING_EFFORTS
     assert traj.reasoning_effort == level
     assert traj.reasoning_budget == _BudgetEnv.BUDGETS[level]
+
+
+def _episode_config(**overrides):
+    return ray_actors.RolloutConfig(
+        max_tokens=_MAX_TOKENS,
+        max_thinking_tokens=4000,
+        thinking_budget_scope="episode",
+        thinking_turn_reserve=256,
+        reasoning_end_token_id=_END,
+        chat_template_kwargs={"reasoning_budget_scope": "episode"},
+        **overrides,
+    )
+
+
+async def test_episode_scope_narrows_each_turns_engine_cap_to_what_the_budget_has_left(monkeypatch):
+    """Three turns each spending 1500 reasoning tokens of the level's 4000-token episode budget: the
+    engine cap walks 4000 → 2500 → 1000 while every request keeps stating the episode's 4000 and its
+    scope to the template and asks for the ids the spend is read off — on both drivers identically."""
+    context = {"reasoning_effort": "high"}
+    config = _episode_config()
+    ids = _ids_closing_reasoning_after(1500)
+    expected_caps = [4000, 2500, 1000]
+    stated = {"reasoning_budget_scope": "episode", "reasoning_budget": 4000}
+
+    gens = [_actor_tool_turn(ids), _actor_tool_turn(ids), _actor_text_turn(ids)]
+    seen, result = await _drive_actor(_BudgetEnv, context, config, generations=gens)
+    assert result.error is None, result.error
+    assert [cfg.max_thinking_tokens for cfg, _, _, _ in seen] == expected_caps
+    assert [payload["thinking_token_budget"] for _, _, _, payload in seen] == expected_caps
+    assert {budget for _, _, budget, _ in seen} == {4000}
+    assert [payload["chat_template_kwargs"] for _, _, _, payload in seen] == [stated] * 3
+    assert all(payload["return_token_ids"] is True for _, _, _, payload in seen)
+    # 4500 spent of 4000: a further turn would have reasoned only its reserve.
+    assert result.trajectory.info["thinking_budget_exhausted"] is True
+    assert result.metrics["episode/thinking_budget_exhausted"] == 1.0
+    assert (result.trajectory.reasoning_effort, result.trajectory.reasoning_budget) == ("high", 4000)
+
+    responses = [_tool_turn(ids), _tool_turn(ids), _text_turn(token_ids=ids)]
+    calls, eval_traj = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=responses, config=config)
+    assert [call["extra_body"]["thinking_token_budget"] for call in calls] == expected_caps
+    assert [call["extra_body"]["chat_template_kwargs"] for call in calls] == [stated] * 3
+    assert all(call["extra_body"]["return_token_ids"] is True for call in calls)
+    assert eval_traj.info["thinking_budget_exhausted"] is True
+    assert (eval_traj.reasoning_effort, eval_traj.reasoning_budget) == ("high", 4000)
+
+    # Anti-vacuity for the flag: an episode that stops well inside its budget is recorded as such.
+    calls, kept = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=[_text_turn(token_ids=ids)])
+    assert kept.info.get("thinking_budget_exhausted") is None, "the per-turn scope records no verdict"
+    _, kept = await _drive_eval(
+        monkeypatch, _BudgetEnv(), context, responses=[_text_turn(token_ids=ids)], config=config
+    )
+    assert kept.info["thinking_budget_exhausted"] is False
+
+
+async def test_episode_scope_refuses_a_turn_without_sampled_ids():
+    """The spend is read off the sampled ids; a turn that arrives without them cannot be counted, and
+    counting it as zero would hand every later turn the full budget — the loophole the scope closes.
+    The same fake turn drives every per-turn-scope test above without error."""
+    seen, result = await _drive_actor(_BudgetEnv, {"reasoning_effort": "high"}, _episode_config())
+    assert result.error is not None and "sampled token ids" in result.error
+    assert len(seen) == 1, "the episode must stop at the turn it cannot count"
+
+
+def test_episode_scope_refuses_a_level_with_nothing_to_share():
+    """An episode budget is the level's ``thinking_tokens`` or the run's ceiling; with neither there is
+    no total for the turns to share, and binding one silently would run the scope as uncapped reasoning
+    while the template promised a budget. The ceiling alone is a complete budget."""
+    context = {"reasoning_effort": "high"}
+    with pytest.raises(ValueError, match="nothing to share"):
+        episode.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS, scope="episode")
+    ceiling_only = episode.bind_episode_effort(
+        context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=8192, scope="episode"
+    )
+    assert (ceiling_only.thinking_budget, ceiling_only.turn_thinking_cap(0)) == (8192, 8192)
+    # The per-turn scope has nothing to share and binds the uncapped run as before.
+    assert episode.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS).thinking_budget is None
 
 
 def test_drivers_share_one_seam():

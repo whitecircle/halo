@@ -8,7 +8,7 @@ return those facts in different places. Transport and the episode loop belong to
 import logging
 from typing import Any, get_args, get_type_hints
 
-from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
+from src.configs.rollout_config import REASONING_BUDGET_TEMPLATE_VAR, THINKING_SCOPE_EPISODE, RolloutConfig
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
@@ -140,10 +140,14 @@ def capture_routing_mask(choice: dict[str, Any], data: dict[str, Any]) -> str | 
     return choice.get("routed_experts") or (data.get("sglext") or {}).get("routed_experts")
 
 
-def generation_control_fields(config: RolloutConfig, reasoning_effort: str | None = None) -> dict[str, Any]:
-    """The request fields carrying a turn's generation contract: the reasoning level, the CoT budget
-    bound to that level, and the turn terminator. One owner for both drivers — the training payload
-    below and the eval runner's SDK call — so a knob cannot reach one and quietly miss the other.
+def generation_control_fields(
+    config: RolloutConfig, reasoning_effort: str | None = None, reasoning_budget: int | None = None
+) -> dict[str, Any]:
+    """The request fields carrying a turn's generation contract: the reasoning level, the CoT cap the
+    engine enforces this turn (``config.max_thinking_tokens``), the budget the template states
+    (``reasoning_budget``; the engine cap stands in when omitted, the same number under the per-turn
+    scope), and the turn terminator. One owner for both drivers — the training payload below and the
+    eval runner's SDK call — so a knob cannot reach one and quietly miss the other.
 
     ``reasoning_effort`` goes out TOP-LEVEL: that spelling is the one both engines derive their
     thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``) and
@@ -153,7 +157,7 @@ def generation_control_fields(config: RolloutConfig, reasoning_effort: str | Non
     value whichever spelling the engine reads.
     The run's other template variables (``config.chat_template_kwargs``) ride in the nested form,
     joined by the level's thinking budget under :data:`REASONING_BUDGET_TEMPLATE_VAR`; the config
-    refuses both per-episode keys there.
+    refuses the per-episode keys there, and the scope variable it sets itself.
     """
     fields: dict[str, Any] = {}
     if config.stop_token_ids:
@@ -179,11 +183,17 @@ def generation_control_fields(config: RolloutConfig, reasoning_effort: str | Non
                 config.backend,
                 config.max_tokens,
             )
+    if config.thinking_budget_scope == THINKING_SCOPE_EPISODE and config.backend == VLLM_BACKEND:
+        # The episode scope counts a turn's reasoning off the sampled ids, so every driver's request
+        # asks for them — the eval transport requests no other capture.
+        fields["return_token_ids"] = True
     template_kwargs = dict(config.chat_template_kwargs or {})
-    if config.max_thinking_tokens is not None:
-        # The level's per-turn cap as a template variable, so a template can state the budget the
-        # engine enforces; a template that does not read it ignores it.
-        template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = config.max_thinking_tokens
+    stated_budget = reasoning_budget if reasoning_budget is not None else config.max_thinking_tokens
+    if stated_budget is not None:
+        # The level's budget as a template variable, so a template can state the budget the engine
+        # enforces; a template that does not read it ignores it. Episode-constant: the trainer renders
+        # every turn of a trajectory with the one value the trajectory carries.
+        template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = stated_budget
     if reasoning_effort is not None:
         fields["reasoning_effort"] = reasoning_effort
         if config.backend != VLLM_BACKEND:
@@ -200,9 +210,11 @@ def build_payload(
     config: RolloutConfig,
     reasoning_effort: str | None = None,
     tools: list[dict] | None = None,
+    reasoning_budget: int | None = None,
 ) -> dict[str, Any]:
     """Build the OpenAI chat-completions request payload. ``reasoning_effort`` is the per-episode
-    resolved level; ``config.max_thinking_tokens`` carries that level's budget when the env binds one."""
+    resolved level; ``config.max_thinking_tokens`` carries the turn's engine cap and ``reasoning_budget``
+    the level's budget the template states (see :func:`generation_control_fields`)."""
     payload: dict[str, Any] = {
         "messages": messages,
         "temperature": config.temperature,
@@ -232,5 +244,5 @@ def build_payload(
         payload["model"] = config.model_name
     if tools:
         payload["tools"] = tools
-    payload.update(generation_control_fields(config, reasoning_effort))
+    payload.update(generation_control_fields(config, reasoning_effort, reasoning_budget))
     return payload

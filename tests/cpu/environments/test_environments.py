@@ -549,7 +549,9 @@ Action: fake_tool(arg="test")"""
     env.step(episode_ids, [action])
 
     traj = env.get_trajectories(episode_ids)[0]
-    observations = traj.info.get("observations", [])
+    observations = [
+        m.content.removeprefix("Observation: ") for m in traj.messages if m.content.startswith("Observation: ")
+    ]
     assert len(observations) > 0
     assert "Unknown tool 'fake_tool'" in observations[0]
     assert f"Available tools: {', '.join(sorted(registry.names()))}" in observations[0]
@@ -1120,7 +1122,9 @@ Action: python(code="factorial(10)")"""
     traj = env.get_trajectories(episode_ids)[0]
     assert traj.info["total_tool_calls"] == 1
 
-    observations = traj.info.get("observations", [])
+    observations = [
+        m.content.removeprefix("Observation: ") for m in traj.messages if m.content.startswith("Observation: ")
+    ]
     assert len(observations) > 0
     assert "3628800" in observations[-1]
 

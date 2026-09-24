@@ -25,10 +25,12 @@ environment_kwargs:
   max_grading_seconds: 150
   verdict_detail: outcome
   reasoning_effort: random
-  reasoning_effort_profiles:
-    low: {thinking_tokens: 8192, max_submissions: 1, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, max_submissions: 2, max_test_calls: 4}
-    high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}
+  reasoning_effort_profiles:   # thinking_tokens is the episode's total under the scope below
+    low: {thinking_tokens: 24576, max_submissions: 1, max_test_calls: 2}
+    medium: {thinking_tokens: 32768, max_submissions: 2, max_test_calls: 4}
+    high: {thinking_tokens: 36000, max_submissions: 3, max_test_calls: 6}
+rollout_max_thinking_tokens: 18000     # the most one turn may reason of it
+rollout_thinking_budget_scope: episode
 ```
 
 | Knob | Default | Effect |
@@ -51,9 +53,10 @@ The objective's shape is the `environment` term's `exponent` in the top-level `r
 ### Reasoning effort
 
 `reasoning_effort` defaults to `medium` here, and the class ladder sets `thinking_tokens` only: low
-4096, medium 8192, high 16384. `reasoning_effort_profiles` merges per level over it, so a profile
-naming only interaction keys keeps the class budget
-([Reasoning budget](../async-grpo/rollouts.md#reasoning-budget)). The level and its budget reach the
+4096, medium 8192, high 16384 — per turn, or the episode's total under
+`rollout_thinking_budget_scope: episode`, which then scales the floor's reference
+([Reasoning budget](../async-grpo/rollouts.md#reasoning-budget)). `reasoning_effort_profiles` merges
+per level over it, so a profile naming only interaction keys keeps the class budget. The level and its budget reach the
 model through the chat template; on Qwen3.6 that is the shipped effort template the recipes pin.
 
 This environment adds three profile keys, bound per episode:

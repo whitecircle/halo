@@ -96,7 +96,9 @@ Three decisions matter more than the rest.
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
   model should think. `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
   (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). The engine-side cap
-  `rollout_max_thinking_tokens` is vLLM-only.
+  `rollout_max_thinking_tokens` is vLLM-only. A level's budget covers each turn by default; with
+  `rollout_thinking_budget_scope: episode` (vLLM-only) it covers the whole episode, so a recovery turn gets only what
+  is left, as in the Qwen3.6 vLLM code-contests recipes.
 
     The model only sees the level if the chat template renders it. `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`
     and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja` do. Pin one with `force_chat_template: true` and serve

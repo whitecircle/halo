@@ -293,11 +293,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
         if results and all(r.unknown_tool for r in results):
             self._flag_calls_rejected(trajectory)
 
-        return {
-            # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
-            "step_tool_calls": len(results),
-            "step_successful": sum(1 for r in results if r.success),
-        }
+        # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
+        return {"step_tool_calls": len(results)}
 
     def _step_single(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None

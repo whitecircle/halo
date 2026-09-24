@@ -6,7 +6,7 @@ Trainer GPUs must not overlap the server's: one process cannot NCCL-broadcast to
 
 ## Rollout backend
 
-`rollout_backend: vllm` (default) or `sglang`. Both serve rollouts over `/v1/chat/completions` and take weights over NCCL. A pair the engine cannot update online is refused at construction with its loader reason ([which families each serves](../../../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SGLang also refuses `rollout_max_thinking_tokens` and [`carry_reasoning`](rollouts.md#carried-reasoning).
+`rollout_backend: vllm` (default) or `sglang`. Both serve rollouts over `/v1/chat/completions` and take weights over NCCL. A pair the engine cannot update online is refused at construction with its loader reason ([which families each serves](../../../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SGLang also refuses `rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and [`carry_reasoning`](rollouts.md#carried-reasoning).
 
 TRL's `top_p`, `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler here, and only `top_p` has a `rollout_top_p` equivalent; `temperature` is force-set to `rollout_temperature`, so log-probs are scored at the sampling temperature.
 

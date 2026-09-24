@@ -10,8 +10,8 @@ from typing import Any, Literal
 
 # ``AsyncTrainingConfig`` is the validated YAML surface and supplies every mirrored field below, so a
 # directly-built RolloutConfig defaults to what that path would produce; one shared constant per pair
-# keeps the two in step. The three fields that path derives rather than mirrors
-# (``capture_token_ids``, ``capture_routed_experts``, ``stop_token_ids``) default to the off state
+# keeps the two in step. The fields that path derives rather than mirrors (``capture_token_ids``,
+# ``capture_routed_experts``, ``stop_token_ids``, ``reasoning_end_token_id``) default to the off state
 # instead — see each field.
 DEFAULT_ROLLOUT_TEMPERATURE = 0.7
 DEFAULT_ROLLOUT_TOP_P = 0.95
@@ -25,9 +25,21 @@ DEFAULT_RETRY_BASE_WAIT_SECONDS = 1.0
 # directly built RolloutConfig does not default above what that validated path allows.
 DEFAULT_EPISODE_TIMEOUT_SECONDS = 1200.0
 
-# Chat-template variable carrying an episode's per-turn thinking budget (the cap the engine enforces),
-# the pair of the request's top-level ``reasoning_effort``; both are per episode, never run-wide.
+# Chat-template variable carrying an episode's thinking budget (per turn or per episode, by the scope
+# below), the pair of the request's top-level ``reasoning_effort``; both are per episode, never run-wide.
 REASONING_BUDGET_TEMPLATE_VAR = "reasoning_budget"
+# Chat-template variable naming what the stated budget covers. Run-wide, so the config builder injects
+# it into the template variables under the episode scope; absent means the per-turn scope.
+REASONING_SCOPE_TEMPLATE_VAR = "reasoning_budget_scope"
+
+# What a thinking budget covers: each turn on its own, or the episode's turns together (each turn's
+# engine cap is then what the budget has left).
+THINKING_SCOPE_TURN = "turn"
+THINKING_SCOPE_EPISODE = "episode"
+THINKING_BUDGET_SCOPES = (THINKING_SCOPE_TURN, THINKING_SCOPE_EPISODE)
+DEFAULT_THINKING_BUDGET_SCOPE = THINKING_SCOPE_TURN
+DEFAULT_THINKING_TURN_RESERVE = 512
+DEFAULT_REASONING_END_TOKEN = "</think>"
 
 
 @dataclass
@@ -47,8 +59,24 @@ class RolloutConfig:
     validated surface this mirrors."""
 
     max_thinking_tokens: int | None = None
-    """Per-turn reasoning-token budget (vLLM ``thinking_token_budget``): caps CoT, then forces an
-    answer. Requires a server-side reasoning parser. None = only ``max_tokens`` caps the turn."""
+    """Reasoning-token budget (vLLM ``thinking_token_budget``): caps CoT, then forces an answer. Per
+    turn under the ``turn`` scope; under the ``episode`` scope the drivers narrow it per turn to what
+    the episode's budget has left. Requires a server-side reasoning parser. None = only ``max_tokens``
+    caps the turn."""
+
+    thinking_budget_scope: str = DEFAULT_THINKING_BUDGET_SCOPE
+    """What a thinking budget covers — ``turn`` (every turn gets it whole) or ``episode`` (the turns
+    share it: a turn's engine cap is the budget minus the reasoning the earlier turns spent, never below
+    ``thinking_turn_reserve``). Mirrors ``AsyncTrainingConfig.rollout_thinking_budget_scope``."""
+
+    thinking_turn_reserve: int = DEFAULT_THINKING_TURN_RESERVE
+    """Under the ``episode`` scope, the reasoning a turn always gets once the budget is spent, so the
+    model can still close its reasoning and act. Mirrors ``AsyncTrainingConfig.rollout_thinking_turn_reserve``."""
+
+    reasoning_end_token_id: int | None = None
+    """The id of the token that closes reasoning, resolved from ``rollout_reasoning_end_token`` by the
+    caller that owns the tokenizer. The ``episode`` scope counts a turn's reasoning as the sampled ids
+    before it; the ``turn`` scope never reads it."""
 
     capture_token_ids: bool = False
     """Request per-token logprobs so the sampled generation token ids can be captured (needs the

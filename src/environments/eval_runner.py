@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 # Per-generation HTTP timeout (seconds). Generous by default: eval runs many episodes concurrently
 # against one endpoint, and a long reasoning turn queued behind them takes minutes to come back.
 DEFAULT_REQUEST_TIMEOUT_S = 180.0
+# ``info`` keys a persisted trajectory leaves out: the row payload and the raw tool-call log, which the
+# messages already carry; ``_``-prefixed grading stamps (hidden tests, checker source) go with them.
+_SERIALIZED_INFO_DROP = frozenset({"tool_calls", "context"})
 
 
 def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
@@ -68,13 +71,11 @@ def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
 
 
 def serialize_trajectory(traj: Trajectory | None) -> dict[str, Any] | None:
-    """Serialize a finished episode for persistence: full message list plus a curated ``info`` view.
-    Drops answer-key and bookkeeping fields so the file neither bloats nor leaks the expected output:
-    ``_``-prefixed keys (hidden tests, checker source), the raw ``tool_calls`` log, and ``context``."""
+    """Serialize a finished episode for persistence: the full message list plus ``info`` without the
+    ``_``-prefixed grading stamps and :data:`_SERIALIZED_INFO_DROP`."""
     if traj is None:
         return None
-    _DROP = {"tool_calls", "context"}
-    info = {k: v for k, v in traj.info.items() if not k.startswith("_") and k not in _DROP}
+    info = {k: v for k, v in traj.info.items() if not k.startswith("_") and k not in _SERIALIZED_INFO_DROP}
     info["eval_stats"] = traj.info.get("_eval_stats")
     return {
         "messages": [m.to_dict() for m in traj.messages],
@@ -163,13 +164,19 @@ async def run_episode(
     # what the policy was trained under. The resolved draw is stamped back into the reset context so
     # per-episode effort-conditioned setup (interaction budgets) sees the level being used.
     effort = bind_episode_effort(
-        context, env, max_tokens=rollout.max_tokens, max_thinking_tokens=rollout.max_thinking_tokens
+        context,
+        env,
+        max_tokens=rollout.max_tokens,
+        max_thinking_tokens=rollout.max_thinking_tokens,
+        scope=rollout.thinking_budget_scope,
+        turn_reserve=rollout.thinking_turn_reserve,
     )
     if effort.level is not None:
         context = {**(context or {}), "reasoning_effort": effort.level}
     # The per-episode contract, narrowed as the training actor narrows it, so the engine enforces the
     # level's CoT budget here too rather than the trajectory only recording it.
-    episode_rollout = replace(rollout, max_tokens=effort.max_tokens, max_thinking_tokens=effort.thinking_budget)
+    episode_rollout = replace(rollout, max_tokens=effort.max_tokens)
+    reasoning_spent = 0
 
     episode = EpisodeDispatcher(env)
     episode_ids, steps = await episode.reset([prompt], [context])
@@ -186,6 +193,8 @@ async def run_episode(
         for _ in range(env.max_turns):
             if step.done:
                 break
+            # The engine cap this turn: the level's budget, or under the episode scope what it has left.
+            turn_rollout = replace(episode_rollout, max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent))
             try:
                 resp = await generate_openai_response(
                     model=rollout.model_name or NOT_GIVEN,
@@ -196,7 +205,7 @@ async def run_episode(
                     custom_client=client,
                     tools=tools,
                     request_timeout=rollout.request_timeout,
-                    extra_body=generation_control_fields(episode_rollout, effort.level),
+                    extra_body=generation_control_fields(turn_rollout, effort.level, effort.thinking_budget),
                 )
             except Exception as exc:
                 # Unlogged, this break yields an all-zero eval indistinguishable from a bad endpoint.
@@ -217,7 +226,9 @@ async def run_episode(
                 reasoning=resp.reasoning or "",
                 tokens=resp.completion_tokens or 0,
                 finish_reason=finish_reason,
+                token_ids=resp.token_ids,
             )
+            reasoning_spent += effort.spend_of(gen, rollout.reasoning_end_token_id)
             steps = await episode.step([eid], [gen.text], [step_context_from_generation(context, gen)])
             step = steps[0]
 
@@ -232,7 +243,7 @@ async def run_episode(
             steps = await episode.finalize_truncated([eid])
             traj = steps[0].trajectory
 
-        effort.stamp(traj)
+        effort.stamp(traj, reasoning_spent)
         if traj is not None:
             traj.info["_eval_stats"] = {
                 "generations": len(finish_reasons),

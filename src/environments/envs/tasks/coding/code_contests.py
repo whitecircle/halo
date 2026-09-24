@@ -17,7 +17,6 @@ from src.environments.base import (
     EPISODE_SLICES_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     SOLVE_RATE_KEY,
-    TOOL_CALL_COUNTS_KEY,
     EpisodeGrade,
     Trajectory,
     require_magnitudes,
@@ -45,8 +44,9 @@ from src.rewards.samples import ScoringSample
 
 logger = logging.getLogger(__name__)
 
-# Effort level -> profile. ``thinking_tokens`` is the per-turn CoT budget; a config adds the
-# interaction budgets (``max_submissions``/``max_test_calls``) so effort buys iteration too.
+# Effort level -> profile. ``thinking_tokens`` is the level's CoT budget (per turn, or per episode
+# by the run's thinking-budget scope); a config adds the interaction budgets (``max_submissions``,
+# ``max_test_calls``) and the test-first bonus (``tested_submission_reward``) so effort buys iteration too.
 REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float]] = {
     "low": {"thinking_tokens": 4096},
     "medium": {"thinking_tokens": 8192},
@@ -362,7 +362,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
 
     def _submissions(self, trajectory: Trajectory) -> int:
         """Graded-submission calls admitted so far (the protocol counts a call before its handler runs)."""
-        return trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(SUBMIT_TOOL, 0)
+        return self._tool_calls_made(trajectory, SUBMIT_TOOL)
 
     @staticmethod
     def _improved_resubmissions(trajectory: Trajectory) -> int:
@@ -372,7 +372,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
 
     def _test_calls(self, trajectory: Trajectory) -> int:
         """Scratchpad calls admitted so far."""
-        return trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(self.test_tool_name, 0)
+        return self._tool_calls_made(trajectory, self.test_tool_name)
 
     def _run_test_in(self, code: str, language: str, stdin: str = "") -> str:
         """The scratchpad handler when the run lets the model choose: ``language`` is required, so a
@@ -485,10 +485,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             f"\n\nBudgets for this task: {max_subs} graded submission{'s' if max_subs != 1 else ''}"
             f"{last_wins}, {max_tests} scratchpad run{'s' if max_tests != 1 else ''}."
         )
-        for message in reversed(traj.messages):
-            if message.role == "user":
-                message.content += contract
-                break
+        traj.append_to_last_user(contract)
 
     @staticmethod
     def _parse_answer(context: dict[str, Any]) -> Any:
@@ -525,8 +522,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         traj.info["_test_cases"] = test_cases
         traj.info["_checker"] = checker
         traj.info["_time_limit"] = float(time_limit) if time_limit else None
-        traj.info["test_cases_count"] = len(test_cases)
-        traj.info["has_checker"] = checker is not None
         traj.info["tests_passed"] = 0
         traj.info["tests_total"] = len(test_cases)
 

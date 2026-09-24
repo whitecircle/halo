@@ -17,10 +17,20 @@ import logging
 
 import pytest
 
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KEY, TOOL_CALL_COUNTS_KEY
+from src.environments.base import (
+    EPISODE_TOOL_BUDGETS_KEY,
+    REWARD_COMPONENTS_KEY,
+    THINKING_BUDGET_EXHAUSTED_KEY,
+    TOOL_CALL_COUNTS_KEY,
+)
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import _MAX_FAILURE_DETAILS, run_solution_against_tests
-from src.environments.episode import bind_episode_effort
+from src.environments.episode import (
+    TurnGeneration,
+    bind_episode_effort,
+    reasoning_tokens_of,
+    resolve_reasoning_end_token_id,
+)
 from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.tools.definitions import NativeToolCall
 
@@ -280,6 +290,145 @@ def test_effort_binding_caps_both_channels():
     assert (over.thinking_budget, over.max_tokens) == (18000, 20000)
     no_global = bind_episode_effort({"reasoning_effort": "low"}, env, max_tokens=1024)
     assert (no_global.thinking_budget, no_global.max_tokens) == (4096, 1024)
+
+
+_SCOPED_PROFILES = {"low": {"thinking_tokens": 4096}, "high": {"thinking_tokens": 30000}}
+# The reasoning-end marker's id: one no reasoning id below carries.
+_END = 151668
+
+
+def _bind_scoped(level, scope, max_thinking_tokens=18000):
+    env = _make_env(reasoning_effort_profiles=_SCOPED_PROFILES)
+    return bind_episode_effort(
+        {"reasoning_effort": level},
+        env,
+        max_tokens=30000,
+        max_thinking_tokens=max_thinking_tokens,
+        scope=scope,
+        turn_reserve=512,
+    )
+
+
+def test_episode_scope_binds_the_level_budget_as_the_episode_total():
+    """Under the episode scope the level's budget is the whole task's, so the run's per-turn ceiling must
+    not clamp it (that clamp belongs to the per-turn scope) — it bounds only what one turn may take of it,
+    so the first turn's cap, and with it the turn's total, still respect the ceiling."""
+    high = _bind_scoped("high", "episode")
+    assert (high.thinking_budget, high.max_tokens) == (30000, 30000)
+    # The engine cap per turn: what the budget has left, never above the ceiling, never below the reserve.
+    assert high.turn_thinking_cap(0) == 18000
+    assert high.turn_thinking_cap(17000) == 13000
+    assert high.turn_thinking_cap(29600) == 512
+    assert high.turn_thinking_cap(40000) == 512
+    assert high.budget_exhausted(29600) is True
+    assert high.budget_exhausted(1000) is False
+    low = _bind_scoped("low", "episode")
+    assert (low.thinking_budget, low.max_tokens) == (4096, 4096 + 12000)
+    assert [low.turn_thinking_cap(spent) for spent in (0, 3000, 4000)] == [4096, 1096, 512]
+
+
+def test_turn_scope_caps_every_turn_alike_and_never_exhausts():
+    turn = _bind_scoped("high", "turn")
+    assert turn.thinking_budget == 18000, "the per-turn scope clamps the level's budget to the ceiling"
+    assert {turn.turn_thinking_cap(spent) for spent in (0, 17000, 40000)} == {18000}
+    assert turn.budget_exhausted(40000) is False
+
+
+def test_episode_scope_without_a_ceiling_hands_a_turn_the_whole_remainder():
+    high = _bind_scoped("high", "episode", max_thinking_tokens=None)
+    assert high.thinking_budget == 30000
+    assert high.turn_thinking_cap(1000) == 30000 - 1000
+
+
+def test_a_reserve_above_the_level_budget_is_clamped_to_it():
+    """A reserve is the floor a spent episode's turn keeps, never a raise: a level whose whole budget is
+    below the reserve gets exactly its budget every turn and counts as exhausted from the start."""
+    env = _make_env(reasoning_effort_profiles={"low": {"thinking_tokens": 256}})
+    tiny = bind_episode_effort(
+        {"reasoning_effort": "low"},
+        env,
+        max_tokens=30000,
+        max_thinking_tokens=18000,
+        scope="episode",
+        turn_reserve=512,
+    )
+    assert tiny.thinking_budget == 256
+    assert tiny.turn_thinking_cap(0) == 256
+    assert tiny.turn_thinking_cap(200) == 256
+    assert tiny.budget_exhausted(0) is True
+
+
+def _gen(token_ids):
+    return TurnGeneration(text="", tool_calls=[], reasoning="", tokens=5, token_ids=token_ids)
+
+
+def test_reasoning_tokens_of_counts_the_sampled_ids_through_the_marker():
+    """The engine's budget counts the close it forces, so the marker is the last reasoning token; a turn
+    cut before it closed spent every sampled id on reasoning. Without the ids, or without the marker's
+    id, there is nothing exact to count and the scope must say so rather than count zero."""
+    assert reasoning_tokens_of(_gen([11, 12, 13, _END, 14]), _END) == 4
+    assert reasoning_tokens_of(_gen([11, 12, 13, 14, 15]), _END) == 5
+    with pytest.raises(ValueError, match="sampled token ids"):
+        reasoning_tokens_of(_gen(None), _END)
+    with pytest.raises(ValueError, match="reasoning_end_token_id"):
+        reasoning_tokens_of(_gen([11, _END]), None)
+
+
+def test_spend_of_counts_only_under_the_episode_scope():
+    """The drivers charge every turn through ``spend_of`` without branching on the scope, so under the
+    per-turn scope it must charge nothing — with or without ids, since that scope never asked for them —
+    and under the episode scope it is the marker count."""
+    per_turn = _bind_scoped("high", "turn")
+    assert per_turn.spend_of(_gen([11, 12, 13, _END, 14]), _END) == 0
+    assert per_turn.spend_of(_gen(None), None) == 0
+    shared = _bind_scoped("high", "episode")
+    assert shared.spend_of(_gen([11, 12, 13, _END, 14]), _END) == 4
+    assert shared.spend_of(_gen([11, 12, 13, 14, 15]), _END) == 5
+    with pytest.raises(ValueError, match="sampled token ids"):
+        shared.spend_of(_gen(None), _END)
+
+
+class _Tokenizer:
+    """The two attributes the resolver reads, over a fixed vocabulary."""
+
+    def __init__(self, vocab, unk_token_id=0):
+        self._vocab = vocab
+        self.unk_token_id = unk_token_id
+
+    def convert_tokens_to_ids(self, token):
+        return self._vocab.get(token, self.unk_token_id)
+
+
+def test_resolve_reasoning_end_token_id_requires_a_token_of_the_tokenizer():
+    """A marker the tokenizer does not know would count every turn's whole generation as reasoning and
+    starve the episode after its first turn, whether the tokenizer answers with unk or with None."""
+    assert resolve_reasoning_end_token_id(_Tokenizer({"</think>": _END}), "</think>") == _END
+    with pytest.raises(ValueError, match="not a token of this tokenizer"):
+        resolve_reasoning_end_token_id(_Tokenizer({"</think>": _END}), "<|end_reasoning|>")
+    with pytest.raises(ValueError, match="not a token of this tokenizer"):
+        resolve_reasoning_end_token_id(_Tokenizer({}, unk_token_id=None), "</think>")
+
+
+def test_stamp_records_budget_exhaustion_only_under_the_episode_scope():
+    """The exhaustion flag is the driver's verdict on the spend it counted, so it exists only where a
+    budget was shared across turns — and the metric follows the flag, absent rather than 0.0 otherwise."""
+    env = _make_env(reasoning_effort_profiles=_SCOPED_PROFILES)
+
+    def stamped(scope, reasoning_spent):
+        traj = _reset(env, {"reasoning_effort": "high", **_TESTS})
+        _bind_scoped("high", scope).stamp(traj, reasoning_spent=reasoning_spent)
+        return traj
+
+    exhausted = stamped("episode", 29600)
+    assert exhausted.info[THINKING_BUDGET_EXHAUSTED_KEY] is True
+    assert env.rollout_metrics(exhausted)["episode/thinking_budget_exhausted"] == 1.0
+    within = stamped("episode", 1000)
+    assert within.info[THINKING_BUDGET_EXHAUSTED_KEY] is False
+    assert env.rollout_metrics(within)["episode/thinking_budget_exhausted"] == 0.0
+    per_turn = stamped("turn", 40000)
+    assert THINKING_BUDGET_EXHAUSTED_KEY not in per_turn.info
+    assert "episode/thinking_budget_exhausted" not in env.rollout_metrics(per_turn)
+    assert (per_turn.reasoning_effort, per_turn.reasoning_budget) == ("high", 18000)
 
 
 def test_invalid_profiles_raise():

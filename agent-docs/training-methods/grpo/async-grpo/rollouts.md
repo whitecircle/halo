@@ -56,13 +56,13 @@ group**, keeping the conditioning of a group identical.
 The level reaches the model only through the chat template. gpt-oss's template renders it natively;
 the stock Qwen3.x and Gemma 4 templates have no effort variable, so those recipes pin
 `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja`,
-which state the level and its per-turn budget in the system block from the `reasoning_effort` and
+which state the level and its budget in the system block from the `reasoning_effort` and
 `reasoning_budget` variables below. A level the model cannot see is not a policy it can learn.
 
 `reasoning_effort_profiles` overrides the class's per-level table. Under a set
-`rollout_max_thinking_tokens`, a level's `thinking_tokens` applies as `min(level budget, that cap)`
-and lowers the turn's total to that budget plus the global answer headroom; left `null`, the level
-caps reasoning alone and `rollout_max_tokens` still bounds the turn. A profile may also carry
+`rollout_max_thinking_tokens`, a level's `thinking_tokens` is capped by it per turn, and the turn's
+total drops to that per-turn cap plus the global answer headroom; left `null`, the level caps
+reasoning alone and `rollout_max_tokens` still bounds the turn. A profile may also carry
 `max_length_cutoff_recoveries`.
 
 `thinking_tokens` is a **vLLM** request field (`thinking_token_budget`). On `rollout_backend:
@@ -76,7 +76,28 @@ content, is nudged and retried within `max_turns` and the episode's `max_length_
 `episode/length_cutoff_turns` or `episode/empty_turns` and pays the protocol's `length_cutoff_penalty`
 (default `0`); the turn that exhausts the cap, or lands on the last turn, ends the episode truncated,
 priced like a `max_turns` overflow. Under carried reasoning a cut costs the policy only a turn and
-the retry thinks on from where it stopped, so the per-turn budget binds only once the cut is priced.
+the retry thinks on from where it stopped, so a per-turn budget binds only once the cut is priced.
+
+**Budget scope.** `rollout_thinking_budget_scope` (default `turn`) says what a budget — a level's
+`thinking_tokens`, else `rollout_max_thinking_tokens` — covers. Under `turn` every turn gets it whole,
+so a cut or empty turn plus its recovery nudge buys another full budget: a cheap "continue thinking"
+that lets an episode's reasoning grow to any per-turn cap. Under `episode` the budget is the episode's
+total: a turn's engine cap is the budget minus the reasoning the earlier turns spent, never below
+`rollout_thinking_turn_reserve` (default `512`, enough to close the reasoning and act) and never above
+`rollout_max_thinking_tokens`, which under this scope is the ceiling one turn may take rather than a
+clamp on the level's budget. The per-turn total (`rollout_max_tokens`, narrowed per level to the first
+turn's cap plus the answer headroom) stays constant across the episode, and a recovery turn gets only
+what is left. `episode/thinking_budget_exhausted` is the fraction of episodes whose budget ran down to
+the reserve.
+
+A turn's spend is read off the engine's sampled ids as the ids up to and including
+`rollout_reasoning_end_token` (default `</think>`, resolved through the tokenizer; the engine's budget
+counts the close it forces, and a turn cut before closing its reasoning counts all of its ids), so the
+scope is vLLM-only, requires `train_on_sampled_tokens`, and every request under it — the eval scripts'
+too — asks for `return_token_ids`. The effort templates read the run-wide `reasoning_budget_scope`
+variable and state the budget as a total across the task's turns; `reasoning_budget` stays the level's
+budget, not the turn's narrowed cap. The floor term's reference scales with it
+([Effort length reward](#effort-length-reward)).
 
 An engine abort never reaches the environment: the actor re-issues the turn up to `max_retries` times
 (default `3`) rather than charging a length cut; past that the episode errors into a masked row.
@@ -113,8 +134,10 @@ A price is paid within the group, so the sibling that reasons less wins it whate
 is why it is capped and near zero at the highest level, and why the recipes never run it alone:
 
 **The floor** (`effort_length_floor_weight`, default `0` = off) is the one term that pays for more
-reasoning. Its reference is `effort_length_floor_budgets` (default `0.75`) times the per-turn thinking
-budget the episode ran under, so it needs no number of its own. The default sits below 1 so that an
+reasoning. Its reference is `effort_length_floor_budgets` (default `0.75`) times the thinking budget
+the episode ran under — a level's per-turn budget, or the episode's total under
+`rollout_thinking_budget_scope: episode`, so a recipe that doubles its budgets for that scope halves
+`effort_length_floor_budgets` to keep the same floor. The default sits below 1 so that an
 episode of a single assistant turn can clear its floor without running into the cap the engine
 enforces per turn. An episode short of the floor pays `-weight × shortfall / floor`. It reads the episode's
 total, not a per-turn mean, so a terse repair turn after a verdict is not under-use and an extra tool
@@ -142,8 +165,9 @@ policy never generated under. Per-turn rows take the engine's ids and cannot dri
 their thinking toggle from and hand the template. SGLang lets a nested copy override that field (it
 pops it into the top-level one before rendering), so on SGLang the same value is added nested too —
 an exact copy, so the render reads one value whichever spelling the engine consults. The level's
-per-turn thinking budget rides in the nested form as `reasoning_budget`, added per request; the
-trainer's own renders carry the same variables, and `rollout_chat_template_kwargs` refuses both keys.
+thinking budget rides in the nested form as `reasoning_budget`, added per request, and under the
+episode scope the run-wide `reasoning_budget_scope: episode` rides beside it; the trainer's own renders
+carry the same variables, and `rollout_chat_template_kwargs` refuses all three keys.
 
 `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` is the hub Qwen3.6 template cut to what the rollouts
 use — text only, thinking always on, an assistant turn rendering whatever reasoning it carries, the

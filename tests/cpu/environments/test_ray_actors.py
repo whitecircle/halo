@@ -511,7 +511,7 @@ async def test_actor_releases_session_when_episode_errors():
 
     calls = {"n": 0}
 
-    async def _fake_generate(client, url, messages, config, reasoning_effort=None):
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
         calls["n"] += 1
         if calls["n"] == 1:  # turn 1: write a file -> creates the episode's session
             tc = [{"id": "c1", "function": {"name": "write_file", "arguments": '{"path": "f.txt", "content": "x"}'}}]
@@ -566,7 +566,7 @@ async def test_actor_drives_async_env_via_step_async():
 
     calls = {"n": 0}
 
-    async def _fake_generate(client, url, messages, config, reasoning_effort=None):
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
         calls["n"] += 1
         if calls["n"] == 1:  # turn 1: call the async tool
             return TurnGeneration("", [{"id": "c1", "function": {"name": "aecho", "arguments": '{"x": "hi"}'}}], "", 1)
@@ -603,7 +603,7 @@ async def test_run_episode_generation_tokens_sum_across_turns():
     per_turn: list[int] = []
     calls = {"n": 0}
 
-    async def _fake_generate(client, url, messages, config, reasoning_effort=None):
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
         i = calls["n"]
         calls["n"] += 1
         tokens = (i + 1) * 10  # turn 1 -> 10, turn 2 -> 20, turn 3 -> 30
@@ -660,7 +660,7 @@ async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
 
     actor._get_http_client = _fake_client
 
-    async def _fake_generate(client, url, messages, config, reasoning_effort=None):
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
         # Yield so both episodes are in-flight before either submits (real concurrent interleaving),
         # then submit the program for whichever problem this episode's prompt names.
         await asyncio.sleep(0)
@@ -724,7 +724,7 @@ async def test_slow_sync_step_does_not_block_concurrent_episodes():
 
     actor._get_http_client = _fake_client
 
-    async def _fake_generate(client, url, messages, config, reasoning_effort=None):
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
         return TurnGeneration("final answer", [], "", 1)  # no tool call -> done after one step
 
     actor._generate = _fake_generate
@@ -781,7 +781,7 @@ async def test_sync_step_offload_preserves_cross_turn_contextvars():
 
     calls = {"A": 0, "B": 0}
 
-    async def _fake_generate(client, url, messages, config, reasoning_effort=None):
+    async def _fake_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
         await asyncio.sleep(0)  # interleave the two episodes
         text = " ".join(m.get("content") or "" for m in messages)
         key = "A" if "task A" in text else "B"

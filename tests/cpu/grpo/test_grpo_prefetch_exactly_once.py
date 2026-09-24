@@ -203,7 +203,7 @@ class _LifecycleHost:
             max_concurrent_rollouts=2,
             eval_rollout_batch_size=None,
             get_server_urls=lambda: ["http://10.0.0.1:8000"],
-            get_rollout_config=lambda stop_token_ids=None: {},
+            get_rollout_config=lambda stop_token_ids=None, reasoning_end_token_id=None: {},
         )
         self.state = types.SimpleNamespace(global_step=7)
         self._environment_spec = "env"
@@ -222,6 +222,9 @@ class _LifecycleHost:
         self.prefetch_starts = 0
 
     def _resolve_rollout_stop_token_ids(self):
+        return None
+
+    def _resolve_reasoning_end_token_id(self):
         return None
 
     def _init_weight_sync_client(self):

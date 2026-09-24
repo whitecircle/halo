@@ -614,5 +614,69 @@ def test_async_config_range_guards_survive_a_cli_override():
         cfg.__post_override__({"rollout_temperature"})
 
 
+def test_async_config_rejects_an_unknown_thinking_budget_scope():
+    """The drivers compare the scope against the two spellings by equality, so a misspelling would run
+    as the per-turn scope while the YAML promised a shared budget."""
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="rollout_thinking_budget_scope must be one of"):
+        AsyncTrainingConfig(rollout_thinking_budget_scope="task")
+    cfg = AsyncTrainingConfig()
+    cfg.rollout_thinking_budget_scope = "task"
+    with pytest.raises(ValueError, match="rollout_thinking_budget_scope must be one of"):
+        cfg.__post_override__({"rollout_thinking_budget_scope"})
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_async_config_rejects_a_thinking_turn_reserve_below_one(bad):
+    """A reserve of 0 hands a spent episode's later turns an engine cap of 0, closing their reasoning
+    before it opens; a bool is an int that spells a mistake, not a token count. Guarded under either
+    scope, so flipping the scope later cannot uncover a stored bad value."""
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="rollout_thinking_turn_reserve must be an int >= 1"):
+        AsyncTrainingConfig(rollout_thinking_turn_reserve=bad)
+
+
+def test_async_config_episode_scope_requires_what_the_reasoning_count_reads():
+    """The episode scope counts a turn's reasoning off the sampled ids up to the reasoning-end marker:
+    without the capture or the marker there is nothing to count. A reserve above the per-turn ceiling
+    would let a spent episode's turn exceed the ceiling the reserve is meant to sit beneath."""
+    AsyncTrainingConfig = _import_async_training_config()
+    episode = {"rollout_thinking_budget_scope": "episode"}
+    with pytest.raises(ValueError, match="requires train_on_sampled_tokens"):
+        AsyncTrainingConfig(**episode, train_on_sampled_tokens=False)
+    with pytest.raises(ValueError, match="requires rollout_reasoning_end_token"):
+        AsyncTrainingConfig(**episode, rollout_reasoning_end_token="")
+    with pytest.raises(ValueError, match=r"rollout_thinking_turn_reserve \(600\) must not exceed"):
+        AsyncTrainingConfig(**episode, rollout_max_thinking_tokens=512, rollout_thinking_turn_reserve=600)
+    # Anti-vacuity: the same shapes construct under the per-turn scope, where nothing reads the ids or
+    # the marker, and the episode scope constructs once every requirement is met.
+    AsyncTrainingConfig(
+        train_on_sampled_tokens=False,
+        rollout_reasoning_end_token="",
+        rollout_max_thinking_tokens=512,
+        rollout_thinking_turn_reserve=600,
+    )
+    ok = AsyncTrainingConfig(**episode, rollout_max_thinking_tokens=4096, rollout_thinking_turn_reserve=4096)
+    assert ok.rollout_thinking_budget_scope == "episode"
+
+
+def test_async_config_injects_the_scope_variable_only_under_the_episode_scope():
+    """The effort templates read ``reasoning_budget_scope`` to state what the budget covers. The config
+    owns it — a YAML copy could disagree with the scope the drivers narrow by — so every request and
+    every trainer-side render sees it exactly when the scope is the episode's."""
+    AsyncTrainingConfig = _import_async_training_config()
+    with pytest.raises(ValueError, match="must not carry 'reasoning_budget_scope'"):
+        AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_budget_scope": "episode"})
+    run_kwargs = {"preserve_thinking": True}
+    episode = AsyncTrainingConfig(rollout_thinking_budget_scope="episode", rollout_chat_template_kwargs=run_kwargs)
+    stated = {"preserve_thinking": True, "reasoning_budget_scope": "episode"}
+    assert episode.rollout_template_variables() == stated
+    assert episode.get_rollout_config(reasoning_end_token_id=1).chat_template_kwargs == stated
+    assert episode.rollout_chat_template_kwargs == run_kwargs, "the YAML's own kwargs are never mutated"
+    turn = AsyncTrainingConfig(rollout_chat_template_kwargs=run_kwargs)
+    assert turn.rollout_template_variables() == run_kwargs
+    assert turn.get_rollout_config().chat_template_kwargs == run_kwargs
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

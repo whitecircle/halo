@@ -18,8 +18,9 @@ from trl import ModelConfig
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
-from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P, RolloutConfig
+from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P, THINKING_SCOPE_EPISODE, RolloutConfig
 from src.environments.base import BaseEnvironment
+from src.environments.episode import resolve_reasoning_end_token_id
 from src.environments.eval_runner import DEFAULT_REQUEST_TIMEOUT_S, trajectory_path, write_trajectories_jsonl
 from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
 from src.training.parser import H4ArgumentParser
@@ -123,24 +124,41 @@ class TrainingContract:
     env_config: EnvironmentConfig
     async_config: AsyncTrainingConfig
     stop_token_ids: list[int] | None
+    reasoning_end_token_id: int | None = None
 
     @classmethod
     def load(cls, path: str) -> "TrainingContract":
-        """Parse ``path``; the stop tokens go through the tokenizer of the model the YAML trains."""
+        """Parse ``path``; the stop tokens and the reasoning-end marker go through the tokenizer of the
+        model the YAML trains."""
         parser = H4ArgumentParser(TRAINING_CONTRACT_CLASSES)
         env_config, async_config, model_config = parser.parse_yaml_file(path, allow_extra_keys=True)
-        stop_token_ids = None
-        if async_config.rollout_stop_tokens:
+        episode_scope = async_config.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE
+        stop_token_ids = reasoning_end_token_id = None
+        if async_config.rollout_stop_tokens or episode_scope:
             tokenizer = AutoTokenizer.from_pretrained(
                 model_config.model_name_or_path, trust_remote_code=model_config.trust_remote_code
             )
-            stop_token_ids = resolve_stop_token_ids(tokenizer, async_config.rollout_stop_tokens)
-        return cls(path=path, env_config=env_config, async_config=async_config, stop_token_ids=stop_token_ids)
+            if async_config.rollout_stop_tokens:
+                stop_token_ids = resolve_stop_token_ids(tokenizer, async_config.rollout_stop_tokens)
+            if episode_scope:
+                reasoning_end_token_id = resolve_reasoning_end_token_id(
+                    tokenizer, async_config.rollout_reasoning_end_token
+                )
+        return cls(
+            path=path,
+            env_config=env_config,
+            async_config=async_config,
+            stop_token_ids=stop_token_ids,
+            reasoning_end_token_id=reasoning_end_token_id,
+        )
 
     def rollout_config(self) -> RolloutConfig:
         """The training run's own ``RolloutConfig``, minus the engine captures the eval transport never
-        requests (ids, logprobs, routing) — recorded as off so the meta line does not claim them."""
-        rollout = self.async_config.get_rollout_config(stop_token_ids=self.stop_token_ids)
+        requests (ids, logprobs, routing) — recorded as off so the meta line does not claim them. The
+        episode thinking scope still gets the ids it counts with: its own request flag asks for them."""
+        rollout = self.async_config.get_rollout_config(
+            stop_token_ids=self.stop_token_ids, reasoning_end_token_id=self.reasoning_end_token_id
+        )
         return replace(rollout, capture_token_ids=False, capture_routed_experts=False)
 
     def env_config_dict(self) -> dict[str, Any]:

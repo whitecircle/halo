@@ -283,3 +283,24 @@ def test_swe_zero_tool_call_completion_grades_zero():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_exam_qa_states_the_choices_inside_the_prompt_the_model_reads():
+    """The choices ride in the last user message, not in a message of their own: the model plans against
+    the question and its options as one prompt, and a persisted trajectory shows them where the model saw them."""
+    env = ExamQAEnvironment(max_turns=2)
+    traj = env._reset_single("Which planet is largest?", {"answer": 1, "choices": ["Mars", "Jupiter"]})
+    last_user = [m for m in traj.messages if m.role == "user"][-1]
+    assert last_user.content.endswith("\n\nChoices:\nMars\nJupiter")
+    assert traj.info["expected_answer"] == "B"
+
+
+def test_append_to_last_user_refuses_a_trajectory_without_a_user_message():
+    traj = Trajectory()
+    with pytest.raises(ValueError, match="no user message"):
+        traj.append_to_last_user("\n\nBudgets for this task: 1 graded submission.")
+    traj.add_message(Message.system("s"))
+    traj.add_message(Message.user("q"))
+    traj.add_message(Message.assistant("a"))
+    traj.append_to_last_user(" + more")
+    assert [m.content for m in traj.messages] == ["s", "q + more", "a"]

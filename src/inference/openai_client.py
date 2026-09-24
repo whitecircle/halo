@@ -189,6 +189,10 @@ async def generate_openai_response(
     prompt_tokens = _get_usage_field(completion, "prompt_tokens")
     completion_tokens = _get_usage_field(completion, "completion_tokens")
     total_tokens = _get_usage_field(completion, "total_tokens")
+    # Outside the OpenAI schema, so the SDK keeps it as an extra attribute of the choice.
+    token_ids = getattr(completion.choices[0], "token_ids", None)
+    if not isinstance(token_ids, list):
+        token_ids = None
 
     def _resp(answer):
         return OpenAIResponse(
@@ -199,6 +203,7 @@ async def generate_openai_response(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            token_ids=token_ids,
         )
 
     if response_format is not None:

@@ -191,10 +191,7 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
 
         if traj.info["choices"]:
             choices_text = "\n".join(traj.info["choices"])
-            for msg in reversed(traj.messages):
-                if msg.role == "user":
-                    msg.content += f"\n\nChoices:\n{choices_text}"
-                    break
+            traj.append_to_last_user(f"\n\nChoices:\n{choices_text}")
 
         return traj
 

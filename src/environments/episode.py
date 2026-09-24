@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
+from src.configs.rollout_config import DEFAULT_THINKING_TURN_RESERVE, THINKING_SCOPE_EPISODE, THINKING_SCOPE_TURN
 from src.environments.base import (
+    THINKING_BUDGET_EXHAUSTED_KEY,
     AsyncBaseEnvironment,
     BaseEnvironment,
     EnvStep,
@@ -24,21 +26,60 @@ from src.inference.response import ENGINE_CUT_FINISH_REASONS
 @dataclass(frozen=True)
 class EpisodeEffort:
     """The generation contract one episode runs under: its resolved reasoning-effort level, the CoT
-    budget bound to that level, and the turn's total token cap."""
+    budget bound to that level, what that budget covers, and the turn's total token cap."""
 
     level: str | None
     thinking_budget: int | None
     max_tokens: int
+    scope: str = THINKING_SCOPE_TURN
+    turn_reserve: int = DEFAULT_THINKING_TURN_RESERVE
+    turn_ceiling: int | None = None
+    """The run's per-turn reasoning ceiling (``rollout_max_thinking_tokens``), read under the episode scope."""
 
-    def stamp(self, trajectory: Trajectory | None) -> None:
+    @property
+    def _reserve(self) -> int:
+        # A reserve above the budget would let the first turn exceed the total the template states.
+        return min(self.turn_reserve, self.thinking_budget)
+
+    def turn_thinking_cap(self, reasoning_spent: int) -> int | None:
+        """The engine's reasoning cap for the turn about to be generated.
+
+        Per-turn scope: the bound budget, every turn. Episode scope: what the budget has left after
+        the reasoning the earlier turns spent, never below the reserve (a turn always gets enough to
+        close its reasoning and act) and never above the run's per-turn ceiling."""
+        if self.thinking_budget is None or self.scope == THINKING_SCOPE_TURN:
+            return self.thinking_budget
+        remaining = max(self.thinking_budget - reasoning_spent, self._reserve)
+        return remaining if self.turn_ceiling is None else min(remaining, self.turn_ceiling)
+
+    def spend_of(self, gen: "TurnGeneration", reasoning_end_token_id: int | None) -> int:
+        """The reasoning a generated turn charges against the episode's budget: nothing under the
+        per-turn scope, else :func:`reasoning_tokens_of`."""
+        if self.scope == THINKING_SCOPE_TURN:
+            return 0
+        return reasoning_tokens_of(gen, reasoning_end_token_id)
+
+    def budget_exhausted(self, reasoning_spent: int) -> bool:
+        """Whether the episode's budget has run down to the reserve: a further turn reasons only that."""
+        return (
+            self.scope == THINKING_SCOPE_EPISODE
+            and self.thinking_budget is not None
+            and self.thinking_budget - reasoning_spent <= self._reserve
+        )
+
+    def stamp(self, trajectory: Trajectory | None, reasoning_spent: int | None = None) -> None:
         """Record this contract on the episode's trajectory (no-op when the episode produced none).
 
         Every rollout driver stamps through here: re-tokenization has to render the level and budget
-        the model generated under, and the effort length terms price the episode by its level."""
+        the model generated under, and the effort length terms price the episode by its level. Under
+        the episode scope the driver also hands over the reasoning the episode spent, recorded as
+        whether the budget ran out."""
         if trajectory is None:
             return
         trajectory.reasoning_effort = self.level
         trajectory.reasoning_budget = self.thinking_budget
+        if self.scope == THINKING_SCOPE_EPISODE and reasoning_spent is not None:
+            trajectory.info[THINKING_BUDGET_EXHAUSTED_KEY] = self.budget_exhausted(reasoning_spent)
 
 
 def resolve_episode_effort(context: dict[str, Any] | None, env: BaseEnvironment) -> str | None:
@@ -59,6 +100,8 @@ def bind_episode_effort(
     *,
     max_tokens: int,
     max_thinking_tokens: int | None = None,
+    scope: str = THINKING_SCOPE_TURN,
+    turn_reserve: int = DEFAULT_THINKING_TURN_RESERVE,
 ) -> EpisodeEffort:
     """Resolve one episode's effort level and bind the env's per-level CoT budget into its token caps.
 
@@ -68,20 +111,60 @@ def bind_episode_effort(
 
     The thinking budget caps only the reasoning channel; the visible channel would otherwise run to the
     global ``max_tokens`` and crowd out the tool call the turn exists to make. The per-effort total is
-    therefore the level's budget plus the global answer headroom (``max_tokens - max_thinking_tokens``),
-    so an effort level bounds the whole turn rather than its reasoning alone.
+    therefore the first turn's reasoning cap plus the global answer headroom
+    (``max_tokens - max_thinking_tokens``), so an effort level bounds the whole turn rather than its
+    reasoning alone.
+
+    ``max_thinking_tokens`` is the run's per-turn ceiling. Under the ``turn`` scope it clamps the level's
+    budget; under the ``episode`` scope the level's budget is the episode's total and the ceiling bounds
+    only how much of it one turn may take (:meth:`EpisodeEffort.turn_thinking_cap`).
     """
     level = resolve_episode_effort(context, env)
     budget = env.thinking_budget_for_effort(level) if level is not None else None
     if budget is None:
+        if scope == THINKING_SCOPE_EPISODE and max_thinking_tokens is None:
+            raise ValueError(
+                "rollout_thinking_budget_scope='episode' with nothing to share: the episode's level sets no "
+                "thinking_tokens and rollout_max_thinking_tokens is unset, so no turn would be capped"
+            )
         # No per-level budget (or no level at all): the global caps stand.
-        return EpisodeEffort(level=level, thinking_budget=max_thinking_tokens, max_tokens=max_tokens)
-    if max_thinking_tokens is not None:
+        return EpisodeEffort(
+            level=level,
+            thinking_budget=max_thinking_tokens,
+            max_tokens=max_tokens,
+            scope=scope,
+            turn_reserve=turn_reserve,
+            turn_ceiling=max_thinking_tokens,
+        )
+    if scope == THINKING_SCOPE_TURN and max_thinking_tokens is not None:
         budget = min(budget, max_thinking_tokens)
+    if max_thinking_tokens is not None:
+        first_turn_cap = min(budget, max_thinking_tokens)
         headroom = max(0, max_tokens - max_thinking_tokens)
     else:
+        first_turn_cap = budget
         headroom = max_tokens
-    return EpisodeEffort(level=level, thinking_budget=budget, max_tokens=min(max_tokens, budget + headroom))
+    return EpisodeEffort(
+        level=level,
+        thinking_budget=budget,
+        max_tokens=min(max_tokens, first_turn_cap + headroom),
+        scope=scope,
+        turn_reserve=turn_reserve,
+        turn_ceiling=max_thinking_tokens,
+    )
+
+
+def resolve_reasoning_end_token_id(tokenizer, token: str) -> int:
+    """The id of ``token`` under the tokenizer, required to resolve: a marker the tokenizer does not
+    know would count every turn's whole generation as reasoning and starve the episode of its budget
+    after the first turn."""
+    tid = tokenizer.convert_tokens_to_ids(token)
+    if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+        raise ValueError(
+            f"rollout_reasoning_end_token {token!r} is not a token of this tokenizer; the episode thinking scope "
+            "counts a turn's reasoning as the sampled ids before that token, so name the model's own marker"
+        )
+    return tid
 
 
 def effort_length_penalty(
@@ -102,7 +185,7 @@ def effort_length_penalty(
 
 def effort_length_floor(reasoning_tokens: list[int], min_tokens: int, weight: float) -> float:
     """Under-use floor in ``[-weight, 0]``: ``-weight * (min_tokens - total) / min_tokens`` while the
-    trajectory's reasoning tokens fall short of ``min_tokens``, a multiple of its per-turn budget.
+    trajectory's reasoning tokens fall short of ``min_tokens``, a multiple of the budget it ran under.
 
     The price only ever pays for less reasoning; this is the term that resists reasoning shrinking
     toward nothing. Summed over the episode, never averaged per turn: a short repair turn after a
@@ -156,6 +239,30 @@ class TurnGeneration:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
+
+
+def reasoning_tokens_of(gen: TurnGeneration, reasoning_end_token_id: int | None) -> int:
+    """The reasoning tokens one turn spent, read off the engine's sampled ids: the ids up to and
+    including the reasoning-end token (the engine's budget counts the close it forces), or all of them
+    when the turn was cut before its reasoning closed.
+
+    The engine's usage block carries no reasoning count and the drivers hold no tokenizer, so the ids
+    are the one exact source; a driver without them cannot run the episode scope and says so."""
+    if gen.token_ids is None:
+        raise ValueError(
+            "the episode thinking scope needs the turn's sampled token ids to count its reasoning, and none "
+            "were captured: the training rollout reads them off the logprobs (train_on_sampled_tokens with the "
+            "server flag --return-tokens-as-token-ids), the eval client off the choice's return_token_ids"
+        )
+    if reasoning_end_token_id is None:
+        raise ValueError(
+            "the episode thinking scope needs reasoning_end_token_id (rollout_reasoning_end_token resolved "
+            "through the tokenizer) to tell a turn's reasoning from its answer"
+        )
+    try:
+        return gen.token_ids.index(reasoning_end_token_id) + 1
+    except ValueError:
+        return len(gen.token_ids)
 
 
 def step_context_from_generation(context: dict[str, Any] | None, gen: TurnGeneration) -> dict[str, Any]:

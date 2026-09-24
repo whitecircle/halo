@@ -49,7 +49,7 @@ async def test_a_request_timeout_inside_the_episode_is_a_masked_error():
     async def _client(timeout):
         return None
 
-    async def _timed_out_generate(client, url, messages, config, reasoning_effort=None):
+    async def _timed_out_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
         raise TimeoutError()  # aiohttp's total-timeout expiry: the builtin, with an empty message
 
     actor._get_http_client = _client

@@ -10,12 +10,18 @@ from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments
 from src.configs.rollout_config import (
     DEFAULT_EPISODE_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
+    DEFAULT_REASONING_END_TOKEN,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_RETRY_BASE_WAIT_SECONDS,
     DEFAULT_ROLLOUT_MAX_TOKENS,
     DEFAULT_ROLLOUT_TEMPERATURE,
     DEFAULT_ROLLOUT_TOP_P,
+    DEFAULT_THINKING_BUDGET_SCOPE,
+    DEFAULT_THINKING_TURN_RESERVE,
     REASONING_BUDGET_TEMPLATE_VAR,
+    REASONING_SCOPE_TEMPLATE_VAR,
+    THINKING_BUDGET_SCOPES,
+    THINKING_SCOPE_EPISODE,
     RolloutConfig,
 )
 from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
@@ -164,7 +170,39 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "help": "Per-turn reasoning-token budget for reasoning models (vLLM thinking_token_budget): "
             "caps the chain-of-thought, then forces the model to answer with the rest of max_tokens. "
             "Requires a reasoning parser on the vLLM server (--reasoning-parser qwen3 for Qwen3.x; the "
-            "openai_gptoss plugin for gpt-oss). None = unbounded reasoning."
+            "openai_gptoss plugin for gpt-oss). None = unbounded reasoning. Under "
+            "rollout_thinking_budget_scope=episode it is the ceiling one turn may take of the episode's budget."
+        },
+    )
+
+    rollout_thinking_budget_scope: str = field(
+        default=DEFAULT_THINKING_BUDGET_SCOPE,
+        metadata={
+            "help": "What a thinking budget (a level's thinking_tokens, else rollout_max_thinking_tokens) covers: "
+            "'turn' gives every turn the whole budget; 'episode' makes it the episode's total, so each turn's "
+            "engine cap is the budget minus the reasoning the earlier turns spent (never below "
+            "rollout_thinking_turn_reserve, never above rollout_max_thinking_tokens). Closes the loophole "
+            "where a cut or empty turn plus its recovery nudge buys another full budget of reasoning. vLLM "
+            "only; needs train_on_sampled_tokens (the spend is read off the sampled ids) and "
+            "rollout_reasoning_end_token. The effort templates state the scope to the model."
+        },
+    )
+
+    rollout_thinking_turn_reserve: int = field(
+        default=DEFAULT_THINKING_TURN_RESERVE,
+        metadata={
+            "help": "Under rollout_thinking_budget_scope=episode: the reasoning a turn always gets once the "
+            "episode's budget is spent, so the model can still close its reasoning and act. Must be >= 1 and "
+            "at most rollout_max_thinking_tokens when that is set."
+        },
+    )
+
+    rollout_reasoning_end_token: str = field(
+        default=DEFAULT_REASONING_END_TOKEN,
+        metadata={
+            "help": "The token that closes the model's reasoning (Qwen3.x '</think>'); under "
+            "rollout_thinking_budget_scope=episode a turn's reasoning is counted as the sampled ids before it. "
+            "Resolved through the tokenizer by the trainer and the eval scripts; it must be a token of it."
         },
     )
 
@@ -369,7 +407,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         default=0.0,
         metadata={
             "help": "Weight of the reasoning under-use floor (0 = off). An episode whose reasoning tokens, summed "
-            "over its turns, fall short of effort_length_floor_budgets x its per-turn thinking budget pays "
+            "over its turns, fall short of effort_length_floor_budgets x the thinking budget it ran under (a "
+            "level's per-turn budget, or the episode's total under rollout_thinking_budget_scope=episode) pays "
             "-weight * shortfall / that floor. The price only ever pays for less reasoning; this is the term that "
             "resists reasoning shrinking toward nothing. An episode with no thinking budget is free of it, and a "
             "run where none can have one is refused at trainer construction. Logged as reward/effort_length_floor."
@@ -378,9 +417,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     effort_length_floor_budgets: float = field(
         default=0.75,
         metadata={
-            "help": "The floor's reference, in per-turn thinking budgets: an episode is asked to reason at least this "
-            "many times its level's thinking_tokens, summed over its turns. Below 1 by default, so an episode of a "
-            "single assistant turn can clear its floor without running into the cap the engine enforces per turn."
+            "help": "The floor's reference, in thinking budgets: an episode is asked to reason at least this many "
+            "times its level's thinking_tokens, summed over its turns. Below 1 by default, so an episode of a single "
+            "assistant turn can clear its floor without running into the cap the engine enforces per turn. Under "
+            "rollout_thinking_budget_scope=episode the budget is the episode's total, so scale this down with it."
         },
     )
 
@@ -517,6 +557,35 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
                 f"rollout_max_tokens ({self.rollout_max_tokens}), which bounds the WHOLE turn: at or "
                 f"above it the turn has no answer headroom left and is cut mid-reasoning every time."
             )
+        if self.rollout_thinking_budget_scope not in THINKING_BUDGET_SCOPES:
+            raise ValueError(
+                f"rollout_thinking_budget_scope must be one of {THINKING_BUDGET_SCOPES}, "
+                f"got {self.rollout_thinking_budget_scope!r}"
+            )
+        if isinstance(self.rollout_thinking_turn_reserve, bool) or self.rollout_thinking_turn_reserve < 1:
+            raise ValueError(
+                f"rollout_thinking_turn_reserve must be an int >= 1 (a turn's engine cap of 0 would close its "
+                f"reasoning before it opened), got {self.rollout_thinking_turn_reserve!r}"
+            )
+        if self.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
+            if (
+                self.rollout_max_thinking_tokens is not None
+                and self.rollout_thinking_turn_reserve > self.rollout_max_thinking_tokens
+            ):
+                raise ValueError(
+                    f"rollout_thinking_turn_reserve ({self.rollout_thinking_turn_reserve}) must not exceed "
+                    f"rollout_max_thinking_tokens ({self.rollout_max_thinking_tokens}), the ceiling one turn may take."
+                )
+            if not self.train_on_sampled_tokens:
+                raise ValueError(
+                    "rollout_thinking_budget_scope='episode' requires train_on_sampled_tokens: the reasoning a turn "
+                    "spent is counted off the sampled ids the capture returns."
+                )
+            if not self.rollout_reasoning_end_token:
+                raise ValueError(
+                    "rollout_thinking_budget_scope='episode' requires rollout_reasoning_end_token, the marker the "
+                    "reasoning count reads up to."
+                )
         if self.max_train_row_tokens is not None and (
             isinstance(self.max_train_row_tokens, bool) or self.max_train_row_tokens < 1
         ):
@@ -544,6 +613,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
                 f"rollout_chat_template_kwargs must not carry {sorted(per_episode)}: the level and its thinking "
                 "budget are per episode; the level travels as the request's top-level field and the budget is "
                 "added to the nested form per request."
+            )
+        if REASONING_SCOPE_TEMPLATE_VAR in self.rollout_chat_template_kwargs:
+            raise ValueError(
+                f"rollout_chat_template_kwargs must not carry {REASONING_SCOPE_TEMPLATE_VAR!r}: it follows "
+                "rollout_thinking_budget_scope, which sets it."
             )
         self._validate_backend_capabilities()
 
@@ -596,6 +670,11 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
                 "thinking_token_budget request field is vLLM-only and SGLang would silently ignore it, "
                 "leaving reasoning uncapped. Steer with the environment's reasoning_effort instead."
             )
+        if self.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
+            raise ValueError(
+                "rollout_thinking_budget_scope='episode' is not supported with rollout_backend='sglang': the "
+                "per-turn engine cap it narrows is the vLLM-only thinking_token_budget field."
+            )
 
     def get_server_urls(self) -> list[str]:
         """Get list of rollout-server URLs for generation."""
@@ -603,16 +682,29 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             return [c["url"] for c in self.rollout_server_configs]
         return [self.rollout_server_url]
 
-    def get_rollout_config(self, stop_token_ids: list[int] | None = None):
-        """Build RolloutConfig from this config. ``stop_token_ids`` is resolved from
-        ``rollout_stop_tokens`` by the trainer, which holds the tokenizer."""
+    def rollout_template_variables(self) -> dict[str, Any]:
+        """The run-wide chat-template variables every request and every trainer-side render carries: the
+        YAML's ``rollout_chat_template_kwargs`` plus, under the episode thinking scope, the scope variable
+        the effort templates read to state what the budget covers."""
+        variables = dict(self.rollout_chat_template_kwargs)
+        if self.rollout_thinking_budget_scope == THINKING_SCOPE_EPISODE:
+            variables[REASONING_SCOPE_TEMPLATE_VAR] = THINKING_SCOPE_EPISODE
+        return variables
+
+    def get_rollout_config(self, stop_token_ids: list[int] | None = None, reasoning_end_token_id: int | None = None):
+        """Build RolloutConfig from this config. ``stop_token_ids`` (from ``rollout_stop_tokens``) and
+        ``reasoning_end_token_id`` (from ``rollout_reasoning_end_token``) are resolved by the caller that
+        owns the tokenizer; the episode thinking scope refuses to count reasoning without the latter."""
         self._validate_timeouts_against_nccl_watchdog()
+        mirrored = {target: getattr(self, source) for target, source in rollout_field_sources(type(self)).items()}
+        mirrored["chat_template_kwargs"] = self.rollout_template_variables()
         return RolloutConfig(
-            **{target: getattr(self, source) for target, source in rollout_field_sources(type(self)).items()},
+            **mirrored,
             # Derived from other state rather than mirrored from a same-named knob.
             capture_token_ids=self.train_on_sampled_tokens,
             capture_routed_experts=self.routing_replay == "rollout",
             stop_token_ids=stop_token_ids,
+            reasoning_end_token_id=reasoning_end_token_id,
         )
 
     def _validate_timeouts_against_nccl_watchdog(self):

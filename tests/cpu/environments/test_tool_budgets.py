@@ -50,6 +50,10 @@ def _observations(traj):
     return [m.content for m in traj.messages if m.role == "tool"]
 
 
+def _react_observations(traj):
+    return [m.content.removeprefix("Observation: ") for m in traj.messages if m.content.startswith("Observation: ")]
+
+
 def test_native_budget_refuses_past_the_cap_and_counts_only_admitted_calls():
     env = NativeToolUseEnvironment(
         tool_registry=_registry(), tool_budgets={"echo": 1}, tool_error_penalty=0.1, tool_success_reward=0.0
@@ -127,8 +131,9 @@ def test_react_budget_refuses_past_the_cap():
     for _ in range(2):
         env.step(ids, ['Thought: go\nAction: echo(code="x")'])
     traj = env.get_trajectories(ids)[0]
-    assert traj.info["observations"][0] == "echo:x"
-    assert traj.info["observations"][1] == "Error: echo limit reached (1); this call was not executed."
+    observations = _react_observations(traj)
+    assert observations[0] == "echo:x"
+    assert observations[1] == "Error: echo limit reached (1); this call was not executed."
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
     with pytest.raises(ValueError, match="tool_budgets"):
         ReActEnvironment(tool_registry=_registry(), tool_budgets={"nope": 1})

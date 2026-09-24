@@ -137,6 +137,7 @@ def _tool_call_response():
         completion_tokens=3,
         tool_calls=[types.SimpleNamespace(id="c1", function=fn)],
         reasoning=None,
+        token_ids=None,
     )
 
 
@@ -205,7 +206,7 @@ async def test_completed_episode_still_pays_success(monkeypatch):
     full weight."""
     env = _tooled_env()
     final = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None
+        answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None, token_ids=None
     )
     traj = await _run_scripted_episode(env, [final], monkeypatch)
     assert traj.done and not traj.truncated
@@ -228,9 +229,10 @@ async def test_length_cutoff_is_recovered_offline_exactly_as_online(monkeypatch)
         completion_tokens=9,
         tool_calls=None,
         reasoning=None,
+        token_ids=None,
     )
     final = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None
+        answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None, token_ids=None
     )
     traj = await _run_scripted_episode(env, [cut_off, final], monkeypatch)
 
@@ -252,7 +254,12 @@ async def test_eval_records_the_reasoning_channel_without_writing_it_to_the_json
     """
     env = _tooled_env()
     final = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning="secret CoT"
+        answer="done",
+        finish_reason="stop",
+        completion_tokens=2,
+        tool_calls=None,
+        reasoning="secret CoT",
+        token_ids=None,
     )
     traj = await _run_scripted_episode(env, [final], monkeypatch)
 
@@ -278,7 +285,7 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
     async def _generate(**kwargs):
         seen["tools"] = kwargs["tools"]
         return types.SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None
+            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
         )
 
     monkeypatch.setattr(env, "reset", _reset)
@@ -366,7 +373,7 @@ async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
     async def _capture(**kwargs):
         seen.append(kwargs)
         return types.SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None
+            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
         )
 
     monkeypatch.setattr(eval_runner, "generate_openai_response", _capture)
@@ -394,7 +401,7 @@ async def test_collect_results_omits_the_model_for_a_single_model_endpoint(monke
     async def _capture(**kwargs):
         seen.append(kwargs)
         return types.SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None
+            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
         )
 
     monkeypatch.setattr(eval_runner, "generate_openai_response", _capture)
@@ -423,6 +430,7 @@ async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
             completion_tokens=1,
             tool_calls=[types.SimpleNamespace(id=f"c-{name}", function=fn)],
             reasoning=None,
+            token_ids=None,
         )
 
     monkeypatch.setattr(
