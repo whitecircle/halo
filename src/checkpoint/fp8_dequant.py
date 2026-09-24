@@ -8,7 +8,6 @@ walked shard by shard), so a multi-hundred-GB release converts in a bounded work
 
 import json
 import logging
-import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from src.checkpoint.tool_io import (
     FP8_HEADER_DTYPE,
     checkpoint_shard_files,
     header_nbytes,
+    header_numel,
     iter_checkpoint_shards,
     preflight_resource_warning,
     reject_in_place_conversion,
@@ -103,7 +103,7 @@ def _preflight_dequant_shards(source: str, output_dir: str, *, tool: str, rules:
             if scale is None:
                 raise ValueError(f"FP8 tensor {name} has no co-located {name}{scale_suffix}")
             rules.validate_scale(name, tuple(header.get_shape()), tuple(scale.get_shape()))
-            output_bytes += math.prod(header.get_shape()) * torch.bfloat16.itemsize
+            output_bytes += header_numel(header) * torch.bfloat16.itemsize
     preflight_resource_warning(tool, output_dir, disk_bytes=output_bytes, ram_bytes=None)
     return output_bytes
 

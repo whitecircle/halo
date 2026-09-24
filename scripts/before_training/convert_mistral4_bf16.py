@@ -24,7 +24,7 @@ import torch
 
 from scripts._common import add_hub_source_args, add_max_shard_size_arg
 from src.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
-from src.checkpoint.tool_io import SAFETENSORS_FLOAT_DTYPES
+from src.checkpoint.tool_io import SAFETENSORS_FLOAT_DTYPES, header_numel
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -87,7 +87,7 @@ def static_fp8_rules(_source: str) -> DequantRules:
 
     def passthrough_nbytes(header) -> int:
         itemsize = torch.bfloat16.itemsize if header.get_dtype() in SAFETENSORS_FLOAT_DTYPES else torch.int8.itemsize
-        return math.prod(header.get_shape()) * itemsize
+        return header_numel(header) * itemsize
 
     return DequantRules(
         scale_suffix=_SCALE_SUFFIX,
