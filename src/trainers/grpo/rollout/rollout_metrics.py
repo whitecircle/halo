@@ -281,6 +281,7 @@ class RolloutMetricsMixin:
             {
                 "latency": r.latency,
                 "generation_tokens": r.generation_tokens,
+                "requests_expired_in_sync": r.requests_expired_in_sync,
                 "turns": r.episode_length,
                 "success": bool(r.success),
                 "truncated": bool(r.trajectory and r.trajectory.truncated),
@@ -306,6 +307,8 @@ class RolloutMetricsMixin:
             return sum(vals) / len(vals)
 
         m["async/mean_rollout_latency"].append(_mean([e["latency"] for e in episodes]))
+        # A count, not a mean: each one threw away a turn the engine had already started.
+        m["async/requests_expired_in_sync"].append(float(sum(e["requests_expired_in_sync"] for e in episodes)))
 
         for key, val in _summarize_episode_generation_tokens([e["generation_tokens"] for e in episodes]).items():
             m[key].append(val)

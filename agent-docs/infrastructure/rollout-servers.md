@@ -109,10 +109,11 @@ aborted turn (`finish_reason: abort`) against the same observation, up to `max_r
 turn, rather than stepping the environment with the fragment. An abort is never charged as a length
 cut: it consumes no length-cutoff recovery.
 
-The paused window is not charged to the episode: every rank credits the push's duration to its
-in-flight episodes' `episode_timeout` (the deadline counts engine-serving time). `request_timeout`,
-aiohttp's total per request, is not credited, so it must still exceed the longest turn plus one sync.
-Otherwise the frozen request times out and its retry re-issues a turn the engine is still completing.
+The paused window is charged to neither the episode nor the request: every rank credits the push's
+duration to its in-flight episodes' `episode_timeout` and, through the Ray actors' copy of the same
+clock, to their in-flight requests' `request_timeout` (both deadlines count engine-serving time). A
+frozen request therefore never expires into a retry that re-issues a turn the engine is still
+completing; `async/requests_expired_in_sync` counts the ones that overran their credit anyway.
 
 **An interrupted mid-stream sync leaves that server unusable.** The engine then holds neither the
 old policy nor the new one, and vLLM's layerwise reload materializes a layer whose tensors straddled

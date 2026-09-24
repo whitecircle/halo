@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 """A timed-out episode must be an INVALID row, not a valid zero-reward group member.
 
-Both deadlines surface as a bare ``TimeoutError`` — ``asyncio.wait_for`` on the episode deadline,
-aiohttp's total timeout on the last retry — and ``str(TimeoutError())`` is ``""``. An error field
-built from it reads as no error to ``rollout_valid_mask``, so every timed-out episode entered the
-GRPO baseline at reward 0 and an all-timed-out step never tripped the empty-step halt.
+A timeout can surface as a bare ``TimeoutError``, and ``str(TimeoutError())`` is ``""``. An error
+field built from it reads as no error to ``rollout_valid_mask``, so a timed-out episode would enter
+the GRPO baseline at reward 0 and an all-timed-out step would never trip the empty-step halt.
 
     python tests/cpu/environments/test_ray_timed_out_episode_masked.py
 """
@@ -46,11 +45,11 @@ class _NeverReturningActor:
 async def test_a_request_timeout_inside_the_episode_is_a_masked_error():
     actor = _actor()
 
-    async def _client(timeout):
+    async def _client():
         return None
 
     async def _timed_out_generate(client, url, messages, config, reasoning_effort=None, reasoning_budget=None):
-        raise TimeoutError()  # aiohttp's total-timeout expiry: the builtin, with an empty message
+        raise TimeoutError()  # the builtin, with an empty message
 
     actor._get_http_client = _client
     actor._generate = _timed_out_generate
@@ -78,7 +77,7 @@ async def test_an_episode_past_its_deadline_is_a_masked_error(monkeypatch):
 
     (result,) = await manager.collect_rollouts(["p"])
 
-    assert result.error and "TimeoutError" in result.error
+    assert result.error and "DeadlineExpired" in result.error
     assert rollout_valid_mask([result], _CPU).tolist() == [False]
 
 

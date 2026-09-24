@@ -110,12 +110,13 @@ class RolloutConfig:
     """Model name for /v1/chat/completions. Optional — vllm-serve uses the loaded model when omitted."""
 
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
-    """HTTP timeout per request in seconds."""
+    """HTTP timeout per request in seconds of engine-serving time: a weight-sync pause is credited back."""
 
     episode_timeout: float = DEFAULT_EPISODE_TIMEOUT_SECONDS
-    """Wall-clock deadline for one episode in seconds (vs ``request_timeout`` per HTTP call). A wedged
-    tool or sandbox otherwise hangs its rank forever, blocking peers at the next collective. Timed-out
-    episodes are cancelled. See :data:`DEFAULT_EPISODE_TIMEOUT_SECONDS` for how the default is sized."""
+    """Deadline for one episode in seconds of engine-serving time (vs ``request_timeout`` per HTTP
+    call). A wedged tool or sandbox otherwise hangs its rank forever, blocking peers at the next
+    collective. Timed-out episodes are cancelled. See :data:`DEFAULT_EPISODE_TIMEOUT_SECONDS` for how
+    the default is sized."""
 
     max_retries: int = DEFAULT_MAX_RETRIES
     """Max retry attempts for transient vLLM failures."""

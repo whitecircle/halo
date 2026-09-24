@@ -457,14 +457,18 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
 
     request_timeout: float = field(
         default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
-        metadata={"help": "HTTP timeout per rollout-server request in seconds."},
+        metadata={
+            "help": "HTTP timeout per rollout-server request in seconds of engine-serving time: a weight-sync "
+            "pause is credited back, so a sync never expires a request."
+        },
     )
 
     episode_timeout: float = field(
         default=DEFAULT_EPISODE_TIMEOUT_SECONDS,
         metadata={
             "help": (
-                "Wall-clock deadline for one rollout episode in seconds. Bounds the WHOLE episode "
+                "Deadline for one rollout episode in seconds of engine-serving time (a weight-sync pause is "
+                "credited back). Bounds the WHOLE episode "
                 "(generation + tool execution + grading), unlike request_timeout which bounds a single "
                 "HTTP call. Without it a wedged tool/sandbox blocks its rank forever, and the other ranks "
                 "block behind it at the next collective. A timed-out episode is cancelled and counted in "

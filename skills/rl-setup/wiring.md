@@ -122,11 +122,11 @@ docker run --gpus all --network=host --ipc=host \
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
 | `effort_length_penalty_k0` / `effort_length_floor_weight` | `None` / `0.0` | both off by default; the first prices an episode's reasoning tokens by its effort level (capped at `effort_length_penalty_c_max`), the second its shortfall against `effort_length_floor_budgets` × the thinking budget it ran under |
-| `episode_timeout` | `1200.0` | per-episode wall clock, checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
+| `episode_timeout` | `1200.0` | per-episode deadline in engine-serving time (a weight-sync pause is credited back), checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
 | `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |
 | `num_prefetch_batches` | `1` | batches prefetched ahead |
-| `model_name` / `request_timeout` / `max_retries` / `retry_base_wait` | — | per-request HTTP behavior |
+| `model_name` / `request_timeout` / `max_retries` / `retry_base_wait` | — | per-request HTTP behavior; `request_timeout` counts engine-serving time like `episode_timeout` |
 
 `vllm_group_port` is **not** in `AsyncTrainingConfig` — it's a TRL `GRPOConfig`
 field (`self.args.vllm_group_port`) read when constructing `VLLMWeightSyncClient`;

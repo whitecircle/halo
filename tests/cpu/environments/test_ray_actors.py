@@ -92,10 +92,16 @@ async def test_rollout_manager_start_shutdown():
         await manager.start()
         assert len(manager._actors) == 2
 
+        # The actors' copy of the pause clock is a live actor the manager's windows reach, in order.
+        manager.begin_engine_pause()
+        manager.end_engine_pause(2.5)
+        assert await manager._actor_pause_clock.paused_seconds.remote() == 2.5
+
         # Shutdown should clean up
         await manager.shutdown()
         assert not manager._started
         assert len(manager._actors) == 0
+        assert manager._actor_pause_clock is None
 
     except ray.exceptions.RaySystemError as e:
         if "Async actor" in str(e):
@@ -356,6 +362,7 @@ CONSUMED_ROLLOUT_RESULT_FIELDS = {
     "latency",
     "error",
     "generation_tokens",
+    "requests_expired_in_sync",
     "metrics",
 }
 
@@ -504,7 +511,7 @@ async def test_actor_releases_session_when_episode_errors():
     orig_open = env.sandbox.open_session
     env.sandbox.open_session = lambda: created.append(orig_open()) or created[-1]
 
-    async def _fake_client(timeout):  # unused (we mock _generate), just must not hit the network
+    async def _fake_client():  # unused (we mock _generate), just must not hit the network
         return None
 
     actor._get_http_client = _fake_client
@@ -520,7 +527,7 @@ async def test_actor_releases_session_when_episode_errors():
 
     actor._generate = _fake_generate
 
-    result = await actor.run_episode("task", None, "http://x", RolloutConfig(max_retries=1))
+    result = await actor.run_episode("task", None, "http://x", RolloutConfig(max_retries=1, retry_base_wait=0.0))
 
     assert result.error and "boom" in result.error, "episode should surface the mid-episode error"
     assert created, "write_file should have opened a session (otherwise the test proves nothing)"
@@ -559,7 +566,7 @@ async def test_actor_drives_async_env_via_step_async():
         env_config={"max_turns": 3},
     )
 
-    async def _fake_client(timeout):
+    async def _fake_client():
         return None
 
     actor._get_http_client = _fake_client
@@ -595,7 +602,7 @@ async def test_run_episode_generation_tokens_sum_across_turns():
 
     actor = _make_actor("native_math", {"max_turns": 5})
 
-    async def _fake_client(timeout):
+    async def _fake_client():
         return None
 
     actor._get_http_client = _fake_client
@@ -655,7 +662,7 @@ async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
     )
     assert actor._get_env() is actor._get_env(), "both episodes must share one cached env instance"
 
-    async def _fake_client(timeout):
+    async def _fake_client():
         return None
 
     actor._get_http_client = _fake_client
@@ -719,7 +726,7 @@ async def test_slow_sync_step_does_not_block_concurrent_episodes():
         env_config={"max_turns": 2},
     )
 
-    async def _fake_client(timeout):
+    async def _fake_client():
         return None
 
     actor._get_http_client = _fake_client
@@ -774,7 +781,7 @@ async def test_sync_step_offload_preserves_cross_turn_contextvars():
     )
     actor = _make_actor(env_type=(_CtxProbeEnv, {"tool_registry": registry}), env_config={"max_turns": 3})
 
-    async def _fake_client(timeout):
+    async def _fake_client():
         return None
 
     actor._get_http_client = _fake_client

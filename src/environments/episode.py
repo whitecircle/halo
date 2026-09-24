@@ -6,12 +6,21 @@ graded the same way whichever one collects it.
 
 import asyncio
 import contextvars
+import logging
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
-from src.configs.rollout_config import DEFAULT_THINKING_TURN_RESERVE, THINKING_SCOPE_EPISODE, THINKING_SCOPE_TURN
+import backoff
+
+from src.configs.rollout_config import (
+    DEFAULT_THINKING_TURN_RESERVE,
+    THINKING_SCOPE_EPISODE,
+    THINKING_SCOPE_TURN,
+    RolloutConfig,
+)
 from src.environments.base import (
     THINKING_BUDGET_EXHAUSTED_KEY,
     VALID_REASONING_EFFORTS,
@@ -21,7 +30,15 @@ from src.environments.base import (
     Trajectory,
     resolve_reasoning_effort,
 )
-from src.inference.response import ENGINE_CUT_FINISH_REASONS
+from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_ABORT
+
+logger = logging.getLogger(__name__)
+
+# vLLM answers 400 when a NaN log-prob keeps it from serialising its OWN response: the request was
+# valid and a fresh one succeeds, so both drivers retry it rather than lose the turn.
+ENGINE_SERIALIZATION_FAULT = "not JSON compliant"
+# Client-error statuses that report a transient server condition, not a bad request.
+RETRYABLE_4XX = frozenset({408, 429})
 
 
 @dataclass(frozen=True)
@@ -248,6 +265,8 @@ class RolloutResult:
     latency: float = 0.0
     error: str | None = None
     generation_tokens: int = 0
+    requests_expired_in_sync: int = 0
+    """Request deadlines that expired on a request in flight across a weight-sync pause, pause credited."""
     metrics: dict[str, float] = field(default_factory=dict)
 
 
@@ -273,6 +292,88 @@ class TurnGeneration:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
+
+
+def describe_exception(exc: BaseException) -> str:
+    """``Type: message``, keeping the type when the message is empty.
+
+    ``asyncio.TimeoutError``, the usual signature of a stalled engine, stringifies to ``""``, so
+    interpolating the exception alone carries no information.
+    """
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def is_engine_fault(status: int, body: str) -> bool:
+    """A client-error status the engine returned for its own fault, which a fresh request clears."""
+    return 400 <= status < 500 and ENGINE_SERIALIZATION_FAULT in body
+
+
+def is_terminal_client_status(status: int, body: str) -> bool:
+    """A client error the request itself caused (the conversation outgrew the served context, a
+    malformed request): retrying the same request cannot succeed."""
+    return 400 <= status < 500 and status not in RETRYABLE_4XX and not is_engine_fault(status, body)
+
+
+async def generate_turn(
+    request: Callable[[], Awaitable[TurnGeneration]],
+    config: RolloutConfig,
+    *,
+    retry_on: tuple[type[BaseException], ...],
+    giveup: Callable[[BaseException], bool],
+    log_prefix: str,
+    on_failure: Callable[[BaseException], None] | None = None,
+) -> TurnGeneration:
+    """One turn under the rollout retry policy every driver shares.
+
+    A failed ``request`` of a ``retry_on`` type is retried with exponential backoff from
+    ``config.retry_base_wait``, up to ``config.max_retries`` times, unless ``giveup`` names it terminal.
+    A generation the engine aborted is re-issued for the same observation, up to ``config.max_retries``
+    times: the fragment is the engine's doing (SGLang's sync pause drops every in-flight request), so
+    stepping it would spend the episode's length-cutoff recovery cap on a cut the policy did not make.
+    Past either bound the turn raises. ``on_failure`` sees every failed ``retry_on`` request, retried or not.
+    """
+
+    def _failed(details: dict) -> None:
+        if on_failure is not None:
+            on_failure(details["exception"])
+
+    def _exhausted(details: dict) -> None:
+        # A terminal failure is the caller's to report; only a spent retry budget is logged here.
+        if not giveup(details["exception"]):
+            logger.warning(
+                f"{log_prefix}: gave up after {details['tries']} tries — {describe_exception(details['exception'])}"
+            )
+
+    @backoff.on_exception(
+        backoff.expo,
+        retry_on,
+        # backoff counts total attempts: max_retries=0 would never match and retry forever.
+        max_tries=config.max_retries + 1,
+        factor=config.retry_base_wait,
+        giveup=giveup,
+        logger=None,
+        on_backoff=[
+            _failed,
+            lambda d: logger.warning(
+                f"{log_prefix}: rollout retry {d['tries']}/{config.max_retries} after {d['wait']:.1f}s — "
+                f"{describe_exception(d['exception'])}"
+            ),
+        ],
+        on_giveup=[_failed, _exhausted],
+    )
+    async def _attempt() -> TurnGeneration:
+        return await request()
+
+    for _ in range(config.max_retries + 1):
+        gen = await _attempt()
+        if gen.finish_reason != FINISH_REASON_ABORT:
+            return gen
+        logger.warning(f"{log_prefix}: the {config.backend} engine aborted the turn; re-issuing it")
+    raise RuntimeError(
+        f"the {config.backend} engine aborted the same turn {config.max_retries + 1} times in a row "
+        f"(finish_reason={FINISH_REASON_ABORT!r}); the turn is not stepped with a fragment"
+    )
 
 
 def reasoning_tokens_of(gen: TurnGeneration, reasoning_end_token_id: int | None) -> int:
