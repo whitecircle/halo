@@ -104,6 +104,9 @@ _MUTABLE_BACKEND_STATE_KEYS = ("padding", "truncation")
 # not per row.
 _UNFINGERPRINTABLE_WARNED: set[tuple[str, str]] = set()
 
+# Tokenizer type names whose content hash raised, reported once by :func:`_tokenizer_content_sig`.
+_CONTENT_SIG_FAILED_WARNED: set[str] = set()
+
 # Set by coordinated_dataset_operation and refused from a caller's kwargs: they steer how an
 # operation runs, not what it produces. The worker count is not listed, since ``num_proc`` is a named
 # parameter of both coordinated ops and cannot arrive through ``**kwargs``.
@@ -194,7 +197,9 @@ def _template_sig(chat_template: Any) -> str | None:
 def _tokenizer_content_sig(val: Any) -> str | None:
     """Content hash of what a tokenizer does to text: the fast backend's serialized state (vocab,
     merges, normalizer) minus its per-call ``_MUTABLE_BACKEND_STATE_KEYS``, else the vocab table.
-    ``None`` when neither is readable."""
+    ``None`` when neither is exposed, or when reading one raises — the latter warned once per type,
+    since the caller's ``name_or_path`` fallback misses the cache on every resume leg and reuses it
+    across a same-path content change."""
     try:
         backend = getattr(val, "backend_tokenizer", None)
         if backend is not None:
@@ -205,7 +210,21 @@ def _tokenizer_content_sig(val: Any) -> str | None:
         get_vocab = getattr(val, "get_vocab", None)
         if callable(get_vocab):
             return hashlib.md5(json.dumps(sorted(get_vocab().items())).encode()).hexdigest()[:16]
-    except Exception:
+    except Exception as exc:
+        # Not narrowable: ``to_str`` raises a bare ``Exception`` for a custom Python component, and a
+        # remote-code ``get_vocab`` raises whatever it raises (bytes keys fail ``json.dumps``).
+        warn_once(
+            logger,
+            _CONTENT_SIG_FAILED_WARNED,
+            type(val).__name__,
+            "Dataset-map cache key cannot hash the content of tokenizer %s (%s: %s) and keys on its "
+            "name_or_path %r instead: a resume from a checkpoint path re-runs every map, and a changed "
+            "tokenizer at the same path reuses the previous run's rows.",
+            type(val).__name__,
+            type(exc).__name__,
+            exc,
+            getattr(val, "name_or_path", None),
+        )
         return None
     return None
 
