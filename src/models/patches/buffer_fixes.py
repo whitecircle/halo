@@ -24,10 +24,10 @@ from src.models.loading.config_levels import text_config
 
 logger = logging.getLogger(__name__)
 
-# ``warn_once`` scope for the unrecognized-rotary warnings, keyed by (reason, class name): an
-# unhandled layout is a property of the family, and this logger reaches every rank on a model
-# carrying a rotary module in every layer.
-_WARNED_ROTARY: set = set()
+# ``warn_once`` scope for the unrecognized-layout and unfixable-buffer warnings, keyed by (reason,
+# class name, ...): an unhandled layout is a property of the family, and this logger reaches every
+# rank on a model carrying such a module in every layer.
+_WARNED_UNFIXED: set = set()
 
 # A fixer returns how many buffers it rebuilt, or ``None`` to hand the module to the next fixer.
 _Fixer = Callable[[nn.Module, str], int | None]
@@ -113,6 +113,20 @@ def _apply_recomputed_rope(
         setattr(module, scaling_name, scaling)
 
 
+def _unfixable(module: nn.Module, name: str, reason: str) -> int:
+    """Claim ``module`` without rebuilding its buffers, warned once per (class, reason): they keep
+    whatever the load produced."""
+    warn_once(
+        logger,
+        _WARNED_UNFIXED,
+        ("unfixable", type(module).__name__, reason),
+        f"Cannot recompute the buffers of {name} ({type(module).__name__}): {reason}, so they keep "
+        f"whatever the load produced — uninitialized memory unless the model's own init filled them. "
+        f"Reported once per (class, reason); every layer of this family is affected.",
+    )
+    return 0
+
+
 def _fix_layer_type_inv_freq(module: nn.Module, module_name: str, layer_type: str, rope_init_fn) -> bool:
     """Recompute one per-layer-type rotary's ``<layer_type>_inv_freq`` triple. Returns whether it did.
 
@@ -149,7 +163,7 @@ def _fix_gemma4_vision_rope(module: nn.Module, name: str) -> int | None:
         return None
     config = getattr(module, "config", None)
     if config is None:
-        return 0
+        return _unfixable(module, name, "the module carries no config to size its rotary table from")
     inv_freq, scaling = module.compute_default_rope_parameters(config)
     _apply_recomputed_rope(module, "", inv_freq, scaling, mirror_twin=False, create_scaling=False)
     logger.debug(f"Fixed vision inv_freq for {name} (spatial_dim formula)")
@@ -168,7 +182,7 @@ def _fix_per_layer_type_rope(module: nn.Module, name: str) -> int | None:
     else:
         return None
     if getattr(module, "config", None) is None:
-        return 0
+        return _unfixable(module, name, "the module carries no config to size its rotary tables from")
     return sum(_fix_layer_type_inv_freq(module, name, layer_type, fn) for layer_type, fn in init_fns)
 
 
@@ -181,7 +195,7 @@ def _fix_single_inv_freq_rope(module: nn.Module, name: str) -> int | None:
         if _is_rotary_module(module):
             warn_once(
                 logger,
-                _WARNED_ROTARY,
+                _WARNED_UNFIXED,
                 ("no-inv-freq", type(module).__name__),
                 f"Rotary module {name} ({type(module).__name__}) exposes no 'inv_freq' and no "
                 f"recognized per-layer-type buffer mapping ('rope_init_fns' / 'layer_types'), so "
@@ -208,15 +222,7 @@ def _fix_single_inv_freq_rope(module: nn.Module, name: str) -> int | None:
         logger.debug(f"Fixed inv_freq for {name}: {how}")
         return 1
 
-    warn_once(
-        logger,
-        _WARNED_ROTARY,
-        ("unfixable", type(module).__name__, rope_type),
-        f"Cannot fix inv_freq for {name} ({type(module).__name__}): no config or unrecognized "
-        f"rope_type={rope_type}. Reported once per (class, rope_type); every layer of this "
-        f"family is affected.",
-    )
-    return 0
+    return _unfixable(module, name, f"no config or unrecognized rope_type={rope_type}")
 
 
 def _get_alibi_slopes(n: int) -> list[float]:
@@ -239,15 +245,12 @@ def _fix_alibi_slope(module: nn.Module, name: str) -> int | None:
     """Bailing MoE Lightning-Attention-2 decay slopes, derived from ctor args nothing stores."""
     if not (hasattr(module, "slope") and hasattr(module, "layer_idx") and hasattr(module, "num_heads")):
         return None
-    config = getattr(module, "config", None)
-    if config is None:
-        return 0
+    num_hidden_layers = getattr(getattr(module, "config", None), "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        return _unfixable(module, name, "no config num_hidden_layers to derive the decay slopes from")
 
     num_heads = module.num_heads
     layer_idx = module.layer_idx
-    num_hidden_layers = getattr(config, "num_hidden_layers", None)
-    if num_hidden_layers is None:
-        return 0
 
     slopes = torch.tensor(_get_alibi_slopes(num_heads), dtype=torch.float)
     new_slope = -slopes * (1 - (layer_idx - 1) / (num_hidden_layers - 1) + 1e-5)
