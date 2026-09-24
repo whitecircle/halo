@@ -608,6 +608,13 @@ class BaseWeightSyncClient:
         to loopback while the server is remote raises rather than widening.
         """
         if env_flag(_WEIGHT_SYNC_BIND_ALL_ENV):
+            logger.warning(
+                f"{_WEIGHT_SYNC_BIND_ALL_ENV} is set: the {self.BACKEND_NAME} weight-sync rendezvous store "
+                f"listens on every interface, not only on {master_address}. The store is unauthenticated and "
+                f"the engine reads the group's bootstrap from it while the group forms (vLLM unpickles it), "
+                f"so any host that reaches the group port then can run code in the rollout server. Keep the "
+                f"port reachable only by trusted hosts."
+            )
             return _ALL_INTERFACES
         try:
             bind_address = socket.gethostbyname(master_address)

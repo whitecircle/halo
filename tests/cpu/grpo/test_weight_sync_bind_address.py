@@ -12,6 +12,7 @@ no engine peer is needed) and read the bound address off the listening socket.
     python tests/cpu/grpo/test_weight_sync_bind_address.py
 """
 
+import logging
 import socket
 from unittest.mock import patch
 
@@ -98,14 +99,20 @@ def test_the_listener_binds_the_advertised_address(vllm_client, engine_requests,
     )
 
 
-def test_the_opt_in_binds_every_interface(vllm_client, engine_requests, monkeypatch):
-    """``HALO_WEIGHT_SYNC_BIND_ALL`` is the one way to a wide bind, for a NAT or port-mapped trainer."""
+def test_the_opt_in_binds_every_interface(vllm_client, engine_requests, monkeypatch, caplog):
+    """``HALO_WEIGHT_SYNC_BIND_ALL`` is the one way to a wide bind, for a NAT or port-mapped trainer, and
+    it is announced at WARNING: an operator must see that the unauthenticated store is on the network."""
     monkeypatch.setenv(BIND_ALL_ENV, "1")
 
-    vllm_client.init_communicator(device="cpu")
+    with caplog.at_level(logging.WARNING):
+        vllm_client.init_communicator(device="cpu")
 
     port = engine_requests[0]["init_info"]["master_port"]
     assert vllm_client._process_group.socket.getsockname() == ("0.0.0.0", port)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(BIND_ALL_ENV in m and "every interface" in m for m in warnings), (
+        f"the wide bind was not announced at WARNING: {warnings}"
+    )
 
 
 @pytest.mark.parametrize("advertised", [NON_LOCAL_ADDRESS, "0.0.0.0"])
