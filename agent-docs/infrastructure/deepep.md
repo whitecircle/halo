@@ -333,7 +333,8 @@ combined = self._gc_combine(output, recv_topk_weights, handle)
 Per-expert received token counts (for grouped GEMM) come from `recv_topk_idx` by a stable sort on the
 expert id, a `scatter_add_` histogram over the host-known `experts_per_rank`, then `cumsum` into the
 grouped-GEMM `offs` — sync-free, where `torch.unique_consecutive` would force a device read-back per
-MoE layer.
+MoE layer. The permute's one read-back is the compaction of DeepEP's `-1`-padded slots (a `nonzero` over
+the valid mask, `ep_size > 1` only), once per MoE layer per forward.
 
 `destroy_all_dispatchers()` must run **before** `dist.destroy_process_group()` — Gin frees the symmetric heap
 through the group communicator, and the reverse order raises `cudaErrorIllegalAddress`.
