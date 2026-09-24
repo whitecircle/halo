@@ -55,7 +55,7 @@ Merging runs on CPU and streams the inputs **one tensor at a time** — each key
 
 The output is a standard HF checkpoint: sharded safetensors plus an index above `--max_shard_size` (5 GB by default), or a single `model.safetensors` with no index when it fits.
 
-Every non-weight file in `--tokenizer_source` is copied verbatim: config, tokenizer, the multimodal processor files, and any remote-code modules the config's `auto_map` names. The saved config's `dtype` is set to the merged dtype. A Hub id resolves to its local snapshot first and is copied the same way.
+Every non-weight file in `--tokenizer_source` is copied: config, tokenizer, the multimodal processor files, and any remote-code modules the config's `auto_map` names. Two are rewritten after the copy: the saved config's `dtype` is set to the merged dtype, and the `README.md` model card gains the `halo` Hub tag, or is created holding it ([Hub model card](checkpoints.md#hub-model-card)). A Hub id resolves to its local snapshot first and is copied the same way.
 
 The resume sidecars are the exception: `scheduler.pt`, `router_balancing_biases.pt` and `rng_state_*` describe one training run, which an N-way merge has none of, so they are dropped. The merged model therefore ships **no** balancing sidecar — a family whose balancing bias lives in a checkpoint slot keeps it through the merged weights, while a `bias_update_transient` run's bias is gone (see [Checkpoints](checkpoints.md#resume-by-parallelism-mode)).
 

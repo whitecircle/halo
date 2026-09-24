@@ -208,13 +208,20 @@ resume demands of the topology, is the
 
 ## Hub model card
 
-A model directory Halo writes carries a `README.md` card tagged `halo` (`HALO_HUB_TAGS` in
-`src/checkpoint/model_card.py`), so an upload lists under that Hub tag. `tag_model_card` changes only
-the `tags` entry of a card already present — TRL's, PEFT's, sentence-transformers', or one an export
-copies from its source. A fresh card holds the tag alone, except in a directory whose
-`adapter_config.json` names a `peft_type` stock PEFT loads, where it also carries `library_name: peft`
-and a Hub `base_model`, as PEFT's own card does. A card whose metadata is not a YAML mapping fails
-the write, naming the file to repair.
+Every checkpoint Halo writes, tool conversions included, carries a `README.md` card tagged `halo`
+(`HALO_HUB_TAGS` in `src/checkpoint/model_card.py`), so an upload lists under that Hub tag.
+`tag_model_card` changes only the `tags` value of a card already present — TRL's, PEFT's,
+sentence-transformers', or one an export copies from its source. The other keys keep their values and
+order and the body is kept, but the metadata block is re-dumped: its YAML comments and flow style are
+lost. A fresh card holds the tag alone, except in a directory whose `adapter_config.json` names a
+`peft_type` stock PEFT loads, where it also carries `library_name: peft` and a Hub `base_model`, as
+PEFT's own card does.
+
+On a card whose metadata is not a YAML mapping, `tag_model_card` raises, naming the file to repair,
+and fails the adapter save or unmerged `convert_to_bf16 --peft` that called it. The export finalizers
+and `reset_sinks` call `tag_exported_model_card` instead, which leaves such a card verbatim and
+untagged with a warning naming the source card: no loader reads the card, and most exports reach it
+only after their weights are on disk.
 
 - **Full-model writes** tag in `finalize_exported_config`, which every parallel saver, the
   single-GPU / DDP fallback and the export tools' `save_full_checkpoint` end with.
@@ -227,8 +234,13 @@ the write, naming the file to repair.
 - **Embedding runs** carry the tag on the SentenceTransformer's `model_card_data`, the source of the
   card sentence-transformers writes.
 
-A new writer ends in `finalize_exported_config` or `copy_checkpoint_aux_files`, or calls
-`tag_model_card` itself, as `reset_sinks` and an unmerged `convert_to_bf16 --peft` do.
+A new writer ends in `finalize_exported_config` or `copy_checkpoint_aux_files`, or calls the tagger
+itself: `tag_exported_model_card` after copying a source tree, as `reset_sinks` does, and
+`tag_model_card` otherwise, as an unmerged `convert_to_bf16 --peft` does.
+
+Under `push_to_hub: true`, the four `transformers.Trainer`-based trainers (SMPO, offline GRPO,
+classification, teacher distillation) upload no card at all: `Trainer._push_from_checkpoint` copies
+only the model files into `output_dir`, and nothing writes `output_dir/README.md` for them.
 
 ## Serving on vLLM / SGLang
 

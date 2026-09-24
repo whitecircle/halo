@@ -56,7 +56,7 @@ changes.
 | `src/checkpoint/adapters.py` (saved-PEFT file layout, expert-LoRA shape gates, merge-into-base) | `agent-docs/optimization/peft.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/checkpoint/tool_io.py` (tool-side checkpoint walks, input gates, staged publish, training-state sidecars), `src/checkpoint/fp8_dequant.py` (streaming fp8 → bf16) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/checkpoint/shard_writer.py` (`StageShardWriter`: incremental safetensors parts + index) | `agent-docs/reference/checkpoints.md` |
-| `src/checkpoint/model_card.py` (`HALO_HUB_TAGS`, `tag_model_card`: the `halo` Hub tag on every written card) | `agent-docs/reference/checkpoints.md` (Hub model card), `human-docs/checkpoints.md` (upload) |
+| `src/checkpoint/model_card.py` (`HALO_HUB_TAGS`, `tag_model_card` / `tag_exported_model_card`: the `halo` Hub tag on the model card of every checkpoint Halo writes, tool conversions included) | `agent-docs/reference/checkpoints.md` (Hub model card), `human-docs/checkpoints.md` (upload) |
 | `src/distributed/checkpoint/write.py` (the collective half of a write: retain-gated DTensor resolve of params and buffers with neutralized sinks, the streamed part writer, the shard-index exchange) | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
 | `src/models/structure.py` (module-tree introspection: unwrap, PEFT names, decoder layers, norms) | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
 | `src/distributed/fsdp.py` (FSDP2 wrapping + reshard) | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/checkpoints.md` |
