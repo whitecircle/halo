@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The Hub seed and the cache-miss policy that makes a repo outside it fail instead of skip.
 
-``tests.common.hub_seed`` derives what the hosted CPU tier downloads; ``HALO_TEST_REQUIRE_HUB_CACHE``
+``tests.common.hub_seed`` derives what ``make seed-hf-cache`` downloads; ``HALO_TEST_REQUIRE_HUB_CACHE``
 turns a cache miss on any Hub repo the seed could hold into a failure, so a test that starts reading a
 new repo cannot pass that tier as a skip. Gated repos and local checkpoint paths still skip.
 

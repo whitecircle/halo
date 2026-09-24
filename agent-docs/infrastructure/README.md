@@ -5,7 +5,7 @@ Runtime image, cloud deployments, and hardware-specific dependency installation.
 ---
 
 - **[Docker](docker.md)** — Build, push, and run the images — Flash Attention, DeepEP V2, and all deps prebuilt for Hopper and Blackwell.
-- **[Continuous Integration](ci.md)** — Hosted lint, docs and CPU-test tiers, the self-hosted CPU and GPU tiers, and the contribution gate — triggers, security controls, and how to enable the self-hosted runner.
+- **[Continuous Integration](ci.md)** — Hosted lint and docs gates, the self-hosted CPU and GPU tiers, the Hub seed, and the contribution gate — triggers, security controls, and how to enable the self-hosted runner.
 - **[AWS authentication](aws-auth.md)** — Optional credentials for S3 datasets and a private ECR registry; the published images pull anonymously.
 - **[DeepEP installation](deepep.md)** — High-throughput all-to-all dispatch/combine kernels for MoE Expert Parallelism, required for EP.
 - **[RunPod multi-node](runpod.md)** — Multi-node EP on RunPod InfiniBand — network setup, torchrun, and validation.

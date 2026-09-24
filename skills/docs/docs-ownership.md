@@ -169,7 +169,7 @@ changes.
 | DeepEP install / NVSHMEM / CDMC notes | `agent-docs/infrastructure/deepep.md` |
 | multi-node / SkyPilot / RunPod / Nomad launch | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |
 | `launcher-configs/**` (SkyPilot task YAMLs, Nomad job specs, accelerate configs) | `agent-docs/infrastructure/{skypilot,nomad}.md`, `human-docs/clusters.md` |
-| `.github/workflows/**` (lint, docs, hosted and self-hosted CPU tiers, GPU tier), `Makefile` test targets, `tests/common/hub_seed.py` | `agent-docs/infrastructure/ci.md`; tier composition lives in `agent-docs/contributing/README.md` ("Tests") |
+| `.github/workflows/**` (lint, docs, CPU and GPU tiers), `Makefile` test targets, `tests/common/hub_seed.py` | `agent-docs/infrastructure/ci.md`; tier composition lives in `agent-docs/contributing/README.md` ("Tests") |
 
 ## Cross-cutting
 

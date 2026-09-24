@@ -42,10 +42,8 @@ models you used.
    again when `tests/common/models.py` or `examples/` gain a repo),
    `make test-cpu`, `make docs` — plus `make test-gpu-core` for GPU-affecting
    changes. Lint/format and the docs link check run on the host; tests run
-   inside the image (`make test-cpu` needs no GPU). Hosted CI runs lint, the
-   docs checks and the CPU tests
-   ([what they do not cover](../agent-docs/infrastructure/ci.md#cpu-tests) ↗);
-   report the GPU test result in the PR.
+   inside the image (`make test-cpu` needs no GPU). Hosted CI runs only lint and
+   the docs checks, so report the test results in the PR.
 3. Ship tests that **fail when the behavior breaks** — no smoke-only or
    `assert x is not None` tests. The anti-slop test guide is in
    [`agent-docs/contributing/`](../agent-docs/contributing/README.md) ↗.
