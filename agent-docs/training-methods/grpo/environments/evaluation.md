@@ -48,7 +48,7 @@ To compare a checkpoint with its base, serve each in turn under the same `--serv
 run one command with `--training_config`, dataset, split and `--num_samples` fixed, so only the
 weights differ.
 
-The report logs mean reward, `success@1`, `success@k` and aggregate telemetry, so token
+The report logs mean reward, `success@1`, `success@k`, `invalid` and aggregate telemetry, so token
 starvation reads differently from wrong answers. `success@1` is the first sample's outcome and
 `success@k` whether any of the `--num_samples` succeeded; neither is the mean over samples a
 benchmark's pass@1 reports. Reasoning models need a large `--max_tokens`: too low cuts the chain of

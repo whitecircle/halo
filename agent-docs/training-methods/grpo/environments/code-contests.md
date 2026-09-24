@@ -86,8 +86,7 @@ message ("1 graded submission, 0 scratchpad runs").
 - `submit_solution` — grades a complete stdin/stdout program against the hidden tests. The only graded channel, with no fenced-code-block fallback. Reaching `max_submissions` ends the episode.
 
 A refused call is a tool error: it pays `tool_error_penalty`, never `tool_success_reward`. A
-scratchpad run lost to the sandbox backend ends the episode out of the baseline, and one whose program
-replaced its working directory ends it in the baseline ([Sandbox faults](sandbox.md#sandbox-faults)). With a
+scratchpad run that ends on a sandbox fault ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)). With a
 language list both tools take a required `language` argument enumerating the set, each program is
 graded in the language its call names, and a foreign value is refused before admission. The episode
 records the last language as its `language` slice, which the trainer slices metrics by
@@ -105,12 +104,12 @@ exception. One sandbox session serves the whole grade, so a compiled
 submission builds once, reset after every test. A compile failure is graded once against the whole
 pool.
 
-- **Comparison.** Byte-exact equality spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within a 1e-6 relative tolerance, gated on a float-looking *expected* token, so integer answers stay exact.
+- **Comparison.** `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within a 1e-6 relative tolerance, gated on a float-looking *expected* token, so integer answers stay exact.
 - **Verdict detail.** Under `full`, a second submission turns the judge into a free test oracle — probing out-earns scratchpad testing within a group. The recipes use `outcome`.
 - **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language.
 - **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests and keeps the full pool as denominator — an ungraded test counts as failed, so size it for an honest solution (the recipes: 150 s). `episode/tests_graded_frac` shows a partial grade.
 - **Special judges.** A per-problem `checker` (Python) in the payload overrides comparison: `python checker.py input.txt correct_output.txt solution_output.txt`, accepted only when it exits cleanly and its last stdout token is `1`. It runs at the 15 s infra default, never the solution's limit.
-- **Infra errors.** A grade that hit a backend error with no test running cleanly or passing marks the episode invalid, so the trainer drops it from the group baseline rather than teaching a wrong answer (`episode/grading_infra_outage`). A build past the compile limit is a compile error, a program that replaces its working directory or floods its output a runtime error, and one that removes its working directory runs the next test in a fresh one: verdicts, not infra. The routes a program still has into an infra error are listed under [Sandbox faults](sandbox.md#sandbox-faults).
+- **Infra errors.** A grade that hit a backend error with no test running cleanly or passing marks the episode invalid, so the trainer drops it from the group baseline rather than teaching a wrong answer (`episode/grading_infra_outage`). A build past the compile limit is a compile error, a program that replaces its working directory a runtime error, one that floods its output an output-limit or runtime error, and one that removes its working directory runs the next test in a fresh one: verdicts, not infra. The routes a program still has into an infra error are listed under [Sandbox faults](sandbox.md#sandbox-faults).
 
 ### Reward ladder
 

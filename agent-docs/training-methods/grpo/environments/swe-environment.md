@@ -39,9 +39,7 @@ Reward knobs are the native protocol's ([Native Tool-Use](native-tool-use.md)).
   comes back as `Code executed successfully (no output)`, so diagnostics need an explicit `2>&1`.
   A non-zero exit returns stdout plus `Error: <last stderr line>`: an observation, not a tool
   error. A sandbox fault on any tool ends the episode instead
-  ([Sandbox faults](sandbox.md#sandbox-faults)): a backend failure drops it from the baseline; a
-  workspace the command replaced with a link or file keeps it in the baseline, graded 0. A removed
-  workspace is recreated empty.
+  ([Sandbox faults](sandbox.md#sandbox-faults)). A removed workspace is recreated empty.
 - `write_file` — writes a file later turns and `run_code` see.
 - `read_file` — reads one back; a missing file is a message, not a tool error.
 - `list_files` — lists the workspace, optionally filtered by a path prefix.

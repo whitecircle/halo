@@ -60,7 +60,7 @@ Knobs every environment accepts (the first two are top-level fields):
 |---|---|---|
 | `max_turns` | class default: 10; `exam_qa` 8, code contests 15, `swe` 20 | turns before the episode truncates; ≥ 1 |
 | `rewards` | `[{source: environment}]` | the reward terms: the environment's grade at `weight` / `exponent`, plus external `judge` / `reward_model` terms ([Reward Terms](../rewards.md)) |
-| `tool_success_reward` / `tool_error_penalty` | `0.05` / `0.1` (`mcp` pays `0.1`; code contests `0` / `0`) | paid per successful tool call, charged per failed one |
+| `tool_success_reward` / `tool_error_penalty` | `0.05` / `0.1` (`mcp` pays `0.1`; code contests `0` / `0`) | paid per successful tool call, charged per failed one; a call a sandbox outage ended goes unpriced ([Sandbox faults](sandbox.md#sandbox-faults)) |
 | `tool_reward_cap` | `tool_success_reward × max_turns` | episode total payable for successful calls |
 | `max_observation_chars` | `16384` | longer tool observations are truncated at the source |
 | `reasoning_effort` | `None` (code contests `medium`) | `low` / `medium` / `high` / `random` CoT steer |
