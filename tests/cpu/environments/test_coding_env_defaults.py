@@ -6,7 +6,8 @@
   it has nothing to grade against — one successful tool call earns nothing.
 - ``code_contests`` shows a failed test as its verdict class alone (``verdict_detail="outcome"``)
   unless a run opts into ``full``: the expected output would turn every resubmission into a test
-  oracle, and the program's stderr, exit code or output size would carry a hidden input back.
+  oracle, and the program's stderr, exit code or output size would carry a hidden input back. A
+  compiler's message shows under ``outcome`` only where no program can make a rebuild quote an input.
 - A coding environment on a sandbox that does not confine the program warns, once per process and
   backend class: ``local``, ``bubblewrap`` with network, and an executor that declares nothing.
 
@@ -15,6 +16,7 @@
 
 import json
 import logging
+import pathlib
 import shutil
 import sys
 
@@ -27,9 +29,12 @@ from src.environments.envs.tasks.coding.grading import (
     VERDICT_DETAIL_FULL,
     VERDICT_DETAIL_OUTCOME,
     GradingSpec,
+    grade_solution,
     run_solution_against_tests,
 )
 from src.environments.envs.tasks.coding.swe import SweEnvironment
+from src.environments.eval_runner import require_answers
+from src.environments.registry import resolve_environment
 from src.environments.sandbox import resolve as resolve_module
 from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
@@ -129,6 +134,25 @@ def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeyp
         run_env.main()
 
 
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: resolve_environment("native_math", {}),
+        lambda: resolve_environment("native_coding", {}),
+        lambda: resolve_environment("native_combined", {}),
+        lambda: resolve_environment("mcp", {}),
+        lambda: _swe(reward_terms=[_JUDGE]),
+    ],
+    ids=["native_math", "native_coding", "native_combined", "mcp", "judge-priced-swe"],
+)
+def test_the_eval_gate_passes_an_environment_that_grades_without_an_answer(build):
+    env = build()
+    try:
+        require_answers(env, [{"context": {}}], "the rows")
+    finally:
+        env.close()
+
+
 def test_swe_pays_the_answer_not_the_tool_call():
     env = _swe()
     try:
@@ -160,6 +184,26 @@ def test_swe_null_answer_leaves_the_baseline_instead_of_paying():
         env.close()
     assert traj.episode_invalid
     assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 0.0
+
+
+def _raising_test_function(trajectory):
+    raise RuntimeError("grader bug")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "context"),
+    [({}, {"answer": None}), ({"test_function": _raising_test_function}, {})],
+    ids=["null-answer", "raising-test-function"],
+)
+def test_a_judge_priced_swe_episode_is_never_voided_by_an_unpriced_grade(kwargs, context):
+    """With no environment term nothing reads the env's own grade, so a grader that would void it
+    must not run: the episode stays in the baseline for its judge."""
+    env = _swe(reward_terms=[_JUDGE], **kwargs)
+    try:
+        traj = _run_swe_episode(env, context, "done")
+    finally:
+        env.close()
+    assert traj.done and not traj.episode_invalid
 
 
 # verdict_detail defaults to outcome
@@ -249,6 +293,33 @@ def test_a_remote_error_shows_its_class_alone_by_default(body, caplog):
     assert "HIDDEN-4217" in full.details
 
 
+class _CheckerOutage(SandboxExecutor):
+    """Runs the submission cleanly and loses each checker run to a backend whose error quotes the
+    checker's files, the reference output among them."""
+
+    isolated = True
+
+    def open_session(self):
+        raise NotImplementedError
+
+    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
+        if files and "checker.py" in files:
+            return SandboxResult(error=f"could not stage {files['correct_output.txt']!r}")
+        return SandboxResult(stdout="7\n", returncode=0)
+
+
+def test_a_checker_outage_shows_its_class_alone_by_default(caplog):
+    spec = GradingSpec(sandbox=_CheckerOutage())
+    tests = [{"input": "", "output": "HIDDEN-4217"}]
+    outcome = grade_solution("print(7)", tests, spec, checker="# judge")
+    assert outcome.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], outcome.details
+    assert outcome.infra_errors == 1 and "HIDDEN-4217" in caplog.text
+    full = grade_solution(
+        "print(7)", tests, GradingSpec(sandbox=_CheckerOutage(), verdict_detail="full"), checker="# judge"
+    )
+    assert "HIDDEN-4217" in full.details
+
+
 _REMOTE_COMPILE_ERROR = {
     "status": "Failed",
     "compile_result": {"status": "Finished", "return_code": 1, "stderr": "main.cpp:1:1: error: HIDDEN-4217"},
@@ -265,15 +336,60 @@ def test_a_remote_compile_message_shows_under_full_only():
     assert "HIDDEN-4217" in full.details
 
 
-def test_a_local_compile_message_shows_under_outcome():
-    """The local build runs once, before any test and without stdin: its message quotes the source only."""
+class _BuildsApart(StubSandbox):
+    compiles_without_test_input = True
+
+
+def test_a_compile_message_shows_under_outcome_only_where_the_backend_builds_apart():
+    rejected = SandboxResult(stderr="main.cpp:1:14: error: undeclared_name", returncode=1, compile_failed=True)
+    tests = [{"input": "", "output": ""}]
+    shown = run_solution_against_tests("code", tests, sandbox=_BuildsApart(rejected), language="cpp")
+    hidden = run_solution_against_tests("code", tests, sandbox=StubSandbox(rejected), language="cpp")
+    assert "undeclared_name" in shown.details and "undeclared_name" not in hidden.details, hidden.details
+    assert BubblewrapSandbox.compiles_without_test_input
+    assert not LocalSubprocessSandbox.compiles_without_test_input and not RemoteSandbox.compiles_without_test_input
+
+
+def _plant_input_and_force_a_rebuild(header: pathlib.Path) -> str:
+    """A C++ program that writes the input it read into ``header`` as an ``#error`` and removes its
+    working directory, so the rebuild the next test forces includes it into the compiler's message."""
+    return (
+        f'#if __has_include("{header}")\n#include "{header}"\n#endif\n'
+        "#include <filesystem>\n#include <fstream>\n#include <iostream>\n#include <string>\n"
+        "int main() {\n  std::string input;\n  std::getline(std::cin, input);\n"
+        f'  std::ofstream("{header}") << "#error " << input << "\\n";\n'
+        "  std::filesystem::remove_all(std::filesystem::current_path());\n"
+        '  std::cout << "wrong";\n}\n'
+    )
+
+
+def test_a_local_rebuild_cannot_carry_a_hidden_input_into_the_verdict(tmp_path):
+    """On ``local`` a program can plant a test's input in a host file and force a rebuild that includes
+    it: the route is real (``full`` shows it), so ``outcome`` shows the compile error's class alone."""
     if shutil.which("g++") is None:
         pytest.skip("g++ not installed")
+    header = tmp_path / "leak.h"
+    program = _plant_input_and_force_a_rebuild(header)
+    tests = [{"input": "HIDDEN-4217", "output": "right"}, {"input": "", "output": "right"}]
+    full = run_solution_against_tests(
+        program, tests, sandbox=LocalSubprocessSandbox(), language="cpp", verdict_detail="full"
+    )
+    assert "HIDDEN-4217" in full.details, full.details
+    header.unlink()
+    outcome = run_solution_against_tests(program, tests, sandbox=LocalSubprocessSandbox(), language="cpp")
+    assert "COMPILATION ERROR" in outcome.details and "HIDDEN-4217" not in outcome.details, outcome.details
+
+
+def test_a_bubblewrap_compile_message_shows_under_outcome():
+    """The jailed build runs once, before any test and without stdin, and nothing can force another."""
+    if shutil.which("g++") is None:
+        pytest.skip("g++ not installed")
+    try:
+        sandbox = BubblewrapSandbox()
+    except RuntimeError as exc:
+        pytest.skip(f"bubblewrap cannot sandbox here: {exc}")
     grade = run_solution_against_tests(
-        "int main() { return undeclared_name; }",
-        [{"input": "", "output": ""}],
-        sandbox=LocalSubprocessSandbox(),
-        language="cpp",
+        "int main() { return undeclared_name; }", [{"input": "", "output": ""}], sandbox=sandbox, language="cpp"
     )
     assert "COMPILATION ERROR" in grade.details and "undeclared_name" in grade.details, grade.details
 

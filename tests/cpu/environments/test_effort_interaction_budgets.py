@@ -150,11 +150,10 @@ def test_a_refused_over_cap_call_logs_no_traceback(caplog):
     def call(i: int) -> NativeToolCall:
         return NativeToolCall(id=f"c{i}", name="python_repl", arguments={"code": "print(1)"})
 
-    native = "src.environments.envs.protocols.native"
-    with caplog.at_level(logging.DEBUG, logger=native):
+    with caplog.at_level(logging.DEBUG, logger="src.environments.envs.protocols.native"):
         env._execute_tool_calls([call(0), call(1), call(2)], traj)
 
-    assert [r.getMessage() for r in caplog.records if r.name == native and r.levelno >= logging.WARNING] == []
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert any("refused the call" in r.getMessage() for r in caplog.records)
 
 

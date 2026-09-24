@@ -289,12 +289,14 @@ class SandboxExecutor(ABC):
     :class:`LanguageSpec` registry, so multi-language and session semantics are identical.
     """
 
-    # Whether a program is confined away from the host's filesystem and network. Only a backend that
-    # confines it declares True: a coding environment warns on every other one.
+    # Whether a program is kept from writing the host's filesystem and from its network; it may still
+    # read what the backend exposes (bubblewrap's read-only system paths and ``extra_ro_binds``). Only
+    # a backend that confines it so declares True: a coding environment warns on every other one.
     isolated: bool = False
-    # Whether a compiled submission is built before, and apart from, every test's stdin, so a
-    # compiler's message can quote only the submission. Only a backend that builds so declares True:
-    # grading shows that message under ``verdict_detail: outcome`` there alone.
+    # Whether a compiled submission is built before, and apart from, every test's stdin, and no program
+    # can make a later build read what an earlier test left behind, so a compiler's message can quote
+    # only the submission. Only a backend that builds so declares True: grading shows that message
+    # under ``verdict_detail: outcome`` there alone.
     compiles_without_test_input: bool = False
 
     @abstractmethod

@@ -29,6 +29,10 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         Remaining args (memory/compile limits) are inherited from the local backend.
     """
 
+    # A session builds once, on an empty stdin, and the jailed program can neither remove its working
+    # directory (a mount point) to force a rebuild nor write outside it for one to include.
+    compiles_without_test_input = True
+
     def __init__(
         self,
         *args,

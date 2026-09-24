@@ -47,7 +47,7 @@ environment_kwargs:
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   execution_progress_reward: 0.05
-  verdict_detail: outcome    # FAIL / pass count only (the Codeforces contract); expected/got would make the judge a free test oracle
+  verdict_detail: outcome    # a failed test's verdict class only; expected/got would make the judge a free test oracle
   resubmission_penalty: 0.2  # magnitude, >= 0 — charged per graded submission after the first
   improved_resubmission_refund: 0.75  # of that price, earned back by beating every earlier result: a fix is cheap, a re-roll is not
   no_tool_use_penalty: 0.1   # ending with 0 tool calls

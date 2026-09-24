@@ -56,7 +56,9 @@ def warn_if_unisolated(sandbox: SandboxExecutor, consumer: str) -> None:
     """Warn once per process when ``consumer`` runs model-written code on a backend that does not
     confine it (:attr:`SandboxExecutor.isolated` is False: ``local``, ``bubblewrap`` with
     ``allow_network``, an executor that declares nothing): the program reaches the host's filesystem or
-    network, where a policy can read or rewrite what grades it and fetch a solution off the network."""
+    network, where a policy can read or rewrite what grades it and fetch a solution off the network.
+    On ``local`` it also reads the grader's launch environment through ``/proc``, whatever secrets the
+    trainer was started with included."""
     if sandbox.isolated:
         return
     warn_once(
@@ -64,9 +66,10 @@ def warn_if_unisolated(sandbox: SandboxExecutor, consumer: str) -> None:
         _UNISOLATED_WARNED,
         type(sandbox),
         "%s runs model-written code on a sandbox that does not confine it (%s): the program can reach "
-        "the host's filesystem or network. Use sandbox_backend='bubblewrap' without network (a "
-        "privileged container) or 'remote' (HALO_SANDBOX_BACKEND / HALO_SANDBOX_URL) for RL on "
-        "untrusted code.",
+        "the host's filesystem or network, and on 'local' read the grader's launch environment "
+        "(/proc/<pid>/environ), secrets passed to the trainer included. Use sandbox_backend="
+        "'bubblewrap' without network (a privileged container) or 'remote' (HALO_SANDBOX_BACKEND / "
+        "HALO_SANDBOX_URL) for RL on untrusted code.",
         consumer,
         type(sandbox).__name__,
     )

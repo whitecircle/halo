@@ -135,9 +135,11 @@ Tips:
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
         """Grade by the test function when one is configured, else by the protocol's answer path against
-        the row's ``validator`` or ``answer``. A row carrying neither raises while the reward prices
-        this grade: there is no completion fallback, since running a command proves nothing."""
-        if not trajectory.info.get("completed"):
+        the row's ``validator`` or ``answer``. A row carrying neither raises: there is no completion
+        fallback, since running a command proves nothing. A reward without an ``environment`` term
+        prices no grade, so none is taken: a grader could only void the episode for a verdict no term
+        reads (a null ``answer``, a raising test function)."""
+        if not self._grades_objective or not trajectory.info.get("completed"):
             return EpisodeGrade(0.0)
 
         if self.test_function:
@@ -155,8 +157,6 @@ Tips:
         # Key presence, not value: the protocol marks a null ``answer`` cell invalid instead of paying it.
         if callable(ctx.get("validator")) or "answer" in ctx:
             return super()._grade_episode(trajectory, context)
-        if not self._grades_objective:
-            return EpisodeGrade(0.0)
         raise ValueError(
             f"{type(self).__name__} has nothing to grade this episode against: no test_function, and the "
             f"row carries no 'answer' or 'validator' (the trainer refuses such a dataset under "
