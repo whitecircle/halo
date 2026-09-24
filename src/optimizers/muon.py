@@ -473,8 +473,10 @@ def build_muon_optimizer(model: torch.nn.Module, args: Any, decay_parameters: Se
         decay_parameters=decay_parameters,
     )
     if is_global_main_process():
-        muon_count = sum(p.numel() for p in model.parameters() if p.requires_grad and p.ndim >= 2)
-        scalar_count = sum(p.numel() for p in model.parameters() if p.requires_grad and p.ndim < 2)
+        # Read off the built optimizer: the embedding and head are 2D yet routed to the scalar AdamW.
+        scalar = optimizer.scalar_optimizer
+        scalar_count = sum(p.numel() for g in scalar.param_groups for p in g["params"]) if scalar is not None else 0
+        muon_count = sum(p.numel() for p in model.parameters() if p.requires_grad) - scalar_count
         logger.info(
             f"Muon optimizer: {muon_count / 1e6:.1f}M params (Newton-Schulz), "
             f"{scalar_count / 1e6:.1f}M params (AdamW scalar)"
