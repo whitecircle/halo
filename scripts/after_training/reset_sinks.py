@@ -27,7 +27,7 @@ from transformers import AutoTokenizer
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_WEIGHTS_FILE, sweep_after_full_save
-from src.checkpoint.model_card import tag_model_card
+from src.checkpoint.model_card import tag_exported_model_card
 from src.checkpoint.tool_io import (
     STAGING_SUFFIX,
     clear_staging_path,
@@ -117,7 +117,7 @@ def _passthrough_copy(checkpoint_dir: Path, output_dir: Path, dry_run: bool) -> 
         )
     logger.info(f"No sinks to reset — copying the checkpoint to {output_dir} unchanged...")
     shutil.copytree(str(checkpoint_dir), str(output_dir), dirs_exist_ok=True)
-    tag_model_card(str(output_dir))
+    tag_exported_model_card(str(output_dir), source_dir=str(checkpoint_dir))
 
 
 def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: bool) -> int:
@@ -172,7 +172,7 @@ def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: 
     logger.info(f"All {len(sink_keys)} sink tensors verified — reset to dtype min.")
     # The copytree carries the source's card over untagged; save_full_checkpoint tags the
     # from_pretrained branch's.
-    tag_model_card(str(output_dir))
+    tag_exported_model_card(str(output_dir), source_dir=str(checkpoint_dir))
 
     return len(sink_keys)
 

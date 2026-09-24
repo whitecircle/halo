@@ -23,7 +23,6 @@ from typing import Any
 
 import torch
 from huggingface_hub import split_torch_state_dict_into_shards
-from huggingface_hub.constants import REPOCARD_NAME
 from safetensors import safe_open
 from safetensors.torch import load_file as _safetensors_load_file
 from safetensors.torch import save_file as _safetensors_save_file
@@ -32,7 +31,7 @@ from transformers.core_model_loading import PrefixChange, revert_weight_conversi
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from src.checkpoint.config_export import save_model_config
-from src.checkpoint.model_card import is_staged_card, tag_model_card
+from src.checkpoint.model_card import is_staged_card, tag_exported_model_card
 from src.models.moe_balancing import balancing_param_keys
 from src.models.structure import fp32_pinned_param_names, norm_param_keys, strip_peft_adapter_segment
 
@@ -411,7 +410,10 @@ def copy_checkpoint_aux_files(
 
     Every tool that builds an export out of a source directory runs this copy, including the ones
     that carry ``config.json`` across as-is and so never reach the config finalizer; the source's
-    card rides along and gets the Halo tag (:func:`~src.checkpoint.model_card.tag_model_card`).
+    card rides along and gets the Halo tag. A source card whose metadata is not a YAML mapping stays
+    verbatim and untagged, with a warning
+    (:func:`~src.checkpoint.model_card.tag_exported_model_card`): no loader reads the card, and most
+    callers run this copy after their weight pass.
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
     preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``, ``rng_state_*``)
@@ -457,17 +459,7 @@ def copy_checkpoint_aux_files(
             shutil.copy2(src, os.path.join(output_dir, name))
             if verbose:
                 print(f"Copied: {name}")  # noqa: T201 - CLI-facing helper; the merge scripts report via print
-    try:
-        tag_model_card(output_dir)
-    except ValueError as error:
-        # Name the source: repairing only the copy would not survive the re-run that recopies it.
-        source_card = os.path.join(input_dir, REPOCARD_NAME)
-        if not os.path.isfile(source_card):
-            raise
-        raise ValueError(
-            f"The model card {source_card}, copied into {output_dir}, has a metadata block that is not "
-            f"a YAML mapping ({error.__cause__ or error}). Repair or remove {source_card}, then re-run."
-        ) from error
+    tag_exported_model_card(output_dir, source_dir=input_dir)
 
 
 def read_checkpoint_index(checkpoint_dir: str, *, missing_ok: bool = False) -> dict:

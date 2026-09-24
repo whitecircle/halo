@@ -1,20 +1,23 @@
 #!/usr/bin/env python
-"""Every model card Halo writes carries the ``halo`` Hugging Face Hub tag.
+"""Every checkpoint Halo writes, tool conversions included, carries the ``halo`` Hugging Face Hub tag.
 
 A model uploaded from a Halo output lists under ``halo`` on the Hub, the way TRL- and PEFT-written
-cards list under ``trl`` and ``peft``. The tag rides two carriers: the loaded model's ``model_tags``
-(which PEFT's own adapter card reads), and the ``README.md`` card the two export finalizers tag — the
-config finalizer every full-model writer ends with, and the non-weight copy every tool that builds an
-export from a source directory runs. The writers that reach neither tag their own output, and the
-embedding script tags the card data sentence-transformers writes its card from. An existing card
-(PEFT's, TRL's, the source model's) changes in its ``tags`` entry only. A fresh card holds the tag,
-plus ``library_name: peft`` and the base model in a stock PEFT adapter directory, and a card whose
-metadata is not YAML fails naming the file to repair.
+cards list under ``trl`` and ``peft``. The ``README.md`` card is tagged by the two export finalizers
+(the config finalizer every full-model writer ends with, and the non-weight copy every tool that
+builds an export from a source directory runs), by the adapter savers, and by the tools that reach
+neither finalizer. The cards libraries build from their own tag lists get it at the source of that
+list: the loaded model's ``model_tags`` (PEFT's adapter card), the trainer's ``create_model_card``
+(TRL's per-checkpoint card), and the embedding pipeline's card data. An existing card changes in its
+``tags`` entry only. A fresh card holds the tag, plus ``library_name: peft`` and the base model in a
+stock PEFT adapter directory, under the mode the umask gives any new file. A card whose metadata is
+not a YAML mapping fails a direct write naming the file to repair; an export, whose weights are
+already on disk by then, carries it verbatim and untagged with a warning naming the source card.
 
     python tests/cpu/checkpoint/test_hub_model_card_tags.py
 """
 
 import json
+import logging
 import os
 import re
 import stat
@@ -26,6 +29,7 @@ from accelerate import PartialState
 from huggingface_hub import ModelCard
 from huggingface_hub.repocard import metadata_load
 from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import GptOssConfig, GptOssForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 from trl import ModelConfig
@@ -33,6 +37,7 @@ from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
+from scripts.after_training import merge_models as merge_models_script
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.training.embedding import build_sentence_transformer
@@ -40,7 +45,7 @@ from src.checkpoint import model_card
 from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, EXPERT_LORA_PEFT_TYPES
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, copy_checkpoint_aux_files
-from src.checkpoint.model_card import tag_model_card
+from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.peft import PeftAdapterSaver
@@ -93,6 +98,8 @@ language:
 ---
 # body
 """
+# Flow sequence left open: not YAML.
+_MALFORMED_CARD = "---\ntags: [x, y\n---\nbody\n"
 # A source model's own card: every field and the body must survive the export untouched.
 _SOURCE_CARD = """---
 library_name: transformers
@@ -128,7 +135,17 @@ def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
     tag_model_card(str(tmp_path))
     assert _card(tmp_path).data.to_dict() == {"tags": [HALO_TAG]}
     assert sorted(os.listdir(tmp_path)) == [CARD], "the staged card was left beside the real one"
-    assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) & 0o044 == 0o044, "the card is not readable by others"
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_a_fresh_card_takes_the_mode_the_umask_gives_any_new_file(tmp_path, umask):
+    """A 022 umask shares the card with the other readers of the output filesystem; a 077 one does not."""
+    previous = os.umask(umask)
+    try:
+        tag_model_card(str(tmp_path))
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((tmp_path / CARD).stat().st_mode) == 0o666 & ~umask
 
 
 def test_a_fresh_card_for_a_stock_peft_adapter_names_peft_and_its_base(tmp_path):
@@ -258,7 +275,7 @@ def test_a_failed_write_leaves_the_card_and_no_staged_copy(tmp_path, monkeypatch
 @pytest.mark.parametrize("metadata", ["tags: [a, b\n", "- a\n- b\n"], ids=["bad-yaml", "not-a-mapping"])
 def test_a_card_whose_metadata_is_not_a_yaml_mapping_names_the_file(tmp_path, metadata):
     (tmp_path / CARD).write_text(f"---\n{metadata}---\nbody\n")
-    with pytest.raises(ValueError, match=rf"(?s){re.escape(str(tmp_path / CARD))}.*Repair or remove it"):
+    with pytest.raises(MalformedModelCardError, match=rf"(?s){re.escape(str(tmp_path / CARD))}.*Repair or remove it"):
         tag_model_card(str(tmp_path))
 
 
@@ -318,15 +335,53 @@ def test_an_export_carries_the_source_card_tagged_and_leaves_the_source_alone(tm
     assert card.text == ModelCard(_SOURCE_CARD).text
 
 
-def test_an_export_names_the_source_card_it_cannot_tag(tmp_path):
+def _card_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == model_card.__name__ and r.levelno == logging.WARNING]
+
+
+def test_an_export_carries_a_malformed_source_card_verbatim_and_names_it(tmp_path, caplog):
     """The weights are already written by then; the re-run recopies the source, so that is the file to fix."""
     source, output = tmp_path / "source", tmp_path / "export"
     source.mkdir()
     output.mkdir()
-    (source / CARD).write_text("---\ntags: [a, b\n---\nbody\n")
+    (source / CARD).write_text(_MALFORMED_CARD)
 
-    with pytest.raises(ValueError, match=rf"Repair or remove {re.escape(str(source / CARD))}, then re-run"):
+    with caplog.at_level(logging.WARNING, logger=model_card.__name__):
         copy_checkpoint_aux_files(str(source), str(output))
+    assert (output / CARD).read_text() == _MALFORMED_CARD
+    assert len(warnings := _card_warnings(caplog)) == 1, warnings
+    assert f"repair or remove {source / CARD}, then re-run" in warnings[0]
+
+
+def test_a_merge_whose_source_card_is_malformed_completes_and_warns_once(tmp_path, caplog, monkeypatch):
+    """The copy runs after the merged weights are written, and the config finalizer re-reads the card."""
+    finalized = []
+
+    def finalize_spy(config, output_dir, *, source):
+        finalize_exported_config(config, output_dir, source=source)
+        finalized.append(output_dir)
+
+    monkeypatch.setattr(merge_models_script, "finalize_exported_config", finalize_spy)
+    models = []
+    for name, value in (("a", 0.0), ("b", 2.0)):
+        model = tmp_path / name
+        model.mkdir()
+        save_file({"w": torch.full((4,), value)}, str(model / "model.safetensors"))
+        Qwen3Config(**_TINY_QWEN3).save_pretrained(model)
+        models.append(str(model))
+    (tmp_path / "a" / CARD).write_text(_MALFORMED_CARD)
+    output = tmp_path / "merged"
+
+    with caplog.at_level(logging.WARNING, logger=model_card.__name__):
+        merge_models_script.merge_models(
+            models, str(output), method="linear", dtype="float32", allow_missing_tokenizer=True, verbose=False
+        )
+    assert torch.equal(load_file(str(output / "model.safetensors"))["w"], torch.ones(4))
+    assert json.loads((output / "config.json").read_text())["dtype"] == "float32"
+    assert finalized == [str(output)]
+    assert (output / CARD).read_text() == _MALFORMED_CARD
+    assert len(warnings := _card_warnings(caplog)) == 1, warnings
+    assert str(tmp_path / "a" / CARD) in warnings[0]
 
 
 def test_an_export_of_a_cardless_source_gets_a_tagged_card(tmp_path):
@@ -372,6 +427,19 @@ def test_the_sinks_reset_passthrough_tags_its_output(tmp_path):
 
     assert reset_sinks(str(source), output_dir=str(output)) == 0
     assert _card(output).data.tags == [HALO_TAG]
+
+
+def test_the_sinks_reset_carries_a_malformed_source_card_and_warns(tmp_path, caplog):
+    """Its tree copy carries the card over as the aux copy does, after the checkpoint is in place."""
+    source, output = tmp_path / "source", tmp_path / "copy"
+    _tiny_qwen3().save_pretrained(source)
+    (source / CARD).write_text(_MALFORMED_CARD)
+
+    with caplog.at_level(logging.WARNING, logger=model_card.__name__):
+        assert reset_sinks(str(source), output_dir=str(output)) == 0
+    assert (output / CARD).read_text() == _MALFORMED_CARD
+    assert len(warnings := _card_warnings(caplog)) == 1, warnings
+    assert str(source / CARD) in warnings[0]
 
 
 def test_the_unmerged_adapter_conversion_tags_its_output(tmp_path):

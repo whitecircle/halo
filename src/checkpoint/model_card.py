@@ -1,14 +1,19 @@
-"""The Hugging Face Hub tag every model Halo writes carries, and the ``README.md`` card that holds it.
+"""The Hugging Face Hub tag on every checkpoint Halo writes, and the ``README.md`` card that holds it.
 
-Exported directories have their card tagged by :func:`tag_model_card`, which both export finalizers
-run: the config finalizer every full-model writer ends with, and the non-weight copy every tool that
-builds an export from a source directory runs. A writer that reaches neither calls it directly.
+:func:`tag_model_card` tags a directory's card, creating it if absent. The two export finalizers run it
+through :func:`tag_exported_model_card`: the config finalizer every full-model writer ends with, and
+the non-weight copy every tool that builds an export from a source directory runs. The adapter savers
+and the tools that reach neither finalizer call one of the two themselves. A card a library builds
+from its own tag list gets the tag where that list comes from: the loaded model's ``model_tags``
+(PEFT's adapter card, ``push_to_hub``), the trainer's ``create_model_card`` (:func:`with_halo_tags`),
+and the embedding pipeline's card data.
 """
 
 import json
+import logging
 import os
 import shutil
-import tempfile
+import uuid
 from pathlib import Path
 
 import yaml
@@ -18,17 +23,29 @@ from huggingface_hub.utils import HFValidationError, validate_repo_id
 from peft import PeftType
 from peft.utils import CONFIG_NAME as ADAPTER_CONFIG_NAME
 
+from src.log import warn_once
+
+logger = logging.getLogger(__name__)
+
 HALO_HUB_TAGS = ("halo",)
 
 # The staged card's name pattern: unique per write, and skipped by the non-weight copy should a
 # crash leave one behind.
 CARD_STAGING_PREFIX = f".{REPOCARD_NAME}."
 CARD_STAGING_SUFFIX = ".tmp"
-# A fresh card's mode: the staging file is created owner-only, which would hide the card from the
-# other readers of a shared output filesystem.
-_FRESH_CARD_MODE = 0o644
 # The adapter types stock PEFT loads; the toolkit's native expert-LoRA types are outside it.
 _STOCK_PEFT_TYPES = frozenset(peft_type.value for peft_type in PeftType)
+# Export cards already warned about, so the config finalizer that follows a copy does not repeat it.
+_WARNED_EXPORT_CARDS: set[str] = set()
+
+
+class MalformedModelCardError(ValueError):
+    """A ``README.md`` whose metadata block is not a YAML mapping, so its tags cannot be rewritten."""
+
+    def __init__(self, card: Path, reason: Exception):
+        self.card = card
+        self.reason = reason
+        super().__init__(f"{_malformed_card_message(card, reason)} Repair or remove it, then re-run.")
 
 
 def is_staged_card(name: str) -> bool:
@@ -45,15 +62,16 @@ def with_halo_tags(tags: str | list[str] | None) -> list[str]:
 def tag_model_card(output_dir: str) -> None:
     """Add :data:`HALO_HUB_TAGS` to the ``README.md`` card in ``output_dir``, creating it if absent.
 
-    Only the ``tags`` entry of an existing card changes: its other metadata round-trips as the raw
-    mapping (``model-index`` included), and its body, line endings and mode are kept. A card that
-    already carries every tag is not rewritten. A fresh card holds the tags, plus what
-    :func:`_fresh_card_metadata` derives for an adapter directory. The write goes to a uniquely named
-    file beside the card and is swapped in, which also replaces a symlinked card (a Hub-cache
-    snapshot) instead of writing through it into the blob.
+    Only the ``tags`` entry of an existing card changes value: its other metadata round-trips as the
+    raw mapping (``model-index`` included), keys and order kept, and its body, line endings and mode
+    are kept. The metadata block is re-dumped, though, so its YAML comments and flow style are lost. A
+    card that already carries every tag is not rewritten. A fresh card holds the tags, plus what
+    :func:`_fresh_card_metadata` derives for an adapter directory, under the mode the umask gives any
+    new file. The write goes to a uniquely named file beside the card and is swapped in, which also
+    replaces a symlinked card (a Hub-cache snapshot) instead of writing through it into the blob.
 
     Raises:
-        ValueError: the card's metadata block is not a YAML mapping.
+        MalformedModelCardError: the card's metadata block is not a YAML mapping.
     """
     path = Path(output_dir) / REPOCARD_NAME
     exists = path.is_file()
@@ -61,31 +79,59 @@ def tag_model_card(output_dir: str) -> None:
         try:
             metadata = metadata_load(path) or {}
         except (yaml.YAMLError, ValueError) as error:
-            raise ValueError(
-                f"The model card {path} has a metadata block that is not a YAML mapping ({error}). Repair "
-                f"or remove it, then re-run."
-            ) from error
+            raise MalformedModelCardError(path, error) from error
     else:
         metadata = _fresh_card_metadata(path.parent)
     tags = with_halo_tags(metadata.get("tags"))
     if exists and tags == metadata.get("tags"):
         return
     metadata["tags"] = tags
-    with tempfile.NamedTemporaryFile(
-        dir=output_dir, prefix=CARD_STAGING_PREFIX, suffix=CARD_STAGING_SUFFIX, delete=False
-    ) as handle:
-        staged = Path(handle.name)
+    staged = _create_staged_card(path.parent)
     try:
         if exists:
             shutil.copyfile(path, staged)
             shutil.copymode(path, staged)
-        else:
-            staged.chmod(_FRESH_CARD_MODE)
         metadata_save(staged, metadata)
         os.replace(staged, path)
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
+
+
+def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -> None:
+    """:func:`tag_model_card` for an export, whose card nothing that loads the checkpoint reads.
+
+    A card whose metadata is not a YAML mapping must not fail an export whose weights are already on
+    disk: it stays verbatim and untagged, and a warning names the file to repair, which is the card in
+    ``source_dir`` when the export copied it from there (a re-run copies it again).
+    """
+    try:
+        tag_model_card(output_dir)
+    except MalformedModelCardError as error:
+        source_card = Path(source_dir) / REPOCARD_NAME if source_dir is not None else None
+        card = source_card if source_card is not None and source_card.is_file() else error.card
+        warn_once(
+            logger,
+            _WARNED_EXPORT_CARDS,
+            os.path.realpath(error.card),
+            f"{_malformed_card_message(card, error.reason)} {output_dir} keeps it verbatim, without the "
+            f"Halo Hub tag; repair or remove {card}, then re-run to tag the export.",
+        )
+
+
+def _malformed_card_message(card: Path, reason: Exception) -> str:
+    return f"The model card {card} has a metadata block that is not a YAML mapping ({reason})."
+
+
+def _create_staged_card(directory: Path) -> Path:
+    """An empty file under a fresh staging name in ``directory``.
+
+    Created with the mode ``open(path, "w")`` gives a file (``0o666`` under the umask), so a fresh
+    card is as readable as the rest of the checkpoint and no more.
+    """
+    staged = directory / f"{CARD_STAGING_PREFIX}{uuid.uuid4().hex}{CARD_STAGING_SUFFIX}"
+    os.close(os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
+    return staged
 
 
 def _fresh_card_metadata(directory: Path) -> dict:
