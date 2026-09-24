@@ -107,7 +107,7 @@ _UNFINGERPRINTABLE_WARNED: set[tuple[str, str]] = set()
 # Tokenizer type names whose content hash raised, reported once by :func:`_tokenizer_content_sig`.
 _CONTENT_SIG_FAILED_WARNED: set[str] = set()
 
-# Set by coordinated_dataset_operation and refused from a caller's kwargs: they steer how an
+# Owned by coordinated_dataset_operation and refused from a caller's kwargs: they steer how an
 # operation runs, not what it produces. The worker count is not listed, since ``num_proc`` is a named
 # parameter of both coordinated ops and cannot arrive through ``**kwargs``.
 _MANAGED_OPERATION_KWARGS = frozenset({"keep_in_memory", "load_from_cache_file"})
@@ -546,9 +546,9 @@ def _build_cache_file_name(
 def _reject_managed_operation_kwargs(kwargs: dict, operation_name: str) -> None:
     """Refuse the execution knobs :func:`coordinated_dataset_operation` sets itself.
 
-    It pins ``load_from_cache_file``/``keep_in_memory``, since the on-disk cache is the cross-rank
-    transport, so a value passed here could never take effect and accepting one would leave a call
-    site reading as if it steered caching.
+    It pins ``load_from_cache_file`` and keeps ``keep_in_memory`` at its default (off), since the
+    on-disk cache is the cross-rank transport, so a value passed here could never take effect and
+    accepting one would leave a call site reading as if it steered caching.
     """
     owned = sorted(set(kwargs) & _MANAGED_OPERATION_KWARGS)
     if owned:
@@ -750,7 +750,6 @@ def coordinated_dataset_operation(
     operation_name: str = "dataset operation",
     num_proc: int = DATASET_NUM_PROC,
     cache_file_name: str | None = None,
-    **kwargs,
 ) -> Dataset | DatasetDict:
     """Run a dataset op with distributed coordination via the deterministic cache file.
 
@@ -787,16 +786,9 @@ def coordinated_dataset_operation(
     # None (not 1) fully disables multiprocessing; num_proc=1 still spawns HF subprocesses.
     effective_num_proc = None if num_proc is not None and num_proc <= 1 else num_proc
 
-    operation_kwargs = {
-        "num_proc": effective_num_proc,
-        "load_from_cache_file": True,
-        **kwargs,
-    }
+    operation_kwargs = {"num_proc": effective_num_proc, "load_from_cache_file": True}
 
     if cache_file_name:
-        if "keep_in_memory" in operation_kwargs:
-            del operation_kwargs["keep_in_memory"]
-
         if isinstance(dataset, Dataset):
             operation_kwargs["cache_file_name"] = cache_path
         elif isinstance(dataset, DatasetDict):

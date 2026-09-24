@@ -237,7 +237,7 @@ def _layer_type_of(layer: torch.nn.Module, index: int, declared: list[str]) -> s
     return declared[index]
 
 
-def _layer_field(decoder, index: int, field: str, default=None):
+def _layer_field(decoder, index: int, field: str):
     """``field`` for layer ``index``: the per-layer config view where transformers registers one
     (Gemma 4's split head_dim, Step-3.7's per-layer heads), else a plain ``<field>_per_layer`` list
     (Laguna's head counts), else the global value."""
@@ -252,7 +252,7 @@ def _layer_field(decoder, index: int, field: str, default=None):
     per_layer = get_config_field(decoder, f"{field}_per_layer")
     if isinstance(per_layer, (list, tuple)) and index < len(per_layer) and per_layer[index] is not None:
         return per_layer[index]
-    return get_config_field(decoder, field, default)
+    return get_config_field(decoder, field)
 
 
 def _layer_attention(decoder, layer_type: str, index: int) -> LayerAttention:
