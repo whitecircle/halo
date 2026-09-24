@@ -17,7 +17,7 @@ from trl import GRPOTrainer
 
 from src.args.mixins import AdvantageShaping, RLRRConfig
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin
+from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.mixins.generation_buffer import GRPOGenerationBufferMixin
@@ -428,6 +428,12 @@ class DistributedGRPOTrainer(
         )
 
         self._install_advantages(result, advantages_full, "RLRR")
+
+    def _loss_logits_width(self) -> LogitsWidth | None:
+        """TRL keeps one logit past the completion for the next-token shift."""
+        if self.max_completion_length is None:
+            return None
+        return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
 
     def _setup_weight_sync(self) -> None:
         """Replace ``VLLMGeneration.sync_weights`` with the distributed-aware version.

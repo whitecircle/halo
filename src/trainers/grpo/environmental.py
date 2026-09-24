@@ -40,7 +40,12 @@ from src.environments.episode import (
     validate_thinking_budget_scope,
 )
 from src.models.structure import resolve_tokenizer
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, rows_forward_densely
+from src.trainers.grpo.mixins.chunked_logprobs import (
+    ChunkedGRPOLogprobsMixin,
+    LogitsWidth,
+    dense_row_spans,
+    rows_forward_densely,
+)
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.mixins.generation_buffer import GRPOGenerationBufferMixin
@@ -399,6 +404,21 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         # After _setup_distributed_modes (needs the EP wrappers); eager, so an unsupported setup fails now.
         self._routing_injector = self._setup_routing_replay(self.async_config.routing_replay)
+
+    def _loss_logits_width(self) -> LogitsWidth:
+        """A per-turn row completes within one turn's cap; a whole-trajectory row runs to the row cap.
+        One logit past the completion is kept for the next-token shift.
+
+        Per-turn, this is the usual row, not a bound: a trajectory whose turns lost their captured ids
+        falls back to one whole-trajectory row, which widens its micro-batch to that row.
+        """
+        cfg = self.async_config
+        if self._train_on_sampled_tokens:
+            return LogitsWidth(cfg.rollout_max_tokens + 1, "rollout_max_tokens")
+        if cfg.max_train_row_tokens is not None:
+            return LogitsWidth(cfg.max_train_row_tokens + 1, "max_train_row_tokens")
+        context = self._context_limit()
+        return LogitsWidth(context + 1, f"max_train_row_tokens (unset: the {context}-token context window)")
 
     def _setup_weight_sync(self) -> None:
         """Gate the model and the rollout backend against what the NCCL sync can actually ship.

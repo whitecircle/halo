@@ -11,7 +11,9 @@ cloned — ``_writable_logits``).
 """
 
 import inspect
+import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 import torch
 from trl import GRPOTrainer
@@ -26,11 +28,51 @@ from src.models.loading.config_levels import text_config
 from src.models.modality import config_declares_multimodality
 from src.models.structure import base_transformers_model
 
+logger = logging.getLogger(__name__)
+
 # Tiles of the chunked matmul / online softmax. The working set is a few [seq, vocab] fp32 tiles
 # (4096 × 16384 × 4 B = 256 MiB each); the loop runs (T / seq) × (V / vocab) iterations, so tiles
 # sized well below this leave the sweep launch-bound on large-vocabulary models.
 _SEQ_CHUNK = 4096
 _VOCAB_CHUNK = 16384
+
+# Bytes per logit the full-logits loss forward holds at its peak: an fp32 plane, or the bf16 logits
+# plus the bf16 log-softmax TRL's selective_log_softmax saves for backward.
+_FULL_LOGITS_BYTES_PER_LOGIT = 4
+# Share of the device memory free at trainer init above which the full-logits plane warns. At init the
+# optimizer state, gradients and activations the same step needs are not allocated yet.
+_FULL_LOGITS_WARN_FRACTION = 0.5
+
+
+@dataclass(frozen=True)
+class LogitsWidth:
+    """The completion logits row a loss forward carries, in tokens, and the setting that bounds it."""
+
+    tokens: int
+    set_by: str
+
+
+def full_logits_verdict(rows: int, width: LogitsWidth, vocab: int, free_bytes: int) -> tuple[bool, str] | None:
+    """``(fatal, message)`` for a full-logits plane of ``rows × width × vocab`` against ``free_bytes``:
+    fatal when it cannot fit at all, a warning when it takes over :data:`_FULL_LOGITS_WARN_FRACTION` of
+    the free memory, ``None`` when it fits comfortably. Pure, so the thresholds are CPU-testable."""
+    plane = rows * width.tokens * vocab * _FULL_LOGITS_BYTES_PER_LOGIT
+    if plane <= _FULL_LOGITS_WARN_FRACTION * free_bytes:
+        return None
+    gib = 1024**3
+    fatal = plane > free_bytes
+    share = (
+        f"more than the {free_bytes / gib:.1f} GiB this device has free"
+        if fatal
+        else f"{plane / free_bytes:.0%} of the {free_bytes / gib:.1f} GiB free before the optimizer state and "
+        f"activations are allocated"
+    )
+    return fatal, (
+        f"The GRPO loss forward materializes full logits: {rows} rows × {width.tokens} tokens × {vocab} vocab × "
+        f"{_FULL_LOGITS_BYTES_PER_LOGIT} B = {plane / gib:.1f} GiB, {share}. Set use_chunked_grpo_logprobs: true "
+        f"to compute the log-probs in vocab chunks instead, or lower per_device_train_batch_size ({rows}) or "
+        f"{width.set_by}, which sets the {width.tokens}-token width."
+    )
 
 
 def dense_row_spans(attention_mask: torch.Tensor) -> list[tuple[int, int]]:
@@ -367,6 +409,37 @@ class ChunkedLogprobsCore:
     backbone forward), ``self.temperature`` and ``self.accelerator``; the construction-time head-path
     check also reads ``self.model``, ``self._use_chunked_grpo_logprobs`` and ``self._pp_runtime``.
     """
+
+    def _check_full_logits_fit(self, width: LogitsWidth | None) -> None:
+        """Refuse a full-logits loss forward that cannot fit on this device; warn when it takes a large
+        share of it. ``width`` is the logits row the loss forward carries (``None``: nothing bounds it,
+        so nothing is checked).
+
+        The rows are ``per_device_train_batch_size``, the chunk the loss forward materializes at once,
+        so the estimate is a floor on the step's peak. Collective when it runs: a plane that fits on
+        one rank and not another raises on every rank, never on one alone.
+        """
+        if self._use_chunked_grpo_logprobs or width is None or not torch.cuda.is_available():
+            return
+        head = self.accelerator.unwrap_model(self.model).get_output_embeddings()
+        if head is None:
+            raise ValueError(
+                "GRPO scores completions through the model's output embedding, and this model reports none "
+                "(get_output_embeddings() is None)."
+            )
+        vocab = head.weight.shape[0]
+        free_bytes, _ = torch.cuda.mem_get_info(self.accelerator.device)
+        verdict = full_logits_verdict(self.args.per_device_train_batch_size, width, vocab, free_bytes)
+        fatal = verdict is not None and verdict[0]
+        if not rank_consensus(not fatal)[0]:
+            raise RuntimeError(
+                verdict[1]
+                if fatal
+                else "Another rank's full-logits plane cannot fit in its free device memory "
+                "(its error states the size); set use_chunked_grpo_logprobs: true."
+            )
+        if verdict is not None and self.accelerator.is_main_process:
+            logger.warning(verdict[1])
 
     @property
     def _chunked_forward_redirection(self) -> _ForwardRedirection:

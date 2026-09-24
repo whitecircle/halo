@@ -82,7 +82,7 @@ from src.models.loading.model_preparation import resolve_auto_model_class
 from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.modality import config_declares_multimodality
 from src.models.structure import resolve_tokenizer
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
+from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import MultiGroupSampler
 from src.trainers.grpo.objective.advantages import STD_EPS
 from src.trainers.grpo.objective.offline import offline_token_objective
@@ -588,6 +588,10 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
         self._setup_distributed_modes()
         self._resolve_chunked_head_transform()
+        # An unset max_completion_length leaves the width to the stored completions; under PP the last
+        # stage's plane is the pipeline's, which use_chunked_grpo_logprobs cannot remove.
+        if self._pp_runtime is None and args.max_completion_length is not None:
+            self._check_full_logits_fit(LogitsWidth(args.max_completion_length + 1, "max_completion_length"))
 
         if self._pp_runtime is not None and self.beta != 0.0:
             self.train_dataset = self._pp_precompute_reference_logps(self.train_dataset, "training")

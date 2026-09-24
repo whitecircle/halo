@@ -7,6 +7,7 @@ disable dropout. The closing order is load-bearing, so it is defined here rather
 constructor.
 """
 
+from src.trainers.grpo.mixins.chunked_logprobs import LogitsWidth
 from src.trainers.mixins.validation import ctor_config, disable_trl_liger_grpo_loss
 
 
@@ -25,18 +26,25 @@ class OnPolicyGRPOInitMixin:
         return training_args, self._init_distributed_config(kwargs, training_args=training_args)
 
     def _finish_on_policy_init(self) -> None:
-        """Realize the parallel modes, gate the reference model and the chunked head path, wire
-        weight sync, disable dropout.
+        """Realize the parallel modes, gate the reference model, the chunked head path and the
+        full-logits plane, wire weight sync, disable dropout.
 
         Dropout goes last: it must reach the EP expert-LoRA dropout that ``_setup_distributed_modes``
-        realizes, or the recomputed log-probs drift from the engine's dropout-free sampling.
+        realizes, or the recomputed log-probs drift from the engine's dropout-free sampling. The plane
+        is checked once the model is placed, so the free memory it is weighed against is real.
         """
         self._setup_distributed_modes()
         self._validate_implicit_reference_model()
         self._resolve_chunked_head_transform()
+        self._check_full_logits_fit(self._loss_logits_width())
         self._setup_weight_sync()
         self._disable_dropout_for_onpolicy()
 
     def _setup_weight_sync(self) -> None:
         """Wire and gate this trainer's engine weight sync, before the first rollout can use it."""
+        raise NotImplementedError
+
+    def _loss_logits_width(self) -> LogitsWidth | None:
+        """The completion logits row this trainer's loss forward carries and the setting that bounds it;
+        ``None`` when no setting does."""
         raise NotImplementedError
