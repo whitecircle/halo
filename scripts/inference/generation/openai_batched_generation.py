@@ -45,6 +45,19 @@ from src.data.pipeline.conversation import build_base_prompt, resolve_system_pro
 from src.inference.openai_client import create_openai_client, parallel_openai_requests
 
 
+def reject_per_row_response_format(rows: list[dict]) -> None:
+    """Refuse rows carrying a structured ``response_format``: every request here goes out as plain
+    text, so a per-row schema (the reward-model scripts honour one) would be dropped from the output
+    unapplied. A ``{"type": "text"}`` format asks for exactly that and passes."""
+    carrying = [row for row in rows if (row.get("response_format") or {}).get("type", "text") != "text"]
+    if carrying:
+        raise ValueError(
+            f"{len(carrying)} of {len(rows)} rows carry a structured response_format, which this tool does not apply: "
+            f"it would generate them as plain text and drop the column. Remove the column, or generate "
+            f"structured rows with the reward-model scripts, which honour it."
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Async batched generation via OpenAI-compatible API")
 
@@ -130,6 +143,7 @@ async def main() -> None:
     if not rows:
         logger.info("All prompts already processed.")
         return
+    reject_per_row_response_format(rows)
 
     logger.info(f"Generating responses for {len(rows)} prompts...")
 
