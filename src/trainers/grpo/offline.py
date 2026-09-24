@@ -587,6 +587,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             self._cached_eval_group_ids = None
 
         self._setup_distributed_modes()
+        self._resolve_chunked_head_transform()
 
         if self._pp_runtime is not None and self.beta != 0.0:
             self.train_dataset = self._pp_precompute_reference_logps(self.train_dataset, "training")

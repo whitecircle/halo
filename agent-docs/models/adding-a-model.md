@@ -7,6 +7,7 @@
 | Large model, want TP beyond what `tp_plan` covers | [Add TP support](#add-tp-support) |
 | Model not in transformers yet | [Vendoring a model](#vendoring-a-model) |
 | Family the auto-detected attention backend cannot run | [Attention backend](#attention-backend) |
+| Forward scales, caps or cuts the logits around `lm_head` | [Declare the head transform](#declare-the-head-transform) |
 
 For plain FSDP, no work is needed — any `AutoModelForCausalLM` works.
 
@@ -19,6 +20,14 @@ Auto-detection covers a family whose attention the installed kernels already run
 Two seams handle those. `resolve_attn_implementation` (`src/models/patches/attention.py`) narrows the backend from the family's own capabilities; `apply_family_attention_patches` (`src/models/loading/model_preparation.py`) applies the family's patches to trainable and frozen loads alike.
 
 Add the family predicate beside the existing ones and wire it into whichever seam applies. The per-family matrix is in [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+
+## Declare the head transform
+
+The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) and the last pipeline stage compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or both paths refuse the family.
+
+Declare it with a `HeadTransformSpec` subclass in `src/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
+
+The declaration is verified, never trusted: `verify_head_transform` runs the family's own forward on a meta-device shell whose backbone emits a fixed hidden state and whose output embedding is a small stand-in, and raises when the declaration does not reproduce the logits. `tests/cpu/models/test_head_transform.py` runs that check over every roster class and compares the chunked sweep's log-probs and gradients with each family's forward; add the family's tiny model there.
 
 ## Add EP support
 

@@ -17,6 +17,7 @@ from transformers import Gemma2Config, Gemma2ForCausalLM, LlamaConfig, LlamaForC
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
 from src.distributed.runtime import materialize_dtensor
+from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
 from src.trainers.grpo.mixins import chunked_logprobs
 from src.trainers.grpo.mixins.chunked_logprobs import (
     _VOCAB_CHUNK,
@@ -195,6 +196,10 @@ class _EmbeddingBackboneHarness(ChunkedGRPOLogprobsMixin):
         self.model.config._attn_implementation = attn_impl
         self.model.get_output_embeddings = lambda: self.model.lm_head
         self.forward_calls: list[tuple[tuple[int, ...], bool]] = []
+
+    def _head_transform(self, unwrapped_model) -> HeadTransform:
+        """A bare module has no family forward to verify; its head is the plain Linear."""
+        return IDENTITY_HEAD_TRANSFORM
 
     def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
         self.forward_calls.append((tuple(input_ids.shape), attention_mask is None))
@@ -413,7 +418,9 @@ def test_softcapped_sweep_matches_the_capped_full_path(monkeypatch):
     (ref_logps * upstream).sum().backward()
 
     got_h, got_w, got_b = (x.clone().requires_grad_(True) for x in (hidden0, weight0, bias0))
-    logps, entropy = chunked_selective_log_softmax_with_entropy(got_h, got_w, ids, got_b, temperature, softcap)
+    logps, entropy = chunked_selective_log_softmax_with_entropy(
+        got_h, got_w, ids, got_b, temperature, HeadTransform(softcap=softcap)
+    )
     (logps * upstream).sum().backward()
 
     uncapped = selective_log_softmax(_ref_logits(hidden0, weight0, bias0, temperature), ids)
@@ -422,6 +429,45 @@ def test_softcapped_sweep_matches_the_capped_full_path(monkeypatch):
     torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
     for got, ref in ((got_h, ref_h), (got_w, ref_w), (got_b, ref_b)):
         torch.testing.assert_close(got.grad, ref.grad, atol=1e-4, rtol=1e-4)
+
+
+def test_every_head_transform_term_reaches_forward_entropy_and_gradients(monkeypatch):
+    # All four terms at once, across tile boundaries: the hidden scale ahead of the matmul, the vocab
+    # cut through the weight and bias rows (a cut the tiles do not align with), the logit scale ahead
+    # of the cap, and the cap. Each term moves the log-probs by whole nats at this scale, and the
+    # backward carries the scale and the cap's tanh derivative into every input's gradient.
+    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
+    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    vocab, kept, temperature = 23, 19, 0.8
+    transform = HeadTransform(hidden_scale=0.5, logit_scale=3.0, softcap=2.0, vocab_size=kept)
+    torch.manual_seed(4)
+    hidden0 = torch.randn(B, T, HIDDEN)
+    weight0 = torch.randn(vocab, HIDDEN) * 0.3
+    bias0 = torch.randn(vocab) * 0.2
+    ids = torch.randint(0, kept, (B, T))
+    upstream = torch.randn(B, T)
+
+    def reference_logits(h, w, b):
+        logits = (h * transform.hidden_scale) @ w[:kept].t() + b[:kept]
+        logits = torch.tanh(logits * transform.logit_scale / transform.softcap) * transform.softcap
+        return logits / temperature
+
+    ref_h, ref_w, ref_b = (x.clone().requires_grad_(True) for x in (hidden0, weight0, bias0))
+    ref_logits = reference_logits(ref_h, ref_w, ref_b)
+    ref_logps, ref_entropy = selective_log_softmax(ref_logits, ids), entropy_from_logits(ref_logits)
+    (ref_logps * upstream).sum().backward()
+
+    got_h, got_w, got_b = (x.clone().requires_grad_(True) for x in (hidden0, weight0, bias0))
+    logps, entropy = chunked_selective_log_softmax_with_entropy(got_h, got_w, ids, got_b, temperature, transform)
+    (logps * upstream).sum().backward()
+
+    untransformed = selective_log_softmax(_ref_logits(hidden0, weight0, bias0, temperature), ids)
+    assert (untransformed - ref_logps).abs().max() > 0.5, "the transform must matter here or the test proves nothing"
+    torch.testing.assert_close(logps, ref_logps, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
+    for got, ref in ((got_h, ref_h), (got_w, ref_w), (got_b, ref_b)):
+        torch.testing.assert_close(got.grad, ref.grad, atol=1e-4, rtol=1e-4)
+    assert torch.count_nonzero(got_w.grad[kept:]) == 0 and torch.count_nonzero(got_b.grad[kept:]) == 0
 
 
 class _CappedHeadHarness(ChunkedGRPOLogprobsMixin):
@@ -464,30 +510,6 @@ def test_the_sweep_reads_the_heads_softcap_off_the_model_config():
         ref = selective_log_softmax(logits[:, :-1][:, -ltk:] / harness.temperature, input_ids[:, -ltk:])
         got, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
     torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-5)
-
-
-def test_the_sweep_finds_a_softcap_only_the_nested_text_config_carries():
-    """A multimodal checkpoint carries the cap on its text config, not at the top level (Gemma 4's
-    own head reads ``config.get_text_config().final_logit_softcapping`` for that reason). A raw
-    ``getattr`` on the composite reads ``None`` and the sweep silently drops the cap again, which is
-    the whole bug — so the two configs must score identically."""
-    flat = _CappedHeadHarness(softcap=0.5)
-    torch.manual_seed(1)
-    input_ids = torch.randint(0, 64, (2, 12))
-    attention_mask = torch.ones_like(input_ids)
-    ltk = 7
-
-    nested = _CappedHeadHarness(softcap=0.5)
-    nested.model.load_state_dict(flat.model.state_dict())
-    composite = PretrainedConfig()
-    composite.text_config = nested.model.config
-    assert getattr(composite, "final_logit_softcapping", None) is None, "the probe must hide the cap"
-    nested.model.config = composite
-
-    with torch.no_grad():
-        want, _ = flat._chunked_logps_impl(flat.model, input_ids, attention_mask, ltk, 2, False)
-        got, _ = nested._chunked_logps_impl(nested.model, input_ids, attention_mask, ltk, 2, False)
-    torch.testing.assert_close(got, want, atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":

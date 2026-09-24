@@ -23,6 +23,7 @@ from transformers import (
     Qwen3VLMoeForConditionalGeneration,
 )
 
+from src.distributed.pipeline_parallel import split
 from src.distributed.pipeline_parallel.split import (
     MTP_LAYER_COUNT_FIELDS,
     PPModelSpec,
@@ -33,6 +34,7 @@ from src.distributed.pipeline_parallel.split import (
     validate_model_supports_pp,
 )
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage, module_path, reject_layer_type_rebase
+from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from src.models.moe_balancing import ROUTER_TOPK_FIELDS
 from src.models.structure import persistent_buffers
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
@@ -481,7 +483,7 @@ def test_composite_vlm_moe_is_rejected():
         validate_model_supports_pp(Qwen3VLMoeForConditionalGeneration(config), "aux_loss")
 
 
-def test_aux_loss_gate_sees_a_coefficient_only_the_wrapper_declares():
+def test_aux_loss_gate_sees_a_coefficient_only_the_wrapper_declares(monkeypatch):
     """The coefficient is read through the wrapper-safe router seam, not off ``text_config`` alone.
 
     A composite config declaring ``router_aux_loss_coef`` at the top level while its text sub-config
@@ -496,6 +498,9 @@ def test_aux_loss_gate_sees_a_coefficient_only_the_wrapper_declares():
 
     model = _moe_model()
     model.config = config
+    # The stand-in config builds no model, so the head-path verification (its own test file) is
+    # stubbed out of this gate's way.
+    monkeypatch.setattr(split, "resolve_head_transform", lambda _model: IDENTITY_HEAD_TRANSFORM)
     with pytest.raises(ValueError, match="aux_loss"):
         validate_model_supports_pp(model, "aux_loss")
 

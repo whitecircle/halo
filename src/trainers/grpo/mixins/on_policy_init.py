@@ -2,8 +2,9 @@
 
 Both constructors open the same way (resolve a config that may have arrived positionally, disable
 TRL's Liger GRPO loss, extract the distributed kwargs) and close the same way: realize the parallel
-modes, gate the implicit reference model, wire weight sync, then disable dropout. The closing order
-is load-bearing, so it is defined here rather than in each constructor.
+modes, gate the implicit reference model and the chunked sweep's head path, wire weight sync, then
+disable dropout. The closing order is load-bearing, so it is defined here rather than in each
+constructor.
 """
 
 from src.trainers.mixins.validation import ctor_config, disable_trl_liger_grpo_loss
@@ -24,13 +25,15 @@ class OnPolicyGRPOInitMixin:
         return training_args, self._init_distributed_config(kwargs, training_args=training_args)
 
     def _finish_on_policy_init(self) -> None:
-        """Realize the parallel modes, gate the reference model, wire weight sync, disable dropout.
+        """Realize the parallel modes, gate the reference model and the chunked head path, wire
+        weight sync, disable dropout.
 
         Dropout goes last: it must reach the EP expert-LoRA dropout that ``_setup_distributed_modes``
         realizes, or the recomputed log-probs drift from the engine's dropout-free sampling.
         """
         self._setup_distributed_modes()
         self._validate_implicit_reference_model()
+        self._resolve_chunked_head_transform()
         self._setup_weight_sync()
         self._disable_dropout_for_onpolicy()
 

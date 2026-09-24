@@ -93,6 +93,8 @@ PP refuses any image-carrying run, so multimodal is EP/ETP-only.
 
 Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP and head stay eager: `InklingMLP` scales its output by a trained `global_scale`, and the head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` before the loss. There is no rotary to fuse: position enters as a learned relative-logit bias.
 
+That division and cut are the family's declared head transform (`src/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep and a last pipeline stage apply them too.
+
 Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
 
 The shipped config sets `packing: false`: full rows attend 8192 tokens/rank/step against the ~2.3k the measurement above ran at, on a peak of 246 of 288 GB, and the depthwise convs cross packed documents either way.

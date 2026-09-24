@@ -3,8 +3,9 @@
 :func:`iter_subclasses` walks a base class's descendants; :func:`build_class_claim_map` resolves a
 key each subclass declares back to the class claiming it. Consumers: the EP patcher (HF MoE block →
 ``EP*MoELayer``), the CP patcher (HF attention → ``*UlyssesAttention``), the PP splitter (HF backbone
-→ ``PPModelSpec``), the EP ``config.model_type`` roster, and the rollout weight-sync clients (keyed
-by ``BACKEND_KEY``, walking the tree directly). A new family or backend registers by subclassing.
+→ ``PPModelSpec``), the head-path contract (HF causal LM → ``HeadTransformSpec``), the EP
+``config.model_type`` roster, and the rollout weight-sync clients (keyed by ``BACKEND_KEY``, walking
+the tree directly). A new family or backend registers by subclassing.
 """
 
 from __future__ import annotations

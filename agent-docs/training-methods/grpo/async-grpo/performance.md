@@ -16,7 +16,9 @@ Neither EP nor TP attacks it: EP wraps only the MoE experts and the MoE TP path 
 
 `use_chunked_grpo_logprobs: true` (default off) removes the wall: completion log-probs come from the backbone's `last_hidden_state` through a chunked (sequence × vocab) matmul, so peak follows the tile size, not `B·T·vocab`. Every code-contests recipe sets it; the online and offline GRPO trainers take the same flag.
 
-The objective is identical — log-probs match the full path to bf16 tolerance, the head's `final_logit_softcapping` applied where the family caps its logits (Gemma) — at the cost of a recompute backward. It runs under FSDP2, ep1/EP and attention-only TP. A multimodal batch takes the full path instead, decided on every rank at once; a PEFT adapter on `lm_head` raises at the first chunked forward.
+The objective is identical — log-probs match the full path to bf16 tolerance — at the cost of a recompute backward. It runs under FSDP2, ep1/EP and attention-only TP. A multimodal batch takes the full path instead, decided on every rank at once; a PEFT adapter on `lm_head` raises at the first chunked forward.
+
+The sweep applies the family's head transform — whatever its `*ForCausalLM.forward` does between the backbone and the logits: Gemma's softcap, Cohere's `logit_scale`, Granite's `logits_scaling` division, Inkling's μP hidden division and vocabulary cut. The transform is resolved and verified against the family's own forward at trainer construction (`src/models/head_transform.py`); a forward it does not reproduce is refused there, naming the class. A new family whose head differs declares its transform ([Adding a Model](../../../models/adding-a-model.md#declare-the-head-transform)).
 
 Under FA4, or at `per_device_train_batch_size: 1`, rows are trimmed to their real span before the backbone forward and the head sweep — most of the training pass, since multi-turn row lengths differ by an order of magnitude.
 
