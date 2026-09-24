@@ -10,7 +10,6 @@ import errno
 import math
 import os
 import select
-import shutil
 import signal
 import stat
 import subprocess
@@ -32,8 +31,9 @@ from src.environments.sandbox.base import (
     SandboxResult,
     SandboxSession,
     compile_limit_verdict,
-    require_encodable_path,
     require_language,
+    require_session_path,
+    safe_member_name,
     utf8_encodable,
 )
 
@@ -49,6 +49,9 @@ RLIMIT_CPU_SLACK_SECONDS = 1.0
 # the episode it belongs to.
 TAMPERED_WORKDIR_RETURNCODE = 1
 
+# How the tree walks open a directory: never through a link, never anything but a directory.
+_DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
 # What a session's staged build was made from: language, source text, auxiliary file contents.
 _BuildKey = tuple[str, str, tuple[tuple[str, str], ...]]
 # Directory entries by name and file type (``lstat``, so a link is a link, not its target).
@@ -58,11 +61,6 @@ _EntryKinds = set[tuple[str, int]]
 class SessionPathError(ValueError):
     """A session path the host must not touch: an entry the program replaced with a link or a
     non-regular file, or one whose resolution leaves the working directory."""
-
-
-def _safe_member_name(name: str) -> bool:
-    """Reject auxiliary-file names that would escape the sandbox working directory."""
-    return name not in ("", ".", "..") and not name.startswith(("/", "\\")) and ".." not in name.split("/")
 
 
 def _open_member(workdir: str, name: str, flags: int) -> int:
@@ -141,28 +139,101 @@ def _entry_kinds(workdir: str) -> _EntryKinds:
 
 def _grant_owner(name: str, bits: int, dir_fd: int | None = None) -> None:
     """Add ``bits`` to the owner permissions of the directory or regular file ``name`` (relative to
-    ``dir_fd`` when given). A link is never followed: one raced in after the type check is refused by
-    ``fchmodat`` with ``AT_SYMLINK_NOFOLLOW`` and left alone, which CPython raises as
-    ``NotImplementedError``, or as ``ValueError`` relative to a directory descriptor."""
-    with contextlib.suppress(FileNotFoundError, NotImplementedError, ValueError):
+    ``dir_fd`` when given); an entry that refuses is left as it is. A link is never followed: one
+    raced in after the type check is refused by ``fchmodat`` with ``AT_SYMLINK_NOFOLLOW``, which
+    CPython raises as ``NotImplementedError``, or as ``ValueError`` relative to a directory descriptor."""
+    with contextlib.suppress(OSError, NotImplementedError, ValueError):
         mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
         if (stat.S_ISDIR(mode) or stat.S_ISREG(mode)) and mode & bits != bits:
             os.chmod(name, stat.S_IMODE(mode) | bits, dir_fd=dir_fd, follow_symlinks=False)
 
 
+def _identity(fd: int) -> tuple[int, int]:
+    """The open directory's ``(st_dev, st_ino)``, which ``..`` must match on the way back up."""
+    info = os.fstat(fd)
+    return info.st_dev, info.st_ino
+
+
+def _sweep_entries(dir_fd: int, *, remove: bool) -> list[str]:
+    """Give the owner back read, write and search on each subdirectory of the directory ``dir_fd``
+    and read and write on each regular file, or with ``remove`` delete each entry that is not a
+    directory; returns the subdirectories' names."""
+    try:
+        with os.scandir(dir_fd) as scan:
+            entries = list(scan)
+    except OSError:
+        return []
+    subdirs = []
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if is_dir:
+            _grant_owner(entry.name, stat.S_IRWXU, dir_fd)
+            subdirs.append(entry.name)
+        elif remove:
+            with contextlib.suppress(OSError):
+                os.unlink(entry.name, dir_fd=dir_fd)
+        else:
+            _grant_owner(entry.name, stat.S_IRUSR | stat.S_IWUSR, dir_fd)
+    return subdirs
+
+
+def _walk_tree(top: str, *, remove: bool) -> None:
+    """Give the owner back read, write and search on the directory ``top`` and every directory under
+    it and read and write on every regular file, or with ``remove`` delete them all, ``top`` included.
+
+    A program running as the host's uid can take those bits away (the host's next staging, reset or
+    removal would then fail on its files), and it can nest directories past any recursion limit or
+    descriptor budget. So the walk holds one descriptor at a time: it descends by name without
+    following a link and climbs back through ``..``, stopping where ``..`` is not the directory it
+    came down from (a child that escaped the run moved the tree). Top-down, so a directory is
+    searchable before it is opened. An entry that fails is skipped; the walk never raises.
+    """
+    _grant_owner(top, stat.S_IRWXU)
+    try:
+        fd = os.open(top, _DIR_OPEN_FLAGS)
+    except OSError:
+        return
+    try:
+        # One frame per directory on the path down: its identity, its name, the subdirectories left.
+        frames = [(_identity(fd), top, _sweep_entries(fd, remove=remove))]
+        while True:
+            pending = frames[-1][2]
+            if pending:
+                name = pending.pop()
+                try:
+                    child = os.open(name, _DIR_OPEN_FLAGS, dir_fd=fd)
+                except OSError:
+                    continue
+                parent, fd = fd, child
+                os.close(parent)
+                frames.append((_identity(fd), name, _sweep_entries(fd, remove=remove)))
+                continue
+            _, name, _ = frames.pop()
+            if not frames:
+                break
+            child, fd = fd, os.open("..", _DIR_OPEN_FLAGS, dir_fd=fd)
+            os.close(child)
+            if _identity(fd) != frames[-1][0]:
+                return
+            if remove:
+                with contextlib.suppress(OSError):
+                    os.rmdir(name, dir_fd=fd)
+    except OSError:
+        return
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    if remove:
+        with contextlib.suppress(OSError):
+            os.rmdir(top)
+
+
 def _restore_owner_access(workdir: str) -> None:
-    """Give the owner back read, write and search on ``workdir`` and every directory under it, and
-    read and write on every regular file. A program running as the host's own uid (a grader that is
-    not root) can take them away, and the host's next staging, reset or removal would then fail on
-    the program's files. Top-down, so a directory is searchable before it is opened; walked by
-    descriptor, so no link is descended or followed."""
-    _grant_owner(workdir, stat.S_IRWXU)
-    with contextlib.suppress(FileNotFoundError):
-        for _path, dirs, files, dir_fd in os.fwalk(workdir):
-            for name in dirs:
-                _grant_owner(name, stat.S_IRWXU, dir_fd)
-            for name in files:
-                _grant_owner(name, stat.S_IRUSR | stat.S_IWUSR, dir_fd)
+    """Give the owner back its access to ``workdir`` and everything under it (:func:`_walk_tree`)."""
+    _walk_tree(workdir, remove=False)
 
 
 def _build_key(spec: LanguageSpec, code: str, files: dict[str, str] | None) -> _BuildKey:
@@ -278,7 +349,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
         can only come from a child that escaped the program's process group taking it again."""
         files = files or {}
         for name in files:
-            if not _safe_member_name(name):
+            if not safe_member_name(name):
                 return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
         try:
             for name, content in files.items():
@@ -449,17 +520,15 @@ class LocalSession(SandboxSession):
         for name, kind in _entry_kinds(self.workdir) - self._staged_entries:
             path = os.path.join(self.workdir, name)
             if kind == stat.S_IFDIR:
-                shutil.rmtree(path, ignore_errors=True)
+                _walk_tree(path, remove=True)
             else:
                 # Refused just after the restore, only an escaped child can have locked it: it stays,
-                # as a directory ``rmtree`` cannot empty does.
+                # as does a directory the walk cannot empty.
                 with contextlib.suppress(FileNotFoundError, PermissionError):
                     os.remove(path)
 
     def write_file(self, path: str, content: str) -> None:
-        require_encodable_path(path)
-        if not _safe_member_name(path):
-            raise ValueError(f"unsafe session file path: {path!r}")
+        require_session_path(path)
         self._require_intact()
         self._build = None
         self._staged_entries = None
@@ -468,9 +537,7 @@ class LocalSession(SandboxSession):
     def read_file(self, path: str) -> str | None:
         """The file's text, or ``None`` when there is no regular file at ``path`` — a link the program
         planted included, so a host file never reaches the trajectory through it."""
-        require_encodable_path(path)
-        if not _safe_member_name(path):
-            raise ValueError(f"unsafe session file path: {path!r}")
+        require_session_path(path)
         self._require_intact()
         try:
             fd = _open_member(self.workdir, path, os.O_RDONLY)
@@ -488,13 +555,14 @@ class LocalSession(SandboxSession):
         return sorted(out)
 
     def close(self) -> None:
+        """Remove the working directory, or the link or file the program put in its place. Never
+        raises: an entry the walk cannot remove stays on disk."""
         try:
             mode = os.lstat(self.workdir).st_mode
-        except FileNotFoundError:
+        except OSError:
             return
         if stat.S_ISDIR(mode):
-            _restore_owner_access(self.workdir)
-            shutil.rmtree(self.workdir, ignore_errors=True)
+            _walk_tree(self.workdir, remove=True)
         else:
-            # A link or file the program put in the directory's place: rmtree refuses a link.
-            os.unlink(self.workdir)
+            with contextlib.suppress(OSError):
+                os.unlink(self.workdir)

@@ -14,7 +14,6 @@ from typing import Any
 from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
-    SANDBOX_FAULT_KEY,
     TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
     EpisodeGrade,
@@ -331,7 +330,7 @@ Always think before acting, and provide a Final Answer when you're done."""
                     observation = f"Error: {e}"
                     info["tool_error"] = str(e)
                 except SANDBOX_FAULTS as e:
-                    # Booked by type (the native protocol's contract), and it ends the episode below.
+                    # Booked by type (the native protocol's contract), and it ends the episode.
                     fault = e
                     observation = f"Error: {e}"
                     info["tool_error"] = str(e)
@@ -343,13 +342,10 @@ Always think before acting, and provide a Final Answer when you're done."""
                     observation = f"Error: {str(e)}"
                     info["tool_error"] = str(e)
 
-            if fault is not None:
-                reward += self._book_sandbox_fault(trajectory, step.action, fault)
-            else:
-                reward += self._credit_tool_call(trajectory, success)
+            reward += self._book_tool_call(trajectory, step.action, success, fault)
             observation = self._truncate_observation(observation)
             trajectory.add_message(Message.user(f"Observation: {observation}"))
-            return trajectory, reward, SANDBOX_FAULT_KEY in trajectory.info, False, info
+            return trajectory, reward, False, False, info
 
         hint = (
             "Please provide either:\n"

@@ -594,11 +594,25 @@ class BaseEnvironment(ABC):
         trajectory.info[TOOL_REWARD_PAID_KEY] = paid + credit
         return credit
 
+    def _book_tool_call(
+        self,
+        trajectory: Trajectory,
+        tool: str,
+        success: bool,
+        fault: SandboxInfraError | SandboxAgentFault | None = None,
+    ) -> float:
+        """Book one executed tool call and return its reward delta: by the class of the sandbox fault
+        that ended it (:meth:`_book_sandbox_fault`), else as a success or a failure
+        (:meth:`_credit_tool_call`). The one entry every protocol books a call through."""
+        if fault is not None:
+            return self._book_sandbox_fault(trajectory, tool, fault)
+        return self._credit_tool_call(trajectory, success)
+
     def _book_sandbox_fault(
         self, trajectory: Trajectory, tool: str, fault: SandboxInfraError | SandboxAgentFault
     ) -> float:
-        """Book one tool call a sandbox fault ended and return its reward delta; the protocol then ends
-        the episode on :data:`SANDBOX_FAULT_KEY`, uncompleted.
+        """Book one tool call a sandbox fault ended and return its reward delta; the step then ends the
+        episode on :data:`SANDBOX_FAULT_KEY`, uncompleted (:meth:`_finalize_step`).
 
         An infrastructure fault says nothing about the policy: the call goes unpriced and the episode
         leaves the GRPO group baseline, the fault stamped as the reason the trainer's all-invalid halt
@@ -860,8 +874,10 @@ class BaseEnvironment(ABC):
         info: dict[str, Any],
         context: dict[str, Any] | None,
     ) -> EnvStep:
-        """Post-``_step_single`` bookkeeping (sync + async paths): enforce ``max_turns`` truncation,
-        record reward/state, price the reward on termination, persist, return the step."""
+        """Post-``_step_single`` bookkeeping (sync + async paths): end an episode a sandbox fault was
+        booked on (uncompleted, not truncated), enforce ``max_turns`` truncation, record reward/state,
+        price the reward on termination, persist, return the step."""
+        done = done or SANDBOX_FAULT_KEY in trajectory.info
         if trajectory.num_turns >= self.max_turns and not done:
             truncated = True
             done = True

@@ -12,6 +12,7 @@ Run:
 """
 
 import json
+import logging
 import sys
 import types
 from typing import Any
@@ -33,6 +34,7 @@ from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
+    report,
     run_episode,
     serialize_trajectory,
     summarize,
@@ -478,6 +480,16 @@ def test_summarize_counts_the_samples_that_carry_no_signal():
     summary = summarize(rows, num_samples=2)
     assert summary["invalid"] == 2
     assert summary["mean_reward"] == pytest.approx(0.25)
+
+
+def test_report_states_the_invalid_count_even_when_none_is(caplog):
+    clean = [{"samples": [{"reward": 1.0, "success": True}, {"reward": 0.0, "success": False}]}]
+    lost = [{"samples": [{"reward": 0.0, "success": False, "error": "outage"}]}]
+    with caplog.at_level(logging.INFO, logger="src.environments.eval_runner"):
+        report(clean, num_samples=2, title="clean")
+        report(lost, num_samples=1, title="lost")
+    clean_log, lost_log = (r.getMessage() for r in caplog.records)
+    assert "invalid=0" in clean_log and "invalid=1" in lost_log
 
 
 if __name__ == "__main__":

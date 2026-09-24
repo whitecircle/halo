@@ -11,7 +11,6 @@ from src.environments.base import (
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
-    SANDBOX_FAULT_KEY,
     TOOL_CALL_COUNTS_KEY,
     AsyncBaseEnvironment,
     BaseEnvironment,
@@ -192,9 +191,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
         """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
-        if result.sandbox_fault is not None:
-            return self._book_sandbox_fault(trajectory, result.name, result.sandbox_fault)
-        return self._credit_tool_call(trajectory, result.success)
+        return self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
 
     def _finalize_text_response(
         self, trajectory: Trajectory, action: str
@@ -316,7 +313,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         tool_calls = self._coerce_tool_calls(tool_calls_data)
         results, reward = self._execute_tool_calls(tool_calls, trajectory)
         info = self._record_tool_interaction(tool_calls, results, trajectory)
-        return trajectory, reward, SANDBOX_FAULT_KEY in trajectory.info, False, info
+        return trajectory, reward, False, False, info
 
     def _step_without_tool_calls(
         self, trajectory: Trajectory, action: str, ctx: dict[str, Any]
@@ -441,4 +438,4 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
         tool_calls = self._coerce_tool_calls(tool_calls_data)
         results, reward = await self._execute_tool_calls_async(tool_calls, trajectory)
         info = self._record_tool_interaction(tool_calls, results, trajectory)
-        return trajectory, reward, SANDBOX_FAULT_KEY in trajectory.info, False, info
+        return trajectory, reward, False, False, info

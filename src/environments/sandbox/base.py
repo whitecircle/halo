@@ -41,15 +41,22 @@ def utf8_encodable(text: str) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
-def require_encodable_path(path: str) -> None:
-    """Refuse a session file path UTF-8 cannot encode (a lone surrogate from model-written JSON) with
-    ``ValueError``, a priced tool error: no backend can create or send such a name, and one that failed
-    there would read as the backend's fault. Refused rather than renamed, so the program never finds
-    its file under a name it did not write."""
+def safe_member_name(name: str) -> bool:
+    """Whether ``name`` stays inside a working directory: relative, naming an entry, never ``..``."""
+    return name not in ("", ".", "..") and not name.startswith(("/", "\\")) and ".." not in name.split("/")
+
+
+def require_session_path(path: str) -> None:
+    """Refuse a session file path no backend may take with ``ValueError``, a priced tool error: one
+    UTF-8 cannot encode (a lone surrogate from model-written JSON) or one that leaves the working
+    directory. A backend that failed on it instead would read as the backend's fault. Refused rather
+    than renamed, so the program never finds its file under a name it did not write."""
     try:
         path.encode("utf-8")
     except UnicodeEncodeError:
         raise ValueError(f"session file path {path!r} is not valid UTF-8") from None
+    if not safe_member_name(path):
+        raise ValueError(f"unsafe session file path: {path!r}")
 
 
 def repl_timeout_message(timeout: float) -> str:
@@ -93,20 +100,20 @@ class SandboxInfraError(RuntimeError):
 
     Distinct from the program's own non-zero exit, compile error, or timeout; those are verdicts on
     the submitted code and stay ordinary string results. The REPL layer raises this so an
-    infrastructure outage reaches the tool layer by type: the protocols end the episode and drop it
-    from the GRPO group baseline instead of pricing the fault as the policy's.
+    infrastructure outage reaches the tool layer by type: the call is booked unpriced, and the episode
+    ends and leaves the GRPO group baseline instead of pricing the fault as the policy's.
     """
 
 
 class SandboxAgentFault(RuntimeError):
     """The program's own action broke its sandbox beyond what the host can safely repair: it put a link
-    or a file in its working directory's place (the ``local`` backend), or a sandbox-backed tool
-    attributes a crash of its environment to the agent.
+    or a file in its working directory's place, which only the ``local`` backend's unconfined program
+    can do.
 
     The fault is the policy's, not the backend's, so it must never read as :class:`SandboxInfraError`
     (an episode could otherwise void itself out of the baseline). Grading judges it as the program's
-    runtime error; the REPL layer raises it, and the protocols price the call as a failed one and end
-    the episode uncompleted, inside the baseline.
+    runtime error; the REPL layer raises it, the call is booked as a failed one, and the episode ends
+    uncompleted, inside the baseline.
     """
 
 

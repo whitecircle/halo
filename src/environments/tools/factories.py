@@ -353,7 +353,8 @@ def create_session_bash_tools(
 
     The command runs through the same backend, working directory and limits as
     :func:`create_session_code_tools`, so it sees the files earlier turns wrote. A non-zero exit is an
-    ordinary observation; only a backend failure raises, as a failed tool call.
+    ordinary observation; a backend failure and a working directory the command replaced raise their
+    sandbox fault, which the protocol books by class.
     """
     spec = require_language("bash")
 
@@ -385,8 +386,9 @@ def create_session_file_tools(
     Files live in the session working dir, so code run via :func:`create_session_code_tools` shares them
     across turns. ``session_getter`` resolves the active episode's session per call.
 
-    A missing session and a rejected (workspace-escaping) path both raise, so the protocol marks the
-    call failed; an absent file is a valid result and stays a string.
+    A rejected path (one that leaves the workspace, or that UTF-8 cannot encode) raises ``ValueError``,
+    a failed call; a missing session and a replaced working directory raise their sandbox fault, which
+    the protocol books by class. An absent file is a valid result and stays a string.
     """
 
     def write_file(path: str, content: str) -> str:

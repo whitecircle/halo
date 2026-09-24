@@ -26,6 +26,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -36,10 +37,12 @@ from src.environments.base import (
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
     REWARD_PENDING_KEY,
+    SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.episode import RolloutResult
@@ -156,8 +159,10 @@ def test_agent_fault_ends_the_episode_failed_and_priced_in_the_baseline(cls):
 def test_each_agent_faulted_call_is_a_failed_call_and_infra_dominates_a_mixed_turn():
     agent_twice, _ = _native_episode("agent", "agent")
     assert agent_twice.done and agent_twice.trajectory.total_reward == pytest.approx(-2 * _TOOL_ERROR_PENALTY)
-    mixed, _ = _native_episode("agent", "infra")
-    assert mixed.done and mixed.trajectory.episode_invalid
+    for order in (("agent", "infra"), ("infra", "agent")):
+        mixed, _ = _native_episode(*order)
+        assert mixed.done and mixed.trajectory.episode_invalid
+        assert mixed.trajectory.info[SANDBOX_FAULT_KEY] == SANDBOX_FAULT_INFRA, order
 
 
 def test_an_ordinary_raising_tool_stays_a_priced_tool_error():
@@ -188,6 +193,26 @@ def test_react_books_the_faults_the_same_way():
     assert agent.trajectory.total_reward == pytest.approx(-_TOOL_ERROR_PENALTY)
 
 
+class _ScratchpadOutage(StubSandbox):
+    """Grades every submission cleanly and loses each scratchpad run to the backend."""
+
+    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
+        return SandboxResult(error="backend down") if "scratch" in code else super().run(code)
+
+
+def test_a_turn_that_spends_the_last_submission_and_faults_ends_uncompleted():
+    env = CodeContestsEnvironment(sandbox=_ScratchpadOutage(), max_submissions=1, **_knobs())
+    context = {"answer": {"tests": [{"input": "", "output": "X"}]}}
+    ids, _ = env.reset(["solve it"], [context])
+    calls = [
+        {"id": "s", "function": {"name": "submit_solution", "arguments": json.dumps({"code": "print('X')"})}},
+        {"id": "r", "function": {"name": "python_repl", "arguments": json.dumps({"code": "# scratch"})}},
+    ]
+    step = env.step(ids, ["both"], [{**context, "tool_calls": calls}])[0]
+    assert step.done and step.trajectory.info[SANDBOX_FAULT_KEY] == SANDBOX_FAULT_INFRA
+    assert not step.trajectory.info["completed"], "a fault-ended episode is uncompleted"
+
+
 @pytest.mark.parametrize("mode", ["infra", "agent"])
 def test_a_fault_ended_episode_is_never_sent_to_a_scorer(mode, monkeypatch):
     """A judge verdict on a crashed fragment would be paid for and taught; on an outage, paid for a
@@ -216,6 +241,7 @@ def test_a_fault_ended_episode_is_never_sent_to_a_scorer(mode, monkeypatch):
     env.settle(ids)
     assert built == [], "no scorer may be built for a fault-ended episode"
     assert step.trajectory.info[REWARD_COMPONENTS_KEY]["reward/quality"] == 0.0
+    assert "episode/reward_scored" not in env.rollout_metrics(step.trajectory), "nothing was scored"
 
 
 def test_the_trainer_trains_on_the_repercussion_and_drops_the_outage():
@@ -320,8 +346,8 @@ def test_an_output_flood_is_the_programs_failure_at_the_file_size_limit():
     flood = f"import sys\nchunk = 'x' * (1 << 20)\nfor _ in range({chunks}):\n    sys.stdout.write(chunk)\n"
     result = LocalSubprocessSandbox().run(flood, timeout=60)
     assert result.error is None and not result.timed_out
-    assert not result.ok, "the flood must fail at the file-size limit, not complete"
-    assert len(result.stdout) <= LOCAL_FSIZE_LIMIT
+    assert result.returncode != 0 and "File too large" in result.stderr, "the flood must fail at the limit"
+    assert len(result.stdout) == LOCAL_FSIZE_LIMIT, "the capture holds the output up to the limit"
 
 
 def _executor(backend: str):
@@ -371,8 +397,13 @@ def test_a_null_test_input_reaches_a_checker_as_an_empty_input():
     assert grade.infra_errors == 0 and grade.passed == 1, grade.details
 
 
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [("a\ud83d.py", "not valid UTF-8"), ("", "unsafe"), (".", "unsafe"), ("..", "unsafe"), ("/abs", "unsafe")]
+    + [("../up.py", "unsafe"), ("sub/../../up.py", "unsafe")],
+)
 @pytest.mark.parametrize("backend", ["local", "remote"])
-def test_a_session_path_utf8_cannot_encode_is_refused_as_an_argument(backend):
+def test_a_session_path_no_backend_can_take_is_refused_as_an_argument(backend, path, reason):
     """A priced tool error on every backend, never a name the backend fails on (an infra error)."""
     if backend == "local":
         session = LocalSubprocessSandbox().open_session()
@@ -387,8 +418,8 @@ def test_a_session_path_utf8_cannot_encode_is_refused_as_an_argument(backend):
         finished = {"status": "Success", "run_result": {"status": "Finished", "stdout": "", "return_code": 0}}
         session = RemoteSandbox("http://sandbox:8080", session=_Recording(finished)).open_session()
     with session:
-        for operation in (lambda: session.write_file("a\ud83d.py", "x"), lambda: session.read_file("a\ud83d.py")):
-            with pytest.raises(ValueError, match="not valid UTF-8"):
+        for operation in (lambda: session.write_file(path, "x"), lambda: session.read_file(path)):
+            with pytest.raises(ValueError, match=reason):
                 operation()
         session.write_file("ok.py", "x")
         assert session.run("print(1)").error is None
@@ -421,7 +452,8 @@ def test_a_replaced_working_directory_is_an_agent_fault_and_never_followed(tmp_p
     result = session.run(_replace_own_workdir(host))
     assert result.agent_fault and "replaced" in result.agent_fault and result.error is None
     assert result.returncode == TAMPERED_WORKDIR_RETURNCODE and not result.ok
-    assert session.run("print(1)").agent_fault, "a broken session never stages into the replaced path"
+    assert session.run("print(1)").agent_fault
+    assert sorted(os.listdir(host)) == ["keep.txt"], "a broken session never stages into the replaced path"
     session.reset_to_staged()
     assert (host / "keep.txt").read_text() == "host data", "reset must not delete through the link"
     for operation in (lambda: session.read_file("keep.txt"), session.list_files, lambda: session.write_file("a", "")):
@@ -453,14 +485,30 @@ _LOCK_THE_WORKDIR = (
     "os.chmod('.', 0o500)\n"
     "print('wrong')\n"
 )
+# Grades the locking program, then drives one session through the two host steps that must give the
+# owner its access back first: a reset (else the lock keeps the program's files) and the staging of the
+# next run (else it cannot write its source).
 _GRADE_AND_REPORT = f"""
 import json, os, tempfile
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.sandbox.local import LocalSubprocessSandbox
 tempfile.tempdir = tempfile.mkdtemp()
 tests = [{{"input": "", "output": "right"}}] * 3
-grade = run_solution_against_tests({_LOCK_THE_WORKDIR!r}, tests, sandbox=LocalSubprocessSandbox())
-report = {{"uid": os.getuid(), "grade": grade._asdict(), "left": os.listdir(tempfile.tempdir)}}
+sandbox = LocalSubprocessSandbox()
+grade = run_solution_against_tests({_LOCK_THE_WORKDIR!r}, tests, sandbox=sandbox)
+with sandbox.open_session() as session:
+    session.run({_LOCK_THE_WORKDIR!r})
+    session.reset_to_staged()
+    after_reset = sorted(os.listdir(session.workdir))
+    session.run({_LOCK_THE_WORKDIR!r})
+    rerun = session.run("print(1)")
+report = {{
+    "uid": os.getuid(),
+    "grade": grade._asdict(),
+    "after_reset": after_reset,
+    "rerun": [rerun.returncode, rerun.stdout.strip()],
+    "left": os.listdir(tempfile.tempdir),
+}}
 print(json.dumps(report))
 """
 # The uid a grader that is not root runs the program as, when the suite itself runs as root.
@@ -497,8 +545,48 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
     assert report["uid"] != 0
     grade = report["grade"]
     assert (grade["graded"], grade["infra_errors"], grade["passed"]) == (3, 0, 0), grade["details"]
-    assert "FAIL" in grade["details"] and "ERROR --" not in grade["details"], grade["details"]
+    assert "Tests 1, 2, 3: FAIL" in grade["details"], "each test judges the program's own output"
+    assert "tampered" not in grade["details"] and "ERROR --" not in grade["details"], grade["details"]
+    assert report["after_reset"] == ["main.py"], "the reset removes what the program locked"
+    assert report["rerun"] == [0, "1"], "the next run stages over the lock"
     assert report["left"] == [], "the session removes the working directory the program locked"
+
+
+_NEST_PAST_THE_RECURSION_LIMIT = (
+    "import os\nfor _ in range(1100):\n    os.mkdir('d')\n    os.chdir('d')\nprint('right')\n"
+)
+
+
+@pytest.mark.parametrize("backend", ["local", "bubblewrap"])
+def test_a_tree_nested_past_the_recursion_limit_is_graded_and_removed(backend, tmp_path, monkeypatch):
+    """The reset between tests and the removal after the grade walk the program's tree without
+    recursion, so nesting it deep is judged like any program, never a host error that voids the grade."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    tests = [{"input": "", "output": "right"}, {"input": "", "output": "wrong"}]
+    grade = run_solution_against_tests(_NEST_PAST_THE_RECURSION_LIMIT, tests, sandbox=_executor(backend))
+    assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 1), grade.details
+    assert "Test 2: FAIL" in grade.details, grade.details
+    assert os.listdir(tmp_path) == [], "the nested working directory is removed"
+
+
+def test_closing_a_session_never_raises(tmp_path, monkeypatch):
+    """What the removal cannot delete stays on disk; the episode's cleanup goes on."""
+
+    def refused(path, *args, **kwargs):
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), path)
+
+    nested, replaced = LocalSubprocessSandbox().open_session(), LocalSubprocessSandbox().open_session()
+    assert nested.run("import os\nos.makedirs('a/b')\nopen('a/b/f', 'w').close()").ok
+    assert replaced.run(_replace_own_workdir(tmp_path)).agent_fault
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "unlink", refused)
+        patched.setattr(os, "rmdir", refused)
+        nested.close()
+        replaced.close()
+    assert os.path.isfile(os.path.join(nested.workdir, "a", "b", "f")) and os.path.islink(replaced.workdir)
+    nested.close()
+    replaced.close()
+    assert not os.path.lexists(nested.workdir) and not os.path.lexists(replaced.workdir)
 
 
 def test_a_link_raced_in_after_the_type_check_is_left_alone(tmp_path, monkeypatch):

@@ -16,6 +16,7 @@ from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_SLICES_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
+    SANDBOX_FAULT_KEY,
     SOLVE_RATE_KEY,
     EpisodeGrade,
     Trajectory,
@@ -498,7 +499,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         A submit_solution call is just a tool call, so without this the model keeps going after submitting.
         """
         trajectory, reward, done, truncated, info = super()._step_single(trajectory, action, context)
-        if not done and self._tool_budget_exhausted(trajectory, SUBMIT_TOOL) is not None:
+        # A turn that also booked a sandbox fault ends on it, uncompleted, whatever it submitted.
+        spent = self._tool_budget_exhausted(trajectory, SUBMIT_TOOL) is not None
+        if not done and spent and SANDBOX_FAULT_KEY not in trajectory.info:
             trajectory.info["completed"] = True
             done = True
         return trajectory, reward, done, truncated, info
