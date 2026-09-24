@@ -26,7 +26,7 @@ add the call to the code you are investigating. The profiler session and CUDA-me
 Use the **torch profiler** for the GPU/operator picture (which kernels dominate, CPU↔GPU gaps) and
 **py-spy** for the pure-CPU picture (Python stalls between kernels).
 
-### 1a. torch.profiler — GPU/operator trace {#1a-torchprofiler--gpuoperator-trace--flame-graph}
+### 1a. torch.profiler — GPU/operator trace
 
 ```yaml
 enable_torch_profiler: true

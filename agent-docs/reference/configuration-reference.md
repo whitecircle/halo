@@ -61,7 +61,7 @@ Two training paths sit outside the two seams. Async GRPO pins the raw context wi
 
 The YAML parser migrates no spelling: a config still naming TRL's retired `max_seq_length` hits the unknown-key raise (see the [Configuration Guide](../getting-started/configuration.md)).
 
-## Performance & balancing flags {#performance-balancing-flags}
+## Performance & balancing flags
 
 Every standard training script inherits these from `CommonScriptArguments`; they wire the observability and balancing callbacks via `build_perf_callbacks` (`src/callbacks/wiring.py`).
 
@@ -72,7 +72,7 @@ Every standard training script inherits these from `CommonScriptArguments`; they
 | `moe_balancing` | `str` | `"auto"` | Router balancing: `auto` (default), `none`, `aux_loss`, `bias_update`, `bias_update_transient`. `auto` resolves per model — `bias_update` where the aux loss cannot reach the loss **and** the bias lands in checkpoint-exported state, `none` + warning where only a transient bias would be possible (Mistral4, Cohere2 MoE, multimodal Qwen3.5/3.6) or where the forward takes no `output_router_logits` and nothing accepts a bias (no balancing route at all — Gemma 4, and the wrapper-signal families launched without EP wrappers), `aux_loss` for other MoE, `none` for dense. An explicit mode **raises** where it would misstate reality (`bias_update` with no bias acceptor or on a family whose bias no export carries, `bias_update_transient` on a family whose bias exports natively, `aux_loss` on a forward that never takes `output_router_logits`), and **warns and stays off** where the term exists but cannot reach the loss (no usable `router_aux_loss_coef`, or an EP wrapper that severs the aux path). Under a GRPO trainer `aux_loss` is inert, and the on-policy weight-sync scripts (online / async GRPO) downgrade both bias modes to `none` — those runs have no router balancing at all. Full resolution rules, per-family support and the mode table: [MoE balancing modes](../training-methods/callbacks.md#moe-balancing-modes). |
 | `router_balancing_rate` | `float` | `1.0e-3` | Sign-step magnitude (γ) for `RouterBiasBalancingCallback` when a bias-update mode is active. |
 | `num_full_model_params` | `float \| null` | `null` | Total param count across all EP/TP ranks. When set, `EfficiencyCallback` computes `distributed_efficiency = params_ratio * mfu`. |
-| `enable_torch_profiler` | `bool` | `false` | Construct [TorchProfilerCallback](debugging.md#1a-torchprofiler--gpuoperator-trace--flame-graph) — captures a step window, writes per-rank Chrome trace + flame-graph stacks + memory timeline. |
+| `enable_torch_profiler` | `bool` | `false` | Construct [TorchProfilerCallback](debugging.md#1a-torchprofiler--gpuoperator-trace) — captures a step window, writes per-rank Chrome trace + flame-graph stacks + memory timeline. |
 | `profiler_output_dir` | `str` | `$HALO_DATA_ROOT/profiling/torch` | Output dir for torch.profiler artifacts (derives from `HALO_DATA_ROOT`; set explicitly to override). |
 | `profiler_wait` / `profiler_warmup` / `profiler_active` | `int` | `5` / `1` / `3` | torch.profiler schedule: skip `wait`, warm up `warmup`, record `active` steps (one-shot). |
 | `profiler_ranks` | `str` | `"0"` | Which global ranks profile: `"0"`, `"all"`, or a comma list like `"0,8"`. |
@@ -94,7 +94,7 @@ Every standard training script inherits these from `CommonScriptArguments`; they
 
 ---
 
-## DistributedArguments (model & from-scratch) {#distributedarguments-model-from-scratch}
+## DistributedArguments (model & from-scratch)
 
 Inherited by the EP/CP/TP scripts from `src/args/distributed_args.py` (parallelism sizes are under [ParallelismConfig](#parallelismconfig)).
 
@@ -168,7 +168,7 @@ Read from the environment (not the YAML); set in the launch command / `.env`. To
 
 ## Trainer-to-config quick reference
 
-Each trainer combines a **trainer config** (hyperparameters) with **script arguments** (dataset, tokenizer, infra). All configs also accept standard `TrainingArguments` fields. Every script additionally parses TRL's `ModelConfig` — `model_name_or_path`, `model_revision`, `dtype`, `attn_implementation`, and the LoRA fields ([PEFT](../optimization/peft.md)) — and [DistributedArguments](#distributedarguments-model-from-scratch); all four dataclasses draw from the one YAML.
+Each trainer combines a **trainer config** (hyperparameters) with **script arguments** (dataset, tokenizer, infra). All configs also accept standard `TrainingArguments` fields. Every script additionally parses TRL's `ModelConfig` — `model_name_or_path`, `model_revision`, `dtype`, `attn_implementation`, and the LoRA fields ([PEFT](../optimization/peft.md)) — and [DistributedArguments](#distributedarguments-model--from-scratch); all four dataclasses draw from the one YAML.
 
 | Trainer | Config Class | Script Arguments | Source |
 |---------|-------------|-----------------|--------|
@@ -313,7 +313,7 @@ Every other field below keeps its name, except `world_size` / `gpus_per_node` (a
 | `ep_lazy_loading` | `bool` | `True` | Lazy safetensors loading for EP, EP+CP, EP+TP, and pure ETP — each rank reads only its expert slice (parallel, low CPU RAM). Covers every MoE family except Cohere2 MoE, across fused and per-expert safetensors layouts — the gate is the layer class's `_supports_lazy_loading` ([per-family EP restrictions](../parallelism/expert-parallelism.md#per-family-ep-restrictions)), not a key list; a checkpoint whose expert layout the loader cannot address, or a non-local one, falls back to sequential CPU-staged loading. TP-only MoE ignores it and always uses `from_pretrained` + patching. |
 | `ep_buffer_backend` | `"auto" \| "elastic" \| "legacy"` | `"auto"` | DeepEP all-to-all transport. `auto`/`elastic`: V2 ElasticBuffer (NCCL Gin, cross-node capable, streams arbitrary sequence length — the only guarded limit is the 32-bit wire index at ~175k tokens/rank). `legacy`: V1 CUDA-IPC Buffer, numerically identical but intranode-only and rejected for any cross-node EP group. See [Transport backend](../infrastructure/deepep.md#transport-backend). |
 | `max_concurrent_loading` | `int \| None` | `null` | Max ranks loading simultaneously per node. Unset resolves node-width-aware to `min(4, max(1, local_world_size // 2))` — 4 on an 8-GPU node, 2 on a 4-GPU tray. **Every** explicit value is honored verbatim, `4` included: `0` = all-parallel, a value at or above the node width disarms the throttle, `1` is fully sequential for CPU-RAM-constrained machines. Governs the CPU-staged loaders (DDP, CP, TP-MoE, grouped-GEMM, non-lazy EP fallback); the lazy-EP path ignores it, and so does HF-native dense TP, which streams each rank's shard straight to its GPU and ends in a tie-equality all-reduce on the default process group that a rank-serialized region would deadlock. |
-| `expert_lora` | `ExpertLoraSpec \| None` | `None` | Native grouped LoRA on EP experts. No CLI flag — it is built from the PEFT `LoraConfig` and passed at construction so it cannot bypass validation. Carries `r` / `alpha` / `dropout` / `projections` / `use_rslora` (`r` a multiple of 8, the grouped GEMM's stride contract at the bf16 the adapters run in — refused at construction otherwise); knobs it cannot honor (`use_dora`, `lora_target_parameters`) are rejected rather than applied to the attention half alone. See [PEFT](../optimization/peft.md#moe-models-expert-targets-and-full-trained-modules). |
+| `expert_lora` | `ExpertLoraSpec \| None` | `None` | Native grouped LoRA on EP experts. No CLI flag — it is built from the PEFT `LoraConfig` and passed at construction so it cannot bypass validation. Carries `r` / `alpha` / `dropout` / `projections` / `use_rslora` (`r` a multiple of 8, the grouped GEMM's stride contract at the bf16 the adapters run in — refused at construction otherwise); knobs it cannot honor (`use_dora`, `lora_target_parameters`) are rejected rather than applied to the attention half alone. See [PEFT](../optimization/peft.md#moe-models--expert-targets-and-full-trained-modules). |
 
 Besides these, `num_nodes`, `num_nvlink_domains`, `ep_group_size`, `data_parallel_size`, `stage_world_size`, `pp_rank`, and the stage-local rank coordinates are computed in `__post_init__`.
 
@@ -562,7 +562,7 @@ Base shared by all training scripts. **Source:** `src/args/common_script_args.py
 | `tokenizer_backend` | `str` | `"hf"` | Text→ids backend: `"hf"` or `"gigatoken"` (optional extra; token IDs verified identical at startup). Resolved in `setup_model_and_tokenizer`, so every training method honors it; embedding rejects it (SentenceTransformer owns tokenization) — see [Dataset Pre-Processing](../data/dataset-preparation.md). |
 | `tools_field` | `str \| None` | `None` | Dataset field with tool definitions passed to `apply_chat_template`. Reward modeling aliases it onto `tools`, the one column TRL's `RewardTrainer` templates. Everywhere the render cannot carry it, it is **rejected** rather than parsed and dropped: outright by KTO and embedding; by async GRPO, whose rollout schema comes from the environment's own tool registry; and on the vision arms of SMPO, DPO and reward modeling, whose pair render templates without `tools=`. |
 | `unfreeze_layers_patterns` / `freeze_layers_patterns` | `list[str] \| None` | `None` | Layer-name patterns to unfreeze / freeze (freeze applied after unfreeze). Under **pipeline parallelism** a pattern that pins a decoder-layer index **raises**: each stage holds only its own layers, re-based to index 0, so a global index selects nothing on most stages and the wrong layer on the rest. Any segment following `layers`/`h` containing a digit counts, including glob character classes (`model.layers.[6-8][0-9].*`); index-free patterns (`*.self_attn.sinks`, `*.mlp.experts.0.*`) pass. A pattern that matches nothing **raises** on either knob — `unfreeze` would leave the model fully frozen, `freeze` would leave what it named training. They match different things: `unfreeze_layers_patterns` is fnmatch against full **module** names, `freeze_layers_patterns` against full **parameter** names. |
-| `enable_efficiency_metrics` / `enable_moe_metrics` / `moe_balancing` / `router_balancing_rate` / `num_full_model_params` | — | — | See [Performance & balancing flags](#performance-balancing-flags). |
+| `enable_efficiency_metrics` / `enable_moe_metrics` / `moe_balancing` / `router_balancing_rate` / `num_full_model_params` | — | — | See [Performance & balancing flags](#performance--balancing-flags). |
 | `report_mfu_diagnostics` | `bool` | `False` | Add MFU / S-MFU / achieved-TFLOPS to the headline log. Values are computed every step regardless; this only controls headline visibility. tokens/s/GPU is the reported throughput metric. |
 | `save_completions` | `bool` | `True` | GRPO family (online / async): write per-step completions and trajectories to `<output_dir>/completions/completions_<step>.parquet` (+ a backend `completions` table). Text is rendered from detokenized message content. Independent of TRL's console-only `log_completions`; ignored by non-generating trainers (SFT, offline GRPO). |
 | `log_decoded_samples` | `bool` | `False` | Write the first few decoded train/eval samples (`skip_special_tokens=False`) to `<output_dir>/log/{train,eval}_sample.txt`. Written on the FS-aware save rank (same gate as `run.log`: global rank 0 on a shared output FS, each node's local rank 0 when `DIST_OUTPUT_SHARED_FILESYSTEM` — or the umbrella it falls back to — is `0`); datasets without `input_ids` are skipped. |
@@ -637,7 +637,7 @@ These extend `CommonScriptArguments` with minimal additions:
 
 ---
 
-## YAML shape {#yaml-config-examples}
+## YAML shape
 
 A config is the method's fields plus any `TrainingArguments` field. `bf16: true`,
 `use_liger_kernel: true` and `logging_nan_inf_filter: false` are toolkit defaults and need not be

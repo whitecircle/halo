@@ -312,7 +312,7 @@ sends them with each update, so its first sync fails. From 0.29 the module the g
 import their protocol types from (`vllm.entrypoints.openai.engine.protocol`) is gone, so the image
 build fails.
 
-### Config-schema parity {#config-schema-parity}
+### Config-schema parity
 
 The server parses every checkpoint with **its** transformers, pinned to the 5.14 line, one line below
 the training image's 5.16 (`Dockerfile.vllm` asserts the pin at build). **Gemma 4 is what pins that

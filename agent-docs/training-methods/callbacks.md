@@ -186,7 +186,7 @@ router_balancing_rate: 1.0e-3     # gamma, bias-update modes only
 logging_steps: 1                  # also the moe/* summary period
 ```
 
-Defaults and full descriptions: [Performance & balancing flags](../reference/configuration-reference.md#performance-balancing-flags).
+Defaults and full descriptions: [Performance & balancing flags](../reference/configuration-reference.md#performance--balancing-flags).
 
 ## Writing custom callbacks
 

@@ -216,7 +216,7 @@ single-group `ep16` on a 2-node, 16-GPU topology. Mechanism:
 division. `ParallelismConfig.validate_against_model_config` raises off `config.json` at the top of
 the model load; `EPConfig.finalize_expert_assignment` re-checks it once the EP groups exist.
 
-## Transport backend {#transport-backend}
+## Transport backend
 
 `ep_buffer_backend` selects the transport for the EP all-to-all. The dispatcher hides the choice behind one
 interface (`_DeepEPBackend`), so it is transparent to the MoE layer and the autograd path.
@@ -275,9 +275,9 @@ capacity-padded buffer.
 
 Levers: `HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN, and
 `HALO_DEEPEP_NUM_SMS` tunes the SM split. Per-config breakdown:
-[Throughput Benchmarks](../optimization/throughput-benchmarks.md#measured-bottleneck-case-study--gpt-oss-20b-ep-on-8-b300).
+[Throughput Benchmarks](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4).
 
-## Dispatch wire-index limit {#token-count-ceiling}
+## Dispatch wire-index limit
 
 ElasticBuffer **forwards** arbitrary sequence length intra-node (gpt-oss-20b ep8 to 65536); cross-node
 Gin has its own ~8k tokens/rank ceiling ([EFA](#expert-parallelism-over-aws-efa)).
