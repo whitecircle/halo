@@ -63,6 +63,7 @@ from src.checkpoint.tool_io import (
     preflight_resource_warning,
     reject_in_place_conversion,
     stored_tensor_nbytes,
+    stored_tensor_numel,
 )
 from src.log import configure_cli_logging
 from src.models.loading.dtype import DTYPE_BY_NAME
@@ -128,7 +129,7 @@ class _TensorReader:
 
     def numel(self, key: str) -> int:
         """Element count of ``key`` from the safetensors header alone — no tensor read."""
-        return math.prod(self._handle(key).get_slice(key).get_shape())
+        return stored_tensor_numel(self._handle(key), key)
 
     def _handle(self, key: str):
         # The RAM preflight sizes the reference key set (the base's, under task_arithmetic/ties)
@@ -240,15 +241,11 @@ class _MergeMethod(NamedTuple):
     fp32_copies: Callable[[int], float]
 
 
-# fp32_copies: the CPU allocator's peak over each op with bf16 inputs (every ``.float()`` copies; fp32
-# inputs peak lower), as test_merge_models measures it. TIES: its one-model peak; a bound above it for
-# two or more.
+# fp32_copies: the allocator's peak with bf16 inputs (every ``.float()`` copies), as test_merge_models pins it.
 _METHODS: dict[str, _MergeMethod] = {
     "linear": _MergeMethod(_merge_linear, ("tensors", "weights"), {}, lambda n_models: 3),
     "slerp": _MergeMethod(_merge_slerp, ("t0", "t1"), {"t": 0.5}, lambda n_models: 5),
     "task_arithmetic": _MergeMethod(_merge_task_arithmetic, ("base", "tensors", "weights"), {}, lambda n_models: 4),
-    # Per model: its delta, their stacked copy, the sign-masked copy, the agreement mask and its
-    # int64 cast in the count.
     "ties": _MergeMethod(
         _merge_ties,
         ("base", "tensors", "weights"),

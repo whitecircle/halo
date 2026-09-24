@@ -17,6 +17,7 @@ import json
 import re
 import tempfile
 import warnings
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 
@@ -496,6 +497,37 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
     working = mm._METHODS["ties"].fp32_copies(3) * 4 * numel
     shard = mm.StageShardWriter(str(tmp_path), "probe", "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
+
+
+def test_the_merge_loop_releases_each_keys_inputs_before_reading_the_next(tmp_path, monkeypatch):
+    """The RAM preflight counts one key's inputs: a binding that outlives its iteration (``per_key``
+    holds every input) keeps the previous key's tensors alive beside the next key's reads."""
+    keys = [f"w{i}" for i in range(3)]
+    models = [
+        _write_tiny_checkpoint(tmp_path / name, {key: torch.full((4,), value) for key in keys})
+        for name, value in (("a", 0.0), ("b", 2.0))
+    ]
+    reads: list[tuple[str, weakref.ref]] = []
+    held_over: list[tuple[str, str]] = []
+    read_tensor = mm._TensorReader.get
+
+    def tracked_get(self, key):
+        held_over.extend((key, prior) for prior, ref in reads if prior != key and ref() is not None)
+        tensor = read_tensor(self, key)
+        reads.append((key, weakref.ref(tensor)))
+        return tensor
+
+    monkeypatch.setattr(mm._TensorReader, "get", tracked_get)
+    mm.merge_models(
+        [str(model) for model in models],
+        str(tmp_path / "out"),
+        method="linear",
+        dtype="float32",
+        allow_missing_tokenizer=True,
+        verbose=False,
+    )
+    assert [key for key, _ref in reads] == [key for key in keys for _model in models], "premise: every key read"
+    assert not held_over, f"(key read, earlier key still alive): {held_over}"
 
 
 if __name__ == "__main__":
