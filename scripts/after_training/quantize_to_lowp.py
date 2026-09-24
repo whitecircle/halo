@@ -214,16 +214,14 @@ def _read_model_types(input_dir: str) -> list[str]:
     """The ``model_type`` spellings this checkpoint declares, most specific first.
 
     Both the top level and the nested ``text_config`` are read: multimodal wrappers nest the LM config,
-    and it is the LM's family that fixes the fused-expert layout.
+    and it is the LM's family that fixes the fused-expert layout. An unreadable ``config.json`` raises:
+    read as "no family", it would skip the MoE expert gate and fail only after the whole export ran.
     """
-    cfg_path = os.path.join(input_dir, "config.json")
+    cfg_path = os.path.join(input_dir, CONFIG_NAME)
     if not os.path.isfile(cfg_path):
         return []
-    try:
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return []
+    with open(cfg_path) as f:
+        cfg = json.load(f)
     candidates = [(cfg.get("text_config") or {}).get("model_type"), cfg.get("model_type")]
     return [candidate for candidate in candidates if candidate]
 

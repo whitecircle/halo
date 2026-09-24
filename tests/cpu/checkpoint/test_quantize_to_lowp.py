@@ -540,6 +540,27 @@ def test_keep_window_refuses_two_interleaved_block_numberings():
         assert "model.mtp.layers.0.mlp.gate_proj.weight_packed" in load_file(os.path.join(out, "model.safetensors"))
 
 
+def test_an_unreadable_config_is_refused_before_any_write(tmp_path):
+    """A truncated ``config.json`` must not read as "no model_type": that skips the MoE expert gate
+    above, quantizes every shard, and fails only at the manifest stamp with a half-written output
+    directory. The config is read ahead of the output directory, so the refusal writes nothing."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    src.mkdir()
+    save_file(
+        {
+            "model.layers.0.mlp.gate_proj.weight": torch.randn(64, 64, dtype=torch.bfloat16),
+            "model.layers.0.mlp.experts.w13_weight": torch.randn(4, 128, 64, dtype=torch.bfloat16),
+        },
+        os.path.join(src, "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+    (src / "config.json").write_text('{"model_type": "qwen3_moe"')
+
+    with pytest.raises(json.JSONDecodeError):
+        quantize_checkpoint(str(src), str(out), "mxfp8")
+    assert not out.exists(), "an unreadable config must be refused before the output directory is created"
+
+
 def test_quantize_refuses_to_write_into_its_own_input_dir():
     """save_sharded_state_dict-style rewrites delete the shards they do not own, so an in-place
     conversion destroys the source checkpoint."""
