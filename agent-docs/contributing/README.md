@@ -11,8 +11,8 @@ same targets. The Docker incantation lives once in the `Makefile`; `make help` l
   `torchrun`, `pytest` directly.
 - **`make lint`, `make format`, `make precommit`, and `make docs` are the only host-runnable gates**
   (ruff via `uvx ruff@$(RUFF_VERSION)`, `RUFF_VERSION ?= 0.9.10`, falling back to a `ruff` already on
-  `PATH`; the docs target is a pure link check). Everything else — tests, benchmarks — runs inside
-  the image.
+  `PATH`; the docs target is a stdlib-`python3` link and anchor check). Everything else — tests,
+  benchmarks — runs inside the image.
 - **Credentials live in the repo-root `.env`.** `cp .env.example .env` and fill it in: the GPU
   `make` targets pass `--env-file .env` and fail outright without the file.
 - **Markdown lives in `agent-docs/` (the detailed reference), `human-docs/` (the concise human
@@ -336,7 +336,7 @@ Update the owning doc page in the same PR when you change `src/` (`skills/docs/d
 follow the anti-slop charter carried by the `/docs` skill: American English, active voice, short
 sentences, tables only for real matrices, no marketing register.
 
-`docs.yml` runs three jobs, and `make docs` runs only the first: the relative-link check over
+`docs.yml` runs three jobs, and `make docs` runs only the first: the link and anchor check over
 `agent-docs/`, `human-docs/`, `skills/` and the root markdown, which blocks a merge; a `diagrams` job
 that re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the committed PNGs
 under `agent-docs/assets/` — touch a generator and you owe `make diagrams` plus the regenerated figure in
