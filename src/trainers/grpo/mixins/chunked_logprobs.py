@@ -179,12 +179,30 @@ def chunked_selective_log_softmax(
     return _sweep(hidden, weight, completion_ids, bias, temperature, head_transform, False)[0]
 
 
+def _matmul_fp32(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+    """``a @ b`` as fp32, or ``out += a @ b`` into an fp32 ``out``.
+
+    Half-precision CUDA operands run on the tensor cores with fp32 accumulation and an fp32 result, so
+    neither the product nor the running sum is rounded to half precision; an fp32 ``a`` (a gradient
+    tile) is cast to ``b``'s dtype first. Other operands (CPU, fp32 weights) take an fp32 matmul, which
+    the pinned ``highest`` precision would otherwise force onto the CUDA cores for the half-precision
+    case too.
+    """
+    if b.is_cuda and b.dtype in (torch.bfloat16, torch.float16):
+        a = a.to(b.dtype)
+        if out is None:
+            return torch.mm(a, b, out_dtype=torch.float32)
+        return torch.addmm(out, a, b, out_dtype=torch.float32, out=out)
+    product = a.float() @ b.float()
+    return product if out is None else out.add_(product)
+
+
 def _logits_tile(
     hidden_chunk, weight_chunk, bias, vocab_start, vocab_end, logit_scale, softcap, inv_t
 ) -> torch.Tensor:
     """One ``[seq, vocab-tile]`` plane of temperature-scaled logits: the family's logit scale, then its
     softcap (``cap · tanh(logits / cap)``), then the temperature, as the model's forward orders them."""
-    logits_chunk = (hidden_chunk @ weight_chunk.to(hidden_chunk.dtype).t()).float()
+    logits_chunk = _matmul_fp32(hidden_chunk, weight_chunk.to(hidden_chunk.dtype).t())
     if bias is not None:
         logits_chunk.add_(bias[vocab_start:vocab_end].to(torch.float32))
     if logit_scale is not None:
@@ -270,10 +288,9 @@ def _selective_logprob_backward(
     hidden, weight, targets, bias, log_z, grad_logprobs, temperature, logit_scale, softcap, vocab_chunk_size
 ):
     """Dual-chunked backward: each logits tile is recomputed from the saved ``log_z`` instead of a
-    stored ``[T, V]`` plane. Both gradients accumulate in fp32; the row activations are upcast once per
-    sequence tile rather than once per vocab tile. Under a softcap the tile's gradient carries the
-    ``tanh`` derivative, ``1 − (logits / cap)²`` on the capped logits, and under a logit scale that
-    scale."""
+    stored ``[T, V]`` plane. Both gradients accumulate in fp32 (:func:`_matmul_fp32`). Under a softcap
+    the tile's gradient carries the ``tanh`` derivative, ``1 − (logits / cap)²`` on the capped logits,
+    and under a logit scale that scale."""
     inv_t = 1.0 / temperature
     n_rows, _ = hidden.shape
     vocab_size = weight.shape[0]
@@ -287,7 +304,6 @@ def _selective_logprob_backward(
     for seq_start in range(0, n_rows, _SEQ_CHUNK):
         seq_end = min(seq_start + _SEQ_CHUNK, n_rows)
         hidden_chunk = hidden[seq_start:seq_end]
-        hidden_chunk_f32 = hidden_chunk.float()
         targets_chunk = targets[seq_start:seq_end]
         grad_chunk = grad_logprobs[seq_start:seq_end]
         logz_chunk = log_z[seq_start:seq_end]
@@ -312,8 +328,8 @@ def _selective_logprob_backward(
             if logit_scale is not None:
                 grad_logits.mul_(logit_scale)
 
-            grad_hidden[seq_start:seq_end].add_(grad_logits @ weight_chunk.float())
-            grad_weight[vocab_start:vocab_end].add_(grad_logits.t() @ hidden_chunk_f32)
+            _matmul_fp32(grad_logits, weight_chunk.to(hidden_chunk.dtype), out=grad_hidden[seq_start:seq_end])
+            _matmul_fp32(grad_logits.t(), hidden_chunk, out=grad_weight[vocab_start:vocab_end])
             if has_bias:
                 grad_bias[vocab_start:vocab_end].add_(grad_logits.sum(dim=0))
 
