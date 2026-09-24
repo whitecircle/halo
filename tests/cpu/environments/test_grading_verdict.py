@@ -32,23 +32,11 @@ from src.environments.envs.tasks.coding.grading import (
     select_verdict,
 )
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxResult
-
-
-class _StubSandbox(SandboxExecutor):
-    """A sandbox whose one-shot ``run`` returns a pre-set result (ignores the code)."""
-
-    def __init__(self, result: SandboxResult):
-        self._result = result
-
-    def open_session(self):  # pragma: no cover
-        raise NotImplementedError
-
-    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
-        return self._result
+from tests.common.code_contests import StubSandbox
 
 
 def _verdict(result: SandboxResult) -> bool:
-    checker = CheckerVerdict("# unused", _StubSandbox(result))
+    checker = CheckerVerdict("# unused", StubSandbox(result))
     return checker("input", "expected", "actual")
 
 
@@ -320,7 +308,7 @@ def test_outcome_verdict_hides_expected_and_produced_output():
     """``verdict_detail="outcome"`` is the Codeforces contract: a wrong answer is a verdict, not a diff.
     With the expected output shown, the graded channel doubled as a free test oracle and submit-first
     out-earned test-first within a GRPO group."""
-    sandbox = _StubSandbox(SandboxResult(stdout="X\n", returncode=0))
+    sandbox = StubSandbox(SandboxResult(stdout="X\n", returncode=0))
     tests = [{"input": "1", "output": "Y"}, {"input": "2", "output": "X"}]
     full = run_solution_against_tests("code", tests, sandbox=sandbox)
     outcome = run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="outcome")
@@ -332,7 +320,7 @@ def test_outcome_verdict_hides_expected_and_produced_output():
     crash = run_solution_against_tests(
         "code",
         tests[:1],
-        sandbox=_StubSandbox(SandboxResult(stdout="", stderr="boom", returncode=1)),
+        sandbox=StubSandbox(SandboxResult(stdout="", stderr="boom", returncode=1)),
         verdict_detail="outcome",
     )
     assert "RUNTIME ERROR (exit 1)" in crash.details and "boom" in crash.details
@@ -342,7 +330,7 @@ def test_outcome_verdict_hides_expected_and_produced_output():
 
 def test_verdict_detail_travels_with_the_grading_contract():
     """The env builds the spec once and the offline re-grader takes it back through ``to_meta``."""
-    sandbox = _StubSandbox(SandboxResult(stdout="X\n", returncode=0))
+    sandbox = StubSandbox(SandboxResult(stdout="X\n", returncode=0))
     spec = GradingSpec(sandbox=sandbox, verdict_detail="outcome")
     assert spec.to_meta()["verdict_detail"] == "outcome"
     assert spec.with_meta({"verdict_detail": "full"}).verdict_detail == "full"
@@ -354,13 +342,13 @@ def test_verdict_detail_travels_with_the_grading_contract():
 
 def test_select_verdict_prefers_checker():
     """A non-empty checker always wins over the comparison mode."""
-    v = select_verdict("# checker", "tokens", _StubSandbox(SandboxResult(stdout="1", returncode=0)))
+    v = select_verdict("# checker", "tokens", StubSandbox(SandboxResult(stdout="1", returncode=0)))
     assert isinstance(v, CheckerVerdict)
 
 
 def test_select_verdict_unknown_comparison_raises():
     with pytest.raises(ValueError):
-        select_verdict(None, "bogus", _StubSandbox(SandboxResult()))
+        select_verdict(None, "bogus", StubSandbox(SandboxResult()))
 
 
 def test_a_runtime_error_excerpt_ends_with_the_exception_line():
@@ -371,7 +359,7 @@ def test_a_runtime_error_excerpt_ends_with_the_exception_line():
         "Traceback (most recent call last):\n" + frames + "AttributeError: module 'math' has no attribute 'gamma2'"
     )
     assert len(stderr) > 2 * _STDERR_EXCERPT_CHARS
-    crash = _StubSandbox(SandboxResult(stdout="", stderr=stderr, returncode=1))
+    crash = StubSandbox(SandboxResult(stdout="", stderr=stderr, returncode=1))
     grade = run_solution_against_tests("code", [{"input": "1", "output": "1"}], sandbox=crash)
     assert "AttributeError: module 'math' has no attribute 'gamma2'" in grade.details
     assert "Traceback (most recent call last)" not in grade.details

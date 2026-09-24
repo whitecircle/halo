@@ -85,9 +85,10 @@ python scripts/environments/inference/regrade_trajectories.py \
 
 It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection`, and
 replays every recorded `submit_solution`, up to that episode's own budget, through `grade_solution`
-under the meta line's `env_grading` contract and `eval_protocol`. Grading stops at the first failing
-test and `max_grading_seconds` does not apply. Reports `s@1` / `s@2` and the protocol per file; keep
-`--workers` at or below the core count.
+under the meta line's `env_grading` contract. The meta's `eval_protocol` only rebuilds the
+environment, whose `max_submissions` is the budget of an episode that stamped none. Grading stops at
+the first failing test and `max_grading_seconds` does not apply. Reports `s@1` / `s@2` and the
+protocol per file; keep `--workers` at or below the core count.
 
 Only `run_code_contests.py` stamps the meta a re-grade needs (`env_type`, `adapter`, `dataset`,
 `model`, `language`); a `run_env.py` dump is refused.

@@ -213,13 +213,14 @@ python scripts/environments/inference/run_code_contests.py --adapter codeforces 
     --num_examples 100 --num_samples 4 --reasoning_effort high
 ```
 
-It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a
-benchmark's mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation));
-at the default `--success_threshold` a problem counts solved only when every test in the pool passes. The threshold reads the
-episode's total reward, so under
-`--training_config` the recipe's shaping enters it: a solved episode charged `tool_error_penalty`
-(every scratchpad call under `leaderboard` is refused) or `length_cutoff_penalty` can land below it.
-The re-grader's `s@1` counts solves directly.
+It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a benchmark's
+mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation)).
+At the default `--success_threshold` a problem counts solved when every test in the pool passes. The
+threshold reads the episode's total reward, so under `--training_config` the recipe's shaping moves
+it both ways: `submission_reward` or `execution_progress_reward` can lift a partial solve over it,
+and `tool_error_penalty` (every scratchpad call under `leaderboard` is refused) or
+`length_cutoff_penalty` can sink a solve below it. The re-grader's `s@1` counts all-pass solves
+directly.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
 level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window
@@ -246,9 +247,9 @@ python scripts/environments/inference/run_code_contests.py --adapter livecodeben
 - `--start_date` / `--end_date` (`YYYY-MM-DD`) are both inclusive and compare the row's `contest_date` by calendar day; either may stay open.
 - `--platform` takes the platforms this adapter grades, as the dataset spells them: `atcoder`, `codeforces`. LeetCode rows are functional, which the stdin/stdout environment cannot grade, so `leetcode` is refused.
 - Rows come newest release file first, each file in its stored order, which is not newest-first (`test6.jsonl` opens on its 2025-01-04 contests). `--num_examples` (default 50) takes the first problems of the window in that order, not its newest; `0` scores the whole window.
-- Any other date spelling, a start after the end, a platform outside that list, or a window on an adapter with no contest date exits before a row is read. A row without a parsable `contest_date` raises under a window.
+- Any other date spelling, a start after the end, a platform outside that list, or a window or platform filter on an adapter that declares none exits before a row is read. A row without a parsable `contest_date` raises under a window.
 
-The selection is recorded in the trajectory meta, and the re-grader rebuilds the same problems from it.
+The selection is recorded in the trajectory meta ([re-grading](evaluation.md#re-grading-recorded-trajectories)).
 Only `livecodebench` declares a contest date and platform (`contest_date`, `platform_field` and
 `platforms` on its `CodeDatasetAdapter`).
 
