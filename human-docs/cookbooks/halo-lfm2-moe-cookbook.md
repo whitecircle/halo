@@ -107,8 +107,6 @@ per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
 gradient_checkpointing: true
-gradient_checkpointing_kwargs:
-  use_reentrant: false
 
 optim: adamw_torch_fused
 learning_rate: 5.0e-06

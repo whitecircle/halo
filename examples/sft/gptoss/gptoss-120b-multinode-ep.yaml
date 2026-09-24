@@ -8,8 +8,8 @@
 # Must be a BF16 (dequantized) checkpoint — EP cannot load the MXFP4-quantized openai/gpt-oss-120b.
 model_name_or_path: unsloth/gpt-oss-120b-BF16
 model_init_kwargs:
-  output_router_logits: true          # enable MoE router auxiliary loss
-  router_aux_loss_coef: 0.001
+  output_router_logits: true          # moe_balancing auto resolves to aux_loss, which sets this too
+  router_aux_loss_coef: 0.001         # the hub config ships 0.9, which would dominate the loss
 
 # --- Dataset ---
 dataset:

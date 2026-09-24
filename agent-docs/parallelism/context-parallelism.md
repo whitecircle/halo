@@ -53,9 +53,11 @@ loop) the wrapper returns the rank-uniform group value instead — the CE sum an
 all-reduced over the CP group — because HF's DP-scoped metric gather keeps a single CP sibling's
 copy as `eval_loss`, and a chunk-partial copy would bias it by that chunk's share of loss tokens.
 
-The MoE router aux loss takes **no** `cp_size` factor. HF's `load_balancing_loss_func` returns a
-per-chunk *mean*, so the FSDP average over CP ranks already reconstructs the global mean; a
-`cp_size` factor would over-weight router balancing `cp_size`× for aux-loss families under EP+CP.
+The MoE router aux loss takes **no** `cp_size` factor. Each rank's `load_balancing_loss_func` sees
+only its chunk's router logits, so the term is chunk-local — the load and the mean router
+probability of that chunk — and the FSDP average over CP ranks trains the mean of the per-chunk
+terms at `router_aux_loss_coef`. That is not the whole-sequence term (a product of means does not
+split across chunks); a `cp_size` factor would only scale it `cp_size`×.
 
 A model that returns an `aux_loss` while its config declares no `router_aux_loss_coef` **raises** — a
 stand-in weight would train a different objective than the same config without CP. Set the field

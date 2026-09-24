@@ -17,6 +17,7 @@ from src.models.loading.config_levels import (
     set_config_field,
     set_config_field_run_scoped,
 )
+from src.models.moe_aux_loss import install_router_aux_gradient
 from src.models.moe_balancing import (
     BIAS_UPDATE_MODES,
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
@@ -163,8 +164,10 @@ def apply_balancing_strategy(
                  ``output_router_logits=False``, create the bias state on supporting routers (raising
                  when nothing would accept it), then check the export contract via
                  :func:`_enforce_bias_export_contract`.
-    aux_loss:    force ``output_router_logits=True``; leave it off when the model has no usable aux-loss
-                 term or its EP wrappers sever the aux-loss path, where enabling it would crash.
+    aux_loss:    force ``output_router_logits=True`` and route the aux-loss router gradient through
+                 reentrant-checkpointed layers (:func:`~src.models.moe_aux_loss.install_router_aux_gradient`);
+                 leave the flag off when the model has no usable aux-loss term or its EP wrappers sever
+                 the aux-loss path, where enabling it would crash.
     none:        leave both untouched.
 
     Under ``policy_gradient_loss`` (GRPO) the loss never adds the router aux loss, so ``aux_loss`` is
@@ -314,3 +317,11 @@ def apply_balancing_strategy(
                 "materialize the router-logit plane and inflate its eval loss."
             )
             set_config_field_run_scoped(cfg, "output_router_logits", True)
+        # MoE gradient checkpointing is reentrant, whose no_grad first pass would leave every
+        # checkpointed layer's aux term without a router gradient.
+        if not install_router_aux_gradient(model):
+            logger.warning(
+                f"moe_balancing=aux_loss: {type(model).__name__} declares no transformers "
+                f"router_logits capture, so under gradient checkpointing a checkpointed layer's "
+                f"router aux loss reaches the logged loss but adds no router gradient."
+            )

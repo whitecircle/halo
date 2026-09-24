@@ -329,6 +329,12 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_ep_gc_bias_balancing.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=900
     ),
+    "parallelism/ep/test_ep_gc_router_aux_loss.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss", "qwen3"),
+        timeout=600,
+        args_matrix=("--family gpt_oss", "--family qwen3_moe"),
+    ),
     "parallelism/ep/test_grouped_mm_b300.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "parallelism/ep/test_zaya_ep.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "zaya"), timeout=1500

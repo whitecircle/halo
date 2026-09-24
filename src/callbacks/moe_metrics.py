@@ -10,7 +10,6 @@ into the training loss.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from functools import partial
 
 import torch
@@ -25,17 +24,12 @@ from src.models.loading.config_levels import (
     set_config_field_run_scoped,
 )
 from src.models.moe_balancing import (
-    has_discard_expert_slot,
+    DeclaredRouter,
+    declared_routers,
     router_logits_forced_off,
 )
 
 logger = logging.getLogger(__name__)
-
-# Key under which transformers' per-model-class ``_can_record_outputs`` declares its router, and the
-# tuple position it captures for a bare-class spec that names no index (its installer's own default
-# for every key but ``hidden_states``).
-_ROUTER_LOGITS_KEY = "router_logits"
-_BARE_SPEC_LOGITS_INDEX = 1
 
 
 def compute_moe_load_metrics(
@@ -125,63 +119,6 @@ def _selected_experts(router_output, logits_index: int) -> torch.Tensor | None:
     return None
 
 
-@dataclass(frozen=True)
-class _HookedRouter:
-    """One router module the callback counts, and how to read its forward output.
-
-    ``logits_index`` is the tuple position transformers' own recorder captures as ``router_logits``.
-    ``folds_discard_slot`` marks a router whose indices map skipped tokens onto a real expert id, so
-    only its logits, which keep the trailing discard column, express the routing.
-    """
-
-    name: str
-    module: torch.nn.Module
-    logits_index: int
-    folds_discard_slot: bool
-
-
-def _router_logits_recorders(model) -> list[tuple]:
-    """Every ``router_logits`` capture spec declared anywhere in the module tree, de-duplicated.
-
-    ``_can_record_outputs`` is transformers' own registry of which module produces ``router_logits``,
-    so it also names the routers to hook. The walk and de-duplication are for composite models, which
-    declare it on the sub-model owning the routers and repeat it on the causal-LM wrapper.
-    """
-    specs: dict[tuple, None] = {}
-    for module in model.modules():
-        entry = (getattr(module, "_can_record_outputs", None) or {}).get(_ROUTER_LOGITS_KEY)
-        if entry is None:
-            continue
-        for spec in entry if isinstance(entry, (list, tuple)) else (entry,):
-            target_class = getattr(spec, "target_class", spec if isinstance(spec, type) else None)
-            class_name = getattr(spec, "class_name", spec if isinstance(spec, str) else None)
-            index = getattr(spec, "index", _BARE_SPEC_LOGITS_INDEX)
-            specs[(target_class, class_name, getattr(spec, "layer_name", None), index)] = None
-    return list(specs)
-
-
-def _hooked_routers(model) -> list[_HookedRouter]:
-    """The declared router modules in module-tree order, which is decoder-layer order.
-
-    Matching mirrors transformers' own installer (target class, else a class-name suffix, refined by
-    ``layer_name``), so the hooks land on exactly the modules an ``output_router_logits`` capture would.
-    """
-    specs = _router_logits_recorders(model)
-    routers: list[_HookedRouter] = []
-    for name, module in model.named_modules():
-        for target_class, class_name, layer_name, index in specs:
-            if target_class is not None:
-                if not isinstance(module, target_class):
-                    continue
-            elif class_name is None or not name.endswith(class_name):
-                continue
-            if layer_name is not None and f".{layer_name.strip('.')}." not in f"{name}.":
-                continue
-            routers.append(_HookedRouter(name, module, index, has_discard_expert_slot(module)))
-            break
-    return routers
-
-
 class MoELoadMetricsCallback(TrainerCallback):
     """Base for the callbacks that derive ``moe/*`` from per-expert load counters.
 
@@ -243,7 +180,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         self._warned_logits_only: set = set()
         self._warned_empty = False
 
-    def _router_hook(self, position: int, router: _HookedRouter, module, inputs, output):
+    def _router_hook(self, position: int, router: DeclaredRouter, module, inputs, output):
         """Count what this router selected; re-rank its logits only if it returns no selection.
 
         Gradient checkpointing re-runs the router in the recompute pass; every metric is a per-layer
@@ -324,7 +261,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         # Without this, a second train() on the same callback would stack another hook per router
         # and double every count.
         self._remove_hooks()
-        routers = _hooked_routers(model)
+        routers = declared_routers(model)
         if routers:
             self._counters = [None] * len(routers)
             self._hook_handles = [
