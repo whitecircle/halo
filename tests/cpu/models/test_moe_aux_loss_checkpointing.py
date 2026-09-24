@@ -157,8 +157,12 @@ def test_reentrant_checkpoint_trains_routers_like_no_checkpoint(family, padded):
     _checkpoint(unrouted)
     dropped = _step(unrouted, batches)[0]
     _assert_matches_native(got, native, dropped)
-    # The logged loss keeps the coefficient-weighted aux term, and the logged aux value is unchanged.
+    # The coefficient is never rewritten, so the logged loss keeps the coefficient-weighted aux term
+    # and the export carries the configured value.
     assert loss == pytest.approx(native_loss, rel=1e-6) and aux == pytest.approx(native_aux, rel=1e-6)
+    with config_export_ready(model.config):
+        exported = model.config.get_text_config().to_dict()
+    assert exported["router_aux_loss_coef"] == COEF and model.router_aux_loss_coef == COEF
 
 
 @pytest.mark.parametrize("family", ["qwen3_moe", "gpt_oss"])
@@ -219,15 +223,6 @@ def test_ep_wrapper_checkpoint_replay(family):
     unrouted = _build(family, balanced=False, ep=True)
     _checkpoint(unrouted, ep=True)
     _assert_matches_native(_step(model, batches)[0], native, _step(unrouted, batches)[0])
-
-
-def test_the_coefficient_is_never_rewritten():
-    """The run keeps the hub coefficient on the config and on the head, and exports it unchanged."""
-    model = _build("qwen3_moe", balanced=True)
-    assert model.config.router_aux_loss_coef == COEF and model.router_aux_loss_coef == COEF
-    with config_export_ready(model.config):
-        exported = model.config.to_dict()
-    assert exported["router_aux_loss_coef"] == COEF
 
 
 def test_cp_wrapper_resolves_and_routes_through_its_inner_model(tmp_path):

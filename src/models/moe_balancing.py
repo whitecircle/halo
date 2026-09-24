@@ -531,9 +531,9 @@ def _router_logits_recorders(model) -> list[tuple]:
     """
     specs: dict[tuple, None] = {}
     for module in model.modules():
-        entry = (getattr(module, "_can_record_outputs", None) or {}).get(ROUTER_LOGITS_KEY)
-        if entry is None:
+        if not declares_router_logits(module):
             continue
+        entry = module._can_record_outputs[ROUTER_LOGITS_KEY]
         for spec in entry if isinstance(entry, (list, tuple)) else (entry,):
             target_class = getattr(spec, "target_class", spec if isinstance(spec, type) else None)
             class_name = getattr(spec, "class_name", spec if isinstance(spec, str) else None)
