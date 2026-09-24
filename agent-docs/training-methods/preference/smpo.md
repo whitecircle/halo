@@ -57,6 +57,8 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 
 `padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` included. It is also incompatible with CP, VLM runs and PP — the shipped PP gates additionally reject PEFT, a non-null clip percentile and a `label_pad_token_id` other than `-100`.
 
+Each row of the flattened batch stays its own document: attention isolates it through `position_ids`, and the LFM-2 and GatedDeltaNet (Qwen3.5/3.6, Qwen3-Next) conv / linear-attention mixers through the segment markers the SFT collators emit. A GatedDeltaNet model is refused without the `causal_conv1d` / `fla` kernels that read them — see [Document isolation under packing](../../data/collators.md#document-isolation-under-packing).
+
 ## Launch
 
 ```bash
@@ -82,7 +84,7 @@ torchrun --nproc_per_node=2 scripts/training/preference/smpo.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_smpo_*.py` (FSDP2, EP, CP, TP, VLM, padding-free, text-on-VLM, TP resume), plus `tests/gpu/parallelism/cp/test_cp_smpo_logprobs.py`.
+Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_smpo_*.py` (FSDP2, EP, CP, TP, VLM, padding-free and its per-document isolation, text-on-VLM, TP resume), plus `tests/gpu/parallelism/cp/test_cp_smpo_logprobs.py`.
 
 ## What to watch
 

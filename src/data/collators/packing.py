@@ -27,6 +27,7 @@ from src.data.spans import (
     tokenize_response_template,
     warn_if_pad_equals_eos,
 )
+from src.models.segment_markers import SegmentMarkers, segment_marker_kwargs
 
 # transformers turns every position-0 reset into a varlen segment boundary, and the FA4 backward
 # pays a fixed per-segment cost, so an unchunked pad tail costs one segment per pad token. Laying
@@ -217,18 +218,12 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
                 batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
                 if self.pad_to_multiple_of:
                     batch = self._pad_flattened_tail(batch)
-            if self.return_seq_idx:
-                # Segment ids for the conv/linear-attention mixers (LFM2 ShortConv, GatedDeltaNet
-                # conv); attention isolation alone leaves those mixers crossing document boundaries.
-                batch["seq_idx"] = ((batch["position_ids"] == 0).cumsum(dim=1) - 1).to(torch.int32)
-            if self.return_flash_attn_kwargs and self.flatten_to_single_row:
-                # GatedDeltaNet's chunked delta rule reads ``cu_seq_lens_q`` and nothing model-side
-                # derives it. Only defined on the flattened [1, total] row — PP has no convention.
-                positions = batch["position_ids"][0]
-                starts = (positions == 0).nonzero(as_tuple=True)[0]
-                cu_seq_lens = torch.cat([starts, torch.tensor([positions.numel()])]).to(torch.int32)
-                batch["cu_seq_lens_q"] = batch["cu_seq_lens_k"] = cu_seq_lens
-                batch["max_length_q"] = batch["max_length_k"] = int(cu_seq_lens.diff().max())
+            # The varlen set is only defined on the flattened [1, total] row — PP keeps its rows.
+            markers = SegmentMarkers(
+                seq_idx=self.return_seq_idx,
+                cu_seq_lens=self.return_flash_attn_kwargs and self.flatten_to_single_row,
+            )
+            batch.update(segment_marker_kwargs(batch["position_ids"], markers))
 
         return batch
 

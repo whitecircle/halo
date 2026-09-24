@@ -19,8 +19,9 @@ import torch
 from accelerate import PartialState
 from transformers.models.qwen3_next import Qwen3NextConfig
 
-from src.data.collators import factory
-from src.data.collators.factory import GDN_SEGMENT_AWARE_BACKENDS, select_data_collator
+from src.data.collators.factory import select_data_collator
+from src.models import segment_markers
+from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS
 
 PartialState()  # the factory logs through accelerate's logger, which needs the state initialized
 
@@ -54,7 +55,7 @@ def _backends(monkeypatch, missing: tuple[str, ...] = ()) -> None:
     without them — a bare pip install, a slim CI image, a CPU box — reaches the factory.
     """
     patched = tuple((name, (lambda ok=(name not in missing): ok)) for name, _ in GDN_SEGMENT_AWARE_BACKENDS)
-    monkeypatch.setattr(factory, "GDN_SEGMENT_AWARE_BACKENDS", patched)
+    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", patched)
 
 
 def test_factory_emits_segment_kwargs_for_gdn_families(monkeypatch):
