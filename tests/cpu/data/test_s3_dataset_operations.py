@@ -779,11 +779,11 @@ def test_cli_delete_refuses_a_prefix_without_recursive():
     """A non-recursive delete aimed at a PREFIX must refuse, not report success having done nothing.
 
     S3's DeleteObject is idempotent: against a key that is only a prefix it returns 204, so
-    ``delete()`` reports True and the CLI would print "Deleted" while the data is still there.
+    ``delete()`` reports True and the CLI would print "Deleted" while the data is still there. The
+    refusal exits non-zero before any delete call.
     """
-    mock_delete = _run_cli(["delete", "my_folder", "--yes"], exists=True, object_exists=False)
-
-    mock_delete.assert_not_called()
+    with pytest.raises(SystemExit, match="is a prefix, not an object"):
+        _run_cli(["delete", "my_folder", "--yes"], exists=True, object_exists=False)
 
 
 def test_cli_delete_reports_a_missing_key():

@@ -11,10 +11,10 @@ Usage:
 
 import argparse
 import logging
-import sys
 
 from src.data.sources import dataset_cache, s3_client
 from src.data.sources.s3_client import DEFAULT_BUCKET, S3Client
+from src.log import configure_cli_logging
 
 
 def _cli_push(args, client: S3Client):
@@ -70,8 +70,7 @@ def _cli_delete(args, client: S3Client):
         print(f"✗ Nothing to delete at {s3_uri}")
         return
     if not args.recursive and not client.object_exists(args.s3_key, args.subfolder):
-        print(f"✗ {s3_uri} is a prefix, not an object — pass --recursive to delete everything under it.")
-        return
+        raise SystemExit(f"✗ {s3_uri} is a prefix, not an object — pass --recursive to delete everything under it.")
 
     if not args.yes:
         target = f"everything under {s3_uri}/" if args.recursive else s3_uri
@@ -89,9 +88,10 @@ def _cli_delete(args, client: S3Client):
         print(f"✓ Deleted {s3_uri}")
     elif args.recursive:
         # exists() passed above, so the key resolves to a single object with nothing beneath it.
-        print(f"✗ Nothing under {s3_uri}/ — that key is a single object; drop --recursive to delete it.")
+        raise SystemExit(f"✗ Nothing under {s3_uri}/ — that key is a single object; drop --recursive to delete it.")
     else:
-        print(f"✗ Failed to delete {s3_uri}")
+        # The client logged the S3 error.
+        raise SystemExit(f"✗ Failed to delete {s3_uri}")
 
 
 def _cli_exists(args, client: S3Client):
@@ -173,12 +173,11 @@ Examples:
     args = parser.parse_args()
 
     # The CLI is a process entry point, so it configures the root handler; imported as a library this
-    # module only emits to its own logger. ``force`` because importing ``src`` already installed a
-    # handler, against which a plain basicConfig is a no-op.
-    level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(stream=sys.stderr, level=level, force=True)
+    # module only emits to its own logger.
+    configure_cli_logging(verbose=args.verbose)
     # Undo the library modules' INFO pins so ``-v`` widens the S3 code that emits the transfer
     # records, not only its dependencies.
+    level = logging.DEBUG if args.verbose else logging.INFO
     for module_logger in (s3_client.logger, dataset_cache.logger):
         module_logger.setLevel(level)
 
