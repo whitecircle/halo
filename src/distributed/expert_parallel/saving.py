@@ -31,6 +31,7 @@ from src.checkpoint.format import (
     save_dtype_caster,
     write_merged_index,
 )
+from src.checkpoint.model_card import tag_model_card
 from src.checkpoint.shard_writer import StageShardWriter
 from src.distributed.checkpoint.write import exchange_shard_index, resolve_retained
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
@@ -326,6 +327,7 @@ def save_ep_lora_adapters(model: torch.nn.Module, output_dir: str, *, adapter_co
                     json.dump(adapter_config, f, indent=2)
             if tokenizer is not None:
                 tokenizer.save_pretrained(output_dir)
+            tag_model_card(output_dir)
             logger.info(f"✓ EP LoRA adapters saved to {output_dir} ({len(state)} tensors)")
 
 

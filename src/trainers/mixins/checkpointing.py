@@ -28,6 +28,7 @@ from src.checkpoint.format import (
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
 )
+from src.checkpoint.model_card import with_halo_tags
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.loader import CheckpointLoader
@@ -426,6 +427,14 @@ class CheckpointingMixin:
         fails if an override forgets.
         """
         self._model_save_collectives_done = True
+
+    def create_model_card(self, *args, tags: str | list[str] | None = None, **kwargs):
+        """The base trainer's card with the Halo Hub tags beside its own.
+
+        The card this adds them to is TRL's ``output_dir/README.md``, written before every checkpoint
+        from its ``_tag_names`` alone; ``push_to_hub`` already merges the model's ``model_tags``.
+        """
+        return super().create_model_card(*args, tags=with_halo_tags(tags), **kwargs)
 
     def _checkpoint_context(self) -> CheckpointContext:
         """Snapshot the trainer state a checkpoint saver needs.

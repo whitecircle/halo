@@ -29,6 +29,7 @@ from peft import LoraConfig, get_peft_model
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import GptOssConfig, GptOssForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 from trl import ModelConfig
+from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
@@ -36,13 +37,17 @@ from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.training.embedding import build_sentence_transformer
 from src.checkpoint import model_card
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
+from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, EXPERT_LORA_PEFT_TYPES
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
-from src.checkpoint.format import copy_checkpoint_aux_files
+from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, copy_checkpoint_aux_files
 from src.checkpoint.model_card import tag_model_card
 from src.configs.embedding_config import EmbeddingConfig
+from src.distributed.checkpoint.context import CheckpointContext
+from src.distributed.checkpoint.peft import PeftAdapterSaver
+from src.distributed.expert_parallel.saving import save_ep_lora_adapters
 from src.models.loading.model_preparation import finalize_run_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
+from src.trainers.sft import DistributedSFTTrainer
 
 PartialState()  # the tools' loads log through accelerate's rank-aware logger
 
@@ -409,6 +414,53 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     assert card.data.library_name == "sentence-transformers"
     assert HALO_TAG in card.data.tags
     assert "sentence-transformers" in card.data.tags
+
+
+def test_a_hand_written_adapter_save_carries_the_tag(tmp_path):
+    """The CP / DTensor / expert-LoRA branches write the adapter files themselves, so no PEFT card."""
+    peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
+    ctx = CheckpointContext(
+        model=peft_model,
+        parallelism_config=None,
+        is_pp_mode=False,
+        is_cp_mode=True,
+        is_tp_mode=False,
+        is_ep_tp_mode=False,
+        has_ep_layers=False,
+        fsdp_wrapped=False,
+        accelerate_manages_fsdp=False,
+        is_save_rank=True,
+        max_shard_size="5GB",
+        save_sharded_ep=False,
+        has_expert_lora=False,
+        merge_expert_lora_on_save=False,
+        cp_wrapper=None,
+        tokenizer=None,
+    )
+    assert PeftAdapterSaver().save(ctx, peft_model, str(tmp_path))
+    assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the hand-written branch wrote the adapter"
+    assert metadata_load(tmp_path / CARD) == {"library_name": "peft", "tags": [HALO_TAG]}
+
+
+def test_the_expert_adapter_writer_tags_its_output(tmp_path):
+    save_ep_lora_adapters(_tiny_qwen3(), str(tmp_path), adapter_config={"peft_type": EXPERT_LORA_PEFT_TYPE})
+    assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the writer ran"
+    assert metadata_load(tmp_path / CARD) == {"tags": [HALO_TAG]}
+
+
+def test_the_trainer_card_written_at_each_checkpoint_carries_the_tag(tmp_path, monkeypatch):
+    """TRL's ``_save_checkpoint`` writes ``output_dir/README.md`` from ``_tag_names`` alone."""
+    # TRL adds hf_jobs under a Jobs run and a trackio:<url> tag under a live Trackio space.
+    monkeypatch.delenv("JOB_ID", raising=False)
+    monkeypatch.setattr(trl_base_trainer, "get_trackio_space_url", lambda: None)
+    trainer = object.__new__(DistributedSFTTrainer)
+    trainer.args = SimpleNamespace(output_dir=str(tmp_path), process_index=0)
+    trainer.model = _tiny_qwen3()
+    trainer.hub_model_id = None
+
+    trainer.create_model_card(model_name="run")
+    # TRL collects the tags through a set, so only membership is stable.
+    assert sorted(_card(tmp_path).data.tags) == sorted(["generated_from_trainer", "trl", "sft", HALO_TAG])
 
 
 if __name__ == "__main__":

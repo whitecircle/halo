@@ -37,6 +37,7 @@ _OWNERSHIP = {
         "_restore_router_balancing_biases",
         "_rotate_checkpoints_after_sidecars",
         "_save_checkpoint",
+        "create_model_card",
         "save_model",
     ),
     GradientSyncMixin: (
@@ -61,7 +62,13 @@ _OWNERSHIP = {
 }
 
 # The checkpoint methods that call ``super()`` — the HF Trainer implementations they extend.
-_SUPER_DELEGATED = ("_load_from_checkpoint", "_load_optimizer_and_scheduler", "_save_checkpoint", "save_model")
+_SUPER_DELEGATED = (
+    "_load_from_checkpoint",
+    "_load_optimizer_and_scheduler",
+    "_save_checkpoint",
+    "create_model_card",
+    "save_model",
+)
 
 
 class _BaseTrainer:
@@ -77,6 +84,9 @@ class _BaseTrainer:
         return "base"
 
     def save_model(self, output_dir=None, _internal_call=False):
+        return "base"
+
+    def create_model_card(self, tags=None, **kwargs):
         return "base"
 
 

@@ -220,15 +220,15 @@ the write, naming the file to repair.
   single-GPU / DDP fallback and the export tools' `save_full_checkpoint` end with.
 - **Exports built from a source directory** tag in `copy_checkpoint_aux_files`, which also covers the
   tools that carry `config.json` across as-is.
-- **PEFT's own `save_pretrained`** (the single-process / DDP adapter save) builds its card from the
-  base model's `model_tags`, which `finalize_run_model` stamps.
+- **Adapter saves** tag in `PeftAdapterSaver` and the EP expert-adapter writer, whichever branch
+  wrote the files.
+- **TRL's per-checkpoint card** (`output_dir/README.md`, which TRL builds from its `_tag_names`
+  alone) gets the tag from the checkpointing mixin's `create_model_card`.
 - **Embedding runs** carry the tag on the SentenceTransformer's `model_card_data`, the source of the
   card sentence-transformers writes.
 
 A new writer ends in `finalize_exported_config` or `copy_checkpoint_aux_files`, or calls
-`tag_model_card` itself, as `reset_sinks` and an unmerged `convert_to_bf16 --peft` do. Adapter
-directories written by hand (FSDP2, CP and EP adapters) carry no card, and the `output_dir/README.md`
-TRL writes at each checkpoint lists TRL's tags only.
+`tag_model_card` itself, as `reset_sinks` and an unmerged `convert_to_bf16 --peft` do.
 
 ## Serving on vLLM / SGLang
 
