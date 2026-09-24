@@ -128,8 +128,15 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
 
     def _compute_loss(self, model, inputs):
         loss = super()._compute_loss(model, inputs)
-        if self.sdpg_beta_base == 0.0 or "teacher_prompt_ids" not in inputs:
+        if self.sdpg_beta_base == 0.0:
             return loss
+        if "teacher_prompt_ids" not in inputs:
+            raise RuntimeError(
+                f"sdpg_beta_base={self.sdpg_beta_base} but the batch carries no teacher_prompt_ids, so "
+                f"the OPD term would be skipped and the step would train plain GRPO. "
+                f"_generate_and_score_completions builds them; an override of it, or of the batch "
+                f"buffering, must keep the teacher_prompt_* keys."
+            )
 
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
         comp_len = completion_ids.size(1)

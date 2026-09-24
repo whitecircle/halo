@@ -93,6 +93,9 @@ _FSDP_SHAPING_KNOBS = ("use_hsdp", "fsdp_reshard_after_forward", "fsdp_reshard_a
 # ParallelismConfig knobs only the mixin-managed (torchrun) FSDP2 wrap implements.
 _ACCELERATE_UNSUPPORTED_KNOBS = (*_FSDP_SHAPING_KNOBS, "fp32_grad_reduce")
 
+# Where TRL keeps its fused Liger loss: preference trainers (DPO/KTO), GRPO, and the name later TRL uses.
+_TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss", "liger_loss")
+
 # Peak-allocated fraction of device memory above which the post-first-step margin warning fires.
 # A rank this close to full after the first optimizer step OOMs on a later backward.
 _MEMORY_MARGIN_WARN_RATIO = 0.92
@@ -566,13 +569,7 @@ class DistributedTrainerMixin(
                 self.model, merge_expert_lora_on_save=self.parallelism_config.merge_expert_lora_on_save
             )
 
-        # Liger's fused loss matmuls the FSDP2-sharded lm_head.weight; the instance flag TRL caches must go too.
-        has_liger_loss = hasattr(self, "liger_loss_fn") or getattr(self, "liger_grpo_loss", None) is not None
-        if self._fsdp_wrapped and getattr(self, "use_liger_kernel", False) and has_liger_loss:
-            self.use_liger_kernel = False
-            self.args.use_liger_kernel = False
-            if is_global_main_process():
-                logger.info("  Disabled Liger fused loss (incompatible with FSDP2 DTensors)")
+        self._disable_trl_liger_loss_under_fsdp2()
 
         # TRL's SyncRefModelCallback zips policy/ref params with plain .data ops — crashes on a DTensor/EP policy.
         wrapped = self._fsdp_wrapped or self.parallelism_config.is_ep_mode or self.parallelism_config.is_tp_mode
@@ -591,6 +588,29 @@ class DistributedTrainerMixin(
 
         # Setup varies per rank (TP materialization, EP patching), so ranks re-align before the first step.
         barrier()
+
+    def _disable_trl_liger_loss_under_fsdp2(self) -> None:
+        """Turn off TRL's fused Liger loss once FSDP2 has sharded the model.
+
+        The loss matmuls ``lm_head.weight`` outside FSDP2's forward hooks, where it is a sharded
+        DTensor. TRL caches the flag on the trainer and builds the loss under a per-trainer name, so
+        the flag must go too, and a name this guard does not know (a TRL release that renamed it)
+        must fail rather than leave the loss running on a shard.
+        """
+        if not (self._fsdp_wrapped and getattr(self, "use_liger_kernel", False)):
+            return
+        if not any(getattr(self, attr, None) is not None for attr in _TRL_LIGER_LOSS_ATTRS):
+            raise RuntimeError(
+                f"use_liger_kernel is on under FSDP2 but none of TRL's known fused Liger loss "
+                f"attributes {_TRL_LIGER_LOSS_ATTRS} is set on {type(self).__name__}: the installed TRL "
+                f"builds that loss under another name, which this guard cannot disable, and it would "
+                f"matmul the FSDP2-sharded lm_head.weight. Set use_liger_kernel: false, or add the new "
+                f"attribute name to _TRL_LIGER_LOSS_ATTRS."
+            )
+        self.use_liger_kernel = False
+        self.args.use_liger_kernel = False
+        if is_global_main_process():
+            logger.info("  Disabled Liger fused loss (incompatible with FSDP2 DTensors)")
 
     def _cast_peft_params_to_compute_dtype(self):
         """Align trainable PEFT params (LoRA adapters + ``modules_to_save`` copies) to the surrounding
@@ -1520,9 +1540,8 @@ class DistributedTrainerMixin(
 
         When custom data distribution gives ranks unequal eval batch counts, the default eval loop's
         per-step gather_for_metrics deadlocks, so gather_function is swapped for the identity (each
-        rank scores its own shard). Gated on actually-unequal counts: for equal-batch DP the
-        identity swap would report rank-0's shard as the global metric, so the cross-rank gather
-        stays.
+        rank scores its own shard, and the logged metrics are rank 0's, which the swap warns about).
+        Gated on actually-unequal counts: for equal-batch DP the cross-rank gather stays.
         """
         if (
             self._needs_custom_accelerator()
@@ -1537,6 +1556,14 @@ class DistributedTrainerMixin(
                     "disables cross-rank padding, which that gather needs. Provide a sized, evenly "
                     "divisible eval dataset or set top_entropy_quantile: 1.0."
                 )
+            metric_key_prefix = kwargs.get("metric_key_prefix", args[2] if len(args) > 2 else "eval")
+            logger.warning(
+                f"Evaluation batch counts differ across ranks (or cannot be measured), so the "
+                f"cross-rank metric gather is replaced by the identity to avoid a deadlock: every "
+                f"'{metric_key_prefix}_*' metric this evaluation logs is rank 0's own shard, not the "
+                f"global value. An eval dataset that splits evenly across the data-parallel ranks "
+                f"restores global metrics."
+            )
             original_gather = self.gather_function
             self.gather_function = lambda x: x
             # evaluation_loop also pads logits/labels outside gather_function; identity is safe (own shard only).
@@ -1563,7 +1590,7 @@ class DistributedTrainerMixin(
         try:
             local_batches = len(self.get_eval_dataloader(eval_dataset))
             measurable = True
-        except (TypeError, AttributeError):
+        except TypeError:
             local_batches, measurable = 0, False
 
         # Agree measurability first: a rank that early-returns leaves peers at the reduces below.

@@ -277,9 +277,11 @@ Code loading via `AutoModelForCausalLM.from_pretrained()` instead — the GPU be
 `apply_liger_kernel_for_direct_loading()`, which applies the toolkit defaults then sets
 `use_liger_kernel = False`.
 
-Under FSDP2, TRL's fused Liger preference/GRPO loss (`liger_loss_fn`, `liger_grpo_loss`) is auto-disabled: it
-does `input @ weight.t()` against `model.lm_head.weight` outside FSDP2's forward hooks, where the weight is a
-sharded DTensor. Model-level kernels stay active.
+Under FSDP2, TRL's fused Liger preference/GRPO loss (`liger_loss_fn`, `liger_grpo_loss`, or `liger_loss` in
+later TRL releases) is auto-disabled: it does `input @ weight.t()` against `model.lm_head.weight` outside FSDP2's
+forward hooks, where the weight is a sharded DTensor. A trainer with TRL's `use_liger_kernel` on and none of
+those attributes set raises at construction rather than leave an unknown loss running. Model-level kernels
+stay active.
 
 ## GptOss
 

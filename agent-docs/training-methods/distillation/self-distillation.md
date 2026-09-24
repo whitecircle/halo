@@ -96,3 +96,4 @@ Failure signatures:
 - A student/teacher response-length mismatch warning — the two branches diverged, usually from truncation upstream.
 - Every row masked, loss flat — `assistant_message_template` does not match the rendered prefix.
 - The gold-answer column missing while `sdpg_beta_base > 0` — the run raises rather than distilling toward a teacher told the answer is nothing.
+- A batch with no `teacher_*` branch while `sdpg_beta_base != 0`, or a trainer built with `reference_kl_coef > 0` and no `reference_model` — both raise rather than dropping the term from the loss.

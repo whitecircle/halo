@@ -2,13 +2,15 @@
 
 Pure functions over a rank-local reward tensor: ``RepeatSampler`` keeps each prompt's completions
 together on one rank, so the baseline needs no cross-rank gather (except ``scale_rewards="batch"``,
-whose divisor must be identical on every rank).
+whose divisor must be identical on every rank, and the non-finite check, which every rank must agree
+on before any of them raises).
 """
 
 import torch
 from accelerate.utils import gather
 
 from src.args.mixins import AdvantageShaping
+from src.distributed.runtime import rank_consensus
 
 # Matches TRL, so env-, online- and offline-GRPO agree on near-degenerate groups.
 STD_EPS = 1e-4
@@ -103,8 +105,26 @@ def group_relative_advantages(
 
     if shaping is not None and shaping.mode in ("asymmetric", "neg_mask_hard"):
         advantages = _negative_side_surgery(advantages, num_generations, shaping, gate_rewards, rewards, valid_mask)
-    # A NaN advantage would propagate into the optimizer.
-    return torch.nan_to_num(advantages, nan=0.0, posinf=0.0, neginf=0.0)
+    _require_finite(rewards, advantages)
+    return advantages
+
+
+def _require_finite(rewards: torch.Tensor, advantages: torch.Tensor) -> None:
+    """Raise on every rank when any rank's rewards or advantages are non-finite.
+
+    Zeroing them would hide a broken reward, and under ``scale_rewards="batch"`` one bad reward
+    turns the shared std non-finite, so the whole step's advantages would be zeroed with it. The
+    verdict is agreed across ranks: a rank raising alone leaves its peers in the next collective.
+    """
+    if rank_consensus(bool(torch.isfinite(rewards).all() & torch.isfinite(advantages).all()))[0]:
+        return
+    bad_rewards = int((~torch.isfinite(rewards)).sum())
+    raise ValueError(
+        f"Non-finite GRPO advantages on at least one rank (this rank: {bad_rewards} non-finite of "
+        f"{rewards.numel()} rewards, {int((~torch.isfinite(advantages)).sum())} non-finite "
+        f"advantages). A reward function or environment returned NaN/Inf; fix it at the source "
+        f"rather than training on zeroed advantages."
+    )
 
 
 def _negative_side_surgery(
@@ -146,8 +166,6 @@ def degenerate_group_mask(
     placeholder's differing reward cannot let an all-alike group escape detection. A group with fewer
     than two valid members carries no intra-group comparison signal and counts as degenerate.
     """
-    if num_generations <= 1 or rewards.numel() % num_generations != 0:
-        return torch.zeros_like(rewards, dtype=torch.bool)
     grouped = _grouped(rewards, num_generations)
     if valid_mask is None:
         spread = grouped.max(dim=1).values - grouped.min(dim=1).values

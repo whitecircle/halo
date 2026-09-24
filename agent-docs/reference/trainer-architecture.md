@@ -320,6 +320,10 @@ per DP rank passes `1` / `0` instead, so accelerate places batches on the device
 away `(N-1)/N` of each slice; offline GRPO passes the same pair, its `MultiGroupSampler` having
 already sharded.
 
+When the eval dataloader yields a different number of batches per rank (or has no length),
+`evaluate()` replaces the per-step metric gather with the identity to avoid a deadlock, and warns:
+the eval metrics it logs are then rank 0's shard, not the global value.
+
 ## Training loop integration
 
 HuggingFace's `_inner_training_loop` calls `accelerator.prepare(model)`, which normally wraps in
