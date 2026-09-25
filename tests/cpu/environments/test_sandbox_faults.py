@@ -68,7 +68,7 @@ from src.rewards.scoring import Scorer, ScoreResult
 from src.rewards.spec import JudgeTerm
 from src.trainers.grpo.environmental import rollout_valid_mask
 from src.trainers.grpo.objective.advantages import group_relative_advantages
-from tests.common.code_contests import StubSandbox
+from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 from tests.common.utils import REPO_ROOT
 
 _TOOL_ERROR_PENALTY = 0.1
@@ -281,25 +281,6 @@ def test_the_repl_raises_each_fault_class_by_the_result():
     )
 
 
-class _Response:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self._payload
-
-
-class _Session:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def post(self, url, json=None, timeout=None):
-        return _Response(self._payload)
-
-
 def test_remote_failed_run_is_the_programs_verdict():
     """SandboxFusion answers ``Failed`` for any run that exited non-zero: that is a runtime error of
     the program, not the service's failure. A ``Failed`` body that names no failing step, and a
@@ -309,12 +290,17 @@ def test_remote_failed_run_is_the_programs_verdict():
         "message": "",
         "run_result": {"status": "Finished", "stdout": "", "stderr": "ZeroDivisionError", "return_code": 1},
     }
-    result = RemoteSandbox("http://sandbox:8080", session=_Session(payload)).run("1/0")
+    result = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload)).run("1/0")
     assert result.error is None and result.returncode == 1 and not result.ok
     assert format_sandbox_repl_output(result, timeout=5) == "Error: ZeroDivisionError"
     contradictory = {"status": "Failed", "run_result": {"status": "Finished", "stdout": "1", "return_code": 0}}
-    assert RemoteSandbox("http://sandbox:8080", session=_Session(contradictory)).run("print(1)").error == "Failed"
-    down = RemoteSandbox("http://sandbox:8080", session=_Session({"status": "SandboxError", "message": "oom"}))
+    assert (
+        RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(contradictory)).run("print(1)").error
+        == "Failed"
+    )
+    down = RemoteSandbox(
+        "http://sandbox:8080", session=RecordingSandboxSession({"status": "SandboxError", "message": "oom"})
+    )
     assert down.run("print(1)").error == "oom"
 
 
@@ -369,17 +355,11 @@ def test_a_lone_surrogate_in_submitted_code_is_graded_not_voided(backend):
 
 
 def test_a_remote_payload_carries_no_lone_surrogate():
-    sent = {}
-
-    class _Recording(_Session):
-        def post(self, url, json=None, timeout=None):
-            sent.update(json)
-            return super().post(url, json=json, timeout=timeout)
-
-    finished = {"status": "Success", "run_result": {"status": "Finished", "stdout": "", "return_code": 0}}
-    RemoteSandbox("http://sandbox:8080", session=_Recording(finished)).run(
+    service = RecordingSandboxSession()
+    RemoteSandbox("http://sandbox:8080", session=service).run(
         "print(1)  # \ud83d", stdin="a\ud83d", files={"h.py": "\ud83d"}
     )
+    sent = service.posts[-1].payload
     assert (sent["code"], sent["stdin"], sent["files"]["h.py"]) == ("print(1)  # ?", "a?", "?")
 
 
@@ -405,18 +385,11 @@ def test_a_null_test_input_reaches_a_checker_as_an_empty_input():
 @pytest.mark.parametrize("backend", ["local", "remote"])
 def test_a_session_path_no_backend_can_take_is_refused_as_an_argument(backend, path, reason):
     """A priced tool error on every backend, never a name the backend fails on (an infra error)."""
+    service = RecordingSandboxSession()
     if backend == "local":
         session = LocalSubprocessSandbox().open_session()
     else:
-        sent = {}
-
-        class _Recording(_Session):
-            def post(self, url, json=None, timeout=None):
-                sent.update(json)
-                return super().post(url, json=json, timeout=timeout)
-
-        finished = {"status": "Success", "run_result": {"status": "Finished", "stdout": "", "return_code": 0}}
-        session = RemoteSandbox("http://sandbox:8080", session=_Recording(finished)).open_session()
+        session = RemoteSandbox("http://sandbox:8080", session=service).open_session()
     with session:
         for operation in (lambda: session.write_file(path, "x"), lambda: session.read_file(path)):
             with pytest.raises(ValueError, match=reason):
@@ -424,7 +397,7 @@ def test_a_session_path_no_backend_can_take_is_refused_as_an_argument(backend, p
         session.write_file("ok.py", "x")
         assert session.run("print(1)").error is None
     if backend == "remote":
-        assert list(sent["files"]) == ["ok.py"], "no refused name reaches the service"
+        assert [list(post.payload["files"]) for post in service.posts] == [["ok.py"]], "no refused name is sent"
 
 
 def test_a_null_test_input_is_no_input_not_an_infra_error():
