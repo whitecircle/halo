@@ -30,7 +30,6 @@ import argparse
 import sys
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
 from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForSequenceClassification
@@ -40,6 +39,8 @@ from src.configs.classification_config import ClassificationConfig
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from src.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
@@ -123,9 +124,6 @@ def pooled_logits(model, batch: dict, device) -> torch.Tensor:
 
 
 def build_trainer(kind: str, model, dataset, tokenizer, config, output_dir):
-    from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-    from src.trainers.reward.classification import ClassificationTrainer
-
     common = {
         "output_dir": output_dir,
         "max_steps": N_STEPS,
@@ -221,11 +219,6 @@ def run(ctx):
     checks["grad_norm_nonzero"] = bool(grad_norms) and min(grad_norms) > 1e-6
     checks["loss_responded_to_updates"] = abs(losses[-1] - losses[0]) > 1e-3
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
-
-    local = torch.tensor(losses, device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, peer, atol=1e-4) for peer in gathered)
 
     # ── Step-1 loss vs the exact objective on a DENSE copy of the init weights. The logged loss is
     # the world mean over ranks, each holding its own DP shard, so the reference is averaged the

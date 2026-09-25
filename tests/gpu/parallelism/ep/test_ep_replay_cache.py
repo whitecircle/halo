@@ -19,6 +19,7 @@ checkpoint modes:
 Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_replay_cache.py
 """
 
+import math
 import sys
 
 import torch
@@ -90,13 +91,16 @@ def load_ep_model(gradient_checkpointing: bool | None):
 
 
 def worst_rel_err(test: dict, reference: dict) -> tuple[float, str, int]:
+    """Largest per-parameter relative error; a non-finite one (either side) reads as ``inf``."""
     worst, name, compared = 0.0, "", 0
     for key, ref in reference.items():
         if ref.norm() == 0:
             continue
         compared += 1
         err = float((test[key] - ref).norm() / ref.norm())
-        if err > worst:
+        if not math.isfinite(err):
+            worst, name = math.inf, key
+        elif err > worst:
             worst, name = err, key
     return worst, name, compared
 

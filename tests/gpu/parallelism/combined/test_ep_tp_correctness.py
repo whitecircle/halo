@@ -38,7 +38,7 @@ from transformers import AutoTokenizer
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import get_tp_mesh
-from tests.common.distributed import ensure_model_downloaded
+from tests.common.distributed import ensure_model_downloaded, world_spread
 from tests.common.ep_reference import (
     broadcast_reference,
     compare_grad,
@@ -142,16 +142,14 @@ def run(ctx):
     log_all(f"  EP+TP loss={loss.item():.6f}  |Δreference|={delta:.3e}")
     metrics["ep_tp_loss"] = loss.item()
     metrics["loss_abs_err"] = delta
-    # Decided below, once the corrupted control's shift is known: the absolute bound alone sits on
-    # the flip-noise boundary (measured 0.09-0.12 on one host across loaded vs quiet runs — NCCL
-    # reduction order shifts with topology state, and near-tied top-k picks flip with it).
+    # Decided below, once the corrupted control's shift is known: TP's reduction order moves with
+    # NCCL topology state and flips near-tied top-k picks with it, which can put the loss just past
+    # the absolute bound alone.
 
     # Every rank saw the same batch, so a spread means the gather/reduce desynced them.
-    gathered = [torch.zeros_like(loss.detach()) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, loss.detach())
-    spread = max(abs(g.item() - gathered[0].item()) for g in gathered)
+    spread = world_spread(loss.item())
     metrics["rank_loss_spread"] = spread
-    checks["losses_agree_across_ranks"] = spread < TOL.rank_loss_consistency_abs
+    checks["losses_agree_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
 
     # ── Router gradient vs the reference ─────────────────────────────────────────────────────
     loss.backward()
@@ -191,10 +189,9 @@ def run(ctx):
     checks["control_wrong_expert_breaks_grad_direction"] = control_cosine < TOL.grad_direction_cosine_min
 
     # Two-sided: inside the flip band, or marginally over it while WELL separated from the
-    # corrupted control — a real expert-identity/reduction bug lives in the control's regime
-    # (0.382 here, O(1) per the docstring), while reduction-order flip noise measured 0.09-0.12
-    # across host states on the same commit. The router-grad cosine check above independently
-    # pins the routing direction, so this cannot mask a structural bug.
+    # corrupted control, whose regime (O(1) per the docstring) is where a real expert-identity or
+    # reduction bug lands. The router-grad cosine check above independently pins the routing
+    # direction, so this cannot mask a structural bug.
     checks["loss_matches_reference"] = delta < LOSS_TOL or (delta < 2 * LOSS_TOL and delta < 0.5 * control_shift)
 
     metrics["peak_gb"] = gpu_peak_mem_gb()

@@ -46,8 +46,10 @@ from trl import SFTConfig
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
+from tests.common.weight_sync import RecordingSender
 
 EP_SIZE = 2
 SEQ_LEN = 64
@@ -59,23 +61,6 @@ N_LAYERS = TINY_GPTOSS_CONFIG["num_hidden_layers"]
 EXPERT_KEYS = ("experts.gate_up_proj", "experts.down_proj")
 # EP-internal attribute names that must never reach vLLM (they are what hung it at ep1).
 FORBIDDEN_NAME_SUBSTRINGS = ("gate_proj_gmm", "up_proj_gmm")
-
-
-class RecordingSender:
-    """Capture every (name, tensor) forwarded to vLLM — no NCCL, no server."""
-
-    def __init__(self):
-        self.params: list[tuple[str, torch.Tensor]] = []
-
-    def update_named_param(self, name: str, data: torch.Tensor) -> None:
-        self.params.append((name, data.detach().clone()))
-
-    def reset_prefix_cache(self) -> None:
-        pass
-
-    @property
-    def names(self) -> list[str]:
-        return [name for name, _ in self.params]
 
 
 def build_model() -> GptOssForCausalLM:
@@ -139,7 +124,7 @@ def local_expert_weights(model) -> dict[str, torch.Tensor]:
 def gather_on_all_ranks(model) -> RecordingSender:
     """``gather_and_send_weights`` is collective, so every rank runs it — and records, so the
     per-rank views can be compared."""
-    recorder = RecordingSender()
+    recorder = RecordingSender(keep_values=True)
     gather_and_send_weights(model, recorder)
     return recorder
 
@@ -150,8 +135,6 @@ def flat_signature(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
 
 @gpu_test_main(exact_world_size=2, prefix="ep2_weight_sync_values")
 def run(ctx):
-    from src.trainers.sft import DistributedSFTTrainer
-
     checks, metrics = {}, {}
     config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model().to(ctx.device)
@@ -177,7 +160,7 @@ def run(ctx):
 
     # ── Gather at init and compare against the dense reference.
     recorder = gather_on_all_ranks(model)
-    gathered = {name: data.float().cpu() for name, data in recorder.params if name.endswith(EXPERT_KEYS)}
+    gathered = {p.name: p.value.float().cpu() for p in recorder.params if p.name.endswith(EXPERT_KEYS)}
     checks["gathered_all_expert_tensors"] = len(gathered) == N_LAYERS * len(EXPERT_KEYS)
     checks["gathered_experts_are_global_count"] = bool(gathered) and all(
         tensor.shape[0] == NUM_EXPERTS for tensor in gathered.values()
@@ -230,15 +213,13 @@ def run(ctx):
     trainer.train()
 
     trained_recorder = gather_on_all_ranks(trainer.model)
-    trained_gathered = {
-        name: data.float().cpu() for name, data in trained_recorder.params if name.endswith(EXPERT_KEYS)
-    }
+    trained_gathered = {p.name: p.value.float().cpu() for p in trained_recorder.params if p.name.endswith(EXPERT_KEYS)}
     checks["trained_gather_differs_from_init"] = any(
         not torch.equal(tensor, dense_reference[name]) for name, tensor in trained_gathered.items()
     )
     # Only meaningful AFTER fully_shard: before the trainer exists nothing can be a DTensor yet, so
     # asserting it on the init gather could never fail. vLLM's loader takes raw tensors.
-    checks["nothing_forwarded_as_dtensor"] = not any(isinstance(data, DTensor) for _, data in trained_recorder.params)
+    checks["nothing_forwarded_as_dtensor"] = not any(p.is_dtensor for p in trained_recorder.params)
 
     # The order contract: this rank's own shard must sit at [rank * local, (rank + 1) * local).
     shards = local_expert_weights(trainer.model)

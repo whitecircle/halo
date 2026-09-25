@@ -37,7 +37,6 @@ Requirements:
 """
 
 import torch
-from torch.distributed.tensor import DTensor
 
 from src.distributed.expert_parallel.base_layer import has_grouped_mm
 from src.distributed.loading.model_loading import load_distributed_model
@@ -47,28 +46,12 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, log
+from tests.common.weight_sync import RecordingSender
 
 MODEL_NAME = GPT_OSS_20B
 
 # EP-internal attribute names that must NEVER reach vLLM (the gather must reshape them away).
 FORBIDDEN_NAME_SUBSTRINGS = ("gate_proj_gmm", "up_proj_gmm")
-
-
-class RecordingSender:
-    """Capture every (name, shape, is_dtensor) forwarded to vLLM — no NCCL, no server."""
-
-    def __init__(self):
-        self.params: list[tuple[str, tuple, bool]] = []
-
-    def update_named_param(self, name: str, data: torch.Tensor) -> None:
-        self.params.append((name, tuple(data.shape), isinstance(data, DTensor)))
-
-    def reset_prefix_cache(self) -> None:
-        pass
-
-    @property
-    def names(self) -> list[str]:
-        return [n for n, _, _ in self.params]
 
 
 def run(ctx):
@@ -97,8 +80,8 @@ def run(ctx):
     checks = {}
     if ctx.rank == 0:
         names = recorder.names
-        gate_up = [(n, s, d) for n, s, d in recorder.params if n.endswith("experts.gate_up_proj")]
-        down = [(n, s, d) for n, s, d in recorder.params if n.endswith("experts.down_proj")]
+        gate_up = [param for param in recorder.params if param.name.endswith("experts.gate_up_proj")]
+        down = [param for param in recorder.params if param.name.endswith("experts.down_proj")]
         forbidden = [n for n in names if any(sub in n for sub in FORBIDDEN_NAME_SUBSTRINGS)]
         # A bare per-expert-less raw ``...experts.gate_proj``/``up_proj`` (NOT the unfused
         # per-expert ``experts.N.gate_proj.weight``) would also be an internal leak.
@@ -112,9 +95,9 @@ def run(ctx):
         checks["down_present"] = len(down) == n_ep_layers
         checks["no_internal_gmm_leak"] = len(forbidden) == 0
         checks["no_raw_split_leak"] = len(raw_split) == 0
-        checks["gate_up_3d_grouped"] = all(len(s) == 3 and s[0] == num_experts for _, s, _ in gate_up)
-        checks["down_3d_grouped"] = all(len(s) == 3 and s[0] == num_experts for _, s, _ in down)
-        checks["expert_weights_materialized"] = all(not d for _, _, d in gate_up + down)
+        checks["gate_up_3d_grouped"] = all(len(p.shape) == 3 and p.shape[0] == num_experts for p in gate_up)
+        checks["down_3d_grouped"] = all(len(p.shape) == 3 and p.shape[0] == num_experts for p in down)
+        checks["expert_weights_materialized"] = all(not p.is_dtensor for p in gate_up + down)
         checks["dense_params_forwarded"] = any("lm_head" in n or "embed" in n for n in names)
 
     # (fsdp_shard_ep1_experts=True is the FSDP-sharded-expert path — exercised by

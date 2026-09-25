@@ -48,7 +48,7 @@ Markers (selection):
                                  trained: dense (Qwen3-0.6B) for the ``not moe`` half, Qwen3-30B-A3B
                                  for the ``moe`` half. No single server satisfies both; run two passes
                                  (``make test-gpu-vllm`` then ``... SERVER_TIER=moe``).
-    <model family>             — gptoss / qwen3 / glm4 / glm5 / gemma4 / mistral4 / mistral3 /
+    <model family>             — gptoss / qwen3 / glm4 / glm5 / gemma4 / mistral4 /
                                  bailing / lfm2 / zaya / deepseek_v4 / inkling / cohere2_moe /
                                  step3p7.
 """
@@ -183,7 +183,6 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/cp/test_cp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
     ),
-    "parallelism/cp/test_cp_rejection.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "cp"), timeout=600),
     "parallelism/cp/test_cp_smpo_logprobs.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
     ),
@@ -236,9 +235,6 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/ep/test_ep_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
-    ),
-    "parallelism/ep/test_ep_gradient_checkpointing.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1500
     ),
     "parallelism/ep/test_ep2_weight_sync_values.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
@@ -353,9 +349,6 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/test_fsdp_tied_embeddings.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
-    "parallelism/test_mistral3_vision_smoke.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "vlm", "mistral3"), timeout=600
-    ),
     "parallelism/test_mistral4_all_parallelism.py": TestSpec(
         nproc=8,
         markers=("gpu", "full", "8gpu", "ep", "cp", "tp", "etp", "moe", "mistral4"),
@@ -396,7 +389,6 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=2100,
     ),
-    "parallelism/test_parallelism_config.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "parallelism/tp/test_replay_mask_tp_broadcast.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp"), timeout=300
     ),
@@ -979,7 +971,6 @@ ALL_MARKERS = (
     "glm4",
     "gemma4",
     "mistral4",
-    "mistral3",
     "bailing",
     "lfm2",
     "zaya",

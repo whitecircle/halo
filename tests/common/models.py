@@ -544,6 +544,48 @@ TINY_STEP3P7_VISION_CONFIG = {
     "max_position_embeddings": 16,
 }
 
+# Tiny Mistral4 (the text backbone of ``MISTRAL3_119B_MOE``) on the release's code paths: MLA
+# attention, MoE with a shared expert and group routing, YARN rope with llama-4 scaling. 8 Q / 8 KV
+# heads so cp8 and tp8 shard heads evenly; 16 experts split evenly at every EP size up to 8.
+TINY_MISTRAL4_CONFIG = {
+    "vocab_size": 512,
+    "hidden_size": 128,
+    "intermediate_size": 256,
+    "moe_intermediate_size": 64,
+    "n_routed_experts": 16,
+    "n_shared_experts": 1,
+    "num_experts_per_tok": 4,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 8,
+    "q_lora_rank": 64,
+    "kv_lora_rank": 32,
+    "qk_nope_head_dim": 16,
+    "qk_rope_head_dim": 16,
+    "qk_head_dim": 32,
+    "v_head_dim": 32,
+    "n_group": 1,
+    "topk_group": 1,
+    "first_k_dense_replace": 0,
+    "hidden_act": "silu",
+    "rope_parameters": {
+        "rope_type": "yarn",
+        "rope_theta": 10000.0,
+        "factor": 2.0,
+        "original_max_position_embeddings": 256,
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "mscale": 1.0,
+        "mscale_all_dim": 1.0,
+        "llama_4_scaling_beta": 0.1,
+    },
+    "rope_interleave": True,
+    "max_position_embeddings": 512,
+    "norm_topk_prob": True,
+    "routed_scaling_factor": 1.0,
+    "tie_word_embeddings": False,
+}
+
 # Special Models
 
 QWEN3_5_VLM_4B = "Qwen/Qwen3.5-4B"  # Natively multimodal (Image-Text-to-Text)

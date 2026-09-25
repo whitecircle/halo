@@ -4,147 +4,46 @@
 Validates EP (Mistral4MoE → DeepEP), CP (Mistral4Attention → Ulysses), and TP
 (selective DTensor attention) integrations for the text backbone of mistral3
 VLMs (``mistralai/Mistral-Small-4-119B-2603`` and similar). Each invocation of
-this script runs **one** parallelism mode determined by ``--mode``; a 8-GPU
-runner script chains them.
+this script runs **one** parallelism mode determined by ``--mode``; the
+manifest's args entries chain them on 8 GPUs.
 
 Build path: instead of downloading the 119 B fp8 checkpoint, the test
-materializes a tiny synthetic Mistral4 model that exercises the same code
-paths (MLA + MoE + YARN + llama-4 scaling + shared expert + group routing).
-A synthetic checkpoint is written to ``--checkpoint-dir`` (rank-0) so the EP
-lazy loader and ``load_distributed_model`` paths are exercised end-to-end.
+materializes ``tests.common.models.TINY_MISTRAL4_CONFIG``, which exercises the
+same code paths (MLA + MoE + YARN + llama-4 scaling + shared expert + group
+routing). A synthetic checkpoint is written to ``--checkpoint-dir`` (rank-0) so
+the EP lazy loader and ``load_distributed_model`` paths are exercised end-to-end.
 
 Run (8 GPUs):
 
     torchrun --nproc_per_node=8 \
         tests/gpu/parallelism/test_mistral4_all_parallelism.py \
         --mode ep --ep 8
-
-The ``run_all`` helper script chains every supported mode in one go.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
-import sys
-import traceback
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from accelerate import PartialState
-from huggingface_hub import snapshot_download
 from liger_kernel.transformers import LigerRMSNorm
 from torch.distributed.tensor import DTensor
-from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM, modeling_mistral4
+from transformers.models.mistral4 import modeling_mistral4
 
 from src.distributed.expert_parallel.saving import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.distributed import init_distributed, shared_scratch_dir, teardown_distributed
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
-
-# Real model used only as a tokenizer source — its weights are never loaded
-# (the synthetic checkpoint we build has different vocab/hidden dims, so
-# matching the vocab between tokenizer and model is also bumped to the real
-# vocab size below).
-TOKENIZER_REPO = "mistralai/Mistral-Small-4-119B-2603"
-TOKENIZER_FILES = ["tokenizer*", "special_tokens*", "chat_template*"]
-
-
-TINY_CONFIG_KWARGS = {
-    "vocab_size": 512,
-    "hidden_size": 128,
-    "intermediate_size": 256,
-    "moe_intermediate_size": 64,
-    "n_routed_experts": 16,
-    "n_shared_experts": 1,
-    "num_experts_per_tok": 4,
-    "num_hidden_layers": 4,
-    "num_attention_heads": 8,
-    "num_key_value_heads": 8,
-    "q_lora_rank": 64,
-    "kv_lora_rank": 32,
-    "qk_nope_head_dim": 16,
-    "qk_rope_head_dim": 16,
-    "qk_head_dim": 32,
-    "v_head_dim": 32,
-    "n_group": 1,
-    "topk_group": 1,
-    "first_k_dense_replace": 0,
-    "hidden_act": "silu",
-    "rope_parameters": {
-        "rope_type": "yarn",
-        "rope_theta": 10000.0,
-        "factor": 2.0,
-        "original_max_position_embeddings": 256,
-        "beta_fast": 32.0,
-        "beta_slow": 1.0,
-        "mscale": 1.0,
-        "mscale_all_dim": 1.0,
-        "llama_4_scaling_beta": 0.1,
-    },
-    "rope_interleave": True,
-    "max_position_embeddings": 512,
-    "norm_topk_prob": True,
-    "routed_scaling_factor": 1.0,
-    "tie_word_embeddings": False,
-}
-
-
-def build_synthetic_checkpoint(out_dir: Path, seed: int = 0) -> Path:
-    """Build a tiny synthetic Mistral4 checkpoint at ``out_dir`` and return the path.
-
-    Writes the same layout as ``model.save_pretrained``: a single
-    ``model.safetensors`` plus ``config.json``. Tokenizer files are copied
-    from the real ``mistralai/Mistral-Small-4-119B-2603`` snapshot so
-    ``AutoTokenizer.from_pretrained(out_dir)`` works without downloading the
-    full model. The synthetic config bumps vocab_size to the real tokenizer's
-    vocab so token ids stay in range.
-    """
-    tokenizer_dir = Path(snapshot_download(TOKENIZER_REPO, allow_patterns=TOKENIZER_FILES))
-    tokenizer_files = [
-        p
-        for p in tokenizer_dir.iterdir()
-        if p.is_file()
-        and (
-            p.name.startswith("tokenizer") or p.name.startswith("special_tokens") or p.name.startswith("chat_template")
-        )
-    ]
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for src in tokenizer_files:
-        shutil.copy2(src, out_dir / src.name)
-
-    torch.manual_seed(seed)
-    config = Mistral4Config(**TINY_CONFIG_KWARGS)
-    model = Mistral4ForCausalLM(config).to(torch.bfloat16)
-    model.save_pretrained(out_dir, safe_serialization=True)
-    return out_dir
-
-
-def make_inputs(vocab_size: int, batch: int, seq: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Generate deterministic ids + labels with mask scattered through the sequence.
-
-    Interleaving the mask (rather than masking a contiguous half) ensures every
-    CP rank receives some active labels, so the per-rank loss is non-zero and
-    backward exercises the gradient through every rank's attention slice.
-    """
-    torch.manual_seed(123)
-    ids = torch.randint(0, vocab_size, (batch, seq), device=device)
-    labels = ids.clone()
-    # Mask every fourth position so each chunk of the sequence keeps active tokens.
-    labels[:, ::4] = -100
-    return ids, labels
-
-
-def find_ep_layers(model: torch.nn.Module) -> list[tuple[str, torch.nn.Module]]:
-    out = []
-    for name, mod in model.named_modules():
-        if hasattr(mod, "ep_config") and hasattr(mod, "dispatcher"):
-            out.append((name, mod))
-    return out
+from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
+from tests.common.ep_reference import ep_layers, random_token_batch
+from tests.common.harness import gpu_test_main
+from tests.common.models import TINY_MISTRAL4_CONFIG
+from tests.common.tiny_models import build_tiny_mistral4_checkpoint
+from tests.common.tolerances import TOL
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 
 def find_attention_classes(model: torch.nn.Module) -> dict[str, int]:
@@ -164,14 +63,15 @@ def run_mode(
     tp: int,
     expert_tp: int,
     checkpoint_dir: str,
+    reload_dir: str,
     use_liger: bool,
     rank: int,
     world_size: int,
     local_rank: int,
-) -> tuple[bool, dict]:
+) -> tuple[dict[str, bool], dict]:
     """Load Mistral4 with the requested parallelism and run forward + backward.
 
-    Returns ``(passed, metrics)``.
+    Returns ``(checks, metrics)``.
     """
     pc = ParallelismConfig(
         ep_size=ep,
@@ -199,7 +99,7 @@ def run_mode(
     log(f"  GPU memory after load: {gpu_mem_gb():.2f}GB")
 
     checks: dict[str, bool] = {}
-    ep_layers = find_ep_layers(model)
+    moe_layers = ep_layers(model)
     attn_classes = find_attention_classes(model)
 
     # ── Sanity ─────────────────────────────────────────────────────────────
@@ -208,18 +108,18 @@ def run_mode(
     # ``ep_size == 1`` grouped-GEMM wrappers (``_load_cp_model`` hands ``load_model_for_cp`` an
     # ep_config whenever ``needs_ep_wrappers`` holds, so its experts do not fall back to the stock
     # per-expert loop while still paying the Liger swiglu/geglu force-off).
-    expected_layers = TINY_CONFIG_KWARGS["num_hidden_layers"]
-    checks["ep_layers_present"] = len(ep_layers) == expected_layers
-    log(f"  EP layers found: {len(ep_layers)} (expected {expected_layers})")
-    if ep_layers:
-        first = ep_layers[0][1]
+    expected_layers = TINY_MISTRAL4_CONFIG["num_hidden_layers"]
+    checks["ep_layers_present"] = len(moe_layers) == expected_layers
+    log(f"  EP layers found: {len(moe_layers)} (expected {expected_layers})")
+    if moe_layers:
+        first = moe_layers[0]
         log(f"  experts_per_rank={first.experts_per_rank}, range=[{first.expert_start}, {first.expert_end})")
         log(f"  use_grouped_mm={first._use_grouped_mm}")
         checks["correct_ep_layer_class"] = type(first).__name__ == "EPMistral4MoELayer"
         # The wrappers exist in EVERY mode (grouped GEMM installs them at ep_size == 1), so their
         # presence proves nothing about the mode under test. The shard widths do: a config whose
         # ep/etp silently collapsed to 1 gets the full expert count and the full FFN width.
-        checks["ep_shard_width"] = first.experts_per_rank == TINY_CONFIG_KWARGS["n_routed_experts"] // ep
+        checks["ep_shard_width"] = first.experts_per_rank == TINY_MISTRAL4_CONFIG["n_routed_experts"] // ep
         checks["etp_shard_width"] = first.expert_tp_size == expert_tp
         log(f"  expert_tp_size={first.expert_tp_size} (expected {expert_tp})")
 
@@ -249,12 +149,7 @@ def run_mode(
 
     # ── Forward + backward ────────────────────────────────────────────────
     # Same input on every rank (broadcast for safety with random init).
-    ids, labels = make_inputs(
-        TINY_CONFIG_KWARGS["vocab_size"],
-        batch=2,
-        seq=64,
-        device=f"cuda:{local_rank}",
-    )
+    ids, labels = random_token_batch(TINY_MISTRAL4_CONFIG["vocab_size"], batch=2, seq=64, device=f"cuda:{local_rank}")
     dist.broadcast(ids, src=0)
     dist.broadcast(labels, src=0)
 
@@ -270,27 +165,23 @@ def run_mode(
 
     # All ranks should observe the same loss within a tight tolerance
     # (modulo CP sharding, which divides the per-token loss across ranks).
-    losses = [torch.zeros_like(loss) for _ in range(world_size)]
-    dist.all_gather(losses, loss.detach())
-    loss_vals = [l.item() for l in losses]
-    log(f"  Per-rank losses: {[f'{l:.6f}' for l in loss_vals]}")
+    spread = world_spread(loss.item())
     if pc.is_cp_mode:
         # Each CP rank computes loss on its sequence chunk → values differ;
-        # only require finiteness.
-        checks["losses_finite_across_ranks"] = all(torch.isfinite(torch.tensor(v)).item() for v in loss_vals)
+        # only require finiteness (the spread is inf when any rank is non-finite).
+        checks["losses_finite_across_ranks"] = math.isfinite(spread)
     else:
-        diff = max(abs(v - loss_vals[0]) for v in loss_vals)
-        checks["losses_consistent_across_ranks"] = diff < 1e-3
-        log(f"  Cross-rank max loss diff: {diff:.6e}")
+        checks["losses_consistent_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+        log(f"  Cross-rank max loss diff: {spread:.6e}")
 
-    # Backward (a raising backward is caught by the caller's try/except, so no check entry here).
+    # Backward (a raising backward fails the run through the harness, so no check entry here).
     loss.backward()
     cleanup_memory()
 
     # ── Gradient check on a known parameter ───────────────────────────────
     # EP: gate weight must have a gradient; expert weights live in the wrapper.
-    if ep_layers:
-        gate_w = ep_layers[0][1].gate.weight
+    if moe_layers:
+        gate_w = moe_layers[0].gate.weight
         gate_grad = gate_w.grad
         gate_grad_norm = float(gate_grad.norm()) if gate_grad is not None else float("nan")
         # A norm of exactly zero means no router signal reached the gate — present but useless,
@@ -306,7 +197,7 @@ def run_mode(
     # enough to reproduce the forward loss.
     saved_loss = float("nan")
     if pc.is_ep_mode and not (pc.is_cp_mode or pc.is_tp_mode):
-        save_dir = Path(checkpoint_dir).parent / f"reload-{mode}"
+        save_dir = Path(reload_dir)
         # Same set of save ranks each iteration — clear stale state first.
         dist.barrier()
         if rank == 0:
@@ -362,11 +253,10 @@ def run_mode(
     metrics = {
         "loss": loss.item() if torch.is_tensor(loss) else loss,
         "reload_loss": saved_loss,
-        "checks": checks,
-        "ep_layer_count": len(ep_layers),
+        "ep_layer_count": len(moe_layers),
         "attention_classes": attn_classes,
     }
-    return all(checks.values()), metrics
+    return checks, metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -386,48 +276,38 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> int:
+@gpu_test_main(min_world_size=2, prefix="mistral4_all_parallelism")
+def run(ctx):
     args = parse_args()
-    rank, world_size, local_rank = init_distributed()
-    # Accelerate's logging utility (used inside src/...) refuses to emit a
-    # message until the global state is initialised — do it explicitly.
-    PartialState()
-
     # Build the synthetic checkpoint on rank 0, barrier, then all ranks read it.
     ckpt_dir = args.checkpoint_dir or shared_scratch_dir("mistral4_tiny")
-
-    if rank == 0:
+    reload_dir = shared_scratch_dir(f"mistral4_reload_{args.mode}")
+    if ctx.rank == 0:
+        ctx.on_teardown(lambda: cleanup_dirs(reload_dir))
+        if args.checkpoint_dir is None:
+            ctx.on_teardown(lambda: cleanup_dirs(ckpt_dir))
         log(f"Building synthetic Mistral4 checkpoint at {ckpt_dir}")
-        build_synthetic_checkpoint(Path(ckpt_dir))
-    dist.barrier()
+        build_tiny_mistral4_checkpoint(Path(ckpt_dir))
+    ctx.barrier()
 
-    try:
-        passed, metrics = run_mode(
-            mode=args.mode,
-            ep=args.ep,
-            cp=args.cp,
-            tp=args.tp,
-            expert_tp=args.etp,
-            checkpoint_dir=ckpt_dir,
-            use_liger=args.liger,
-            rank=rank,
-            world_size=world_size,
-            local_rank=local_rank,
-        )
-    except Exception as exc:
-        log_all(f"FATAL: {exc!r}")
-        traceback.print_exc()
-        passed = False
-        metrics = {"error": repr(exc)}
-
-    dist.barrier()
-    if rank == 0:
-        log(f"\nResult ({args.mode}): {'PASS' if passed else 'FAIL'}")
-        log(f"Metrics: {json.dumps(metrics, indent=2, default=str)}")
-
-    teardown_distributed()
-    return 0 if passed else 1
+    checks, metrics = run_mode(
+        mode=args.mode,
+        ep=args.ep,
+        cp=args.cp,
+        tp=args.tp,
+        expert_tp=args.etp,
+        checkpoint_dir=ckpt_dir,
+        reload_dir=reload_dir,
+        use_liger=args.liger,
+        rank=ctx.rank,
+        world_size=ctx.world_size,
+        local_rank=ctx.local_rank,
+    )
+    log(f"Metrics ({args.mode}): {json.dumps(metrics, indent=2, default=str)}")
+    # A peer can still be reading reload_dir, which rank 0's teardown removes.
+    ctx.barrier()
+    return {"checks": checks, "metrics": metrics}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

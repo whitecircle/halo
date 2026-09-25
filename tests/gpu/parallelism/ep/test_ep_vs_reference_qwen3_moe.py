@@ -40,7 +40,7 @@ from transformers import AutoTokenizer
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.distributed import ensure_model_downloaded
+from tests.common.distributed import ensure_model_downloaded, world_spread
 from tests.common.ep_reference import (
     broadcast_reference,
     compare_grad,
@@ -148,9 +148,7 @@ def run(ctx):
     metrics["loss_abs_err"] = delta
     checks["loss_matches_reference"] = delta < LOSS_TOL
 
-    gathered = [torch.zeros_like(loss.detach()) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, loss.detach())
-    spread = max(abs(g.item() - gathered[0].item()) for g in gathered)
+    spread = world_spread(loss.item())
     metrics["rank_loss_spread"] = spread
     checks["losses_agree_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
 

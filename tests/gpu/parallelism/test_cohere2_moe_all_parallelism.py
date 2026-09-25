@@ -24,26 +24,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
-import sys
-import traceback
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from accelerate import PartialState
 from huggingface_hub import snapshot_download
 from torch.distributed.tensor import DTensor
+from transformers import AutoTokenizer
 from transformers.models.cohere2_moe import Cohere2MoeConfig, Cohere2MoeForCausalLM
 
 from src.distributed.expert_parallel.saving import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.distributed import init_distributed, shared_scratch_dir, teardown_distributed
+from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
+from tests.common.ep_reference import ep_layers, random_token_batch
+from tests.common.harness import gpu_test_main
 from tests.common.models import COMMAND_A_PLUS
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
-
-TOKENIZER_FILES = ["tokenizer*", "special_tokens*", "chat_template*"]
+from tests.common.tiny_models import TOKENIZER_FILE_PREFIXES
+from tests.common.tolerances import TOL
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 # 8 Q / 8 KV heads so cp8 and tp8 shard heads evenly; hidden 256 keeps the DeepEP transport pad
 # (multiple of 256) exact; 4 layers keep the sliding/full interleave present on every pp-free mode.
@@ -77,39 +78,20 @@ def build_synthetic_checkpoint(out_dir: Path, seed: int = 0) -> Path:
     works without the 200B weights; the synthetic config bumps vocab_size to the real tokenizer's
     vocab so token ids stay in range.
     """
-    tokenizer_dir = Path(snapshot_download(COMMAND_A_PLUS, allow_patterns=TOKENIZER_FILES))
+    tokenizer_dir = Path(
+        snapshot_download(COMMAND_A_PLUS, allow_patterns=[f"{prefix}*" for prefix in TOKENIZER_FILE_PREFIXES])
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     for src in tokenizer_dir.iterdir():
-        if src.is_file() and (
-            src.name.startswith("tokenizer")
-            or src.name.startswith("special_tokens")
-            or src.name.startswith("chat_template")
-        ):
+        if src.is_file() and src.name.startswith(TOKENIZER_FILE_PREFIXES):
             shutil.copy2(src, out_dir / src.name)
 
     torch.manual_seed(seed)
-    from transformers import AutoTokenizer
-
     vocab = len(AutoTokenizer.from_pretrained(out_dir))
     config = Cohere2MoeConfig(**{**TINY_CONFIG_KWARGS, "vocab_size": vocab})
     model = Cohere2MoeForCausalLM(config).to(torch.bfloat16)
     model.save_pretrained(out_dir, safe_serialization=True)
     return out_dir
-
-
-def make_inputs(vocab_size: int, batch: int, seq: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Deterministic ids + labels with the mask interleaved so every CP rank keeps active labels."""
-    torch.manual_seed(123)
-    ids = torch.randint(0, vocab_size, (batch, seq), device=device)
-    labels = ids.clone()
-    labels[:, ::4] = -100
-    return ids, labels
-
-
-def find_ep_layers(model: torch.nn.Module) -> list[tuple[str, torch.nn.Module]]:
-    return [
-        (name, mod) for name, mod in model.named_modules() if hasattr(mod, "ep_config") and hasattr(mod, "dispatcher")
-    ]
 
 
 def find_attention_classes(model: torch.nn.Module) -> dict[str, int]:
@@ -129,10 +111,11 @@ def run_mode(
     tp: int,
     expert_tp: int,
     checkpoint_dir: str,
+    reload_dir: str,
     rank: int,
     world_size: int,
     local_rank: int,
-) -> tuple[bool, dict]:
+) -> tuple[dict[str, bool], dict]:
     """Load Cohere2 MoE with the requested parallelism and run forward + backward."""
     pc = ParallelismConfig(
         ep_size=ep,
@@ -160,22 +143,22 @@ def run_mode(
     log(f"  GPU memory after load: {gpu_mem_gb():.2f}GB")
 
     checks: dict[str, bool] = {}
-    ep_layers = find_ep_layers(model)
+    moe_layers = ep_layers(model)
     attn_classes = find_attention_classes(model)
 
     # ── Sanity ─────────────────────────────────────────────────────────────
     # ``use_grouped_gemm`` defaults on, so the EP wrappers exist in EVERY mode; the shard widths
     # are what prove the mode under test engaged.
     expected_layers = TINY_CONFIG_KWARGS["num_hidden_layers"]
-    checks["ep_layers_present"] = len(ep_layers) == expected_layers
-    log(f"  EP layers found: {len(ep_layers)} (expected {expected_layers})")
-    if ep_layers:
-        first = ep_layers[0][1]
+    checks["ep_layers_present"] = len(moe_layers) == expected_layers
+    log(f"  EP layers found: {len(moe_layers)} (expected {expected_layers})")
+    if moe_layers:
+        first = moe_layers[0]
         log(f"  experts_per_rank={first.experts_per_rank}, range=[{first.expert_start}, {first.expert_end})")
         checks["correct_ep_layer_class"] = type(first).__name__ == "EPCohere2MoELayer"
         checks["ep_shard_width"] = first.experts_per_rank == TINY_CONFIG_KWARGS["num_experts"] // ep
         checks["etp_shard_width"] = first.expert_tp_size == expert_tp
-        checks["average_combination_scaled"] = all(layer._output_scale == 0.5 for _, layer in ep_layers)
+        checks["average_combination_scaled"] = all(layer._output_scale == 0.5 for layer in moe_layers)
         log(f"  expert_tp_size={first.expert_tp_size} (expected {expert_tp})")
 
     if pc.is_cp_mode:
@@ -191,7 +174,7 @@ def run_mode(
         log(f"  Attention classes after TP: {attn_classes}; DTensor params present: {checks['tp_engaged']}")
 
     # ── Forward + backward ────────────────────────────────────────────────
-    ids, labels = make_inputs(model.config.vocab_size, batch=2, seq=64, device=f"cuda:{local_rank}")
+    ids, labels = random_token_batch(model.config.vocab_size, batch=2, seq=64, device=f"cuda:{local_rank}")
     dist.broadcast(ids, src=0)
     dist.broadcast(labels, src=0)
 
@@ -202,23 +185,20 @@ def run_mode(
     log(f"  Forward loss: {loss.item():.6f}")
     checks["loss_finite"] = torch.isfinite(loss).item()
 
-    losses = [torch.zeros_like(loss) for _ in range(world_size)]
-    dist.all_gather(losses, loss.detach())
-    loss_vals = [value.item() for value in losses]
-    log(f"  Per-rank losses: {[f'{value:.6f}' for value in loss_vals]}")
+    spread = world_spread(loss.item())
     if pc.is_cp_mode:
-        # Each CP rank computes loss on its sequence chunk → values differ; require finiteness.
-        checks["losses_finite_across_ranks"] = all(torch.isfinite(torch.tensor(v)).item() for v in loss_vals)
+        # Each CP rank computes loss on its sequence chunk → values differ; require finiteness
+        # (the spread is inf when any rank is non-finite).
+        checks["losses_finite_across_ranks"] = math.isfinite(spread)
     else:
-        diff = max(abs(v - loss_vals[0]) for v in loss_vals)
-        checks["losses_consistent_across_ranks"] = diff < 1e-3
-        log(f"  Cross-rank max loss diff: {diff:.6e}")
+        checks["losses_consistent_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+        log(f"  Cross-rank max loss diff: {spread:.6e}")
 
     loss.backward()
     cleanup_memory()
 
-    if ep_layers:
-        gate_grad = ep_layers[0][1].gate.weight.grad
+    if moe_layers:
+        gate_grad = moe_layers[0].gate.weight.grad
         gate_grad_norm = float(gate_grad.norm()) if gate_grad is not None else float("nan")
         checks["ep_router_grad_present"] = (
             gate_grad is not None and torch.isfinite(gate_grad).all().item() and gate_grad_norm > 0.0
@@ -228,7 +208,7 @@ def run_mode(
     # ── EP checkpoint roundtrip (pure EP only) ─────────────────────────────
     saved_loss = float("nan")
     if pc.is_ep_mode and not (pc.is_cp_mode or pc.is_tp_mode):
-        save_dir = Path(checkpoint_dir).parent / f"reload-{mode}"
+        save_dir = Path(reload_dir)
         dist.barrier()
         if rank == 0:
             shutil.rmtree(save_dir, ignore_errors=True)
@@ -275,11 +255,10 @@ def run_mode(
     metrics = {
         "loss": loss.item() if torch.is_tensor(loss) else loss,
         "reload_loss": saved_loss,
-        "checks": checks,
-        "ep_layer_count": len(ep_layers),
+        "ep_layer_count": len(moe_layers),
         "attention_classes": attn_classes,
     }
-    return all(checks.values()), metrics
+    return checks, metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -298,45 +277,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> int:
+@gpu_test_main(min_world_size=2, prefix="cohere2_moe_all_parallelism")
+def run(ctx):
     args = parse_args()
-    rank, world_size, local_rank = init_distributed()
-    # Accelerate's logging utility (used inside src/...) refuses to emit until state exists.
-    PartialState()
-
     ckpt_dir = args.checkpoint_dir or shared_scratch_dir("cohere2_moe_tiny")
-
-    if rank == 0:
+    reload_dir = shared_scratch_dir(f"cohere2_moe_reload_{args.mode}")
+    if ctx.rank == 0:
+        ctx.on_teardown(lambda: cleanup_dirs(reload_dir))
+        if args.checkpoint_dir is None:
+            ctx.on_teardown(lambda: cleanup_dirs(ckpt_dir))
         log(f"Building synthetic Cohere2 MoE checkpoint at {ckpt_dir}")
         build_synthetic_checkpoint(Path(ckpt_dir))
-    dist.barrier()
+    ctx.barrier()
 
-    try:
-        passed, metrics = run_mode(
-            mode=args.mode,
-            ep=args.ep,
-            cp=args.cp,
-            tp=args.tp,
-            expert_tp=args.etp,
-            checkpoint_dir=ckpt_dir,
-            rank=rank,
-            world_size=world_size,
-            local_rank=local_rank,
-        )
-    except Exception as exc:
-        log_all(f"FATAL: {exc!r}")
-        traceback.print_exc()
-        passed = False
-        metrics = {"error": repr(exc)}
-
-    dist.barrier()
-    if rank == 0:
-        log(f"\nResult ({args.mode}): {'PASS' if passed else 'FAIL'}")
-        log(f"Metrics: {json.dumps(metrics, indent=2, default=str)}")
-
-    teardown_distributed()
-    return 0 if passed else 1
+    checks, metrics = run_mode(
+        mode=args.mode,
+        ep=args.ep,
+        cp=args.cp,
+        tp=args.tp,
+        expert_tp=args.etp,
+        checkpoint_dir=ckpt_dir,
+        reload_dir=reload_dir,
+        rank=ctx.rank,
+        world_size=ctx.world_size,
+        local_rank=ctx.local_rank,
+    )
+    log(f"Metrics ({args.mode}): {json.dumps(metrics, indent=2, default=str)}")
+    # A peer can still be reading reload_dir, which rank 0's teardown removes.
+    ctx.barrier()
+    return {"checks": checks, "metrics": metrics}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

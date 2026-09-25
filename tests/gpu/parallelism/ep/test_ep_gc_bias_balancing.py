@@ -113,6 +113,16 @@ def frozen_forward(model, ep_layers, batch) -> list[torch.Tensor | None]:
     return read_counters(ep_layers)
 
 
+def all_checkpoint_funcs_scoped(model) -> bool:
+    """Every installed checkpoint function carries the EP scope, and at least one is installed."""
+    funcs = [
+        module._gradient_checkpointing_func
+        for module in model.modules()
+        if getattr(module, "_gradient_checkpointing_func", None) is not None
+    ]
+    return bool(funcs) and all(getattr(func, "_ep_scoped", False) for func in funcs)
+
+
 def counts_match_expected(counters: list[torch.Tensor | None]) -> bool:
     """Every layer recorded exactly one count per (token, selected expert) of this microbatch."""
     return len(counters) == NUM_LAYERS and all(
@@ -176,11 +186,7 @@ def run(ctx):
 
     # ── 2. REENTRANT checkpointing — what every non-PP EP/CP run is forced onto ──────────────────
     enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
-    checks["gc_scopes_installed"] = all(
-        getattr(module._gradient_checkpointing_func, "_ep_scoped", False)
-        for module in model.modules()
-        if getattr(module, "_gradient_checkpointing_func", None) is not None
-    )
+    checks["gc_scopes_installed"] = all_checkpoint_funcs_scoped(model)
     forward_calls["n"] = 0
     mid_step: list[list[torch.Tensor | None]] = []
     reentrant_counts, reentrant_loss = train_step(model, ep_layers, batch, after_forward=mid_step.append)
@@ -205,11 +211,7 @@ def run(ctx):
     # the model's own method also exercises `_rescope_on_reenable`: HF installs a BARE checkpoint
     # function here, and losing the scope would make the EP layer raise rather than replay.
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    checks["gc_scopes_survive_reenable"] = all(
-        getattr(module._gradient_checkpointing_func, "_ep_scoped", False)
-        for module in model.modules()
-        if getattr(module, "_gradient_checkpointing_func", None) is not None
-    )
+    checks["gc_scopes_survive_reenable"] = all_checkpoint_funcs_scoped(model)
     forward_calls["n"] = 0
     non_reentrant_counts, non_reentrant_loss = train_step(model, ep_layers, batch)
     checks["non_reentrant_gc_recomputed_the_body"] = forward_calls["n"] == 2

@@ -11,8 +11,9 @@ partial-sum reduce. The world size picks the shape:
   * 4 GPUs — EP+ETP (``ep_size=2, expert_tp_size=2``), the production combination.
 
 Checks: the ETP layers store split (not fused) GLU shards; per-rank loss matches the undistributed
-reference; losses agree across ranks (every rank sees the full batch); router-gate, expert-shard,
-and shared-experts gradients are live and finite.
+reference; losses agree across ranks (every rank sees the full batch); router-gate and expert-shard
+gradients match this rank's slice of the reference gradients in direction and scale; shared-experts
+gradients are live and finite.
 
 Run with 2 or 4 GPUs:
     torchrun --nproc_per_node=2 \
@@ -26,14 +27,15 @@ from transformers.models.inkling.configuration_inkling import InklingTextConfig
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.distributed import world_spread
+from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log
 
 SEED = 42
 BATCH, SEQ = 2, 64
-LOSS_TOL = 5e-2  # bf16 noise + ETP's token-space reduce reordering near-tied top-k picks
-RANK_LOSS_TOL = 1e-3  # every rank sees the full batch, so per-rank losses must agree
 
 
 def _build_model(device):
@@ -54,12 +56,22 @@ def run(ctx):
     input_ids = torch.randint(0, TINY_INKLING_CONFIG["vocab_size"], (BATCH, SEQ), device=device)
     labels = input_ids.clone()
 
-    # ── Reference: undistributed forward on the same weights and batch ────────
+    # ── Reference: undistributed forward + backward on the same weights and batch ────────
     ref = _build_model(device)
     ref.train()
-    ref_loss = ref(input_ids=input_ids, labels=labels).loss.item()
+    ref_out = ref(input_ids=input_ids, labels=labels)
+    ref_out.loss.backward()
+    ref_loss = ref_out.loss.item()
     log(f"reference loss: {ref_loss:.6f}")
-    del ref
+    ref_grads = [
+        {
+            "gate_up": layer.mlp.experts.gate_up_proj.grad.detach().clone(),  # [E, 2M, H], halves [gate | up]
+            "down": layer.mlp.experts.down_proj.grad.detach().clone(),  # [E, H, M]
+            "gate": layer.mlp.gate.weight.grad.detach().clone(),
+        }
+        for layer in ref.model.layers
+    ]
+    del ref, ref_out
     cleanup_memory()
 
     # ── ETP: world 2 → pure ETP (ep1×etp2); world 4 → EP+ETP (ep2×etp2) ──────
@@ -87,22 +99,32 @@ def run(ctx):
     metrics["ref_loss"] = ref_loss
     metrics["etp_loss"] = etp_loss
     checks["etp_loss_finite"] = bool(torch.isfinite(out.loss))
-    checks["etp_loss_matches_ref"] = abs(etp_loss - ref_loss) < LOSS_TOL
+    checks["etp_loss_matches_ref"] = abs(etp_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
 
-    loss_t = torch.tensor([etp_loss], device=device)
-    gathered = [torch.zeros_like(loss_t) for _ in range(ctx.world_size)]
-    torch.distributed.all_gather(gathered, loss_t)
-    spread = max(abs(g.item() - gathered[0].item()) for g in gathered)
+    # Every rank sees the full batch, so per-rank losses must agree.
+    spread = world_spread(etp_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < RANK_LOSS_TOL
+    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
+
+    # ── Gradient equivalence vs this rank's slice of the reference ─────────────────────
+    for i, (ep, refs) in enumerate(zip(ep_layers, ref_grads, strict=True)):
+        s, e = ep.expert_start, ep.expert_end
+        inter = refs["down"].shape[2]
+        shard = inter // ep.expert_tp_size
+        lo, hi = ep.expert_tp_rank * shard, (ep.expert_tp_rank + 1) * shard
+        # The reference is in nn.Linear layout; ETP holds this rank's [lo, hi) slice of the expert
+        # intermediate dim of each GLU half and of down_proj, in matmul convention.
+        pairs = {
+            f"l{i}_gate_proj_grad": (ep.gate_proj.grad, refs["gate_up"][s:e, lo:hi].transpose(1, 2)),
+            f"l{i}_up_proj_grad": (ep.up_proj.grad, refs["gate_up"][s:e, inter + lo : inter + hi].transpose(1, 2)),
+            f"l{i}_down_proj_grad": (ep.down_proj.grad, refs["down"][s:e, :, lo:hi].transpose(1, 2)),
+            f"l{i}_router_grad": (ep.gate.weight.grad, refs["gate"]),
+        }
+        score_ep_grad_pairs(pairs, checks, metrics, cos_min=TOL.ep_grad_cosine_min)
 
     def _grad_live(param) -> bool:
         return param.grad is not None and bool(torch.isfinite(param.grad).all()) and param.grad.abs().sum().item() > 0
 
-    checks["router_grad_live"] = all(_grad_live(ep.gate.weight) for ep in ep_layers)
-    checks["expert_shard_grads_live"] = all(
-        _grad_live(ep.gate_proj) and _grad_live(ep.up_proj) and _grad_live(ep.down_proj) for ep in ep_layers
-    )
     checks["shared_grads_live"] = all(_grad_live(ep.shared_experts.gate_proj) for ep in ep_layers)
 
     return {"checks": checks, "metrics": metrics}

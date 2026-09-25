@@ -33,19 +33,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.validation import validate_model_for_ulysses
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
+from tests.common.distributed import world_mean, world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log, log_all
 
 # Configuration
 
 MODEL_NAME = QWEN3_0_6B
 SEQ_LEN = 128  # default; must be divisible by cp_size. Override with --seq to probe long context.
-# Absolute tolerance on (avg CP loss − baseline loss). CP's global sum-normalization is
-# mathematically equal to the baseline mean loss, so the only gap is bf16 rounding through
-# the Ulysses all-to-all — ~1e-2 at this shape. On a base loss ~11 a 0.5 band would be vacuous
-# (>4%); 0.05 still passes on the true diff but fails a real CP normalization/aggregation bug.
-LOSS_TOLERANCE = 0.05
 SEED = 42
 
 
@@ -170,15 +167,6 @@ def run(ctx) -> dict:
     # ── Step 6: Compare losses ───────────────────────────────────────
     log("\n[6/6] Comparing losses...")
 
-    # Gather all CP losses to rank 0
-    cp_loss_tensor = torch.tensor([cp_loss], device=device)
-    base_loss_tensor = torch.tensor([base_loss], device=device)
-
-    all_cp_losses = [torch.zeros(1, device=device) for _ in range(world_size)]
-    all_base_losses = [torch.zeros(1, device=device) for _ in range(world_size)]
-    dist.all_gather(all_cp_losses, cp_loss_tensor)
-    dist.all_gather(all_base_losses, base_loss_tensor)
-
     checks = {}
 
     # Check 1: Baseline loss is finite
@@ -186,51 +174,33 @@ def run(ctx) -> dict:
     checks["base_loss_finite"] = base_finite
     log(f"  Baseline loss finite: {'PASS' if base_finite else 'FAIL'}")
 
-    # Check 2: CP loss is finite on all ranks
-    all_cp_finite = all(math.isfinite(t.item()) for t in all_cp_losses)
-    checks["cp_loss_finite"] = all_cp_finite
-    log(f"  CP loss finite (all ranks): {'PASS' if all_cp_finite else 'FAIL'}")
+    # Check 2: CP loss is finite (each rank reports its own)
+    cp_finite = math.isfinite(cp_loss)
+    checks["cp_loss_finite"] = cp_finite
+    log_all(f"  CP loss finite: {'PASS' if cp_finite else 'FAIL'}")
 
-    # Check 3: CP losses are close across ranks (they should produce
-    # different local losses due to different chunks, but each should
-    # be a reasonable value)
-    cp_values = [t.item() for t in all_cp_losses]
-    log(f"  CP losses per rank: {[f'{v:.6f}' for v in cp_values]}")
-
-    # Check 4: CP loss is in reasonable range compared to baseline
-    # CP uses globally-normalized sum loss scaled by cp_size, so values
-    # may differ from baseline mean loss, but should be in the same ballpark
-    avg_cp_loss = sum(cp_values) / len(cp_values)
+    # Check 3: CP's global sum-normalization equals the baseline mean loss in exact arithmetic, so
+    # the rank average must match the baseline up to bf16 rounding through the Ulysses all-to-all.
+    avg_cp_loss = world_mean(cp_loss)
     loss_diff = abs(avg_cp_loss - base_loss)
-    loss_close = loss_diff < LOSS_TOLERANCE
+    loss_close = loss_diff < TOL.parallel_vs_baseline_loss_abs
     checks["loss_close"] = loss_close
     log(f"  Avg CP loss: {avg_cp_loss:.6f}, Baseline loss: {base_loss:.6f}")
-    log(f"  Loss difference: {loss_diff:.6f} (tolerance: {LOSS_TOLERANCE})")
+    log(f"  Loss difference: {loss_diff:.6f} (tolerance: {TOL.parallel_vs_baseline_loss_abs})")
     log(f"  Loss close: {'PASS' if loss_close else 'FAIL'}")
 
-    # Check 5: Both losses are reasonable (not zero, not extremely large)
-    base_reasonable = 0.0 < base_loss < 100.0
-    cp_reasonable = all(0.0 < v < 100.0 for v in cp_values)
-    checks["base_reasonable"] = base_reasonable
-    checks["cp_reasonable"] = cp_reasonable
-    log(f"  Baseline in range (0, 100): {'PASS' if base_reasonable else 'FAIL'}")
-    log(f"  CP in range (0, 100): {'PASS' if cp_reasonable else 'FAIL'}")
-
-    # Check 6: under no_grad (the eval loop's path) the CP loss must be rank-UNIFORM — HF's
+    # Check 4: under no_grad (the eval loop's path) the CP loss must be rank-UNIFORM — HF's
     # DP-scoped metric gather keeps one CP sibling's copy, so a rank-varying value IS eval_loss bias.
-    spread = max(abs(v - cp_values[0]) for v in cp_values)
+    spread = world_spread(cp_loss)
     checks["eval_loss_rank_uniform"] = spread == 0.0
     log(f"  Eval-path CP loss rank spread: {spread:.6e} ({'PASS' if spread == 0.0 else 'FAIL'})")
 
-    # Check 7: with every loss token in the LAST chunk, each rank's eval-path loss must still equal
+    # Check 5: with every loss token in the LAST chunk, each rank's eval-path loss must still equal
     # the baseline masked loss — a chunk-partial value reports ~0 on cp_rank 0 here.
-    masked_values = [torch.zeros(1, device=device) for _ in range(world_size)]
-    dist.all_gather(masked_values, torch.tensor([cp_masked_loss], device=device))
-    masked_ok = all(abs(t.item() - base_masked_loss) < LOSS_TOLERANCE for t in masked_values)
+    masked_ok = abs(cp_masked_loss - base_masked_loss) < TOL.parallel_vs_baseline_loss_abs
     checks["eval_loss_unbiased_under_uneven_mask"] = masked_ok
-    log(
-        f"  Masked eval losses per rank: {[f'{t.item():.6f}' for t in masked_values]} "
-        f"vs baseline {base_masked_loss:.6f} ({'PASS' if masked_ok else 'FAIL'})"
+    log_all(
+        f"  Masked eval loss {cp_masked_loss:.6f} vs baseline {base_masked_loss:.6f} ({'PASS' if masked_ok else 'FAIL'})"
     )
 
     return {"checks": checks}

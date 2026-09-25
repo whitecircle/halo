@@ -26,6 +26,7 @@ from src.models.moe_balancing import resolve_balancing_mode
 from src.models.patches.attention import _model_is_deepseek_v4
 from src.models.patches.buffer_fixes import fix_rotary_inv_freq
 from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.tiny_models import randomize_tid2eid
 
 SEED = 1234
 
@@ -37,20 +38,8 @@ def _tiny_config(**overrides) -> DeepseekV4Config:
 def _tiny_model(config: DeepseekV4Config | None = None):
     torch.manual_seed(SEED)
     model = AutoModelForCausalLM.from_config(config or _tiny_config())
-    randomize_tid2eid(model)
+    randomize_tid2eid(model, seed=SEED)
     return model.eval()
-
-
-def randomize_tid2eid(model, seed: int = SEED) -> None:
-    """Fill hash-layer tid2eid with DISTINCT experts per token id (random-init leaves it all-zero;
-    DeepEP dispatch and the wrapper's init guard both require distinct top-k experts per token)."""
-    gen = torch.Generator().manual_seed(seed)
-    num_experts = model.config.n_routed_experts
-    for layer in model.model.layers:
-        if layer.mlp.is_hash:
-            table = layer.mlp.gate.tid2eid
-            perm = torch.rand(table.shape[0], num_experts, generator=gen).argsort(dim=-1)
-            table.copy_(perm[:, : table.shape[1]])
 
 
 def _bare_ep_layer(**attrs) -> EPDeepseekV4MoELayer:

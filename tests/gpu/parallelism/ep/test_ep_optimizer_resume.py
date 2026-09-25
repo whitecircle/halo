@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import logging
+import math
 import os
 import random
 
@@ -51,6 +52,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, local_optimizer_state, log, optimizer_state_matches, step_losses
 
 parser = argparse.ArgumentParser()
@@ -69,7 +71,7 @@ MAX_SEQ_LENGTH = 256
 # Resumed steps 4-6 vs the continuous run: identical batches and restored moments, differing only
 # by stochastic-rounding noise (the SR stream restarts on resume) — a warm restart instead shifts
 # the trajectory by the full Adam-moment reset, far above this tolerance.
-LOSS_TOL = 0.05
+LOSS_TOL = TOL.resume_loss_abs
 
 _TINY_COMMON = {
     "hidden_size": 256,
@@ -341,7 +343,10 @@ def run(ctx):
     continuous_tail = continuous_losses[SAVE_AT_STEP:]
     checks["resumed_ran_remaining_steps"] = len(resumed_tail) == TOTAL_STEPS - SAVE_AT_STEP
     if checks["resumed_ran_remaining_steps"] and checks["continuous_ran_all_steps"]:
-        max_delta = max(abs(a - b) for a, b in zip(continuous_tail, resumed_tail, strict=True))
+        deltas = [abs(a - b) for a, b in zip(continuous_tail, resumed_tail, strict=True)]
+        # max() never lets a later NaN displace the running max, so a non-finite delta is made the worst
+        # outright.
+        max_delta = max(deltas) if all(math.isfinite(delta) for delta in deltas) else math.inf
         metrics["resume_loss_max_delta"] = max_delta
         log(
             f"continuous tail: {[f'{loss:.4f}' for loss in continuous_tail]}  "

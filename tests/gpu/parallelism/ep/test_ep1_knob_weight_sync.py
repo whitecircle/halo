@@ -13,10 +13,10 @@ Builds the real FSDP2-wrapped ``DistributedSFTTrainer`` at ep1 (default knob), r
 forward+backward (experts settle into their sharded resting state), and asserts — under BOTH
 resharding modes (ZeRO2 ``reshard_after_forward=False`` and ZeRO3 ``=True``):
   1. The raw expert weight is genuinely FSDP-sharded (a DTensor whose local shard < global).
-  2. ``gather_expert_state_dict`` returns plain (non-DTensor), finite, full tensors (key format is
-     family-specific, so this asserts on the values).
+  2. ``gather_expert_state_dict`` returns plain (non-DTensor), finite tensors covering every expert
+     (fused keys: leading dim == num_experts; per-expert keys: every index), not one rank's shard.
   3. The full ``gather_and_send_weights`` (the RL entrypoint) forwards every param plain (no DTensor
-     reaches vLLM), with expert + dense params present.
+     reaches vLLM), with expert + dense params present and every expert in the expert tensors.
 
 A gather blind to the sharded experts raises (mixed Tensor/DTensor) or returns a partial shard.
 
@@ -33,6 +33,8 @@ Requirements:
     - 2x GPU with >=80GB memory; DeepEP installed
     - Default model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
 """
+
+import re
 
 import torch
 from torch.distributed.tensor import DTensor
@@ -51,6 +53,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, log
+from tests.common.weight_sync import RecordingSender
 
 # Default gpt-oss; override HALO_TEST_EP1_KNOB_MODEL / HALO_TEST_EP1_KNOB_ATTN to validate another MoE family
 # (e.g. HALO_TEST_EP1_KNOB_MODEL=$HALO_DATA_ROOT/models/GLM-4.7-Flash-patched for the fused-GLU base gather path).
@@ -60,17 +63,25 @@ SEQ_LEN = 128
 SEED = 42
 
 
-class RecordingSender:
-    """Capture every (name, is_dtensor) forwarded to vLLM by gather_and_send_weights — no NCCL."""
+# A per-expert hub key names one expert (``experts.3.gate_proj.weight``); a fused one holds them all.
+_PER_EXPERT_KEY = re.compile(r"(?:^|\.)experts\.(\d+)\.")
 
-    def __init__(self):
-        self.params: list[tuple[str, bool]] = []
 
-    def update_named_param(self, name, data):
-        self.params.append((name, isinstance(data, DTensor)))
+def holds_every_expert(shapes: dict[str, tuple[int, ...]], num_experts: int) -> bool:
+    """Whether expert tensors keyed by name cover all ``num_experts`` experts, not one rank's shard.
 
-    def reset_prefix_cache(self):
-        pass
+    A plain local FSDP shard passes every dtype/finiteness check; only the expert count tells it apart.
+    Fused keys carry the experts on the leading dim; per-expert keys must name every index for each
+    layer and projection, so one tensor's missing expert cannot hide behind another's.
+    """
+    groups: dict[tuple[str, str], set[int]] = {}
+    for key, shape in shapes.items():
+        match = _PER_EXPERT_KEY.search(key)
+        if match:
+            groups.setdefault((key[: match.start(1)], key[match.end(1) :]), set()).add(int(match.group(1)))
+        elif shape[0] != num_experts:
+            return False
+    return bool(shapes) and all(indices == set(range(num_experts)) for indices in groups.values())
 
 
 def gather_is_full(reshard, tokenizer, local_rank, output_dir):
@@ -135,12 +146,16 @@ def gather_is_full(reshard, tokenizer, local_rank, output_dir):
     raw_sharded = isinstance(raw, DTensor) and raw.to_local().numel() < raw.numel()
 
     gathered = layer.gather_expert_state_dict(device="cpu")
-    # full = every gathered expert tensor materialized to a plain (non-DTensor) finite tensor. Key
-    # format is family-specific (fused ``experts.gate_up_proj`` for GptOss/GLM4/Zaya/…, per-expert
-    # ``experts.{i}.gate_proj.weight`` for Qwen3/Bailing), so assert on the values, not the keys.
+    # full = every gathered expert tensor materialized to a plain (non-DTensor) finite tensor that holds
+    # every expert. Key format is family-specific (fused ``experts.gate_up_proj`` for GptOss/GLM4/Zaya/…,
+    # per-expert ``experts.{i}.gate_proj.weight`` for Qwen3/Bailing); holds_every_expert reads both.
     vals = list(gathered.values())
-    full = len(vals) >= 2 and all(not isinstance(v, DTensor) and torch.isfinite(v).all() for v in vals)
-    shapes = {tuple(v.shape) for v in vals}
+    shapes = {key: tuple(v.shape) for key, v in gathered.items()}
+    full = (
+        len(vals) >= 2
+        and all(not isinstance(v, DTensor) and torch.isfinite(v).all() for v in vals)
+        and holds_every_expert(shapes, layer.num_experts)
+    )
     log(f"  raw expert sharded-at-rest={raw_sharded}  gather full/plain={full}  tensors={len(vals)} shapes={shapes}")
 
     # The full RL weight-sync entrypoint: EP expert gather + dense-param full_tensor + expert
@@ -148,12 +163,16 @@ def gather_is_full(reshard, tokenizer, local_rank, output_dir):
     # and both expert and dense (lm_head/embed) params must be present.
     recorder = RecordingSender()
     gather_and_send_weights(wrapped, recorder)
-    names = [n for n, _ in recorder.params]
-    any_dtensor = any(is_dt for _, is_dt in recorder.params)
+    names = recorder.names
+    any_dtensor = any(param.is_dtensor for param in recorder.params)
     has_experts = any("expert" in n.lower() for n in names)
     has_dense = any("lm_head" in n or "embed" in n for n in names)
+    sent_experts_full = holds_every_expert(
+        {param.name: param.shape for param in recorder.params if ".experts." in param.name}, layer.num_experts
+    )
     log(
-        f"  gather_and_send_weights: {len(names)} params, any_dtensor={any_dtensor}, experts={has_experts}, dense={has_dense}"
+        f"  gather_and_send_weights: {len(names)} params, any_dtensor={any_dtensor}, experts={has_experts}, "
+        f"dense={has_dense}, every expert sent={sent_experts_full}"
     )
 
     trainer.cleanup_ep()
@@ -163,6 +182,7 @@ def gather_is_full(reshard, tokenizer, local_rank, output_dir):
         "raw_sharded": raw_sharded,
         "gather_full": full,
         "send_all_plain": not any_dtensor and has_experts and has_dense,
+        "send_experts_full": sent_experts_full,
     }
 
 
@@ -182,9 +202,11 @@ def run(ctx) -> dict:
             "zero2_raw_sharded": z2["raw_sharded"],
             "zero2_gather_full": z2["gather_full"],
             "zero2_send_all_plain": z2["send_all_plain"],
+            "zero2_send_experts_full": z2["send_experts_full"],
             "zero3_raw_sharded": z3["raw_sharded"],
             "zero3_gather_full": z3["gather_full"],
             "zero3_send_all_plain": z3["send_all_plain"],
+            "zero3_send_experts_full": z3["send_experts_full"],
         }
     }
 

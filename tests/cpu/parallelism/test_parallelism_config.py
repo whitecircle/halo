@@ -11,13 +11,12 @@ from unittest.mock import patch
 
 import pytest
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from src.args.distributed_args import DistributedArguments
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
+from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import create_config, make_parallelism_config
-from tests.common.ports import free_port
 
 # Module path prefix for mocking the src.distributed.runtime imports in parallelism_config
 _MOD = "src.distributed.parallelism_config"
@@ -543,6 +542,35 @@ def test_boolean_mode_properties():
     assert cfg.is_ep_cp_mode is False
 
 
+def test_default_sizes_and_mode_flags():
+    """Default config: every axis at 1, no mode flag set, grouped GEMM (and so the EP wrappers) on."""
+    cfg = create_config(world_size=8, gpus_per_node=8)
+    assert (cfg.ep_size, cfg.cp_size, cfg.tp_size, cfg.expert_tp_size) == (1, 1, 1, 1)
+    assert not (cfg.is_ep_mode or cfg.is_cp_mode or cfg.is_tp_mode)
+    assert cfg.use_grouped_gemm is True
+    assert cfg.needs_ep_wrappers is True
+
+
+@pytest.mark.parametrize(
+    ("axis", "ep_cp_tp_flags"),
+    [
+        ({"ep_size": 8}, (True, False, False)),
+        ({"cp_size": 4}, (False, True, False)),
+        ({"tp_size": 4}, (False, False, True)),
+    ],
+)
+def test_a_single_axis_sets_only_its_own_mode_flag(axis, ep_cp_tp_flags):
+    cfg = create_config(world_size=8, gpus_per_node=8, **axis)
+    assert (cfg.is_ep_mode, cfg.is_cp_mode, cfg.is_tp_mode) == ep_cp_tp_flags
+
+
+def test_ep_cp_mode_flags():
+    """EP+CP sets both axis flags and the combined one, and not the EP+TP one."""
+    cfg = create_config(ep_size=8, cp_size=8, world_size=16, gpus_per_node=8, ep_scope="node")
+    assert cfg.is_ep_mode and cfg.is_cp_mode and cfg.is_ep_cp_mode
+    assert not (cfg.is_tp_mode or cfg.is_ep_tp_mode)
+
+
 def test_num_ep_groups_node():
     """Node-local EP: num_ep_groups = (gpus_per_node / ep_group_size) * num_nodes."""
     cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, ep_scope="node")
@@ -599,28 +627,21 @@ _GLOO_WORLD = 8
 _GLOO_TIMEOUT_SEC = 180
 
 
-def _ep_group_size_one_worker(rank: int, out_dir: str, port: int) -> None:
+def _ep_group_size_one_worker(rank: int, out_dir: str) -> None:
     """Build the REAL ``EPConfig`` and ``ParallelismConfig`` for ``rank`` on a live gloo group."""
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(_GLOO_WORLD))
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=_GLOO_WORLD, timeout=datetime.timedelta(seconds=_GLOO_TIMEOUT_SEC)
-    )
-    try:
-        ep = EPConfig(ep_size=1, world_size=_GLOO_WORLD, gpus_per_node=_GLOO_WORLD, use_grouped_gemm=False)
-        pc = make_parallelism_config(world_size=_GLOO_WORLD, gpus_per_node=_GLOO_WORLD, rank=rank, ep_size=1)
-        failures = []
-        if ep.ep_group_size != 1 or not ep.needs_expert_grad_sync:
-            failures.append(f"precondition: ep_group_size={ep.ep_group_size} sync={ep.needs_expert_grad_sync}")
-        if pc.num_ep_groups != ep.num_ep_groups:
-            failures.append(f"num_ep_groups {pc.num_ep_groups} != EPConfig's {ep.num_ep_groups}")
-        if sorted(pc.get_expert_replica_ranks()) != sorted(ep.expert_replica_ranks):
-            failures.append(f"replicas {pc.get_expert_replica_ranks()} != EPConfig's {ep.expert_replica_ranks}")
-        if dist.get_world_size(ep.expert_replica_group) != _GLOO_WORLD:
-            failures.append(f"replica group holds {dist.get_world_size(ep.expert_replica_group)} of {_GLOO_WORLD}")
-        with open(os.path.join(out_dir, f"result_{rank}.txt"), "w") as fh:
-            fh.write("PASS" if not failures else "FAIL: " + "; ".join(failures))
-    finally:
-        dist.destroy_process_group()
+    ep = EPConfig(ep_size=1, world_size=_GLOO_WORLD, gpus_per_node=_GLOO_WORLD, use_grouped_gemm=False)
+    pc = make_parallelism_config(world_size=_GLOO_WORLD, gpus_per_node=_GLOO_WORLD, rank=rank, ep_size=1)
+    failures = []
+    if ep.ep_group_size != 1 or not ep.needs_expert_grad_sync:
+        failures.append(f"precondition: ep_group_size={ep.ep_group_size} sync={ep.needs_expert_grad_sync}")
+    if pc.num_ep_groups != ep.num_ep_groups:
+        failures.append(f"num_ep_groups {pc.num_ep_groups} != EPConfig's {ep.num_ep_groups}")
+    if sorted(pc.get_expert_replica_ranks()) != sorted(ep.expert_replica_ranks):
+        failures.append(f"replicas {pc.get_expert_replica_ranks()} != EPConfig's {ep.expert_replica_ranks}")
+    if dist.get_world_size(ep.expert_replica_group) != _GLOO_WORLD:
+        failures.append(f"replica group holds {dist.get_world_size(ep.expert_replica_group)} of {_GLOO_WORLD}")
+    with open(os.path.join(out_dir, f"result_{rank}.txt"), "w") as fh:
+        fh.write("PASS" if not failures else "FAIL: " + "; ".join(failures))
 
 
 def test_ep_group_size_one_agrees_with_a_real_eight_rank_ep_config(tmp_path):
@@ -634,8 +655,8 @@ def test_ep_group_size_one_agrees_with_a_real_eight_rank_ep_config(tmp_path):
     A ``num_ep_groups`` of 1 there under-counts the replica set the deferred sweep divides by.
     """
     out_dir = str(tmp_path)
-    mp.start_processes(
-        _ep_group_size_one_worker, args=(out_dir, free_port()), nprocs=_GLOO_WORLD, join=True, start_method="spawn"
+    run_gloo_ranks(
+        _ep_group_size_one_worker, _GLOO_WORLD, out_dir, pg_timeout=datetime.timedelta(seconds=_GLOO_TIMEOUT_SEC)
     )
     for rank in range(_GLOO_WORLD):
         with open(os.path.join(out_dir, f"result_{rank}.txt")) as fh:
@@ -1256,8 +1277,4 @@ def test_epconfig_second_timing_rejects_expert_lora_with_etp():
 
 
 if __name__ == "__main__":
-    import sys
-
-    import pytest
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

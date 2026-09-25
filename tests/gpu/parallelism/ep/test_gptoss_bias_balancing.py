@@ -20,11 +20,12 @@ tiny randomly-initialised model (no download):
   6. The per-expert load counter accumulates (sum == tokens * top_k).
   7. `on_step_end` applies the DeepSeek-V3 sign update (±gamma) into `router.bias`
      and zeros the counter.
-  8. A full model forward runs through the real EP dispatch and populates counters.
-  9. GLM4 / Mistral4 (+ the LFM2 side-buffer route seam): `route_tokens_to_experts`
+  8. GLM4 / Mistral4 (+ the LFM2 side-buffer route seam): `route_tokens_to_experts`
      injects a balancing bias into the selection scores (additive to any native
      correction bias) while the gate weights stay bias-free, and accumulates the
      load counter.
+
+Counting through a full forward on a live DeepEP buffer is ``test_ep_gc_bias_balancing.py``'s job.
 
 Run with 1 or 2 GPUs (ep_size = world_size):
     torchrun --nproc_per_node=2 \
@@ -253,32 +254,6 @@ def run(ctx) -> dict:
     check(checks, "update magnitude == gamma", torch.allclose(b0.abs(), torch.full_like(b0, gamma), atol=1e-6))
     counter_after = ep_layers[0].expert_load_counter
     check(checks, "counter zeroed after step", float(counter_after.abs().sum().item()) == 0.0)
-
-    # 8. Full forward through the real EP dispatch populates counters.
-    for layer in ep_layers:
-        layer.expert_load_counter = None
-    try:
-        torch.manual_seed(SEED)
-        input_ids = torch.randint(0, 256, (BATCH, SEQ_LEN), device=device)
-        model.train()
-        out = model(input_ids=input_ids, labels=input_ids)
-        loss_ok = torch.isfinite(out.loss).item()
-        counters_populated = all(
-            l.expert_load_counter is not None and l.expert_load_counter.sum().item() > 0 for l in ep_layers
-        )
-        check(checks, "full forward loss is finite", loss_ok, f"loss={out.loss.item():.4f}")
-        check(checks, "full forward populates all counters", counters_populated)
-    except Exception as e:
-        # The DeepEP dispatch buffer is lazily allocated by the real
-        # load_distributed_model path, not by this minimal standalone build, so a
-        # full forward may raise here (dispatch on a None ElasticBuffer). The
-        # routing logic under test runs *before* dispatch and is fully covered by
-        # the direct _route_with_bias checks above; dispatch/compute/combine is
-        # pre-existing, separately-tested code.
-        log(
-            f"  [WARN] full-forward check skipped (DeepEP buffer not initialised in minimal harness): "
-            f"{type(e).__name__}: {e}"
-        )
 
     # Other families: verify the bias injection in route_tokens_to_experts.
     # These methods need only a few plain attributes, so we exercise them on

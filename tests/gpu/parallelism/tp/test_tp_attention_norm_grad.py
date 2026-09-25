@@ -37,7 +37,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.mesh import get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
-from tests.common.distributed import shared_scratch_dir
+from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.utils import cleanup_memory, log, log_all
 
@@ -180,10 +180,7 @@ def run(ctx):
     checks["norm_grads_match_reference"] = worst < NORM_GRAD_TOL
 
     # The whole failure mode at dp>1 is the ranks disagreeing, so pin agreement directly.
-    spread = torch.tensor([worst], device=device)
-    gathered = [torch.zeros_like(spread) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, spread)
-    checks["ranks_agree"] = max(abs(g.item() - gathered[0].item()) for g in gathered) < 1e-6
+    checks["ranks_agree"] = world_spread(worst) < 1e-6
 
     return {"checks": checks, "metrics": metrics}
 

@@ -47,7 +47,8 @@ from src.distributed.context_parallel.validation import (
 )
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.distributed import shared_scratch_dir
+from tests.common.distributed import shared_scratch_dir, world_mean, world_spread
+from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.utils import cleanup_memory, log, log_all
 
@@ -120,15 +121,6 @@ def build_synthetic_all_full_attention_ckpt(out_dir: Path, seed: int = 0) -> Pat
         )
     model.save_pretrained(out_dir, safe_serialization=True)
     return out_dir
-
-
-def make_inputs(vocab_size: int, batch: int, seq: int, device: str):
-    torch.manual_seed(123)
-    ids = torch.randint(0, vocab_size, (batch, seq), device=device)
-    labels = ids.clone()
-    # Mask every fourth token so every CP rank receives some active labels.
-    labels[:, ::4] = -100
-    return ids, labels
 
 
 def reference_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, device: str) -> float:
@@ -288,12 +280,7 @@ def run(ctx) -> dict:
         build_synthetic_all_full_attention_ckpt(Path(ckpt_dir))
     ctx.barrier()
 
-    ids, labels = make_inputs(
-        TINY_TEXT_CONFIG["vocab_size"],
-        batch=2,
-        seq=64,
-        device=device,
-    )
+    ids, labels = random_token_batch(TINY_TEXT_CONFIG["vocab_size"], batch=2, seq=64, device=device)
     dist.broadcast(ids, src=0)
     dist.broadcast(labels, src=0)
 
@@ -310,23 +297,13 @@ def run(ctx) -> dict:
     log("\n[2/4] CP forward (cp_size=2) — Qwen3_5MoeUlyssesAttention")
     cp_loss = cp_forward(ckpt_dir, ids, labels, ctx.rank, ctx.local_rank)
 
-    # Each CP rank computes loss on its sequence chunk → per-rank values differ.
-    # Aggregate by averaging the per-token losses across CP ranks (since each
-    # rank has the same number of label tokens after the every-fourth mask
-    # alignment matches the chunk boundary).
-    all_losses = [torch.zeros(1, device=device, dtype=torch.float64) for _ in range(ctx.world_size)]
-    dist.all_gather(all_losses, torch.tensor([cp_loss], device=device, dtype=torch.float64))
-    per_rank = [l.item() for l in all_losses]
-    # The CP trainer aggregates per-token loss across CP ranks; for raw
-    # comparison without the trainer's aggregation, take the mean — the
-    # interleaved mask leaves each rank with the same active-token count.
-    cp_mean = sum(per_rank) / len(per_rank)
+    # Under no_grad the wrapper returns the rank-uniform group mean, so the rank average is that value.
+    cp_mean = world_mean(cp_loss)
     ref_vs_cp = abs(cp_mean - ref_loss)
 
     if ctx.rank == 0:
         log("\n" + "=" * 70)
         log(f"  Reference loss:         {ref_loss:.6f}")
-        log(f"  CP loss (per rank):     {[f'{l:.6f}' for l in per_rank]}")
         log(f"  CP loss (mean):         {cp_mean:.6f}")
         log(f"  |CP mean - reference|:  {ref_vs_cp:.3e}")
         log(f"  Tolerance:              {LOSS_TOLERANCE:.3e}")
@@ -352,16 +329,13 @@ def run(ctx) -> dict:
     # Equal-length unpadded rows only: each chunk then holds the same token count, so the mean of
     # per-chunk aux means is comparable to the full-batch mean without any count-weighting bias.
     local_aux = cp_aux_component(ckpt_dir, ids, labels, ctx.rank, ctx.local_rank)
-    aux_parts = [torch.zeros(1, device=device, dtype=torch.float64) for _ in range(ctx.world_size)]
-    dist.all_gather(aux_parts, torch.tensor([local_aux], device=device, dtype=torch.float64))
-    cp_aux = sum(t.item() for t in aux_parts) / ctx.world_size
+    cp_aux = world_mean(local_aux)
     aux_delta = abs(cp_aux - ref_aux)
 
     # The eval-path wrapper all-reduces the aux term to the CP-group mean, so the per-rank
     # components must agree — a chunk-local aux (rank-varying) has the same MEAN and would pass the
     # average comparison below while still biasing eval_loss through the one-representative gather.
-    aux_spread = max(abs(t.item() - aux_parts[0].item()) for t in aux_parts)
-    checks["cp_aux_component_rank_uniform"] = aux_spread <= 1e-6
+    checks["cp_aux_component_rank_uniform"] = world_spread(local_aux) <= 1e-6
 
     if ctx.rank == 0:
         log(

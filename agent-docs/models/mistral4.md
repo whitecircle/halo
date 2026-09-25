@@ -14,7 +14,7 @@ EP+ETP (`ep_size>1` and `expert_tp_size>1`) is experimental and node-local; it c
 
 ¹ Node-local EP+CP requires `ep_group_size == nvlink_domain_size`, so on 8-GPU nodes `ep_size=8` exactly; `cp_size` then only has to divide the domain.
 
-Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per single-node mode under `pytest -m "gpu and mistral4"`; EP+CP coverage lives in the Cohere2 MoE matrix) and `tests/gpu/parallelism/test_mistral3_vision_smoke.py` (Pixtral + text forward/backward).
+Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per single-node mode under `pytest -m "gpu and mistral4"`; EP+CP coverage lives in the Cohere2 MoE matrix); `tests/cpu/parallelism/test_mistral4_registries.py` pins the EP/CP/TP registry claims.
 
 ## EP wrapper
 

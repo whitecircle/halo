@@ -26,7 +26,6 @@ Test Matrix:
   1. Forward pass: both the non-EP baseline and the EP loss match the undistributed reference
   2. Logit comparison: EP logits ≈ non-EP logits (cosine similarity)
   3. Router gradient comparison: EP router grads ≈ non-EP router grads
-  4. Per-expert output: verifies routed tokens produce same expert output
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -38,19 +37,16 @@ Requirements:
     - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
 """
 
-import sys
-import traceback
-
 import torch
 import torch.distributed as dist
-from accelerate import PartialState
 from transformers import AutoTokenizer
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
-from tests.common.distributed import ensure_model_downloaded, init_distributed, teardown_distributed
+from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import broadcast_reference, dense_reference, fixed_chat_batch
+from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, cos_sim, gpu_mem_gb, log, log_all
@@ -191,10 +187,9 @@ def run_ep_forward(batch):
     if not ep_layers:
         raise RuntimeError("EP=2 load produced no EP-wrapped layers — the comparison would be vacuous")
 
-    if ep_layers:
-        layer = ep_layers[0]
-        log(f"  Expert range (rank {rank}): [{layer.expert_start}, {layer.expert_end})")
-        log(f"  Experts per rank: {layer.experts_per_rank}")
+    layer = ep_layers[0]
+    log(f"  Expert range (rank {rank}): [{layer.expert_start}, {layer.expert_end})")
+    log(f"  Experts per rank: {layer.experts_per_rank}")
 
     log(f"  Input shape: {input_ids.shape}")
 
@@ -439,100 +434,71 @@ def compare_results(
     return passed, results
 
 
-def main():
-    rank, world_size, local_rank = init_distributed()
-    PartialState()
-
+@gpu_test_main(exact_world_size=EP_SIZE, prefix="ep_vs_no_ep")
+def run(ctx):
     log(f"\n{'#' * 70}")
     log("  EP vs Non-EP Correctness Test (Gold Standard)")
-    log(f"  World size: {world_size}, EP size: {EP_SIZE}")
+    log(f"  World size: {ctx.world_size}, EP size: {EP_SIZE}")
     log(f"  Model: {MODEL_NAME}")
     log(f"  Seq len: {SEQ_LEN}, Seed: {SEED}")
-    log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(
         f"  Tolerances: loss_abs={LOSS_ABS_TOL}, logit_cos={LOGIT_COSINE_MIN}, "
         f"router_grad_cos={ROUTER_GRAD_COSINE_MIN}"
     )
     log(f"{'#' * 70}")
 
-    if world_size != EP_SIZE:
-        log(f"\nERROR: This test requires exactly {EP_SIZE} GPUs, got {world_size}")
-        teardown_distributed()
-        return 1
+    log("\nEnsuring model is downloaded...")
+    ensure_model_downloaded(MODEL_NAME, ctx.rank)
 
-    try:
-        log("\nEnsuring model is downloaded...")
-        ensure_model_downloaded(MODEL_NAME, rank)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+    # One batch for all three models, broadcast once: a per-phase rebuild would leave the sides
+    # comparable only for as long as the fixture stayed byte-identical between calls.
+    device = f"cuda:{ctx.local_rank}"
+    batch = fixed_chat_batch(tokenizer, SEQ_LEN, device, seed=SEED)
+    for tensor in batch:
+        dist.broadcast(tensor, src=0)
 
-        # One batch for all three models, broadcast once: a per-phase rebuild would leave the sides
-        # comparable only for as long as the fixture stayed byte-identical between calls.
-        device = f"cuda:{local_rank}"
-        batch = fixed_chat_batch(tokenizer, SEQ_LEN, device, seed=SEED)
-        for tensor in batch:
-            dist.broadcast(tensor, src=0)
-
-        # Undistributed reference: neither side of the comparison below is one, so both are scored
-        # against this. Rank 0 builds and frees it before the parallel loads (see LOSS_ABS_TOL).
-        reference_loss_local = 0.0
-        if rank == 0:
-            reference_loss_local, _ = dense_reference(
-                MODEL_NAME, *batch, device, attn_implementation=ATTN_IMPLEMENTATION
-            )
-            log(f"  Reference (single-GPU dense): loss={reference_loss_local:.6f}")
-        reference_loss, _ = broadcast_reference(reference_loss_local, None, device, rank, with_grad=False)
-
-        barrier()
-        cleanup_memory()
-
-        baseline_loss, baseline_logits, baseline_router_grads = run_baseline_forward(batch)
-
-        barrier()
-        cleanup_memory()
-
-        ep_loss, ep_logits, ep_router_grads = run_ep_forward(batch)
-
-        barrier()
-        cleanup_memory()
-
-        passed, results = compare_results(
-            reference_loss,
-            baseline_loss,
-            baseline_logits,
-            baseline_router_grads,
-            ep_loss,
-            ep_logits,
-            ep_router_grads,
-            local_rank,
-        )
-
-    except Exception as e:
-        log(f"\nFATAL ERROR: {e}")
-        traceback.print_exc()
-        passed = False
-        results = {}
+    # Undistributed reference: neither side of the comparison below is one, so both are scored
+    # against this. Rank 0 builds and frees it before the parallel loads (see LOSS_ABS_TOL).
+    reference_loss_local = 0.0
+    if ctx.rank == 0:
+        reference_loss_local, _ = dense_reference(MODEL_NAME, *batch, device, attn_implementation=ATTN_IMPLEMENTATION)
+        log(f"  Reference (single-GPU dense): loss={reference_loss_local:.6f}")
+    reference_loss, _ = broadcast_reference(reference_loss_local, None, device, ctx.rank, with_grad=False)
 
     barrier()
+    cleanup_memory()
 
-    log(f"\n{'#' * 70}")
-    if passed:
-        log("  EP vs NON-EP CORRECTNESS TEST: PASSED")
-        log("  EP produces numerically equivalent results to non-EP baseline")
-    else:
-        log("  EP vs NON-EP CORRECTNESS TEST: FAILED")
-        if results:
-            for k, v in results.items():
-                log(f"    {k}: {v}")
-    log(f"{'#' * 70}\n")
+    baseline_loss, baseline_logits, baseline_router_grads = run_baseline_forward(batch)
 
     barrier()
-    teardown_distributed()
+    cleanup_memory()
 
-    return 0 if passed else 1
+    ep_loss, ep_logits, ep_router_grads = run_ep_forward(batch)
+
+    barrier()
+    cleanup_memory()
+
+    passed, results = compare_results(
+        reference_loss,
+        baseline_loss,
+        baseline_logits,
+        baseline_router_grads,
+        ep_loss,
+        ep_logits,
+        ep_router_grads,
+        ctx.local_rank,
+    )
+    if not passed:
+        for key, value in results.items():
+            log(f"    {key}: {value}")
+    # compare_results broadcasts rank 0's verdict, so every rank reports the same one.
+    return {"checks": {"ep_matches_no_ep_baseline_and_reference": passed}}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

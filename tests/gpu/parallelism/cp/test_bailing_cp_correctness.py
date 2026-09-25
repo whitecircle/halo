@@ -40,8 +40,11 @@ from src.distributed.context_parallel.validation import (
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from tests.common.distributed import world_mean
+from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_MOE_LING_MINI
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, cos_sim, log, log_all
 
 # Shrunk from the hub config so every family field the wrapper reads (partial_rotary_factor,
@@ -75,9 +78,6 @@ BATCH, SEQ = 2, 64
 ATTN_ATOL = 3e-2
 ATTN_COSINE_MIN = 0.9995
 
-# Loss: CP's per-rank sum normalization vs the reference mean, on top of the same bf16 noise.
-LOSS_TOLERANCE = 5e-2
-
 # Gradients (CP-rank average vs reference), matching tests/gpu/parallelism/cp/test_cp_train_correctness.py.
 GRAD_COSINE_MIN = 0.99
 GRAD_NORM_RTOL = 0.10
@@ -104,15 +104,6 @@ def build_tiny_model(device: str) -> nn.Module:
         if tensor.is_floating_point():
             dist.broadcast(tensor.data, src=0)
     return model
-
-
-def make_inputs(vocab_size: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Token ids + labels with a quarter of the positions masked (every rank keeps active labels)."""
-    torch.manual_seed(123)
-    ids = torch.randint(0, vocab_size, (BATCH, SEQ), device=device)
-    labels = ids.clone()
-    labels[:, ::4] = -100
-    return ids, labels
 
 
 def causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -230,7 +221,7 @@ def run(ctx):
     ctx.barrier()
 
     model = build_tiny_model(device)
-    ids, labels = make_inputs(model.config.vocab_size, device)
+    ids, labels = random_token_batch(model.config.vocab_size, BATCH, SEQ, device)
 
     log("[1/4] Validation gates")
     checks["validation_gates"] = check_validation_gates(model)
@@ -255,15 +246,14 @@ def run(ctx):
     cp_loss = cp_model(input_ids=ids, labels=labels, use_cache=False).loss
     log_all(f"  cp_loss={cp_loss.item():.6f}")
 
-    losses = [torch.zeros(1, dtype=torch.float64, device=device) for _ in range(ctx.world_size)]
-    dist.all_gather(losses, torch.tensor([cp_loss.item()], dtype=torch.float64, device=device))
-    cp_mean = sum(t.item() for t in losses) / ctx.world_size
+    cp_mean = world_mean(cp_loss.item())
     delta = abs(cp_mean - reference_value)
-    log(f"  reference={reference_value:.6f}  cp_mean={cp_mean:.6f}  |Δ|={delta:.3e}  tol={LOSS_TOLERANCE:.1e}")
+    tolerance = TOL.parallel_vs_baseline_loss_abs
+    log(f"  reference={reference_value:.6f}  cp_mean={cp_mean:.6f}  |Δ|={delta:.3e}  tol={tolerance:.1e}")
     metrics["reference_loss"] = reference_value
     metrics["cp_mean_loss"] = cp_mean
     metrics["loss_delta"] = delta
-    checks["cp_loss_matches_reference"] = delta <= LOSS_TOLERANCE
+    checks["cp_loss_matches_reference"] = delta <= tolerance
 
     log("[4/4] CP backward")
     cp_loss.backward()
