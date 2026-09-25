@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 ENGINE_SERIALIZATION_FAULT = "not JSON compliant"
 # Client-error statuses that report a transient server condition, not a bad request.
 RETRYABLE_4XX = frozenset({408, 429})
+# What an engine's client error says when the conversation outgrew the served context, lowercased:
+# vLLM's and SGLang's "maximum context length" / "model's context length", vLLM's "maximum model
+# length", and the OpenAI API's error code.
+CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
 
 
 @dataclass(frozen=True)
@@ -313,6 +317,13 @@ def is_terminal_client_status(status: int, body: str) -> bool:
     """A client error the request itself caused (the conversation outgrew the served context, a
     malformed request): retrying the same request cannot succeed."""
     return 400 <= status < 500 and status not in RETRYABLE_4XX and not is_engine_fault(status, body)
+
+
+def is_context_overflow(status: int, body: str) -> bool:
+    """A terminal client error reporting that the conversation outgrew the served context
+    (:data:`CONTEXT_OVERFLOW_MARKERS`), the one terminal client error an episode's own length causes."""
+    lowered = body.lower()
+    return is_terminal_client_status(status, body) and any(marker in lowered for marker in CONTEXT_OVERFLOW_MARKERS)
 
 
 async def generate_turn(

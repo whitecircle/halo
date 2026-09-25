@@ -63,12 +63,13 @@ a partial one. `--success_threshold` decides only for an environment without tha
 A turn runs under training's retry policy (`max_retries`, `retry_base_wait` from `--training_config`,
 else 3 and 1 s): an engine fault the OpenAI client does not retry (vLLM's `not JSON compliant` 400) is
 retried with backoff, and an engine abort is re-issued, never stepped. The client itself retries
-transport failures. A generation that still fails ends the episode. When the episode's own request
-caused it — a client error such as a conversation over the served context, or a turn that outran
-`--request_timeout` on every client retry — the sample is graded on what it earned, like a miss.
-Any other failure makes it a generation error: `reward` and `success` are null, it leaves every score
-(the telemetry line still counts it), and `generation_errors` counts it. A score left with no sample
-reads `nan`.
+transport failures. A generation that still fails ends the episode. When the episode's own length
+caused it — a conversation over the served context (a client error whose message names the context
+length), or a turn that outran `--request_timeout` on every client retry — the sample is graded on
+what it earned, like a miss. Any other failure, a rejected key, an unknown model or route and a
+malformed request among them, makes it a generation error: `reward` and `success` are null, it leaves
+every score (the telemetry line still counts it), and `generation_errors` counts it. A score left with
+no sample reads `nan`.
 
 `invalid` counts the samples scored 0 with no signal, each carrying `error`: an invalid grade (a
 grading or sandbox outage, a failed scorer, a null `answer`) or an episode whose run raised. Invalid
@@ -91,8 +92,9 @@ generation contract (`rollout`), the `training_config`, `system_prompt` and tool
 coding, also the adapter, contest `selection`, language, `eval_protocol`, effort and the `GradingSpec`
 (`env_grading`).
 
-Each later line is an `episode`, addressed by `index` and `id`: `reward`, `success`, `stats`, the
-messages, `reasoning_effort` / `reasoning_budget`, `info`. The answer key (`_`-prefixed `info`
+Each later line is an `episode`, addressed by `index` and `id`: `reward`, `success`,
+`generation_error` (null on a scored sample), `stats`, the messages, `reasoning_effort` /
+`reasoning_budget`, `info`. The answer key (`_`-prefixed `info`
 fields), the `info` tool-call log, `context` and assistant chain-of-thought are stripped; each
 message keeps its own `tool_calls`, which the re-grader replays.
 
@@ -111,8 +113,11 @@ It rebuilds each problem's hidden tests by `index` under the meta line's contest
 replays every recorded `submit_solution`, up to that episode's own budget, through `grade_solution`
 under the meta line's `env_grading` contract. The meta's `eval_protocol` only rebuilds the
 environment, whose `max_submissions` is the budget of an episode that stamped none. Grading stops at
-the first failing test and `max_grading_seconds` does not apply. Reports `s@1` / `s@2` and the
-protocol per file; keep `--workers` at or below the core count.
+the first failing test and `max_grading_seconds` does not apply. It reports, per file, the protocol
+and, over the episodes that carry a verdict (`n`): `s@1`, the fraction whose first admitted submission
+passes every test, and `s@2`, the fraction whose any submission within the episode's budget does. An
+episode recorded with a `generation_error` leaves `n` and is counted in `generation_errors`. Keep
+`--workers` at or below the core count.
 
 Only `run_code_contests.py` stamps the meta a re-grade needs (`env_type`, `adapter`, `dataset`,
 `model`, `language`); a `run_env.py` dump is refused.

@@ -31,9 +31,9 @@ from src.data.sources.paths import parse_dataset_source
 from src.environments.base import (
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_REASON_KEY,
-    SOLVE_RATE_KEY,
     BaseEnvironment,
     Trajectory,
+    solve_verdict,
 )
 from src.environments.engine_wire import generation_control_fields
 from src.environments.episode import (
@@ -43,8 +43,8 @@ from src.environments.episode import (
     bind_episode_effort,
     describe_exception,
     generate_turn,
+    is_context_overflow,
     is_engine_fault,
-    is_terminal_client_status,
     step_context_from_generation,
     validate_thinking_budget_scope,
 )
@@ -120,8 +120,9 @@ def write_trajectories_jsonl(path: str, meta: dict[str, Any], results: list[dict
     """Write a run's trajectories to ``path`` as JSONL, returning the episode count.
 
     Line 1 is a ``{"type": "meta", ...}`` record; each following line is a ``{"type": "episode", ...}``
-    with one sample's messages and grading verdict, addressable by ``index`` and dataset ``id``.
-    Episodes present only when ``collect_results`` ran with ``collect_trajectories=True``."""
+    with one sample's messages and grading verdict, addressable by ``index`` and dataset ``id``, and
+    :data:`GENERATION_ERROR_KEY` naming the failure of a sample that carries no verdict (``None`` on a
+    scored one). Episodes present only when ``collect_results`` ran with ``collect_trajectories=True``."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     count = 0
     with open(path, "w") as fh:
@@ -136,6 +137,7 @@ def write_trajectories_jsonl(path: str, meta: dict[str, Any], results: list[dict
                     "sample_index": i,
                     "reward": s.get("reward"),
                     "success": s.get("success"),
+                    GENERATION_ERROR_KEY: s.get(GENERATION_ERROR_KEY),
                     "stats": s.get("stats"),
                 }
                 traj = s.get("trajectory")
@@ -185,13 +187,14 @@ def _is_terminal_for_eval(exc: BaseException) -> bool:
 
 
 def _is_request_fault(exc: BaseException) -> bool:
-    """Whether a generation failed on the request the episode itself built: a terminal client error
-    (the conversation outgrew the served context) or a turn that outran ``request_timeout`` on every
-    client retry. Both follow the episode's own length, so the sample is graded on what it earned; any
-    other failure is the driver's, and the sample carries no verdict."""
+    """Whether a generation failed on the request the episode itself built: the conversation outgrew the
+    served context (:func:`is_context_overflow`), or a turn outran ``request_timeout`` on every client
+    retry. Both follow the episode's own length, so the sample is graded on what it earned. Any other
+    failure is the driver's, a rejected key, an unknown model or route and a malformed request among
+    them, and the sample carries no verdict."""
     if isinstance(exc, APITimeoutError):
         return True
-    return isinstance(exc, APIStatusError) and is_terminal_client_status(exc.status_code, exc.message)
+    return isinstance(exc, APIStatusError) and is_context_overflow(exc.status_code, exc.message)
 
 
 async def _request_turn(
@@ -390,8 +393,9 @@ async def collect_results(
                     rec["trajectory"] = serialize_trajectory(traj)
                 return rec
             except Exception as e:  # one bad episode must not sink the batch
-                logger.warning(f"Eval episode failed (id={example.get('id')}): {e}")
-                return {"reward": 0.0, "success": False, "stats": {}, "error": str(e)}
+                reason = describe_exception(e)
+                logger.warning(f"Eval episode failed (id={example.get('id')}): {reason}")
+                return {"reward": 0.0, "success": False, "stats": {}, "error": reason}
 
         samples = await asyncio.gather(*[sample() for _ in range(num_samples)])
         return {"group": example.get("group"), "id": example.get("id"), "samples": samples}
@@ -400,15 +404,15 @@ async def collect_results(
 
 
 def _solved(env: BaseEnvironment, traj: Trajectory | None, reward: float, success_threshold: float) -> bool:
-    """Whether a sample solved its task: the environment's solve verdict (:data:`SOLVE_RATE_KEY`, the flag
+    """Whether a sample solved its task: the environment's solve verdict (:func:`solve_verdict`, the flag
     training's ``outcome/solve_rate`` averages) where it reports one, else ``reward >= success_threshold``.
 
     A shaped total mixes the objective with prices a solve does not depend on — a tool-error or
     length-cutoff penalty sinks a solved episode below the threshold, a submission bonus lifts a partial
     one over it — so it decides only where the environment has no verdict of its own.
     """
-    verdict = env.rollout_metrics(traj).get(SOLVE_RATE_KEY) if traj is not None else None
-    return reward >= success_threshold if verdict is None else verdict >= 1.0
+    verdict = solve_verdict(env.rollout_metrics(traj)) if traj is not None else None
+    return reward >= success_threshold if verdict is None else verdict
 
 
 def _mean_or_nan(values: Iterable[float]) -> float:

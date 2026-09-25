@@ -138,6 +138,9 @@ async def _await_with_deadline(
             else:
                 remaining = 0.0
             if remaining <= 0:
+                if task.done():
+                    # Finished while the clock was being read: the result stands.
+                    return task.result()
                 raise DeadlineExpired(
                     f"{what} exceeded its {timeout:.0f}s deadline ({credit:.0f}s of engine pause excluded)", credit
                 )
@@ -585,10 +588,17 @@ class RolloutManager:
         try:
             local_node_id = ray.get_runtime_context().get_node_id()
             strategy = NodeAffinitySchedulingStrategy(node_id=local_node_id, soft=True, _spill_on_unavailable=True)
+        except (TypeError, ValueError) as exc:
+            # A Ray without the private spill argument (TypeError), or a node id it refuses (ValueError).
+            logger.warning(
+                "RolloutManager: node affinity unavailable (%s); the environment actors are placed anywhere in "
+                "the Ray cluster instead of preferring this node",
+                describe_exception(exc),
+            )
+            actor_cls, clock_cls = EnvironmentActor, _RemoteEnginePauseClock
+        else:
             actor_cls = EnvironmentActor.options(scheduling_strategy=strategy)
             clock_cls = _RemoteEnginePauseClock.options(scheduling_strategy=strategy)
-        except Exception:  # affinity is an optimization, not fatal
-            actor_cls, clock_cls = EnvironmentActor, _RemoteEnginePauseClock
         self._actor_pause_clock = clock_cls.remote()
         self._actors = [
             actor_cls.remote(i, self.env_type, self.env_config, self._actor_pause_clock)

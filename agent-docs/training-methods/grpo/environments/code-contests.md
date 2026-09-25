@@ -223,8 +223,11 @@ mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#runni
 A problem counts solved when the submitted program passes every test in the pool — the environment's
 verdict, not the shaped total, so the recipe's shaping under `--training_config` (a
 `tool_error_penalty` on every refused scratchpad call under `leaderboard`, a submission bonus) moves
-it neither way, and the coding CLI takes no `--success_threshold`. The re-grader's `s@1` counts the
-same all-pass solves.
+it neither way, and the coding CLI takes no `--success_threshold`. The verdict is the episode's last
+graded submission and `success@1` each row's first scored sample, while the
+[re-grader](evaluation.md#re-grading-recorded-trajectories) scores every episode on its first
+submission (`s@1`) or any within its budget (`s@2`). The two score the same submission only on a
+`leaderboard` run at `--num_samples 1`, where each row is one episode with one submission.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
 level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window

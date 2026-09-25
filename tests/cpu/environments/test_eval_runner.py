@@ -1,11 +1,14 @@
 #!/usr/bin/env python
-"""CPU tests for the shared eval runner's dataset loading (load_hf_split) and trajectory recording
-(serialize_trajectory + write_trajectories_jsonl).
+"""CPU tests for the shared eval runner: dataset loading (``load_hf_split``), trajectory recording
+(``serialize_trajectory`` + ``write_trajectories_jsonl``), the episode driver's failure handling and
+retries (``run_episode``), and the scores (``collect_results`` + ``summarize`` + ``report``).
 
-The critical invariant: a recorded trajectory must keep the conversation and the grading verdict but
-must NOT leak the answer key (the hidden test cases live in ``info["_test_cases"]`` / the graded
-``info["context"]["answer"]`` payload). A drop-list that stops covering one of those keys writes it
-into the recorded file.
+- A recorded trajectory keeps the conversation and the grading verdict but never the answer key (the
+  hidden tests in ``info["_test_cases"]``, the graded ``info["context"]["answer"]`` payload).
+- A generation the episode's own request lost (a context overflow, a timeout past every retry) is
+  graded on what the episode earned; one the driver lost is a generation error: no verdict, out of
+  every score, counted and recorded apart.
+- A sample counts solved on the environment's own verdict where it reports one.
 
 Run:
     python tests/cpu/environments/test_eval_runner.py
@@ -21,7 +24,15 @@ from typing import Any
 import httpx
 import pytest
 from datasets import Dataset, DatasetDict
-from openai import NOT_GIVEN, APITimeoutError, BadRequestError
+from openai import (
+    NOT_GIVEN,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 
 import src.environments.eval_runner as eval_runner
 from src.configs.rollout_config import RolloutConfig
@@ -122,6 +133,32 @@ def test_write_trajectories_jsonl_meta_then_episodes(tmp_path):
     assert ep["index"] == 0 and ep["id"] == "cf-1900-A"  # addressable per-episode
     assert [m["role"] for m in ep["messages"]] == ["system", "user", "assistant"]
     assert "EXPECTED_OUTPUT_42" not in json.dumps(lines)  # no leak through the writer either
+    assert ep[eval_runner.GENERATION_ERROR_KEY] is None
+
+
+def test_a_generation_error_is_recorded_with_its_episode(tmp_path):
+    """The file is what the offline re-grader reads: without the marker it could not tell a sample the
+    driver lost from a scored miss, and would count it in ``n``."""
+    lost = {"reward": None, "success": None, "stats": {}, eval_runner.GENERATION_ERROR_KEY: "NotFoundError: gone"}
+    path = str(tmp_path / "traj.jsonl")
+    write_trajectories_jsonl(path, {"model": "m"}, [{"group": None, "id": "p", "samples": [lost]}])
+    with open(path) as f:
+        episode = [json.loads(line) for line in f][1]
+    assert episode[eval_runner.GENERATION_ERROR_KEY] == "NotFoundError: gone"
+    assert episode["reward"] is None and episode["success"] is None
+
+
+async def test_an_episode_that_raises_records_its_exception_type(monkeypatch):
+    """A bare ``TimeoutError`` stringifies to ``""``: the error must still name what was raised."""
+
+    async def _raises(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(eval_runner, "run_episode", _raises)
+    (row,) = await collect_results(
+        _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
+    )
+    assert row["samples"][0]["error"] == "TimeoutError"
 
 
 # run_episode failure handling
@@ -474,21 +511,25 @@ def test_summarize_empty_results_fails_loud():
 
 
 def test_summarize_counts_the_samples_that_carry_no_signal():
-    """An invalid grade or a lost episode scores 0 and stays in the means; the report counts them apart,
-    so a sandbox outage does not read as a weak model."""
+    """An invalid grade, or an episode whose run raised, scores 0 and stays in the means; the report
+    counts them apart, so a sandbox outage does not read as a weak model."""
     rows = [
         {"samples": [{"reward": 1.0, "success": True}, {"reward": 0.0, "success": False, "error": "outage"}]},
-        {"samples": [{"reward": 0.0, "success": False}, {"reward": 0.0, "success": False, "error": "lost"}]},
+        {"samples": [{"reward": 0.0, "success": False}, {"reward": 0.0, "success": False, "error": "raised"}]},
     ]
     summary = summarize(rows, num_samples=2)
     assert summary["invalid"] == 2
     assert summary["mean_reward"] == pytest.approx(0.25)
 
 
+def _status_error(error_cls: type[APIStatusError], status: int, message: str) -> APIStatusError:
+    body = json.dumps({"object": "error", "message": message, "type": error_cls.__name__, "code": status})
+    response = httpx.Response(status, text=body, request=httpx.Request("POST", "http://x/v1/chat/completions"))
+    return error_cls(f"Error code: {status} - {body}", response=response, body=json.loads(body))
+
+
 def _bad_request(message: str) -> BadRequestError:
-    body = json.dumps({"object": "error", "message": message, "type": "BadRequestError", "code": 400})
-    response = httpx.Response(400, text=body, request=httpx.Request("POST", "http://x/v1/chat/completions"))
-    return BadRequestError(f"Error code: 400 - {body}", response=response, body=json.loads(body))
+    return _status_error(BadRequestError, 400, message)
 
 
 def _final(answer="done"):
@@ -566,6 +607,32 @@ async def test_a_failure_the_episode_itself_caused_is_graded_not_dropped(monkeyp
     assert eval_runner.GENERATION_ERROR_KEY not in sample
     assert sample["success"] is False and sample["reward"] == pytest.approx(0.05)
     assert summarize([row], num_samples=1)["generation_errors"] == 0
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _status_error(NotFoundError, 404, "The model `m` does not exist."),
+        _status_error(AuthenticationError, 401, "Invalid API key"),
+        _status_error(PermissionDeniedError, 403, "Forbidden"),
+        _bad_request("max_tokens must be positive"),
+    ],
+    ids=["unknown-model", "rejected-key", "forbidden", "malformed-request"],
+)
+async def test_a_client_error_the_episode_did_not_cause_is_a_generation_error(monkeypatch, failure):
+    """A terminal client error other than a context overflow says nothing about the episode: an unknown
+    model or route, a rejected key, a request the driver built wrong. Graded as a miss it would score
+    the endpoint's misconfiguration as the policy's failure."""
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([_tool_call_response(), failure]))
+
+    (row,) = await collect_results(
+        _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
+    )
+
+    (sample,) = row["samples"]
+    assert type(failure).__name__ in sample[eval_runner.GENERATION_ERROR_KEY]
+    assert sample["reward"] is None and sample["success"] is None
+    assert summarize([row], num_samples=1)["generation_errors"] == 1
 
 
 async def test_an_engine_fault_past_the_retries_is_a_generation_error_row(monkeypatch):

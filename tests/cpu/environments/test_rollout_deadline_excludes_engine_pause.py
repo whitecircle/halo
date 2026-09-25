@@ -74,6 +74,27 @@ def test_the_episodes_own_timeout_error_is_not_mistaken_for_the_deadline():
         asyncio.run(_await_with_deadline(_FailingRef(), 5.0, _PausedClock(credit=1.0)))
 
 
+def test_a_result_that_lands_while_the_clock_is_read_is_returned_not_expired():
+    """The deadline runs out and the work finishes during the clock read that settles the expiry: the
+    finished result stands rather than being dropped for an expiry that no longer holds."""
+
+    async def scenario():
+        landed = asyncio.Event()
+
+        async def work():
+            await landed.wait()
+            return "done"
+
+        async def a_read_during_which_the_work_lands():
+            landed.set()
+            await asyncio.sleep(0)
+            return 0.0
+
+        return await _await_with_deadline(work(), 0.01, a_read_during_which_the_work_lands)
+
+    assert asyncio.run(scenario()) == "done"
+
+
 def _manager(episode_timeout: float) -> RolloutManager:
     return RolloutManager(
         num_workers=1,

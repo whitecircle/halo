@@ -10,8 +10,13 @@ These tests use Ray in local mode and mock the vLLM HTTP calls.
 
 import asyncio
 import json
+import logging
 import sys
 from types import SimpleNamespace
+
+import pytest
+
+from src.environments import ray_actors
 
 # Test: Environment Actor (Direct - Without Ray)
 
@@ -110,6 +115,63 @@ async def test_rollout_manager_start_shutdown():
         raise
     finally:
         ray.shutdown()
+
+
+class _Spawner:
+    """Stands in for a ``@ray.remote`` class: records each spawn, refuses an affinity it was not given."""
+
+    def __init__(self, name: str, spawned: list[str]):
+        self.name, self.spawned = name, spawned
+
+    def options(self, **kwargs):
+        raise AssertionError(f"{self.name} placed with a scheduling strategy that could not be built")
+
+    def remote(self, *args):
+        self.spawned.append(self.name)
+        return SimpleNamespace()
+
+
+def _manager_on_a_fake_cluster(monkeypatch, strategy) -> tuple[ray_actors.RolloutManager, list[str]]:
+    spawned: list[str] = []
+    runtime = SimpleNamespace(get_node_id=lambda: "node")
+    monkeypatch.setattr(
+        ray_actors, "ray", SimpleNamespace(is_initialized=lambda: True, get_runtime_context=lambda: runtime)
+    )
+    monkeypatch.setattr(ray_actors, "NodeAffinitySchedulingStrategy", strategy)
+    monkeypatch.setattr(ray_actors, "EnvironmentActor", _Spawner("actor", spawned))
+    monkeypatch.setattr(ray_actors, "_RemoteEnginePauseClock", _Spawner("clock", spawned))
+    manager = ray_actors.RolloutManager(
+        num_workers=2,
+        env_type="react_math",
+        env_config={},
+        server_urls=["http://localhost:8000"],
+        rollout_config=ray_actors.RolloutConfig(),
+    )
+    return manager, spawned
+
+
+async def test_a_ray_without_the_affinity_spills_the_actors_with_a_warning(monkeypatch, caplog):
+    """Affinity is a placement preference, so a Ray that cannot build it still starts the pool, but
+    says so: the actors may then land on any node, where a loopback server URL reaches nothing."""
+
+    def unsupported(**kwargs):
+        raise TypeError("__init__() got an unexpected keyword argument '_spill_on_unavailable'")
+
+    manager, spawned = _manager_on_a_fake_cluster(monkeypatch, unsupported)
+    with caplog.at_level(logging.WARNING, logger=ray_actors.__name__):
+        await manager.start()
+    assert spawned == ["clock", "actor", "actor"]
+    assert "node affinity unavailable" in caplog.text and "_spill_on_unavailable" in caplog.text
+
+
+async def test_an_unexpected_affinity_failure_is_not_swallowed(monkeypatch):
+    def broken(**kwargs):
+        raise RuntimeError("the raylet is gone")
+
+    manager, spawned = _manager_on_a_fake_cluster(monkeypatch, broken)
+    with pytest.raises(RuntimeError, match="raylet"):
+        await manager.start()
+    assert spawned == []
 
 
 # Test: RolloutConfig
