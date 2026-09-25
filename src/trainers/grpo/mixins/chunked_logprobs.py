@@ -155,7 +155,6 @@ def _sweep(
         temperature,
         head_transform.logit_scale,
         head_transform.softcap,
-        _VOCAB_CHUNK,
         compute_entropy,
     )
     return logps.reshape(b, t), entropy.reshape(b, t)
@@ -179,12 +178,30 @@ def chunked_selective_log_softmax(
     return _sweep(hidden, weight, completion_ids, bias, temperature, head_transform, False)[0]
 
 
+def _matmul_fp32(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+    """``a @ b`` as fp32, or ``out += a @ b`` into an fp32 ``out``.
+
+    On CUDA with a bf16 or fp16 ``b``, both operands are in ``b``'s dtype (an fp32 ``a``, such as the
+    backward's gradient tile, is cast to it first) and the tensor-core GEMM accumulates in fp32 and
+    returns fp32, so neither the product nor the running sum ``out`` is rounded to half precision. Any
+    other ``b`` (CPU, fp32) takes an fp32 matmul. Half operands are not upcast on CUDA: under the pinned
+    ``highest`` fp32 matmul precision that product would run on the CUDA cores.
+    """
+    if b.is_cuda and b.dtype in (torch.bfloat16, torch.float16):
+        a = a.to(b.dtype)
+        if out is None:
+            return torch.mm(a, b, out_dtype=torch.float32)
+        return torch.addmm(out, a, b, out_dtype=torch.float32, out=out)
+    product = a.float() @ b.float()
+    return product if out is None else out.add_(product)
+
+
 def _logits_tile(
     hidden_chunk, weight_chunk, bias, vocab_start, vocab_end, logit_scale, softcap, inv_t
 ) -> torch.Tensor:
     """One ``[seq, vocab-tile]`` plane of temperature-scaled logits: the family's logit scale, then its
     softcap (``cap · tanh(logits / cap)``), then the temperature, as the model's forward orders them."""
-    logits_chunk = (hidden_chunk @ weight_chunk.to(hidden_chunk.dtype).t()).float()
+    logits_chunk = _matmul_fp32(hidden_chunk, weight_chunk.to(hidden_chunk.dtype).t())
     if bias is not None:
         logits_chunk.add_(bias[vocab_start:vocab_end].to(torch.float32))
     if logit_scale is not None:
@@ -203,7 +220,6 @@ def _selective_logprob_entropy_forward(
     temperature: float,
     logit_scale: float | None,
     softcap: float | None,
-    vocab_chunk_size: int,
     compute_entropy: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Dual-chunked (sequence × vocab) selective log-softmax with an entropy accumulator in the same sweep.
@@ -236,8 +252,8 @@ def _selective_logprob_entropy_forward(
         target_logit = torch.zeros((n_chunk,), device=device, dtype=torch.float32)
         row_idx = torch.arange(n_chunk, device=device)
 
-        for vocab_start in range(0, vocab_size, vocab_chunk_size):
-            vocab_end = min(vocab_start + vocab_chunk_size, vocab_size)
+        for vocab_start in range(0, vocab_size, _VOCAB_CHUNK):
+            vocab_end = min(vocab_start + _VOCAB_CHUNK, vocab_size)
             weight_chunk = weight[vocab_start:vocab_end]
             logits_chunk = _logits_tile(
                 hidden_chunk, weight_chunk, bias, vocab_start, vocab_end, logit_scale, softcap, inv_t
@@ -267,13 +283,13 @@ def _selective_logprob_entropy_forward(
 
 
 def _selective_logprob_backward(
-    hidden, weight, targets, bias, log_z, grad_logprobs, temperature, logit_scale, softcap, vocab_chunk_size
+    hidden, weight, targets, bias, log_z, grad_logprobs, temperature, logit_scale, softcap
 ):
     """Dual-chunked backward: each logits tile is recomputed from the saved ``log_z`` instead of a
-    stored ``[T, V]`` plane. Both gradients accumulate in fp32; the row activations are upcast once per
-    sequence tile rather than once per vocab tile. Under a softcap the tile's gradient carries the
-    ``tanh`` derivative, ``1 − (logits / cap)²`` on the capped logits, and under a logit scale that
-    scale."""
+    stored ``[T, V]`` plane. Both gradient GEMMs take the fp32 gradient tile cast to the activations'
+    dtype (bf16 in training) and accumulate in fp32 (:func:`_matmul_fp32`). Under a softcap the tile's
+    gradient carries the ``tanh`` derivative, ``1 − (logits / cap)²`` on the capped logits, and under a
+    logit scale that scale."""
     inv_t = 1.0 / temperature
     n_rows, _ = hidden.shape
     vocab_size = weight.shape[0]
@@ -287,14 +303,13 @@ def _selective_logprob_backward(
     for seq_start in range(0, n_rows, _SEQ_CHUNK):
         seq_end = min(seq_start + _SEQ_CHUNK, n_rows)
         hidden_chunk = hidden[seq_start:seq_end]
-        hidden_chunk_f32 = hidden_chunk.float()
         targets_chunk = targets[seq_start:seq_end]
         grad_chunk = grad_logprobs[seq_start:seq_end]
         logz_chunk = log_z[seq_start:seq_end]
         row_idx = torch.arange(seq_end - seq_start, device=hidden.device)
 
-        for vocab_start in range(0, vocab_size, vocab_chunk_size):
-            vocab_end = min(vocab_start + vocab_chunk_size, vocab_size)
+        for vocab_start in range(0, vocab_size, _VOCAB_CHUNK):
+            vocab_end = min(vocab_start + _VOCAB_CHUNK, vocab_size)
             weight_chunk = weight[vocab_start:vocab_end]
             logits_chunk = _logits_tile(
                 hidden_chunk, weight_chunk, bias, vocab_start, vocab_end, logit_scale, softcap, inv_t
@@ -312,8 +327,8 @@ def _selective_logprob_backward(
             if logit_scale is not None:
                 grad_logits.mul_(logit_scale)
 
-            grad_hidden[seq_start:seq_end].add_(grad_logits @ weight_chunk.float())
-            grad_weight[vocab_start:vocab_end].add_(grad_logits.t() @ hidden_chunk_f32)
+            _matmul_fp32(grad_logits, weight_chunk.to(hidden_chunk.dtype), out=grad_hidden[seq_start:seq_end])
+            _matmul_fp32(grad_logits.t(), hidden_chunk, out=grad_weight[vocab_start:vocab_end])
             if has_bias:
                 grad_bias[vocab_start:vocab_end].add_(grad_logits.sum(dim=0))
 
@@ -344,11 +359,9 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, hidden, weight, targets, bias, temperature, logit_scale, softcap, vocab_chunk_size, compute_entropy
-    ):
+    def forward(ctx, hidden, weight, targets, bias, temperature, logit_scale, softcap, compute_entropy):
         logprobs, log_z, entropy = _selective_logprob_entropy_forward(
-            hidden, weight, targets, bias, temperature, logit_scale, softcap, vocab_chunk_size, compute_entropy
+            hidden, weight, targets, bias, temperature, logit_scale, softcap, compute_entropy
         )
         if bias is None:
             bias = hidden.new_empty((0,))
@@ -357,7 +370,6 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
         ctx.temperature = temperature
         ctx.logit_scale = logit_scale
         ctx.softcap = softcap
-        ctx.vocab_chunk_size = vocab_chunk_size
         ctx.mark_non_differentiable(entropy)
         return logprobs, entropy
 
@@ -374,14 +386,12 @@ class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
             temperature=ctx.temperature,
             logit_scale=ctx.logit_scale,
             softcap=ctx.softcap,
-            vocab_chunk_size=ctx.vocab_chunk_size,
         )
         return (
             grad_hidden.to(hidden.dtype),
             grad_weight.to(weight.dtype),
             None,
             grad_bias.to(bias.dtype) if ctx.has_bias else None,
-            None,
             None,
             None,
             None,

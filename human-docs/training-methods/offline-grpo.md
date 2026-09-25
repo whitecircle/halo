@@ -60,8 +60,8 @@ gradient_accumulation_steps: 8
   outlier-heavy reward sets; `z_norm`, `minmax`, `quantile_uniform` and `robust` are the alternatives.
 - `loss_type` — `bnpo` averages over the micro-batch's tokens, `grpo` averages per sequence first (use it when
   completion lengths vary a lot), `dr_grpo` divides by a constant that removes length bias.
-- `kl_beta` — above `0` the trainer builds a reference model and penalizes drift from it. Leave it at `0` unless
-  rewards fall through training.
+- `kl_beta` — above `0` the run holds a reference model and penalizes drift from it: a full extra copy per rank on a
+  full fine-tune, the base with the adapters off under PEFT. Leave it at `0` unless rewards fall through training.
 - `initial_min_log_prob` / `min_log_prob` — a floor on low-probability tokens of negative-advantage rows. It is what
   keeps the loss finite when the policy is pushed away from something it already thinks is unlikely.
 - `max_completion_length` is a truncation cap, not a generation budget: a completion cut at the cap is trained

@@ -203,7 +203,7 @@ def _construct(processing_class, max_length=64, data_collator=None):
 
     with (
         mock.patch.object(RewardTrainer, "__init__", fake_reward_init),
-        mock.patch.object(DistributedTrainerMixin, "_init_distributed_config", lambda self, kwargs: kwargs),
+        mock.patch.object(DistributedTrainerMixin, "_init_distributed_config", lambda self, kwargs, **_: kwargs),
         mock.patch.object(DistributedTrainerMixin, "_setup_distributed_modes", lambda self: None),
     ):
         trainer = DistributedRewardTrainer(

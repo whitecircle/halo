@@ -67,7 +67,7 @@ def _trl_baseline_advantages():
 
 
 def test_std_floor_alone_arms_the_reward_stash():
-    """The stash gate must fire for the floor alone, or the hook sees ``None`` and returns."""
+    """The stash gate must fire for the floor alone, or the hook finds no stashed rewards to recompute from."""
     assert _OnlineStub(std_floor=0.2)._recomputes_from_gathered_rewards is True
     assert _OnlineStub()._recomputes_from_gathered_rewards is False
 

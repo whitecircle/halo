@@ -72,6 +72,13 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
         opd_exclude_eos: bool = True,
         **kwargs,
     ):
+        if reference_kl_coef > 0 and reference_model is None:
+            raise ValueError(
+                f"reference_kl_coef={reference_kl_coef} weights a KL anchor to a frozen reference, but "
+                f"no reference_model was passed, so L_ref would be silently dropped. Pass the reference "
+                f"(the self_distill script loads it from reference_model_name_or_path), or set "
+                f"reference_kl_coef: 0."
+            )
         # Tunables arrive under the names and defaults SDPGArguments declares. The dataset-side
         # fields stay with the script, which bakes the hint into the teacher prompts.
         dataset_side = SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS
@@ -100,7 +107,7 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
 
         self._resolve_stop_token_ids()
 
-        if self._reference_model is not None and self.reference_kl_coef > 0:
+        if self.reference_kl_coef > 0:
             self._validate_reference_model(self._reference_model)
             self._setup_reference_model()
 
@@ -173,17 +180,17 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
         mode = "train" if self.model.training else "eval"
         metrics = {"sft_loss": sft_loss.detach()}
 
-        # The teacher forward is a collective, so whether it runs must be a world-wide decision.
-        run_teacher = teacher.get("input_ids") is not None and self.sdpg_beta_base != 0.0
-        # Both halves of the verdict, so every rank raises on a mismatch; on "any" alone the
-        # teacher-carrying ranks would enter the collective forward and hang.
-        all_teacher, any_teacher = rank_consensus(run_teacher)
-        if any_teacher and not all_teacher:
+        # The teacher forward is a collective, so the branch must be present on every rank or the
+        # step fails on all of them: some ranks entering it alone would hang, and none entering it
+        # would train SFT alone under a self-distillation config.
+        run_teacher = self.sdpg_beta_base != 0.0
+        if run_teacher and not rank_consensus(teacher.get("input_ids") is not None)[0]:
             raise RuntimeError(
-                "Some ranks have a teacher branch in this batch and others do not — the teacher forward "
-                "is a collective, so the batch must carry teacher_* keys on every rank. Check the collator."
+                f"sdpg_beta_base={self.sdpg_beta_base} needs the privileged teacher branch (teacher_* "
+                f"keys) in every rank's batch, and at least one rank's batch carries none. The "
+                f"SelfDistill collators build it; check the data_collator, or set sdpg_beta_base: 0 "
+                f"to drop the term."
             )
-        run_teacher = any_teacher
         if run_teacher:
             # Every per-token tensor must come from the teacher branch: its sequence is longer (the hint).
             per_token = (
@@ -224,7 +231,7 @@ class DistributedSelfDistillationTrainer(StoredMetricsMixin, DistributedSFTTrain
             metrics["opd_loss"] = opd_loss.detach()
             metrics["beta"] = beta
 
-        if self.reference_kl_coef > 0 and self._reference_model is not None:
+        if self.reference_kl_coef > 0:
             with torch.no_grad():
                 ref_logits = self._reference_model(**model_inputs).logits
             ref_loss = self._reference_loss(student_logits, ref_logits, labels)

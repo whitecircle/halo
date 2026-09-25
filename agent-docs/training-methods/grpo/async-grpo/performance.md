@@ -16,7 +16,7 @@ With chunked log-probs off, every GRPO trainer weighs the plane at construction,
 
 ## Chunked log-probs
 
-`use_chunked_grpo_logprobs: true` (default off) removes the wall: completion log-probs come from the backbone's `last_hidden_state` through a chunked (sequence × vocab) matmul, so peak follows the tile size, not `B·T·vocab`. Every code-contests recipe sets it; the online and offline GRPO trainers take the same flag.
+`use_chunked_grpo_logprobs: true` (default off) removes the wall: completion log-probs come from the backbone's `last_hidden_state` through a chunked (sequence × vocab) matmul, so peak follows the tile size, not `B·T·vocab`. Each tile is a tensor-core matmul with an fp32 result, and the backward's GEMMs take bf16 operands (the gradient tile cast down) and accumulate in fp32, so the logits are never rounded to bf16 and the head costs about what the full-logits path does (Qwen3-8B, 8k tokens: 51 ms forward+backward on a B300). Every code-contests recipe sets it; the online and offline GRPO trainers take the same flag.
 
 The objective is identical — log-probs match the full path to bf16 tolerance — at the cost of a recompute backward. It runs under FSDP2, ep1/EP and attention-only TP. A multimodal batch takes the full path instead, decided on every rank at once; a PEFT adapter on `lm_head` raises at the first chunked forward.
 

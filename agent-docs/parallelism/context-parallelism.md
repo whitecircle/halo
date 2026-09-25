@@ -181,8 +181,8 @@ on by default), and the saver ladder checks for EP layers first, so EP+CP and ev
 MoE take the EP save — which strips the `.original_attention.` prefix itself.
 
 The CP save runs on the FS-aware main process via `trainer.save_model(output_dir)`, using
-`_find_cp_wrapper()` rather than `extract_model_from_parallel` (FSDP wraps the inner model *inside*
-the CP wrapper, whose `__getattr__` proxy would make the standard unwrap go past it). The wrapper's
+`_find_cp_wrapper()`, which finds the wrapper on the compile-unwrapped model, directly or under
+PEFT. The wrapper's
 `state_dict()` remaps `.original_attention.` keys to standard paths and drops the duplicate dense
 `.mlp.{gate,up,down}_proj` keys only on layers carrying routed experts — genuinely dense layers keep
 their dense MLP weights.

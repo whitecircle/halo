@@ -75,6 +75,7 @@ from src.trainers.grpo.rollout.rollout_metrics import (
     group_solve_counts,
 )
 from src.trainers.grpo.rollout.routing_replay import (
+    ROLLOUT_COVERAGE_SHAPES,
     ROUTING_MASKS_KEY,
     RoutingReplayInjector,
     assemble_rollout_masks,
@@ -1075,11 +1076,18 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                         self._routing_injector.num_experts,
                     )
                     rollout_routing_masks = rollout_routing_masks.to(device)
-                    # prompt_len_mismatch is not a shape class, so it must stay out of the denominator.
-                    shape_keys = ("full", "engine_omits_last", "completion_only", "unresolved")
-                    total = sum(coverage[k] for k in shape_keys)
+                    total = sum(coverage[k] for k in ROLLOUT_COVERAGE_SHAPES)
                     for key, count in coverage.items():
                         self._world_metrics.fraction(f"routing/rollout_{key}_frac", count, total)
+                    if coverage["unresolved"] == total and self._batch_build_error is None:
+                        self._batch_build_error = (
+                            f"routing_replay='rollout': no routed row on this rank ({total} in the "
+                            f"batch) matched a known engine coverage convention, so every position "
+                            f"would replay natural routing and R3 would be inert. The engine's "
+                            f"routed_experts token count no longer lines up with the trainer's "
+                            f"prompt + completion lengths — check the engine version against the "
+                            f"conventions in assemble_rollout_masks."
+                        )
                 except ValueError as e:
                     if self._batch_build_error is None:
                         self._batch_build_error = f"routing_replay='rollout': {e}"

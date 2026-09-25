@@ -213,7 +213,9 @@ Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported mo
     Leave it off and say why in the spec comment.
 
 3. **Set `flce_default=True`** only when the `[seq, vocab]` logits plane is the family's binding memory limit; the generic default keeps logits for metrics.
-4. **Set `delegates_to_upstream=True`** when upstream already covers the family and the spec only ADDS to it (Qwen3.5/3.6, Qwen3-Next), or takes over a role upstream gets wrong (GptOss's norm casting, Gemma 4's EP-surviving dense MLP — the withheld flag goes in `upstream_off` and the spec must fill that role).
+4. **Set `delegates_to_upstream=True`** when upstream already covers the family and the spec only ADDS to it (dense Qwen3.5/3.6), or takes over a role upstream gets wrong (GptOss's norm casting, Gemma 4's EP-surviving dense MLP, the Qwen MoE `swiglu` that would also swap the routed experts — the withheld flag goes in `upstream_off` and the spec must fill that role).
+
+    A MoE family's routed experts never run Liger's fused MoE kernel (`LigerExperts`): where upstream's `swiglu` could swap them and the spec does not withhold it, the orchestrator forces the flag off whenever Halo does not wrap the experts ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
 
     Upstream's applier runs first with every other flag it declares; the spec names only the roles it leaves eager or takes over.
 

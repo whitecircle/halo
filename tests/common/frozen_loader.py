@@ -1,7 +1,7 @@
 """Stub harness for the shared frozen-auxiliary-model loader.
 
 Every unparallelized frozen model the toolkit scores a policy against (the DPO/KTO reference, the
-SDPG KL anchor, both distillation teacher paths) loads through
+SDPG KL anchor, the offline-GRPO KL reference, both distillation teacher paths) loads through
 :func:`~src.distributed.loading.frozen_models.load_frozen_auxiliary_model`, so its module namespace is
 where a test intercepts the hub fetches. That also makes these stubs a consolidation check: a call
 site that re-implemented the load would fetch through its own names, and :func:`captured_load` would

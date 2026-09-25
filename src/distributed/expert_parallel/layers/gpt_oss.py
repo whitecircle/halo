@@ -216,10 +216,6 @@ class EPGptOssMoELayer(EPMoELayerBase):
             device, partial(self._materialize_expert_weight, merge_lora=merge_lora), retain=retain
         )
 
-    def gather_expert_grads(self, device: str = "cpu") -> dict:
-        """Expert gradients in the same interleaved layout (see the base method)."""
-        return self._gather_interleaved_experts(device, self._expert_grad)
-
     def _gather_interleaved_experts(
         self, device: str, take: Callable[[str], torch.Tensor], retain: bool = True
     ) -> dict:
@@ -229,7 +225,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         GptOss already stores matmul convention (no transpose). ``down_proj_bias`` lives only on
         ``expert_tp_rank == 0``, so it is EP-gathered only: TP-gathering would issue a collective the
         bias-less TP ranks cannot satisfy. The grouped-GEMM branch re-interleaves from the
-        de-interleaved layout the adapter (and the gradient) lives in. ``retain=False`` runs every
+        de-interleaved layout the adapter lives in. ``retain=False`` runs every
         gather and keeps nothing (see :meth:`~EPMoELayerBase.gather_expert_state_dict`).
         """
         gate_up_bias = None

@@ -29,6 +29,10 @@ from src.trainers.mixins.ep_introspection import named_ep_layers
 
 ROUTING_MASKS_KEY = "routing_masks"
 
+# The coverage conventions a routed row falls into, exactly one per row (``prompt_len_mismatch`` is
+# counted on top of them, so it stays out of any per-row denominator).
+ROLLOUT_COVERAGE_SHAPES = ("full", "engine_omits_last", "completion_only", "unresolved")
+
 
 _NPY_MAGIC = b"\x93NUMPY"
 
@@ -94,11 +98,13 @@ def assemble_rollout_masks(
     Positions without engine routing stay ``-1`` (natural selection): padding, whole rows without a
     mask, the prompt span on a count mismatch, and rows whose coverage matches no known engine
     convention. Those last are counted rather than raised, since a per-rank raise would desync ranks
-    into a collective hang; the caller decides uniformly. Returns ``(masks, stats)`` with
-    per-convention row counts, the observable for engine coverage drift.
+    into a collective hang; the caller decides uniformly, and refuses a batch in which every routed
+    row is unresolved. Returns ``(masks, stats)`` with per-convention row counts
+    (:data:`ROLLOUT_COVERAGE_SHAPES` plus ``prompt_len_mismatch``), the observable for engine
+    coverage drift.
     """
     rows = len(turn_masks)
-    stats = {"full": 0, "engine_omits_last": 0, "completion_only": 0, "prompt_len_mismatch": 0, "unresolved": 0}
+    stats = {**dict.fromkeys(ROLLOUT_COVERAGE_SHAPES, 0), "prompt_len_mismatch": 0}
     out = torch.full((rows, max_prompt_len + max_completion_len, num_layers, top_k), -1, dtype=torch.int16)
     for i, turn in enumerate(turn_masks):
         if turn is None:
