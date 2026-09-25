@@ -12,11 +12,11 @@ common weight-space methods:
                         to the base (arXiv:2306.01708).
 
 Merging streams one tensor at a time across the input checkpoints (each key is loaded from every
-model, merged, then written), so peak host memory is every input's copy of the largest tensor, the
-method's float32 working set over it, and one pending output shard, never the merged model. Output is
-HF-sharded safetensors (``--max_shard_size`` sets the per-file cap). Config, tokenizer and any
-remote-code modules are copied from ``--tokenizer_source`` (default: the base model, or the first
-model); a Hub id there is downloaded (weights excluded) and copied the same way.
+model, merged, then written), so peak host memory is every input's copy of the costliest tensor (the
+largest, in practice), the method's float32 working set over it, and one pending output shard, never
+the merged model. Output is HF-sharded safetensors (``--max_shard_size`` sets the per-file cap).
+Config, tokenizer and any remote-code modules are copied from ``--tokenizer_source`` (default: the base
+model, or the first model); a Hub id there is downloaded (weights excluded) and copied the same way.
 
 Examples:
     # Weighted linear average (weights normalized by their sum)
@@ -376,19 +376,24 @@ def merge_models(
 
     writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
 
-    # Peak RAM is every contributor's copy of the largest tensor as stored, the method's fp32 working
-    # set over it, and the writer's pending output shard. On disk the artifact is one input's size.
-    ram_bytes = writer.max_bytes
-    largest = max(ref_keys, key=readers[0].numel, default=None)
-    if largest is not None:
-        contributors = [*readers, *([base_reader] if base_reader is not None else [])]
-        working_bytes = spec.fp32_copies(len(readers)) * torch.float32.itemsize * readers[0].numel(largest)
-        ram_bytes += sum(reader.nbytes(largest) for reader in contributors) + math.ceil(working_bytes)
+    # Peak RAM is the costliest key, every contributor's copy as stored plus the method's fp32 working
+    # set over it (an integer pass-through key counted as if merged), and the writer's pending output
+    # shard. On disk the artifact is one input's size.
+    contributors = [*readers, *([base_reader] if base_reader is not None else [])]
+    working_bytes_per_element = spec.fp32_copies(len(readers)) * torch.float32.itemsize
+    costliest_key_bytes = max(
+        (
+            sum(reader.nbytes(key) for reader in contributors)
+            + math.ceil(working_bytes_per_element * readers[0].numel(key))
+            for key in ref_keys
+        ),
+        default=0,
+    )
     preflight_resource_warning(
         "merge_models",
         output_dir,
         disk_bytes=sum(os.path.getsize(shard) for shard in set(readers[0].weight_map.values())),
-        ram_bytes=ram_bytes,
+        ram_bytes=costliest_key_bytes + writer.max_bytes,
     )
 
     for i, key in enumerate(ref_keys):

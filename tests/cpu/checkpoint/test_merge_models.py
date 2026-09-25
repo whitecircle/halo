@@ -472,10 +472,10 @@ def test_each_method_working_set_bound_covers_its_peak(method, n_models, dtype, 
 
 
 def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tmp_path, monkeypatch):
-    """The RAM estimate is every contributor's copy of the largest tensor as stored (a fp32 base beside
-    bf16 fine-tunes here), the method's working set for the model count (not the contributor count)
-    over that tensor, and the writer's pending shard. "Largest" is by elements, since the working set
-    is float32 whatever the stored dtype: key ``a`` stores more bytes (fp32) but ``b`` more elements."""
+    """The RAM estimate is the costliest key — every contributor's copy as stored (a fp32 base beside
+    bf16 fine-tunes here) plus the method's working set for the model count (not the contributor count)
+    over it — and the writer's pending shard. The working set is float32 whatever the stored dtype, so
+    key ``b``, with more elements, outweighs ``a``, which stores more bytes (fp32)."""
     captured = {}
     monkeypatch.setattr(mm, "preflight_resource_warning", lambda *_, ram_bytes, **__: captured.update(ram=ram_bytes))
     wide_bytes, large = torch.randn(600), torch.randn(64, 16)
@@ -495,6 +495,34 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
     numel = large.numel()
     stored = 3 * numel * 2 + numel * 4
     working = mm._METHODS["ties"].fp32_copies(3) * 4 * numel
+    shard = mm.StageShardWriter(str(tmp_path), "probe", "1MB", enabled=False).max_bytes
+    assert captured["ram"] == stored + working + shard
+
+
+def test_the_ram_preflight_counts_the_costliest_key_when_sizes_tie(tmp_path, monkeypatch):
+    """Keys of equal element count can store different bytes: here only ``b``'s base copy is fp32. The
+    estimate is the largest per-key total, not the first key with the most elements."""
+    captured = {}
+    monkeypatch.setattr(mm, "preflight_resource_warning", lambda *_, ram_bytes, **__: captured.update(ram=ram_bytes))
+    tensor = torch.randn(32, 32)
+    base = _write_tiny_checkpoint(tmp_path / "base", {"a": tensor.bfloat16(), "b": tensor})
+    models = [
+        _write_tiny_checkpoint(tmp_path / f"m{i}", {"a": tensor.bfloat16(), "b": tensor.bfloat16()}) for i in range(2)
+    ]
+
+    mm.merge_models(
+        [str(model) for model in models],
+        str(tmp_path / "out"),
+        method="task_arithmetic",
+        base_model=str(base),
+        max_shard_size="1MB",
+        allow_missing_tokenizer=True,
+        verbose=False,
+    )
+
+    numel = tensor.numel()
+    stored = 2 * numel * 2 + numel * 4
+    working = mm._METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
     shard = mm.StageShardWriter(str(tmp_path), "probe", "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
 
