@@ -8,7 +8,7 @@ Ray's entire job: weight sync and gradients go over NCCL, generation is HTTP to
 
 On a single node Ray configures itself. The implementation lives in
 `src/environments/ray_actors.py` and the trainer's `_init_async_components`; the pin is
-`ray[default] 2.52.x` (`pyproject.toml`). Terms: [glossary](../reference/glossary.md).
+`ray[default] 2.58.x` (`pyproject.toml`). Terms: [glossary](../reference/glossary.md).
 
 ## Lifecycle
 

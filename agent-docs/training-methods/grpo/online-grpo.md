@@ -128,7 +128,7 @@ Weights are pushed before the **next** generation, not at the optimizer step: TR
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)
 
-Rank 0 binds the NCCL weight-sync TCPStore and advertises an address for the vLLM workers to dial back. Resolution order: an explicit `group_host` argument → `VLLM_GROUP_HOST` → **loopback when the server address is one this host itself binds** → default-route NIC.
+Rank 0 advertises an address for the vLLM workers to dial back and binds the NCCL weight-sync TCPStore on that address alone ([group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)). Resolution order: an explicit `group_host` argument → `VLLM_GROUP_HOST` → **loopback when the server address is one this host itself binds** → default-route NIC.
 
 Loopback for a local server is deliberate: an external NIC there lets a provider firewall drop the hairpin traffic, and the first collective spins forever. Set `VLLM_GROUP_HOST` to the trainer IP a **remote** server should dial when the default route is not on its subnet. It is the control-plane address, not `NCCL_SOCKET_IFNAME`.
 

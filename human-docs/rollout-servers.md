@@ -108,7 +108,11 @@ python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8
 
 Group ports must be unique across servers even on different hosts, since all of them are bound on the trainer. If the
 trainer's routable address is not on its default-route NIC, name it in the trainer's environment with
-`VLLM_GROUP_HOST` (or `SGLANG_GROUP_HOST`), or per server with a `group_host` entry.
+`VLLM_GROUP_HOST` (or `SGLANG_GROUP_HOST`), or per server with a `group_host` entry. The group port listens on the
+advertised address alone and takes unauthenticated connections until the trainer closes its communicator, so keep it
+reachable only by trusted hosts. A trainer the server reaches through NAT or a port mapping is refused;
+`HALO_WEIGHT_SYNC_BIND_ALL=1` opts in by listening on every interface, so set it only where no untrusted host can reach
+the group port.
 
 ## What weight sync is
 

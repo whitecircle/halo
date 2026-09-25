@@ -220,10 +220,13 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         """Form the weight-update group: trainer rank 0, engine ranks 1..N."""
         engine_ws = self.fetch_engine_world_size()
         world_size = engine_ws + 1
-        master_address, master_port = self._resolve_group_address()
+        master_address, master_port, bind_address = self._resolve_group_address()
         self._resolve_sync_device(device)
 
-        logger.info(f"SGLang NCCL init: engine_ws={engine_ws}, master={master_address}:{master_port}")
+        logger.info(
+            f"SGLang NCCL init: engine_ws={engine_ws}, master={master_address}:{master_port}, "
+            f"listening on {bind_address}"
+        )
 
         # The engine registers the group by name as soon as it is asked to join and rejects any later
         # join under that name, so a trainer that died between the request and a working group leaves
@@ -259,6 +262,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                     world_size=world_size,
                     device=self.sync_device,
                     group_name=self.group_name,
+                    bind_address=bind_address,
                     timeout_s=_GROUP_FORMATION_TIMEOUT_S,
                 ),
             )

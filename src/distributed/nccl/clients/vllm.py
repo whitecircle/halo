@@ -192,9 +192,12 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
         resp.raise_for_status()
         inference_ws = resp.json()["world_size"]
         world_size = inference_ws + 1
-        master_address, master_port = self._resolve_group_address()
+        master_address, master_port, bind_address = self._resolve_group_address()
 
-        logger.info(f"NCCL init: inference_ws={inference_ws}, master={master_address}:{master_port}")
+        logger.info(
+            f"NCCL init: inference_ws={inference_ws}, master={master_address}:{master_port}, "
+            f"listening on {bind_address}"
+        )
 
         server_call = _AsyncCall(
             name=_EP_INIT_ENGINE,
@@ -215,13 +218,12 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
         pg: StatelessProcessGroup | None = None
         comm_call: _AsyncCall | None = None
         try:
-            # Bind to all interfaces so a multi-homed trainer accepts the connection on any NIC.
             pg = StatelessProcessGroup.create(
                 host=master_address,
                 port=master_port,
                 rank=0,
                 world_size=world_size,
-                bind_host="0.0.0.0",
+                bind_address=bind_address,
             )
             # ncclCommInitRank is unconditionally blocking (the wrapper binds no non-blocking init and
             # NCCL has no comm-init deadline), so a server that never joins would park the trainer with
@@ -249,7 +251,7 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
                 # Not a topology problem: the hint below would point at VLLM_GROUP_HOST rather than
                 # the port another live group already holds.
                 raise RuntimeError(
-                    f"Could not bind the weight-transfer group port {master_port} on this host ({e}). "
+                    f"Could not bind the weight-transfer group port {bind_address}:{master_port} ({e}). "
                     f"A connected client holds its group port until close_communicator(), so every vLLM "
                     f"server — and every trainer process sharing this host — needs its own "
                     f"vllm_group_port / group_port."

@@ -29,12 +29,14 @@ from torch.distributed.tensor import DTensor
 from urllib3.util.retry import Retry
 
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
-from src.env import env_positive_int, env_str
+from src.env import env_flag, env_positive_int, env_str
 
 logger = logging.getLogger(__name__)
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "0.0.0.0", "::1", "localhost"}
+_ALL_INTERFACES = "0.0.0.0"
+_WEIGHT_SYNC_BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
 # Bailing spellings whose checkpoints declare a model class neither pinned engine registers; each
 # client quotes them for its own release through :func:`unregistered_bailing_model_types`.
 _UNREGISTERED_BAILING_CLASSES = (
@@ -182,9 +184,10 @@ def chunk_by_bytes(
     return chunks
 
 
-def _get_open_port() -> int:
+def _get_open_port(host: str) -> int:
+    """A port free on ``host``, the address the rendezvous listener will bind."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
+        s.bind((host, 0))
         return s.getsockname()[1]
 
 
@@ -568,14 +571,18 @@ class BaseWeightSyncClient:
         nucleus_renormalized = None if nucleus is None else nucleus[0] - base[0] > _NUCLEUS_RENORM_MIN_SHIFT_NATS
         return SamplerLogprobSemantics(temperature_applied, nucleus_renormalized)
 
-    def _resolve_group_address(self) -> tuple[str, int]:
-        """The address the engine's workers dial back to for the weight-transfer group.
+    def _resolve_group_address(self) -> tuple[str, int, str]:
+        """``(master address, port, bind address)`` of the weight-transfer group's rendezvous.
 
-        Resolution order: explicit ``group_host``, the backend's group-host env var, loopback when the
-        server is on this machine, then the default-route NIC. Raises when a remote server would be
-        told to dial a loopback address, which forms no group and times out.
+        The master address is what the engine's workers dial back to. Resolution order: explicit
+        ``group_host``, the backend's group-host env var, loopback when the server is on this machine,
+        then the default-route NIC. Raises when a remote server would be told to dial a loopback
+        address, which forms no group and times out. The bind address is where the listener takes
+        that connection (:meth:`_rendezvous_bind_address`); an auto-picked port is probed there.
+        Outside ``HALO_WEIGHT_SYNC_BIND_ALL`` the engine is sent the bind address rather than the
+        name it was resolved from, since a name the server resolves differently would be dialed where
+        nothing listens.
         """
-        master_port = self.group_port if self.group_port > 0 else _get_open_port()
         master_address = self.group_host or (env_str(self.GROUP_HOST_ENV) if self.GROUP_HOST_ENV else None)
         if not master_address:
             # Same-host groups stay on loopback: firewalls drop hairpin traffic on the external NIC.
@@ -589,7 +596,56 @@ class BaseWeightSyncClient:
                 f"{self.GROUP_HOST_ENV or 'the group host'} (or the per-server group_host) to the "
                 f"trainer's routable IP on the subnet the server can reach."
             )
-        return master_address, master_port
+        bind_address = self._rendezvous_bind_address(master_address)
+        if bind_address != _ALL_INTERFACES:
+            master_address = bind_address
+        master_port = self.group_port if self.group_port > 0 else _get_open_port(bind_address)
+        return master_address, master_port, bind_address
+
+    def _rendezvous_bind_address(self, master_address: str) -> str:
+        """The local address the rendezvous listener binds: the advertised ``master_address``, resolved.
+
+        The store is unauthenticated and the engine reads the group's bootstrap from it, so it listens
+        only where the engine is told to dial. A name resolves once, here, to the one IPv4 address the
+        port probe, the listener and the engine all use; the listener is IPv4-only, so an address with
+        no IPv4 form (an IPv6 literal, a name without an A record) raises whatever the bind mode.
+        ``HALO_WEIGHT_SYNC_BIND_ALL`` widens the listener to every interface for a trainer reached
+        through NAT or a port mapping, whose advertised address is not its own. Without it, an address
+        that is not local, the wildcard, or a name resolving to loopback while the server is remote
+        raises rather than widening.
+        """
+        host_knob = f"{self.GROUP_HOST_ENV or 'the group host'} (or the per-server group_host)"
+        try:
+            bind_address = socket.gethostbyname(master_address)
+        except OSError:
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} weight-sync group address {master_address} has no IPv4 address on "
+                f"this host. The rendezvous store listens on IPv4 only; IPv6 is unsupported. Set "
+                f"{host_knob} to this host's IPv4 address on an interface the server reaches."
+            ) from None
+        if env_flag(_WEIGHT_SYNC_BIND_ALL_ENV):
+            logger.warning(
+                f"{_WEIGHT_SYNC_BIND_ALL_ENV} is set: the {self.BACKEND_NAME} weight-sync rendezvous store "
+                f"listens on every interface, not only on {master_address}. The store is unauthenticated and "
+                f"the engine reads the group's bootstrap from it while the group forms (vLLM unpickles it), "
+                f"so any host that reaches the group port then can run code in the rollout server. Keep the "
+                f"port reachable only by trusted hosts."
+            )
+            return _ALL_INTERFACES
+        if (
+            bind_address == _ALL_INTERFACES
+            or not _is_local_address(bind_address)
+            or (_is_loopback(bind_address) and not _is_local_address(self.host))
+        ):
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} weight-sync group address {master_address} (resolves to "
+                f"{bind_address}) is not a single address of this host that the server at {self.host} can "
+                f"reach. The group's rendezvous store is unauthenticated, so it listens only on the address "
+                f"it advertises. Set {host_knob} to this host's IP on an interface the server reaches. For "
+                f"a trainer reached through NAT or a port mapping, set {_WEIGHT_SYNC_BIND_ALL_ENV}=1 to "
+                f"listen on every interface, only on a network where no untrusted host can reach the group port."
+            )
+        return bind_address
 
     def _lift_pause(self, timeout: float, context: str) -> None:
         """Resume a quiesced engine, clearing ``_paused`` only once the server confirmed.

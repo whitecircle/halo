@@ -5,6 +5,8 @@ import pickle
 import socket
 import time
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from typing import Any
 
@@ -19,6 +21,30 @@ _DATA_EXPIRATION_SECONDS = 3600
 _STORE_TIMEOUT_SECONDS = 300
 
 
+@contextmanager
+def rendezvous_listener(bind_address: str, port: int) -> Iterator[int]:
+    """Yield the fd of an IPv4 socket listening on ``bind_address:port``, for a ``TCPStore`` master.
+
+    Handed over as ``master_listen_fd``, the fd is the store's only listener; a master that opens its
+    own listens on every interface whatever host it is given. The store owns the fd from that call
+    on, closing it in its destructor and on a failed start, so the socket is detached on exit rather
+    than closed: closing it under a live store aborts the store's daemon thread, and after a failed
+    start it would close whatever reused the fd number.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((bind_address, port))
+        listener.listen()
+    except BaseException:
+        listener.close()
+        raise
+    try:
+        yield listener.fileno()
+    finally:
+        listener.detach()
+
+
 @dataclasses.dataclass
 class StatelessProcessGroup:
     """NCCL unique-ID publication via TCPStore (only broadcast_obj is kept)."""
@@ -26,7 +52,6 @@ class StatelessProcessGroup:
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store | None
-    socket: socket.socket | None
 
     data_expiration_seconds: int = _DATA_EXPIRATION_SECONDS
     broadcast_send_counter: int = 0
@@ -62,53 +87,36 @@ class StatelessProcessGroup:
         port: int,
         rank: int,
         world_size: int,
-        bind_host: str | None = None,
+        bind_address: str | None = None,
     ) -> "StatelessProcessGroup":
         """Create a StatelessProcessGroup without polluting global torch.distributed state.
 
-        ``bind_host`` (default ``host``) is the interface rank 0 binds to; pass ``"0.0.0.0"`` on a
-        multi-homed node to accept the peer on any NIC while still advertising a routable ``host``.
+        ``bind_address`` (default ``host``) is the address rank 0's listener binds: ``host`` resolved,
+        or every interface where the caller opted in for an advertised address that is not local
+        (NAT, a port mapping).
         """
         launch_server = rank == 0
-        if launch_server:
-            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listen_socket.bind((bind_host or host, port))
-            listen_socket.listen()
-            listen_fd = listen_socket.fileno()
-        else:
-            listen_socket = None
-            listen_fd = None
+        listener = rendezvous_listener(bind_address or host, port) if launch_server else nullcontext()
+        with listener as listen_fd:
+            store = TCPStore(
+                host_name=host,
+                port=port,
+                world_size=world_size,
+                is_master=launch_server,
+                timeout=timedelta(seconds=_STORE_TIMEOUT_SECONDS),
+                use_libuv=False,
+                master_listen_fd=listen_fd,
+            )
 
-        store = TCPStore(
-            host_name=host,
-            port=port,
-            world_size=world_size,
-            is_master=launch_server,
-            timeout=timedelta(seconds=_STORE_TIMEOUT_SECONDS),
-            use_libuv=False,
-            master_listen_fd=listen_fd,
-        )
-
-        return StatelessProcessGroup(
-            rank=rank,
-            world_size=world_size,
-            store=store,
-            socket=listen_socket,
-        )
+        return StatelessProcessGroup(rank=rank, world_size=world_size, store=store)
 
     def close(self) -> None:
         """Release rank 0's listener so ``port`` can be rebound; idempotent, and a no-op off rank 0.
 
-        The C++ store holds the listening fd (handed over as ``master_listen_fd``) and its daemon
-        thread polls it, so closing the Python socket under a live store aborts that thread
-        ("Unexpected poll revent on the master's listening socket"). Detaching leaves the fd to the
-        store; dropping the last store reference then runs the destructor, which stops the daemon and
-        closes the fd. Dropping the reference here rather than at garbage-collection time makes the
-        release deterministic even while another holder of this group (a thread parked in
-        ``ncclCommInitRank``, a traceback) is still alive.
+        The store owns the listening fd (:func:`rendezvous_listener`), so dropping the last store
+        reference runs its destructor, which stops the daemon and closes the fd. Dropping the
+        reference here rather than at garbage-collection time makes the release deterministic even
+        while another holder of this group (a thread parked in ``ncclCommInitRank``, a traceback) is
+        still alive.
         """
-        if self.socket is not None:
-            self.socket.detach()
-            self.socket = None
         self.store = None
