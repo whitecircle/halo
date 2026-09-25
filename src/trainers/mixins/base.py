@@ -56,9 +56,8 @@ from src.distributed.runtime import (
 )
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from src.kernels.liger.orchestrator import (
-    apply_liger_parallelism_overrides,
-    liger_ep_disables_fused_glu,
-    liger_parallelism_overrides,
+    sanitize_liger_config,
+    trl_reapplication_config,
     warn_if_flce_unreachable,
 )
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
@@ -266,18 +265,23 @@ class DistributedTrainerMixin(
                     "node (otherwise non-zero nodes resume at global_step=0 → step desync)."
                 )
 
-        # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering.
+        # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering and
+        # running upstream's applier alone.
         if training_args is not None and getattr(training_args, "use_liger_kernel", False):
             safe_config = dict(getattr(training_args, "liger_kernel_config", None) or {})
             if "fused_linear_cross_entropy" not in safe_config:
                 safe_config["fused_linear_cross_entropy"] = False
-            forced_off = liger_parallelism_overrides(
-                has_ep_wrapped_experts=liger_ep_disables_fused_glu(parallelism_config.needs_ep_wrappers, model_config),
-                tp_size=parallelism_config.tp_size,
-                cp_size=parallelism_config.cp_size,
-                pp_size=parallelism_config.pp_size,
+            training_args.liger_kernel_config = trl_reapplication_config(
+                model_config,
+                sanitize_liger_config(
+                    safe_config,
+                    needs_ep_wrappers=parallelism_config.needs_ep_wrappers,
+                    model_config=model_config,
+                    tp_size=parallelism_config.tp_size,
+                    cp_size=parallelism_config.cp_size,
+                    pp_size=parallelism_config.pp_size,
+                ),
             )
-            training_args.liger_kernel_config = apply_liger_parallelism_overrides(safe_config, forced_off)
 
         # Deferred past TRL.__init__ (which would re-apply Liger on EP-wrapped experts); restored before train().
         self._deferred_liger_kernel = parallelism_config.needs_ep_wrappers and disable_trl_liger(training_args)

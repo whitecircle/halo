@@ -106,7 +106,8 @@ class LigerFamilySpec:
     delegates_to_upstream: bool = False
     # Upstream flags a delegating spec passes as False because it fills that role itself — where
     # upstream's variant is not the family's function (GptOss's norm is Gemma-cast; upstream applies
-    # the llama cast) or where upstream's swap does not survive the EP wrapper the toolkit's does.
+    # the llama cast), where upstream's swap does not survive the EP wrapper the toolkit's does, or
+    # where upstream's `swiglu` would also put `LigerExperts` in place of the routed experts.
     upstream_off: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -391,8 +392,8 @@ def _patch_instance(model, spec: LigerFamilySpec, flags: dict) -> None:
             if type(module).__name__ not in spec.glu_mlp:
                 continue
             # The class swap already fuses this module unless something bound a forward over it,
-            # which upstream's instance patch does on the MLPs a delegating spec names when HF
-            # Trainer re-applies Liger through Liger's own registry (a kernel-equivalent forward).
+            # which upstream's instance patch does on the MLPs a delegating spec names whenever it
+            # runs on the built model with the GLU flag on (a kernel-equivalent forward).
             # Re-binding puts the toolkit's patch last.
             if getattr(type(module), _PATCHED_MARKER, None) == "glu_mlp" and "forward" not in module.__dict__:
                 continue
@@ -415,6 +416,9 @@ class LigerApplier:
     def __init__(self, spec: LigerFamilySpec):
         self.spec = spec
         self.upstream = _upstream_applier(spec) if spec.delegates_to_upstream else None
+        # Never handed to upstream as given: its CE branch rebinds `torch.nn.functional.cross_entropy`
+        # for the whole process (the scoped patch serves CE instead), and the roles the spec took over.
+        self.withheld = ("cross_entropy", *spec.upstream_off)
         # Resolved once: the signature the orchestrator reads and the defaults a call starts from come
         # from the same source, and under delegation deriving it means inspecting upstream's signature.
         self.defaults = dict(self._declared_parameters())
@@ -426,6 +430,10 @@ class LigerApplier:
         )
         self.__qualname__ = f"apply_liger_kernel_to_{spec.model_types[0]}"
         self.__module__ = __name__
+
+    def hands_upstream(self, flag: str) -> bool:
+        """Whether a call passes ``flag`` on to upstream's applier, leaving that role to upstream."""
+        return self.upstream is not None and flag in self.defaults and flag not in self.withheld
 
     def _declared_parameters(self):
         """One parameter per role that will run; a role nothing fills is not offered.
@@ -471,11 +479,10 @@ class LigerApplier:
 
         patched: list[str] = []
         if self.upstream is not None:
-            # Upstream keeps every role it declares except the ones this spec takes over and the
-            # loss, whose upstream branch rebinds `torch.nn.functional.cross_entropy` for the whole
-            # process; the scoped patch below serves it instead. What follows adds only the classes
-            # the spec names, which `_named_class` checks are unclaimed.
-            upstream_flags = {**flags, "cross_entropy": False, **dict.fromkeys(spec.upstream_off, False)}
+            # Upstream keeps every role it declares except the withheld ones; the scoped CE patch
+            # below serves the loss. What follows adds only the classes the spec names, which
+            # `_named_class` checks are unclaimed.
+            upstream_flags = {**flags, **dict.fromkeys(self.withheld, False)}
             self.upstream(model=model, **upstream_flags)
             on = sorted(name for name, enabled in upstream_flags.items() if enabled)
             patched.append(f"{self.upstream.__name__}({', '.join(on)})")
