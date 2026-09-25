@@ -10,7 +10,7 @@ The same recipe supports [Laguna XS 2.1](https://huggingface.co/poolside/Laguna-
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Yes | Yes | No | No | untested | No | No | Yes |
 
-Halo supports Laguna's sigmoid router, correction bias, shared expert, fused expert weights, and standard Hugging Face checkpoint layout. CPU parity coverage lives in `tests/cpu/parallelism/test_laguna_ep.py`: an fp64 forward match against the library block, the per-expert gather layout, and the shared-expert naming.
+Halo supports Laguna's sigmoid router, correction bias, shared expert, fused expert weights, and standard Hugging Face checkpoint layout.
 
 ETP is mechanically reachable — the experts use the shared fused-GLU storage, so the generic sharding path handles `expert_tensor_parallel_size > 1` — but no GPU test covers it on Laguna. Nothing rejects it; it is a validation gap, not a limit.
 
@@ -25,42 +25,8 @@ This cookbook uses Laguna S 2.1 on four NVIDIA B300 GPUs; EP4 places 64 of the 2
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-laguna \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host.
 
 ## Train Laguna S 2.1 with EP4
 
@@ -85,7 +51,6 @@ save_sharded_ep: false
 use_grouped_gemm: true
 
 attn_implementation: sdpa
-use_liger_kernel: false
 packing: true
 max_length: 2048
 bf16: true
@@ -129,9 +94,8 @@ halo launch sft laguna-s-2.1-sft.yaml -n 4
 racy four-rank groups, which [`ParallelismConfig`](../parallelism.md) rejects at config
 time — run this recipe on exactly four.
 
-Two settings are load-bearing. `attn_implementation: sdpa` and `use_liger_kernel: false`
-are required: the pinned hub revision provides neither a Flash-Attention path nor
-Liger-patchable module names. And `pad_token` / `eos_token` really do use the CJK angle
+Two settings are load-bearing. `attn_implementation: sdpa` is required: the pinned hub
+revision has no Flash-Attention path. And `pad_token` / `eos_token` really do use the CJK angle
 brackets U+3008/U+3009 — substituting ASCII `<`/`>` silently adds new tokens instead of
 resolving the existing ones.
 
@@ -198,17 +162,11 @@ output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
-container; it listens on port 30000. Serving runs on any 0.5.17 image: point
-`SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the compose file's local
-tag once with `make build-sglang`.
+Serve the gathered checkpoint with SGLang on port 30000, from the host
+([server setup](README.md#serve-from-the-host)).
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/laguna-s-2.1-ultrachat-ep4 \
-SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/laguna-s-2.1-ultrachat-ep4" \
   docker compose -f docker-compose.sglang.yml up
 ```
 
@@ -238,39 +196,26 @@ Keep TP disabled for LoRA.
 
 ## Continue with GRPO
 
-Use `examples/grpo/environmental/environmental-grpo-template.yaml` as the starting point.
-Set `model_name_or_path` to the gathered checkpoint.
-
-Laguna rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
-refuses the weight sync for the family: its loader asserts every routed-expert tensor of
-every sparse layer in each `load_weights` call, which the chunked online update cannot
-satisfy. Start the server on separate GPUs.
-
-Run the server on the host, not inside the training container; the commands below retag
-the pulled image to the name the compose file expects. Its service mounts only the
-HuggingFace cache, so add `- /data/checkpoints:/data/checkpoints:ro` under the
-`vllm-server` `volumes:` to serve a checkpoint from disk.
-
-```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
-VLLM_MODEL=/data/checkpoints/laguna-s-2.1-ultrachat-ep4 \
-VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
-```
-
-That command already passes `--moe-backend triton`, which is required: Blackwell's
-auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
-(`--enable-return-routed-experts`).
-
-Save the config as `laguna-grpo.yaml`:
+Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `laguna-grpo.yaml`,
+set `model_name_or_path` to the gathered checkpoint's `/data` path and the environment and
+reward fields for your task, and add:
 
 ```yaml
 rollout_server_url: http://localhost:8000
 train_on_sampled_tokens: true
 routing_replay: rollout
+```
+
+Laguna rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
+refuses the weight sync for the family: its loader asserts every routed-expert tensor of
+every sparse layer in each `load_weights` call, which the chunked online update cannot
+satisfy. Start the server on the host ([server setup](README.md#serve-from-the-host)), on
+GPUs the trainer will not use:
+
+```bash
+VLLM_MODEL=/data/checkpoints/laguna-s-2.1-ultrachat-ep4 \
+VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+  docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
 ```bash

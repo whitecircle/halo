@@ -25,8 +25,6 @@ CP is not supported. The short-convolution layers operate across the sequence ax
 
 This cookbook uses LFM2.5-8B-A1B. The runnable EP2 configuration is
 [`examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml`](../../examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml).
-The path is also exercised by `tests/gpu/trainers/sft/test_sft_lfm2_moe.py`, which runs
-LFM2-24B-A2B in both plain FSDP and EP modes.
 
 Start with two NVIDIA B300 GPUs for LFM2.5-8B-A1B and four or eight GPUs for
 LFM2-24B-A2B; the GRPO continuation needs four, two for the rollout server and two for the
@@ -34,42 +32,8 @@ trainer.
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-lfm2 \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host.
 
 ## Train all weights with EP2
 
@@ -170,11 +134,10 @@ export LFM2_CHECKPOINT=/data/checkpoints/lfm2-24b-a2b-ultrachat-ep4
 ```
 
 On an eight-GPU node, raise `expert_parallel_size` to 8 when expert memory is the main
-limit, and launch eight processes to match. On a single node the working EP sizes are the
-whole job, 2, or 1: an intermediate size such as 4 on eight GPUs forms two four-rank DeepEP
-dispatch groups whose combine barriers race FSDP2, and
-[`ParallelismConfig`](../parallelism.md) rejects it at config time. Keep CP disabled for
-all released LFM2 MoE checkpoints.
+limit, and launch eight processes to match. EP4 on eight GPUs is rejected at config time;
+`ep4 + etp2` is the 4-way alternative
+([rules](../parallelism.md#rules-that-save-you-a-wasted-run)). Keep CP disabled for all
+released LFM2 MoE checkpoints.
 
 ## Add TP or ETP
 
@@ -238,17 +201,11 @@ reply = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special
 print(reply)
 ```
 
-Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
-container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
-this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
-compose file's local tag once with `make build-sglang`.
+Serve the gathered checkpoint with SGLang on port 30000, from the host
+([server setup](README.md#serve-from-the-host)).
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/lfm2.5-8b-a1b-ultrachat-ep2 \
-SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/lfm2.5-8b-a1b-ultrachat-ep2" \
   docker compose -f docker-compose.sglang.yml up
 ```
 
@@ -275,32 +232,9 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 
 ## Continue with GRPO
 
-Start from the SFT checkpoint. Copy `examples/grpo/environmental/environmental-grpo-template.yaml`,
-set `model_name_or_path` to that checkpoint, and set the environment and reward fields
-for your task.
-
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
-serves and weight-syncs LFM-2 (`rollout_backend: sglang`, port 30000), with expert
-distribution. Start the server on separate GPUs.
-
-Run the server on the host, not inside the training container. Pull the prebuilt server
-image and retag it to the name the compose file expects. Its service mounts only the
-HuggingFace cache, so add `- /data/checkpoints:/data/checkpoints:ro` under the
-`vllm-server` `volumes:` to serve a checkpoint from disk.
-
-```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
-VLLM_MODEL=/data/checkpoints/lfm2.5-8b-a1b-ultrachat-ep2 \
-VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
-```
-
-That command already passes `--moe-backend triton`, which is required: Blackwell's
-auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
-(`--enable-return-routed-experts`).
+Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `lfm2-grpo.yaml`,
+set `model_name_or_path` to the SFT checkpoint's `/data` path and the environment and
+reward fields for your task, and add:
 
 ```yaml
 rollout_server_url: http://localhost:8000
@@ -308,7 +242,18 @@ train_on_sampled_tokens: true
 routing_replay: rollout
 ```
 
-Then launch the trainer.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
+serves and weight-syncs LFM-2 (`rollout_backend: sglang`, port 30000), with expert
+distribution. Start the server on the host ([server setup](README.md#serve-from-the-host)),
+on GPUs the trainer will not use:
+
+```bash
+VLLM_MODEL=/data/checkpoints/lfm2.5-8b-a1b-ultrachat-ep2 \
+VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+  docker compose -f docker-compose.vllm.yml up vllm-server
+```
+
+Then launch the trainer in the training container.
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo lfm2-grpo.yaml -n 2

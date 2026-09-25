@@ -19,42 +19,8 @@ This recipe starts with one NVIDIA B300 GPU. The ETP variant needs two.
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-zaya1 \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it.
 
 ## Train all weights
 
@@ -175,10 +141,9 @@ output = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Neither pinned rollout engine serves ZAYA1 natively. vLLM 0.26.0 ships no native
-Zaya implementation, and an exported checkpoint resolves only through its generic
-transformers backend, whose generation quality is unverified, so inference stays
-on transformers for now.
+Neither pinned engine serves a ZAYA1 export: vLLM 0.26.0 has no native Zaya class
+(its generic transformers backend is unverified), and SGLang 0.5.17's loader reads the
+legacy per-expert layout. Run inference from transformers.
 
 ## Train a LoRA adapter
 

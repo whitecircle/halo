@@ -17,48 +17,12 @@ CP is not supported because the recurrent linear-attention layers cannot use a U
 | `Qwen/Qwen3.5-35B-A3B` | `59d61f3ce65a6d9863b86d2e96597125219dc754` | 256 | 8 |
 | `Qwen/Qwen3.6-35B-A3B` | `995ad96eacd98c81ed38be0c5b274b04031597b0` | 256 | 8 |
 
-Qwen has not published an official Qwen3.7 checkpoint. Add it only after its model class and checkpoint format are verified.
-
 This recipe starts with eight NVIDIA B300 GPUs; EP8 places 32 experts on each GPU.
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-qwen36 \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host.
 
 ## Train all weights with EP8
 
@@ -147,10 +111,8 @@ To train Qwen3.5, replace the model name, revision, and output directory with th
 
 ## Add TP or ETP
 
-On one eight-GPU node `expert_parallel_size` must be 8, 2, or 1 — an intermediate size
-such as 4 forms two four-rank DeepEP dispatch groups whose combine barriers race FSDP2,
-and [`ParallelismConfig`](../parallelism.md) rejects it at config time. Attention TP does
-not change that: it leaves the dispatch-group width alone.
+On one eight-GPU node pure EP is 8, 2 or 1, with or without attention TP; for a 4-way
+expert split use `ep4 + etp2` ([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
 
 Use EP8 with TP2 when attention memory is the limit.
 
@@ -194,23 +156,16 @@ output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with Halo's vLLM image on the host, not inside the
-training container; it listens on port 8000, and vLLM 0.26.0's expert loader reads
-the gathered save's fused layout directly. SGLang 0.5.17 registers the multimodal
+Serve the gathered checkpoint with vLLM on port 8000, from the host
+([server setup](README.md#serve-from-the-host)); vLLM 0.26.0's expert loader reads the
+gathered save's fused layout directly. SGLang 0.5.17 registers the multimodal
 `Qwen3_5MoeForConditionalGeneration` as well as the text-only `Qwen3_5MoeForCausalLM`,
-so on port 30000 it serves the hub checkpoint and a `text_only_model` export alike;
-vLLM takes the latter only after `scripts/after_training/reattach_vision_tower.py`.
-The compose service mounts only the HuggingFace cache, so add
-`- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to serve
-a checkpoint from disk.
+so it serves the hub checkpoint and a `text_only_model` export alike; vLLM takes the
+latter only after `scripts/after_training/reattach_vision_tower.py`.
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
 VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
-VLLM_TOOL_PARSER=qwen3_xml \
+VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_TOOL_PARSER=qwen3_xml \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
@@ -235,74 +190,53 @@ Keep TP disabled for LoRA.
 
 ## Continue with GRPO
 
-Start from one of the shipped configs under `examples/grpo/environmental/qwen3_5/vllm/`, or
-from `examples/grpo/environmental/environmental-grpo-template.yaml`. Replace the model
-path with the gathered SFT checkpoint. The full-finetune ep1 code-contests recipe is a
-curriculum: run `-stage1-codeforces`, `-stage2-hard` and `-stage3-extra-hard` in order, each
-from the previous stage's checkpoint.
-
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
-serves and weight-syncs this family (`rollout_backend: sglang`; ep1 configs under
-`examples/grpo/environmental/qwen3_5/sglang/`), but rejects `rollout_max_thinking_tokens`
-at config time; that sync needs this repo's SGLang image
-([Supported Matrix](../supported-matrix.md#rollout-engines)). Start the server on
-separate GPUs.
-
-Run the server on the host, not inside the training container; the commands below retag
-the pulled image to the name the compose file expects. Its service mounts only the
-HuggingFace cache, so add `- /data/checkpoints:/data/checkpoints:ro` under the
-`vllm-server` `volumes:` to serve a checkpoint from disk.
+Copy the shipped EP4 code-contests recipe and set `model_name_or_path` to the SFT
+checkpoint's `/data` path.
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
-VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
-VLLM_TOOL_PARSER=qwen3_xml \
-VLLM_REASONING_PARSER=qwen3 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
+cp examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep4.yaml \
+  qwen3.6-grpo.yaml
 ```
 
-That command already passes `--moe-backend triton`, which is required: Blackwell's
-auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. `VLLM_TOOL_PARSER=qwen3_xml` matters as much for tool-using
-environments. The `hermes` default cannot parse this family's XML tool calls, so calls
-stay plain text, every episode ends unsolved, and training runs on a flat zero
-gradient. The shipped configs set `rollout_max_thinking_tokens`, which needs the
-reasoning parser above **and** `VLLM_USE_V2_MODEL_RUNNER=0` in the server
-environment; Model Runner V2 rejects thinking budgets with a 400 on every request.
-To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
-(`--enable-return-routed-experts`).
+Its dataset is a placeholder: prepare a HardTests pool as described in
+[Code Contests](../../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗,
+then replace `your-org/code-contests-hardtests-rl:medium`. The other configs under
+`examples/grpo/environmental/qwen3_5/vllm/` change the environment, adapter or EP size.
+The full-finetune ep1 code-contests recipe is a curriculum: run `-stage1-codeforces`,
+`-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint.
 
-For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
-trainer will not use.
+The recipe pins `chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and
+sends a thinking budget, so its two servers must serve that same file, with the `qwen3_xml`
+tool parser, the `qwen3` reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`. Start them on
+the host ([server setup](README.md#serve-from-the-host)), on GPUs 4–7:
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
+cp jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja "$HALO_SCRATCH/"
+export VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8
+export VLLM_CHAT_TEMPLATE=/data/qwen3.6-reasoning-effort.jinja
+export VLLM_TOOL_PARSER=qwen3_xml VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0
 
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8 \
-SGLANG_MODEL_DIR=/data/checkpoints \
-SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
-SGLANG_REASONING_PARSER=qwen3 \
-  docker compose -f docker-compose.sglang.yml up sglang-server
+VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
+  docker compose -p qwen36-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
+VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 VLLM_PORT=8001 \
+  docker compose -p qwen36-rollout-1 -f docker-compose.vllm.yml up -d vllm-server
 ```
 
-The compose default `--moe-runner-backend triton` is required for weight sync and for R3
-capture under `routing_replay: rollout` (add `SGLANG_ENABLE_R3=1`).
+The `hermes` default cannot parse this family's XML tool calls, so without `qwen3_xml`
+every episode ends unsolved and training runs on a flat zero gradient. Model Runner V2
+answers the thinking budget with a 400 on every request.
 
-```yaml
-rollout_server_url: http://localhost:8000
-train_on_sampled_tokens: true
-routing_replay: rollout
-```
+Launch the trainer in the training container on GPUs 0–3.
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo qwen3.6-grpo.yaml -n 4
+CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
+  halo launch environmental-grpo qwen3.6-grpo.yaml -n 4
 ```
 
-`CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
-Size `expert_parallel_size` to the trainer's GPU count, not the node's: the SFT value
-assumes the whole node. Full setup:
+SGLang 0.5.17 also serves and weight-syncs this family, from the ep1 configs under
+`examples/grpo/environmental/qwen3_5/sglang/` (ports 30000 and 30001). Serve them with
+`SGLANG_CHAT_TEMPLATE` on the same template and `SGLANG_REASONING_PARSER=qwen3`.
+`rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and
+`carry_reasoning` are vLLM-only ([Supported Matrix](../supported-matrix.md#rollout-engines)).
+Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

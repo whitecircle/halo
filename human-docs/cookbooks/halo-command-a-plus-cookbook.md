@@ -6,16 +6,15 @@ This recipe uses the BF16 checkpoint and text-only UltraChat data. The same mode
 
 Command A+ has 128 routed experts. The router selects eight experts and also runs four shared experts.
 
-Validation status: EP8 is validated on the 200B+ checkpoint at full scale on an 8-GPU B300 node. The
-CP, TP, and ETP wrappers pass the tiny-model 8-GPU parallelism matrix (cp8, tp8, ep8+tp2,
-ep2+etp4), but no full-scale run has confirmed them yet; the layout sections below say so
-where it matters.
+Validation status: only EP8 has a full-scale run, on the 200B+ checkpoint on an 8-GPU B300
+node. CP, TP, ETP, EP+CP and EP+TP pass the tiny-model 8-GPU parallelism matrix (cp8, tp8,
+etp8, ep2+etp4, ep8+cp2, ep8+tp2); LoRA has no GPU test for this family.
 
 ## Halo support
 
 | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | untested | untested | untested | untested | untested | untested |
+| Yes | Yes | Yes | Yes | Yes | Yes | Yes | untested |
 
 Halo wraps the Cohere2 MoE blocks inside the vision model. It keeps the native Hugging Face checkpoint format.
 
@@ -25,46 +24,12 @@ The EP8 recipe assumes eight NVIDIA B300 GPUs; the BF16 model needs at least fou
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-command-a-plus \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host.
 
 ## Train all weights with EP8
 
-The config below uses the supervised split of [UltraChat 200K](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k). The processor reads the text conversations through the VLM data path; keep packing disabled for this model.
+The config below uses the supervised split of [UltraChat 200K](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k). Text-only data takes the text pipeline, where packing works; the recipe keeps `packing: false` to stay on its memory-validated shape.
 
 Create `command-a-plus-sft.yaml`.
 
@@ -139,12 +104,8 @@ The model has no usable router auxiliary loss and no exportable bias slot, so pl
 Only EP8 is validated at full scale (see the note at the top); validate any
 layout below with a short run before committing GPU-days to it.
 
-Every layout below stays on the same eight ranks. On a single node the working EP sizes are
-the whole job, 2, or 1 — an intermediate size such as 4 forms two four-rank DeepEP dispatch
-groups whose combine barriers race FSDP2, and `ParallelismConfig` rejects it at config time.
-EP+CP narrows that further: the EP group has to fill the NVLink domain, so the CP variant
-keeps `ep_size` at 8. Attention TP leaves the dispatch-group width alone, so EP+TP keeps
-the same 8, 2, or 1. Pure ETP is the exception — it turns EP off entirely.
+Every layout below stays on the same eight ranks. Pure EP there is 8, 2 or 1, and EP+CP
+needs EP8 ([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
 
 Use CP when the sequence length causes attention memory pressure.
 
@@ -216,17 +177,11 @@ print(reply)
 
 Use `AutoProcessor` when the dataset or request contains images.
 
-Serve the gathered checkpoint with Halo's vLLM image on the host, not inside the
-training container; it listens on port 8000. vLLM 0.26.0 registers the family, and
-its loader reads the gathered save's fused expert pair directly, with nothing to
-unfuse. The compose service mounts only the HuggingFace cache, so add
-`- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to serve
-a checkpoint from disk.
+Serve the gathered checkpoint with vLLM on port 8000, from the host
+([server setup](README.md#serve-from-the-host)). vLLM 0.26.0 registers the family, and
+its loader reads the gathered save's fused expert pair directly, with nothing to unfuse.
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
 VLLM_MODEL=/data/checkpoints/command-a-plus-ultrachat-ep8 \
 VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
   docker compose -f docker-compose.vllm.yml up vllm-server
@@ -252,8 +207,7 @@ output_dir: /data/checkpoints/command-a-plus-ultrachat-lora
 ```
 
 Keep EP enabled if the base model needs expert sharding. Keep TP disabled for LoRA.
-Like the non-EP layouts, LoRA has no full-scale validation run for this family —
-validate before a long run.
+LoRA is untested on this family; validate before a long run.
 
 ## Continue with GRPO
 
@@ -262,12 +216,9 @@ completions and needs no rollout server, so the standard offline configuration a
 unchanged. `packing` is an SFT-only field; the GRPO configs declare none, so a
 `packing:` key there fails to parse.
 
-Online GRPO and async GRPO with environments are refused at construction for this family:
-`EPCohere2MoELayer` declares `_supports_weight_sync = False`, because no NCCL weight
-sync has been validated against a serving engine for Cohere2 MoE. vLLM 0.26.0 ships the
-architecture — including a fused `experts.gate_up_proj` load path — so the missing
-piece is a validated end-to-end sync, not engine support. Until that run exists,
-continue with offline methods.
+Online GRPO and async GRPO with environments are refused at construction for this family
+(`_supports_weight_sync = False`: no NCCL weight sync has been validated against a serving
+engine for Cohere2 MoE), on either engine. Use offline methods.
 
 ## Sources
 
