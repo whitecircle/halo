@@ -60,7 +60,7 @@ from src.data.pipeline.processing import coordinated_map
 from src.data.pipeline.rendered import probe_tokenizer_specials
 from src.data.spans import LABEL_IGNORE_INDEX, ends_with_terminator, resolve_eos_token_ids
 from src.data.vlm import render_vlm_text
-from src.distributed.context_parallel.config import cp_boundary_shift, split_sequence_for_cp
+from src.distributed.context_parallel.config import cp_shift_against_full_labels
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -704,28 +704,6 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         return global_logp_sums / global_token_counts.clamp(min=1)
 
-    def _get_boundary_labels(
-        self,
-        labels: torch.Tensor,
-        cp_config,
-    ) -> torch.Tensor | None:
-        """First token of the next rank's chunk, which this rank's last logit predicts.
-
-        Returns [batch, 1], or None on the last rank (and without CP). ``labels`` is the full
-        pre-split sequence [batch, seq_len].
-        """
-        if cp_config is None or cp_config.cp_size <= 1:
-            return None
-
-        if cp_config.cp_rank == cp_config.cp_size - 1:  # last rank needs no boundary labels
-            return None
-
-        chunk_size = labels.size(1) // cp_config.cp_size
-        next_chunk_start = (cp_config.cp_rank + 1) * chunk_size
-        boundary_label = labels[:, next_chunk_start : next_chunk_start + 1]
-
-        return boundary_label
-
     def concatenated_forward(
         self,
         model: nn.Module,
@@ -772,7 +750,6 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             )
 
         cp_config = self.cp_config
-        boundary_labels = self._get_boundary_labels(labels, cp_config) if cp_config else None
 
         outputs = model(
             input_ids=input_ids,
@@ -783,9 +760,9 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         logits = outputs.logits
 
         if cp_config is not None and cp_config.cp_size > 1:
-            local_labels = split_sequence_for_cp(labels, cp_config, seq_dim=1)
-            is_last_rank = cp_config.cp_rank == cp_config.cp_size - 1
-            shift_logits, shift_labels = cp_boundary_shift(logits, local_labels, boundary_labels, is_last_rank)
+            shift_logits, shift_labels = cp_shift_against_full_labels(
+                logits, labels, cp_config.cp_rank, cp_config.cp_size
+            )
         else:
             shift_logits = logits[:, :-1, :]
             shift_labels = labels[:, 1:]

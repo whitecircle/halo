@@ -163,6 +163,20 @@ def cp_boundary_shift(
     return logits, torch.cat([local_labels[:, 1:], boundary_labels], dim=1)
 
 
+def cp_shift_against_full_labels(
+    logits: torch.Tensor, labels: torch.Tensor, cp_rank: int, cp_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """:func:`cp_boundary_shift` of CP rank ``cp_rank``'s local logits against the full pre-split
+    ``[batch, seq_len]`` labels: its own label chunk, plus the next chunk's first label (the token
+    its last logit predicts) on every rank but the last."""
+    chunk_size = labels.size(1) // cp_size
+    start = cp_rank * chunk_size
+    end = start + chunk_size
+    is_last_rank = cp_rank == cp_size - 1
+    boundary_labels = None if is_last_rank else labels[:, end : end + 1]
+    return cp_boundary_shift(logits, labels[:, start:end], boundary_labels, is_last_rank)
+
+
 def split_sequence_for_cp(
     tensor: torch.Tensor,
     cp_config: CPConfig,

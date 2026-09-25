@@ -19,7 +19,7 @@ from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.config import (
     CPConfig,
-    cp_boundary_shift,
+    cp_shift_against_full_labels,
     split_sequence_for_cp,
 )
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
@@ -163,22 +163,10 @@ class UlyssesCPModelWrapper(nn.Module):
 
         _reject_left_padding(attention_mask)
 
-        chunk_size = seq_len // self.cp_size
-        start = self.cp_rank * chunk_size
-        end = start + chunk_size
-        is_last_rank = self.cp_rank == self.cp_size - 1
-
         local_input_ids = split_sequence_for_cp(input_ids, self.cp_config)
         local_attention_mask = (
             split_sequence_for_cp(attention_mask, self.cp_config) if attention_mask is not None else None
         )
-
-        if labels is not None:
-            local_labels = split_sequence_for_cp(labels, self.cp_config)
-            boundary_label = labels[:, end : end + 1].contiguous() if not is_last_rank else None
-        else:
-            local_labels = None
-            boundary_label = None
 
         if position_ids is None:
             position_ids = (
@@ -202,13 +190,8 @@ class UlyssesCPModelWrapper(nn.Module):
             **kwargs,
         )
 
-        if local_labels is not None:
-            loss = self._compute_cp_loss(
-                outputs.logits,
-                local_labels,
-                boundary_label,
-                is_last_rank,
-            )
+        if labels is not None:
+            loss = self._compute_cp_loss(outputs.logits, labels)
 
             # A per-chunk mean: FSDP's CP-rank average already recovers the global mean, so no
             # cp_size factor here (unlike the CE sum term).
@@ -245,22 +228,17 @@ class UlyssesCPModelWrapper(nn.Module):
             )
         return coef
 
-    def _compute_cp_loss(
-        self,
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-        boundary_label: torch.Tensor | None,
-        is_last_rank: bool,
-    ) -> torch.Tensor:
-        """Causal LM loss with boundary handling and global (sum/global_tokens) normalization.
+    def _compute_cp_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Causal LM loss of this rank's chunk against the full ``labels``, with boundary handling and
+        global (sum/global_tokens) normalization.
 
-        For non-final ranks the last logit predicts the next chunk's first label
-        (``boundary_label``). Sum-normalized (not local mean) so every token weighs equally
-        regardless of CP rank; the ``× cp_size`` factor cancels FSDP's grad average over CP ranks.
+        For non-final ranks the last logit predicts the next chunk's first label. Sum-normalized (not
+        local mean) so every token weighs equally regardless of CP rank; the ``× cp_size`` factor
+        cancels FSDP's grad average over CP ranks.
         """
         vocab_size = logits.size(-1)
 
-        shift_logits, shift_labels = cp_boundary_shift(logits, labels, boundary_label, is_last_rank)
+        shift_logits, shift_labels = cp_shift_against_full_labels(logits, labels, self.cp_rank, self.cp_size)
 
         # fp32 CE like HF's ForCausalLMLoss / Liger FLCE: bf16 softmax+CE rounds differently.
         shift_logits = shift_logits.reshape(-1, vocab_size).float()
