@@ -8,7 +8,8 @@ the dispatch on the checkpoint makes those recipes raise on the very path they i
 adds the run's own declaration of image data; the model still loads through its multimodal class.
 
 Driven through ``main()`` rather than a restatement of the branch: the seam is only correct if the
-script reaches it with the dataset in hand, after the model load.
+script reaches it with the dataset in hand, before the model load that takes the verdict to decide
+whether the checkpoint's processor is required.
 
 Run: pytest tests/cpu/config/test_sft_modality_dispatch.py
 """
@@ -53,8 +54,8 @@ class _VLMPathReached(Exception):
 
 @pytest.fixture(autouse=True)
 def _hub_offline(monkeypatch):
-    """No network from this tier: the modality probe must resolve from the name heuristic and the
-    already-loaded config, never a hub round-trip."""
+    """No network from this tier: the modality probe must resolve from the name heuristic, never a
+    hub round-trip."""
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
 
@@ -68,12 +69,13 @@ def _dataset(extra_columns: dict | None = None) -> DatasetDict:
     return DatasetDict({"train": Dataset.from_dict(data), "test": Dataset.from_dict(data)})
 
 
-def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: bool, tokenizer=None):
+def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: bool, tokenizer=None, loads=None):
     """Run ``sft.py:main()`` up to the data dispatch against a multimodal checkpoint.
 
     The VLM prep is left REAL unless ``stub_vlm_prep``: its packing rejection is the exact error a
     misrouted text recipe hits, so that failure mode is what this asserts on. ``tokenizer``
-    stands in for the processor's own, whose padding side the run must settle.
+    stands in for the processor's own, whose padding side the run must settle. ``loads`` collects
+    the keyword arguments of every model load.
     """
     tokenizer = tokenizer if tokenizer is not None else types.SimpleNamespace(padding_side="left")
     module = _script_module("sft.py")
@@ -101,11 +103,16 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
     def fail_vlm(*_args, **_kwargs):
         raise _VLMPathReached
 
+    def load_model(*_args, **kwargs):
+        if loads is not None:
+            loads.append(kwargs)
+        return model, processing_class, tokenizer, True
+
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_model_for_training", return_value=(model, processing_class, tokenizer, True)),
+        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
-        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok, is_vlm: pc),
+        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
         mock.patch.object(module, "setup_peft_model", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=((dataset, False), False)),
@@ -162,7 +169,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
         mock.patch.object(module, "load_model_for_training", return_value=(model, processing_class, tokenizer, True)),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
-        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok, is_vlm: pc),
+        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
         mock.patch.object(module, "setup_peft_model", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
@@ -252,6 +259,31 @@ def test_embedded_image_conversation_still_dispatches_to_the_vlm_path(tmp_path):
         _run_sft(tmp_path, "", dataset, stub_vlm_prep=True)
 
 
+def test_text_only_model_refuses_embedded_images_before_the_model_load(tmp_path):
+    """The verdict reads the checkpoint's multimodal config, so image parts embedded in the
+    conversation would route a text-only CausalLM load to the VLM data path, where a bare tokenizer
+    stands in for the processor and the pixels are dropped."""
+    rows = [[{"role": "user", "content": [{"type": "image", "image": "b64"}]}]]
+    dataset = DatasetDict({"train": Dataset.from_dict({"prompt": rows}), "test": Dataset.from_dict({"prompt": rows})})
+    loads = []
+    with pytest.raises(ValueError, match="text_only_model=True loads the text-only CausalLM"):
+        _run_sft(tmp_path, "text_only_model: true\n", dataset, stub_vlm_prep=True, loads=loads)
+    assert not loads
+
+
+def test_the_run_verdict_reaches_the_model_load(tmp_path):
+    """Only an image run requires the checkpoint's processor, and a multimodal checkpoint may ship
+    none (Step-3.7 Flash): the load has to be handed the verdict the dataset decides."""
+    text_loads, image_loads = [], []
+    with pytest.raises(_TextPathReached):
+        _run_sft(tmp_path, "", _dataset(), stub_vlm_prep=False, loads=text_loads)
+    with pytest.raises(_VLMPathReached):
+        _run_sft(tmp_path, "", _dataset({"images": [[]]}), stub_vlm_prep=True, loads=image_loads)
+
+    assert [load["vlm_run"] for load in text_loads] == [False]
+    assert [load["vlm_run"] for load in image_loads] == [True]
+
+
 # --- one seam, every script ------------------------------------------------------------------------
 
 
@@ -298,6 +330,46 @@ def test_data_dispatch_goes_through_the_shared_seam(script):
         node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "is_vlm_run" in called, f"{script} decides its data path without the shared is_vlm_run seam"
+
+
+# Every script that loads a possibly-multimodal checkpoint through the modality-aware loader.
+_LOADING_SCRIPTS = sorted(
+    str(path.relative_to(_TRAINING_DIR))
+    for path in _TRAINING_DIR.rglob("*.py")
+    if "load_model_for_training(" in path.read_text(encoding="utf-8")
+)
+
+
+def test_the_loading_script_roster_is_not_vacuous():
+    assert set(_DISPATCHING_SCRIPTS) <= set(_LOADING_SCRIPTS), _LOADING_SCRIPTS
+
+
+@pytest.mark.parametrize("script", _LOADING_SCRIPTS)
+def test_every_model_load_takes_the_run_verdict(script):
+    """``vlm_run`` must be the script's own ``is_vlm_run`` result: a constant, or the checkpoint's
+    verdict, either refuses the text recipes on a checkpoint shipping no processor or hands an image
+    run a bare tokenizer."""
+    tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
+    verdicts = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", None) == "is_vlm_run"
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    loads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "load_model_for_training"
+    ]
+    assert verdicts and loads, f"{script} no longer both decides the run and loads through the shared loader"
+    for call in loads:
+        passed = [kw.value for kw in call.keywords if kw.arg == "vlm_run"]
+        assert len(passed) == 1 and isinstance(passed[0], ast.Name) and passed[0].id in verdicts, (
+            f"{script}: load_model_for_training is not handed the is_vlm_run verdict as vlm_run"
+        )
 
 
 if __name__ == "__main__":

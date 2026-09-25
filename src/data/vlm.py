@@ -297,7 +297,8 @@ def is_vlm_run(
     The checkpoint alone cannot decide it: every natively-multimodal family (Gemma 4, Qwen3.5/3.6) is
     a VLM by config while its text-only recipes are ordinary text runs. The run declares image data by
     naming the column (``images_field``) or carrying one; the model loads through its own multimodal
-    class either way, so only the data prep, collator and eval split follow this verdict.
+    class either way, so only the processor requirement, data prep, collator and eval split follow
+    this verdict.
 
     Agreed across ranks once for the whole verdict rather than per term. ``config`` / ``revision`` /
     ``trust_remote_code`` reach the modality probe as in :func:`~src.models.modality.is_vlm_model`;

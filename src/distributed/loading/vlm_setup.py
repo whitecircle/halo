@@ -11,21 +11,30 @@
 Dataset-side preparation lives in :mod:`src.data.pipeline.vlm_dataset`.
 """
 
+import os
+
 from accelerate.logging import get_logger
+from huggingface_hub import hf_hub_download, is_offline_mode
+from huggingface_hub.errors import LocalEntryNotFoundError, RemoteEntryNotFoundError
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoProcessor, AutoTokenizer
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.auto.modeling_auto import MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
+from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME
 from trl import ModelConfig
 
 from src.distributed.filesystem import hub_metadata_main_first
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import is_global_main_process
+from src.distributed.runtime import is_global_main_process, rank_consensus
 from src.models.loading.dtype import resolve_quantization_config, resolve_training_dtype
 from src.models.loading.model_preparation import finalize_liger_after_direct_load
 from src.models.modality import config_declares_multimodality, is_vlm_model
 
 logger = get_logger(__name__, log_level="INFO")
+
+# The files ``AutoProcessor`` reads a checkpoint's image processor from; a checkpoint shipping neither
+# has no native processor to build.
+_PROCESSOR_CONFIG_FILES = (PROCESSOR_NAME, IMAGE_PROCESSOR_NAME)
 
 
 def load_model_consuming_init_kwargs(
@@ -73,24 +82,57 @@ def load_model_consuming_init_kwargs(
     return model, tokenizer
 
 
-def load_vlm_processor(model_config: ModelConfig):
+def load_vlm_processor(model_config: ModelConfig, *, required: bool = True):
     """Load the checkpoint's ``AutoProcessor``, pinned to the model revision.
 
     The pin matters: hub ``main`` may carry different image geometry (patch size, pixel budget) from
     the commit the run trains on. Passing the result as the trainer's ``processing_class`` is what
-    puts ``processor_config.json`` beside the weights in an exported checkpoint.
+    puts ``processor_config.json`` beside the weights in an exported checkpoint, which the serving
+    engines build the multimodal class's processor from at startup.
+
+    ``required=False`` (a run without image data) returns ``None`` for a checkpoint that ships no
+    processor config, rather than the ``AutoProcessor`` failure an image run has to raise: such a
+    checkpoint (Step-3.7 Flash) has no processor for the export to carry. That verdict is agreed
+    across ranks, so every rank makes the call alike.
 
     Main-rank-first like every other pre-download hub read: the processor pulls several small files
     and, under ``trust_remote_code``, writes transformers' unlocked dynamic-module cache.
     """
+    model_path = model_config.model_name_or_path
+    revision = getattr(model_config, "model_revision", None)
+    if not required:
+        shipped = hub_metadata_main_first("processor_probe", lambda: _ships_processor_config(model_path, revision))
+        # A shipped config on any rank wins: ranks split between processor and tokenizer would enter
+        # different hub phases and save different processing classes.
+        if not rank_consensus(shipped)[1]:
+            return None
     return hub_metadata_main_first(
         "vlm_processor",
         lambda: AutoProcessor.from_pretrained(
-            model_config.model_name_or_path,
-            trust_remote_code=model_config.trust_remote_code,
-            revision=getattr(model_config, "model_revision", None),
+            model_path, trust_remote_code=model_config.trust_remote_code, revision=revision
         ),
     )
+
+
+def _ships_processor_config(model_path: str, revision: str | None) -> bool:
+    """Whether the checkpoint carries a processor config, on a confirmed answer only.
+
+    A local directory answers by its files, the Hub by a 404 for this revision; offline, the cache
+    stands for the checkpoint. A Hub it cannot reach raises rather than reading as absent, which
+    would drop the processor from the run's exports.
+    """
+    if os.path.isdir(model_path):
+        return any(os.path.isfile(os.path.join(model_path, name)) for name in _PROCESSOR_CONFIG_FILES)
+    for name in _PROCESSOR_CONFIG_FILES:
+        try:
+            hf_hub_download(model_path, name, revision=revision)
+            return True
+        except RemoteEntryNotFoundError:
+            continue
+        except LocalEntryNotFoundError:
+            if not is_offline_mode():
+                raise
+    return False
 
 
 def multimodal_sequence_classification_model_types() -> list[str]:
@@ -145,10 +187,15 @@ def load_vlm_model_and_processor(
     weights_source: str | None = None,
     attn_default: str | None = None,
     *,
+    vlm_run: bool,
     reset_sinks: bool = True,
     train_sinks: bool = False,
 ):
-    """Load a VLM model + processor + tokenizer for distributed training. Returns ``(model, processor, tokenizer)``.
+    """Load a VLM model + processor + tokenizer for distributed training.
+
+    Returns ``(model, processing_class, tokenizer)``. The processing class is the checkpoint's
+    processor, required when ``vlm_run`` (the run feeds images, :func:`~src.data.vlm.is_vlm_run`); a
+    run without image data takes the tokenizer instead when the checkpoint ships no processor config.
 
     The model load goes through ``load_distributed_model`` rather than a bare ``from_pretrained``, which
     is what gives MoE VLMs EP/TP/CP wrapping, attention fallbacks, QLoRA and Liger. ``model_init_kwargs``
@@ -164,7 +211,7 @@ def load_vlm_model_and_processor(
     # Same revision as the model weights: an unpinned processor/tokenizer loads hub main.
     revision = getattr(model_config, "model_revision", None)
 
-    processor = load_vlm_processor(model_config)
+    processor = load_vlm_processor(model_config, required=vlm_run)
     tokenizer = (
         processor.tokenizer
         if hasattr(processor, "tokenizer")
@@ -191,7 +238,7 @@ def load_vlm_model_and_processor(
     if is_global_main_process():
         logger.info(f"Loaded VLM model: {type(model).__name__}")
 
-    return model, processor, tokenizer
+    return model, processor if processor is not None else tokenizer, tokenizer
 
 
 def load_model_for_training(
@@ -199,6 +246,7 @@ def load_model_for_training(
     training_config,
     parallelism_config: ParallelismConfig,
     *,
+    vlm_run: bool,
     attn_default: str | None = None,
     reset_sinks: bool = True,
     train_sinks: bool = False,
@@ -208,8 +256,10 @@ def load_model_for_training(
 ):
     """Modality-aware model load; the entry point used by every training script.
 
-    Returns ``(model, processing_class, tokenizer, is_vlm)``: VLM → processor as processing_class; text →
-    tokenizer. Both apply QLoRA + parallelism-aware Liger, leaving parallelism wrapping to the trainer.
+    Returns ``(model, processing_class, tokenizer, is_vlm)``, ``is_vlm`` being the checkpoint's verdict.
+    A multimodal checkpoint loads through :func:`load_vlm_model_and_processor`, whose processing class
+    follows ``vlm_run`` (the run's :func:`~src.data.vlm.is_vlm_run` verdict); a text checkpoint takes
+    the tokenizer. Both apply QLoRA + parallelism-aware Liger, leaving parallelism wrapping to the trainer.
     ``attn_default`` is the fallback attn impl when the config sets none. ``init_from_scratch`` (text only)
     loads fresh weights. ``weights_source`` overrides where the weights load from (EP/CP resume checkpoint).
     ``text_only_model`` skips the VLM branch: the multimodal checkpoint loads through its text-only
@@ -222,16 +272,17 @@ def load_model_for_training(
     ):
         if init_from_scratch:
             raise ValueError("init_from_scratch is not supported for VLM models.")
-        model, processor, tokenizer = load_vlm_model_and_processor(
+        model, processing_class, tokenizer = load_vlm_model_and_processor(
             model_config,
             training_config,
             parallelism_config,
             weights_source=weights_source,
             attn_default=attn_default,
+            vlm_run=vlm_run,
             reset_sinks=reset_sinks,
             train_sinks=train_sinks,
         )
-        return model, processor, tokenizer, True
+        return model, processing_class, tokenizer, True
 
     model, tokenizer = load_model_consuming_init_kwargs(
         model_config,

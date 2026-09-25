@@ -126,6 +126,23 @@ def main():
     )
     parallelism_config = runtime.parallelism_config
 
+    ds, dataset_presharded = load_script_datasets(args, parallelism_config)
+    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
+    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
+    # name, so a declared column has to carry TRL's spelling before either verdict is taken.
+    ds = alias_images_column(ds, args.images_field, str(args.dataset))
+    _reject_embedded_image_parts(ds, args.completion_field)
+    # Vision routing keys on the dataset, not the checkpoint: a natively-multimodal model trains
+    # text-only unpaired data through TRL's text path. Decided before the model load, which requires
+    # the checkpoint's processor for a vision run.
+    is_vlm_data = is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        ds,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
     # --- Model (text or VLM, auto-detected); padded preference takes the shared padded-workload
     # backend (SDPA, dropped under live sinks). The reference load uses the same binding: a logratio
     # whose halves came from different attention kernels is biased. ---
@@ -134,6 +151,7 @@ def main():
         model_config,
         kto_config,
         parallelism_config,
+        vlm_run=is_vlm_data,
         attn_default=attn_default,
         reset_sinks=dist_args.reset_sinks,
         train_sinks=dist_args.train_sinks,
@@ -157,18 +175,8 @@ def main():
     )
 
     tokenizer = apply_max_length(kto_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer, is_vlm)
+    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
     log_model_info(model, tokenizer)
-
-    ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
-    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
-    # name, so a declared column has to carry TRL's spelling before either verdict is taken.
-    ds = alias_images_column(ds, args.images_field, str(args.dataset))
-    _reject_embedded_image_parts(ds, args.completion_field)
-    # Vision routing keys on the dataset, not the checkpoint: a natively-multimodal model trains
-    # text-only unpaired data through TRL's text path.
-    is_vlm_data = is_vlm_run(args, model_config.model_name_or_path, ds, config=model.config)
 
     _require_kto_columns(ds, args)
     train_dataset = _rename_kto_columns(ds["train"], args)

@@ -107,7 +107,7 @@ def test_text_only_skips_the_vlm_branch_in_load_model_for_training(monkeypatch):
     )
     model_config = SimpleNamespace(model_name_or_path="fake/vlm", model_revision=None, trust_remote_code=False)
     result = vlm_setup.load_model_for_training(
-        model_config, SimpleNamespace(), SimpleNamespace(), text_only_model=True
+        model_config, SimpleNamespace(), SimpleNamespace(), vlm_run=False, text_only_model=True
     )
     assert "probe" not in calls, "text_only_model=True must not enter the vlm_probe store phase"
     assert calls["loader_kwargs"]["text_only_model"] is True

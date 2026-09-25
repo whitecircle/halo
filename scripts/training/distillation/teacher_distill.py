@@ -178,12 +178,30 @@ def main():
     parallelism_config = runtime.parallelism_config
     local_rank = runtime.local_rank
 
+    ds, dataset_presharded = load_script_datasets(
+        args,
+        parallelism_config,
+        conversation_field=args.conversation_field,
+    )
+    # The data path follows the run, not the checkpoint class: a natively-multimodal student
+    # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
+    # which requires the checkpoint's processor for an image run.
+    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
+    is_vlm = is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        ds,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
     # Same padded-workload request the teacher load makes: the two forwards are compared token by
     # token, so a backend split between them biases the distillation targets.
     student_model, processing_class, tokenizer, is_vlm_checkpoint = load_model_for_training(
         model_config,
         training_config,
         parallelism_config,
+        vlm_run=is_vlm,
         attn_default=padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks),
         reset_sinks=dist_args.reset_sinks,
         train_sinks=dist_args.train_sinks,
@@ -191,7 +209,8 @@ def main():
         text_only_model=dist_args.text_only_model,
     )
     tokenizer = apply_max_length(training_config, args, student_model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer, is_vlm_checkpoint)
+    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
+    enforce_text_path_padding_side(tokenizer, is_vlm)
 
     # The distillation trainer is a plain Trainer (no peft_config kwarg), so PEFT is applied here via
     # prepare_peft_model (k-bit prep before the wrap, then the bf16 adapter cast).
@@ -213,16 +232,6 @@ def main():
         teacher_params = sum(p.numel() for p in teacher_model.parameters()) / 1e9
         logger.info(f"Teacher model: {args.teacher_model} ({teacher_params:.2f}B params)")
 
-    ds, dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        conversation_field=args.conversation_field,
-    )
-    # The data path follows the run, not the checkpoint class: a natively-multimodal student
-    # distilled on text-only rows is a text run (see is_vlm_run).
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
-    is_vlm = is_vlm_run(args, model_config.model_name_or_path, ds, config=student_model.config)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
     if is_vlm:
         train_dataset, eval_dataset, data_collator = _prepare_vlm_distill_data(
             ds, args, training_config, processing_class, tokenizer, student_model.config

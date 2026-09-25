@@ -68,9 +68,9 @@ def main():
 
     # The run's data path, not the checkpoint's modality: a multimodal checkpoint carrying text-only
     # pairs is a text run, and CP / padding_free stay legal for it. Decided here so the VLM
-    # guards (the trainer enforces the same ones) raise before the model load, and pinned to the same
-    # revision as that load, since hub `main` can name a different modality than the commit this run
-    # trains.
+    # guards (the trainer enforces the same ones) raise before the model load, which also requires
+    # the checkpoint's processor for a VLM run, and pinned to the same revision as that load, since
+    # hub `main` can name a different modality than the commit this run trains.
     is_vlm = is_vlm_run(
         args,
         model_config.model_name_or_path,
@@ -87,10 +87,11 @@ def main():
 
     # --- Model (class follows the checkpoint); padded preference takes the shared padded-workload
     # backend (SDPA, dropped under live sinks) ---
-    model, processing_class, tokenizer, is_vlm_checkpoint = load_model_for_training(
+    model, processing_class, tokenizer, _ = load_model_for_training(
         model_config,
         smpo_config,
         parallelism_config,
+        vlm_run=is_vlm,
         attn_default=padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks),
         reset_sinks=dist_args.reset_sinks,
         train_sinks=dist_args.train_sinks,
@@ -99,9 +100,7 @@ def main():
     )
 
     tokenizer = apply_max_length(smpo_config, args, model, tokenizer)
-    # The checkpoint verdict: a text run on a multimodal checkpoint still saves through the
-    # processor, so every checkpoint it writes carries a processor_config.json.
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer, is_vlm_checkpoint)
+    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
     enforce_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")

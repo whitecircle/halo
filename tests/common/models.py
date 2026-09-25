@@ -33,6 +33,7 @@ LAGUNA_S_2_1 = "poolside/Laguna-S-2.1"
 MISTRAL3_119B_MOE = "mistralai/Mistral-Small-4-119B-2603"
 COMMAND_A_PLUS = "CohereLabs/command-a-plus-05-2026-bf16"
 ZAYA_8B = "Zyphra/ZAYA1-8B"
+STEP3P7_FLASH = "stepfun-ai/Step-3.7-Flash"
 
 # Local checkpoints (scripts/before_training/patch_vocab.py output) under the toolkit scratch root;
 # agent-docs/contributing/README.md gives the command that writes each one. A suite defaulting to one
@@ -599,10 +600,12 @@ GEMMA3_4B_IT = "google/gemma-3-4b-it"  # gated: anonymous downloads are refused
 QWEN2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
 
-# Snapshots a test pins because hub main can drift a chat template out from under it.
+# Snapshots a test pins because hub main can drift the files it reads (a chat template, the set of
+# processor configs) out from under it.
 PINNED_REVISIONS = {
     QWEN2_5_VL_3B: "66285546d2b821cf421d4f5eb2576359d3770cd3",
     QWEN3_VL_2B: "89644892e4d85e24eaac8bacfd4f463576704203",
+    STEP3P7_FLASH: "5f6244077ac62e04eec3f320501ff8c2b293373a",
 }
 
 # Profiling Benchmark Configs

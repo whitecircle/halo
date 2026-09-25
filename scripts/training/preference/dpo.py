@@ -68,6 +68,29 @@ def main():
     )
     parallelism_config = runtime.parallelism_config
 
+    ds, dataset_presharded = load_script_datasets(args, parallelism_config)
+    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
+    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
+    # name, so a declared column has to carry TRL's spelling before either verdict is taken.
+    ds = alias_images_column(ds, args.images_field, str(args.dataset))
+
+    # Vision routing keys on the dataset, not the model: natively-multimodal models train on text
+    # preference data through the normal text pipeline, and only an image-carrying dataset takes TRL's
+    # vision path. There the rows pass through untouched: TRL tokenizes them, auto-selects
+    # DataCollatorForVisionPreference and applies no hub-shape normalization of its own. Decided
+    # before the model load, which requires the checkpoint's processor for a vision run.
+    is_vlm_data = is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        ds,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    if is_vlm_data:
+        # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
+        # tools column would survive the signature filter and render toolless.
+        reject_unsupported_args("DPO VLM mode", tools_field=args.tools_field)
+
     # --- Model (text or VLM, auto-detected); padded preference takes the shared padded-workload
     # backend (SDPA, dropped under live sinks). The reference load uses the same binding: a logratio
     # whose halves came from different kernels is biased.
@@ -76,6 +99,7 @@ def main():
         model_config,
         dpo_config,
         parallelism_config,
+        vlm_run=is_vlm_data,
         attn_default=attn_default,
         reset_sinks=dist_args.reset_sinks,
         train_sinks=dist_args.train_sinks,
@@ -99,24 +123,9 @@ def main():
     )
 
     tokenizer = apply_max_length(dpo_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer, is_vlm)
+    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
     log_model_info(model, tokenizer)
 
-    ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
-    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
-    # name, so a declared column has to carry TRL's spelling before either verdict is taken.
-    ds = alias_images_column(ds, args.images_field, str(args.dataset))
-
-    # Vision routing keys on the dataset, not the model: natively-multimodal models train on text
-    # preference data through the normal text pipeline, and only an image-carrying dataset takes TRL's
-    # vision path. There the rows pass through untouched: TRL tokenizes them, auto-selects
-    # DataCollatorForVisionPreference and applies no hub-shape normalization of its own.
-    is_vlm_data = is_vlm_run(args, model_config.model_name_or_path, ds, config=model.config)
-    if is_vlm_data:
-        # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
-        # tools column would survive the signature filter and render toolless.
-        reject_unsupported_args("DPO VLM mode", tools_field=args.tools_field)
     enforce_text_path_padding_side(tokenizer, is_vlm_data)
     train_dataset, eval_dataset, generate_callback = prepare_script_preference_data(
         args,

@@ -230,8 +230,8 @@ def main():
         assistant_only_loss=sft_config.assistant_only_loss,
     )
 
-    # The checkpoint's modality picks the processing class and the run label, both needed before the
-    # dataset exists. Pinned like the model load: an unpinned probe reads hub `main`, whose config can
+    # The checkpoint's modality names the run, which init_training_script needs before the dataset
+    # exists. Pinned like the model load: an unpinned probe reads hub `main`, whose config can
     # name a different modality than the commit this run trains. The process group is initialized
     # first (init_training_script's own call is then a no-op) because the main-rank-first ordering
     # that guards transformers' unlocked remote-code module cache needs a live group; without it
@@ -255,10 +255,31 @@ def main():
     )
     parallelism_config = runtime.parallelism_config
 
-    model, processing_class, tokenizer, is_vlm_checkpoint = load_model_for_training(
+    (ds, is_preprocessed), dataset_presharded = load_script_datasets(
+        args,
+        parallelism_config,
+        loader=load_datasets_auto,
+        conversation_field=args.conversation_field,
+    )
+
+    # The run's data path, decided before the model load because it also decides whether the
+    # checkpoint's processor is required: a multimodal checkpoint carrying text-only rows is a text
+    # run, and packing / padding_free / train_on_last_assistant_only stay legal for it. The model
+    # class is unaffected; it follows the checkpoint.
+    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
+    is_vlm = is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        ds,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
+    model, processing_class, tokenizer, _ = load_model_for_training(
         model_config,
         sft_config,
         parallelism_config,
+        vlm_run=is_vlm,
         reset_sinks=dist_args.reset_sinks,
         train_sinks=dist_args.train_sinks,
         init_from_scratch=dist_args.init_from_scratch,
@@ -274,24 +295,11 @@ def main():
             "memory); it cannot default to the model context window. Set max_length in the config."
         )
     tokenizer = apply_max_length(sft_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer, is_vlm_checkpoint)
+    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
+    enforce_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
-
-    (ds, is_preprocessed), dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        loader=load_datasets_auto,
-        conversation_field=args.conversation_field,
-    )
-
-    # The run's data path, decided now that the dataset is known: a multimodal checkpoint carrying
-    # text-only rows is a text run, and packing / padding_free / train_on_last_assistant_only stay
-    # legal for it. The model class is unaffected; it was resolved from the checkpoint above.
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
-    is_vlm = is_vlm_run(args, model_config.model_name_or_path, ds, config=model.config)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
 
     if is_vlm:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_vlm_data(

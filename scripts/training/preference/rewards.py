@@ -126,7 +126,7 @@ def main():
     # side TRL's text collator pads on and the one the pooled head's rightmost-non-pad rule expects.
     processing_class = tokenizer
     if is_vlm:
-        processing_class = install_resolved_tokenizer(load_vlm_processor(model_config), tokenizer, True)
+        processing_class = install_resolved_tokenizer(load_vlm_processor(model_config), tokenizer)
 
     # No pre-tokenization pass here on either branch: TRL's RewardTrainer chat-templates and tokenizes
     # the raw chosen/rejected columns itself (natively supporting implicit-prompt datasets and

@@ -194,7 +194,9 @@ def run(ctx):
     model_config = ModelConfig(
         model_name_or_path=MODEL_NAME, attn_implementation="flash_attention_2", trust_remote_code=True
     )
-    model, processing_class, tokenizer, is_vlm = load_model_for_training(model_config, config, parallelism_config)
+    model, processing_class, tokenizer, is_vlm = load_model_for_training(
+        model_config, config, parallelism_config, vlm_run=False
+    )
     assert is_vlm, "Qwen3-VL must be detected as a VLM by load_model_for_training"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

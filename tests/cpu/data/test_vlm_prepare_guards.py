@@ -109,7 +109,7 @@ def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeyp
     monkeypatch.setattr(vlm_setup, "load_vlm_processor", _processor_reached)
     model_config = types.SimpleNamespace(model_name_or_path="Qwen/Qwen3-4B", model_revision=None)
     with pytest.raises(_Sentinel):
-        vlm_setup.load_vlm_model_and_processor(model_config, None, None)
+        vlm_setup.load_vlm_model_and_processor(model_config, None, None, vlm_run=True)
 
 
 if __name__ == "__main__":

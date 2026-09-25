@@ -13,7 +13,7 @@ from typing import Any, NamedTuple
 import torch
 from accelerate import PartialState
 from accelerate.logging import get_logger
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase
 
 from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.callbacks.parameter_stats import ParameterStatsCallback
@@ -21,6 +21,7 @@ from src.callbacks.wiring import build_perf_callbacks, reorder_integration_callb
 from src.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
 from src.data.pipeline.processing import log_dataset_examples, resolve_map_num_proc
 from src.data.sources.loading import is_presharded_dataset_load, load_datasets, reject_image_columns
+from src.data.vlm import dataset_declares_images
 from src.distributed.expert_parallel.dispatcher import verify_rank_uniform_env
 from src.distributed.filesystem import verify_output_filesystem_sharing
 from src.distributed.loading.peft_setup import split_expert_lora_targets
@@ -161,9 +162,10 @@ def sync_token_field(args, training_config, field_name: str) -> None:
 def reject_images_under_text_only_model(args, datasets, *, text_only_model: bool) -> None:
     """Reject image data on a run that loaded a multimodal checkpoint through its text-only class.
 
-    Under ``text_only_model`` the loaded config is the text sub-config, so ``is_vlm_run`` cannot
-    route to a VLM data path: an image column would be pruned and the run would train on the rows'
-    text alone. Called once the dataset is in hand, before the modality dispatch.
+    ``is_vlm_run`` reads the checkpoint's config, which still says multimodal, so each image
+    declaration it counts (``images_field``, an image column, parts embedded in
+    ``conversation_field``) would route the run to a VLM data path with no vision model behind it.
+    Called once the dataset is in hand, before that verdict.
     """
     if not text_only_model:
         return
@@ -175,6 +177,13 @@ def reject_images_under_text_only_model(args, datasets, *, text_only_model: bool
             f"multimodal wrapper, or drop images_field for a text-only run."
         )
     reject_image_columns(datasets, "text_only_model=True (text-only CausalLM load)")
+    conversation_field = getattr(args, "conversation_field", None)
+    if conversation_field and dataset_declares_images(datasets, conversation_field):
+        raise ValueError(
+            f"The {conversation_field!r} column embeds image content parts, but text_only_model=True "
+            f"loads the text-only CausalLM class, which has no vision path. Drop text_only_model to "
+            f"train the multimodal wrapper, or drop the image parts for a text-only run."
+        )
 
 
 def load_script_datasets(
@@ -317,16 +326,18 @@ def apply_max_length(
     )
 
 
-def install_resolved_tokenizer(processing_class, tokenizer: PreTrainedTokenizer, is_vlm: bool):
+def install_resolved_tokenizer(processing_class, tokenizer: PreTrainedTokenizer):
     """Return the trainer's ``processing_class`` carrying the resolved tokenizer.
 
     ``apply_max_length`` may hand back a different object than the one loaded (the
-    ``tokenizer_backend`` proxy), and a VLM processor still holds the raw inner tokenizer.
+    ``tokenizer_backend`` proxy), and a processor still holds the raw inner tokenizer. Read off the
+    loaded object rather than the checkpoint's modality: a multimodal checkpoint that ships no
+    processor loads a tokenizer for a run without image data.
     """
-    if is_vlm:
-        processing_class.tokenizer = tokenizer
-        return processing_class
-    return tokenizer
+    if isinstance(processing_class, PreTrainedTokenizerBase):
+        return tokenizer
+    processing_class.tokenizer = tokenizer
+    return processing_class
 
 
 def enforce_text_path_padding_side(tokenizer: PreTrainedTokenizer, vlm_run: bool) -> None:

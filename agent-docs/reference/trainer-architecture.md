@@ -104,9 +104,11 @@ on the **run** (`is_vlm_run`): the VLM data path needs a multimodal checkpoint *
 data, so text-only rows on a natively-multimodal model (Qwen3.5/3.6, Gemma 4, Inkling) train through
 the text pipeline with packing available ([declaration rules](../data/dataset-formats.md#sft-vlm)).
 
-KTO takes its processor **class** from the checkpoint (`install_resolved_tokenizer` keeps the
-processor a multimodal checkpoint resolved to) but routes its data path off the **dataset**, as
-`scripts/training/preference/kto.py` states. The model class always follows the checkpoint.
+KTO routes its data path off the **dataset** (TRL's own column probe), as
+`scripts/training/preference/kto.py` states. The model class always follows the checkpoint. SFT,
+DPO, KTO, SMPO and distillation load the processing class by the rule in
+[SFT — VLMs](../training-methods/sft.md#vision-language-models); reward modeling loads the processor
+for an image run only.
 
 | Method | Vision | Notes |
 |---|---|---|

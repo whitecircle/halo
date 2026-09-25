@@ -116,7 +116,7 @@ def _run_kto(
         ),
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
-        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok, is_vlm: pc),
+        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
         mock.patch.object(module, "setup_peft_model", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),

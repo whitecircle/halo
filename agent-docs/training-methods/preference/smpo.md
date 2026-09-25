@@ -71,7 +71,7 @@ torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \
 
 ## Vision-language
 
-The model class follows the **checkpoint**: a multimodal config loads through `AutoModelForImageTextToText` plus its processor, so the run's checkpoints carry a `processor_config.json` (unless `text_only_model` forced the text class). The data path follows the **run** — VLM only when the dataset declares images in an `images`/`image` column. Text pairs on a multimodal checkpoint are a text run, and keep CP and `padding_free`.
+The model class follows the **checkpoint**: a multimodal config loads through `AutoModelForImageTextToText` plus its processor wherever the checkpoint ships one ([SFT — VLMs](../sft.md#vision-language-models)), so the run's checkpoints carry that `processor_config.json` (unless `text_only_model` forced the text class). The data path follows the **run** — VLM only when the dataset declares images in an `images`/`image` column. Text pairs on a multimodal checkpoint are a text run, and keep CP and `padding_free`.
 
 A dataset carrying images inside its messages alone reads as text, and the renderer refuses it rather than training on pixel-less placeholders.
 

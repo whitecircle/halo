@@ -241,27 +241,36 @@ def main():
     )
     parallelism_config = runtime.parallelism_config
 
+    ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=args.conversation_field)
+    _require_privileged_answer_column(ds, args)
+    # The data path follows the run, not the checkpoint class: a natively-multimodal student
+    # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
+    # which requires the checkpoint's processor for an image run.
+    reject_images_under_text_only_model(args, ds, text_only_model=distributed_args.text_only_model)
+    is_vlm = is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        ds,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
     model, processing_class, tokenizer, is_vlm_checkpoint = load_model_for_training(
         model_config,
         sft_config,
         parallelism_config,
+        vlm_run=is_vlm,
         reset_sinks=distributed_args.reset_sinks,
         train_sinks=distributed_args.train_sinks,
         weights_source=runtime.model_source,
         text_only_model=distributed_args.text_only_model,
     )
     tokenizer = apply_max_length(sft_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer, is_vlm_checkpoint)
+    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
+    enforce_text_path_padding_side(tokenizer, is_vlm)
     peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
-    ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=args.conversation_field)
-    _require_privileged_answer_column(ds, args)
-    # The data path follows the run, not the checkpoint class: a natively-multimodal student
-    # distilled on text-only rows is a text run (see is_vlm_run).
-    reject_images_under_text_only_model(args, ds, text_only_model=distributed_args.text_only_model)
-    is_vlm = is_vlm_run(args, model_config.model_name_or_path, ds, config=model.config)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
     if is_vlm:
         num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
         train_dataset, eval_dataset, collator = _build_vlm_dataset_and_collator(
