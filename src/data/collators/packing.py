@@ -495,9 +495,6 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
         warn_if_pad_equals_eos(self.tokenizer)
 
     def _sample_labels(self, labels: list[int], input_ids: list[int]) -> list[int]:
-        return self._apply_completion_mask(labels, input_ids)
-
-    def _apply_completion_mask(self, labels: list[int], input_ids: list[int]) -> list[int]:
         """Completion-only mask labels (unmask only template→EOS spans). Operates on the flattened,
         padding-free sequence, so a terminator-less turn falls back to end-of-sequence
         (:data:`~src.data.spans.PACKED_SPAN_POLICY`, the same named policy the packing collator

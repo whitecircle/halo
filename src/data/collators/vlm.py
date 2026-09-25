@@ -219,9 +219,14 @@ class SelfDistillVLMDataCollator(VLMDataCollator):
         self.confidence_field = confidence_field
         self.confidence_power = confidence_power
 
-    def _inject_hint(self, history: list[dict[str, Any]], answer: Any, solution: Any) -> list[dict[str, Any]]:
-        """Append the privileged hint text to the last user turn of ``history``."""
-        return inject_privileged_hint(history, self.hint_template, answer, solution)
+    def _teacher_history(self, history: list[dict[str, Any]], example: dict[str, Any]) -> list[dict[str, Any]]:
+        """``history`` with the row's privileged hint appended to its last user turn."""
+        return inject_privileged_hint(
+            history,
+            self.hint_template,
+            example.get(self.answer_field),
+            example.get(self.solution_field) if self.solution_field else None,
+        )
 
     def __call__(self, examples):
         batch = super().__call__(examples)
@@ -230,12 +235,8 @@ class SelfDistillVLMDataCollator(VLMDataCollator):
         teacher_texts = []
         all_images = []
         for example in examples:
-            history = example.get("history", [])
             images = example.get("images", [])
-            answer = example.get(self.answer_field)
-            solution = example.get(self.solution_field) if self.solution_field else None
-
-            teacher_history = self._inject_hint(history, answer, solution)
+            teacher_history = self._teacher_history(example.get("history", []), example)
             teacher_texts.append(self._render(teacher_history, example))
             if images:
                 all_images.extend(images)
