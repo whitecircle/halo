@@ -29,9 +29,9 @@ on the command line after the config path. The parser applies the same three too
 (`bf16: true`, `use_liger_kernel: true`, `logging_nan_inf_filter: false`) and raises on a key it does
 not know rather than ignoring it — see [Configuration](../configuration.md).
 
-One data and collator stack. Datasets come from the Hub, a local path or `s3://` in the same
-`dataset:` field, mix by list, and are rendered with the model's chat template before tokenization
-([Datasets](../data.md)). Columns differ per method; everything above them does not.
+One data stack. Datasets come from the Hub, a local path or `s3://` in the same `dataset:` field
+and mix by list ([Datasets](../data.md)); the columns, and how each method renders and collates
+them, differ per method.
 
 One parallelism stack. Expert, tensor and expert-tensor parallelism work on every trainer; context
 parallelism is enabled on SFT and SMPO only, and pipeline parallelism is not available in this

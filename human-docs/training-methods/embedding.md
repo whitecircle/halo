@@ -72,7 +72,7 @@ want to be large — keep it at the length you actually embed.
 ## Run
 
 ```bash
-# single GPU or FSDP2 data parallel
+# single GPU; add -n 8 for FSDP2 data parallel
 halo launch embedding examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml
 
 # MoE backbone with expert parallelism pinned in the config

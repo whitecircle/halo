@@ -94,19 +94,12 @@ Three decisions matter more than the rest.
   and is never truncated — the context window bounds it, and a row past that fails the step. Watch `episode/turns`:
   pinned at the cap, raise it; far below, lower it, since turns are sequential and set step time.
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets how much the
-  model should think. `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
-  (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). The engine-side cap
-  `rollout_max_thinking_tokens` is vLLM-only. A level's budget covers each turn by default; with
-  `rollout_thinking_budget_scope: episode` (vLLM-only) it covers the whole episode, so a recovery turn gets only what
-  is left, as in the Qwen3.6 vLLM code-contests recipes.
-
-    The model only sees the level if the chat template renders it. `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`
-    and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja` do. Pin one with `force_chat_template: true` and serve
-    the same file ([Chat template](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#chat-template) ↗).
-
-    Caps alone do not make `low` reason less than `high`. `effort_length_penalty_k0` charges for reasoning tokens, most
-    at `low`. `effort_length_floor_weight` charges an episode that stops far short of its budget. Both are off by
-    default ([Effort length reward](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#effort-length-reward) ↗).
+  model should think, and `reasoning_effort_profiles` gives each level its own caps, as the code-contests recipes do
+  (`{high: {thinking_tokens: 16384, max_submissions: 3, max_test_calls: 6}}`). `rollout_max_thinking_tokens`,
+  `rollout_thinking_budget_scope: episode` and `carry_reasoning` are vLLM-only, and on SGLang a level's
+  `thinking_tokens` caps nothing. The model sees the level only through a chat template that renders it; templates,
+  budget scope and length pricing are in
+  [Reasoning budget](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-budget) ↗.
 - **Tool budgets.** An environment pays `tool_success_reward` per successful call, charges `tool_error_penalty` per
   failure, and caps what successful calls earn across the episode — not the episode reward — at `tool_reward_cap`
   (default `tool_success_reward × max_turns`). Keep them small beside the objective, or tool-calling beats finishing.
@@ -126,7 +119,7 @@ paying for generation and training one after the other.
 ## Run
 
 ```bash
-VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 \
+VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_TP=4 VLLM_REASONING_PARSER=qwen3 \
     docker compose -f docker-compose.vllm.yml up -d vllm-server
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 halo launch environmental-grpo \
     examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml -n 4
@@ -135,9 +128,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 halo launch environmen
 A native-tool environment needs the server started with the tool-call parser for the model family: without one vLLM
 rejects every rollout, and with the wrong one the calls come back as text and every episode scores zero. ReAct
 environments need no parser. Before a long run, put the config through a
-few rows with `halo run run-env --training_config <config>.yaml --dataset <hub-id-or-path> --num_examples 20
---base_url http://localhost:8000/v1 --model <served-id>`: that exercises the parser, the template, the sandbox or
-judge backend and the dataset columns in a minute.
+few rows with `halo run run-env --training_config <config>.yaml --dataset <hub-id-or-path> --split train
+--answer_field <column> --num_examples 20 --base_url http://localhost:8000/v1 --model <served-id>`: that exercises the
+parser, the template and the sandbox or judge backend in a minute. `--training_config` carries the environment and
+rollout settings, not the dataset fields, so `--split` (default `test`), `--answer_field` (default `answer`) and,
+where needed, `--config` and `--prompt_field` must match the config's dataset.
 
 Evaluation runs the same loop: set `eval_strategy`, plus `num_generations_eval: 1` for a fast pass@1 monitor.
 `eval_rollout_batch_size` widens an eval round (rows per rank) so the servers do not idle — a multiple of
@@ -148,8 +143,9 @@ Evaluation runs the same loop: set `eval_strategy`, plus `num_generations_eval: 
 `reward/objective` says whether the task is being learned — a rising total reward with a flat objective is shaping,
 not progress (code contests add `outcome/solve_rate` beside it). `episode/turns` and `episode/truncation_rate` say
 whether episodes finish, and `sampling/logratio_mean` drifting steadily negative means the weight sync is broken and
-the policy is training on stale rollouts. With several servers, `async/prefetch_hit_rate` above roughly 0.8 means
-generation overlaps training.
+the policy is training on stale rollouts. With several servers, `async/prefetch_hit_rate` says which phase bounds the
+step: it climbs toward 1 on a short single-turn environment (below ~0.8, add servers) and sits near 0 by construction
+once a multi-turn round outlasts the update.
 
 `reward/within_group_std` near zero is the quiet failure: every episode in a group scored the same, so the advantages
 are zero and that prompt teaches nothing. Rollouts land in `<output_dir>/completions/` as parquet.
