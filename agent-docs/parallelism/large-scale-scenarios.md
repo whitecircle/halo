@@ -371,7 +371,7 @@ export NVLINK_DOMAIN_SIZE=64
 
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` composes with the `ElasticBuffer` on single-node
 runs. Set it when variable-shape packing at `per_device_train_batch_size > 1` fragments the
-allocator; no shipped config sets it. Measured on B300 it cuts peak reserved memory by ~14% at unchanged
+allocator; no shipped config sets it. Measured on B300 it cuts peak reserved memory by 13–14% at unchanged
 throughput on dense packed SFT (Qwen3-8B, 41.3 → 35.4 GB), DPO (61.6 → 52.7 GB) and SMPO (41.1 →
 35.8 GB); under EP8 it trims 1–6 GB and costs ~1.5% throughput.
 
