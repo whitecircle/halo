@@ -313,6 +313,23 @@ def test_env_reset_parses_payload_and_reward_is_fraction():
     assert traj.total_reward == pytest.approx(0.5)
 
 
+def test_env_reset_reads_a_bare_list_of_tests_from_json():
+    env = CodeContestsEnvironment(language="python")
+    traj = env._reset_single("Print a+b.", {"answer": json.dumps(_ADD_TESTS)})
+    assert traj.info["_test_cases"] == _ADD_TESTS
+    assert traj.info["tests_total"] == len(_ADD_TESTS)
+
+
+@pytest.mark.parametrize("answer", ['{"tests": [', None, 42, '"tests"'], ids=["unparseable", "null", "int", "scalar"])
+def test_env_reset_refuses_an_answer_that_holds_no_test_set(answer):
+    """Graded against zero tests, such a row would score 0 inside its GRPO group like a wrong solution.
+    Refused at reset instead, the episode becomes a rollout error the trainer masks out of the baseline."""
+    env = CodeContestsEnvironment(language="python")
+    with pytest.raises(ValueError, match="'answer'"):
+        env.reset(["Print a+b."], [{"answer": answer}])
+    assert env._trajectories == {}
+
+
 def test_environment_term_exponent_makes_partial_credit_convex():
     """With the environment term's exponent above 1 a half-right submission earns well under half a
     solve, while a full pass and a zero pass are unchanged — the exponent reshapes partial credit only."""
