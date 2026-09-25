@@ -48,7 +48,7 @@ Once your PR path is approved, the normal bar applies (full detail in
 - **Everything runs in the Docker image.** The host has no usable Python. Pull the prebuilt image
   (`docker pull public.ecr.aws/whitecircle/halo:blackwell`, then tag it `halo:blackwell` — or `hopper`)
   or build it (`make build-blackwell`), then use the `make` targets (`make test-cpu`, ...); only
-  `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (a pure link check)
+  `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (a link and anchor check)
   run on the host. `make test-cpu` needs Docker, not a GPU.
 - **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
   `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (and
