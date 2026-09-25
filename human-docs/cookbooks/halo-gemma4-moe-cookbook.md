@@ -18,42 +18,9 @@ H100 or H200, use the Hopper image. The training config does not change.
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-export HALO_IMAGE=public.ecr.aws/whitecircle/halo:blackwell
-# On H100 or H200, use public.ecr.aws/whitecircle/halo:hopper.
-docker pull "$HALO_IMAGE"
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell. Downloading the Gemma checkpoint requires accepting Google's license on Hugging Face.
-
-```bash
-export HALO_SCRATCH=/path/to/storage
-mkdir -p "$HALO_SCRATCH/hf" "$HALO_SCRATCH/checkpoints" "$HALO_SCRATCH/tmp"
-docker run --rm -it \
-  --name halo-gemma4 \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$HALO_SCRATCH":/data \
-  -w /workspace \
-  "$HALO_IMAGE" bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host. Downloading the Gemma
+checkpoint requires accepting Google's license on Hugging Face.
 
 ## Train all weights with EP8
 
@@ -121,7 +88,7 @@ halo launch sft gemma4-sft.yaml -n 8
 
 Keep `attn_implementation: sdpa`. It is the supported attention backend for this checkpoint.
 
-Do not enable `fp32_non_ep_params`. The router is outside the EP wrapper, and DeepEP combine expects BF16 data. Gemma 4 has no supported auxiliary-loss or bias-update balancing path, so keep `moe_balancing: none`.
+Do not enable `fp32_non_ep_params`: it is refused at load under EP, because Gemma 4's norms re-emit activations at weight dtype and the upcast would put fp32 tokens on DeepEP's 2-byte transport. Gemma 4 has no supported auxiliary-loss or bias-update balancing path, so keep `moe_balancing: none`.
 
 Keep `per_device_train_batch_size` at 1 with `packing: true` and scale through
 `gradient_accumulation_steps`: Gemma 4 never reaches a varlen kernel, so packing builds a
@@ -139,10 +106,8 @@ expert_parallel_size: 1
 expert_tensor_parallel_size: 8
 ```
 
-With eight training GPUs, `expert_parallel_size` must be 8, 2, or 1. A value of 4
-forms two four-rank DeepEP dispatch groups whose
-combine barriers race FSDP2, and [`ParallelismConfig`](../parallelism.md) rejects it at
-config time.
+With eight training GPUs, pure EP is 8, 2 or 1; for a 4-way expert split use
+`ep4 + etp2` ([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
 
 ## Run text inference
 
@@ -173,15 +138,11 @@ print(processor.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 
 Use the same model class and processor for image-and-text inference.
 
-Serve the gathered checkpoint with Halo's SGLang image. Run this command on the host.
-The compose service mounts `SGLANG_MODEL_DIR` at the same path inside the container.
+Serve the gathered checkpoint with SGLang on port 30000, from the host
+([server setup](README.md#serve-from-the-host)).
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
 SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gemma-4-26b-a4b-ultrachat-ep8" \
-SGLANG_MODEL_DIR="$HALO_SCRATCH/checkpoints" \
 SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
   docker compose -f docker-compose.sglang.yml up sglang-server
 ```
@@ -213,7 +174,8 @@ Keep TP disabled for LoRA.
 
 Use the shipped SGLang LoRA recipe. It trains from the base checkpoint by default.
 To continue from the SFT checkpoint, set `model_name_or_path` to its `/data` path.
-Set `SGLANG_MODEL` to the matching `$HALO_SCRATCH` path on the host.
+Set `SGLANG_MODEL` to the matching `$HALO_SCRATCH` path on the host. Point `output_dir`
+at `/data/checkpoints/` too; the recipe writes under the repo checkout.
 
 ```bash
 cp \
@@ -226,15 +188,11 @@ The config contains a placeholder dataset. Prepare a HardTests pool as described
 then replace `your-org/code-contests-hardtests-rl:medium` in `gemma4-grpo.yaml`.
 
 The shipped config uses two SGLang servers on four GPUs. Start both servers on the
-host. The trainer will use GPUs 0–3.
+host ([server setup](README.md#serve-from-the-host)). The trainer will use GPUs 0–3.
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-export SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17
 export SGLANG_MODEL=google/gemma-4-26B-A4B-it
 cp jinja-templates/gemma4/gemma4-reasoning-effort.jinja "$HALO_SCRATCH/"
-export SGLANG_MODEL_DIR="$HALO_SCRATCH"
 export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/gemma4-reasoning-effort.jinja"
 
 SGLANG_CUDA_DEVICES=4,5 SGLANG_TP=2 SGLANG_PORT=30000 \
@@ -247,9 +205,7 @@ curl --fail http://localhost:30000/health
 curl --fail http://localhost:30001/health
 ```
 
-The compose file sets `--moe-runner-backend triton`, which keeps the expert weights in
-the layout required for synchronization. Do not set `SGLANG_ENABLE_R3`. Gemma 4 does
-not support routing replay.
+Do not set `SGLANG_ENABLE_R3`. Gemma 4 does not support routing replay.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
@@ -258,5 +214,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server; they cannot share a GPU.
 The shipped SGLang recipe uses `expert_parallel_size: 1`. For a shipped EP4 recipe,
-use a config under `examples/grpo/environmental/gemma4/vllm/`. Full setup:
+use a config under `examples/grpo/environmental/gemma4/vllm/`. Its effort profiles send a
+thinking budget, so serve it with `VLLM_TOOL_PARSER=gemma4`, `VLLM_REASONING_PARSER=gemma4`,
+`VLLM_USE_V2_MODEL_RUNNER=0` and `VLLM_CHAT_TEMPLATE=/data/gemma4-reasoning-effort.jinja`
+(the file copied above; [Rollout Servers](../rollout-servers.md)). Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

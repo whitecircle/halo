@@ -134,9 +134,10 @@ On DPO and SMPO, `rewards/accuracies` is the share of pairs scored in the right 
 chance, and it should climb early — and `rewards/margins` is the separation being bought. KTO has no
 pairs, so it logs no accuracy and reports margins only from batches holding both labels. The failure to watch for is
 `logps/chosen` and `logps/rejected` falling together: the model is making both answers less likely,
-which degrades generation. Lower the learning rate, raise `beta`, or add an SFT term (`chosen_sft_ratio`
-on SMPO, `[sigmoid, sft]` on DPO). On SMPO, a loss that goes NaN usually means the log-prob clips
-were disabled — keep `min_log_prob` and `lower_clip_percentile` at their defaults.
+which degrades generation. Lower the learning rate, or anchor harder: on SMPO raise `chosen_sft_ratio`
+or lower `beta` (it scales the margin term); on DPO add `[sigmoid, sft]` or raise `beta`. On SMPO, a
+loss that goes NaN usually means the log-prob clips were disabled — keep `min_log_prob` and
+`lower_clip_percentile` at their defaults.
 
 ## Go deeper
 

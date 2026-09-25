@@ -57,13 +57,8 @@ launcher's. `halo run --list` prints the full catalog. The ones you'll actually 
 
 | Tool | Purpose |
 | --- | --- |
-| `merge-ep-shards` | merge a sharded EP save into one checkpoint |
-| `merge-peft-adapters` | fold a LoRA adapter into its base model |
-| `merge-models` | weight-space merge (linear, SLERP, task-arithmetic, TIES) |
-| `convert-to-bf16` / `quantize-to-lowp` | cast to bf16 / quantize to mxfp8, mxfp4 or nvfp4 |
-| `unfuse-moe-experts` | rewrite fused MoE experts to the per-expert hub layout (refuses a family with no per-expert hub form: GptOss, Inkling, Gemma4, Mistral4, Zaya, Step-3.7 Flash) |
-| `reset-sinks` | disable the attention-sink mechanism in a GPT-OSS checkpoint |
-| `convert-glm5-bf16` | dequantize the fp8 GLM-5.3-Flash release to bf16 — required before training that family |
+| `merge-ep-shards` / `merge-peft-adapters` / `merge-models` / `convert-to-bf16` / `quantize-to-lowp` / `unfuse-moe-experts` / `reset-sinks` | checkpoint post-processing — see [Checkpoints](checkpoints.md#post-processing-tools) |
+| `convert-glm5-bf16` / `convert-mistral4-bf16` / `convert-deepseek-v4-bf16` | dequantize that family's low-precision hub release to bf16 — required before training it |
 | `prepare-dataset` | tokenize, pack, and shard a corpus offline |
 | `compact-code-tests` / `prepare-code-dataset` | build a code-contests pool: cap the test corpus, then compose prompts, pack tests and checker, and publish rating bands |
 | `dataset-deduplication` | deduplicate generated or collected data |

@@ -59,7 +59,8 @@ gradient_accumulation_steps: 8
 - `advantage_method` — `quantile_norm` (the default) ranks the group's rewards, which handles discrete or
   outlier-heavy reward sets; `z_norm`, `minmax`, `quantile_uniform` and `robust` are the alternatives.
 - `loss_type` — `bnpo` averages over the micro-batch's tokens, `grpo` averages per sequence first (use it when
-  completion lengths vary a lot), `dr_grpo` divides by a constant that removes length bias.
+  completion lengths vary a lot), `dr_grpo` divides by `max_completion_length`, a constant that removes length bias,
+  so it needs that cap set.
 - `kl_beta` — above `0` the run holds a reference model and penalizes drift from it: a full extra copy per rank on a
   full fine-tune, the base with the adapters off under PEFT. Leave it at `0` unless rewards fall through training.
 - `initial_min_log_prob` / `min_log_prob` — a floor on low-probability tokens of negative-advantage rows. It is what
@@ -78,7 +79,7 @@ halo launch offline-grpo examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-
 ```
 
 Nothing else has to be running — no vLLM, no Ray. Expert, tensor and expert-tensor parallelism all work; context
-parallelism is refused when the trainer is built, because the forward is trimmed to the completion
+parallelism is rejected at config time, before the model loads, because the forward is trimmed to the completion
 tokens.
 
 Test the setup first with `--max_steps=10 --save_strategy=no` on a slice of the data: that exercises tokenization,

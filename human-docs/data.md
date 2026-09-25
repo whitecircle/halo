@@ -12,7 +12,8 @@ method reads a fixed set of columns:
 | KTO | `prompt`, `completion`, `label` | `List[Dict]`, `List[Dict]`/`str`, `bool` |
 | Offline GRPO | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` |
 | Classification | `prompt` or `text_field`, `label` | `List[Dict]`/`str`, `str`/`List[str]` |
-| Online GRPO / async GRPO with environments | `prompt`, `answer` | `str`/`List[Dict]`, `str` |
+| Online GRPO | `prompt`, `answer` | `str`/`List[Dict]`, `str` |
+| Async GRPO with environments | `prompt` (+ `answer` where the environment grades one) | `str`/`List[Dict]`, `str` |
 
 Some column names are configurable — `conversation_field` for SFT, `text_field`
 for classification, `completion_field`/`label_field` for KTO,
@@ -39,9 +40,9 @@ dataset_ratio: [1.0, 0.5]
 ```
 
 Two things to watch when you mix sources. Only the columns **common to every
-source** survive (bar the ones your config names, which are null-filled where a
-source lacks them), and columns whose types disagree are dropped — that's usually
-why a field you need has vanished. And a list is loaded **fully replicated on
+source** survive (bar the conversation and tools columns your config names,
+which are null-filled where a source lacks them), and columns whose types
+disagree are dropped — that's usually why a field you need has vanished. And a list is loaded **fully replicated on
 every rank**, which silently turns off the probes that detect a pre-processed or
 sharded dataset. Point `dataset` at a single path when you want either.
 
@@ -92,10 +93,8 @@ The code-contests environment reads a prepared pool rather than a plain dataset.
 `halo run compact-code-tests` caps a test corpus to one suite per problem, then
 `halo run prepare-code-dataset` builds the pool and, with `--push_bands`, one
 config per rating band — the `<repo>:<band>` the shipped examples name in
-`dataset:`. How the pool is consumed during training is on
-[Async GRPO with Environments](training-methods/async-grpo-environments.md); the
-build flags are in
-[Code Contests](../agent-docs/training-methods/grpo/environments/code-contests.md) ↗.
+`dataset:`. The pool format, build flags and bands:
+[Code Contests](../agent-docs/training-methods/grpo/environments/code-contests.md#dataset) ↗.
 
 Full schema (including multimodal content), collators, and the S3 utilities:
 [Dataset Formats](../agent-docs/data/dataset-formats.md) ↗ ·

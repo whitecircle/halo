@@ -25,42 +25,8 @@ This recipe uses eight NVIDIA B300 GPUs for EP8.
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-gpt-oss \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host.
 
 ## Train all weights with EP8
 
@@ -122,12 +88,11 @@ dataloader_num_workers: 2
 use_peft: false
 ```
 
-Two templates ship for GPT-OSS. `gpt-oss-multiturn.jinja` is the SFT and self-distillation choice:
-it renders the `<|channel|>final` marker on every assistant turn and closes each one with
-`<|return|>`, so completion-only masking trains every turn of a multi-turn row. Under
-`gpt-oss-harmony.jinja` a plain assistant turn renders channel-less, the marker above matches
-nothing, and the run trains zero tokens at a loss near zero. Keep harmony for RL, where the
-training render must byte-match the server's. Both need `force_chat_template: true`.
+Two templates ship for GPT-OSS. `gpt-oss-multiturn.jinja` is the SFT choice: it renders
+the `<|channel|>final` marker on every assistant turn, so completion-only masking trains
+every turn. Under `gpt-oss-harmony.jinja` that marker matches nothing and the run trains
+zero tokens at a loss near zero. RL uses harmony, where the training render must
+byte-match the server's. Both need `force_chat_template: true`.
 
 Launch eight processes.
 
@@ -135,13 +100,16 @@ Launch eight processes.
 halo launch sft gpt-oss-20b-sft.yaml -n 8
 ```
 
-Halo selects the installed Flash Attention backend. SFT resets the attention sinks by default.
+Halo selects the installed Flash Attention backend. SFT neutralizes the attention sinks by
+default (`reset_sinks: true`) and exports them that way; a later stage with
+`reset_sinks: false`, such as GRPO, runs the sinks as saved. If GRPO should keep the
+pretrained sinks, set `reset_sinks: false` here too (FA4 on Blackwell; the CP variant below
+then does not apply).
 
 ## Change the parallelism layout
 
-On one eight-GPU node, `expert_parallel_size` must be 8, 2, or 1 — an intermediate
-size such as 4 forms two four-rank DeepEP dispatch groups whose combine barriers race
-FSDP2, and [`ParallelismConfig`](../parallelism.md) rejects it at config time.
+On one eight-GPU node pure EP is 8, 2 or 1; for a 4-way expert split use `ep4 + etp2`
+([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
 
 Use CP2 with EP8 for long sequences. EP+CP requires the EP group to fill the NVLink
 domain, so EP8 is the only EP size that pairs with CP here.
@@ -152,8 +120,7 @@ context_parallel_size: 2
 packing: false
 ```
 
-Use EP8 with TP2 when attention weights need more sharding. Attention TP leaves the
-dispatch-group width alone, so the same EP sizes apply — 8, 2, or 1.
+Use EP8 with TP2 when attention weights need more sharding.
 
 ```yaml
 expert_parallel_size: 8
@@ -198,17 +165,11 @@ output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
-container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
-this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
-compose file's local tag once with `make build-sglang`.
+Serve the gathered checkpoint with SGLang on port 30000, from the host
+([server setup](README.md#serve-from-the-host)).
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/gpt-oss-20b-ultrachat-ep8 \
-SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-ultrachat-ep8" \
   docker compose -f docker-compose.sglang.yml up
 ```
 
@@ -242,41 +203,12 @@ Halo sends the expert targets to its grouped LoRA path. Keep TP disabled for LoR
 
 ## Continue with GRPO
 
-Start from `examples/grpo/environmental/environmental-grpo-template.yaml`, or from one of
-the shipped GPT-OSS configs: `examples/grpo/environmental/gptoss/sglang/` (full and LoRA,
-ep1) or `examples/grpo/environmental/gptoss/vllm/` (full and LoRA, ep1 and ep4). Point
-`model_name_or_path` at the SFT checkpoint and set the environment and reward fields
-for your task.
-
-vLLM (`rollout_backend: vllm`) is the config default and runs the faster step. SGLang
-0.5.17 serves the GPT-OSS weight sync too, and the shipped
-`sglang/gptoss-20b-code-contests-lora-ep1.yaml` is already wired for that engine. One
-constraint comes with SGLang: `rollout_max_thinking_tokens` stays unset. That field is
-vLLM-only; steer reasoning with the environment's `reasoning_effort` instead.
-
-Serve from the prebuilt NCCL-aligned image, since upstream SGLang images ship a different
-NCCL and cannot form the weight-sync group. Run it on the host, not inside the training
-container, on GPUs the trainer will not use.
-
-```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/gpt-oss-20b-ultrachat-ep8 \
-SGLANG_MODEL_DIR=/data/checkpoints \
-SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
-  docker compose -f docker-compose.sglang.yml up sglang-server
-```
-
-The compose default `--tool-call-parser auto` resolves GPT-OSS to the harmony parser from
-its chat template. A server started with no parser at all leaves tool calls as plain text:
-every episode ends unsolved, and training runs to completion on a flat zero gradient. Set
-`SGLANG_REASONING_PARSER=gpt-oss` as well. When serving `routing_replay: rollout`, add
-`SGLANG_ENABLE_R3=1`; the triton MoE runner the capture hook needs is already the compose
-file's default (`SGLANG_MOE_RUNNER_BACKEND=triton`).
-
-Save the config as `gpt-oss-grpo.yaml` (or start from the shipped
-`examples/grpo/environmental/gptoss/sglang/gptoss-20b-code-contests-lora-ep1.yaml`):
+Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `gpt-oss-grpo.yaml`,
+point `model_name_or_path` at the SFT checkpoint's `/data` path, set the environment and
+reward fields for your task, and set the keys below. The shipped GPT-OSS configs under
+`examples/grpo/environmental/gptoss/sglang/` (full and LoRA, ep1) and `.../vllm/` (full and
+LoRA, ep1 and ep4) are already wired for their engine but list two servers; start the
+ones their header names instead of the single server below.
 
 ```yaml
 rollout_backend: sglang
@@ -284,8 +216,13 @@ rollout_server_url: http://localhost:30000
 train_on_sampled_tokens: true
 routing_replay: rollout
 rollout_stop_tokens: ["<|call|>"]
+chat_template: jinja-templates/gpt-oss/gpt-oss-harmony.jinja
+force_chat_template: true
+attn_implementation: flash_attention_4
 reset_sinks: false
 moe_balancing: none
+beta: 0.0
+output_dir: /data/checkpoints/gpt-oss-20b-grpo
 fsdp_reshard_after_backward: false
 ```
 
@@ -294,62 +231,54 @@ model generates past its tool call and hallucinates the result for most of the t
 `fsdp_reshard_after_backward: false` is optional: it leaves one FSDP2 re-gather per
 optimizer step instead of one per grad-accumulation microstep, for one unsharded bf16
 parameter copy per GPU (fine at 20B).
-`reset_sinks: false` keeps the pretrained sinks live and frozen so the trainer's log
-probabilities match the served policy. Live sinks restrict the attention backend to a
-sink-carrying implementation: FA4 on Blackwell, or `flex_attention`, `eager`, or an FA3
-build exposing `s_aux` on Hopper (the shipped Hopper FA3 does not).
-FA2 and SDPA are rejected, and CP is unavailable in this mode.
+`reset_sinks: false` keeps the checkpoint's sinks live and frozen so the trainer's log
+probabilities match the served policy. Live sinks need a sink-carrying attention
+implementation (FA4 on Blackwell); FA2 and SDPA are rejected and CP is unavailable
+([sink handling](../../agent-docs/models/gpt-oss.md#attention-sinks) ↗). `beta: 0.0`
+is required too: the reference model a nonzero `beta` builds cannot carry live sinks.
 
-Launch the trainer on the remaining GPUs. The weight-sync group is ordinary NCCL between
-the two containers — CUDA IPC over NVLink on one host — and its one server-side
-requirement, `NCCL_CUMEM_ENABLE=1`, is the compose file's default.
+Serve the same harmony file. On the host ([server setup](README.md#serve-from-the-host)),
+copy it onto the scratch volume, then start the server on GPUs the trainer will not use:
+
+```bash
+cp jinja-templates/gpt-oss/gpt-oss-harmony.jinja "$HALO_SCRATCH/"
+```
+
+```bash
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-ultrachat-ep8" \
+SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/gpt-oss-harmony.jinja" \
+SGLANG_REASONING_PARSER=gpt-oss SGLANG_ENABLE_R3=1 \
+SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
+  docker compose -f docker-compose.sglang.yml up sglang-server
+```
+
+The compose default `--tool-call-parser auto` picks the harmony parser off the template.
+Launch the trainer in the training container on the remaining GPUs; they cannot share one.
 
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo gpt-oss-grpo.yaml -n 4
 ```
 
-`CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
-
-vLLM (`rollout_backend: vllm`, the config default) is the other engine, the one the shipped
-expert-distributed ep4 configs target, and the only one for `rollout_max_thinking_tokens`. Pull the
-prebuilt server image and retag it to the name the compose file expects:
-
-```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-```
-
-Its service mounts only the HuggingFace cache, so add
-`- /data/checkpoints:/data/checkpoints:ro` under the `vllm-server` `volumes:` to serve a
-checkpoint from disk. Two parsers are required. The Halo image runs GPT-OSS with harmony
-off, so tool calls arrive as plain text that the default `hermes` parser cannot read — use
-the bundled text tool parser instead. `rollout_max_thinking_tokens` needs the bundled
-reasoning parser:
+vLLM (`rollout_backend: vllm`, `rollout_server_url: http://localhost:8000`) is the engine
+the shipped ep4 configs target, and the only one for `rollout_max_thinking_tokens`,
+`rollout_thinking_budget_scope: episode` and `carry_reasoning`
+([Supported Matrix](../supported-matrix.md#rollout-engines)). GPT-OSS tool calls arrive
+as plain text that the default `hermes` parser cannot read, so vLLM needs the bundled
+text tool parser, and a thinking budget needs the bundled reasoning parser with Model
+Runner V1 (V2 answers `thinking_token_budget` with a 400):
 
 ```bash
 VLLM_MODEL=/data/checkpoints/gpt-oss-20b-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
-VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py \
-VLLM_TOOL_PARSER=gpt_oss_text \
-VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py \
-VLLM_REASONING_PARSER=openai_gptoss \
+VLLM_CHAT_TEMPLATE=/data/gpt-oss-harmony.jinja \
+VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
+VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text \
+VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss \
 VLLM_USE_V2_MODEL_RUNNER=0 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
-`VLLM_USE_V2_MODEL_RUNNER=0` pairs with the reasoning parser: Model Runner V2 rejects
-`thinking_token_budget`, so with it on, every request carrying
-`rollout_max_thinking_tokens` comes back 400.
-
-That command already passes `--moe-backend triton`, which is required: Blackwell's
-auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
-(`--enable-return-routed-experts`). If SFT
-overrode the chat template, point `VLLM_CHAT_TEMPLATE` at the same `.jinja` so the
-server-side render matches training. The trainer config then sets `rollout_backend: vllm`
-and `rollout_server_url: http://localhost:8000`, and launches the same way. It may size
-`expert_parallel_size` to the trainer's GPU count; the
-shipped ep4 configs assume four trainer GPUs.
+The trainer may size `expert_parallel_size` to its own GPU count; the shipped ep4
+configs assume four trainer GPUs.
 
 ## Sources
 

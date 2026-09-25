@@ -21,42 +21,8 @@ expert compute.
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-glm47 \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host.
 
 ## Train all weights with EP8
 
@@ -66,8 +32,9 @@ Start from the checked-in configuration.
 cp examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml glm47-sft.yaml
 ```
 
-The copy reads as below. It trains on the supervised split of
-[UltraChat 200K](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) and renders
+In the copy, set `output_dir: /data/checkpoints/glm-4.7-flash-ultrachat-ep8` so the
+checkpoint lands on the scratch volume; the copy then reads as below. It trains on the
+supervised split of [UltraChat 200K](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) and renders
 multi-turn data with Halo's `glm-chat.jinja` template, which preserves GLM's native role
 markers.
 
@@ -144,19 +111,18 @@ and what the shipped config sets.
 
 ## Add CP, TP, or ETP
 
-On one eight-GPU node `expert_parallel_size` must be 8, 2, or 1 — an intermediate size
-such as 4 forms two four-rank DeepEP dispatch groups whose combine barriers race FSDP2,
-and [`ParallelismConfig`](../parallelism.md) rejects it at config time. EP+CP narrows that
-further: the EP group has to fill the NVLink domain, so EP8 is the only EP size that pairs
-with CP here.
+On one eight-GPU node pure EP is 8, 2 or 1; for a 4-way expert split use `ep4 + etp2`
+([rules](../parallelism.md#rules-that-save-you-a-wasted-run)). EP+CP also needs the EP
+group to fill the NVLink domain, so EP8 is the only EP size that pairs with CP here.
 
 Use CP when the sequence length causes attention memory pressure.
 
 ```yaml
 context_parallel_size: 2
+packing: false
 ```
 
-EP8 and CP2 use the same eight ranks.
+EP8 and CP2 use the same eight ranks. The collator rejects packing under CP.
 
 ```bash
 halo launch sft glm47-sft.yaml -n 8
@@ -213,19 +179,13 @@ reply = tokenizer.decode(output[0][inputs.input_ids.shape[-1]:], skip_special_to
 print(reply)
 ```
 
-Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
-container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
-this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
-compose file's local tag once with `make build-sglang`. On Blackwell set
+Serve the gathered checkpoint with SGLang on port 30000, from the host
+([server setup](README.md#serve-from-the-host)). On Blackwell set
 `SGLANG_ATTENTION_BACKEND=triton`: the engine's default backend has no kernel for GLM-4's
 MLA head size and the server exits at start.
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/glm-4.7-flash-ultrachat-ep8 \
-SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/glm-4.7-flash-ultrachat-ep8" \
 SGLANG_ATTENTION_BACKEND=triton \
   docker compose -f docker-compose.sglang.yml up
 ```
@@ -254,65 +214,44 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 
 ## Continue with GRPO
 
-Start from the SFT checkpoint. Copy `examples/grpo/environmental/environmental-grpo-template.yaml`,
-set `model_name_or_path` to that checkpoint, and set the environment and reward fields
-for your task.
-
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17 also
-serves and weight-syncs this family (`rollout_backend: sglang`, port 30000); that sync
-needs this repo's SGLang image ([Supported Matrix](../supported-matrix.md#rollout-engines)).
-Start the server on separate GPUs.
-
-Run the server on the host, not inside the training container: pull the prebuilt server
-image and retag it to the name the compose file expects. Its service mounts only the
-HuggingFace cache, so add `- /data/checkpoints:/data/checkpoints:ro` under the
-`vllm-server` `volumes:` to serve a checkpoint from disk.
-
-```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
-VLLM_MODEL=/data/checkpoints/glm-4.7-flash-ultrachat-ep8 \
-VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 \
-VLLM_TOOL_PARSER=glm47 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
-```
-
-`VLLM_TOOL_PARSER` is not optional here. The compose default is `hermes`, which cannot
-read GLM-4's tool-call format: the server returns no `tool_calls`, every episode scores
-zero reward, and the run trains on a flat zero gradient without erroring.
-
-That command already passes `--moe-backend triton`, which is required: Blackwell's
-auto-selected MoE backends repack expert weights at load and silently corrupt every
-weight sync. On Blackwell, GLM-4's MLA attention additionally needs
-`VLLM_ATTENTION_BACKEND=CUTLASS_MLA` (a compose variable; SGLang:
-`SGLANG_ATTENTION_BACKEND=triton`). Serving `routing_replay: rollout` needs
-`VLLM_ENABLE_R3=1` (`--enable-return-routed-experts`; SGLang: `SGLANG_ENABLE_R3=1`).
-
-For SGLang instead, serve from the prebuilt NCCL-aligned image on the host, on GPUs the
-trainer will not use.
-
-```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/glm-4.7-flash-ultrachat-ep8 \
-SGLANG_MODEL_DIR=/data/checkpoints \
-SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 \
-SGLANG_ATTENTION_BACKEND=triton \
-  docker compose -f docker-compose.sglang.yml up sglang-server
-```
-
-The compose default `--moe-runner-backend triton` is required for weight sync and for R3
-capture under `routing_replay: rollout` (add `SGLANG_ENABLE_R3=1`).
+Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `glm47-grpo.yaml`,
+set `model_name_or_path` to the SFT checkpoint's `/data` path and the environment and
+reward fields for your task, and add:
 
 ```yaml
 rollout_server_url: http://localhost:8000
 train_on_sampled_tokens: true
 routing_replay: rollout
+beta: 0.0
+output_dir: /data/checkpoints/glm-4.7-flash-grpo
 ```
 
-Then launch the trainer.
+Rollouts run on vLLM (`rollout_backend: vllm`, the config default). Start the server on
+the host ([server setup](README.md#serve-from-the-host)), on GPUs the trainer will not use:
+
+```bash
+VLLM_MODEL=/data/checkpoints/glm-4.7-flash-ultrachat-ep8 \
+VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
+VLLM_TOOL_PARSER=glm47 VLLM_ATTENTION_BACKEND=CUTLASS_MLA \
+  docker compose -f docker-compose.vllm.yml up vllm-server
+```
+
+`VLLM_TOOL_PARSER=glm47` is required: the compose default `hermes` cannot read GLM-4's
+tool-call format, so every episode scores zero and the run trains on a flat zero gradient
+without erroring. `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` is required on Blackwell, whose
+auto-selected MLA kernel rejects GLM-4's head config.
+
+SGLang 0.5.17 also serves and weight-syncs this family. For it, set
+`rollout_backend: sglang` and `rollout_server_url: http://localhost:30000`, and start:
+
+```bash
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/glm-4.7-flash-ultrachat-ep8" \
+SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 SGLANG_ENABLE_R3=1 \
+SGLANG_ATTENTION_BACKEND=triton \
+  docker compose -f docker-compose.sglang.yml up sglang-server
+```
+
+Then launch the trainer in the training container.
 
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo glm47-grpo.yaml -n 4

@@ -1,7 +1,7 @@
 name: lint
 
-# Hosted, pure-Python gates that run on every PR/push — the host has no GPU stack, so these
-# are the only checks that run outside the Docker image. ruff (lint + format-check) is pinned.
+# Hosted gates that run on every PR/push outside the Docker image (the runner has no GPU stack).
+# ruff (lint + format-check) is pinned.
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.12"
       # Pinned ruff via pip — ruff is a standalone binary, no project install needed
-      # (host has no torch). Matches docs.yml's setup-python pattern.
+      # (host has no torch).
       - run: pip install ruff==0.9.10
       - name: ruff format --check
         run: ruff format --check .

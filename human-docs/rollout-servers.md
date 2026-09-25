@@ -42,8 +42,8 @@ curl -s localhost:8000/health
 
 Tool parsers are per model family, and a wrong one is silent: the calls come back as ordinary text, no tool ever runs,
 and every episode scores zero. Qwen3.5/3.6 need `qwen3_xml` (hermes does not parse their XML calls); GPT-OSS needs the
-bundled `gpt_oss_text` parser, loaded with `VLLM_TOOL_PARSER_PLUGIN`; the shipped Gemma 4 recipes serve on the default
-`hermes`, as most families do. ReAct environments send no tool schema at all and want **no** parser. The
+bundled `gpt_oss_text` parser, loaded with `VLLM_TOOL_PARSER_PLUGIN`; Gemma 4 needs `gemma4`; most others take the
+default `hermes`. ReAct environments send no tool schema at all and want **no** parser. The
 reasoning-parser and attention-backend variables a few families need are on
 [Rollout Servers](../agent-docs/infrastructure/rollout-servers.md) ↗.
 

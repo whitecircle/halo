@@ -24,9 +24,9 @@ the baked defaults are deliberate. The exceptions are the EFA recipe
 
 The defaults land on the root filesystem, which is usually too small for real
 runs — see [Installation](installation.md). On the host side, the `make`
-targets and the compose files share one variable for the large volume:
-`HALO_SCRATCH` (default `/mnt`). Export it once on a host whose big disk lives
-elsewhere and every `make` target mounts and caches there.
+targets and the vLLM compose file's `training` service share one variable for
+the large volume: `HALO_SCRATCH` (default `/mnt`). Export it once on a host
+whose big disk lives elsewhere and every `make` target mounts and caches there.
 
 ## Secrets — put these in `.env`
 
@@ -57,9 +57,9 @@ elsewhere and every `make` target mounts and caches there.
 | `DIST_INPUT_SHARED_FILESYSTEM` | the umbrella | read side — model/dataset downloads, dataset map/pack, HF caches |
 | `DIST_OUTPUT_SHARED_FILESYSTEM` | the umbrella | write side — checkpoints, `run.log`, dumped artifacts |
 | `DIST_STORE_TIMEOUT_HOURS` | `4` | raise when one rank's model download or corpus pack runs longer than four hours while the others wait; this is not the NCCL watchdog |
-| `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when slow dataset prep or 100B-scale checkpoint saves outlast the NCCL watchdog |
-| `NVLINK_DOMAIN_SIZE` | GPUs per node | `72` on GB200/GB300 NVL72 racks |
-| `NCCL_SOCKET_IFNAME` | `^docker,veth` in the `make` targets and compose files | pin NCCL to the fast NIC on multi-homed nodes |
+| `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when 100B-scale gathered checkpoint saves or large cross-node all-to-alls outlast the NCCL watchdog |
+| `NVLINK_DOMAIN_SIZE` | GPUs per node | `72` on an NVL72 rack, whose NVLink domain spans the rack |
+| `NCCL_SOCKET_IFNAME` | `^docker,veth` in the compose bases and `make test-gpu-vllm`/`-sglang`; `^lo,docker,veth,tailscale` under `EFA=1` and the EFA overlays; otherwise unset | pin NCCL to the fast NIC on multi-homed nodes |
 | `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` | unset | AWS EFA only: the trainer via `make ... EFA=1`, a rollout server via its compose EFA overlay — see [Clusters](clusters.md) |
 
 A side variable inherits the umbrella while unset and overrides it once set.
@@ -90,9 +90,9 @@ crashing mid-run. These are the ones that come up:
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is worth +9.7% on ep8 |
 
 The rollout servers have a set of their own (`VLLM_*` / `SGLANG_*`: R3 capture,
-speculative decoding, attention backend, the address the server dials back for
-the weight-sync group). They are set on the server container, and
-[Rollout Servers](rollout-servers.md) is where they belong.
+speculative decoding, attention backend), set on the server container — except
+`VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, the weight-sync dial-back address, which
+the trainer reads. See [Rollout Servers](rollout-servers.md).
 
 The rest — DeepEP buffer sizing, gradient-bucket geometry, low-precision cache
 switches, weight-sync timeouts, the EP profiling switches — are catalogued with

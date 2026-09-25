@@ -15,9 +15,10 @@ their combinations — produces a gathered checkpoint you can load with
 
 The sharded EP save skips the gather, which speeds up checkpointing for very
 large models; the trade is a `halo run merge-ep-shards` before the checkpoint
-stands alone. Its restrictions — a single EP group, no context parallelism,
-`expert_tensor_parallel_size: 1`, a shared output filesystem — are checked at
-startup, so an unsupported combination fails fast. TP needs no
+stands alone. Its restrictions — one EP group spanning all ranks, no CP, ETP or
+expert LoRA, a shared filesystem across nodes, not every family
+([full list](../agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp) ↗)
+— are checked at startup, so an unsupported combination fails fast. TP needs no
 sharded mode — full tensors are reconstructed from the DTensors at save time.
 
 ## Resume
@@ -27,20 +28,17 @@ pick up the latest one in `output_dir`.
 
 A torchrun run also saves per-rank optimizer shards (single-GPU, DDP and
 `accelerate` FSDP keep HF's own `optimizer.pt`), the schedule, and the step. Resume is **exact**, optimizer
-state included, as long as the run's topology fingerprint matches. That
-fingerprint covers more than the GPU count: world size, the EP / ETP / CP / TP
-sizes, `ep_scope`, `nvlink_domain_size`, `hsdp`, `use_grouped_gemm`,
-`fsdp_shard_ep1_experts`, `expert_replica_size`, and the optimizer class — the
-last few change slice ownership or expert parameter names without changing a
-single tensor shape, so a restore that ignored them would report success over
-permuted state.
+state included, only when the run's topology fingerprint matches: world size,
+every parallel size, the layout knobs, and the optimizer class
+([full list](../agent-docs/reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun) ↗).
 
 If any field differs, or the run saved with `save_only_model: true`, you get a
 warm restart instead: weights and learning-rate schedule restored, optimizer
 moments fresh. MoE router-balancing state round-trips automatically where it
 applies.
 
-EP and CP resume by rebuilding the model *from* the checkpoint rather than
+Every torchrun resume at the default `use_grouped_gemm: true` (dense included),
+and every EP, TP or CP resume, rebuilds the model *from* the checkpoint rather than
 loading weights back into a running model, which the fused-expert and CP-wrapped
 layouts cannot accept. One consequence: the training scripts must launch the
 resume, since they repoint the model source.
@@ -76,13 +74,17 @@ it first with `merge-ep-shards`, the one tool that takes that layout.
 
 ## Serving the result
 
-Any gathered checkpoint loads into vLLM or SGLang directly. Merge sharded saves
-first, and serve a LoRA run either as base-plus-adapter or merged. If the loader
-complains about fused expert weights, run `unfuse-moe-experts` on the checkpoint.
-Serving *during* training — the rollout server the RL methods generate against —
-is [Rollout Servers](rollout-servers.md).
+A gathered checkpoint loads with `from_pretrained`, but vLLM and SGLang serve it
+only where the pinned engine's loader reads that family's layout. Mistral4,
+Ling 3.0, Ring, Inkling, GLM-5 Next, DeepSeek-V4 and Zaya have no validated path
+on either. A loader that reads only per-expert names can drop fused expert
+weights without an error; `unfuse-moe-experts` rewrites such a checkpoint first
+([per-engine loaders](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
 Step-3.7 Flash needs no rewrite — its gathered save is already in the hub layout
-vLLM reads, and the tool refuses it accordingly.
+vLLM reads, and the tool refuses it accordingly. Merge sharded saves first, and
+serve a LoRA run either as base-plus-adapter or merged. Serving *during*
+training — the rollout server the RL methods generate against — is
+[Rollout Servers](rollout-servers.md).
 
 ## Uploading to the HuggingFace Hub
 
@@ -97,12 +99,12 @@ hf auth login          # once, or set HF_TOKEN
 hf upload my-org/my-model checkpoints/sft-qwen3-4b-ultrachat/checkpoint-1000
 ```
 
-Upload the checkpoint directory itself, not the whole `output_dir`. Unless the run
-set `save_only_model: true`, that directory also holds every rank's optimizer
-shards and the training state (`optimizer_*`, `rng_state_*`, `scheduler.pt`,
-`trainer_state.json`) — exclude them, or they go public with the weights. For a
-LoRA run, upload the adapter directory, or merge it with `merge-peft-adapters`
-for a standalone model. That tool refuses EP expert-LoRA adapters: train those
+Upload the checkpoint directory itself, not the whole `output_dir`, and exclude
+its training state, or it goes public with the weights: `scheduler.pt`,
+`trainer_state.json` and (under bias balancing) `router_balancing_biases.pt` in
+every checkpoint, plus `optimizer*` and `rng_state*` unless the run set
+`save_only_model: true`. For a LoRA run, upload the adapter directory, or merge
+it with `merge-peft-adapters` for a standalone model. That tool refuses EP expert-LoRA adapters: train those
 with `merge_expert_lora_on_save: true` to save the merged model instead.
 
 Every checkpoint Halo writes — a full model or an adapter (QLoRA and EP expert

@@ -72,7 +72,8 @@ already carries one — without it your template is dropped without a word. Bund
 for GPT-OSS) when the render must match a rollout server byte for byte.
 
 `assistant_message_template` is separate and must byte-match what that template renders for an
-assistant turn — a marker that does not match masks every row and the loss goes flat.
+assistant turn: a marker it never renders raises at startup, one it renders only for some message
+shapes masks the rows it misses.
 
 ## LoRA and QLoRA
 

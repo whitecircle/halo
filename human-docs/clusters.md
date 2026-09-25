@@ -49,8 +49,8 @@ whole-corpus pack outlasts that while the other ranks wait.
 
 ## Network fabric
 
-InfiniBand works out of the box; the sensible NCCL settings are baked into the
-image. Three situations need extra environment:
+InfiniBand and RoCE run on the NCCL defaults baked into the image, but only EFA
+is validated by real multi-node runs. Three situations need extra environment:
 
 - **AWS EFA**: add `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric`, pass `--device
   /dev/infiniband`, and for cross-node expert parallelism also `NCCL_GIN_TYPE=2`
@@ -66,12 +66,13 @@ image. Three situations need extra environment:
   `halo run weight-sync-transport --server-url http://<server>:8000 --expect efa`
   confirms the sync formed on EFA before you train.
 
-On GB200/GB300 NVL72 racks, set `NVLINK_DOMAIN_SIZE=72` so Halo knows the NVLink
-domain is the rack, not the node.
+On an NVL72 rack, `NVLINK_DOMAIN_SIZE=72` tells Halo the NVLink domain is the
+rack, not the node — but its Grace hosts (GB200/GB300) are aarch64, which the
+images do not build for ([Installation](installation.md)).
 
-Cross-node expert parallelism needs `--ep_scope=global` and a real RDMA fabric;
-the ready-made template is
-`examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
+Cross-node expert parallelism needs a real RDMA fabric; the default
+`ep_scope: auto` goes global once the EP group outgrows the NVLink domain. The
+ready-made template is `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
 
 ![Two nodes: node-local TP groups over NVLink, one global EP group whose all-to-all crosses RDMA, and DP pairs formed by matching TP positions](../agent-docs/assets/diagrams/ep_multi_node_layout.png)
 
@@ -123,8 +124,9 @@ sky launch -c oss-120b launcher-configs/skypilot/aws/gpt-oss-120b/crossnode-ep.y
 sky logs oss-120b --follow
 ```
 
-Each YAML ships `resources.image_id` commented out — uncomment it and point it
-at a registry holding your image before launching. Details:
+Each YAML ships `resources.image_id` commented out, naming the prebuilt image for
+its GPUs — uncomment it before launching, and repoint it only for your own
+build. Details:
 [SkyPilot](../agent-docs/infrastructure/skypilot.md) ↗.
 
 ## RunPod

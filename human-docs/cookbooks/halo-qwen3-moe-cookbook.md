@@ -16,42 +16,8 @@ This recipe starts with four NVIDIA B300 GPUs. EP4 places 32 experts on each GPU
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-qwen3-moe \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run all remaining commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it, except the server commands marked for the host.
 
 ## Train all weights with EP4
 
@@ -127,11 +93,9 @@ FA3 is absent) on Hopper.
 
 ## Add CP, TP, or ETP
 
-Every layout below stays on the same four ranks. Size EP to the whole job (`ep4` here) or
-to 2. An intermediate size such as `ep4` on an eight-GPU node forms two four-rank DeepEP
-dispatch groups whose combine barriers race FSDP2, and
-[`ParallelismConfig`](../parallelism.md) rejects it at config time. EP+CP narrows that
-further: the EP group has to fill the NVLink domain.
+Every layout below stays on the same four ranks, where EP4 is one dispatch group. The
+same config on eight GPUs is rejected at config time
+([rules](../parallelism.md#rules-that-save-you-a-wasted-run)).
 
 Use CP for longer sequences. EP4 and CP2 use the same four ranks. Disable packing, since
 the collator rejects it when CP splits the sequence.
@@ -191,17 +155,11 @@ output = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperatur
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Serve the gathered checkpoint with SGLang 0.5.17 on the host, not inside the training
-container; it listens on port 30000. Serving runs on any 0.5.17 image (weight sync needs
-this repo's): point `SGLANG_IMAGE` at the prebuilt one (no retag needed), or build the
-compose file's local tag once with `make build-sglang`.
+Serve the gathered checkpoint with SGLang on port 30000, from the host
+([server setup](README.md#serve-from-the-host)).
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
-
-SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.17 \
-SGLANG_MODEL=/data/checkpoints/qwen3-30b-a3b-ultrachat-ep4 \
-SGLANG_MODEL_DIR=/data/checkpoints \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-ultrachat-ep4" \
   docker compose -f docker-compose.sglang.yml up
 ```
 
@@ -228,46 +186,37 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 
 ## Continue with GRPO
 
-Use `examples/grpo/environmental/environmental-grpo-template.yaml` as the starting point.
-Set `model_name_or_path` to the gathered SFT checkpoint.
-
-Rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang
-0.5.17 also serves and weight-syncs Qwen3 MoE (`rollout_backend: sglang`, port
-30000), with expert distribution.
-
-Run the server on the host, not inside the training container, on GPUs the
-trainer will not use. Pull the prebuilt server image, retag it to the name the
-compose file expects, and add `- /data/checkpoints:/data/checkpoints:ro` under the
-`vllm-server` `volumes:`, since its service mounts only the HuggingFace cache.
-
-```bash
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
-
-VLLM_MODEL=/data/checkpoints/qwen3-30b-a3b-ultrachat-ep4 \
-VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
-  docker compose -f docker-compose.vllm.yml up vllm-server
-```
-
-That command already passes the required `--moe-backend triton`; Blackwell's
-auto-selected MoE backends repack expert weights at load and silently corrupt
-every weight sync. To serve `routing_replay: rollout`, also set `VLLM_ENABLE_R3=1`
-(`--enable-return-routed-experts`).
+Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to
+`qwen3-moe-grpo.yaml`, set `model_name_or_path` to the gathered SFT checkpoint's `/data`
+path and the environment and reward fields for your task, and add:
 
 ```yaml
 rollout_backend: vllm
 rollout_server_url: http://localhost:8000
 train_on_sampled_tokens: true
 routing_replay: rollout
+beta: 0.0
+output_dir: /data/checkpoints/qwen3-30b-a3b-grpo
 ```
 
-Launch the trainer on the remaining GPUs; `expert_parallel_size` may match the
-trainer's GPU count.
+Rollouts run on vLLM (the config default). SGLang 0.5.17 also serves and weight-syncs
+Qwen3 MoE (`rollout_backend: sglang`, port 30000), with expert distribution.
+
+Start the server on the host ([server setup](README.md#serve-from-the-host)), on GPUs the
+trainer will not use:
+
+```bash
+VLLM_MODEL=/data/checkpoints/qwen3-30b-a3b-ultrachat-ep4 \
+VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+  docker compose -f docker-compose.vllm.yml up vllm-server
+```
+
+Launch the trainer in the training container on the remaining GPUs; they cannot share
+one. `expert_parallel_size` may match the trainer's GPU count.
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo qwen3-moe-grpo.yaml -n 2
 ```
 
-`CUDA_VISIBLE_DEVICES` fences the trainer off the server; they cannot share a
-GPU. Full setup:
+Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

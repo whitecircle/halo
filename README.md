@@ -24,7 +24,7 @@ The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP
 
 Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and supporting a new model family typically takes under 140 lines of integration code.
 
-On 8× B300, Halo delivers up to ~2.8× the training throughput of stock TRL (2.7× at 25% less peak memory when both sides shard ZeRO-3), with larger margins over the other frameworks benchmarked.
+On 8× B300, Halo trains gpt-oss-20b at up to ~2.8× the throughput of stock TRL (2.7× at 25% less peak memory when both sides shard ZeRO-3).
 
 `Pre- & Post-Training` · `EP / CP / TP / ETP` ·
 `Multi-Node` · `Verifiable & Multi-Turn RL` · `FA4 + Liger + Grouped GEMM` · `Full BF16`
@@ -37,7 +37,7 @@ On 8× B300, Halo delivers up to ~2.8× the training throughput of stock TRL (2.
 
 - **Parallelism is added to the existing model.** EP wraps MoE blocks, CP wraps attention, and TP/ETP shard weights in place. There is no separate distributed implementation of the model.
 
-- **The distributed stack is built on PyTorch.** FSDP2, DTensor, and DeviceMesh provide the underlying primitives, while DeepEP handles the all-to-all communication for Expert Parallelism. EP, CP, TP, and ETP can be configured independently and combined across GPUs and nodes.
+- **The distributed stack is built on PyTorch.** FSDP2, DTensor, and DeviceMesh provide the underlying primitives, while DeepEP handles the all-to-all communication for Expert Parallelism. EP, CP, TP, and ETP are set independently, and EP combines with CP, TP, or ETP across GPUs and nodes.
 
 - **Training methods share the same infrastructure.** Pre-training, SFT, preference optimization, distillation, and RL use the same parallelism and checkpointing code, so new methods don't need their own distributed implementation.
 
@@ -179,6 +179,7 @@ The full reference is also perfectly readable if you're human and want the detai
 [Performance](human-docs/performance.md) ·
 [Supported Matrix](human-docs/supported-matrix.md) ·
 [Supported Models](human-docs/models.md) ·
+[Model Cookbooks](human-docs/cookbooks/README.md) ·
 [Model Integration Cost](human-docs/model-integration-cost.md) ·
 [Checkpoints & Export](human-docs/checkpoints.md) ·
 [Monitoring](human-docs/monitoring.md) ·
@@ -212,19 +213,19 @@ A typical run is: **pick an `examples/` config → `halo launch <method> <config
 
 ## Benchmarks
 
-Benchmarks below were run on 8× B300. The stock TRL baseline uses `trl.SFTTrainer` with
-Transformers v5 and FSDP2 ZeRO-3, with the same model, data, bf16 precision, FlashAttention 4,
-Liger kernels, and grouped GEMM.
+Benchmarks below were run on B300, 8 GPUs unless a row says otherwise. The stock TRL baseline
+uses `trl.SFTTrainer` with Transformers v5 and FSDP2 ZeRO-3, with the same model, data, bf16
+precision, FlashAttention 4, Liger kernels, and grouped GEMM.
 
 | Result | Configuration |
 |---|---|
 | **2.3–2.8× stock TRL throughput** | gpt-oss-20b, 4k–16k; EP2 / dense EP1. Loss matches the baseline to ~1% by step 100. |
-| **24,456 tok/s/GPU** | gpt-oss-20b, 4k, batch 4, GC off — ~196k tok/s across 8 GPUs. |
-| **12,584 tok/s/GPU at 1,410 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2 — the highest achieved TFLOPS of the MoE rosters. |
-| **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. CP configurations cut per-GPU memory to roughly half the baseline. |
-| **23–76 GB/GPU on the same 16k workload** | EP8+CP8: 23 GB at 5.4k tok/s/GPU. Dense EP1: 76 GB at 18.3k tok/s/GPU. |
-| **2.12× Grouped GEMM** | Qwen3-30B-A3B, EP2; 3.43× at batch 1. |
-| **2.1–3.7× FA4 kernel throughput** | FA4 vs FA2; up to 2.3× end-to-end on dense long-context training. |
+| **24,456 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off — ~196k tok/s across 8 GPUs. |
+| **12,584 tok/s/GPU at 1,410 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2 — the highest achieved TFLOPS of any EP>1 run benchmarked. |
+| **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. EP8+CP8 and dense CP-only run at about half TRL's per-GPU memory. |
+| **24–76 GB/GPU on the same 16k workload** | EP8+CP8: 23.6 GB at 5,460 tok/s/GPU. Dense EP1: 76 GB at 18,304 tok/s/GPU. |
+| **2.12× Grouped GEMM** | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4; 3.43× at batch 1. |
+| **2.1–3.7× FA4 kernel throughput** | FA4 vs FA2 on the isolated kernel; up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
 
 Full results and methodology: [Performance](human-docs/performance.md)
 
@@ -270,19 +271,21 @@ Enabled by default where supported:
 - **Attention and kernels** — Flash Attention 4 on Blackwell, FA2/FA3 on Hopper, Liger fused
   CE/SwiGLU/RMSNorm, and Grouped GEMM for MoE expert compute.
 
-- **Precision and optimizers** — `AdamWBF16` with stochastic rounding uses 6 bytes/parameter of
-  optimizer state instead of 12 with FP32 master weights. Muon and FlashAdamW are also supported.
-  FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with mxfp8/nvfp4 export.
+- **Precision and optimizers** — `AdamWBF16` with stochastic rounding keeps weights and optimizer
+  state in 6 bytes/parameter instead of 12 with FP32 master weights. Muon and FlashAdamW are also
+  supported. FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with mxfp8/nvfp4
+  export.
 
 - **Memory and PEFT** — padding-free, boundary-aware packing with `cu_seq_lens`, plus LoRA and QLoRA.
-  QLoRA fits a 24 GB consumer GPU: Qwen3-4B peaks at 7.9 GB (batch 1, 4k) and Qwen3-8B at 32k fits in
-  20.9 GB with the fused loss. Ampere and Ada cards run single-GPU LoRA/QLoRA from `halo:blackwell` (FA2/SDPA).
+  QLoRA fits a 24 GB consumer GPU: the [Qwen3-4B QLoRA example](examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml)
+  peaks at 7.9 GB (batch 1, 4k) and Qwen3-8B at 32k fits in 20.9 GB with the fused loss. Ampere and Ada
+  cards run single-GPU LoRA/QLoRA from `halo:blackwell` (FA2/SDPA), but that path is not validated.
 
 - **Checkpoints** — large gathered checkpoints are automatically sharded, with tools for merging
-  EP/TP shards and PEFT adapters back into a standard HuggingFace checkpoint.
+  per-rank EP shards and PEFT adapters back into a standard HuggingFace checkpoint.
   → [Checkpoints](human-docs/checkpoints.md)
 
-- **Data** — offline tokenization, packing, and sharding, plus native `s3://` dataset streaming.
+- **Data** — offline tokenization, packing, and sharding, plus native `s3://` dataset loading with a local cache.
 
 → [Performance](human-docs/performance.md) — what each lever buys, and the bottlenecks they attack
 

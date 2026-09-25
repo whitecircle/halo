@@ -39,8 +39,8 @@ The rules below are mostly about how those groups may be shaped.
 Halo validates the layout at startup and rejects invalid shapes with an
 explanation before touching the GPUs. The rules people actually hit:
 
-- **TP+CP, TP+ETP, ETP+CP, and EP+TP+ETP are unsupported.** Attention TP and
-  expert TP never combine — pick EP+TP *or* EP+ETP, never both.
+- **TP+CP, TP+ETP, ETP+CP, and any three axes are unsupported.** EP pairs with
+  at most one of TP, CP or ETP — pick EP+TP, EP+CP *or* EP+ETP.
 - **Single-node EP must fill the NVLink domain, or be `ep_size=2`.** Something in
   between (say EP=4 on 8 GPUs) is rejected: the MoE routing collectives race
   FSDP2's DP-wide ones, and the default buffer backend faults where the legacy

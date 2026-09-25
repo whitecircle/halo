@@ -8,7 +8,7 @@ The model has 128 routed experts and selects four experts for each token. It als
 
 | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Yes | Yes | Yes | Yes | Yes | untested | Yes | Yes |
 
 Halo uses DeepEP for token dispatch and grouped GEMM for the expert projections, and it preserves Mistral 4's group-top-k router and shared expert. CP and selective TP support the MLA attention layers.
 
@@ -16,42 +16,8 @@ This recipe starts with eight NVIDIA B300 GPUs. EP8 places 16 routed experts on 
 
 ## Start the training container
 
-```bash
-git clone --recurse-submodules https://github.com/whitecircle/halo
-cd halo
-docker pull public.ecr.aws/whitecircle/halo:blackwell
-```
-
-Export `HF_TOKEN` and `WANDB_API_KEY` in the host shell.
-
-```bash
-# D = the host's large scratch volume. /mnt is not guaranteed large — verify with `df -h`
-# and point D (or HALO_SCRATCH) at the real big disk.
-D=${HALO_SCRATCH:-/mnt}
-mkdir -p "$D/hf" "$D/models" "$D/checkpoints" "$D/tmp"
-docker run --rm -it \
-  --name halo-mistral4 \
-  --gpus all \
-  --network host \
-  --ipc=host \
-  --shm-size=128g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  -e HF_TOKEN \
-  -e WANDB_API_KEY \
-  -e HF_HOME=/data/hf \
-  -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp \
-  -e HALO_DATA_ROOT=/data \
-  -e PYTHONPATH=/workspace \
-  -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  -v "$(pwd)":/workspace \
-  -v "$D":/data \
-  -w /workspace \
-  public.ecr.aws/whitecircle/halo:blackwell bash
-```
-
-Run the training commands inside this container.
+Start the [cookbook container](README.md#start-the-training-container) and run the commands
+below inside it.
 
 ## Convert the checkpoint to BF16
 
@@ -143,7 +109,8 @@ Keep `flash_attention_2` — it is what the shipped config pins and what this re
 
 ## Add CP, TP, or ETP
 
-Use CP2 with EP8 for longer sequences. Disable packing when CP splits the sequence.
+Use CP2 with EP8 for longer sequences; EP+CP is a valid shape but untested on this family,
+so validate it with a short run first. Disable packing when CP splits the sequence.
 
 ```yaml
 expert_parallel_size: 8

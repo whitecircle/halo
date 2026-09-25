@@ -12,9 +12,12 @@ Pick the image that matches your GPUs:
 
 | GPU | Image | Attention stack |
 | --- | --- | --- |
-| B200 / B300 / GB200 / GB300 | `halo:blackwell` | Flash Attention 4 + 2 |
+| B200 / B300 | `halo:blackwell` | Flash Attention 4 + 2 |
 | H100 / H200 | `halo:hopper` | Flash Attention 3 + 2 |
-| A100, RTX 3090 / 4090 (single GPU, LoRA/QLoRA) | `halo:blackwell` | Flash Attention 2 / SDPA; no DeepEP |
+| A100, RTX 3090 / 4090 (single GPU, LoRA/QLoRA) | `halo:blackwell` | Flash Attention 2 / SDPA; no DeepEP; not validated |
+
+Both images are x86_64-only: Grace-based GB200/GB300 hosts (aarch64) need an
+arm64 build, which the Dockerfile does not provide.
 
 You still need the repo — configs, scripts, and the `make` targets live there:
 
@@ -43,8 +46,8 @@ Or build from source. No token, no registry login:
 make build-blackwell     # or: make build-hopper
 ```
 
-The first build takes a while: DeepEP, DeepGEMM and (on Hopper) Flash Attention
-compile from source.
+The first build takes a while: DeepEP, DeepGEMM (Blackwell) and Flash Attention
+(Hopper) compile from source.
 
 ## 2. Create a `.env` file
 
@@ -69,8 +72,8 @@ and the root filesystem is usually small. Find your large volume and verify it
 actually is one; a path named `/mnt` proves nothing.
 
 ```bash
-df -h                          # find the volume with real space
-findmnt -no TARGET,AVAIL /mnt  # confirm that path is that volume, not the root disk
+df -h                             # find the volume with real space
+findmnt -T /mnt -no TARGET,AVAIL  # the filesystem that actually holds /mnt
 ```
 
 Hand that path to the container through four environment variables: `HF_HOME`
