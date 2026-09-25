@@ -169,7 +169,7 @@ def _apply_fsdp2(
         logger.info(f"    - DP group size: {dp_mesh.size()}")
         logger.info(f"    - Mixed precision: {mp_policy.param_dtype}")
         logger.info(f"    - reshard_after_forward: {reshard_after_forward}")
-        if mp_policy is not None and not mp_policy.cast_forward_inputs:
+        if not mp_policy.cast_forward_inputs:
             logger.info("    - cast_forward_inputs: False (model maintains an fp32 inter-layer residual)")
         if ignored_params:
             logger.info(f"    - Ignored params: {len(ignored_params)} (EP modules)")
@@ -348,7 +348,7 @@ def create_mixed_precision_policy_v2(
     args,
     fp32_master_weights: bool = False,
     cast_forward_inputs: bool = True,
-) -> MixedPrecisionPolicy | None:
+) -> MixedPrecisionPolicy:
     """Create FSDP v2 MixedPrecisionPolicy from training args.
 
     ``fp32_master_weights=True``: params stored fp32, cast to compute dtype for forward/backward,

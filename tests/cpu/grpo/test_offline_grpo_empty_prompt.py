@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """Offline GRPO refuses a prompt that tokenizes to nothing, at dataset map time, on every rank.
 
-The collator used to stand a pad token (attention 1) in for an empty prompt, so the row's
-completions trained against a context the data never held. The refusal lives in the tokenize map
-rather than the collator: the map runs inside ``coordinated_map``, whose failure join raises on every
-rank, where a collator raise on the one rank that drew the row would leave its peers in the next
-collective.
+Its completions would otherwise train against a context the data never held. The refusal lives in
+the tokenize map rather than the collator: the map runs inside ``coordinated_map``, whose failure
+join raises on every rank, where a collator raise on the one rank that drew the row would leave its
+peers in the next collective.
 
     python tests/cpu/grpo/test_offline_grpo_empty_prompt.py
 """

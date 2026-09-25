@@ -369,9 +369,9 @@ def load_distributed_model(
                 "Quantized loading (QLoRA / bitsandbytes) is not supported with EP / TP / PP "
                 "or grouped-GEMM MoE loaders: they materialize plain de-quantized weights, so "
                 "bitsandbytes Params4bit are lost and PEFT's 4-bit adapter dispatch fails (PP "
-                "rejects PEFT outright). For QLoRA use plain data parallelism or CP (which "
-                "preserves quantization); on a MoE model also set `use_grouped_gemm: false`, "
-                "under torchrun and accelerate launch alike. Under EP/TP use plain LoRA (no "
+                "rejects PEFT outright). For QLoRA use plain data parallelism (on a MoE model with "
+                "`use_grouped_gemm: false`, under torchrun and accelerate launch alike) or CP on a "
+                "dense model, which preserves quantization. Under EP/TP use plain LoRA (no "
                 "quantization)."
             )
         common_kwargs["quantization_config"] = quantization_config

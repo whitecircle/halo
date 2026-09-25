@@ -52,7 +52,7 @@ PEFT_BASE_MODEL_PREFIX = "base_model.model."
 _CP_WRAPPER_MODULE_LEVEL = "model."
 
 # The model-level flags a quantized load sets: bitsandbytes sets the 8/4-bit pair, torchao/quanto only
-# ``is_quantized``. peft's k-bit preparation keys on all three.
+# ``is_quantized``.
 _KBIT_QUANTIZED_FLAGS = ("is_loaded_in_8bit", "is_loaded_in_4bit", "is_quantized")
 
 
