@@ -180,7 +180,7 @@ Trainer-side, all three GRPO scripts default `attn_implementation` to **SDPA** f
 
 Run a smoke config against a live server first — `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml` (dense) or `.../gptoss/online-grpo-gptoss-20b-ep-smoke.yaml` (EP). Each sets `max_steps: 3` and `save_strategy: "no"`, exercising rendering, rewards, the loss and one weight sync in minutes.
 
-CPU: `pytest tests/cpu/grpo -m cpu`. GPU: `tests/gpu/trainers/grpo/test_online_grpo_mock.py` needs no server; the `test_online_grpo_vllm_*_e2e.py` suites run the PEFT × parallelism × resume matrix against one.
+CPU: `pytest tests/cpu/grpo -m cpu`. GPU: the `test_online_grpo_vllm_*_e2e.py` suites run the PEFT × parallelism × resume matrix against a live server.
 
 ## What to watch
 

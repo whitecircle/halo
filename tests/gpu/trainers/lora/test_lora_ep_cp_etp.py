@@ -2,7 +2,9 @@
 """
 Test: LoRA adapters with EP+CP and ETP parallelism modes on GptOss-20B.
 
-Validates that PEFT LoRA adapters work correctly in combined modes:
+Trains PEFT LoRA adapters in combined modes and checks the loss stays finite, the adapters (a
+lora_B included) move, and the saved adapter reloads to its trained values; no loss or gradient is
+compared against a non-parallel reference:
   1. LoRA + EP=2 + CP=2 -> train 5 steps -> save -> verify checkpoint -> reload
   2. LoRA + ETP (expert_tp_size=2) -> train 5 steps -> save -> verify checkpoint -> reload
 
@@ -14,14 +16,11 @@ Run with 2 GPUs:
 import argparse
 import math
 import os
-import sys
 import traceback
 
 import torch
-import torch.distributed as dist
-from accelerate import PartialState
-from peft import LoraConfig, PeftModel, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
@@ -29,15 +28,15 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import (
-    cleanup_dirs,
-    ensure_model_downloaded,
-    init_distributed,
-    setup_cache_dirs,
-    teardown_distributed,
-)
+from tests.common.distributed import ensure_model_downloaded
+from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import adapter_save_checks, snapshot_adapters
+from tests.common.peft_helpers import (
+    adapter_save_checks,
+    assert_adapters_moved,
+    snapshot_adapters,
+    verify_adapter_reload,
+)
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 MODEL_NAME = GPT_OSS_20B
@@ -52,45 +51,6 @@ SEED = 42
 LORA_TARGET_MODULES = ["q_proj", "v_proj"]
 LORA_R = 8
 LORA_ALPHA = 16
-
-
-def _verify_checkpoint_reload(
-    save_dir: str,
-    tokenizer,
-    rank: int,
-    local_rank: int,
-) -> dict[str, bool]:
-    if rank != 0:
-        return {}
-    checks = {}
-    try:
-        log("  Reloading base model for checkpoint verification...")
-        base_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            device_map={"": local_rank},
-        )
-        log(f"  Loading adapter from {save_dir}...")
-        reloaded = PeftModel.from_pretrained(base_model, save_dir)
-        checks["adapter_reload"] = True
-        log("  Adapter reload: PASS")
-
-        reloaded.eval()
-        test_input = tokenizer("What is 2 + 2?", return_tensors="pt").to(f"cuda:{local_rank}")
-        with torch.no_grad():
-            output = reloaded(**test_input)
-        logits_finite = torch.isfinite(output.logits).all().item()
-        checks["reload_logits_finite"] = logits_finite
-        log(f"  Reload logits finite: {'PASS' if logits_finite else 'FAIL'}")
-
-        del reloaded, base_model
-        cleanup_memory()
-    except Exception as e:
-        log(f"  Checkpoint reload FAILED: {e}")
-        traceback.print_exc()
-        checks["adapter_reload"] = False
-    return checks
 
 
 def run_lora_ep_cp(
@@ -179,10 +139,11 @@ def run_lora_ep_cp(
         log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'}")
 
         lora_after = snapshot_adapters(model, expert_lora=False)
-        updated = sum(1 for n in lora_before if n in lora_after and not torch.equal(lora_before[n], lora_after[n]))
-        lora_ok = updated > 0
+        # A zero-init lora_B must move: lora_before predates the trainer's bf16 cast of the fp32
+        # adapters, which alone changes every lora_A.
+        lora_ok, detail = assert_adapters_moved(lora_before, lora_after)
         checks["lora_updated"] = lora_ok
-        log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({updated}/{len(lora_before)})")
+        log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({detail})")
 
         save_dir = os.path.join(base_output_dir, "lora_ep_cp_save")
         log("\n  --- Checkpoint Save (LoRA+EP+CP) ---")
@@ -191,7 +152,9 @@ def run_lora_ep_cp(
 
         save_checks = adapter_save_checks(save_dir, rank)
         checks.update(save_checks)
-        reload_checks = _verify_checkpoint_reload(save_dir, tokenizer, rank, local_rank)
+        reload_checks = verify_adapter_reload(
+            save_dir, lora_after, model_name=MODEL_NAME, tokenizer=tokenizer, rank=rank, local_rank=local_rank
+        )
         checks.update(reload_checks)
         barrier()
 
@@ -297,10 +260,11 @@ def run_lora_etp(
         log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'}")
 
         lora_after = snapshot_adapters(model, expert_lora=False)
-        updated = sum(1 for n in lora_before if n in lora_after and not torch.equal(lora_before[n], lora_after[n]))
-        lora_ok = updated > 0
+        # A zero-init lora_B must move: lora_before predates the trainer's bf16 cast of the fp32
+        # adapters, which alone changes every lora_A.
+        lora_ok, detail = assert_adapters_moved(lora_before, lora_after)
         checks["lora_updated"] = lora_ok
-        log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({updated}/{len(lora_before)})")
+        log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({detail})")
 
         save_dir = os.path.join(base_output_dir, "lora_etp_save")
         log("\n  --- Checkpoint Save (LoRA+ETP) ---")
@@ -309,7 +273,9 @@ def run_lora_etp(
 
         save_checks = adapter_save_checks(save_dir, rank)
         checks.update(save_checks)
-        reload_checks = _verify_checkpoint_reload(save_dir, tokenizer, rank, local_rank)
+        reload_checks = verify_adapter_reload(
+            save_dir, lora_after, model_name=MODEL_NAME, tokenizer=tokenizer, rank=rank, local_rank=local_rank
+        )
         checks.update(reload_checks)
         barrier()
 
@@ -330,28 +296,18 @@ def run_lora_etp(
         barrier()
 
 
-def main() -> int:
+def run(ctx) -> dict:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["ep_cp", "etp", "all"], default="all")
     args, _ = parser.parse_known_args()
 
-    rank, world_size, local_rank = init_distributed()
-    PartialState()
-
-    base_output_dir, cache_dir = setup_cache_dirs("test_lora_ep_cp_etp", rank)
-
     log(f"\n{'#' * 70}")
     log("  LoRA + EP+CP / ETP Parallelism Test")
-    log(f"  World size: {world_size}, Mode: {args.mode}, Model: {MODEL_NAME}")
-    log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  World size: {ctx.world_size}, Mode: {args.mode}, Model: {MODEL_NAME}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"{'#' * 70}")
 
-    if world_size != 2:
-        log(f"\nERROR: This test requires exactly 2 GPUs, got {world_size}")
-        teardown_distributed()
-        return 1
-
-    ensure_model_downloaded(MODEL_NAME, rank)
+    ensure_model_downloaded(MODEL_NAME, ctx.rank)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -366,46 +322,25 @@ def main() -> int:
         log(f"\n{'=' * 70}")
         log("  TEST 1: LoRA + EP=2 + CP=2 (GptOss-20B)")
         log(f"{'=' * 70}")
-        success, detail = run_lora_ep_cp(
-            tokenizer,
-            train_dataset,
-            eval_dataset,
-            rank,
-            local_rank,
-            base_output_dir,
+        results["lora_ep_cp"] = run_lora_ep_cp(
+            tokenizer, train_dataset, eval_dataset, ctx.rank, ctx.local_rank, ctx.output_dir
         )
-        results["lora_ep_cp"] = (success, detail)
 
     if args.mode in ("etp", "all"):
         log(f"\n{'=' * 70}")
         log("  TEST 2: LoRA + ETP (expert_tp_size=2) (GptOss-20B)")
         log(f"{'=' * 70}")
-        success, detail = run_lora_etp(
-            tokenizer,
-            train_dataset,
-            eval_dataset,
-            rank,
-            local_rank,
-            base_output_dir,
+        results["lora_etp"] = run_lora_etp(
+            tokenizer, train_dataset, eval_dataset, ctx.rank, ctx.local_rank, ctx.output_dir
         )
-        results["lora_etp"] = (success, detail)
 
-    log(f"\n{'#' * 70}")
-    log("  FINAL RESULTS")
-    log(f"{'#' * 70}")
     for name, (passed, detail) in results.items():
-        status = "PASSED" if passed else "FAILED"
-        log(f"  {name:20s} {status} -- {detail}")
-    log(f"{'#' * 70}")
+        log(f"  {name:20s} {'PASSED' if passed else 'FAILED'} -- {detail}")
 
-    all_passed = all(p for p, _ in results.values())
-    log(f"\n  Overall: {'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'}")
+    return {"checks": {name: passed for name, (passed, _) in results.items()}}
 
-    cleanup_dirs(base_output_dir, cache_dir)
-    if dist.is_initialized():
-        teardown_distributed()
-    return 0 if all_passed else 1
 
+main = gpu_test_main(exact_world_size=2, prefix="test_lora_ep_cp_etp")(run)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

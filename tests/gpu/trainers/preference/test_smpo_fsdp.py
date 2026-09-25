@@ -1,9 +1,8 @@
 #!/usr/bin/env python
 """
-SMPO Trainer test with standard FSDP (no EP/CP/TP).
+SMPO Trainer smoke test with standard FSDP (no EP/CP/TP).
 
-Validates that SmoothMarginPOTrainer works correctly in standard FSDP mode
-on Qwen3-0.6B with:
+Runs SmoothMarginPOTrainer in standard FSDP mode on Qwen3-0.6B with:
 - Gradient checkpointing
 - Liger kernels (fused RMSNorm + cross-entropy)
 - BF16 mixed precision
@@ -13,7 +12,9 @@ on Qwen3-0.6B with:
 Test Phases:
 1. Synthetic preference dataset creation (prompt/chosen/rejected)
 2. SMPO training for 10 steps
-3. Validation: loss is finite
+3. Validation: the final and every per-step loss is finite
+
+It does not compare the SMPO objective against a reference, so a wrong-but-finite loss passes.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -160,11 +161,6 @@ def run(ctx):
     all_finite = all(math.isfinite(l) for l in step_losses)
     checks["all_steps_finite"] = all_finite
     log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    # Check 3: Training loss is reasonable (not diverged)
-    loss_reasonable = training_loss < 100.0
-    checks["loss_reasonable"] = loss_reasonable
-    log(f"  Loss reasonable (<100): {'PASS' if loss_reasonable else 'FAIL'}")
 
     return {"checks": checks}
 

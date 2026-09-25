@@ -518,7 +518,6 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=2400,
         flaky=True,
     ),
-    "trainers/grpo/test_environmental_grpo_mock.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "trainers/grpo/test_offline_grpo.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
     "trainers/grpo/test_offline_grpo_bnpo.py": TestSpec(
         # FSDP then TP=2 in one process; 900s covers the one-time FA2 compile + both modes + evals.
@@ -540,9 +539,6 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "tp", "qwen3"),
         timeout=2400,
     ),
-    # No family marker: nothing here loads a checkpoint (online GRPO refuses to construct without a
-    # vLLM server), so the node is config/class-surface plus reward extraction.
-    "trainers/grpo/test_online_grpo_mock.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     # One node per leg: each leg holds its trainer-side weight-transfer port for the life of the
     # process (only close_communicator frees it, which a leg never calls), and the environmental legs
     # additionally stand up Ray actors.

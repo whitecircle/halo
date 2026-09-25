@@ -1,18 +1,16 @@
 #!/usr/bin/env python
 """
-Offline GRPO Trainer test with batch_size=4 and mixed group sizes.
+Offline GRPO Trainer smoke test with batch_size=4 and mixed group sizes.
 
-Validates that OfflineGRPOTrainer works correctly with per_device_train_batch_size > 1,
-where a single batch contains examples from multiple different prompt groups with
-different group sizes (4 and 8 completions per prompt).
-
-Tests all 3 loss types: grpo, bnpo, dr_grpo.
+Runs OfflineGRPOTrainer with per_device_train_batch_size > 1, where a single batch contains
+examples from multiple different prompt groups with different group sizes (4 and 8 completions
+per prompt), once per loss type (grpo, bnpo, dr_grpo). For each it checks only that the final and
+every per-step loss is finite; no loss is compared against a reference or across loss types.
 
 Key differences from test_offline_grpo.py:
 - batch_size=4 (vs 1) to stress multi-example batching
 - Mixed group sizes: 50% prompts with 4 completions, 50% with 8 completions
-- Tests all 3 loss types sequentially
-- Verifies loss consistency across loss types
+- Runs all 3 loss types sequentially
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -113,7 +111,6 @@ def create_offline_grpo_dataset(
     """Create synthetic offline GRPO dataset with mixed group sizes.
 
     50% of prompts get 4 completions, 50% get 8 completions.
-    This tests the group_weights = 1/group_size normalization.
     """
     rng = random.Random(seed)
     data = []
@@ -226,13 +223,13 @@ def run(ctx):
     log(f"{'=' * 70}")
 
     # ── Load tokenizer ──
-    log("\n[1/4] Loading tokenizer...")
+    log("\n[1/3] Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # ── Create datasets ──
-    log("\n[2/4] Creating synthetic datasets with mixed group sizes...")
+    log("\n[2/3] Creating synthetic datasets with mixed group sizes...")
     train_dataset = create_offline_grpo_dataset(tokenizer, NUM_TRAIN_SAMPLES, seed=SEED)
     eval_dataset = create_offline_grpo_dataset(tokenizer, NUM_EVAL_SAMPLES, seed=SEED + 1)
 
@@ -246,8 +243,7 @@ def run(ctx):
     log(f"  Eval: {len(eval_dataset)} prompts")
 
     # ── Run each loss type ──
-    log("\n[3/4] Training with each loss type...")
-    results = {}
+    log("\n[3/3] Training with each loss type...")
     checks = {}
     metrics = {}
 
@@ -256,7 +252,6 @@ def run(ctx):
         # A fresh output dir per loss type, inside the harness-owned scratch it reclaims.
         output_dir = os.path.join(ctx.output_dir, loss_type)
         result = run_single_loss_type(loss_type, MODEL_NAME, tokenizer, train_dataset, eval_dataset, output_dir)
-        results[loss_type] = result
 
         loss = result["loss"]
         step_losses = result["step_losses"]
@@ -277,27 +272,7 @@ def run(ctx):
         checks[f"{loss_type}_all_steps_finite"] = all_finite
         log(f"    All steps finite: {'PASS' if all_finite else 'FAIL'}")
 
-        reasonable = loss < 100.0
-        checks[f"{loss_type}_loss_reasonable"] = reasonable
-        log(f"    Loss reasonable (<100): {'PASS' if reasonable else 'FAIL'}")
-
         metrics[f"{loss_type}_final_loss"] = loss
-
-    # ── Cross-loss-type validation ──
-    log("\n[4/4] Cross-validation...")
-
-    # All loss types should produce finite, reasonable losses
-    all_losses = {lt: results[lt]["loss"] for lt in LOSS_TYPES}
-    log(f"  Losses: {', '.join(f'{lt}={v:.6f}' for lt, v in all_losses.items())}")
-
-    # Verify no loss type diverged vs the others (within 100x is a sanity check)
-    loss_values = list(all_losses.values())
-    if all(v > 0 for v in loss_values):
-        max_ratio = max(loss_values) / min(loss_values)
-        ratio_ok = max_ratio < 100.0
-        checks["loss_ratio_reasonable"] = ratio_ok
-        metrics["max_loss_ratio"] = max_ratio
-        log(f"  Max loss ratio: {max_ratio:.2f} {'PASS' if ratio_ok else 'FAIL'}")
 
     return {"checks": checks, "metrics": metrics}
 

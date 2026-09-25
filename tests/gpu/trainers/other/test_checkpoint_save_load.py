@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Checkpoint Save/Load Roundtrip Test across Parallelism Modes.
+Checkpoint Save Test across Parallelism Modes.
 
 Validates that DistributedSFTTrainer can train and save model checkpoints
 correctly under different parallelism configurations. For each mode, the
@@ -21,7 +21,6 @@ Run with 2 GPUs:
 
 import math
 import os
-import sys
 import traceback
 
 import torch
@@ -34,7 +33,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import cleanup_dirs, init_distributed, setup_cache_dirs, teardown_distributed
+from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, log
 
@@ -208,21 +207,13 @@ def run_mode_test(
         dist.barrier()
 
 
-def main() -> int:
-    """Run checkpoint save/load roundtrip tests. Returns 0 on success, 1 on failure."""
-    rank, world_size, local_rank = init_distributed()
-
-    # trainers require an initialized PartialState
-    from accelerate import PartialState
-
-    PartialState()
-
-    # per-rank HF cache avoids cross-rank contention
-    base_output_dir, cache_dir = setup_cache_dirs("test_ckpt_save_load", rank)
+@gpu_test_main(min_world_size=2, prefix="test_ckpt_save_load")
+def run(ctx) -> dict:
+    rank, local_rank, base_output_dir = ctx.rank, ctx.local_rank, ctx.output_dir
 
     log(f"\n{'#' * 70}")
-    log("  Checkpoint Save/Load Roundtrip Test")
-    log(f"  World size: {world_size}, Model: {MODEL_NAME}")
+    log("  Checkpoint Save Test")
+    log(f"  World size: {ctx.world_size}, Model: {MODEL_NAME}")
     log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
     log("  Modes: FSDP, CP=2, TP=2")
     log(f"  Steps per mode: {MAX_STEPS}")
@@ -230,103 +221,67 @@ def main() -> int:
 
     results: dict[str, tuple[bool, str]] = {}
 
-    try:
-        log("\n[Setup] Loading tokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        log(f"  Tokenizer loaded: vocab_size={tokenizer.vocab_size}")
+    log("\n[Setup] Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    log(f"  Tokenizer loaded: vocab_size={tokenizer.vocab_size}")
 
-        log("[Setup] Creating synthetic datasets...")
-        train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
-        eval_dataset = create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1)
-        log(f"  Train: {len(train_dataset)} samples, Eval: {len(eval_dataset)} samples")
+    log("[Setup] Creating synthetic datasets...")
+    train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
+    eval_dataset = create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1)
+    log(f"  Train: {len(train_dataset)} samples, Eval: {len(eval_dataset)} samples")
 
-        log(f"\n{'=' * 60}")
-        log("  MODE 1: FSDP (Standard Data Parallelism)")
-        log(f"{'=' * 60}")
+    log(f"\n{'=' * 60}")
+    log("  MODE 1: FSDP (Standard Data Parallelism)")
+    log(f"{'=' * 60}")
 
-        pc_fsdp = ParallelismConfig()
-        success, detail = run_mode_test(
-            mode_name="FSDP",
-            parallelism_config=pc_fsdp,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            base_output_dir=base_output_dir,
-            rank=rank,
-            local_rank=local_rank,
-        )
-        results["FSDP"] = (success, detail)
+    results["FSDP"] = run_mode_test(
+        mode_name="FSDP",
+        parallelism_config=ParallelismConfig(),
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        base_output_dir=base_output_dir,
+        rank=rank,
+        local_rank=local_rank,
+    )
 
-        log(f"\n{'=' * 60}")
-        log("  MODE 2: CP=2 (Context Parallelism)")
-        log(f"{'=' * 60}")
+    log(f"\n{'=' * 60}")
+    log("  MODE 2: CP=2 (Context Parallelism)")
+    log(f"{'=' * 60}")
 
-        pc_cp = ParallelismConfig(cp_size=2)
-        success, detail = run_mode_test(
-            mode_name="CP2",
-            parallelism_config=pc_cp,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            base_output_dir=base_output_dir,
-            rank=rank,
-            local_rank=local_rank,
-        )
-        results["CP=2"] = (success, detail)
+    results["CP=2"] = run_mode_test(
+        mode_name="CP2",
+        parallelism_config=ParallelismConfig(cp_size=2),
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        base_output_dir=base_output_dir,
+        rank=rank,
+        local_rank=local_rank,
+    )
 
-        log(f"\n{'=' * 60}")
-        log("  MODE 3: TP=2 (Tensor Parallelism)")
-        log(f"{'=' * 60}")
+    log(f"\n{'=' * 60}")
+    log("  MODE 3: TP=2 (Tensor Parallelism)")
+    log(f"{'=' * 60}")
 
-        pc_tp = ParallelismConfig(tp_size=2)
-        success, detail = run_mode_test(
-            mode_name="TP2",
-            parallelism_config=pc_tp,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            base_output_dir=base_output_dir,
-            rank=rank,
-            local_rank=local_rank,
-        )
-        results["TP=2"] = (success, detail)
+    results["TP=2"] = run_mode_test(
+        mode_name="TP2",
+        parallelism_config=ParallelismConfig(tp_size=2),
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        base_output_dir=base_output_dir,
+        rank=rank,
+        local_rank=local_rank,
+    )
 
-    except Exception as e:
-        log(f"\nFATAL ERROR: {e}")
-        traceback.print_exc()
-
-    log(f"\n{'#' * 70}")
-    log("  Checkpoint Save/Load Test Summary")
-    log(f"{'#' * 70}")
-
-    all_passed = True
     for mode_name, (passed, detail) in results.items():
-        status = "PASS" if passed else "FAIL"
-        log(f"  {mode_name:>8s}: {status} -- {detail}")
-        if not passed:
-            all_passed = False
+        log(f"  {mode_name:>8s}: {'PASS' if passed else 'FAIL'} -- {detail}")
 
-    if not results:
-        all_passed = False
-        log("  No modes were tested!")
-
-    log(f"\n{'#' * 70}")
-    if all_passed:
-        log(f"  CHECKPOINT SAVE/LOAD TEST PASSED (all {len(results)} modes)")
-    else:
-        failed_modes = [m for m, (p, _) in results.items() if not p]
-        log(f"  CHECKPOINT SAVE/LOAD TEST FAILED: {failed_modes}")
-    log(f"{'#' * 70}\n")
-
-    log("Cleaning up...")
-    cleanup_memory()
-    cleanup_dirs(base_output_dir, cache_dir)
-    teardown_distributed()
-
-    return 0 if all_passed else 1
+    return {"checks": {mode_name: passed for mode_name, (passed, _) in results.items()}}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

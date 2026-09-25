@@ -43,9 +43,11 @@ from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 from trl import KTOConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
+from src.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.distributed import snapshot_full_weights, world_mean
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.utils import fro_rel_err
 
 N_ROWS = 32
 N_STEPS = 6
@@ -166,14 +168,8 @@ def flat_gradient(model, order: list[str]) -> torch.Tensor:
     return torch.cat(flat)
 
 
-def relative_error(got: torch.Tensor, want: torch.Tensor) -> float:
-    return float((got - want).norm() / want.norm().clamp(min=1e-12))
-
-
 @gpu_test_main(exact_world_size=2, prefix="kto_fsdp_multi_gpu")
 def run(ctx):
-    from src.trainers.preference.kto import DistributedKTOTrainer
-
     checks, metrics = {}, {}
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
     if tokenizer.pad_token is None:
@@ -303,18 +299,18 @@ def run(ctx):
     reference_gradient = local_gradient.clone()
     dist.all_reduce(reference_gradient, op=dist.ReduceOp.AVG)
 
-    sync_error = relative_error(fsdp_gradient, reference_gradient)
+    sync_error = fro_rel_err(fsdp_gradient, reference_gradient)
     metrics["grad_sync_rel_err"] = sync_error
     checks["fsdp_gradient_is_the_dp_average"] = sync_error < GRAD_RTOL
 
     # NEGATIVE CONTROL: ``local_gradient`` is exactly what this rank would hold with the DP reduce
     # dropped — its own batch's gradient and nothing else. It must MISS the pin, or "FSDP2 produced
     # the average" carries no information because the average and the local value coincide.
-    unreduced_error = relative_error(local_gradient, reference_gradient)
+    unreduced_error = fro_rel_err(local_gradient, reference_gradient)
     metrics["unreduced_grad_rel_err"] = unreduced_error
     checks["unreduced_gradient_would_miss_the_pin"] = unreduced_error > GRAD_RTOL
     # And FSDP2's gradient must not BE the local one, which is the same statement from the other side.
-    fsdp_vs_local = relative_error(fsdp_gradient, local_gradient)
+    fsdp_vs_local = fro_rel_err(fsdp_gradient, local_gradient)
     metrics["fsdp_vs_local_rel_err"] = fsdp_vs_local
     checks["fsdp_gradient_is_not_the_local_gradient"] = fsdp_vs_local > GRAD_RTOL
     log(

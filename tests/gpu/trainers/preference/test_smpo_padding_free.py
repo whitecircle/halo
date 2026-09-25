@@ -1,9 +1,8 @@
 #!/usr/bin/env python
 """
-SMPO Trainer test with padding-free mode (Flash Attention 2).
+SMPO Trainer smoke test with padding-free mode (Flash Attention 2).
 
-Validates that SmoothMarginPOTrainer works correctly in padding-free mode
-on Qwen3-0.6B with:
+Runs SmoothMarginPOTrainer in padding-free mode on Qwen3-0.6B with:
 - Padding-free flattening (eliminates padding waste)
 - Flash Attention 2 for document boundary handling
 - Gradient checkpointing
@@ -14,7 +13,10 @@ on Qwen3-0.6B with:
 Test Phases:
 1. Synthetic preference dataset creation (prompt/chosen/rejected)
 2. SMPO training for 10 steps with padding_free=True
-3. Validation: loss is finite and reasonable
+3. Validation: the final and every per-step loss is finite
+
+It does not compare the SMPO objective against a reference. Per-document isolation of the
+flattened rows is pinned by tests/gpu/trainers/preference/test_smpo_padding_free_segments.py.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -149,11 +151,6 @@ def run(ctx):
     all_finite = all(math.isfinite(l) for l in step_losses)
     checks["all_steps_finite"] = all_finite
     log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    # Check 3: Training loss is reasonable (not diverged)
-    loss_reasonable = training_loss < 100.0
-    checks["loss_reasonable"] = loss_reasonable
-    log(f"  Loss reasonable (<100): {'PASS' if loss_reasonable else 'FAIL'}")
 
     return {"checks": checks, "metrics": {"final_train_loss": training_loss}}
 

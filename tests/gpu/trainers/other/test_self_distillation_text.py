@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """Test: DistributedSelfDistillationTrainer (SDPG) on a text LLM — single-GPU smoke.
 
-Validates the text SDPG self-distillation path end-to-end under TRL 1.6:
-1. SelfDistillTextCollator emits the student batch + teacher_* branch (privileged hint) with
-   byte-identical response tokens.
-2. The trainer runs the student + privileged-teacher forward and computes
-   L = L_sft + beta(k) * L_OPD on the shared response tokens (opd_loss metric recorded).
+Runs the text SDPG self-distillation path end-to-end under TRL 1.6: SelfDistillTextCollator builds
+the student batch plus the privileged-hint teacher_* branch, and the trainer runs the student and
+teacher forwards for L = L_sft + beta(k) * L_OPD. It checks only that every logged step loss is
+finite and that the opd_loss metric was recorded (the privileged-teacher forward ran); it does not
+compare either loss term against a reference. The student/teacher response-token alignment is
+pinned on CPU by tests/cpu/trainers/test_self_distillation_text_collator.py.
 
 Model defaults to Qwen3-0.6B (CI); set HALO_TEST_MODEL to override (e.g. Qwen/Qwen3.5-4B).
 

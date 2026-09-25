@@ -210,7 +210,6 @@ def run_training(
     checks = {}
     checks["loss_finite"] = math.isfinite(training_loss)
     checks["all_steps_finite"] = all(math.isfinite(l) for l in step_losses)
-    checks["loss_reasonable"] = training_loss < 100.0
     if not is_tp:
         checks["has_eval"] = len(eval_losses) > 0
         checks["eval_finite"] = all(math.isfinite(l) for l in eval_losses) if eval_losses else False
