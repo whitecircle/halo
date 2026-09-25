@@ -20,7 +20,6 @@ the layer-less shapes above keep working.
     python tests/cpu/parallelism/test_fsdp2_shards_every_backbone.py
 """
 
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -190,4 +189,4 @@ def test_reachable_layer_lists_and_non_decoders_are_never_refused():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

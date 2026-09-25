@@ -15,7 +15,6 @@ tokenizer's side is invisible to any collator test that builds its own right-pad
 """
 
 import inspect
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -113,4 +112,4 @@ def test_factory_propagates_the_guard(train_on_completions_only):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

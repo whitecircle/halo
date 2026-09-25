@@ -2,7 +2,6 @@
 """Tests for VariableSchedulerCallback. Run: python tests/cpu/callbacks/test_variable_scheduler.py"""
 
 import math
-import sys
 
 import pytest
 
@@ -285,4 +284,4 @@ def test_on_step_begin():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

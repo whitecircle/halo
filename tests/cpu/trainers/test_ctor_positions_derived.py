@@ -14,8 +14,6 @@ gate on the wrong argument.
 Run: ``python tests/cpu/trainers/test_ctor_positions_derived.py`` (or ``pytest -m cpu``).
 """
 
-import sys
-
 import pytest
 
 from src.trainers.grpo.mixins.on_policy_init import GRPO_CTOR_POSITIONS
@@ -149,4 +147,4 @@ def test_missing_parameter_fails_loud():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

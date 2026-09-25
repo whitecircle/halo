@@ -9,7 +9,6 @@ without it every turn falls back to re-tokenizing a chat-template re-render behi
 """
 
 import re
-import sys
 
 import pytest
 import yaml
@@ -131,4 +130,4 @@ def test_the_compose_command_carries_no_yaml_comment_lines():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

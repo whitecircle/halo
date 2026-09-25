@@ -643,6 +643,4 @@ def test_load_skips_ignore_plans(tmp_path):
 
 
 if __name__ == "__main__":
-    import pytest
-
-    pytest.main([__file__, "-v"])
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -9,7 +9,6 @@ temp dir may belong to a live writer and must be kept.
 
 import hashlib
 import os
-import sys
 import time
 import uuid
 from unittest.mock import MagicMock, patch
@@ -143,4 +142,4 @@ def test_sharded_shard_load_reclaims_stale_temp(tmp_path, monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -21,7 +21,6 @@ expert count in none of the registered fields), because a false raise here block
     python tests/cpu/parallelism/test_model_shape_gate.py
 """
 
-import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -260,4 +259,4 @@ def test_a_module_that_is_both_ep_and_dtype_incompatible_is_ignored_once():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

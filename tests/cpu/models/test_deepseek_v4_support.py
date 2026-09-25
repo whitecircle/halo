@@ -6,7 +6,6 @@ the per-rope-type inv_freq buffer fix, and the moe_balancing auto resolution.
     python tests/cpu/models/test_deepseek_v4_support.py
 """
 
-import sys
 import tempfile
 from functools import partial
 
@@ -298,4 +297,4 @@ def test_moe_balancing_auto_resolves_bias_update_for_v4_ep():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

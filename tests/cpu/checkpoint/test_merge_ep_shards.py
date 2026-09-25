@@ -11,7 +11,6 @@ tests assert exact shapes AND values, not just key presence.
 
 import json
 import os
-import sys
 import tempfile
 from collections import defaultdict
 from unittest.mock import patch
@@ -967,4 +966,4 @@ def test_the_reader_accepts_exactly_what_the_writer_names():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

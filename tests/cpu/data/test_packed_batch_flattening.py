@@ -11,7 +11,6 @@ exact concatenation of the per-row (batch-1) collations.
 Run: pytest tests/cpu/data/test_packed_batch_flattening.py
 """
 
-import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -197,4 +196,4 @@ def test_b1_single_doc_full_row_stays_dense():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -295,4 +295,4 @@ def test_unknown_reasoning_effort_is_rejected_at_parse_time(tmp_path):
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

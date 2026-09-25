@@ -22,7 +22,6 @@ import builtins
 import contextlib
 import datetime
 import os
-import sys
 
 import pytest
 import torch.distributed as dist
@@ -217,4 +216,4 @@ def test_run_training_tears_down_dispatchers_before_the_process_group_on_success
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

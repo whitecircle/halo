@@ -205,4 +205,4 @@ def test_clean_text_dataset_still_reaches_training(case, tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

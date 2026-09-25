@@ -15,7 +15,6 @@ Run: python tests/cpu/environments/test_mcp_lifecycle.py  (or pytest)
 
 import asyncio
 import importlib
-import sys
 import types
 from datetime import timedelta
 
@@ -248,4 +247,4 @@ def test_stdio_transport_merges_credentials_over_sdk_default_env(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

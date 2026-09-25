@@ -19,7 +19,6 @@ last test pins it.
 """
 
 import subprocess
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -343,4 +342,4 @@ def test_the_clique_read_is_memoized_per_device():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

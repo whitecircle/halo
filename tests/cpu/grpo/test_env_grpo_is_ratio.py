@@ -5,8 +5,6 @@ without perturbing the other rows: an all-or-nothing gate costs the whole batch 
 silently removing the correction on any step containing one bad episode.
 """
 
-import sys
-
 import pytest
 import torch
 
@@ -81,4 +79,4 @@ def test_ratio_is_truncated_at_clip_max():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

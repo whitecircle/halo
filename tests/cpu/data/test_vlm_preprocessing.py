@@ -14,7 +14,6 @@ Usage:
 import base64
 import io
 import logging
-import sys
 import tempfile
 
 import numpy as np
@@ -623,4 +622,4 @@ def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -16,6 +16,7 @@ _build_cache_file_name and assert:
 Run: pytest tests/cpu/data/test_cache_key_knobs.py
 """
 
+import pytest
 from datasets import Dataset
 
 from src.data.pipeline.processing import _build_cache_file_name, _get_closure_fingerprint
@@ -122,8 +123,4 @@ def test_irrelevant_captured_object_does_not_change_cache_name():
 
 
 if __name__ == "__main__":
-    import sys
-
-    import pytest
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

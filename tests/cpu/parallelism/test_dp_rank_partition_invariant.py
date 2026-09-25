@@ -21,7 +21,6 @@ Usage:
 """
 
 import itertools
-import sys
 from collections import Counter
 
 import pytest
@@ -134,4 +133,4 @@ def test_ranks_that_must_share_a_batch_do(world, gpn, kwargs):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

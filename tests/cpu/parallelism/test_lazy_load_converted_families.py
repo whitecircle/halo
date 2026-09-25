@@ -21,8 +21,6 @@ lazy-loadable and has a tiny checkpoint builder here — so a family whose flag 
     python tests/cpu/parallelism/test_lazy_load_converted_families.py
 """
 
-import sys
-
 import pytest
 import torch
 from transformers import AutoConfig
@@ -196,4 +194,4 @@ def test_the_hub_layout_is_not_the_canonical_one(family):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

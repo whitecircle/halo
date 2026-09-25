@@ -151,6 +151,4 @@ def test_a_sub_config_tie_without_an_output_head_still_loads():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

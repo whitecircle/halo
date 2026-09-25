@@ -13,7 +13,6 @@ Run: pytest tests/cpu/data/test_loading_schema_warnings.py
 """
 
 import logging
-import sys
 
 import pytest
 from accelerate import PartialState
@@ -101,4 +100,4 @@ def test_no_schema_warning_when_nothing_is_lost(caplog):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

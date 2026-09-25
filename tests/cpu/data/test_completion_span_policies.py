@@ -20,8 +20,6 @@ Usage:
     python tests/cpu/data/test_completion_span_policies.py
 """
 
-import sys
-
 import pytest
 import torch
 
@@ -223,4 +221,4 @@ def test_extra_ignore_ids_inside_a_span_stay_masked(span_policy):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

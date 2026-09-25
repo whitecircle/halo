@@ -122,4 +122,4 @@ def test_importing_the_callback_does_not_import_deep_ep():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

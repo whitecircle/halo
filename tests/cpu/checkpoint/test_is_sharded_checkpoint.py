@@ -17,7 +17,6 @@ Run: pytest tests/cpu/checkpoint/test_is_sharded_checkpoint.py
 
 import json
 import os
-import sys
 
 import pytest
 import torch
@@ -108,4 +107,4 @@ def test_load_full_state_dict_reads_a_gathered_index(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

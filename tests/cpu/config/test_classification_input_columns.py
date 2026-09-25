@@ -9,8 +9,6 @@ first, naming what is missing.
 Run: pytest tests/cpu/config/test_classification_input_columns.py
 """
 
-import sys
-
 import pytest
 
 from tests.common.utils import load_script_module
@@ -40,4 +38,4 @@ def test_text_field_naming_a_missing_column_raises_with_the_name(classification)
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

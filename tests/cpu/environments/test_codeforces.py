@@ -13,7 +13,6 @@ Run:
 """
 
 import json
-import sys
 
 import pytest
 
@@ -606,4 +605,4 @@ def test_non_coding_env_defines_no_reasoning_effort():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

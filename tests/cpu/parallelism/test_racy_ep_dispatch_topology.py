@@ -19,8 +19,6 @@ group construction — after the whole model has loaded.
     python tests/cpu/parallelism/test_racy_ep_dispatch_topology.py
 """
 
-import sys
-
 import pytest
 
 from src.distributed.parallelism_config import ParallelismConfig
@@ -140,4 +138,4 @@ def test_global_scope_ep_etp_on_one_domain_is_rejected_at_config_time():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

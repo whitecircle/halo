@@ -10,7 +10,6 @@ Usage:
 """
 
 import copy
-import sys
 
 import pytest
 
@@ -188,4 +187,4 @@ def test_generative_prep_normalizes_hub_shapes_before_templating(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

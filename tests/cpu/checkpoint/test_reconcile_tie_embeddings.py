@@ -6,7 +6,6 @@ resolved by suffix so wrapped/VLM layouts (``model.language_model.embed_tokens.w
 covered — an exact-key lookup silently skips them and the reload re-ties a trained head away.
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -88,4 +87,4 @@ def test_untied_config_untouched():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

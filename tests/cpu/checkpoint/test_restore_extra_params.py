@@ -243,6 +243,4 @@ def test_the_restore_branches_on_the_shared_multi_rank_probe(tmp_path, monkeypat
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

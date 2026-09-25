@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -575,4 +574,4 @@ def test_pp_checkpoint_reloads_onto_a_different_pp_size(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

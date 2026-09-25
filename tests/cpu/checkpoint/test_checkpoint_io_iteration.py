@@ -19,7 +19,6 @@ Run: pytest tests/cpu/checkpoint/test_checkpoint_io_iteration.py
 
 import contextlib
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -200,4 +199,4 @@ def test_a_declared_top_level_model_type_still_wins(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

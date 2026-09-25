@@ -177,4 +177,4 @@ def test_gpt_oss_multiturn_terminates_every_assistant_turn():
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

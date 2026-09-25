@@ -20,7 +20,6 @@ therefore have to be done here, and each is silent corruption when it is not:
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -455,4 +454,4 @@ def test_a_lazy_loader_call_site_goes_through_the_one_gate(call_site):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

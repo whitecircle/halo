@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 
 import pytest
 import torch.nn as nn
@@ -79,4 +78,4 @@ def test_non_generative_stage_writes_no_generation_config(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

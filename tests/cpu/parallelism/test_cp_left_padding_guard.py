@@ -13,8 +13,6 @@ and SMPO is one of only two CP-enabled trainers. The repo already rejects ``padd
     python tests/cpu/parallelism/test_cp_left_padding_guard.py
 """
 
-import sys
-
 import pytest
 import torch
 
@@ -46,4 +44,4 @@ def test_equal_length_prompts_produce_no_leading_pad():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

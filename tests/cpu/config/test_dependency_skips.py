@@ -22,7 +22,6 @@ Usage:
 
 import ast
 import re
-import sys
 import tomllib
 from importlib.metadata import packages_distributions
 from pathlib import Path
@@ -152,4 +151,4 @@ def test_scan_flags_a_first_party_skip_but_spares_a_third_party_submodule(tmp_pa
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

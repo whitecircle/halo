@@ -378,4 +378,4 @@ def test_the_local_endpoint_default_has_one_home():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

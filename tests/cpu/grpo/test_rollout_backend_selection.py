@@ -9,7 +9,6 @@ rejections and the payload gating that stand in the way.
 
 import logging
 import re
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -382,4 +381,4 @@ def test_rollout_config_backend_roster_matches_the_gate_and_the_readers():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

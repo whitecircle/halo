@@ -21,7 +21,6 @@ group and compares the AVG-reduced gradient against a single-process, non-TP ref
 
 import copy
 import os
-import sys
 
 import pytest
 import torch
@@ -139,4 +138,4 @@ def test_mla_kv_a_proj_rope_gradient_survives_the_replicated_avg(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

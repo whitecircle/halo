@@ -18,7 +18,6 @@ Run: ``pytest -m cpu tests/cpu/parallelism/test_scripts_pass_model_as_kwarg.py``
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 
 import pytest
@@ -77,4 +76,4 @@ def test_no_script_passes_the_model_positionally():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

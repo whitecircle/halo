@@ -25,7 +25,6 @@ import ast
 import contextlib
 import datetime
 import os
-import sys
 
 import pytest
 import torch.distributed as dist
@@ -283,4 +282,4 @@ def test_main_first_wrapper_diverges_the_collective_sequence(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

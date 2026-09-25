@@ -15,7 +15,6 @@ tests exercise the single-process decision logic and, via monkeypatched consensu
 """
 
 import os
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -659,4 +658,4 @@ def test_fsdp2_resume_skips_the_reload_when_the_weights_came_from_this_checkpoin
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

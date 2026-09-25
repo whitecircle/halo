@@ -12,7 +12,6 @@ eval runner with its generation call stubbed — so the tests fail if either one
     python tests/cpu/environments/test_effort_binding.py
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -324,4 +323,4 @@ def test_context_level_wins_over_the_env_setting():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

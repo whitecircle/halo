@@ -274,8 +274,4 @@ def test_unmatchable_template_warns_on_the_padding_free_path():
 
 
 if __name__ == "__main__":
-    import sys
-
-    import pytest
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

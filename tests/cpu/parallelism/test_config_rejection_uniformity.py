@@ -14,7 +14,6 @@ Usage:
     python tests/cpu/parallelism/test_config_rejection_uniformity.py
 """
 
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -138,4 +137,4 @@ def test_the_default_elastic_backend_is_never_judged_by_the_v1_table():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -82,6 +82,4 @@ def test_the_wrappers_are_off_when_the_run_turns_grouped_gemm_off():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

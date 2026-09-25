@@ -10,7 +10,6 @@ routed weights alone changes every weight.
 """
 
 import json
-import sys
 
 import pytest
 import torch
@@ -181,4 +180,4 @@ def test_balancing_bias_steers_selection_only():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

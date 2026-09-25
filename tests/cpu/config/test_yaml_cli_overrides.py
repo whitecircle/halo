@@ -13,6 +13,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from src.training.parser import H4ArgumentParser
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -84,8 +86,4 @@ def test_example_launch_commands_use_the_equals_form():
 
 
 if __name__ == "__main__":
-    import sys
-
-    import pytest
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

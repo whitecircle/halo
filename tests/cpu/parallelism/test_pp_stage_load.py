@@ -131,12 +131,6 @@ def test_absent_head_comes_from_the_rng_so_every_stage_draws_the_same(checkpoint
     assert not torch.equal(heads[-1], reseeded)
 
 
-if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
-
-
 # Per-node PP checkpoints (DIST_OUTPUT_SHARED_FILESYSTEM=0)
 # A per-node PP save leaves each node its own stage's shards plus the FULL index, so an absent
 # other-stage shard is legitimate only when its planned keys are cross-stage modules the stage drops.
@@ -205,3 +199,7 @@ def test_per_node_dir_rejects_a_stage_it_does_not_hold(per_node_dirs):
     node0, _ = per_node_dirs
     with pytest.raises(RuntimeError, match="NOT the cross-stage modules"):
         _load(node0, 1, dtype=torch.bfloat16)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

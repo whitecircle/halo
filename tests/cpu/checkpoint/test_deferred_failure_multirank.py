@@ -17,7 +17,6 @@ The process-group timeout is deliberately short so a regression FAILS instead of
 import contextlib
 import datetime
 import os
-import sys
 
 import pytest
 import torch.distributed as dist
@@ -108,4 +107,4 @@ def test_a_clean_save_raises_on_nobody(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

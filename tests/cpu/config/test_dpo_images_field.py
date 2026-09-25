@@ -166,4 +166,4 @@ def test_alias_onto_an_occupied_images_column_raises(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

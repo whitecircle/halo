@@ -147,4 +147,4 @@ def test_sft_matches_the_mixin_it_redeclares():
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

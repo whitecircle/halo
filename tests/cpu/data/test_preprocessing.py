@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 import tempfile
 
 import pytest
@@ -705,4 +704,4 @@ def test_hub_dataset_without_metadata_is_raw_not_an_error(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

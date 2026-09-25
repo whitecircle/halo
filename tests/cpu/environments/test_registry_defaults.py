@@ -9,8 +9,6 @@ help that tells users which default they are getting is held to the classes them
 Run: python tests/cpu/environments/test_registry_defaults.py  (or pytest)
 """
 
-import sys
-
 import pytest
 
 from src.configs.environment_config import EnvironmentConfig
@@ -214,4 +212,4 @@ def test_environment_config_explicit_max_turns_overrides():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -11,7 +11,6 @@ Usage:
 """
 
 import copy
-import sys
 
 import numpy as np
 import pytest
@@ -162,4 +161,4 @@ def test_create_vlm_processor_images_field_and_generation_slice():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

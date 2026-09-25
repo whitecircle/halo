@@ -224,4 +224,4 @@ def test_script_uses_the_shared_chat_template_resolver():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

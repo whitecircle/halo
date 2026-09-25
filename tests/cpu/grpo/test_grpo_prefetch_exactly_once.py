@@ -21,7 +21,6 @@ queue silently discards completed rollouts. The contract:
 """
 
 import queue
-import sys
 import threading
 import types
 
@@ -314,4 +313,4 @@ def test_prefetch_stays_on_for_two_engines_and_the_client_shape_follows_the_list
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

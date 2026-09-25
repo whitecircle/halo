@@ -11,8 +11,6 @@ raise, naming the layers, before anything loads.
 Run: pytest tests/cpu/peft/test_ep_lora_apply_miss.py
 """
 
-import sys
-
 import pytest
 import torch
 import torch.nn as nn
@@ -114,4 +112,4 @@ def test_empty_adapter_state_is_a_noop():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

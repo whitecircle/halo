@@ -17,8 +17,6 @@ Usage:
     python tests/cpu/data/test_tokenize_rendered_real.py
 """
 
-import sys
-
 import pytest
 
 from src.data.pipeline.rendered import probe_tokenizer_specials, tokenize_rendered
@@ -142,4 +140,4 @@ def test_zaya_max_length_boundary_never_doubles_the_terminator():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

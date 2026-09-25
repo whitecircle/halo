@@ -277,4 +277,4 @@ def test_the_fixture_rows_carry_the_fields_the_cli_actually_reads():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

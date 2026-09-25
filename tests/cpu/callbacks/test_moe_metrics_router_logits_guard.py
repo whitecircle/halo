@@ -135,6 +135,4 @@ def test_aux_loss_with_usable_coef_not_stamped():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

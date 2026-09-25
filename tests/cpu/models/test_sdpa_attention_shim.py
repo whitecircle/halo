@@ -198,4 +198,4 @@ def test_wrapping_is_idempotent(tmp_path, monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

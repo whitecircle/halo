@@ -14,7 +14,6 @@ Tests cover:
 import asyncio
 import dataclasses
 import logging
-import sys
 import time
 
 import pytest
@@ -2012,4 +2011,4 @@ def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog)
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

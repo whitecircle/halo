@@ -69,6 +69,4 @@ def test_a_missing_data_file_raises_a_named_error(tmp_path):
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

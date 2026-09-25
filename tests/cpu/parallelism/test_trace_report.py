@@ -149,4 +149,4 @@ def test_every_label_failing_exits_nonzero(tmp_path, monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

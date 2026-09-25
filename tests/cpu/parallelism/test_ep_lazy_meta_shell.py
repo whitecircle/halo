@@ -157,6 +157,4 @@ def test_the_graft_leaves_persistent_meta_buffers_for_the_loader(config):
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

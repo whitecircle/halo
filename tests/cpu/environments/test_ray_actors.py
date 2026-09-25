@@ -11,7 +11,6 @@ These tests use Ray in local mode and mock the vLLM HTTP calls.
 import asyncio
 import json
 import logging
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -996,6 +995,4 @@ def test_async_training_config_to_rollout_config():
 
 
 if __name__ == "__main__":
-    import pytest
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

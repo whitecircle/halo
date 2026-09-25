@@ -18,7 +18,6 @@ Run: ``pytest -m cpu tests/cpu/parallelism/test_docs_limitation_tables.py``
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -312,4 +311,4 @@ def test_every_capability_a_family_switches_off_is_a_restrictable_flag():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

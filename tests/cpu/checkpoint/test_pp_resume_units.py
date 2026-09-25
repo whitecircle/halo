@@ -12,7 +12,6 @@ back through each stage's ``global_parameter_name``. The gates under test:
 """
 
 import os
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -374,4 +373,4 @@ def test_pp_torn_shard_subset_raises(tmp_path, monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

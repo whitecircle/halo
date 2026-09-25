@@ -24,8 +24,6 @@ training run (an N-way model merge).
     python tests/cpu/checkpoint/test_checkpoint_aux_copy.py
 """
 
-import sys
-
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
@@ -241,4 +239,4 @@ def test_a_sibling_output_directory_is_allowed(checkpoint_dir, tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

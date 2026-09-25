@@ -13,7 +13,6 @@ Run: pytest tests/cpu/inference/test_image_content_refusal.py
 """
 
 import asyncio
-import sys
 import types
 from concurrent.futures import ThreadPoolExecutor
 
@@ -84,4 +83,4 @@ def test_both_rm_scripts_score_through_the_guarded_seam(script):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

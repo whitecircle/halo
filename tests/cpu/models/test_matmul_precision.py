@@ -7,7 +7,6 @@ default drifts off 'highest' or the escape-hatch knob breaks.
 """
 
 import os
-import sys
 
 import pytest
 import torch
@@ -67,4 +66,4 @@ def test_cudnn_tf32_follows_the_same_knob():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

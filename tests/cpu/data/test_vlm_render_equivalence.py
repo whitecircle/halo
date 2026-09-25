@@ -19,7 +19,6 @@ Run: pytest tests/cpu/data/test_vlm_render_equivalence.py
 
 import base64
 import io
-import sys
 
 import numpy as np
 import pytest
@@ -271,4 +270,4 @@ def test_image_rows_render_and_collate_at_runtime(model_name, revision, case):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

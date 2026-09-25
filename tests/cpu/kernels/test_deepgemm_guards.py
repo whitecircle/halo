@@ -13,7 +13,6 @@ are reachable with the resolver stubbed:
 import ast
 import pathlib
 import re
-import sys
 import types
 
 import pytest
@@ -135,4 +134,4 @@ def test_a_genuinely_different_shape_still_warns(caplog):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

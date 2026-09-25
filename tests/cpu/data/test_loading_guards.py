@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 import tempfile
 
 import pytest
@@ -490,4 +489,4 @@ def test_test_size_carves_a_held_out_split_from_a_train_only_entry():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

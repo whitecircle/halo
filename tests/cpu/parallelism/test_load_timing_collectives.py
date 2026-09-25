@@ -14,7 +14,6 @@ own interval), and no barrier is issued.
 
 import datetime
 import os
-import sys
 
 import pytest
 import torch.distributed as dist
@@ -70,4 +69,4 @@ def test_the_span_is_global_and_costs_no_barrier(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

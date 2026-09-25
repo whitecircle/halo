@@ -13,7 +13,6 @@ Two units are covered without a GPU / a live model:
     python tests/cpu/grpo/test_token_id_training.py
 """
 
-import sys
 import types
 
 import pytest
@@ -445,4 +444,4 @@ def test_prefix_render_failure_on_a_later_turn_masks_the_earlier_rows_too():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

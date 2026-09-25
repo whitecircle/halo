@@ -11,7 +11,6 @@ config — deciding from the raw user dict either flips the flag off while the m
 """
 
 import logging
-import sys
 import types
 
 import pytest
@@ -572,4 +571,4 @@ def test_finalize_noop_when_liger_disabled():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

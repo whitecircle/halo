@@ -17,7 +17,6 @@ Usage:
     python tests/cpu/parallelism/test_pp_data_parallel_composition.py
 """
 
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -198,4 +197,4 @@ def test_nvl72_pipeline_needs_more_than_one_rack():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

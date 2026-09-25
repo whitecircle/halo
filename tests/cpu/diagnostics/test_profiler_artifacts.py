@@ -9,7 +9,6 @@ Run: python tests/cpu/diagnostics/test_profiler_artifacts.py
 
 import logging
 import os
-import sys
 
 import pytest
 
@@ -81,4 +80,4 @@ def test_non_empty_stacks_are_kept_and_reported(tmp_path, caplog):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -14,7 +14,6 @@ Usage:
     python tests/cpu/parallelism/test_barrier_fencing.py
 """
 
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -69,4 +68,4 @@ def test_barrier_is_a_no_op_without_a_process_group():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

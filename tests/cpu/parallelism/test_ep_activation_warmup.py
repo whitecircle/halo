@@ -16,7 +16,6 @@ Run: pytest tests/cpu/parallelism/test_ep_activation_warmup.py
 """
 
 import contextlib
-import sys
 
 import pytest
 import torch
@@ -261,4 +260,4 @@ def test_gptoss_warms_the_activation_its_compute_path_calls(
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

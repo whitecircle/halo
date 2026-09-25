@@ -7,8 +7,6 @@ to a token budget.
     python tests/cpu/environments/test_reasoning_effort.py
 """
 
-import sys
-
 import pytest
 
 from src.environments.base import VALID_REASONING_EFFORTS, BaseEnvironment, EpisodeGrade, resolve_reasoning_effort
@@ -64,4 +62,4 @@ def test_codeforces_binds_level_to_budget():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

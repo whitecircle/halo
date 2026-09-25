@@ -12,7 +12,6 @@ objective. These tests FAIL when either path drifts from the full-logits referen
     python tests/cpu/grpo/test_offline_grpo_chunked_logprobs.py
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -193,4 +192,4 @@ def test_check_degenerate_drop_refuses_empty_dataset():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

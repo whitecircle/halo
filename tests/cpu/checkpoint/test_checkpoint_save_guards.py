@@ -7,7 +7,6 @@ loadable checkpoint; (b) ``merge_expert_lora_on_save=True`` is incompatible with
 per-node local disks scatters the shards where the merge never sees a complete set.
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -199,4 +198,4 @@ def test_unclaimed_model_type_is_rejected_not_guessed():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

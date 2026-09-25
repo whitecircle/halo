@@ -58,4 +58,4 @@ def test_tool_result_serializes_to_an_openai_tool_message():
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

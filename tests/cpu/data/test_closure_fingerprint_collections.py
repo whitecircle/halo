@@ -97,6 +97,4 @@ def test_unfingerprintable_cell_warns_once(caplog):
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

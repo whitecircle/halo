@@ -15,7 +15,6 @@ import inspect
 import io
 import logging
 import pathlib
-import sys
 
 import numpy as np
 import pytest
@@ -383,4 +382,4 @@ def test_completion_masking_without_a_marker_is_refused_at_construction(build):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

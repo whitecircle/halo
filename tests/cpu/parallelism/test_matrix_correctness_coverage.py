@@ -17,8 +17,6 @@ Usage:
     python tests/cpu/parallelism/test_matrix_correctness_coverage.py
 """
 
-import sys
-
 import pytest
 
 from src.distributed.parallelism_config import SUPPORTED_AXIS_SETS, _render_axis_set
@@ -106,4 +104,4 @@ def test_the_coverage_map_is_not_vacuous():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -17,8 +17,6 @@ Usage:
     python tests/cpu/data/test_tokenize_rendered.py
 """
 
-import sys
-
 import pytest
 
 from src.data.pipeline.preferences import build_reward_preprocess_fn
@@ -505,4 +503,4 @@ def test_classification_row_skips_the_unlabeled_sentinel_in_a_multi_label_row(se
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

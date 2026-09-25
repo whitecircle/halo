@@ -11,7 +11,6 @@ Run: ``python tests/cpu/checkpoint/test_tp_resume_coverage_gate.py`` (or ``pytes
 """
 
 import os
-import sys
 
 import pytest
 import torch
@@ -96,4 +95,4 @@ def test_a_matching_checkpoint_loads_every_key(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

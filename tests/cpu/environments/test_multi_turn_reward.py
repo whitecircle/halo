@@ -14,8 +14,6 @@ gradient to learn the loop. Small shaping rungs bootstrap it and self-neutralize
     python tests/cpu/environments/test_multi_turn_reward.py
 """
 
-import sys
-
 import pytest
 
 from src.environments.base import (
@@ -277,4 +275,4 @@ def test_swe_applies_tool_use_shaping():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))
