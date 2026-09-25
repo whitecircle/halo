@@ -78,6 +78,7 @@ def _run_ep_gc_guard(config):
     )
     stub.args = _Args()
     stub.model = _GCModel()
+    stub._get_unwrapped_model = lambda: stub.model
 
     with patch("src.trainers.mixins.ep_introspection.is_global_main_process", return_value=True):
         EpIntrospectionMixin._setup_ep_gradient_checkpointing(stub)
@@ -171,6 +172,7 @@ def test_h1_guard_skipped_when_no_ep_layers():
     stub._has_ep_layers = False  # no EP layers → early return before the guard
     stub.args = _Args()
     stub.model = _GCModel()
+    stub._get_unwrapped_model = lambda: stub.model
     EpIntrospectionMixin._setup_ep_gradient_checkpointing(stub)  # must not raise
 
     # Prove the mutated shape actually arms the guard (the skip assertion above is not vacuous).

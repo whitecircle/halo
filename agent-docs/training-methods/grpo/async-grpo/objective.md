@@ -53,6 +53,8 @@ The code-contests recipes run `asymmetric` with `advantage_neg_scale: 0.7`. `sca
 
 `scale_rewards_std_floor` (default `0`, `0.2` in the code-contests recipes) divides by `max(std, floor)`, so a degenerate batch cannot inflate its noise into full-scale advantages. Set it below the healthy batch std.
 
+A non-finite reward or advantage fails the step on every rank: under `batch` scaling a single one makes the shared std, and so every advantage of the step, non-finite.
+
 `drop_degenerate_groups` defaults **on** here (off for online GRPO): all-alike groups carry no gradient but still inflate the DAPO normalizer (`sampling/degenerate_group_frac`). `mask_truncated_completions` is enforced here, not in TRL's generation path; the recipes leave it off.
 
 ## KL and template protection
@@ -68,7 +70,7 @@ The code-contests recipes run `asymmetric` with `advantage_neg_scale: 0.7`. `sca
 - `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass, so it needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation.
 - `rollout` (R3) replays the engine's own selection, and needs `train_on_sampled_tokens` plus a capture-capable server.
 
-Both need MoE EP wrappers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot; `routing/replay_flip_rate` reports the share of selections the live top-k would have flipped. Under `rollout`, a batch with no mask fails on every rank; the gpt-oss ep1 recipes ship it.
+Both need MoE EP wrappers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot; `routing/replay_flip_rate` reports the share of selections the live top-k would have flipped. Under `rollout`, the step fails on every rank when a trainable batch carries no mask, or when no routed row on some rank matches an engine coverage convention (`routing/rollout_unresolved_frac` is the world share, so it can read below 1 then). The gpt-oss ep1 recipes ship `rollout`.
 
 ## Batch construction
 

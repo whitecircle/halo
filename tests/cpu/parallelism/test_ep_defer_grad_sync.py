@@ -275,6 +275,25 @@ def test_deferred_replica_average_refuses_the_world_group_fallback():
         DistributedTrainerMixin._sync_deferred_expert_grads(host)
 
 
+def test_the_sweep_refuses_a_missing_ep_config():
+    """Both callers run only with EP layers present, so a missing config is a setup that never
+    captured it; returning would skip the cross-replica average and let expert replicas drift."""
+    host = _deferred_sweep_host()
+    host._ep_config = None
+    with pytest.raises(RuntimeError, match="no EPConfig was captured"):
+        DistributedTrainerMixin._sync_deferred_expert_grads(host)
+
+
+def test_the_etp_generation_broadcast_refuses_a_missing_ep_config():
+    """Under ETP the group comes off the EP config; ``None`` would skip the broadcast and let the
+    expert-TP partners generate different batches."""
+    host = SimpleNamespace(
+        parallelism_config=SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=True), _ep_config=None
+    )
+    with pytest.raises(RuntimeError, match="no EPConfig was captured"):
+        DistributedTrainerMixin._get_tp_or_etp_process_group(host)
+
+
 def test_deferred_replica_average_uses_the_replica_group_when_there_is_one():
     """Anti-vacuity: with the group present the same sweep reduces over it and raises nothing."""
     replica_group = object()

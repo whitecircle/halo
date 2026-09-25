@@ -7,8 +7,29 @@ disable dropout. The closing order is load-bearing, so it is defined here rather
 constructor.
 """
 
+from trl import GRPOTrainer
+
 from src.trainers.grpo.mixins.chunked_logprobs import LogitsWidth
-from src.trainers.mixins.validation import ctor_config, disable_trl_liger_grpo_loss
+from src.trainers.mixins.validation import ctor_config, ctor_positions, disable_trl_liger
+
+# TRL GRPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
+# Shared with SDPG, whose *args reach GRPOTrainer through the online trainer.
+GRPO_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "model", "args")
+
+
+def disable_trl_liger_grpo_loss(training_args) -> None:
+    """Keep TRL's ``use_liger_kernel`` off for the on-policy GRPO trainers.
+
+    On GRPO the flag swaps the loss for ``LigerFusedLinearGRPOLoss``, which breaks the global
+    ``num_items_in_batch`` normalizer, bypasses chunked-logprobs OOM protection, and drops the
+    entropy path. Halo's toolkit default sets it True, so force it off before TRL caches it.
+    """
+    disable_trl_liger(
+        training_args,
+        "Disabling TRL's use_liger_kernel for GRPO: it swaps the loss for the fused Liger GRPO "
+        "loss (breaks global token normalization and chunked logprobs). Model-level Liger "
+        "kernels are still applied by load_distributed_model.",
+    )
 
 
 class OnPolicyGRPOInitMixin:
@@ -17,13 +38,15 @@ class OnPolicyGRPOInitMixin:
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Resolve the training config and extract the distributed kwargs; ``(config, kwargs)``.
 
-        The config may arrive positionally, which ``_init_distributed_config``'s ``kwargs["args"]``
-        fallback cannot see; its Liger EP/TP/CP filter, non-shared-FS ``save_on_each_node`` forcing
-        and EP/CP reentrant override would then no-op.
+        The config is resolved here, positionally or by keyword, because TRL's Liger GRPO loss has to
+        be switched off on it before ``_init_distributed_config`` runs; the positionals are forwarded
+        so that a positional model reaches the mixin's MoE gates too.
         """
-        training_args = ctor_config(args, kwargs)
+        training_args = ctor_config(args, kwargs, GRPO_CTOR_POSITIONS)
         disable_trl_liger_grpo_loss(training_args)
-        return training_args, self._init_distributed_config(kwargs, training_args=training_args)
+        return training_args, self._init_distributed_config(
+            kwargs, training_args=training_args, ctor_args=args, ctor_positions=GRPO_CTOR_POSITIONS
+        )
 
     def _finish_on_policy_init(self) -> None:
         """Realize the parallel modes, gate the reference model, the chunked head path and the
