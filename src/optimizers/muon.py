@@ -160,10 +160,10 @@ def _embedding_and_head_param_ids(model: torch.nn.Module) -> set[int]:
     return {id(p) for module in targets for p in module.parameters(recurse=True)}
 
 
-def _fused_momentum_nesterov(params, grads, momentums, momentum_val, nesterov):
+def _fused_momentum_nesterov(grads, momentums, momentum_val, nesterov):
     """Launch fused momentum+nesterov kernel for all params, return NS inputs."""
     ns_inputs = []
-    for _, g, m in zip(params, grads, momentums, strict=True):
+    for g, m in zip(grads, momentums, strict=True):
         m_local = to_local(m)
         g_local = to_local(g)
         u = torch.empty_like(m_local)
@@ -267,13 +267,7 @@ class Muon(UpstreamMuon):
             states = [get_or_initialize_muon_state(self.state, p) for p in group_params]
             momentums = [s["momentum"] for s in states]
 
-            ns_inputs = _fused_momentum_nesterov(
-                group_params,
-                grads,
-                momentums,
-                momentum_val,
-                nesterov,
-            )
+            ns_inputs = _fused_momentum_nesterov(grads, momentums, momentum_val, nesterov)
 
             ns_inputs_by_shape, shape_indices, split_metadata = get_newton_schulz_inputs_from_gradients(
                 ns_inputs, param_split_fn

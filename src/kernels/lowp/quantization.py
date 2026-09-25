@@ -13,6 +13,7 @@ import weakref
 from dataclasses import dataclass
 
 import torch
+from torch._dynamo.exc import TorchDynamoException
 
 from src.env import env_flag
 
@@ -253,7 +254,8 @@ def _round_trip(t: torch.Tensor, fmt: str, axis: int) -> torch.Tensor:
             return _block_round_trip(t, fmt, axis)
     try:
         return _compiled_round_trip(t, fmt, axis)
-    except Exception as exc:  # compile/runtime failure → eager for the rest of the run
+    except TorchDynamoException as exc:
+        # Only a compile failure disables compile; a caller's error or an OOM propagates.
         _compile_failed = True
         _warn_compile_disabled(exc)
         return _block_round_trip(t, fmt, axis)
