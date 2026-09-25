@@ -24,6 +24,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from src.distributed.mesh import MeshDim, create_dp_mesh, create_dp_tp_mesh, mesh_dim_names
 from src.distributed.runtime import is_global_main_process
+from src.models.loading.dtype import resolve_training_dtype
 from src.models.structure import (
     DECODER_LAYER_LIST_ATTRS,
     backbone_with_layers,
@@ -166,8 +167,7 @@ def _apply_fsdp2(
     if is_global_main_process():
         logger.info(f"  Applying FSDP2 for data parallelism ({label}, {topology}):")
         logger.info(f"    - DP group size: {dp_mesh.size()}")
-        mp_label = "bf16" if getattr(args, "bf16", False) else ("fp16" if getattr(args, "fp16", False) else "fp32")
-        logger.info(f"    - Mixed precision: {mp_label}")
+        logger.info(f"    - Mixed precision: {mp_policy.param_dtype}")
         logger.info(f"    - reshard_after_forward: {reshard_after_forward}")
         if mp_policy is not None and not mp_policy.cast_forward_inputs:
             logger.info("    - cast_forward_inputs: False (model maintains an fp32 inter-layer residual)")
@@ -355,11 +355,8 @@ def create_mixed_precision_policy_v2(
     grads reduced in fp32. ``cast_forward_inputs=False`` for models carrying an fp32 activation
     across FSDP layers (see :func:`_should_cast_forward_inputs`).
     """
-    if getattr(args, "bf16", False):
-        compute_dtype = torch.bfloat16
-    elif getattr(args, "fp16", False):
-        compute_dtype = torch.float16
-    else:
+    compute_dtype = resolve_training_dtype(args)
+    if compute_dtype == torch.float32:
         # torch 2.11's fully_shard requires a non-None policy; an all-fp32 one is a functional no-op.
         return MixedPrecisionPolicy(
             param_dtype=torch.float32,

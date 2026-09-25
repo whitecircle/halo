@@ -61,6 +61,7 @@ from src.kernels.liger.orchestrator import (
     warn_if_flce_unreachable,
 )
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
+from src.models.loading.dtype import resolve_training_dtype
 from src.models.moe_balancing import ep_wraps_experts
 from src.models.structure import model_has_quantized_params, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
@@ -626,12 +627,10 @@ class DistributedTrainerMixin(
         """
         if self.parallelism_config.fp32_non_ep_params:
             target_dtype = torch.float32
-        elif getattr(self.args, "bf16", False):
-            target_dtype = torch.bfloat16
-        elif getattr(self.args, "fp16", False):
-            target_dtype = torch.float16
         else:
-            return
+            target_dtype = resolve_training_dtype(self.args)
+            if target_dtype == torch.float32:
+                return
         peft_model = find_peft_model(self.model)
         if peft_model is None:
             return
