@@ -167,6 +167,30 @@ def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:
     return torch.dot(a, b).item() / (norm_a * norm_b)
 
 
+def max_abs_rel_err(actual: torch.Tensor, reference: torch.Tensor) -> float:
+    """Largest elementwise error, relative to the reference's largest magnitude (fp32).
+
+    Scaled by the peak rather than elementwise, so near-zero reference entries do not dominate. The
+    floor only keeps an all-zero reference finite: any nonzero ``actual`` then reads as a huge error.
+    NaN in either operand propagates, so a ``<`` bound fails on it.
+    """
+    diff = (actual.float() - reference.float()).abs().max()
+    return (diff / reference.float().abs().max().clamp(min=1e-9)).item()
+
+
+def fro_rel_err(actual: torch.Tensor, reference: torch.Tensor) -> float:
+    """Frobenius norm of the error relative to the reference's (fp64).
+
+    A zero-norm reference raises: a relative error against it is undefined, and a fixture that
+    produces one tests nothing.
+    """
+    reference = reference.double()
+    norm = reference.norm().item()
+    if norm == 0.0:
+        raise ValueError("relative error against a zero-norm reference is undefined")
+    return (actual.double() - reference).norm().item() / norm
+
+
 def log_spectrum_matrix(rows: int, cols: int, generator: torch.Generator, decades: float = 1.0) -> torch.Tensor:
     """A random fp64 ``rows x cols`` matrix whose singular values are log-spaced from 1 down ``decades``.
 
