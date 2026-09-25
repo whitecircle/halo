@@ -16,8 +16,7 @@ from accelerate import PartialState
 
 from src.models.patches import attention
 
-# The patches log through accelerate's logger, which needs an initialized state.
-PartialState()
+PartialState()  # the patches log through accelerate's logger
 
 _LOGGER = "src.models.patches.attention"
 
