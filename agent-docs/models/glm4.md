@@ -6,7 +6,7 @@
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | GLM-4 MoE Lite | Yes | Yes (MLA path) | Yes (selective) | Yes | — ¹ | Yes | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). The layer stack is uniform, so the shipped PP split contract carries no constraint of its own.
+¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAttention-4 backward NaN on Blackwell, so the loader falls back from FA4 to SDPA (`model_fa4_backward_nan_prone`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 

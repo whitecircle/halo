@@ -168,7 +168,7 @@ Either way Gemma 4 gets no balancing **and** no `moe/*` metrics, and `output_rou
 - **DPO / SMPO / reward** — the forward runs without `labels`, and none of the three add the term.
 - **Distillation (teacher and self)** — both strip `labels`, for full-vocab logits.
 - **Classification / embedding** — non-causal heads; the causal-LM forward never runs.
-- **GRPO (offline / online / async)** — the loss is per-token log-probs, so the mode warns and leaves the flag off.
+- **GRPO (offline / online / async)** — the loss is per-token log-probs, so the mode warns and leaves the flag off; with `output_router_logits` already on at a positive `router_aux_loss_coef`, an explicit `aux_loss` raises at construction (below).
 - **Pipeline parallelism** (itself [not yet available](../parallelism/pipeline-parallelism.md)) — a stage would apply the head itself; the shipped split gate **raises** when `aux_loss` resolves with a positive coefficient.
 
 Inertness is a **trainer-class contract**: `_consumes_router_aux_loss` declares whether the objective goes through a `labels` forward (`True` only on `DistributedSFTTrainer` and `DistributedKTOTrainer`). An explicit `aux_loss` on a non-consuming trainer **raises**; an `auto` resolution landing there turns `output_router_logits` back off.
@@ -183,7 +183,7 @@ Every bias mode checkpoints its biases to `router_balancing_biases.pt` on the FS
 
 The restore is all-or-nothing across ranks: a missing or torn file on some ranks raises, as does a saved bias whose shape does not match the live router, rather than being `copy_`-broadcast into it. A checkpoint without the file keeps zero-init biases and warns; a sidecar matching **no** live router drops every trained bias, loudly — what a weight-sync RL leg does to a `bias_update` checkpoint.
 
-`scripts/after_training/convert_to_bf16.py` and the `merge_peft_adapters.py` merge path apply the sidecar into the model's native slots, materializing a config-gated slot the base lacks — a PEFT merge starts from base weights that never saw the sign updates. Saves keep balancing tensors at their trained fp32; a bf16 round trip would quantize away several 1e-3 steps.
+The PEFT merge path (`merge_peft_adapters.py`, `convert_to_bf16.py --peft --merge_adapter`) applies the sidecar into the model's native slots, materializing a config-gated slot the base lacks — a merge starts from base weights that never saw the sign updates. A full checkpoint already carries the biases in those slots, so `convert_to_bf16.py` reads them back from its shards at the trained fp32. Saves keep balancing tensors at their trained fp32; a bf16 round trip would quantize away several 1e-3 steps.
 
 ## Relevant YAML
 

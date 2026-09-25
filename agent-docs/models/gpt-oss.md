@@ -8,7 +8,7 @@ Two sizes: 20B and 120B. MoE with **attention sinks** (per-head learnable scalar
 
 `GptOssConfig` ships a native HF `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo selective-TP path.
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). Its shipped split contract binds stage boundaries to multiples of the period-2 `layer_types` pattern, and its balancing gate admits only `bias_update` or `none`.
+¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 ## EP wrapper
 

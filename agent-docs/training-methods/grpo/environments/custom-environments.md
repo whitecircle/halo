@@ -88,10 +88,10 @@ A CPU test, in the shape of `tests/cpu/environments/test_environments.py`:
 ```python
 import pytest
 
-def test_guess_env_grades_a_correct_answer(isolated_registry):
-    from src.configs.environment_config import EnvironmentConfig
-    from src.environments.registry import register_environment, resolve_environment
+from src.configs.environment_config import EnvironmentConfig
+from src.environments.registry import register_environment, resolve_environment
 
+def test_guess_env_grades_a_correct_answer(isolated_registry):
     register_environment("guess", lambda c: GuessEnvironment(**c))
     env = resolve_environment("guess", EnvironmentConfig(environment_type="guess").to_env_config())
 

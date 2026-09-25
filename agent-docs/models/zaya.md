@@ -46,9 +46,7 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 **CP** — the CCA convolutions run over the sequence axis and the delayed `v_proj_delayed` shifts each token's value to the previous timestep. Both break Ulysses partitioning at chunk boundaries: the conv receptive field crosses them with no handshake, and the delay would pull a sequence element from another rank.
 
-**PP** — `ZayaPPSpec` declares `SUPPORTS_PP = False`. Two tensors cross every decoder-layer boundary: the fp32 residual stream and the EDA `prev_router_hidden_states`, which each layer's router adds to and forwards (it accumulates, so a later stage cannot recompute it). That is a two-tensor, mixed-dtype boundary the single-activation pipeline contract does not carry, and the loop selects `layer_types` by list position.
-
-The released checkpoint also ties `lm_head` to `embed_tokens` (the tie gate) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)). Upstream ships no `base_model_pp_plan` either.
+**PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 **ETP** is supported via the shared fused-GLU helper: gate/up halves store as separate shards at `expert_tp_size > 1` so each rank holds matching intermediate positions, while the router (owning the EDA state) and the discard-slot masking stay replicated and FSDP-managed. EP+ETP without GC carries the same constraints as plain EP.
 

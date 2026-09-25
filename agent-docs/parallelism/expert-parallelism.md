@@ -151,8 +151,8 @@ That sweep covers every shape holding more than one EP group, the single-node on
 `ep2+tp2`) included. Mechanism:
 [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync).
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` is a free global default (baked into the images): neutral on dense
-and `ep_size=2`, **+9.7%** on `ep_size=8`.
+`CUDA_DEVICE_MAX_CONNECTIONS=1` is baked into the images as a free default
+([DeepEP → Environment variables](../infrastructure/deepep.md#environment-variables)).
 
 ## Quick start
 
@@ -489,7 +489,7 @@ topology rejections sit on top: single-domain multi-group EP with `ep_size > 2`
 | `use_grouped_gemm: false` | drops the wrappers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `_validate_expert_lora_realized` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_validate_fsdp_settings` |
 | `use_hsdp` | rejected — EP already shards over the EP group | `_validate_hsdp` |
-| `bf16_optimizer: false` | rejected on any MoE — fused AdamW cannot mix plain expert tensors with FSDP2 DTensors | `mixins/base.py` |
+| `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build — fused AdamW cannot mix plain expert tensors with FSDP2 DTensors. `fp32_non_ep_params: true` (fp32 masters on the non-expert params), `muon` and `flash_adamw` build | `mixins/base.py` |
 | `ref_model` (explicit) | rejected — the reference is never parallelized, so its log-probs would not match the policy | `_validate_reference_model` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `model_loading.py`, `ParallelismValidationMixin` |
@@ -517,48 +517,7 @@ roughly halving per doubling of `ep_size`. `ep4` is not a legal shape on 8 GPUs
 
 ## Adding a new model
 
-1. **Declare** the HF MoE class name in the wrapper's `HF_MODULE_NAMES`.
-   `patch_moe_model_for_ep()` instantiates it and auto-detects `num_experts`.
-
-    `MOE_LAYER_MAP` is derived from the `EPMoELayerBase` subclass tree by `build_moe_layer_map()`
-    (duplicate names raise), and `layers/roster.py` imports every module in the package, so dropping
-    the file into `layers/` is the whole registration.
-
-2. **Choose a wrapper** by expert layout:
-    - Pre-fused contiguous halves (`gate_up_proj` `[gate | up]`): reuse `EPGlm4MoELayer` or call
-      `_init_fused_glu_params`.
-    - Separate `gate_proj`/`up_proj` fused at init: reuse `EPQwen3MoELayer` / `EPBailingMoELayer`.
-    - Interleaved fused weights (`[g0, u0, g1, u1, …]`): reuse `EPGptOssMoELayer`.
-    - Custom routing: subclass `EPMoELayerBase`. The base owns `__init__` and expert-compute
-      dispatch; a contiguous-halves family only needs `forward`.
-    - Per-expert hub layout (GLM4, LFM2): declare `_PER_EXPERT_UNFUSED_KEYS` and the base
-      `gather_expert_state_dict` splits the fused gather automatically.
-
-    Construction is a template with one hook per step (`_detect_hidden_dim` / `_init_routing` /
-    `_init_shared_experts` / `_init_expert_compute` / `_init_expert_params`), so a family declares
-    what differs and inherits the rest, `self.top_k` included, which routing replay sizes its mask
-    from.
-
-3. **Expert detection:** declare `_NUM_EXPERTS_ATTR_PATHS` with the family's dotted attribute path —
-   `detect_num_experts` is one base implementation for every family, probing those paths first and
-   the generic container attributes second.
-
-4. **(Optional) bias-update balancing**, only for families doing routing *selection* in-layer
-   (every wrapper except Gemma 4, whose router sits outside it, and Zaya, whose own gate owns the
-   buffer). See
-   [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
-
-    - Set `_supports_bias_balancing = True` (+ `_ep_severs_aux_loss = True` when the family's
-      aux-loss path dies under EP).
-    - Add the per-expert bias to selection scores before top-k and gather gate weights from the
-      **unbiased** scores; call `self._record_expert_load(...)`. `_deepseek_biased_route(logits)`
-      does both in one call.
-    - Declare `_NATIVE_BALANCING_BIAS_ATTR` when the family ships a checkpoint slot for the bias.
-      Without one the family reaches only `bias_update_transient`, whose bias no export carries.
-
-Routing weights must produce FP32 `topk_weights`. Test:
-
-```bash
-torchrun --nproc_per_node=2 \
-    tests/gpu/parallelism/ep/test_ep_correctness.py
-```
+Procedure: [Adding a Model → Add EP support](../models/adding-a-model.md#add-ep-support). The per-PR
+EP correctness gate (gpt-oss-20b, EP=2 against the undistributed forward) is
+`torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_correctness.py`; a new family adds its
+own EP-vs-FSDP equivalence test.

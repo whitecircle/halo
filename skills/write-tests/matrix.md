@@ -78,7 +78,7 @@ A rejection test asserts the *reason*, not just that something raised:
 
 ```python
 import pytest
-with pytest.raises(ValueError, match="not supported"):   # CPU: ParallelismConfig(...)
+with pytest.raises(ValueError, match="is not a supported parallelism combination"):   # CPU: ParallelismConfig(...)
     ...
 ```
 

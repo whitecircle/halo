@@ -8,7 +8,7 @@ Transformers ships `transformers.models.laguna` natively, and the released check
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | Laguna S / XS 2.1 | Yes | **No** | **No** | untested | — ¹ | **No** | **No** | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). Laguna-S-2.1's `layer_types` repeat with period 4, so the shipped PP split contract binds stage boundaries to multiples of 4.
+¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 ## EP wrapper
 

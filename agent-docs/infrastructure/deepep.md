@@ -19,7 +19,7 @@ IPC over NVLink) stays selectable for intranode EP via `ep_buffer_backend`.
 
 ## Prerequisites
 
-- NVLink for intranode communication: Blackwell (B200/B300, GB200/GB300) or Hopper (H100/H200).
+- NVLink for intranode communication: Blackwell (B200/B300) or Hopper (H100/H200).
 - RDMA is required for cross-node EP via the Gin backend (`DeepEPDispatcher.is_inter_node`, set when
   `num_nodes > 1` and `node_local=False`); intra-node runs the non-Gin path and needs no RDMA.
 - Python 3.12 (`requires-python = ">=3.12,<3.13"`); PyTorch 2.11+ (`pyproject.toml` pins `torch>=2.11.0,<2.12.0`); CUDA 12.3+ (image 13.2);
@@ -64,12 +64,12 @@ exports.
 |----------|-------------|---------|
 | `EP_DISABLE_GIN` | `1` disables the Gin (RDMA) backend → non-Gin NVLink path. The dispatcher sets it from EP topology (`1` intra-node, `0` inter-node); an explicit value is honored and logged. | dispatcher-set |
 | `EP_SUPPRESS_NCCL_CHECK` | Suppress DeepEP's duplicate-NCCL-runtime guard (the NGC image's HPC-X `libnccl-net` transport *plugin* trips it; complementary, not a conflicting runtime). Must be in the **process** environment — DeepEP reads it inside `check_nccl_so()` at `import deep_ep`, so a Python write is too late; the dispatcher warns whenever the value it sees is not `1`. | `1` (image `ENV`, both images) |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | Hardware work-queue count. `1` is DeepEP's free default (measured below), latched at `cuInit` — a launch outside the image exports it before the process starts. The toolkit only warns on another value; it does not make the racy single-domain multi-group shape safe (below). | `1` (image ENV) |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | Hardware work-queue count. `1` serializes device work onto one queue and is free: neutral on dense and `ep_size=2`, **+9.7%** on `ep_size=8` (8×B300, 20B MoE, seq 4096, GC on). Latched at `cuInit` — a launch outside the image exports it before the process starts. The toolkit only warns on another value; it does not make the racy single-domain multi-group shape safe ([below](#ep-grouping-what-is-reliable)). | `1` (image ENV) |
 | `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` | Cross-node (Gin) dispatch ceiling in tokens/rank, checked against the all-reduced capacity at buffer sizing; a larger dispatch wedges instead of erroring ([AWS EFA](#expert-parallelism-over-aws-efa)). `0` disables. | `8192` |
 | `HALO_DEEPEP_NUM_SMS` | Pin the dispatch/combine SM count (else auto from `get_theoretical_num_sms`). Applies to both backends; legacy requires an even count. | auto |
 | `HALO_DEEPEP_NUM_QPS` | Override the RDMA queue-pair count for dispatch **and** combine (also sets the buffer's allocation). **elastic only** — V1 takes no per-call QP count. On non-IBGDA fabrics (EFA proxy Gin) more QPs can raise the latency-bound internode all-to-all parallelism — A/B it. | auto (`0`) |
 | `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | Device-side spin budget for the dispatch/combine barrier (below). **elastic only** — the V1 buffer's ctor takes no timeout, so a value set under `legacy` is ignored with a warning. | `100` |
-| `HALO_EP_SHARED_OVERLAP` | `1` runs the always-active shared-expert FFN on a side stream concurrent with the routed dispatch all-to-all (shared-expert families: Qwen3.5/3.6, GLM4 MoE Lite/Laguna, Bailing, Mistral4, DeepSeek-V4, Inkling, Cohere2 MoE). | off |
+| `HALO_EP_SHARED_OVERLAP` | `1` runs the always-active shared-expert FFN on a side stream concurrent with the routed dispatch all-to-all (every wrapped family with a shared expert; GPT-OSS, Qwen3 MoE, LFM-2, Gemma 4 and Zaya have none). | off |
 | `HALO_EP_CAPACITY_DEDUP` | `0` restores the per-MoE-layer buffer-capacity all-reduce, and with it a private arena per layer. | `1` (on) |
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
@@ -192,29 +192,14 @@ path peels `base_model` off the wrapper) and opens its own scope through `bump_f
 
 ## EP grouping: what is reliable
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` serializes device work onto one hardware queue, and it is **free** as a
-default: neutral on dense and `ep_size=2`, **+9.7%** on `ep_size=8` (8×B300, 20B MoE, seq 4096, GC on).
+Single-domain multi-group pure EP with `ep_size > 2` (`ep4` on one 8-GPU domain) is rejected at config
+time: the groups' combine barriers race FSDP2's DP-wide NCCL collectives. The two transports fail
+differently on 8×B300: `legacy` (V1 `Buffer`) deadlocks around step 2 (`DeepEP timeout check failed`
+→ `cudaErrorLaunchFailure`), the `elastic` default faults with `CUDA error: Invalid access of peer GPU
+memory over nvlink`. `CUDA_DEVICE_MAX_CONNECTIONS=1` prevents neither.
 
-**It does not make single-domain multi-group >2-rank pure EP reliable.** `ep_size > 2` with
-`ep_group_size < nvlink_domain_size` inside one NVLink domain is rejected at config time. The unit is
-the domain, not the OS node, so on NVL72 with `NVLINK_DOMAIN_SIZE=72` that covers `ep8`.
-
-The groups' combine barriers race FSDP2's DP-wide NCCL collectives, and the two transports fail
-differently on 8×B300: `legacy` (V1 `Buffer`) deadlocks around step 2, the `elastic` default (V2 over
-NCCL Gin) faults with `CUDA error: Invalid access of peer GPU memory over nvlink`. Safe shapes, the
-`ep4+etp2` exemption and the full mechanism:
-[Expert Parallelism](../parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs).
-
-**Multi-node multi-group EP is supported** — EP groups that span nodes and act as data-parallel replicas
-(`num_ep_groups>1`, `num_nodes>1`, no expert-TP). Nothing races the combine there: every backward-time
-collective stays **within** the EP group, and the cross-replica DP average is deferred to a
-post-backward sweep. Node-local `ep8×2` and cross-node `ep8` (two replicas) both converge and match
-single-group `ep16` on a 2-node, 16-GPU topology. Mechanism:
-[Multi-Node](../parallelism/multi-node.md#deferred-cross-replica-sync).
-
-`ep_size` must divide the expert count exactly: DeepEP dispatch assumes a uniform expert→rank
-division. `ParallelismConfig.validate_against_model_config` raises off `config.json` at the top of
-the model load; `EPConfig.finalize_expert_assignment` re-checks it once the EP groups exist.
+Grouping rules, safe shapes and multi-node multi-group EP:
+[Expert Parallelism → EP grouping](../parallelism/expert-parallelism.md#ep-grouping).
 
 ## Transport backend
 

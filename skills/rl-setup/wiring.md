@@ -110,7 +110,7 @@ docker run --gpus all --network=host --ipc=host \
 | `rollout_server_configs` | `None` | multi-server: `[{"url": ..., "group_port": ...}]`; overrides `rollout_server_url`, enables prefetch overlap |
 | `rollout_connection_timeout` | `120.0` | wait for `/health` |
 | `sync_weights_every_n_steps` | `1` | NCCL weight push cadence |
-| `num_rollout_workers` | `64` | Ray env actors (per DP rank when `ray_address` set) |
+| `num_rollout_workers` | `64` | Ray env actors per training rank (`ray_address: null`); with `ray_address` set, one pool of this size split across the ranks |
 | `max_concurrent_rollouts` | `None` | pipeline depth; default 4 × this rank's share of `num_rollout_workers` (the whole pool locally, `÷ world_size` on a shared Ray cluster) |
 | `ray_address` | `None` | shared Ray cluster; `None` = per-rank local |
 | `rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` | `0.7` / `0.95` / `32768` | rollout sampling (max tokens per turn) |
@@ -125,7 +125,7 @@ docker run --gpus all --network=host --ipc=host \
 | `episode_timeout` | `1200.0` | per-episode deadline in engine-serving time (a weight-sync pause is credited back), checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
 | `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |
-| `num_prefetch_batches` | `1` | batches prefetched ahead |
+| `num_prefetch_batches` | `1` | prefetch result-queue bound; the pipeline is one round deep, so values above 1 only add headroom |
 | `model_name` / `request_timeout` / `max_retries` / `retry_base_wait` | — | per-request HTTP behavior; `request_timeout` counts engine-serving time like `episode_timeout` |
 
 `vllm_group_port` is **not** in `AsyncTrainingConfig` — it's a TRL `GRPOConfig`
@@ -165,11 +165,13 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
    POSTs `/init_weight_transfer_engine` (server rank_offset=1) while
    the trainer (rank 0) builds the `StatelessProcessGroup` + `PyNcclCommunicator`
    concurrently. Done once, while vLLM is idle.
-3. Each sync: `sync_model_weights()` → `/pause` → `/start_weight_update` →
-   `packed_broadcast_producer` (~1 GB packed buffers) alongside server
-   `/update_weights` → `/finish_weight_update` → `/resume`. LoRA:
-   `update_named_param()` buffers, `reset_prefix_cache()` flushes in one bulk
-   broadcast (adapters merged first, names stripped of `base_model.model.`).
+3. Each sync: the gather calls `update_named_param()` per param, which stages it on the sync
+   GPU and flushes a chunk whenever the next param would overflow `HALO_WEIGHT_SYNC_CHUNK_MB`
+   (default 1024). The first flush opens the update (`/pause?mode=keep` → `/start_weight_update`);
+   each chunk is a `/update_weights` declaration alongside `packed_broadcast_producer`.
+   `reset_prefix_cache()` sends the tail chunk, then `/finish_weight_update` → `/resume`. PEFT
+   adapters are merged first, names stripped of `base_model.model.`. `sync_model_weights()` is the
+   single-call form of the same phases (`update_model_params`, the reconnect replay).
 
 The parallelism-aware gather is the shared `gather_and_send_weights`
 (`src/trainers/grpo/rollout/weight_sync.py`) that both the online trainer and env
@@ -227,20 +229,24 @@ Config: `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml`
 `rewards:` term list, defaulting to `[{source: accuracy}]` — the RLVR graders `accuracy` and
 `format`, plus `judge` / `reward_model` (`src/args/rlvr_online_grpo_args.py`).
 
-```bash
-# vLLM on GPU 0
-docker compose -f docker-compose.vllm.yml up vllm-server   # or standalone docker run
+Server and trainer GPUs must be disjoint (a rank cannot NCCL-broadcast to itself), and the server
+must serve the trained model — bare compose serves `Qwen/Qwen3-0.6B` on GPU 7.
 
-# Trainer on GPUs 1+ (accelerate for plain DP/LoRA)
-CUDA_VISIBLE_DEVICES=1 accelerate launch \
+```bash
+# Dense: server on GPU 0, FSDP2 DP on 1-3 (the recipe's own split)
+VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=0 \
+  docker compose -f docker-compose.vllm.yml up -d vllm-server
+CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 \
   scripts/training/online_grpo/rlvr.py \
   examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml
 
-# MoE with EP (torchrun, not accelerate)
-torchrun --nproc_per_node=8 \
+# MoE with EP: one DeepEP group across the trainer GPUs (ep_size = trainer-GPU count)
+VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 \
+  docker compose -f docker-compose.vllm.yml up -d vllm-server
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
   scripts/training/online_grpo/rlvr.py \
   examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-dapo-math.yaml \
-  --expert_parallel_size=8
+  --expert_parallel_size=4
 ```
 
 (`scripts/training/online_grpo/rlvr.py` — verifiable rewards.)
@@ -255,29 +261,28 @@ each with `vllm/` and — ep1 only — `sglang/`); in a filename `-lora-`/`-full
 a graded tool-heavy one, or `gptoss/sglang/gptoss-20b-code-contests-full-ep1.yaml` on SGLang. Each
 reads `EnvironmentConfig` + `AsyncTrainingConfig` from YAML.
 
+Each recipe's header carries its server flags and GPU split. React-math (EP=4) serves on GPUs 4-7
+with `--reasoning-parser qwen3` and no tool-call parser — react_math reads its Action from the
+text, and compose always passes `--tool-call-parser` — so it runs standalone:
+
 ```bash
-# vLLM (tool parser matters here — env GRPO uses /v1/chat/completions with tools)
-VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_TOOL_PARSER=hermes \
-  docker compose -f docker-compose.vllm.yml up vllm-server
+docker run -d --gpus all --network=host --ipc=host -e CUDA_VISIBLE_DEVICES=4,5,6,7 \
+  vllm-server:0.26.0 Qwen/Qwen3.6-35B-A3B --port 8000 \
+  --weight-transfer-config '{"backend": "nccl"}' --moe-backend triton \
+  --return-tokens-as-token-ids --logprobs-mode processed_logprobs --reasoning-parser qwen3
 
 # Trainer — single entry point; resolves the env from environment_type in the YAML
-CUDA_VISIBLE_DEVICES=1 accelerate launch \
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
   scripts/training/environmental_grpo.py \
   examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml
-
-# EP/TP: same script under torchrun + parallel flags
-torchrun --nproc_per_node=8 \
-  scripts/training/environmental_grpo.py \
-  examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-lora-ep1.yaml \
-  --expert_parallel_size=8
 ```
 
 `scripts/training/environmental_grpo.py` is the single async-GRPO
-entry point: it resolves the env from `environment_type` in the YAML (`accelerate
-launch` for plain DP, `torchrun` for EP/TP/ETP). `halo launch environmental-grpo <config>
---nproc N` builds the same line. For a non-registry environment,
-call `register_environment(name, factory)` at import time and set that name as
-`environment_type`.
+entry point: it resolves the env from `environment_type` in the YAML. Launch it with `torchrun`:
+`accelerate launch` refuses EP/CP/TP and, on a MoE, the grouped-GEMM expert wrappers weight sync
+needs, so it fits only a dense plain-DP run. `halo launch environmental-grpo <config> --nproc N`
+builds the torchrun line. For a non-registry environment, call
+`register_environment(name, factory)` at import time and set that name as `environment_type`.
 
 Minimal async-GRPO YAML shape (the load-bearing keys):
 
@@ -307,7 +312,7 @@ enable_prefetch: true
 num_generations: 4
 beta: 0.01                      # 0.0 disables the ref model
 epsilon: 0.2
-scale_rewards: group           # TRL takes 'group' | 'batch' | 'none'
+scale_rewards: batch           # 'batch' (the recipes') | 'group' | 'none'
 max_prompt_length: 512
 max_completion_length: 512
 ```

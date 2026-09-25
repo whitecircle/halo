@@ -18,7 +18,7 @@ rank 0** writes its own copy.
 | **TP** (HF-native or selective) | `save_tp_checkpoint` — reconstruct DTensors, then all-gather the hand-sliced GptOss `sinks` (which the parameter walk skips: it would emit this rank's slice under the same key) | Save rank | `DTensor.full_tensor()` |
 | **CP** | `save_cp_checkpoint` — remap Ulysses wrapper keys to HF paths | Save rank | `full_tensor()` |
 | **FSDP2** (plain torchrun DP) | `save_fsdp2_checkpoint` — stream the gathered chunks | Save rank | `full_tensor()` |
-| **Single-GPU / accelerate** | no saver (the ladder returns `None`) → HF Trainer default | Main process | None |
+| **Single-GPU / accelerate** (no EP layers) | no saver (the ladder returns `None`) → HF Trainer default | Main process | None |
 
 Selection reads what the model **is**, not the configured sizes. A model carrying EP layers takes
 `save_ep_checkpoint` even at `ep_size == 1` (experts replicated, FSDP2-sharded), so an ep1 MoE run
@@ -28,7 +28,8 @@ every trainer.
 `EmbeddingTrainer` runs the same ladder with the checkpoint context re-pointed from the
 `SentenceTransformer` `nn.Sequential` at the `auto_model` backbone, then writes the ST pipeline
 config beside it. Its in-place-injected LoRA is not a `PeftModel`, so `PeftAdapterSaver` never sees
-it: the adapter is folded into the gathered state dict and handed to the same shared writer.
+it: that branch skips the ladder, folds the adapter into the gathered state dict and writes it
+through `write_gathered_checkpoint`.
 
 **Gathered saves** (the default everywhere) produce HuggingFace-compatible checkpoints loadable with
 `from_pretrained()`. The optional **per-rank sharded EP save** (`save_sharded_ep`) is a
@@ -42,7 +43,7 @@ Under EP the same `retain` flag is threaded into each family's `gather_expert_st
 expert all-gathers stay on every rank; the layout assembly after them runs only where the result is
 kept. A family that returns tensors anyway is rejected, not obeyed.
 
-Every gathered save then **streams** through `StageShardWriter`: FSDP2, CP and TP via
+Every ladder save then **streams** through `StageShardWriter`: FSDP2, CP and TP via
 `stream_gathered_checkpoint`, one conversion-closed chunk (a decoder layer) at a time; EP and PP by
 writing each MoE layer out as it is gathered.
 
@@ -65,7 +66,7 @@ safetensors *file* header is the container format, not this marker.
 |---|---|---|---|---|
 | **Single file** | `model.safetensors` | any gathered save under the shard threshold | *(no index)* | Yes |
 | **Gathered HF-sharded** | `model-00001-of-000NN.safetensors` + index | any gathered save over the threshold — the default for production-size models | none | Yes |
-| **PP per-stage** | `model-pp00000-of-00004-00001.safetensors` — one or more parts per stage + merged index | `pp_size > 1` — [not yet available in this release](../parallelism/pipeline-parallelism.md), so no run produces it today | none | Yes — **no merge step** |
+| **PP per-stage** | `model-pp00000-of-00004-00001.safetensors` — one or more parts per stage + merged index | `pp_size > 1` — [not yet available in this release](../parallelism/pipeline-parallelism.md), so no run produces it | none | Yes — **no merge step** |
 | **EP per-rank sharded** | `model-00000-of-000NN.safetensors` (`.shard_{rank}` keys) + index | `save_sharded_ep: true` | `format: "ep_sharded"` | No — `merge_ep_shards.py` first |
 
 Shard size defaults to 5 GB (`save_max_shard_size` overrides it). It bounds the **gathered** writers
@@ -131,10 +132,8 @@ recomputed on load.
 One `persistent_buffers()` helper drives the EP, TP, and FSDP2 gathers; CP gets the same set through
 the wrapper's own `state_dict()`.
 
-Resolving a tensor is a collective (`full_tensor()` on a DTensor), so the FSDP2, TP and CP gathers
-share one preamble. It runs every leg — parameters *and* buffers — on every rank and keeps only the
-writer's host copy. A leg entered by the writer alone hangs the save on the ranks that never enter
-it.
+The buffer leg is collective too, so the FSDP2, TP and CP gathers share one preamble that runs it on
+every rank; a leg entered by the writer alone hangs the save.
 
 The exported `config.json` is serialized with run-scoped router mutations restored
 (`config_export_ready`): the balancing strategy's zeroed `router_aux_loss_coef`, forced
@@ -192,10 +191,6 @@ layouts.
 
 `save_pp_checkpoint` saves the stage config verbatim and skips the reconciliation — PP rejects
 tied-embedding models outright when it splits the model.
-
-FSDP2/CP and TP funnel into one writer (`stream_gathered_checkpoint`), so all three get the same
-save-dtype and hub-expert-layout normalization and the same auto-sharded safetensors layout. A
-failing write raises through `DeferredRankFailure` so every rank sees it at the next collective.
 
 The `.bin`-then-sweep fallback belongs to `write_gathered_checkpoint`, the whole-dict writer the
 injected-LoRA embedding merge uses: it needs a dict still whole after the failure, which a streamed
@@ -280,12 +275,15 @@ read directly.
 | Serving loader | Families | Fused `gate_up_proj` / `down_proj` |
 |---|---|---|
 | vLLM 0.26.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4 | loaded directly |
-| vLLM 0.26.0 `FusedMoE` (`cohere2_moe`, `step3p5`) | Cohere2 MoE, Step-3.7 Flash | loaded directly |
+| vLLM 0.26.0 `FusedMoE` (`cohere2_moe`) | Cohere2 MoE | loaded directly |
+| vLLM 0.26.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
 | vLLM 0.26.0 per-expert-only | GLM-4 MoE Lite, Laguna, LFM-2, Bailing/Ling 2.0 | hard-fail or silent drop — un-fuse first |
 | vLLM 0.26.0 — no model class | Mistral4, Ling 3.0 (`bailing_hybrid`), Ring (`bailing_moe_linear`) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
+| vLLM 0.26.0 — export layout not read | Inkling, DeepSeek-V4, GLM-5 Next (module-spelled exports, [below](#expert-parallelism-ep-eptp-epcp)), Zaya (no class) | not servable ([DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md)) |
 
 SGLang 0.5.17 reads each family's hub layout through its own per-family loader, so the same un-fuse
-rule applies; it registers no class for Mistral4, Ling 3.0 or Ring either.
+rule applies; it registers no class for Mistral4, Ling 3.0 or Ring either, and its DeepSeek-V4 and
+Zaya loaders read per-expert layouts the gathered export does not carry.
 
 **MLA backend on Blackwell.** GLM-4 MoE Lite uses MLA; flashinfer's MLA kernel rejects its head
 config on SM100+ — serve with vLLM `--attention-backend CUTLASS_MLA` or SGLang
@@ -313,6 +311,11 @@ layer class declares the pairs in `_EXPORT_KEY_RENAMES` and the gather rewrites 
 one such family). transformers expresses this as `WeightRenaming` and applies it only inside
 `from_pretrained`.
 
+vLLM keys on hub names and silently skips unknown ones, so the module spelling would drop those
+tensors from serving and from the RL weight sync. The lazy loader applies the inverse of
+`_EXPORT_KEY_RENAMES` on read; `merge_ep_shards.py` and the GRPO weight sync apply the same rewrite,
+keeping merged-from-sharded and pushed-to-vLLM key-identical to gathered.
+
 Four families declare transformers' load-side conversion for their hub checkpoints
 (`_HUB_CONVERSION_KEYS`), which the lazy loaders replay per key. Three of them are bridged read-side
 only, so their gathered exports keep the canonical module spelling:
@@ -330,11 +333,6 @@ The conversion sources are not all vendor-anchored (DeepSeek-V4's `\.norm\.` →
 matches the canonical final norm). So the lazy loaders keep a converted key whose targets all miss
 the model's key space while the key itself resolves — the same model-key validation transformers'
 own loader applies. A canonical checkpoint (an EP or PP resume of a toolkit save) loads untouched.
-
-vLLM keys on hub names and silently skips unknown ones, so the module spelling would drop those
-tensors from serving and from the RL weight sync. The lazy loader applies the inverse on
-read; `merge_ep_shards.py` and the GRPO weight sync apply the same rewrite, keeping
-merged-from-sharded and pushed-to-vLLM key-identical to gathered.
 
 **Sharded (`save_sharded_ep: true`)** writes each rank's expert shard keyed by global rank, with
 global rank 0 adding non-expert params and the index. Because the shards are global-rank-keyed and
@@ -382,9 +380,8 @@ python scripts/after_training/merge_ep_shards.py \
 The merge copies the resume sidecars (`scheduler.pt`, `router_balancing_biases.pt`, `rng_state_*`)
 while excluding stale weight artifacts, so the merged directory resumes weights, scheduler and
 balancing biases — but **not** the optimizer: the per-rank `optimizer_shard_XXXXX.pt` files are
-weight-suffixed and dropped, so a resume from the merged directory warm-restarts. Moot for every
-shipped sharded config, which sets `save_only_model: true`. A resume pointed at the unmerged directory
-raises the merge-first error directly.
+weight-suffixed and dropped, so a resume from the merged directory warm-restarts. A resume pointed at
+the unmerged directory raises the merge-first error directly.
 
 The merge requires a per-rank index carrying `ep_size`, so a gathered, PP or already-merged directory
 is declined rather than transformed twice, and an adapter sitting beside the shards is refused up
@@ -464,11 +461,9 @@ re-apply it, because a merge rebuilds the base from the hub, whose sinks are alw
 `reset_sinks` run trained its adapter under neutralized ones. It is a separate sidecar, never
 `adapter_config.json`, so stock PEFT keeps loading the adapter unchanged.
 
-A directory holding native grouped expert adapters is labeled with a `peft_type` PEFT does not know
-— `EXPERT_LORA` for an expert-only save (which carries no PeftModel, so the saver synthesizes the
-config), `LORA_WITH_EP_EXPERT_LORA` for a mixed attention+expert one — so an external
-`PeftModel.from_pretrained` raises on the label instead of loading the attention half alone. The keys
-and the synthesized fields are on [PEFT](../optimization/peft.md#checkpoint-saving).
+A directory holding native grouped expert adapters carries a `peft_type` stock PEFT does not know, so
+an external load raises instead of loading the attention half alone
+([PEFT](../optimization/peft.md#checkpoint-saving)).
 
 ## Accelerate / FSDP checkpoints
 
@@ -485,7 +480,8 @@ or `SHARDED_STATE_DICT` saves per-rank shards.
 > The `torchrun` path uses FSDP2 exclusively and is unaffected.
 
 Under `torchrun`, HF's built-in FSDP is disabled (`config.fsdp = ""`) and the mixin applies FSDP2
-(`fully_shard`) programmatically, excluding EP modules via `ignored_params`.
+(`fully_shard`) programmatically. EP modules go in `ignored_params` except at `ep_group_size == 1`,
+where `fsdp_shard_ep1_experts` (default on) shards them.
 
 ## Load coverage gate
 
@@ -531,7 +527,7 @@ whether to repoint the weights source.
 It repoints when `needs_ep_wrappers`, `is_cp_mode` or `is_tp_mode` holds — with the default
 `use_grouped_gemm: true` that is **every stock torchrun run**, dense included. The return is the
 **checkpoint directory**, so the trained weights load at model construction (Path B). Only a
-`use_grouped_gemm: false` run with no CP and no TP keeps `model_name_or_path` (Path A).
+`use_grouped_gemm: false` run with no EP, CP or TP keeps `model_name_or_path` (Path A).
 
 The FSDP2 loader detects a model constructed from the checkpoint and skips the redundant
 full-state-dict re-read.
@@ -585,9 +581,7 @@ Because the Path-B base is rebuilt fresh, two classes of trained state are resto
 
     That call warns on partial matches and raises if *every* saved key is unmatched, so a silent
     zero-init resume cannot pass quietly. Expert adapters that **no** EP layer can receive raise
-    too: resuming with EP off, `use_grouped_gemm: false`, or the expert projections dropped from
-    `lora_target_modules` would otherwise discard every saved expert delta while reporting a
-    successful restore.
+    too ([PEFT](../optimization/peft.md#checkpoint-saving)).
 
 - **Wrapper-added params** (`_restore_extra_trained_params`) — anything the unwrapped model declares
   in `_extra_checkpoint_param_names`, read tensor-by-name
@@ -607,25 +601,12 @@ Because the Path-B base is rebuilt fresh, two classes of trained state are resto
 > sharded state, and exports **nowhere**
 > ([mechanism](../training-methods/callbacks.md#routerbiasbalancingcallback)).
 
-Both modes are all-reduced every step and so replica-identical. The save rank writes them to
-`router_balancing_biases.pt` and every rank copies them back on resume. Under PP they are remapped
-through `global_parameter_name` and merged to one file on that same FS-aware save rank.
-
-Two restore verdicts are loud: a saved bias whose shape does not match the live router **raises**
-(`copy_` would broadcast it), and a sidecar matching no live router at all warns per rank and is
-dropped.
-
-`merge_peft_adapters.py` and `convert_to_bf16.py` re-apply that state through
-`apply_training_sidecars` (`src/checkpoint/tool_io.py`), splitting on whether the source ships model
-weights of its own.
-
-An adapter directory has none, so the sidecar is applied into the assembled model's native slots —
-the merge starts from base weights that never saw the updates. A source that does carry weights
-already holds the bias, and its balancing tensors are re-read from its own shards at their trained
-fp32, so the bf16 conversion cannot quantize the sign steps away.
-
-A config-gated slot the base was assembled without (LFM-2 with `use_expert_bias: false`) is
-re-materialized during the apply and the flag flipped on the merged config.
+The save rank writes both modes' biases to `router_balancing_biases.pt` and every rank restores them
+on resume ([The balancing sidecar](../training-methods/callbacks.md#the-balancing-sidecar)). The
+export tools re-apply them through `apply_training_sidecars` (`src/checkpoint/tool_io.py`): an
+adapter directory gets the sidecar applied into the merged model's native slots, while a source that
+carries weights already holds the bias and has its balancing tensors re-read from its own shards at
+their trained fp32.
 
 ### Full-state-dict weight loading
 
@@ -702,8 +683,8 @@ every rank of an `expert_replica_group`, and so do their moments: the gradients 
 that group and `AdamWBF16` draws its stochastic rounding from a rank-synchronized RNG.
 
 Only the group's **lowest rank** keeps them in its shard; its peers strip them and read them back
-from that rank's shard on resume. At Qwen3.5-397B-A17B on 512 GPUs at `ep8` that is 64 copies
-collapsed to one — a checkpoint's optimizer state drops from ~103 TB to ~4 TB.
+from that rank's shard on resume. At Qwen3.5-397B-A17B on 512 GPUs at `ep64` that is 8 copies
+collapsed to one — the EP modules' optimizer state drops from ~14 TB to ~1.8 TB.
 
 The dedup needs a shared output filesystem: a peer must be able to read the writer's shard. On a
 per-node filesystem every rank writes its own copy and the save warns once naming the fix.
@@ -823,11 +804,9 @@ independently; all nodes must have equivalent checkpoint dirs at the same path. 
 FS-aware: shared = global rank 0 creates; non-shared = each node's local rank 0 creates, then a
 barrier.
 
-**WandB run resumption:** when `WANDB_RUN_ID` is unset, the auto ID is
-`md5(f"{output_dir}:{int(time.time())}")[:8]`. The timestamp synchronizes the ID across **ranks of one
-launch** (rank 0 broadcasts it) but is **not** stable **across launches** — a resumed launch in the
-same `output_dir` gets a new ID and a new run. Export `WANDB_RUN_ID` (and typically
-`WANDB_RESUME=allow`) to continue.
+**WandB run resumption:** the auto run ID is stamped per launch, so a resumed launch starts a new run;
+export `WANDB_RUN_ID` (and `WANDB_RESUME=allow`) to continue
+([Environment variables](configuration-reference.md#environment-variables)).
 
 Five environment variables govern checkpoint behavior — `DIST_OUTPUT_SHARED_FILESYSTEM` (or its
 `DIST_SHARED_FILESYSTEM` umbrella), `DIST_NCCL_TIMEOUT_MINUTES`,

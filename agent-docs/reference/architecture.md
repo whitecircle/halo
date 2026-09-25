@@ -1,9 +1,9 @@
 # Architecture
 
 Halo extends HuggingFace — Transformers, Accelerate, TRL — with Expert, Context, Tensor, and
-Expert-Tensor parallelism plus alignment methods TRL does not ship (SMPO, Offline GRPO, Async GRPO
-with Environments). Every trainer subclasses a TRL, Transformers, or SentenceTransformers trainer
-and adds one mixin.
+Expert-Tensor parallelism plus alignment methods TRL does not ship (SMPO, Offline GRPO) and Async
+GRPO with Environments. Every trainer subclasses a TRL, Transformers, or SentenceTransformers trainer
+and adds `DistributedTrainerMixin`.
 
 The default save is a standard HuggingFace checkpoint and there is no Megatron conversion step; the
 one opt-in per-rank format (`save_sharded_ep`) needs a merge script before reload.
@@ -114,13 +114,14 @@ planner, fuser, per-family conversion/rename resolution.
 
 The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`src/distributed/mesh.py`); EP and CP use
 hand-built `dist.new_group` groups whose all-to-all patterns do not map to a mesh. The trainer reads
-every group through one `ParallelDims` view (`src/distributed/mesh.py`), and the bucketed
+the mesh groups (DP, TP) through the `ParallelDims` view (`src/distributed/mesh.py`) and the expert
+groups (dispatch, expert-TP, expert-replica) off `EPConfig`. The bucketed
 gradient all-reduce every post-backward sweep shares — deferred EP cross-replica, TP replicated,
 QLoRA — is a torch-only leaf (`src/distributed/grad_reduce.py`) that imports no parallelism
 implementation.
 
 Which axis combinations may run is an allowlist, not a denylist — see
-[Parallelism](../parallelism/README.md#communication-and-data-flow).
+[Parallelism](../parallelism/README.md#supported-combinations).
 
 ## A training step
 
@@ -138,7 +139,7 @@ load_distributed_model            src/distributed/loading/model_loading.py
    │  • load_pp_stage_model → this stage's decoder layers only (when pp_size > 1)
    ▼
 DistributedTrainerMixin._setup_distributed_modes
-   │  • FSDP2 fully_shard (EP modules in ignored_params)
+   │  • FSDP2 fully_shard (EP modules in ignored_params, except at ep_group_size == 1)
    │  • router/expert grad-sync hooks already attached at EP-wrapper construction (load);
    │    PEFT modules_to_save router copies re-hooked here
    ▼
@@ -159,13 +160,14 @@ error. See the [Configuration Guide](../getting-started/configuration.md).
 `resolve_attn_implementation` (`src/models/patches/attention.py`) auto-selects the attention
 backend from compute capability: `flash_attention_4` on SM100+ when `flash_attn.cute` imports,
 `flash_attention_3` on Hopper, FA2 otherwise. Per-model overrides then redirect the families whose
-head geometry or sinks a flash kernel cannot serve — Qwen3.5/3.6/Qwen3-Next, GLM-4 MoE Lite and
-Gemma4 to SDPA, DeepSeek-V4 to eager. See [Flash Attention](../optimization/flash-attention.md) for
-the per-model table and the reason behind each redirect.
+head geometry or sinks a flash kernel cannot serve; the per-model table and the reason behind each
+redirect are on [Flash Attention](../optimization/flash-attention.md).
 
 For MoE models the loader replaces each MoE block with the per-family EP wrapper holding this
 rank's expert slice. FSDP2 `fully_shard` then shards the non-expert params, with EP modules in
-`ignored_params` so their gradients sync through the manual hooks instead. Saving gathers the
+`ignored_params` so their gradients sync through the manual hooks instead — except at
+`ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard the experts too
+and its reduce-scatter is their only sync. Saving gathers the
 distributed shards back into a standard HuggingFace checkpoint — see
 [Checkpoints & Resume](checkpoints.md).
 

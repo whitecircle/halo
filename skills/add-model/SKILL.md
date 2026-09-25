@@ -27,7 +27,7 @@ file-touch list, the traps and the commands; read it before editing.
 ## Checklist (overview)
 
 1. **Dense or MoE?** Dense `AutoModelForCausalLM` / multimodal `AutoModelForImageTextToText`
-   needs **no EP work** — plain FSDP just works. Only MoE families need an EP wrapper.
+   needs **no EP work** — plain FSDP works as is. Only MoE families need an EP wrapper.
 2. **MoE → add an EP wrapper.** Create `src/distributed/expert_parallel/layers/<name>.py`
    subclassing `EPMoELayerBase` (`base_layer.py`) — or `EPSharedExpertsMoELayerBase`,
    `EPSeparateGluMoELayerBase`, `EPGroupLimitedMoELayerBase` where the family fits one. The base
@@ -48,16 +48,8 @@ file-touch list, the traps and the commands; read it before editing.
    (`src/kernels/liger/builder.py`) turns each spec into the applier the orchestrator dispatches.
    Name a role only where the kernel reproduces the family's forward exactly. A family upstream
    Liger already covers sets `delegates_to_upstream=True` and names only the roles it adds.
-4. **Router balancing.** `moe_balancing` is
-   `Literal["auto", "none", "aux_loss", "bias_update", "bias_update_transient"]`, default **`auto`**.
-   Leave it at `auto` and make the family resolvable: `aux_loss` when selection happens inside the
-   HF gate (nothing to do), or `bias_update` (set `_supports_bias_balancing = True` + inject
-   `_balancing_bias` / `_record_expert_load` in the wrapper's routing). A model with native
-   balancing biases resolves to `bias_update` through `auto`. `bias_update` requires the bias to
-   land in a checkpoint-**exported** slot (`_NATIVE_BALANCING_BIAS_ATTR`); a family whose
-   architecture has no such slot must opt in explicitly with `bias_update_transient` — a
-   trainer-only side buffer every export serves without. What `auto` resolves to per family is
-   published in `agent-docs/training-methods/callbacks.md`.
+4. **Router balancing.** Leave `moe_balancing` at `auto` and make the family resolvable — the
+   wrapper hooks and the export contract are in `checklist.md` → *Router balancing*.
 5. **Not in transformers yet → vendor.** Copy `configuration_*.py` + `modeling_*.py` into
    `src/models/<name>/`, register the `Auto*` classes in a module of that package (never its
    `__init__.py` — package inits carry a docstring only), and trigger that module's import as a

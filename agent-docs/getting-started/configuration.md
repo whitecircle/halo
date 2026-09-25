@@ -60,7 +60,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 - **Unwrapped MoE experts** — `swiglu` off, even when requested, where Halo does not wrap the routed experts (`ep_size: 1` with `use_grouped_gemm: false`, or a family with no EP layer class) and upstream liger-kernel holds the flag, which its MoE appliers use to install `LigerExperts` (input gradient wrong on Blackwell in the pinned release). The flag goes whole, so upstream's dense, shared-expert and vision SwiGLU on such a model run eager too ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
 
 - **TP** (`tp_size > 1`) — `cross_entropy` and `fused_linear_cross_entropy` off; the `lm_head` logits are DTensor-sharded across the vocab dim, so a fused softmax would see a partial vocab.
-- **CP or PP** (`cp_size > 1` or `pp_size > 1`) — same two off: the CP wrapper (and, when PP lands, the last pipeline stage) computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.
+- **CP or PP** (`cp_size > 1` or `pp_size > 1`) — same two off: the CP wrapper or the last pipeline stage computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.
 
 `fused_linear_cross_entropy` is otherwise opt-in, defaulting on only for DeepSeek-V4, GLM-4 MoE Lite, and Zaya. Override individual kernels with `liger_kernel_config`:
 
@@ -104,7 +104,7 @@ EP/CP/TP/ETP/PP under `accelerate launch` **raise** at startup for any `distribu
 | EP+CP / EP+TP | add both flags |
 | Multi-node | add `--nnodes`, `--node_rank`, `--master_addr`, `--master_port` |
 
-EP+ETP (`ep_size>1` and `expert_tensor_parallel_size>1`) is supported but experimental: the expert-TP reduction runs in token space so the coupled DeepEP dispatch groups don't deadlock the combine barrier under FSDP2. It must stay node-local and cannot combine with attention TP. See [Parallelism](../parallelism/README.md).
+EP+ETP (`ep_size>1` and `expert_tensor_parallel_size>1`) is supported but experimental: the expert-TP reduction runs in token space so the coupled DeepEP dispatch groups don't deadlock the combine barrier under FSDP2. Its expert-TP groups stay NVLink-local — across domains it runs as one EP group with exactly one ETP group per domain — and it cannot combine with attention TP. See [ETP validation rules](../parallelism/expert-tensor-parallelism.md#validation-rules).
 
 FSDP2 (`fully_shard`) is applied automatically for all `torchrun` modes: gradients and optimizer states stay sharded across DP ranks, so memory scales ~`dp_size` smaller than DDP. EP/CP exclude the EP modules via `ignored_params` — except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default `true`) hands the experts to FSDP2 as well and its reduce-scatter becomes their only gradient sync. TP with DP>1 uses a 2D mesh for DTensor-compatible grad sync.
 

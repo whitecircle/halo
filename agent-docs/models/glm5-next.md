@@ -6,7 +6,7 @@
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
 | GLM-5 Next | Yes | **No** | **No** | Yes | — ¹ | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md) — the shipped split contract for the family is under [Limitations](#limitations).
+¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 ## Architecture
 
@@ -26,8 +26,9 @@
 The only release is fp8-e4m3 block-quantized (`quantization_config`: 128×128 blocks, fp32 per-block `*_scale_inv` sidecars; the KDA stack, norms, router, hyper-connection tensors and vision tower stay unquantized). EP requires plain BF16 experts, so convert once:
 
 ```bash
-HF_HOME=/mnt/hf python scripts/before_training/convert_glm5_bf16.py \
-    --model_id zai-org/GLM-5.3-Flash --output_dir /mnt/models/GLM-5.3-Flash-BF16
+D=/path/to/large/volume   # verified with df -h / findmnt
+HF_HOME=$D/hf python scripts/before_training/convert_glm5_bf16.py \
+    --model_id zai-org/GLM-5.3-Flash --output_dir $D/models/GLM-5.3-Flash-BF16
 ```
 
 Budget ~330 GB download cache + ~650 GB output; the conversion streams shard-by-shard, so host RAM stays bounded by `--max_shard_size`. Unquantized tensors keep their stored dtype, and the emitted `config.json` drops its `quantization_config`.
@@ -70,10 +71,6 @@ Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend 
 
 - **CP** — 34 of 45 layers are a KDA linear recurrence over the sequence axis; validation rejects both the `Glm5NextTextLinearAttention` module and any `layer_types` containing `"linear_attention"` ([Context Parallelism](../parallelism/context-parallelism.md#supported-model-architectures)).
 - **TP** — no shard plan: the DSA indexer and the KDA projections have no sound sharding, so a `tensor_parallel_size > 1` run is rejected (zero shardable layers).
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md). The shipped `Glm5NextPPSpec` split contract carries the 4×-widened hyper-connection stream as the stage boundary, keeps `hc_head` on the last stage, and refuses a stage that begins on a `shared` DSA indexer layer (GLM-5.3-Flash ships all `full`).
-
-    The family ships only the composite `Glm5NextForConditionalGeneration`, no text-only CausalLM. The multimodal gate admits a run that feeds no images: the vision tower and projector are held by no stage, stashed on the save rank and re-emitted unchanged in every checkpoint, so the export reloads as the composite class. A run that feeds images is refused.
-
 - **Packing** — the KDA conv/scan crosses packed document boundaries on every backend, the same accepted mixer class as Zaya and Ling ([Collators](../data/collators.md#document-isolation-under-packing)); pack only where a small amount of cross-document mixing is acceptable.
 
 ## Configs

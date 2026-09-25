@@ -29,7 +29,8 @@ zero weight. Setting it also turns on `sampling/rows_over_cap_frac`, the share o
 
 Native-tool environments send the env's `tools` schema, so the server needs the matching
 `--tool-call-parser`. A mismatched parser fails silently: calls come back as text with no
-`tool_calls`, so every turn scores as a give-up. A missing one is a 400. Per-family values:
+`tool_calls`, so every turn scores as a give-up. A missing one is a 400 on vLLM; SGLang returns the
+call as text. Per-family values:
 [Rollout Servers](../../../infrastructure/rollout-servers.md#vllm).
 [ReAct](../environments/react.md) envs send no `tools` and need no parser.
 

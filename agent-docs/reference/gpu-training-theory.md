@@ -280,7 +280,7 @@ DeepGEMM removes that wall (expert per token-row resolved on-device from an int3
 Training runs in bf16 rather than fp16 because gradients span an enormous dynamic range that fp16's narrow exponent overflows (fp16 needs loss scaling). bf16 keeps fp32's range and pays for it in precision, roughly 2 significant digits. That's survivable only because the precision-sensitive steps stay fp32:
 
 - **Reductions accumulate in fp32.** Summing thousands of bf16 numbers (softmax, RMSNorm denominator, loss, long dot product) would otherwise swamp the small terms. Tensor cores already accumulate every matmul in fp32 and round the result to bf16.
-- **The optimizer keeps the update honest.** A step often nudges a weight by less than the bf16 ULP (the gap between neighboring representable values), which round-to-nearest would drop. **AdamWBF16** uses stochastic rounding on the weight write and on the always-positive `exp_avg_sq`, where nearest-rounding also biased upward ~50%. [BF16 Optimizer](../optimization/bf16-optimizer.md).
+- **The optimizer keeps the update honest.** A step often nudges a weight by less than the bf16 ULP (the gap between neighboring representable values), which round-to-nearest would drop. **AdamWBF16** uses stochastic rounding on the weight write and on the always-positive `exp_avg_sq`, where nearest rounding biases the running variance by tens of percent ([BF16 Optimizer](../optimization/bf16-optimizer.md#stochastic-rounding)).
 
 **Master weights** are the textbook version of that second defense: keep the authoritative copy of every weight and both moments in fp32, and cast down to bf16 only for the forward and backward. That state costs 12 B/param, with the transient bf16 copy on top.
 

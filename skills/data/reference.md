@@ -67,7 +67,7 @@ overrides recorded in `metadata.json` and re-checked at training time — `--bos
 **Two distinct mechanisms** (don't conflate):
 - **preprocessed** — output `metadata.json` has `preprocessed: true`; `load_datasets_auto()`
   (`src/data/sources/loading.py`) auto-detects via `is_preprocessed_dataset()`
-  (`src/data/pipeline/preprocessed_metadata.py`) and **skips tokenization**. No config flag needed — just point `dataset:` at the output.
+  (`src/data/pipeline/preprocessed_metadata.py`) and **skips tokenization**. No config flag needed — point `dataset:` at the output.
 - **presharded** — sharded output has `shard_index.json`; the trainer computes
   `dataset_presharded = is_presharded_dataset_load(...)` and passes it so the DataLoader does **not**
   re-shard already-split data. `--num-shards` **must be ≥ data_parallel_size**: a short train split
@@ -92,8 +92,9 @@ JSON or a JSON file path).
   flake can't split ranks onto sharded-vs-full paths (→ divergent sizes / NCCL hang).
 - `fs_aware_main_first(tag)` (`src/distributed/filesystem.py`) / `is_input_shared_filesystem()`
   (`src/distributed/runtime.py`): shared input FS
-  (`DIST_INPUT_SHARED_FILESYSTEM`, falling back to the `DIST_SHARED_FILESYSTEM="1"` umbrella) → only global rank 0 downloads/processes; non-shared (`"0"`)
-  → each node's local rank 0 acts, nodes in parallel. Waiters sit on a c10d store key bounded by
+  (`DIST_INPUT_SHARED_FILESYSTEM`, falling back to the `DIST_SHARED_FILESYSTEM="1"` umbrella) →
+  global rank 0 runs the body first, then the peers run it against the cache it filled; non-shared
+  (`"0"`) → each node's local rank 0 leads its node, nodes in parallel. Waiters sit on a c10d store key bounded by
   `DIST_STORE_TIMEOUT_HOURS` (default 4 h), never inside a collective — the body is unbounded
   single-rank work and must itself issue no collective.
 
@@ -124,8 +125,10 @@ that rows are flattened, as does packing on a dense-mask backend for a family th
 
 `bfd` packing emits `seq_lengths` per packed doc; collators reset `position_ids` at each boundary and
 build flash-attn `cu_seq_lens`. `wrapped` has no `seq_lengths` (cross-document attention — avoid with
-FlashAttention). VLM: packing/padding-free both unsupported. TRL caveat: set `padding_free=False` +
-`dataset_kwargs={"skip_prepare_dataset": True}` so TRL doesn't reject the custom collators.
+FlashAttention). VLM: packing/padding-free both unsupported. The scripts call
+`disable_trl_dataset_prep` (`src/training/script_runner.py`) after building the collator, which
+clears TRL's `packing` / `padding_free` and sets `skip_prepare_dataset`; do not set these in YAML
+(that turns the padding-free collator off). A custom script must call it.
 
 ## Footguns (source-cited)
 
@@ -134,8 +137,8 @@ FlashAttention). VLM: packing/padding-free both unsupported. TRL caveat: set `pa
   as `functools.partial` bound args, both invisible to the source hash. Without folding them into the
   cache-file name, two runs sharing processor source but differing in tokenizer collide on one cache file
   → wrong token IDs → embedding OOB crash at step 0. The closure fingerprint covers closures;
-  `get_function_identifier` covers partials (the wrapped func id + bound args/keywords) — the eval path's
-  `partial(prepare_generative_row, tokenizer=…, max_length=…)` evaded the closure check otherwise.
+  `get_function_identifier` covers partials (the wrapped func id + bound args/keywords), such as the
+  eval path's `partial(prepare_generative_row, tokenizer=…, max_length=…)`.
   The tokenizer term is keyed on **content**, not on `name_or_path`: the fast backend's serialized
   state (else the sorted vocab), plus the chat-template hash and the special-token ids and sides. A
   path term would miss the cache on every resume leg, since a resume repoints the load at the run's
@@ -145,7 +148,7 @@ FlashAttention). VLM: packing/padding-free both unsupported. TRL caveat: set `pa
   one-time `Dataset-map cache fingerprint … skips a value of type …` warning — thread that value
   through `cache_key_extras`.
 - **Rank-unstable HF fingerprints** — HF `_fingerprint`/`cache_files` diverge across ranks → each rank
-  writes its own ~45 GB packed copy. The deterministic `_toolkit_cache_key` stamp is what keeps the
+  writes its own packed copy. The deterministic `_toolkit_cache_key` stamp is what keeps the
   key rank-stable; `pack_dataset_coordinated` packs once on the main rank under `fs_aware_main_first`.
 - **Presharded re-shard trap** — a sharded dataset already gives each DP rank a disjoint slice; if
   `dataset_presharded` isn't passed, the DataLoader re-shards and drops ~(N-1)/N of each slice.

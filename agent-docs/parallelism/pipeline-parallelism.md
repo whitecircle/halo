@@ -3,9 +3,7 @@
 **Status: not yet available in this release.** The pipeline-parallel seams ship — the config
 surface, the rank math, the trainer gates, and the stage/split/loss/checkpoint contracts — but the
 schedule engine that would drive microbatches through the stages does not.
-`pipeline_parallel_size > 1` is rejected at config time with a pointer to this page. The
-implementation is nearly complete; after extensive testing it will be enabled for selected models
-and trainers in an upcoming version.
+`pipeline_parallel_size > 1` is rejected at config time with a pointer to this page.
 
 PP would split a model's decoder layers into contiguous **stages**, each owning a rank block, as
 the outermost parallelism dimension and the only one designed to cross NVLink domains — the only
@@ -62,8 +60,7 @@ loading, no production path reaches it. No PP run is launchable.
 
 ## Sharding large models today
 
-PP targets the models whose layer stack outgrows one NVLink domain. Until it lands, shard with the
-available axes: [Expert Parallelism](expert-parallelism.md) (orthogonal to DP, the workhorse for
+Shard with the available axes: [Expert Parallelism](expert-parallelism.md) (orthogonal to DP, the workhorse for
 MoE), [Tensor Parallelism](tensor-parallelism.md), [Context Parallelism](context-parallelism.md)
 for long sequences, and their supported combinations — see the [Parallelism overview](README.md) and
 [Multi-Node](multi-node.md) for topology guidance.

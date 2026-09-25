@@ -39,7 +39,7 @@ Three shapes, decided by `load_reference_model_for_preference` (`src/distributed
 - **EP / TP / PP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1; a resume re-derives them from the trained one.
 - **A frozen copy** — every other shape, precompute on plain data parallelism included. It mirrors the policy load (same revision, attention validator, sink policy) and stays resident for the run.
 
-Under EP, TP or PP a frozen copy is rejected outright — the reference is never parallelized — so full fine-tuning there needs precompute. TP rejects PEFT too, leaving precompute as its only shape; native EP expert-LoRA needs it as well, since grouped expert adapters cannot be toggled off.
+Under EP, TP or PP a frozen copy is rejected outright — the reference is never parallelized — so full fine-tuning there needs precompute. TP rejects PEFT too, leaving precompute as its only shape; native EP expert-LoRA needs it as well, since the loader refuses expert targets without it.
 
 A policy carrying live attention sinks (`reset_sinks: false`) is refused whenever a reference model reaches the trainer, single GPU included. Only PEFT, or EP/TP/PP with precompute, leaves none.
 

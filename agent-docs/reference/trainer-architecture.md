@@ -199,7 +199,8 @@ hijacked onto the mixin's FSDP2. An MoE whose experts are already wrapped under 
 raises here.
 
 `_setup_ep_only()` patches gradient clipping and installs the EP gradient sync (which applies FSDP2
-with EP modules in `ignored_params`); it handles EP, pure ETP, and EP+ETP. CP setup validates the
+with EP modules in `ignored_params`, except at `ep_group_size == 1` —
+[below](#gradient-synchronization)); it handles EP, pure ETP, and EP+ETP. CP setup validates the
 model is already a `UlyssesCPModelWrapper` (wrapped at load time). FSDP2 (`fully_shard`,
 `reshard_after_forward` from `fsdp_reshard_after_forward`, default `false`) carries non-EP gradient
 sync wherever DP > 1 — pure TP and EP+TP at DP=1 skip the wrap entirely.
@@ -242,9 +243,9 @@ In CP-only mode each rank computes partial gradients from its chunk and FSDP ave
 correct global mean (`effective_grad = (1/cp_size) * sum(partial_grad_i)`). In EP+TP with DP=1,
 DTensor and EP hooks alone sync; with DP>1, FSDP2 syncs non-EP params across nodes.
 
-Clipping and sync read their process groups (TP, DP, dispatch-EP, expert-TP, expert-replica) through
-one `ParallelDims` view (`src/distributed/mesh.py`) rather than re-deriving mesh lookups
-per call site.
+Clipping and sync read the mesh groups (TP, DP) through the `ParallelDims` view
+(`src/distributed/mesh.py`) and the expert groups (dispatch-EP, expert-TP, expert-replica) off
+`EPConfig`, rather than re-deriving them per call site.
 
 ### EP-aware gradient clipping
 

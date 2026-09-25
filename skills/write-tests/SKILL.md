@@ -47,7 +47,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 
 def test_ep_tp_etp_combo_rejected():
     """EP+TP+ETP is unsupported and must raise at config time."""
-    with pytest.raises(ValueError, match="not supported"):
+    with pytest.raises(ValueError, match="is not a supported parallelism combination"):
         ParallelismConfig(ep_size=2, tp_size=2, expert_tp_size=2)
 
 

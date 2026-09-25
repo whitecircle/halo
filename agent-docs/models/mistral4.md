@@ -4,17 +4,17 @@
 
 | | EP | CP | TP | ETP | PP | EP+CP | EP+TP | EP+ETP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Mistral4 MoE | Yes | Yes (legacy path) | Yes (selective) | Yes (pure, `ep_size=1`) | — ² | Yes ¹ | Yes | Experimental |
+| Mistral4 MoE | Yes | Yes (legacy path) | Yes (selective) | Yes (pure, `ep_size=1`) | — ² | untested ¹ | Yes | Experimental |
 
-² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). The decoder layers are homogeneous, so the shipped PP split contract carries no constraint of its own.
+² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
-EP+ETP (`ep_size>1` and `expert_tp_size>1`) is experimental and node-local; it cannot combine with attention TP (`tp_size>1`). The Mistral4 suite runs `ep_size=2, expert_tp_size=4`; the sibling `ep_size=4, expert_tp_size=2` is a legal shape that this model's matrix does not cover.
+EP+ETP (`ep_size>1` and `expert_tp_size>1`) is experimental; its expert-TP groups stay NVLink-local, and it cannot combine with attention TP (`tp_size>1`). The Mistral4 suite runs `ep_size=2, expert_tp_size=4`; the sibling `ep_size=4, expert_tp_size=2` is a legal shape that this model's matrix does not cover.
 
 `ep4+etp2` clears the racy-EP gate because ETP raises `ep_group_size` to the domain, even though DeepEP still forms the two 4-rank dispatch groups the gate rejects for bare `ep4` — and that validation does not clear bare `ep4` on 8 (`is_racy_single_domain_multigroup_ep`). See [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md).
 
-¹ Node-local EP+CP requires `ep_group_size == nvlink_domain_size`, so on 8-GPU nodes `ep_size=8` exactly; `cp_size` then only has to divide the domain.
+¹ A valid shape that has not been run on this model. Node-local EP+CP requires `ep_group_size == nvlink_domain_size`, so on 8-GPU nodes `ep_size=8` exactly; `cp_size` then only has to divide the domain.
 
-Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per single-node mode under `pytest -m "gpu and mistral4"`; EP+CP coverage lives in the Cohere2 MoE matrix) and `tests/gpu/parallelism/test_mistral3_vision_smoke.py` (Pixtral + text forward/backward).
+Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per single-node mode under `pytest -m "gpu and mistral4"`; the single-node EP+CP coverage lives in the Cohere2 MoE matrix) and `tests/gpu/parallelism/test_mistral3_vision_smoke.py` (Pixtral + text forward/backward).
 
 ## EP wrapper
 

@@ -4,13 +4,15 @@ The host has no usable Python — PyTorch, DeepEP, and Flash Attention live only
 that executes runs inside an image.
 
 - `halo:hopper` — H100/H200 (SM90): FA2 + FA3 + DeepEP.
-- `halo:blackwell` — B200 (SM100) / B300, GB200/GB300 (SM103): FA2 + FA4 + DeepEP (no FA3).
+- `halo:blackwell` — B200 (SM100) / B300 (SM103): FA2 + FA4 + DeepEP (no FA3).
 - `vllm-server:0.26.0` — vLLM inference server with native NCCL weight transfer (separate container).
 - `sglang-server:0.5.17` — SGLang inference server, NCCL matched to the training image so it can
   receive weight updates too ([Rollout Servers](rollout-servers.md)). Serving-only use needs no custom build.
 
 All four are published to Amazon ECR Public under `public.ecr.aws/whitecircle/halo` — anonymous pulls,
 no AWS account ([Registry](#registry)) — or build credential-free from source ([Building](#building)).
+The images are x86_64-only: Grace-based GB200/GB300 hosts (aarch64) need an arm64 build the
+Dockerfile does not provide.
 
 ## Standard training launch
 
@@ -100,7 +102,7 @@ bound the kernels the toolkit actually runs.
 On Blackwell, FA4 is the auto-selected default (`_detect_attention_impl`); FA2 stays available. See
 [Flash Attention](../optimization/flash-attention.md) and [DeepEP](deepep.md).
 
-Either training image is ~45–50 GB; a cold build takes tens of minutes, longest on Hopper (FA2 and FA3
+Either training image is ~30–32 GB; a cold build takes tens of minutes, longest on Hopper (FA2 and FA3
 build from source there).
 
 ## Building
@@ -164,7 +166,7 @@ base NGC image need updating.
 
 | Variable | Value | Effect |
 |----------|-------|--------|
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Latched by the driver at `cuInit` (DeepEP import time), so it must be in the environment from PID 1. Free default: neutral on dense and `ep_size=2`, +9.7% on `ep_size=8`. It does **not** make racy single-domain multi-group EP safe — `ParallelismConfig` rejects that shape. Override `-e CUDA_DEVICE_MAX_CONNECTIONS=8` for pure-dense FSDP all-gather/compute overlap. See [DeepEP](deepep.md). |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Latched by the driver at `cuInit` (DeepEP import time), so it must be in the environment from PID 1. Free default ([measured effect](deepep.md#environment-variables)); it does **not** make racy single-domain multi-group EP safe — `ParallelismConfig` rejects that shape. Override `-e CUDA_DEVICE_MAX_CONNECTIONS=8` for pure-dense FSDP all-gather/compute overlap. |
 | `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` | `0` | The NGC base defaults fp32 matmuls to TF32, whose 10-bit mantissa collapses adjacent long-context RoPE positions past 2048. Forced off. |
 | `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED` | `1` | Persist the FA4 CuTe DSL kernel cache (~10 s JIT per kernel on first use). |
 | `CUTE_DSL_ENABLE_TVM_FFI` | `1` | TVM-FFI direct-invocation ABI for CuTe DSL kernels. |

@@ -248,18 +248,18 @@ rejects expert LoRA earlier still, at config time in `ParallelismConfig`, before
 ## Measured cost
 
 Dense — 1× B300 (SM103), `DistributedSFTTrainer`, AdamWBF16, Liger, FA4, Qwen3-8B, seq 16384, BS=1, GC,
-10 steps / 3 warmup:
+10 steps / 3 warmup (full fine-tuning at this shape: [Liger → Benchmarks](liger-kernels.md#benchmarks)):
 
 | Config | Trainable | tokens/s/GPU | Peak memory |
 |---|---|---|---|
-| Full fine-tuning | 8,191M (100%) | 17,342 | 64.6 GB |
 | LoRA r=64, attn only | 61M (0.7%) | 16,824 | 34.6 GB |
 | LoRA r=64, all linear | 175M (2.1%) | 11,717 | 35.9 GB |
 | QLoRA r=64, all linear (NF4 base) | 175M (3.6%) | 15,802 | 25.3 GB |
 
-Attention-only nearly matches full-FT throughput; all-linear is ~32% slower, since adapter matmuls run on
-every MLP layer. Throughput is **rank-invariant** within a variant (attn-only ~16.8k, all-linear ~11.9k
-across r=16/64/128): the frozen base forward/backward dominates the step, and only memory grows with rank.
+Attention-only matches full-FT throughput at about half its memory; all-linear is ~29% slower, since
+adapter matmuls run on every MLP layer. Throughput is **rank-invariant** within a variant (attn-only
+~16.8k, all-linear ~11.9k across r=16/64/128): the frozen base forward/backward dominates the step, and
+only memory grows with rank.
 
 QLoRA saves ~10 GB more than bf16 all-linear LoRA and is ~33% faster, because the 4-bit base cuts weight
 bandwidth on the bandwidth-bound MLP matmuls. It is the path onto consumer GPUs, since plain LoRA needs
@@ -301,14 +301,17 @@ before peft's exit, so the restore lands on the sharded params, and the next for
 them once. A pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same unsharded
 params and reshards nothing.
 
-An **explicit** `ref_model` is rejected under EP and TP (it is never parallelized, so its log-probs would not
-match the policy's): use LoRA with `ref_model=None`, or `precompute_ref_log_probs=True`. Under TP, LoRA is
-rejected too, so DPO/KTO there must precompute. SMPO is reference-free.
+DPO and KTO reject an **explicit** `ref_model` under EP and TP (it is never parallelized, so its log-probs
+would not match the policy's), as self-distillation does its KL `reference_model`: use LoRA with
+`ref_model=None`, or `precompute_ref_log_probs=True`. Under TP, LoRA is rejected too, so DPO/KTO there
+must precompute. SMPO is reference-free. Offline GRPO is the exception: a wrapped MoE at `kl_beta > 0`
+requires a dense `ref_model`, which the script loads
+([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
 
-Where no adapter wraps the model — a full fine-tune, or an expert-only LoRA run, which builds no
-`PeftModel` — TRL builds its own reference model whenever none is passed and none of its no-reference
-cases apply (a PEFT-wrapped policy; `precompute_ref_log_probs` on DPO/KTO; `beta == 0` on GRPO): an
-unparallelized fp32 replica per rank. `_validate_implicit_reference_model` warns about that under EP,
+On the TRL-derived trainers (online / async GRPO, DPO, KTO), where no adapter wraps the model — a full
+fine-tune, or an expert-only LoRA run, which builds no `PeftModel` — TRL builds its own reference model
+whenever none is passed and none of its no-reference cases apply (a PEFT-wrapped policy;
+`precompute_ref_log_probs` on DPO/KTO; `beta == 0` on GRPO): an unparallelized fp32 replica per rank. `_validate_implicit_reference_model` warns about that under EP,
 and **raises** whenever the policy carries live attention sinks (`reset_sinks: false`), where the two
 models would compute different log-probs for identical tokens. Set `use_peft: true`,
 `precompute_ref_log_probs: true` (DPO/KTO), or `beta: 0` (GRPO).

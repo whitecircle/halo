@@ -25,18 +25,23 @@ additionally needs `ep_size` in the index metadata, not just the marker.
 
 ## Resume — three paths
 
-- **Path A — reload from checkpoint** (TP-only, dense FSDP2/DDP): weights come from the checkpoint.
-  TP (`_load_tp`) streams the checkpoint one tensor at a time per rank and `distribute_tensor`s each
-  into the live DTensor's placements before `copy_` (hand-sharded non-DTensor params — GptOss sinks —
-  are sliced by `tp_rank`); FSDP2 (`_load_fsdp2`) reshards first, then reads the whole dict on rank 0 via
-  `load_full_state_dict()` and hands it to `set_model_state_dict(broadcast_from_rank0)` — skipped
-  outright when the model was already constructed from that checkpoint (re-reading a 100B+ state
-  dict is waste), except for `load_best_model_at_end`. Both gate on
-  key coverage across ranks and restore weights + trainer state.
-- **Path B — skip reload** (EP, ETP, EP+TP, EP+CP, CP): model rebuilt by `load_distributed_model()` at
-  `__init__`, so **weights are not reloaded**. **Set `model_name_or_path` to the gathered checkpoint
-  dir** — a checkpoint that ships base weights the live model was not built from makes the loader
-  raise (rank-0 verdict, broadcast), as does `load_best_model_at_end` under EP/CP full fine-tuning.
+- **Path A — reload from checkpoint** (only a `use_grouped_gemm: false` run with no EP/ETP/CP/TP):
+  `model_name_or_path` stays the weights source. Under FSDP2 `_load_fsdp2` reshards, reads the whole
+  dict on rank 0 via `load_full_state_dict()` and hands it to `set_model_state_dict(broadcast_from_rank0)`,
+  gated on key coverage; DDP falls through to the base Trainer's loader.
+- **Path B — load at construction** (EP, ETP, EP+TP, EP+CP, CP, TP, and at the default
+  `use_grouped_gemm: true` every other run, dense included): `resolve_resume_weights_source`
+  (`src/training/environment.py`) repoints the policy's weights source at the checkpoint dir (an
+  adapter-only one keeps the base), so `load_distributed_model()` builds the model from the trained
+  weights. `model_config` is not mutated — the DPO/KTO/SDPG reference and the dataset-compat check
+  keep the base, so **leave `model_name_or_path` at the base**. An unmerged per-rank save raises
+  here, before construction. The loader then skips the re-read: EP/CP always, `_load_tp` / `_load_fsdp2` when the model was
+  constructed from that checkpoint. A model built from anything else makes the loader raise
+  (rank-0 verdict, broadcast) under EP/CP when the checkpoint ships base weights, and under TP+DP,
+  whose strided dp-over-tp placement `distribute_tensor` does not invert; pure TP instead streams the
+  checkpoint one tensor at a time per rank and `distribute_tensor`s each into the live placements
+  (GptOss sinks sliced by `tp_rank`). `load_best_model_at_end` raises under EP/CP full fine-tuning
+  and TP+DP; FSDP2 and pure TP re-read for it.
 - **Path C — PP** (`_load_pp_stage`, dispatched first): stage-local restore. Unreachable while PP is
   unavailable in this release.
 
@@ -186,14 +191,12 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   reshard first.
 - **GptOss EP-save biases** — `EPGptOssMoELayer.gather_expert_state_dict`
   (`src/distributed/expert_parallel/layers/gpt_oss.py`) carries the 2-D `gate_up_proj_bias` /
-  `down_proj_bias` alongside the 3-D expert weights, so the gathered checkpoint reloads cleanly. GptOss
-  EP checkpoints produced by a `param.dim()==3`-only filter (no 2-D biases) must be patched from the
-  source biases before reload.
+  `down_proj_bias` alongside the 3-D expert weights, so the gathered checkpoint reloads cleanly.
 - **CP-only state_dict drops dense MLP only on sparse layers** — `UlyssesCPModelWrapper.state_dict`
   (`src/distributed/context_parallel/wrapper.py`) filters duplicate dense `.mlp.{gate,up,down}_proj`
   keys per layer, gated on layers that actually carry routed experts. A model-global filter would drop
   the genuinely-dense early layers (GLM-4 MoE Lite, Mistral4 `first_k_dense_replace`) → a corrupt CP-only
-  checkpoint, masked on resume (CP reloads weights from `model_name_or_path`).
+  checkpoint.
 - **TP attention head divisibility** — `parallelize_attention.py` raises before sharding when
   `num_attention_heads` (or non-MLA GQA `num_key_value_heads`) is not divisible by `tp_size`;
   `ColwiseParallel` would otherwise split Q/K/V inside a head and silently corrupt attention. MLA

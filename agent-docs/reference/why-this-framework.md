@@ -72,7 +72,7 @@ The Megatron-LM, Laguna and LFM2.5 rows are from the Halo research page (whiteci
 Notes on individual frameworks:
 
 - **Accelerate** is the foundation layer this toolkit builds on (launcher + FSDP2/DTensor TP/CP plumbing over native HF), not a competing trainer — it ships no trainers, RL, MoE/EP, attention kernels, or `s3://` loading.
-- **Megatron-LM** adds deeper TE/FP8 optimization for 1000+ GPU dense pre-training; its alignment is split across four repos and needs MCore conversion. This toolkit's pipeline parallelism is [not yet available](../parallelism/pipeline-parallelism.md) (the seams ship, the engine lands in a future release); on large NVLink domains FSDP2 + EP/TP avoids the pipeline bubble — see [When PP is worth it](../parallelism/README.md#when-pipeline-parallelism-is-worth-it).
+- **Megatron-LM** adds deeper TE/FP8 optimization for 1000+ GPU dense pre-training; its alignment is split across four repos and needs MCore conversion. This toolkit's pipeline parallelism is [not yet available](../parallelism/pipeline-parallelism.md) (the seams ship, the schedule engine does not); on large NVLink domains FSDP2 + EP/TP avoids the pipeline bubble — see [When PP is worth it](../parallelism/README.md#when-pipeline-parallelism-is-worth-it).
 - **Axolotl** (v0.19.0) closes most of the EP gap (DeepEP on native HF, no conversion, composed with CP and FSDP) and offers config-driven YAML, s3/GCS data, FA2/3/4, and async-GRPO + NeMo Gym. This toolkit still adds SMPO, Offline GRPO, EP+TP and pure ETP (Axolotl's EP×TP raises), and full BF16.
 - **NVIDIA NeMo RL** — alignment on DTensor (FSDP2+TP+CP) or Megatron-Core; MCore conversion on the Megatron path; capabilities span four repos.
 - **SkyRL** — RL plus a native SFT trainer (v0.3.0), no DPO/reward/distillation; async dispatcher ~1.55× over naive batching; EP/CP/TP need its Megatron backend.
@@ -83,8 +83,8 @@ Any HuggingFace `AutoModelForCausalLM` works with standard FSDP, and any model c
 gets TP. Advanced parallelism (EP, CP, ETP) requires per-family wrappers, not a model
 reimplementation or a checkpoint conversion.
 
-For EP, that is a wrapper under `src/distributed/expert_parallel/layers/` (under 140 lines; GPT-OSS
-the outlier at 366) subclassing `EPMoELayerBase` and declaring its `HF_MODULE_NAMES` /
+For EP, that is a wrapper under `src/distributed/expert_parallel/layers/` (most under 140 lines)
+subclassing `EPMoELayerBase` and declaring its `HF_MODULE_NAMES` /
 `HF_MODEL_TYPES`, with `MOE_LAYER_MAP` derived from the subclass tree so the family self-registers on
 import. Fifteen MoE families ship one; the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the
@@ -107,14 +107,15 @@ loader streams layers from safetensors, so a family whose EP layer sets
 | Accelerate | 1.11.x | FSDP distributed training |
 | PEFT | 0.18.x | LoRA and parameter-efficient fine-tuning |
 | vLLM | 0.26.0 | Online generation for GRPO (separate container) |
+| SGLang | 0.5.17 | Alternative rollout server for Async GRPO with Environments (separate container) |
 | DeepEP | V2 (commit `af9a040`) | MoE expert parallelism |
 | Flash Attention | 2.x / 3.x / 4.x (FA4 on Blackwell) | Attention acceleration |
 | Liger Kernel | 0.8.x | Triton kernel optimizations |
 | FlashAdamW | 0.1.x (extra) | Quantized AdamW states (~5 bytes/param) |
 
-`pyproject.toml` is PEP 621; each pin is a bounded range (e.g. `transformers>=5.16.1,<5.17.0`, `torch>=2.11.0,<2.12.0`) resolved by `uv` into `uv.lock`.
+`pyproject.toml` is PEP 621; the core pins are bounded ranges (e.g. `transformers>=5.16.1,<5.17.0`, `torch>=2.11.0,<2.12.0`) resolved by `uv` into `uv.lock`.
 
 > [!WARNING]
-> **vLLM runs as a separate Docker container**
+> **Rollout servers run as separate Docker containers**
 >
-> vLLM pins its own torch/transformers stack — it is **not** in the training environment. It runs as an isolated container (`Dockerfile.vllm` + `docker-compose.vllm.yml`). The training container talks to vLLM over HTTP (generation) and a vendored NCCL client (`src/distributed/nccl/`, weight sync).
+> vLLM and SGLang each pin their own torch/transformers stack — neither is in the training environment. Each runs as an isolated container (`Dockerfile.vllm` + `docker-compose.vllm.yml`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). The training container talks to the server over HTTP (generation) and a vendored NCCL client (`src/distributed/nccl/`, weight sync).

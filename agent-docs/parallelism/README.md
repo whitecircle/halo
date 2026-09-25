@@ -22,7 +22,7 @@ Wrapped MoE families: [Qwen3 MoE](../models/qwen3.md#qwen3-moe), [Qwen3.5/3.6 Mo
 
 ## Supported combinations
 
-All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignored_params` and sync via EP backward hooks; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
+All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignored_params` and sync via EP backward hooks, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
 
 | Mode | Data Parallel Size | Notes |
 |------|-------------------|-------|
@@ -104,9 +104,7 @@ rank holds `seq_len / cp_size` tokens of its batch, and the Ulysses all-to-all r
 sequences inside attention.
 
 Microbatching is TRL/Accelerate gradient accumulation (`gradient_accumulation_steps`); EP grad hooks
-skip cross-rank sync on accumulation steps. [Pipeline parallelism](pipeline-parallelism.md) — the
-outermost, cross-node dimension, which would replace that accumulation with its own microbatch
-schedule — is not yet available in this release ([why it will matter](#when-pipeline-parallelism-is-worth-it)).
+skip cross-rank sync on accumulation steps.
 
 ### Stacking the dimensions
 
@@ -139,7 +137,7 @@ traced to the code that raises. This table is the index into them, not a second 
 
 | Axis | Trainers | Models | Signature knob rejections |
 |---|---|---|---|
-| [EP](expert-parallelism.md#limitations) | all | the wrapped MoE families; a dense model raises | QLoRA, PEFT inside expert layers, `fsdp_reshard_after_forward`, `use_hsdp`, `bf16_optimizer: false`, `accelerate launch` |
+| [EP](expert-parallelism.md#limitations) | all | the wrapped MoE families; a dense model raises | QLoRA, PEFT inside expert layers, `fsdp_reshard_after_forward`, `use_hsdp`, stock AdamW with `bf16_optimizer: false`, `accelerate launch` |
 | [ETP](expert-tensor-parallelism.md#limitations) | all (gated by `_supports_ep`) | every EP-capable MoE family | expert LoRA, `save_sharded_ep` — plus every EP rule |
 | [TP](tensor-parallelism.md#limitations) | all | the attention classes in `TP_SHARDABLE_ATTENTION_CLASSES`; zero sharded layers raises | LoRA/PEFT, QLoRA, `fsdp_reshard_after_forward` at DP > 1, `use_hsdp` |
 | [CP](context-parallelism.md#limitations) | SFT and SMPO only | the Ulysses attention wrappers | packing, padding-free, left padding, non-Flash attention, `label_smoothing_factor`, `loss_type: dft`, eval metrics, multimodal |
@@ -175,7 +173,7 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 
 ⁴ Zaya — CCA rules out CP/TP, GC unsupported; see [Zaya — Limitations](../models/zaya.md#limitations).
 
-⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). See [mistral4.md](../models/mistral4.md).
+⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). EP+CP is a valid shape not yet run on this model. See [mistral4.md](../models/mistral4.md).
 
 ⁶ LFM-2 — CP blocked by the sequence-axis short-conv layers in the hybrid stack (no Ulysses wrapper); see [lfm2.md](../models/lfm2.md).
 
@@ -199,8 +197,8 @@ Per-family configs and EP wrapper internals: [Supported Models](../models/README
 
 ## When pipeline parallelism is worth it
 
-PP is [not yet available in this release](pipeline-parallelism.md); this section is the forward-looking rationale for why it exists on the roadmap.
+PP is [not yet available in this release](pipeline-parallelism.md); `pipeline_parallel_size > 1` is rejected at config time.
 
-Inside one NVLink domain PP earns nothing: FSDP2 + EP/TP/ETP/CP already run every collective on the fabric, and PP only adds bubbles. It is the cross-domain axis, and whether it is worth its constraints depends on how big the domain is.
+Inside one NVLink domain PP earns nothing: FSDP2 + EP/TP/ETP/CP already run every collective on the fabric, and PP only adds bubbles. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), where a pipeline would send `2 × (pp_size − 1)` point-to-point activations. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
 
-Across nodes the question is which traffic crosses RDMA. Global-scope EP puts the DeepEP dispatch/combine there, and that is **four** latency-bound all-to-alls per MoE layer per microbatch — dispatch and combine each have a genuine second one in backward (`src/distributed/expert_parallel/autograd.py`). PP would instead keep EP node-local and send `2 × (pp_size − 1)` point-to-point activation tensors per microbatch. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright; on NVL8 hosts with EFA/RDMA, PP + node-local EP is the trade PP will exist to offer. Until it lands, take a large MoE across nodes with global-scope EP, node-local EP+CP/EP+TP/EP+ETP, or multi-group EP — see [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).
+Take a large MoE across nodes with global-scope EP, node-local EP+CP/EP+TP/EP+ETP, or multi-group EP — see [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).

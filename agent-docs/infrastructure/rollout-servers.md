@@ -454,8 +454,9 @@ Tool parsers are per family. For **native-tool** envs (`code_contests`, `swe`, `
 open-book `exam_qa`) the absence of the right one is silent and fatal to RL: calls stay text, no
 `tool_calls`, every episode reward 0, flat zero gradient.
 
-ReAct envs parse actions from the response text, so a mismatched parser costs them nothing. A
-*missing* one still 400s, since the trainer sends `tools` for any env with a tool registry:
+ReAct envs send no `tools` schema (their tools are named in the system prompt) and parse actions
+from the response text, so the parser plays no part there; the ReAct recipes serve without one.
+Native-tool parsers per family:
 
 | Family | `--tool-call-parser` |
 |---|---|

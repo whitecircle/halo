@@ -7,11 +7,7 @@
 | Bailing MoE / Ling 2.0 | Yes | Yes | **No** | Yes | — ¹ |
 | Ring-mini-linear-2.0, Ling 3.0 | Yes | **No** | **No** | Yes | — ¹ |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). Only Ling 2.0's layer stack is uniform: Ling 3.0 alternates KDA and MLA attention on a `layer_group_size` period, Ring interleaves 16 linear-attention layers with 4 full-attention ones.
-
-No variant binds a stage boundary. The alternation lives in the layer modules themselves, not in a `layer_types` list that mask selection indexes by position, and a stage is built by slicing the live `ModuleList`, so every layer keeps its own type wherever the cut lands.
-
-The shipped gate is instead multi-token prediction. Ling 2.0 and Ling-3.0-tiny ship `num_nextn_predict_layers: 0`; Ling-3.0-flash ships `1`, which the gate refuses unless set to `0` in `model_init_kwargs`.
+¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 The shipped config trains `inclusionAI/Ling-mini-2.0` (`model_type: bailing_moe`). The sibling `inclusionAI/Ring-mini-linear-2.0` is a **different** architecture (`BailingMoeLinearV2ForCausalLM`, `model_type: bailing_moe_linear`) that swaps softmax attention for Lightning Attention-2. Both share the `BailingMoeV2SparseMoeBlock` the EP wrapper targets.
 
@@ -111,7 +107,7 @@ Bailing is aux-loss-free by design (`topk_method: noaux_tc`): no modeling varian
 
 The wrapper exposes it as a live property, so callback updates and the `router_balancing_biases.pt` resume-restore always reach the buffer the gate reads. Because the buffer is part of the checkpoint, a gathered save exports the **final** bias and a served checkpoint routes exactly as training did.
 
-Most wrapper families adopt a native slot the same way. The exceptions are Qwen3, Qwen3.5/3.6, Mistral4 and Cohere2 MoE, whose routers carry no such slot — strict `bias_update` raises there and only the trainer-only `bias_update_transient` runs, its bias never leaving the run — and Gemma 4, which has no balancing route at all. `moe/*` load metrics come with the callback.
+Most wrapper families adopt a native slot the same way; the per-family slots and the exceptions are in the [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) table. `moe/*` load metrics come with the callback.
 
 An explicit `aux_loss` warns and stays off (there is no aux term to enable). Without the EP wrapper — `use_grouped_gemm: false` at `expert_parallel_size: 1` — nothing counts expert loads, so `bias_update` raises at setup; freezing the gate is the fallback mitigation there:
 

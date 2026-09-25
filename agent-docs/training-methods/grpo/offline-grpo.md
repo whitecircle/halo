@@ -106,7 +106,7 @@ torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \
 
 `halo launch offline-grpo <config> --nproc 8` builds the same line. From Python, load the model through `load_distributed_model` and pass the same `ParallelismConfig` to the trainer.
 
-**MoE balancing.** A policy-gradient loss never adds the router aux term, so `moe_balancing: aux_loss` warns and does nothing. With no weight sync here, `bias_update` is the working choice on a family whose bias exports — unlike the on-policy trainers, where it is downgraded ([Callbacks](../callbacks.md#routerbiasbalancingcallback)); the shipped recipes set `none`.
+**MoE balancing.** A policy-gradient loss never adds the router aux term, so `moe_balancing: aux_loss` warns and does nothing — or raises at construction when `output_router_logits` is on with a positive `router_aux_loss_coef`. With no weight sync here, `bias_update` is the working choice on a family whose bias exports — unlike the on-policy trainers, where it is downgraded ([Callbacks](../callbacks.md#routerbiasbalancingcallback)); the shipped recipes set `none`.
 
 ## Testing a setup
 

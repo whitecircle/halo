@@ -270,7 +270,7 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_ENV_GRPO_SGLANG_MODEL` | Checkpoint of the SGLang Environmental-GRPO e2e wrappers (`trainers/grpo/test_env_grpo_sglang_e2e.py` and its four-rank sibling `test_env_grpo_sglang_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`); a per-family pass points it at the family and serves the same checkpoint. Its own knob because its server and default family differ from the vLLM leg's. |
 | `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` | Per-family overrides for the Environmental-GRPO e2e body: the policy's `attn_implementation` (unset = the loader's auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset = the attention projections read off the checkpoint's index, which MLA families resolve to their own names; needed where the projections do not end in `_proj`, such as Ling's `query_key_value,dense`). |
 | `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoint of the 4-rank Environmental-GRPO e2e (`trainers/grpo/test_env_grpo_vllm_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`), whose rows hold two parallelism axes at once (EP+ETP, EP+TP, ep4). Its own knob because it shares the 2-GPU file's server but not its default family. |
-| `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_vllm_weight_transfer_reinit.py`. Each cycle leaked ~633 MiB of NCCL communicator on both ends before the re-init patch, so twelve overshoot the suite's 1 GiB growth budget several times over. |
+| `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_vllm_weight_transfer_reinit.py`. An unreleased communicator costs ~633 MiB per cycle on each end, so twelve cycles of a leak overshoot the suite's 1 GiB growth budget several times over. |
 | `HALO_TEST_VLLM_SERVER_GPU` | The vLLM server's GPU as `nvidia-smi` indexes it, for the same suite's device-memory read. Unset means "every GPU the trainer does not own", which is exactly the server's on the tier's own topology (`TRAINER_CUDA_DEVICES` covers the rest); set it when another job holds a third GPU. |
 
 **Env knob or `args_matrix` row?** `nproc`, `markers`, `timeout` and the tier are per-`TestSpec`, not
@@ -291,7 +291,7 @@ must select their two CP legs and nothing else.
 `core` is the pre-merge gate, and small-and-fast is its *intent*: ≤2 GPUs, tiny model. Size the host
 from the manifest, not from that intent. Over half of `tests/gpu/manifest.py` carries `core`.
 
-Within that tier four entries need 4 GPUs, 18 declare a timeout ≥1500 s (three at 2400 s), and a large
+Within that tier several entries need 4 GPUs, many declare timeouts of 1500–2400 s, and a large
 minority load a real multi-billion-parameter checkpoint (gpt-oss-20b, GLM-4.7-Flash, ZAYA1-8B,
 Qwen3-30B-A3B, Qwen3.5-2B, Qwen3-VL-2B and three Ling/Ring checkpoints), so summed worst-case timeouts
 run to tens of hours. This page owns tier composition; the manifest is the only place exact counts live.
@@ -344,8 +344,9 @@ keep `provenance` accurate.
 The committed set is gpt-oss-20b SFT under Expert Parallelism at **ep1 / ep2 / ep8** — 8× B300, seq
 4096, batch 1, gradient checkpointing on, `CUDA_DEVICE_MAX_CONNECTIONS=1`, bf16 + FA4 + grouped GEMM
 on `halo:blackwell`: 9,401 / 10,551 / 8,225 tok/s/GPU. **ep4 is intentionally excluded** —
-pure `2 < ep_size < gpus_per_node` deadlocks the DeepEP combine barrier and the trainer fails fast
-([DeepEP](../infrastructure/deepep.md)).
+pure `ep_size > 2` with `ep_group_size < nvlink_domain_size` is rejected at config time: its DeepEP
+combine races FSDP2's DP-wide collectives
+([Expert Parallelism](../parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
 
 ## Docs
 
