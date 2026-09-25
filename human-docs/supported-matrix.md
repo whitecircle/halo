@@ -74,10 +74,10 @@ the loader reason at construction, rather than failing mid-run.
   families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0,
   LFM-2.
 
-`rollout_max_thinking_tokens` and `rollout_thinking_budget_scope: episode` are
-vLLM-only and refused under SGLang. SGLang must be served from this repo's image,
-not upstream. Engine setup, ports, weight sync and `routing_replay`:
-[Rollout Servers](rollout-servers.md).
+`rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and
+`carry_reasoning` are vLLM-only and refused under SGLang. SGLang must be served
+from this repo's image, not upstream. Engine setup, ports, weight sync and
+`routing_replay`: [Rollout Servers](rollout-servers.md).
 
 ## Parallelism modes
 
