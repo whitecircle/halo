@@ -49,7 +49,8 @@ DOCKER_RUN = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_
   -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(NCCL_PROTO_ENV) $(EXTRA_DOCKER_ENV) \
   -v $(CURDIR):/workspace $(MNT_MOUNT) $(if $(strip $(AWS_DIR)),-v $(AWS_DIR):/root/.aws,) -w /workspace \
   $(IMAGE)
-# Per-target additions to the run above (see test-gpu-vllm).
+# Extra docker flags for this run and the CPU one below: per target (see test-gpu-vllm) or from the
+# caller, e.g. EXTRA_DOCKER_ENV="-e HF_HUB_OFFLINE=1" for an offline CPU tier.
 EXTRA_DOCKER_ENV ?=
 # Fabric for NCCL in the container — the weight-sync group to a rollout server and every other
 # trainer collective. EFA=1 passes the EFA devices and names the aws-ofi-nccl net, so a missing
@@ -72,10 +73,10 @@ NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
 HF_CACHE ?= $(HALO_SCRATCH)/hf
 DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) \
   $(if $(strip $(HF_CACHE)),-e HF_HOME=$(HF_CACHE) -v $(HF_CACHE):$(HF_CACHE),) \
-  -e PYTHONPATH=/workspace -v $(CURDIR):/workspace -w /workspace $(IMAGE)
+  -e PYTHONPATH=/workspace $(EXTRA_DOCKER_ENV) -v $(CURDIR):/workspace -w /workspace $(IMAGE)
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format precommit test-cpu test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench \
+.PHONY: help install lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench \
         docs diagrams build-blackwell build-hopper build-vllm build-sglang build-all \
         ecr-public-login push-public-blackwell push-public-hopper push-public-vllm \
         push-public-sglang push-public-all train clean
@@ -99,6 +100,10 @@ precommit: lint ## format-check + lint (CI gate)
 
 test-cpu: ## pytest CPU tier inside the image
 	$(DOCKER_RUN_CPU) bash -lc "pytest -m cpu tests/cpu $(PYTEST_ARGS)"
+
+seed-hf-cache: ## fetch the Hub configs and tokenizers the CPU tier reads into HF_CACHE (tests/common/hub_seed.py)
+	@test -n "$(strip $(HF_CACHE))" || { echo "HF_CACHE is empty: there is no cache to seed"; exit 1; }
+	$(DOCKER_RUN_CPU) bash -lc "HF_HUB_DISABLE_PROGRESS_BARS=1 python -m tests.common.hub_seed"
 
 # Both entrypoints are named explicitly: pointing pytest at `tests/gpu/` would collect the manifest
 # scripts as modules (executing their top-level torchrun code), which the launcher design avoids.

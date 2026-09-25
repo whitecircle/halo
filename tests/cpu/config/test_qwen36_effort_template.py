@@ -12,9 +12,12 @@ import pytest
 from huggingface_hub import try_to_load_from_cache
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
+from tests.common.models import QWEN3_6_MOE_35B
+from tests.common.tokenizers import skip_uncached
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_PATH = REPO_ROOT / "jinja-templates" / "qwen3" / "qwen3.6-reasoning-effort.jinja"
-STOCK_TEMPLATE_REPO = "Qwen/Qwen3.6-35B-A3B"
+STOCK_TEMPLATE_REPO = QWEN3_6_MOE_35B
 
 TOOLS = [
     {
@@ -132,7 +135,7 @@ def test_text_item_lists_render_and_other_items_are_refused(template):
 def test_matches_the_hub_template_apart_from_the_effort_line(template):
     stock = _stock_template()
     if stock is None:
-        pytest.skip("hub Qwen3.6 template not in the local HF cache")
+        skip_uncached(STOCK_TEMPLATE_REPO, "chat template of")
     ours = _render(
         template,
         CONVERSATION,

@@ -24,7 +24,8 @@ jobs:
     runs-on: [self-hosted, halo]
     # Skip draft PRs (still runs on pushes to main and on ready PRs).
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    timeout-minutes: 75
+    # The tier takes ~1.5 h in one pytest process.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

@@ -20,7 +20,6 @@ Requires the model tokenizers/configs in the HF cache (offline-friendly).
 import os
 
 import pytest
-from transformers import AutoConfig
 
 from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
 from src.data.collators.packing import (
@@ -28,27 +27,28 @@ from src.data.collators.packing import (
     DataCollatorWithFlatteningAndCompletionMask,
 )
 from src.data.spans import build_completion_only_labels, resolve_eos_token_ids
-from tests.common.tokenizers import load_cached_tokenizer
+from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, QWEN3_0_6B, QWEN3_5_2B
+from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
 
 # Distinctive content so decode-based assertions are unambiguous after templating/tokenization.
 U1, A1 = "Question alpha numero uno", "Response bravo the first answer"
 U2, A2 = "Question charlie numero dos", "Response delta the second answer"
 ASST_MARKERS = {  # the assistant generation marker per family (matches the production YAML configs)
-    "Qwen/Qwen3-0.6B": "<|im_start|>assistant\n",
-    "Qwen/Qwen3.5-2B": "<|im_start|>assistant\n",
-    "zai-org/GLM-4.7-Flash": "<|assistant|>",
-    "google/gemma-3-4b-it": "<start_of_turn>model\n",
+    QWEN3_0_6B: "<|im_start|>assistant\n",
+    QWEN3_5_2B: "<|im_start|>assistant\n",
+    GLM4_FLASH: "<|assistant|>",
+    GEMMA3_4B_IT: "<start_of_turn>model\n",
 }
 # Families whose native template leaves the FINAL assistant turn unterminated need the SFT template,
 # or the completion collators cannot train that turn (Qwen3/Gemma terminate every turn natively).
 SFT_TEMPLATE_FILES = {
-    "zai-org/GLM-4.7-Flash": "jinja-templates/glm/glm-chat.jinja",
+    GLM4_FLASH: "jinja-templates/glm/glm-chat.jinja",
 }
 # Families whose assistant turns end in a token that is NOT ``tokenizer.eos_token_id`` — exactly the
 # ones a single-eos search gets wrong.
-NON_EOS_TERMINATED = ("zai-org/GLM-4.7-Flash", "google/gemma-3-4b-it")
+NON_EOS_TERMINATED = (GLM4_FLASH, GEMMA3_4B_IT)
 # One family per template shape (im_end / role marker / end_of_turn); Qwen3.5 shares Qwen3's.
-COLLATOR_FAMILIES = ("Qwen/Qwen3-0.6B", "zai-org/GLM-4.7-Flash", "google/gemma-3-4b-it")
+COLLATOR_FAMILIES = (QWEN3_0_6B, GLM4_FLASH, GEMMA3_4B_IT)
 
 
 def _apply_sft_template(tok, model_id):
@@ -70,10 +70,7 @@ CONVO = [
 def _load(model_id):
     """Tokenizer + config for ``model_id``, skipping the test when the HF cache lacks them."""
     tok = load_cached_tokenizer(model_id, trust_remote_code=True)
-    try:
-        cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True, local_files_only=True)
-    except OSError:
-        pytest.skip(f"config for {model_id} is not in the local HF cache")
+    cfg = load_cached_config(model_id, trust_remote_code=True)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     # GLM-4.7-Flash/Gemma default to left padding, which the packing collator rejects.

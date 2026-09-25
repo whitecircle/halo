@@ -17,8 +17,14 @@ import sys
 import types
 
 import pytest
+import torch
 
+from src.environments.base import Message, Trajectory
 from src.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
+from src.environments.episode import RolloutResult
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from tests.common.models import GPT_OSS_20B
+from tests.common.tokenizers import load_cached_tokenizer
 
 
 def _choice(tokens):
@@ -67,8 +73,6 @@ def test_extract_token_logprobs_rejects_missing_or_malformed():
 def _make_trainer_stub(tok):
     """A minimal object exposing exactly what _tokenize_trajectory_turns touches, with the real methods
     bound so the prompt render is the genuine template path."""
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-
     stub = types.SimpleNamespace(
         processing_class=tok,
         _tokenizer=tok,
@@ -92,13 +96,6 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
     must be those ids verbatim — no template re-render (which drifts from the server on effort
     steering, tool-schema formatting, and channel placement). Turns without them fall back to the
     render. Model-agnostic: the ids are opaque to the assembly."""
-    try:
-        from src.environments.base import Message, Trajectory
-        from src.environments.episode import RolloutResult
-        from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-    except Exception as e:
-        pytest.skip(f"trainer import unavailable: {e}")
-
     engine_prompt = [11, 22, 33, 44, 55]
     comp = [7, 8, 9]
     traj = Trajectory()
@@ -133,16 +130,7 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
 
 
 def test_per_turn_assembly_uses_sampled_ids_verbatim():
-    try:
-        from transformers import AutoTokenizer
-
-        from src.environments.base import Message, Trajectory
-        from src.environments.episode import RolloutResult
-        from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer  # noqa: F401
-
-        tok = AutoTokenizer.from_pretrained("unsloth/gpt-oss-20b-BF16")
-    except Exception as e:
-        pytest.skip(f"gpt-oss tokenizer / trainer import unavailable: {e}")
+    tok = load_cached_tokenizer(GPT_OSS_20B)
 
     # Distinct sampled-id sequences per turn; assembly must reproduce each without re-tokenizing.
     turn1 = tok(
@@ -182,18 +170,10 @@ def test_prompt_render_includes_tool_schema():
     rollout sends env.get_tools_schema() as chat-template `tools=`, so the trainer render must too.
     Omitting it drops ~2/3 of the prompt (the harmony tool block) and mis-conditions every completion
     token — the mechanism behind is_ratio≈0.47. This fails if the render stops passing tools."""
-    try:
-        from transformers import AutoTokenizer
-
-        from src.environments.base import Message, Trajectory
-        from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-
-        tok = AutoTokenizer.from_pretrained("unsloth/gpt-oss-20b-BF16")
-        # Production pins this harmony template on both the trainer and the vLLM server; mirror it.
-        with open("jinja-templates/gpt-oss/gpt-oss-harmony.jinja") as f:
-            tok.chat_template = f.read()
-    except Exception as e:
-        pytest.skip(f"gpt-oss tokenizer unavailable: {e}")
+    tok = load_cached_tokenizer(GPT_OSS_20B)
+    # Production pins this harmony template on both the trainer and the vLLM server; mirror it.
+    with open("jinja-templates/gpt-oss/gpt-oss-harmony.jinja") as f:
+        tok.chat_template = f.read()
 
     tools = [
         {
@@ -226,8 +206,6 @@ def test_prompt_render_includes_tool_schema():
 def test_fallback_context_render_is_the_engine_view():
     """A turn without engine prompt ids re-renders its history exactly as the engine was told it:
     with carried reasoning only the previous assistant turn keeps its thought, without it none does."""
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
 
     def _episode():
         traj = Trajectory()
@@ -254,9 +232,6 @@ def test_fallback_context_render_is_the_engine_view():
 def test_a_per_turn_row_over_the_train_row_cap_leaves_the_batch():
     """The cap is the rank's memory bound: the oversized turn is left out, its episode's other turns stay,
     and the trainer's counter records it. Without a cap the same row trains."""
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
-
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("short", token_ids=[5, 6], prompt_token_ids=[1, 2]))
@@ -270,10 +245,6 @@ def test_a_per_turn_row_over_the_train_row_cap_leaves_the_batch():
 
 
 def test_every_turn_over_the_cap_trains_as_one_masked_row():
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("long", token_ids=[7, 8, 9, 10], prompt_token_ids=[1, 2, 3, 4]))
@@ -290,10 +261,6 @@ def test_every_turn_over_the_cap_trains_as_one_masked_row():
 def _turns_stub():
     """A stub exposing only _tokenize_trajectory_turns + its render dep, no tokenizer needed for the
     old-logps rows (fallback path is not exercised)."""
-    import types
-
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-
     stub = types.SimpleNamespace(
         _warned_capture_missing=False,
         _rollout_routing_replay=False,
@@ -304,7 +271,7 @@ def _turns_stub():
     )
     stub._render_messages_to_ids = lambda *a, **k: [1, 2, 3]
     stub._context_limit = lambda: 10**9  # no overflow in this test's tiny rows
-    stub._tokenize_trajectory = lambda result: (__import__("torch").tensor([0]),) * 3
+    stub._tokenize_trajectory = lambda result: (torch.tensor([0]),) * 3
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
     return stub
 
@@ -312,11 +279,6 @@ def _turns_stub():
 def test_old_logps_aligned_1to1_with_sampled_ids():
     """The behavior-policy reference (4th tuple element) is the turn's sampling logprobs, exactly aligned
     with completion_ids — so the PPO ratio exp(cur - old) is well-defined per sampled token."""
-    import torch
-
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
-
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("a1", token_ids=[10, 11, 12], token_logprobs=[-0.1, -0.2, -0.3]))
@@ -338,9 +300,6 @@ def test_old_logps_aligned_1to1_with_sampled_ids():
 def test_old_logps_none_when_a_turn_lacks_logprobs():
     """A turn with ids but no logprobs → old is None for that row, so the batch-level gate disables the
     IS trust region (never a misaligned/partial reference)."""
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
-
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("a1", token_ids=[10, 11], token_logprobs=[-0.1, -0.2]))
@@ -354,9 +313,6 @@ def test_turns_path_records_context_overflow():
     """The sampled-tokens (default) path must record an oversize error when a per-turn row exceeds the
     context window — never silently truncate. The single-sequence path already does; this locks the
     turns path, which every shipped env config uses."""
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
-
     stub = _turns_stub()
     stub._context_limit = lambda: 4  # render=3 prompt tokens + 5 completion ids = 8 > 4
     stub._batch_build_error = None
@@ -375,8 +331,6 @@ def test_turns_path_records_context_overflow():
 
 def _render_stub(render):
     """A stub with the REAL whole-trajectory tokenizer and per-turn splitter wired over ``render``."""
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-
     stub = types.SimpleNamespace(
         _warned_capture_missing=False,
         _rollout_routing_replay=False,
@@ -404,8 +358,6 @@ def test_unrenderable_trajectory_invalidates_the_episode_instead_of_the_run():
     template rejects it (a malformed tool-call payload), the episode must be dropped as invalid — fully
     masked row, no group-baseline weight — and NOT recorded as the fatal batch error that takes every
     rank down mid-run."""
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
 
     def render(*_a, **_k):
         raise TypeError("Can only get item pairs from a mapping.")
@@ -424,9 +376,6 @@ def test_unrenderable_trajectory_invalidates_the_episode_instead_of_the_run():
 
 
 def test_per_turn_prefix_render_failure_drops_the_episode_not_the_run():
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
-
     calls = []
 
     def render(msgs, *_a, **_k):
@@ -453,10 +402,6 @@ def test_prefix_render_failure_masks_the_episode_even_when_the_whole_render_woul
     """The invalidated episode must not reach the whole-trajectory fallback: that render can succeed
     where the per-turn prefix render failed and would hand an episode already excluded from the group
     baseline a weighted row (and, under rollout routing replay, a row with no captured routing)."""
-    import torch
-
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
 
     def render(*_a, **_k):
         raise ValueError("template rejects this prefix")
@@ -481,8 +426,6 @@ def test_prefix_render_failure_masks_the_episode_even_when_the_whole_render_woul
 def test_prefix_render_failure_on_a_later_turn_masks_the_earlier_rows_too():
     """An episode is invalid as a whole: a first turn whose engine prompt ids made it a trainable row
     must not survive a later turn's failed prefix render at the episode's (now excluded) advantage."""
-    from src.environments.base import Message, Trajectory
-    from src.environments.episode import RolloutResult
 
     def render(*_a, **_k):
         raise ValueError("template rejects this prefix")

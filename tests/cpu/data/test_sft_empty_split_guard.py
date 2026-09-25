@@ -16,11 +16,12 @@ import datasets
 import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
-from transformers import AutoTokenizer
 
 PartialState()
 
 from scripts.training.sft import _prepare_text_data
+from tests.common.models import QWEN3_0_6B
+from tests.common.tokenizers import load_cached_tokenizer
 
 _MAX_LENGTH = 64
 _SHORT = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
@@ -60,7 +61,7 @@ def _writable_dataset_cache(tmp_path, monkeypatch):
 
 
 def _prepare(train_messages, test_messages):
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     ds = DatasetDict(
         {
             "train": Dataset.from_dict({"messages": train_messages}),
@@ -72,7 +73,7 @@ def _prepare(train_messages, test_messages):
         False,
         _args(),
         _sft_config(),
-        SimpleNamespace(model_name_or_path="Qwen/Qwen3-0.6B"),
+        SimpleNamespace(model_name_or_path=QWEN3_0_6B),
         tokenizer,
         SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
         hf_config=None,

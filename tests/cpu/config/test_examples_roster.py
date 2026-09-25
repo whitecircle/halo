@@ -24,7 +24,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from transformers import AutoConfig
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
 from src.distributed.loading.peft_setup import split_expert_lora_targets
@@ -34,6 +33,7 @@ from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, nati
 from src.models.patches.attention import model_has_sinks, validate_attn_implementation
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.parallelism import make_parallelism_config
+from tests.common.tokenizers import load_cached_config, try_cached_config
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
     EXAMPLES_ROOT,
@@ -146,7 +146,7 @@ def build_parallelism_config(config: Path):
     # (PP and Expert-TP both refuse it) go unchecked, exactly like the model-dependent cases below.
     expert_lora = (
         split_expert_lora_targets(model_config)
-        if cached_model_config(model_config.model_name_or_path) is not None
+        if try_cached_config(model_config.model_name_or_path, trust_remote_code=True) is not None
         else None
     )
     world_size, gpus_per_node = launch_topology(config)
@@ -166,26 +166,14 @@ def build_parallelism_config(config: Path):
         )
 
 
-def cached_model_config(reference: str):
-    """The model's real config from the local HF cache, or ``None`` when it is not there.
+def model_config_for(config: Path, parsed: tuple):
+    """The example's model config from the local HF cache; a skip when this host cannot resolve it.
 
-    ``local_files_only`` keeps this tier offline: a CI runner without the weights cache skips the
+    ``local_files_only`` keeps this tier offline: a runner without the cache skips the
     config-dependent checks instead of hanging on the hub, and a host-local checkpoint path
     (``/mnt/...``) that does not exist here skips the same way.
     """
-    try:
-        return AutoConfig.from_pretrained(reference, local_files_only=True, trust_remote_code=True)
-    except Exception:
-        return None
-
-
-def model_config_for(config: Path, parsed: tuple):
-    """The example's resolved model config, or a skip when this host cannot resolve it."""
-    reference = parsed_field(parsed, "model_name_or_path")
-    resolved = cached_model_config(reference)
-    if resolved is None:
-        pytest.skip(f"model {reference!r} is not in the local HF cache; config-dependent checks need it")
-    return resolved
+    return load_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
 
 
 def test_examples_declare_their_launch_width():
@@ -328,7 +316,7 @@ def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
     if (raw.get("pipeline_parallel_size") or 1) > 1:
         return
     parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    model_config = cached_model_config(parsed_field(parsed, "model_name_or_path"))
+    model_config = try_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
     if (raw.get("expert_parallel_size") or 1) <= 1 and not config_has_experts(model_config):
         return
     declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
@@ -377,7 +365,7 @@ def test_some_example_model_is_cached():
     cached = [
         config
         for config in _EXAMPLES
-        if cached_model_config(raw_config(config).get("model_name_or_path", "")) is not None
+        if try_cached_config(raw_config(config)["model_name_or_path"], trust_remote_code=True) is not None
     ]
     assert cached, (
         "no example's model is in the local HF cache, so every config-dependent check below skipped. "

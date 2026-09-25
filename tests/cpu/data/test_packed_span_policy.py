@@ -17,7 +17,6 @@ Run: python tests/cpu/data/test_packed_span_policy.py  (or pytest)
 import pytest
 import torch
 from datasets import Dataset
-from transformers import AutoTokenizer
 
 from src.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
@@ -27,6 +26,8 @@ from src.data.pipeline import preprocessing as preprocessing_mod
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import _completion_only_labels, tokenize_dataset
 from src.data.spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, mask_batch_to_completion_spans
+from tests.common.models import QWEN3_0_6B
+from tests.common.tokenizers import load_cached_tokenizer
 
 PAD, EOS, IGNORE = 0, 1, -100
 RESP_1, RESP_2 = 10, 11
@@ -154,10 +155,7 @@ def test_the_bake_selects_the_policy_its_artifact_will_be_collated_under(
 ):
     """Wiring: ``tokenize_dataset`` hands the bake the policy of the collator that will read the
     artifact. Baking one policy into an artifact collated under the other is the divergence itself."""
-    try:
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    except Exception as e:
-        pytest.skip(f"tokenizer unavailable offline: {e}")
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
 
     seen = []
     real_bake = preprocessing_mod._completion_only_labels

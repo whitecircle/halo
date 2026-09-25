@@ -9,22 +9,21 @@ EOS ``<|im_end|>`` doubles as the turn delimiter — the exact case a first-EOS
 heuristic mis-handles). Run: ``pytest tests/cpu/environments/test_trajectory_masking.py``.
 """
 
-import os
 from types import MethodType, SimpleNamespace
 
 import pytest
-from transformers import AutoTokenizer
 
 from src.environments.base import BaseEnvironment, Message, Trajectory
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from tests.common.models import QWEN3_0_6B
+from tests.common.tokenizers import load_cached_tokenizer
 
-MODEL = "Qwen/Qwen3-0.6B"
+MODEL = QWEN3_0_6B
 
 
 @pytest.fixture(scope="module")
 def tokenizer():
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    return AutoTokenizer.from_pretrained(MODEL)
+    return load_cached_tokenizer(MODEL)
 
 
 def _stub(tokenizer):

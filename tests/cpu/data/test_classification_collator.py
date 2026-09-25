@@ -13,10 +13,10 @@ Requires the Qwen3 tokenizer in the HF cache (offline-friendly).
 
 import pytest
 import torch
-from transformers import AutoTokenizer
 
 from src.data.collators.classification import ClassificationDataCollatorWithPadding
 from tests.common.models import QWEN3_0_6B
+from tests.common.tokenizers import load_cached_tokenizer
 
 
 def _features(tokenizer):
@@ -38,7 +38,7 @@ def _features(tokenizer):
 
 
 def test_collator_drops_source_columns():
-    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B, trust_remote_code=True)
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B, trust_remote_code=True)
     collator = ClassificationDataCollatorWithPadding(tokenizer, max_length=64)
 
     batch = collator(_features(tokenizer))
@@ -51,7 +51,7 @@ def test_collator_drops_source_columns():
 
 def test_multi_label_targets_survive():
     """Multi-label rows carry a float vector in `label`; it must reach the batch as `labels`."""
-    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B, trust_remote_code=True)
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B, trust_remote_code=True)
     collator = ClassificationDataCollatorWithPadding(tokenizer, max_length=64)
 
     features = _features(tokenizer)

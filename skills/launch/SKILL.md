@@ -49,6 +49,7 @@ make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
            IMAGE=halo:hopper        # run on Hopper instead
 
 # Tests
+make seed-hf-cache                           # Hub configs + tokenizers the CPU tier reads (no weights)
 make test-cpu                                # pytest CPU tier (no GPU, runs in image)
 make test-gpu-core                           # core GPU tier (PR gate)
 make test-gpu-full                           # full GPU tier (nightly)

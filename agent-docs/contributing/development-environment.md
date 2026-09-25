@@ -68,12 +68,13 @@ back to the host `.venv`. For Hopper, change `"image"` to `halo:hopper`.
 
 The code does not auto-load `.env` — it is passed with `docker run --env-file .env`. Only the GPU
 `make` targets do this (`DOCKER_RUN`, and only when `ENV_FILE` is non-empty); the CPU targets
-(`install`, `test-cpu`, `diagrams`) pass no credentials at all; `docs` runs on the host.
+(`install`, `test-cpu`, `seed-hf-cache`, `diagrams`) pass no credentials at all; `docs` runs on the host.
 
 The CPU targets mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
 read-write, because many CPU tests load a real tokenizer. A test calling `from_pretrained` directly
 hard-fails when the cache is missing and the Hub is unreachable; one going through
-`tests/common/tokenizers.py` skips instead.
+`tests/common/tokenizers.py` skips instead, or fails under `HALO_TEST_REQUIRE_HUB_CACHE=1`.
+`make seed-hf-cache` fills that cache ([what the seed holds](../infrastructure/ci.md#hub-seed)).
 
 Secrets live in the repo-root `.env`. Cache and path redirects are `-e` flags pointed at a **verified**
 large volume: the root filesystem is small, and a path named `/mnt` is not guaranteed to be a separate

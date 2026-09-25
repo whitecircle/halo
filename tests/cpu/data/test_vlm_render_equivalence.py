@@ -31,15 +31,12 @@ from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_vlm_dataset
 from src.data.pipeline.row_processors import create_vlm_processor
 from src.data.pipeline.vlm_dataset import _vlm_extra_columns, vlm_map_features
+from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_VL_2B
 from tests.common.tokenizers import load_cached_processor
 
-# Processor-only snapshots are enough (no weights are loaded); revisions are pinned because hub main
-# can drift a chat template out from under the comparison. Two template dialects, so a divergence
-# only one of them expresses cannot pass unnoticed.
-PROCESSORS = [
-    ("Qwen/Qwen2.5-VL-3B-Instruct", "66285546d2b821cf421d4f5eb2576359d3770cd3"),
-    ("Qwen/Qwen3-VL-2B-Instruct", "89644892e4d85e24eaac8bacfd4f463576704203"),
-]
+# Processor-only snapshots are enough (no weights are loaded), at their pinned revisions. Two template
+# dialects, so a divergence only one of them expresses cannot pass unnoticed.
+PROCESSORS = [(name, PINNED_REVISIONS[name]) for name in (QWEN2_5_VL_3B, QWEN3_VL_2B)]
 
 MAX_LENGTH = 8192
 

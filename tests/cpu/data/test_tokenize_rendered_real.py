@@ -23,7 +23,7 @@ import pytest
 
 from src.data.pipeline.rendered import probe_tokenizer_specials, tokenize_rendered
 from src.data.pipeline.row_processors import create_llm_processor
-from tests.common.models import ZAYA_8B
+from tests.common.models import GEMMA3_4B_IT, GEMMA4_31B_QAT, GLM4_FLASH, GPT_OSS_20B_OPENAI, QWEN3_0_6B, ZAYA_8B
 from tests.common.tokenizers import load_cached_tokenizer
 
 MESSAGES = [
@@ -38,7 +38,7 @@ def _render(tokenizer, messages, add_generation_prompt):
 
 
 def test_gemma3_single_bos_training_and_generation():
-    tok = load_cached_tokenizer("google/gemma-3-4b-it")
+    tok = load_cached_tokenizer(GEMMA3_4B_IT)
     specials = probe_tokenizer_specials(tok)
     assert specials.adds_leading_bos and specials.trailing_special_ids == ()
 
@@ -50,7 +50,7 @@ def test_gemma3_single_bos_training_and_generation():
 
 
 def test_gemma4_template_bos_survives():
-    tok = load_cached_tokenizer("google/gemma-4-31B-it-qat-w4a16-ct")
+    tok = load_cached_tokenizer(GEMMA4_31B_QAT)
     specials = probe_tokenizer_specials(tok)
     assert not specials.adds_leading_bos and specials.trailing_special_ids == ()
 
@@ -62,7 +62,7 @@ def test_gemma4_template_bos_survives():
         assert ids.count(tok.bos_token_id) == 1
 
 
-@pytest.mark.parametrize("name", ["Qwen/Qwen3-0.6B", "zai-org/GLM-4.7-Flash"])
+@pytest.mark.parametrize("name", [QWEN3_0_6B, GLM4_FLASH])
 def test_no_specials_families_verbatim(name):
     tok = load_cached_tokenizer(name)
     specials = probe_tokenizer_specials(tok)
@@ -75,7 +75,7 @@ def test_no_specials_families_verbatim(name):
 
 
 def test_gptoss_nominal_bos_never_injected():
-    tok = load_cached_tokenizer("openai/gpt-oss-20b")
+    tok = load_cached_tokenizer(GPT_OSS_20B_OPENAI)
     specials = probe_tokenizer_specials(tok)
     assert not specials.adds_leading_bos and specials.trailing_special_ids == ()
     assert tok.bos_token_id is not None, "precondition: gpt-oss defines a nominal bos_token"

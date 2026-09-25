@@ -35,6 +35,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from tests.common.models import GEMMA3_4B_IT, GPT_OSS_20B_OPENAI, QWEN3_0_6B
 from tests.common.tokenizers import try_cached_tokenizer
 
 # Distinctive, non-overlapping markers so a decode-based assertion names exactly one message.
@@ -97,18 +98,18 @@ CONVOS = {
 # (first, last) token of every trained span, hand-checked against the full render; absent pairs are
 # shapes the template rejects, kept honest by test_every_renderable_case_has_expected_boundaries.
 EXPECTED_SPAN_BOUNDARIES = {
-    ("Qwen/Qwen3-0.6B", "tool"): (("<think>", "\n"), ("<think>", "\n")),
-    ("Qwen/Qwen3-0.6B", "chat"): (("I", "\n"), ("<think>", "\n")),
-    ("Qwen/Qwen3-0.6B", "whitespace"): (("\n\n\n", "\n"), ("<think>", "\n")),
-    ("Qwen/Qwen3-0.6B", "truncated"): (("<think>", "\n"), ("<think>", "\n")),
+    (QWEN3_0_6B, "tool"): (("<think>", "\n"), ("<think>", "\n")),
+    (QWEN3_0_6B, "chat"): (("I", "\n"), ("<think>", "\n")),
+    (QWEN3_0_6B, "whitespace"): (("\n\n\n", "\n"), ("<think>", "\n")),
+    (QWEN3_0_6B, "truncated"): (("<think>", "\n"), ("<think>", "\n")),
     # harmony: the mid-episode terminator is <|call|> / <|end|>, and <|return|> only ends the episode.
-    ("openai/gpt-oss-20b", "tool"): ((" to", "<|call|>"), ("<|channel|>", "<|return|>")),
-    ("openai/gpt-oss-20b", "chat"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
-    ("openai/gpt-oss-20b", "whitespace"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
-    ("openai/gpt-oss-20b", "truncated"): (("<|channel|>", "<|call|>"), ("<|channel|>", "<|call|>")),
+    (GPT_OSS_20B_OPENAI, "tool"): ((" to", "<|call|>"), ("<|channel|>", "<|return|>")),
+    (GPT_OSS_20B_OPENAI, "chat"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
+    (GPT_OSS_20B_OPENAI, "whitespace"): (("<|channel|>", "<|end|>"), ("<|channel|>", "<|return|>")),
+    (GPT_OSS_20B_OPENAI, "truncated"): (("<|channel|>", "<|call|>"), ("<|channel|>", "<|call|>")),
     # Monotone control: its header absorbs the leading newlines, the opposite of Qwen3 on this convo.
-    ("google/gemma-3-4b-it", "chat"): (("I", "\n"), ("It", "\n")),
-    ("google/gemma-3-4b-it", "whitespace"): (("RE", "\n"), ("RE", "\n")),
+    (GEMMA3_4B_IT, "chat"): (("I", "\n"), ("It", "\n")),
+    (GEMMA3_4B_IT, "whitespace"): (("RE", "\n"), ("RE", "\n")),
 }
 CASES = sorted(EXPECTED_SPAN_BOUNDARIES)
 MODELS = sorted({model for model, _ in CASES})
@@ -456,7 +457,7 @@ def test_prefix_diffing_row_is_rejected_where_it_diverges(model, convo_name):
 def test_sampled_token_path_bypasses_re_rendering():
     """``train_on_sampled_tokens`` with the engine's ids present trains those ids verbatim: the
     re-render path stays out of the token-id path."""
-    stub, messages, _ = _case("Qwen/Qwen3-0.6B", "tool")
+    stub, messages, _ = _case(QWEN3_0_6B, "tool")
     sampled = {1: [101, 102, 103], 3: [201, 202]}
     for idx, ids in sampled.items():
         messages[idx].token_ids = ids
@@ -473,7 +474,7 @@ def test_sampled_token_path_falls_back_to_the_identical_render_row():
     """With no captured ids the turns path falls back to the single re-rendered row, and that row is
     identical to the one ``_tokenize_trajectory`` builds — the two paths cannot disagree about what the
     trajectory is."""
-    stub, messages, full = _case("openai/gpt-oss-20b", "tool")
+    stub, messages, full = _case(GPT_OSS_20B_OPENAI, "tool")
     result = RolloutResult(prompt="task", trajectory=_trajectory(messages))
 
     rows = stub._tokenize_trajectory_turns(result)
@@ -489,7 +490,7 @@ def test_sampled_token_path_falls_back_to_the_identical_render_row():
 def test_unlocatable_turn_span_is_reported_not_guessed(caplog):
     """A render that cannot be decomposed drops THAT episode (named in the warning) with a fully masked
     row; it is not guessed from prefix renders and does not fail the run."""
-    stub, messages, _ = _case("Qwen/Qwen3-0.6B", "tool")
+    stub, messages, _ = _case(QWEN3_0_6B, "tool")
     real_render = stub._render_messages_to_ids
 
     def _unanchorable(msgs, add_generation_prompt, template_kwargs, include_thinking=True):
@@ -501,7 +502,7 @@ def test_unlocatable_turn_span_is_reported_not_guessed(caplog):
     with caplog.at_level("WARNING"):
         result, row = _row_with_result(stub, messages)
 
-    _assert_dropped_not_guessed(stub, result, row, caplog, "Qwen/Qwen3-0.6B")
+    _assert_dropped_not_guessed(stub, result, row, caplog, QWEN3_0_6B)
 
 
 def test_consecutive_assistant_turns_are_reported_not_guessed(caplog):
@@ -511,7 +512,7 @@ def test_consecutive_assistant_turns_are_reported_not_guessed(caplog):
     last token with the turn's first content token differently per turn — so it must be reported rather
     than carried over from another turn.
     """
-    stub = _load("openai/gpt-oss-20b")
+    stub = _load(GPT_OSS_20B_OPENAI)
     if stub is None:
         pytest.skip("gpt-oss tokenizer unavailable")
     messages = [
@@ -530,7 +531,7 @@ def test_template_render_failure_is_reported_not_raised(caplog):
     """A template that rejects the trajectory itself drops the episode, never raises: a raw exception
     on one rank alone leaves its peers in the batch collectives until the NCCL watchdog fires, and a
     batch error recorded for one malformed trajectory takes every rank down mid-run."""
-    stub, messages, _ = _case("Qwen/Qwen3-0.6B", "chat")
+    stub, messages, _ = _case(QWEN3_0_6B, "chat")
 
     def _explode(*_args, **_kwargs):
         raise TypeError("Can only get item pairs from a mapping")

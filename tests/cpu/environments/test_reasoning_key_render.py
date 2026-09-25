@@ -25,29 +25,41 @@ import pytest
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 from src.environments.base import REASONING_KEYS, Message
-from tests.common.models import ZAYA_8B
+from tests.common.models import (
+    BAILING_MOE_RING_MINI,
+    GEMMA3_4B_IT,
+    GEMMA4_31B_QAT,
+    GLM4_FLASH,
+    GPT_OSS_20B_OPENAI,
+    LFM2_24B_A2B,
+    MISTRAL3_119B_MOE,
+    QWEN3_0_6B,
+    QWEN3_5_2B,
+    QWEN3_6_MOE_35B,
+    ZAYA_8B,
+)
 from tests.common.tokenizers import try_cached_tokenizer
 
 # One tokenizer per reasoning family on the roster, plus two non-reasoning controls whose templates
 # drop CoT under every spelling (asserted below, not assumed).
 ROSTER = (
-    "Qwen/Qwen3-0.6B",
-    "Qwen/Qwen3.5-2B",
-    "Qwen/Qwen3.6-35B-A3B",
+    QWEN3_0_6B,
+    QWEN3_5_2B,
+    QWEN3_6_MOE_35B,
     ZAYA_8B,
-    "openai/gpt-oss-20b",
-    "zai-org/GLM-4.7-Flash",
-    "google/gemma-4-31B-it-qat-w4a16-ct",
-    "mistralai/Mistral-Small-4-119B-2603",
-    "inclusionAI/Ring-mini-linear-2.0",
-    "LiquidAI/LFM2-24B-A2B",
-    "google/gemma-3-4b-it",
+    GPT_OSS_20B_OPENAI,
+    GLM4_FLASH,
+    GEMMA4_31B_QAT,
+    MISTRAL3_119B_MOE,
+    BAILING_MOE_RING_MINI,
+    LFM2_24B_A2B,
+    GEMMA3_4B_IT,
 )
 # A cache miss must not quietly empty the matrix; below this the file proves nothing.
 MIN_REASONING_FAMILIES = 5
 # The one family whose template reads ``thinking`` and nothing else, so a single-key emission has to
 # keep working for it.
-HARMONY = "openai/gpt-oss-20b"
+HARMONY = GPT_OSS_20B_OPENAI
 
 COT = "Twenty one plus twenty one is forty two."
 ANSWER = "The answer is 42."
