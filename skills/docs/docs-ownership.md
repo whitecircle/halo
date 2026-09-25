@@ -79,6 +79,7 @@ changes.
 | `src/models/modality.py` (multimodal checkpoint detection) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `src/models/attention_geometry.py` (head-dim and KV-head resolution across composite/per-layer configs) | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md` |
 | `src/models/attention_layout.py` (per-layer attention cost rules off `layer_types` + head geometry — the MFU attention term) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `src/models/segment_markers.py` (per-family conv / linear-attention segment markers, the GatedDeltaNet kernel refusal) | `agent-docs/data/collators.md` (Document isolation under packing), `agent-docs/optimization/padding-free-collator.md`, `agent-docs/training-methods/preference/smpo.md` |
 | new model support | new `agent-docs/models/<family>.md` + model matrices in `expert-parallelism.md`/`grouped-gemm.md` + `agent-docs/models/README.md` + `CLAUDE.md` index |
 
 ## Collators & data

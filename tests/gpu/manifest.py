@@ -755,6 +755,9 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/preference/test_smpo_padding_free.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
+    "trainers/preference/test_smpo_padding_free_segments.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "lfm2", "qwen3"), timeout=600
+    ),
     "trainers/preference/test_smpo_tp.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
     ),

@@ -57,7 +57,7 @@ VARLEN_ATTN_IMPLEMENTATIONS = ("flash_attention_2", "flash_attention_3", "flash_
 
 # Families interleaving GatedDeltaNet (linear-attention) layers with softmax attention. Prefixes
 # rather than exact spellings, so text-tower variants (``qwen3_5_moe_text``) match; shared by the
-# collator factory's seq_idx emission and the packing shim below.
+# segment-marker gate (``src/models/segment_markers.py``) and the FA4 backward gate below.
 GDN_MODEL_TYPE_PREFIXES = ("qwen3_5", "qwen3_next")
 
 # The two spellings a flash kernel gives the learnable-sink argument (FA3's ``s_aux``, FA4's

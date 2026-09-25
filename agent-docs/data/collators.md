@@ -137,10 +137,10 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | Mistral4 | isolated — flash needs `patch_mistral4_flash_packed_position_ids` (upstream drops `position_ids` before the attention interface); dense clean to grouped-GEMM reduction noise | — |
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
 | DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors pool KV across the whole row — **cross by construction** |
-| Qwen3.5 / 3.6, Qwen3-Next | isolated | GatedDeltaNet reads `seq_idx` (conv) + `cu_seq_lens_q` (delta rule): the collators emit both for the family, so its boundaries reach the kernels — but only the `fla` / `causal-conv1d` fast paths consume them (both installed in the images). The torch fallbacks take neither, so a multi-document row would cross in the conv *and* the scan — the factory refuses `packing` / `padding_free` unless transformers' own fast-path predicates hold |
+| Qwen3.5 / 3.6, Qwen3-Next | isolated | GatedDeltaNet reads `seq_idx` (conv) + `cu_seq_lens_q` (delta rule): the collators and SMPO's padding-free forward emit both for the family, so its boundaries reach the kernels — but only the `fla` / `causal-conv1d` fast paths consume them (both installed in the images). The torch fallbacks take neither, so a multi-document row would cross in the conv *and* the scan — the factory refuses `packing` / `padding_free`, and SMPO its `padding_free`, unless transformers' own fast-path predicates hold |
 | Bailing / Ling | remote code; see [Bailing/Ling](../models/bailing.md) | KDA linear attention — **crosses**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
 | GLM-5 Next | both layer types receive the 2D padding mask `create_recurrent_attention_mask` builds, so no packed-boundary parameter reaches the DSA attention either | KDA linear attention — **crosses**, the same unreachable-boundary class as Bailing/Ling |
-| LFM-2 | isolated | ShortConv is isolated exactly: the collators emit `seq_idx` for this family and both conv paths honor it |
+| LFM-2 | isolated | ShortConv is isolated exactly: the collators and SMPO's padding-free forward emit `seq_idx` for this family and both conv paths honor it |
 | Zaya | isolated — flash needs `patch_zaya_flash_packed_position_ids` | CCA convolution + delayed-value recurrence — **cross by construction**, amplifying with depth |
 | Cohere2 MoE | isolated on every backend, no patch needed — the forward feeds `position_ids` into mask construction and through layer kwargs to the attention interface | — |
 | Step-3.7 Flash | isolated on SDPA and eager, no patch needed — the forward feeds `position_ids` into both mask constructions (full and sliding); bit-exact through dense layers, MoE layers add expert-summation reduction noise (~1e-7 fp32). Training path only: a live cache suppresses the packed mask (`use_cache=False`, as DeepSeek-V4) | — |
@@ -149,6 +149,9 @@ The GPT-OSS leak is the one case the toolkit refuses outright: `select_data_coll
 `DENSE_PACKING_LEAK_MODEL_TYPES` (`src/data/collators/factory.py`) when packing is asked for on a
 non-varlen backend. Pin `flash_attention_2` or turn packing off. The refusal reads the text
 sub-config too, so a composite (VLM) wrapper around a leaking family is covered.
+
+Which families get which segment markers, and the kernel refusal below, live in
+`src/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward.
 
 The GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) carry two more refusals, both about markers
 that would be emitted but not read:
@@ -159,8 +162,8 @@ that would be emitted but not read:
 
     The torch fallbacks it takes otherwise drop `seq_idx` and `cu_seq_lens_q`, so conv and recurrent
     state cross document boundaries while attention stays isolated, invisible in the loss. `packing`
-    and `padding_free` are both refused unless those same predicates hold, so the refusal cannot
-    disagree with the kernels actually selected (the production images satisfy them).
+    and `padding_free` (SFT and SMPO) are refused unless those same predicates hold, so the refusal
+    cannot disagree with the kernels actually selected (the production images satisfy them).
 
 - **Pipeline parallelism** ([not yet available](../parallelism/pipeline-parallelism.md)) — its
   collator seam keeps the packed rows instead of flattening them, and the delta rule's varlen

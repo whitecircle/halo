@@ -4,6 +4,8 @@ Concatenates variable-length sequences into one flattened tensor and emits `cu_s
 
 SMPO also supports `padding_free`, but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline-arithmetic-intensity-and-the-ridge-point).
 
+SMPO's flattened row isolates its documents too: attention through `position_ids`, and LFM-2 and GatedDeltaNet through `seq_idx` / `cu_seq_lens` segment markers built by the same gate these collators use (`src/models/segment_markers.py`).
+
 Implementations live in `src/data/collators/packing.py`:
 
 - `DataCollatorWithFlattening` — padding-free, no completion masking.

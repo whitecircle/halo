@@ -115,7 +115,7 @@ def test_factory_emits_seq_idx_for_lfm2_only():
     assert batch["seq_idx"].dtype == torch.int32
 
     # Through the factory, not a hand-built collator: the negative half must exercise the family
-    # gate itself, or widening emit_seq_idx to every family would pass unnoticed.
+    # gate itself, or widening segment_markers_for's seq_idx to every family would pass unnoticed.
     qwen3_config = Qwen3Config(num_hidden_layers=1)
     qwen3_config._attn_implementation = "flash_attention_2"
     other = select_data_collator(_mock_tokenizer(), packing=True, model_config=qwen3_config)

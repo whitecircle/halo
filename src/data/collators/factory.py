@@ -2,7 +2,6 @@
 
 from accelerate import PartialState
 from accelerate.logging import get_logger
-from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
 
 from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
 from src.data.collators.packing import (
@@ -14,11 +13,11 @@ from src.data.collators.packing import (
 )
 from src.data.spans import resolve_eos_token_ids, verify_marker_renders_in_chat_template
 from src.models.patches.attention import (
-    GDN_MODEL_TYPE_PREFIXES,
     VARLEN_ATTN_IMPLEMENTATIONS,
     effective_attn_implementation,
     model_type_matches,
 )
+from src.models.segment_markers import require_segment_aware_kernels, segment_markers_for
 
 logger = get_logger(__name__)
 
@@ -27,16 +26,6 @@ logger = get_logger(__name__)
 # Packing is refused for them; a varlen kernel is their production path. Isolation matrix:
 # ``agent-docs/data/collators.md``.
 DENSE_PACKING_LEAK_MODEL_TYPES = frozenset({"gpt_oss"})
-
-
-# Backends whose availability selects transformers' segment-aware GatedDeltaNet kernels; the torch
-# fallbacks ignore ``seq_idx``/``cu_seqlens`` and run a packed row as one document while attention
-# stays isolated. These are transformers' own fast-path predicates; re-spelling them as bare
-# ``find_spec`` checks would drop the ``fla>=0.2.2`` floor and the CUDA-capable-torch conjunct.
-GDN_SEGMENT_AWARE_BACKENDS = (
-    ("causal_conv1d", is_causal_conv1d_available),
-    ("fla>=0.2.2", is_flash_linear_attention_available),
-)
 
 
 def _validate_collator_options(
@@ -175,33 +164,11 @@ def select_data_collator(
 
     eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
 
-    # Conv/linear-attention mixers cross document boundaries unless the modeling gets its segment
-    # markers from forward kwargs (LFM2 ShortConv: ``seq_idx``; GatedDeltaNet: ``seq_idx`` plus
-    # ``cu_seq_lens_q``). Family-gated: emitting them universally pushes unread kwargs everywhere.
-    emit_seq_idx = (
-        model_type_matches(model_config, "lfm2", *GDN_MODEL_TYPE_PREFIXES) if model_config is not None else False
-    )
-    emit_packed_flash_kwargs = (
-        model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES) if model_config is not None else False
-    )
-    # Emitting the markers is not enough on its own: only the fast-path kernels read them.
-    if (packing or padding_free) and emit_packed_flash_kwargs:
-        missing = ", ".join(name for name, is_available in GDN_SEGMENT_AWARE_BACKENDS if not is_available())
-        if missing:
-            mode = "packing" if packing else "padding_free"
-            raise ValueError(
-                f"{mode}=True is refused for the GatedDeltaNet family "
-                f"model_type={getattr(model_config, 'model_type', None)!r}: {missing} unavailable. "
-                f"transformers selects its segment-aware linear-attention kernels on exactly these "
-                f"checks (package installed, at the version floor, CUDA-capable torch), and the torch "
-                f"fallbacks it takes instead IGNORE the document markers this collator emits — the "
-                f"conv drops seq_idx, the chunked delta rule drops cu_seq_lens_q — so conv and "
-                f"recurrent state cross packed document boundaries silently, while attention stays "
-                f"isolated. Install {missing} (the production images pin both), or train this family "
-                f"unpacked."
-            )
+    markers = segment_markers_for(model_config)
+    if packing or padding_free:
+        require_segment_aware_kernels(model_config, "packing" if packing else "padding_free")
 
-    if packing and emit_packed_flash_kwargs and keeps_packed_rows:
+    if packing and markers.cu_seq_lens and keeps_packed_rows:
         raise ValueError(
             "packing under pipeline parallelism is not supported for the GatedDeltaNet families "
             "(Qwen3.5/3.6, Qwen3-Next): PP keeps the packed rows (no flattening), and the varlen "
@@ -243,7 +210,7 @@ def select_data_collator(
             response_prompt_template=assistant_message_template,
             tokenizer=tokenizer,
             return_flash_attn_kwargs=True,
-            return_seq_idx=emit_seq_idx,
+            return_seq_idx=markers.seq_idx,
             train_on_last_assistant_only=train_on_last_assistant_only,
             eos_token_ids=eos_token_ids,
         )
@@ -254,7 +221,7 @@ def select_data_collator(
         collator = DataCollatorWithFlattening(
             tokenizer=tokenizer,
             return_flash_attn_kwargs=True,
-            return_seq_idx=emit_seq_idx,
+            return_seq_idx=markers.seq_idx,
         )
 
     elif packing and train_on_completions_only:
@@ -265,15 +232,15 @@ def select_data_collator(
             tokenizer=tokenizer,
             train_on_last_assistant_only=train_on_last_assistant_only,
             eos_token_ids=eos_token_ids,
-            return_seq_idx=emit_seq_idx,
-            return_flash_attn_kwargs=emit_packed_flash_kwargs,
+            return_seq_idx=markers.seq_idx,
+            return_flash_attn_kwargs=markers.cu_seq_lens,
         )
 
     elif packing:
         prefix = "📦"
         collator_name = "DataCollatorWithPacking"
         collator = DataCollatorWithPacking(
-            tokenizer=tokenizer, return_seq_idx=emit_seq_idx, return_flash_attn_kwargs=emit_packed_flash_kwargs
+            tokenizer=tokenizer, return_seq_idx=markers.seq_idx, return_flash_attn_kwargs=markers.cu_seq_lens
         )
 
     elif train_on_completions_only:

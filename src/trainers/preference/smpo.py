@@ -73,6 +73,12 @@ from src.distributed.pipeline_parallel.losses import (
     token_logprobs,
 )
 from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS
+from src.models.segment_markers import (
+    document_ids,
+    require_segment_aware_kernels,
+    segment_marker_kwargs,
+    segment_markers_for,
+)
 from src.models.structure import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.pp_gates import reject_pp_peft
@@ -342,6 +348,10 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
                     f"contexts — silently. Use one of {list(VARLEN_ATTN_IMPLEMENTATIONS)}, or set "
                     f"padding_free: false."
                 )
+            require_segment_aware_kernels(model.config, "padding_free")
+        # position_ids alone keep the padding-free row's documents apart in attention; these are the
+        # segment markers this family's conv / linear-attention mixers read on top.
+        self._segment_markers = segment_markers_for(model.config)
 
         # The model rides through the distributed seam so PP can split it into this rank's stage.
         dist_kwargs = self._init_distributed_config(
@@ -867,7 +877,12 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         num_chosen: int,
         device: torch.device,
     ) -> dict[str, torch.Tensor]:
-        """Padding-free forward: flatten [2*B, seq_len] → [1, total_non_pad_tokens] to drop padding compute."""
+        """Padding-free forward: flatten [2*B, seq_len] → [1, total_non_pad_tokens] to drop padding compute.
+
+        Each row becomes one document of the flattened row: its ``position_ids`` restart at 0, and
+        the family's segment markers (``self._segment_markers``) ride along for the mixers that
+        read their document boundaries from kwargs instead.
+        """
         flat_input_ids = input_ids[attention_mask.bool()].unsqueeze(0)
         flat_labels = labels[attention_mask.bool()].unsqueeze(0)
         position_ids = attention_mask.cumsum(1)[attention_mask.bool()].unsqueeze(0) - 1
@@ -876,6 +891,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             input_ids=flat_input_ids,
             position_ids=position_ids,
             use_cache=False,
+            **segment_marker_kwargs(position_ids, self._segment_markers),
         )
         flat_logits = outputs.logits
 
@@ -892,8 +908,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         per_token_logps[~loss_mask] = 0
         flat_nll = -per_token_logps[0]
 
-        seq_idx = (position_ids[0] == 0).cumsum(0) - 1
-        shift_seq_idx = seq_idx[1:]
+        shift_seq_idx = document_ids(position_ids[0])[1:]
         is_chosen = shift_seq_idx < num_chosen
         flat_logps = per_token_logps[0]
         flat_mask = loss_mask[0]
