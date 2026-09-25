@@ -217,6 +217,11 @@ lost. A fresh card holds the tag alone, except in a directory whose `adapter_con
 `peft_type` stock PEFT loads, where it also carries `library_name: peft` and a Hub `base_model`, as
 PEFT's own card does.
 
+Tagging leaves an existing card's `base_model` as it is. The card PEFT's own `save_pretrained` writes
+(the single-GPU / DDP adapter save) sets it to the base model's `_name_or_path`, a local path when the
+run loaded its base from disk; the Hub refuses a local-path `base_model`, so replace it with the Hub id
+before uploading that adapter.
+
 On a card with malformed metadata (not a YAML mapping, or a `tags` entry that is neither a list nor a
 string), `tag_model_card` raises, naming the file to repair, and fails the adapter save or unmerged
 `convert_to_bf16 --peft` that called it. The export finalizers and `reset_sinks` call

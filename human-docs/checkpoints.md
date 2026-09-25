@@ -108,7 +108,7 @@ with `merge_expert_lora_on_save: true` to save the merged model instead.
 Every checkpoint Halo writes — a full model or an adapter (QLoRA and EP expert
 adapters included) from training, or a tool's conversion — holds a `README.md`
 model card tagged `halo`, so the upload lists under that Hub tag; fill in its
-body before you publish. A tool whose source card has malformed metadata
+body, and replace a local-path `base_model` with the Hub id, before you publish. A tool whose source card has malformed metadata
 copies that card untagged and warns.
 
 Shard layouts, merge flags, and the full resume mechanics:
