@@ -18,6 +18,9 @@ Two things about that neutralization must hold, and neither is visible from a pa
   permanently — every later gather in the process would silently keep the identity semantics. The
   attribute has to be *deleted* off ``__dict__``.
 
+The branch warns that the metrics it logs are rank 0's shard, and only a length-less loader
+(``TypeError``) counts as unmeasurable.
+
 Run: ``python tests/cpu/trainers/test_eval_gather_escape_hatch.py`` (or ``pytest -m cpu``).
 """
 
@@ -147,6 +150,37 @@ def test_the_equal_batch_path_never_swaps_either_seam(distributed):
     gathered, padded = trainer.observed[0]
     assert gathered == ("real-gather", _SENTINEL)
     assert padded == ("class-padded", _SENTINEL)
+
+
+def test_the_hatch_warns_that_the_logged_metrics_are_one_ranks_shard(distributed):
+    """Nothing in the logged numbers says they cover rank 0's shard alone; the warning is the only sign."""
+    trainer = _StubTrainer()
+    with patch.object(mixin_module.logger, "warning") as warning:
+        trainer.evaluate(metric_key_prefix="test")
+    (message,), _ = warning.call_args
+    assert "'test_loss'" in message and "rank 0's own shard" in message
+
+
+def test_the_equal_batch_path_does_not_warn(distributed):
+    trainer = _StubTrainer(unequal=False)
+    with patch.object(mixin_module.logger, "warning") as warning:
+        trainer.evaluate()
+    warning.assert_not_called()
+
+
+def _raise(exc):
+    raise exc
+
+
+def test_only_a_length_less_loader_counts_as_unmeasurable():
+    """``len()`` of an iterable loader is a ``TypeError``; anything else is a bug to surface, not a
+    reason to switch the whole evaluation onto the rank-0-shard path."""
+    unmeasurable = SimpleNamespace(get_eval_dataloader=lambda dataset: iter(()))
+    assert DistributedTrainerMixin._eval_ranks_have_unequal_batches(unmeasurable, (), {}) is True
+
+    broken = SimpleNamespace(get_eval_dataloader=lambda dataset: _raise(AttributeError("loader bug")))
+    with pytest.raises(AttributeError, match="loader bug"):
+        DistributedTrainerMixin._eval_ranks_have_unequal_batches(broken, (), {})
 
 
 if __name__ == "__main__":

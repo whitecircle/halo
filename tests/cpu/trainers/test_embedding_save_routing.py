@@ -15,6 +15,7 @@ import contextlib
 import pytest
 import torch
 import torch.nn as nn
+from peft import LoraConfig, inject_adapter_in_model
 
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.trainer import EmbeddingTrainer
@@ -144,6 +145,8 @@ def test_gathered_lora_save_writes_through_the_shared_writer(monkeypatch, tmp_pa
     backbone exports module-fused expert keys vLLM rejects, and there is no ``.bin`` recovery.
     """
     host, backbone, _ = _host(has_lora=True, is_save_rank=True)
+    # The fixture's adapters are plain modules, not LoraLayers; the fold factor is not under test here.
+    host._lora_scaling = lambda backbone: 1.0
     ctx = _context(host, monkeypatch)
     written = {}
 
@@ -166,6 +169,17 @@ def test_gathered_lora_save_writes_through_the_shared_writer(monkeypatch, tmp_pa
     assert written["max_shard_size"] == ctx.max_shard_size
     assert written["keys"] == ["linear.weight"]  # adapters folded, base_layer spelling gone
     assert host.processing_class.saved_to == str(tmp_path)
+
+
+def test_lora_fold_factor_is_the_live_adapter_scaling_or_a_raise():
+    """The fold multiplies ``B @ A`` by the adapter's ``lora_alpha / r``; a guessed 1.0 would export
+    wrong merged weights whenever the two differ, so a backbone with no LoraLayer scaling raises."""
+    backbone = inject_adapter_in_model(LoraConfig(r=2, lora_alpha=8, target_modules=["linear"]), _Backbone())
+    assert EmbeddingTrainer._lora_scaling(None, backbone) == 4.0
+
+    unscaled, _, _ = _host(has_lora=True)
+    with pytest.raises(RuntimeError, match="no LoraLayer with an adapter scaling"):
+        EmbeddingTrainer._lora_scaling(None, unscaled._get_unwrapped_model())
 
 
 def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatch, tmp_path):

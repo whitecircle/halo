@@ -24,6 +24,7 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
+from transformers import Qwen3MoeConfig
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
@@ -34,6 +35,7 @@ from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
 from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -89,6 +91,9 @@ class _Trainer(EpIntrospectionMixin):
             gradient_checkpointing=gradient_checkpointing, gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
         )
 
+    def _get_unwrapped_model(self) -> nn.Module:
+        return self.model
+
 
 def test_zaya_declares_gc_unsupported_and_base_default_is_supported():
     assert EPZayaMoELayer._supports_gradient_checkpointing is False
@@ -114,6 +119,18 @@ def test_gc_on_supporting_layer_passes():
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is True
     assert trainer.args.gradient_checkpointing is False  # HF Trainer re-enable prevented
+
+
+def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
+    """No EP/CP axis (ep_size=1 grouped-GEMM wrappers): the MoE verdict comes from the backbone's
+    config alone, and a router re-run in non-reentrant recompute can flip a near-tie pick."""
+    trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True)
+    trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)
+    trainer.model.config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
+    assert not trainer.parallelism_config.is_ep_mode, "fixture must leave only the config to decide"
+    with patch("src.trainers.mixins.ep_introspection.enable_ep_gradient_checkpointing") as enable:
+        trainer._setup_ep_gradient_checkpointing()
+    enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
 
 def test_gc_under_pp_is_non_reentrant():

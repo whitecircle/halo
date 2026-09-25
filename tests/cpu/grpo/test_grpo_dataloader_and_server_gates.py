@@ -8,8 +8,7 @@
   only prunes when the dataset exposes ``column_names`` silently trains such a dataset on every
   column and fails here.
 - ``_require_vllm_server_mode`` raises instead of no-opping when no training config reaches the
-  ctor, and it agrees with ``_is_vllm_server_mode`` on what "server mode" means — a disagreement
-  would accept a config the TRL vLLM-client patch then declines to install.
+  ctor, and refuses every non-server shape before TRL's vLLM client is swapped in.
 
     python tests/cpu/grpo/test_grpo_dataloader_and_server_gates.py
 """
@@ -129,25 +128,6 @@ def test_non_server_configs_are_refused(use_vllm, vllm_mode, match):
     args = SimpleNamespace(use_vllm=use_vllm, vllm_mode=vllm_mode)
     with pytest.raises(ValueError, match=match):
         DistributedGRPOTrainer._require_vllm_server_mode(args)
-
-
-@pytest.mark.parametrize(
-    ("use_vllm", "vllm_mode", "is_server"),
-    [(True, "server", True), (True, "colocate", False), (False, "server", False)],
-)
-def test_server_mode_detection_agrees_with_the_requirement_gate(use_vllm, vllm_mode, is_server):
-    """The detector decides whether TRL's vLLM client is swapped for the vendored NCCL one; the
-    requirement gate decides whether construction proceeds. A config the gate accepts but the
-    detector calls non-server would run unpatched and import a vLLM the training image lacks."""
-    args = SimpleNamespace(use_vllm=use_vllm, vllm_mode=vllm_mode)
-    assert DistributedGRPOTrainer._is_vllm_server_mode(args) is is_server
-
-    accepted = True
-    try:
-        DistributedGRPOTrainer._require_vllm_server_mode(args)
-    except ValueError:
-        accepted = False
-    assert accepted is is_server, "the server-mode detector and the requirement gate disagree"
 
 
 if __name__ == "__main__":

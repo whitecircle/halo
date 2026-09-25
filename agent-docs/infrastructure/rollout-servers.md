@@ -270,7 +270,9 @@ before rewriting and its post-images after, at build, and stays in the image (`/
 `kv_a_proj_with_mqa` from a cache local to one `load_weights` call, one chunk, and drop a half that
 arrives alone. The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps it in
 one chunk, deferring the first half when the byte budget would cut between them; a pair still
-incomplete when the sync closes refuses the close.
+incomplete when the sync closes refuses the close. Every push, streamed or rolling, first scopes the
+pair to the pushed model's modules: a block without `q_lora_rank` has no `q_a_proj`, so its
+`kv_a_proj_with_mqa` travels alone.
 
 **The triton runner.** The `flashinfer_trtllm*`, aiter and quantized runners repack expert weights
 after the load, and an online update writes the canonical layout into the repacked buffer.

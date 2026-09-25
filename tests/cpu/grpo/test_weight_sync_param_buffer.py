@@ -59,7 +59,9 @@ def _bare_manager(
 ) -> tuple[InferenceClientManager, list[VLLMWeightSyncClient]]:
     """A manager over ``num_clients`` bare clients, without the NCCL/HTTP handshake."""
     configs = [{"url": f"http://server{i}:8000", "group_port": 51216 + i} for i in range(num_clients)]
-    manager = InferenceClientManager(server_configs=configs)
+    manager = InferenceClientManager(
+        server_configs=configs, connection_timeout=0.0, client_cls=VLLMWeightSyncClient, base_group_port=51216
+    )
     clients = []
     for index, config in enumerate(configs):
         client = _bare_client(wires[index] if wires else None)
@@ -204,11 +206,12 @@ def test_manager_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
         def buffer_param(self, name, snapshot):
             self._param_buffer.append((name, snapshot))
 
-        def scope_co_load_groups(self, module_names):
-            pass
-
-    manager = InferenceClientManager(server_configs=[{"url": "http://server0:8000"}, {"url": "http://server1:8000"}])
-    manager._client_factory = _StubClient
+    manager = InferenceClientManager(
+        server_configs=[{"url": "http://server0:8000"}, {"url": "http://server1:8000"}],
+        connection_timeout=0.0,
+        client_cls=_StubClient,
+        base_group_port=51216,
+    )
     manager.init_communicators(0)
     assert manager._device == torch.device("cuda", 0), f"stored {manager._device!r} for device index 0"
     assert joined == [torch.device("cuda", 0)] * 2, "clients must join on the same normalized device"
