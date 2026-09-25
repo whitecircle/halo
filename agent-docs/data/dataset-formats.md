@@ -200,7 +200,7 @@ Single-label uses a string; multi-label uses a list. The row carries a `prompt` 
 {"text": "A romantic comedy about time travel.", "label": ["comedy", "romance", "sci-fi"]}
 ```
 
-Labels are collected from the training data, stringified, and sorted alphabetically; the label set fixes the head's `num_labels` and shape (the config field is derived, never read from YAML). Labels seen only in validation/test are added with a warning. `-1` is dropped from the label set — it is the cross-entropy ignore sentinel on a row, not a class; the rows themselves are kept.
+Labels are collected from the training data, stringified, and sorted alphabetically; the label set fixes the head's `num_labels` and shape (the config field is derived, never read from YAML). Labels seen only in validation/test are added with a warning. `-1` marks an unlabeled row: a multi-label row reads it as absence and it is dropped from the label set, while a single-label dataset carrying it is refused before the model load — filter those rows out.
 
 ```yaml
 dataset: "path/to/classification/dataset"

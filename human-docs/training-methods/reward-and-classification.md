@@ -76,8 +76,9 @@ split, sorted for stable ids, so `num_labels`, `label2id` and `id2label` are nev
 Labels that appear only in validation are added with a warning.
 
 Rows are truncated to `max_length` rather than dropped here, because a label describes a whole
-document and a shortened document still carries it. A `-1` label is dropped from the label set; on a
-single-label row it reaches the loss as an out-of-range class, so filter those rows out.
+document and a shortened document still carries it. A `-1` label marks an unlabeled row: multi-label
+rows read it as absence, and a single-label dataset carrying one is refused before the model loads,
+so filter those rows out.
 
 ### Config
 
