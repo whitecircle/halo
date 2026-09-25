@@ -141,7 +141,7 @@ Every MoE run with gradient checkpointing is reentrant outside PP, and a reentra
 
 The gradient is the family's own `load_balancing_loss_func`, differentiated by autograd: the load pooled over all layers, the attention mask, `router_aux_loss_coef` and the trainer's loss scaling apply exactly as without checkpointing, whichever consumer adds the term (the model forward, a fused-loss forward, the CP wrapper, TRL's KTO). The coefficient stays as configured, so the logged `loss` and `aux_loss` read as they do without checkpointing. Collected logits that carry a graph (no checkpointing, the layers `every_n_layers` leaves unchecked) keep the native path, so no term counts twice. EP needs no collective: each rank computes its aux loss from its own tokens, as HF does.
 
-Two conditions raise instead of dropping the gradient: a kept gradient that no recompute took by the end of the backward, and one backward carrying the aux loss of two checkpointed forwards.
+Every case the hooks cannot route raises instead of dropping the gradient: a kept gradient no recompute took by the end of the backward, one backward carrying the aux loss of two checkpointed forwards, a router run twice in one checkpointed forward or first seen after the model's first forward, recomputed logits of another shape, and an owning block that returns no hidden-state tensor. A model declaring no `router_logits` capture gets no hooks and a warning: its checkpointed layers' aux term reaches the logged loss without a router gradient.
 
 ### `auto` resolution per family
 
