@@ -12,8 +12,8 @@ VLMs, which uses the same fused-GLU contiguous-halves layout as GLM-4 MoE
 Lite, LFM-2, Qwen3.5/3.6, Gemma-4 and Zaya), runs two configurations and
 compares forward losses:
 
-1. **Reference** — rank 0 loads the model with no distribution
-   (``ParallelismConfig()``), so the math runs through the standard
+1. **Reference** — rank 0 loads the model with plain ``from_pretrained``
+   (no Halo loader, no EP wrapper), so the math runs through the standard
    ``Mistral4MoE`` block on full weights.
 2. **ETP** — both ranks load the model with ``ep_size=1,
    expert_tp_size=2``, so the fused-GLU experts go through the shared

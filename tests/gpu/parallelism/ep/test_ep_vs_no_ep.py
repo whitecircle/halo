@@ -2,25 +2,25 @@
 """
 EP vs Non-EP Correctness Test: Gold Standard Comparison.
 
-Loads the SAME MoE model twice — once without EP (standard FSDP, all experts
+Loads the SAME MoE model twice — once without EP (the model's own HF MoE modules, all experts
 on every rank) and once with EP=2 (experts distributed across ranks via DeepEP) —
 and compares forward pass loss and per-token logits on identical input, so that EP
 dispatch → expert compute → combine is measured directly against having all experts
 locally available.
 
-The baseline is loaded through the same loader with no parallelism axes — grouped GEMM
-(the SM90+ default) still wraps its experts, so the baseline is itself an approximation of the
-undistributed model, not the undistributed model. Both sides are therefore scored against a plain
-``AutoModelForCausalLM`` reference rather than against each other: each carries its own independent
-router-pick-flip deviation from that reference, and the DIFFERENCE of two such deviations is not
-bounded by a tolerance derived for one of them (see LOSS_ABS_TOL).
+The baseline goes through the same loader with grouped GEMM off: with it on (the SM90+ default) the
+loader wraps the experts in the same MoE layer class the EP side runs, even at ``ep_size=1``, and the
+comparison would score that wrapper against itself. Both sides are still scored against a plain
+``AutoModelForCausalLM`` reference rather than against each other: each side's deviation from that
+reference is bounded, and the DIFFERENCE of two such deviations is not bounded by a tolerance derived
+for one of them (see LOSS_ABS_TOL).
 
 Both sides are loaded over the checkpoint's PRETRAINED attention sinks, on the one backend that
 carries them — see ATTN_IMPLEMENTATION. Under the loader's fine-tuning sink reset the model runs
 off-distribution, both sides reroute against each other, and the file reports that as an EP defect.
 This is the nightly counterpart of the core-tier
-tests/gpu/parallelism/ep/test_ep_correctness.py: it scores the ep1 wrapper alongside the EP model
-and adds the per-token logit and top-1 comparisons that one leaves out.
+tests/gpu/parallelism/ep/test_ep_correctness.py: it holds both models at once and adds the
+per-token logit and top-1 comparisons that one leaves out.
 
 Test Matrix:
   1. Forward pass: both the non-EP baseline and the EP loss match the undistributed reference
@@ -70,9 +70,10 @@ ATTN_IMPLEMENTATION = "eager"
 # bf16 reorders the expert sum feeding a near-tied top-4-of-32 router, so loss rides the
 # router-pick-flip bound rather than a bitwise one. It bounds ONE side against the undistributed
 # reference, which is why both sides are scored against that reference and never against each other:
-# swept over nine renderings of this fixture each side stays inside 0.086 of the reference while the
-# gap between them reaches 0.128. Nor can that gap simply be gated wider — rotating an expert bank
-# moves it by as little as 0.17, so a bound loose enough for the noise would pass a wrongly-routed model.
+# swept over nine renderings of this fixture, the ep1 and ep2 grouped-GEMM models each stay inside
+# 0.086 of the reference while the gap between them reaches 0.128. Nor can that gap simply be gated
+# wider — rotating an expert bank moves it by as little as 0.17, so a bound loose enough for the noise
+# would pass a wrongly-routed model.
 LOSS_ABS_TOL = TOL.router_pick_flip_loss_abs
 LOGIT_COSINE_MIN = 0.95
 ROUTER_GRAD_COSINE_MIN = TOL.grad_direction_cosine_min
@@ -99,14 +100,16 @@ def run_baseline_forward(batch):
     input_ids, attention_mask, labels = batch
 
     log(f"\n{'=' * 70}")
-    log("PHASE 1: Non-EP Baseline (Standard FSDP, All Experts Local)")
+    log("PHASE 1: Non-EP Baseline (HF MoE Modules, All Experts Local)")
     log(f"{'=' * 70}")
 
-    log("  Loading model WITHOUT EP (via load_distributed_model, no parallelism)...")
+    log("  Loading model WITHOUT EP (via load_distributed_model, no parallelism, no grouped GEMM)...")
     log(f"  GPU memory before: {gpu_mem_gb():.2f} GB")
 
     # Same loader as the EP side so attn_implementation validation matches (GptOss rejects FA2 in tf5).
-    no_ep_config = ParallelismConfig()
+    # Grouped GEMM off, or needs_ep_wrappers holds at ep_size=1 and the baseline runs the EP side's
+    # MoE wrapper instead of the model's own modules.
+    no_ep_config = ParallelismConfig(use_grouped_gemm=False)
     model, _ = load_distributed_model(
         model_name_or_path=MODEL_NAME,
         parallelism_config=no_ep_config,
