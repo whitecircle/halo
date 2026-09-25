@@ -131,7 +131,7 @@ Examples:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--subfolder", "-s", default=None, help="Optional S3 subfolder prefix (default: none)")
     common_parser.add_argument(
-        "--bucket", "-b", default=DEFAULT_BUCKET, help=f"S3 bucket name (default: {DEFAULT_BUCKET})"
+        "--bucket", "-b", default=DEFAULT_BUCKET, help="S3 bucket name (default: $HALO_S3_DEFAULT_BUCKET)"
     )
     common_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
     common_parser.add_argument("--quiet", "-q", action="store_true", help="Disable progress bar")
