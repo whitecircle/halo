@@ -182,11 +182,11 @@ def chunked_selective_log_softmax(
 def _matmul_fp32(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
     """``a @ b`` as fp32, or ``out += a @ b`` into an fp32 ``out``.
 
-    Half-precision CUDA operands run on the tensor cores with fp32 accumulation and an fp32 result, so
-    neither the product nor the running sum is rounded to half precision; an fp32 ``a`` (a gradient
-    tile) is cast to ``b``'s dtype first. Other operands (CPU, fp32 weights) take an fp32 matmul, which
-    the pinned ``highest`` precision would otherwise force onto the CUDA cores for the half-precision
-    case too.
+    On CUDA with a bf16 or fp16 ``b``, both operands are in ``b``'s dtype (an fp32 ``a``, such as the
+    backward's gradient tile, is cast to it first) and the tensor-core GEMM accumulates in fp32 and
+    returns fp32, so neither the product nor the running sum ``out`` is rounded to half precision. Any
+    other ``b`` (CPU, fp32) takes an fp32 matmul. Half operands are not upcast on CUDA: under the pinned
+    ``highest`` fp32 matmul precision that product would run on the CUDA cores.
     """
     if b.is_cuda and b.dtype in (torch.bfloat16, torch.float16):
         a = a.to(b.dtype)
@@ -288,9 +288,10 @@ def _selective_logprob_backward(
     hidden, weight, targets, bias, log_z, grad_logprobs, temperature, logit_scale, softcap, vocab_chunk_size
 ):
     """Dual-chunked backward: each logits tile is recomputed from the saved ``log_z`` instead of a
-    stored ``[T, V]`` plane. Both gradients accumulate in fp32 (:func:`_matmul_fp32`). Under a softcap
-    the tile's gradient carries the ``tanh`` derivative, ``1 − (logits / cap)²`` on the capped logits,
-    and under a logit scale that scale."""
+    stored ``[T, V]`` plane. Both gradient GEMMs take the fp32 gradient tile cast to the activations'
+    dtype (bf16 in training) and accumulate in fp32 (:func:`_matmul_fp32`). Under a softcap the tile's
+    gradient carries the ``tanh`` derivative, ``1 − (logits / cap)²`` on the capped logits, and under a
+    logit scale that scale."""
     inv_t = 1.0 / temperature
     n_rows, _ = hidden.shape
     vocab_size = weight.shape[0]
