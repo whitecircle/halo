@@ -458,7 +458,10 @@ def parse_args():
         "--output_dir",
         type=str,
         required=True,
-        help="Output directory for the BF16 model (any model*.safetensors/index already there is removed first)",
+        help=(
+            "Output directory for the BF16 model "
+            "(every model*.safetensors/index the completed save did not produce is removed afterwards)"
+        ),
     )
     parser.add_argument(
         "--model_type",
