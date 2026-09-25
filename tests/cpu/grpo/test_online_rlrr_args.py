@@ -7,8 +7,8 @@
 * Every RLRR invariant (the clip band, positive finite τ/λ, finite band and threshold) fails when
   the args are built — the parse step — gate on or off, instead of inside the trainer after the model
   load.
-* ``AdvantageShaping`` refuses a non-finite scale, which the normalizer's ``nan_to_num`` would
-  otherwise turn into all-zero advantages.
+* ``AdvantageShaping`` refuses a non-finite scale at parse time: it would make every shaped advantage
+  non-finite, which the normalizer refuses only at the first step.
 * ``rlrr_*`` values without ``use_rlrr`` and ``sdpg_*`` / ``opd_positive_advantage_only`` values
   without ``use_sdpg`` are refused by the script rather than silently ignored.
 

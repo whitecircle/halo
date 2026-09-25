@@ -43,7 +43,7 @@ The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the gro
 
 **Diagnose with power, not `nvidia-smi` util %.** Util % means "any SM had work," not "SMs did arithmetic." Power draw is honest: near TDP = compute-bound (kernel good); ~50–70% TDP at high util = memory/launch-bound; <40% TDP at high util = wrong kernel for this shape/SKU. A/B one config flip over 10 steady-state steps and sample `nvidia-smi --query-gpu=power.draw`.
 
-## The duplicate-index gather trap {#the-duplicate-index-gather-trap}
+## The duplicate-index gather trap
 
 Around the kernel sit the token permutation and, for expert-bias models (GptOss), the per-expert bias broadcast. Both gather rows by an index with heavy duplication (every token of an expert shares its id). The forward gather (`x[idx]` / `x.index_select(0, idx)`) is cheap; the trap is the backward.
 
@@ -150,7 +150,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 
 The wrapper keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: an MoE with `use_grouped_gemm: true` under any `accelerate launch` is rejected at load (the wrappers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`. Standalone benchmark: **3.07× over the naive loop** at 128 experts × 4096 tokens on B300 (naive 51.66 → grouped 158.66 TFLOPS).
 
-`LigerExperts` (Liger's fused single-process expert FFN) is inert wherever an EP wrapper owns the routed experts — including this EP=1 path — because the wrapper replaces the very module the swap targets, and at EP>1 the rank holds only its expert slice. Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep-cp-tp-behavior).
+Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under this wrapper (EP=1 included), which replaces the very module the swap targets, and is kept off wherever no wrapper is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp-behavior).
 
 ## Weight layout
 

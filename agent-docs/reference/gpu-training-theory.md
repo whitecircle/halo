@@ -217,7 +217,7 @@ A naive activation is several such kernels, each a separate HBM round trip. Fusi
 
 The toolkit gets this fusion from two places:
 
-- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP wrapper replaced the MoE layer, the cross-entropy variants when TP shards the vocab, CP computes its own loss, or a per-microbatch PP loss would own the reduction. [Liger Kernels](../optimization/liger-kernels.md).
+- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP wrapper replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab, CP computes its own loss, or a per-microbatch PP loss would own the reduction. [Liger Kernels](../optimization/liger-kernels.md).
 - **torch.compile** (Inductor) auto-fuses pointwise chains. [torch.compile](../optimization/torch-compile.md).
 
 ### Fused-linear-cross-entropy (FLCE)

@@ -8,7 +8,8 @@ the parameter disappears from it.
 The per-trainer slots below are pinned as LITERALS read off TRL 1.6.0's signatures — recomputing
 ``params.index(...)`` here would assert the derivation against itself. A TRL bump that moves one of
 these parameters fails this test, which is the point: the gates that read them (SFT's CP collator
-rejection, DPO/KTO's EP/TP reference rejection) would otherwise gate on the wrong argument.
+rejection, DPO/KTO's EP/TP reference rejection, the mixin's positional model/config) would otherwise
+gate on the wrong argument.
 
 Run: ``python tests/cpu/trainers/test_ctor_positions_derived.py`` (or ``pytest -m cpu``).
 """
@@ -16,52 +17,61 @@ Run: ``python tests/cpu/trainers/test_ctor_positions_derived.py`` (or ``pytest -
 import sys
 
 import pytest
-from trl import DPOTrainer, GRPOTrainer, RewardTrainer
 
-from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value
+from src.trainers.grpo.mixins.on_policy_init import GRPO_CTOR_POSITIONS
+from src.trainers.mixins.validation import ctor_config, ctor_model_and_config, ctor_positions, ctor_value
 from src.trainers.preference.dpo import _CTOR_POSITIONS as DPO_CTOR_POSITIONS
 from src.trainers.preference.kto import _CTOR_POSITIONS as KTO_CTOR_POSITIONS
+from src.trainers.reward.bradley_terry import _CTOR_POSITIONS as REWARD_CTOR_POSITIONS
 from src.trainers.sft import _CTOR_POSITIONS as SFT_CTOR_POSITIONS
 
 
-def test_sft_data_collator_slot_matches_installed_trl():
+def test_sft_slots_match_installed_trl():
     """TRL 1.6.0: ``SFTTrainer.__init__(self, model, args, data_collator, ...)``."""
-    assert SFT_CTOR_POSITIONS == {"data_collator": 2}
+    assert SFT_CTOR_POSITIONS == {"model": 0, "args": 1, "data_collator": 2}
 
 
-def test_dpo_ref_model_slot_matches_installed_trl():
+def test_dpo_slots_match_installed_trl():
     """TRL 1.6.0: ``DPOTrainer.__init__(self, model, ref_model, args, ...)``."""
-    assert DPO_CTOR_POSITIONS == {"ref_model": 1}
+    assert DPO_CTOR_POSITIONS == {"model": 0, "args": 2, "ref_model": 1}
 
 
-def test_kto_ref_model_slot_matches_installed_trl():
+def test_kto_slots_match_installed_trl():
     """TRL 1.6.0: the public ``KTOTrainer.__init__`` is a ``(*args, **kwargs)`` deprecation shim, so
     the slots are ``trl.experimental.kto.kto_trainer.KTOTrainer.__init__(self, model, ref_model,
     args, ...)`` — the signature the shim forwards to."""
-    assert KTO_CTOR_POSITIONS == {"ref_model": 1}
+    assert KTO_CTOR_POSITIONS == {"model": 0, "args": 2, "ref_model": 1}
 
 
-def test_ctor_config_slots_match_the_installed_trl_signatures():
-    """``ctor_config``'s positional slots are hardcoded; this is what keeps them honest.
+def test_reward_and_grpo_slots_match_installed_trl():
+    """TRL 1.6.0: ``RewardTrainer(model, args, ...)``, ``GRPOTrainer(model, reward_funcs, args, ...)``."""
+    assert REWARD_CTOR_POSITIONS == {"model": 0, "args": 1}
+    assert GRPO_CTOR_POSITIONS == {"model": 0, "args": 2}
 
-    Eight call sites pass ``position=2`` (default) or ``position=1`` (``RewardTrainer``). The slot
-    cannot be derived at the call site without changing ``ctor_config``'s truthiness fall-through —
-    ``ctor_value`` returns ``None`` for an explicit ``args=None`` where ``ctor_config`` falls through
-    to the positional slot, which ``_require_vllm_server_mode`` relies on. So the derivation runs
-    here instead: a TRL release that reorders these parameters fails this test.
-    """
-    assert ctor_positions(DPOTrainer, "args") == {"args": 2}
-    assert ctor_positions(GRPOTrainer, "args") == {"args": 2}
-    assert ctor_positions(RewardTrainer, "args") == {"args": 1}
+
+def test_ctor_config_reads_the_slot_of_the_forwarded_base():
+    """``RewardTrainer`` takes its config one slot earlier than the GRPO/DPO shape; the table decides."""
+    config = object()
+    assert ctor_config((None, config), {}, REWARD_CTOR_POSITIONS) is config
+    assert ctor_config((None, None, config), {}, GRPO_CTOR_POSITIONS) is config
+    assert ctor_config((None, config), {}, GRPO_CTOR_POSITIONS) is None
 
 
 def test_ctor_config_falls_through_an_explicit_none_keyword():
     """Load-bearing at ``_require_vllm_server_mode``: ``args=None`` must not mask a positional config."""
     config = object()
-    assert ctor_config((None, None, config), {"args": None}) is config
-    assert ctor_config((), {"args": config}) is config
-    assert ctor_config((None, config), {}, position=1) is config
-    assert ctor_config((), {}) is None
+    assert ctor_config((None, None, config), {"args": None}, GRPO_CTOR_POSITIONS) is config
+    assert ctor_config((), {"args": config}, GRPO_CTOR_POSITIONS) is config
+    assert ctor_config((), {}, GRPO_CTOR_POSITIONS) is None
+
+
+def test_positionals_without_a_slot_table_raise():
+    """Keywords resolve without a table; positionals cannot, and skipping them would silently drop the
+    setup that reads the model and the config."""
+    model, config = object(), object()
+    assert ctor_model_and_config((), {"model": model, "args": config}, None) == (model, config)
+    with pytest.raises(ValueError, match="without a ctor_positions table"):
+        ctor_model_and_config((model, config), {}, None)
 
 
 def test_gate_extracts_the_passed_collator():

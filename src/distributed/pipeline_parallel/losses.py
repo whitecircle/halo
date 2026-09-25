@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from src.data.spans import LABEL_IGNORE_INDEX
+from src.models.head_transform import HeadTransform
 
 # fp32 elements per CE chunk. The fp32 upcast of a [tokens, V] plane is the last stage's memory peak;
 # chunking under a non-reentrant checkpoint bounds the held fp32 state to one chunk. Budgeted in
@@ -57,9 +58,12 @@ def _ce_sum_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> tor
     return F.cross_entropy(chunk_logits.float(), chunk_labels, ignore_index=LABEL_IGNORE_INDEX, reduction="sum")
 
 
-def _head_ce_sum_chunk(head: nn.Module, chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
-    """Project one token chunk through the head and sum its fp32 CE — the unit the checkpoint recomputes."""
-    return _ce_sum_chunk(head(chunk_hidden), chunk_labels)
+def _head_ce_sum_chunk(
+    head: nn.Module, head_transform: HeadTransform, chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor
+) -> torch.Tensor:
+    """Project one token chunk through the family's head path and sum its fp32 CE — the unit the
+    checkpoint recomputes."""
+    return _ce_sum_chunk(head_transform.project(head, chunk_hidden), chunk_labels)
 
 
 def _chunked_token_results(
@@ -216,7 +220,9 @@ def causal_lm_token_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Te
     return _chunked_ce_sum(logits.reshape(-1, logits.size(-1)), _shift_labels_left(labels).reshape(-1))
 
 
-def fused_causal_lm_token_loss(head: nn.Module, hidden_states: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def fused_causal_lm_token_loss(
+    head: nn.Module, head_transform: HeadTransform, hidden_states: torch.Tensor, labels: torch.Tensor
+) -> torch.Tensor:
     """:func:`causal_lm_token_loss` with the head folded in, so no ``[mb, S, V]`` plane is built.
 
     The last pipeline stage calls this from inside its own forward
@@ -236,6 +242,11 @@ def fused_causal_lm_token_loss(head: nn.Module, hidden_states: torch.Tensor, lab
     relative, roughly 3x the error bf16 already carries against fp64 on the unchunked reduction.
     ``HALO_PP_FUSED_HEAD_LOSS=0`` takes the unfused path. Only the last stage has a head, so only it
     may call this.
+
+    ``head_transform`` is the family's head path (the stage's
+    :attr:`~src.distributed.pipeline_parallel.stage.PipelineStageModule.head_transform`), applied to
+    every chunk as the unfused path applies it to the whole plane. Chunks are sized from the head's
+    full width, which a vocabulary truncation only narrows.
     """
     vocab_size = getattr(head, "out_features", None)
     if vocab_size is None:
@@ -245,7 +256,7 @@ def fused_causal_lm_token_loss(head: nn.Module, hidden_states: torch.Tensor, lab
             f"set HALO_PP_FUSED_HEAD_LOSS=0 to keep the unfused logits path."
         )
     return _chunked_token_sum(
-        functools.partial(_head_ce_sum_chunk, head),
+        functools.partial(_head_ce_sum_chunk, head, head_transform),
         hidden_states.reshape(-1, hidden_states.size(-1)),
         _shift_labels_left(labels).reshape(-1),
         _ce_chunk_rows(vocab_size),

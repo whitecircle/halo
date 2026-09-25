@@ -27,6 +27,7 @@ import inspect
 import time
 
 import torch
+from liger_kernel.transformers.swiglu import LigerExperts
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
@@ -315,10 +316,11 @@ def _loss_and_grads(model, input_ids) -> tuple[float, dict[str, torch.Tensor]]:
 def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     """The shared-expert MLP a delegating spec names must arrive fused THROUGH the EP wrapper.
 
-    Upstream's ``swiglu`` sets only the routed-experts class, which ``patch_moe_model_for_ep``
-    replaces wholesale (the wrapped layer has no ``experts`` submodule left, which is why that swap
-    is inert rather than wrong). The shared expert is adopted unchanged, so it is fused only because
-    the spec names its class — the reason the EP force-off does not apply to these families.
+    The routed experts are the wrapper's own (upstream's ``LigerExperts`` swap is withheld); the
+    shared expert is adopted unchanged, so it is fused only because the spec names its class — the
+    reason the EP force-off does not apply to these families. The wrapped layer keeps no ``experts``
+    submodule: the premise that upstream's swap is inert under a wrapper, which the soft EP gate and the
+    routed-experts rule's skip under a wrapper both rely on.
 
     Compared on the shared expert's own gradients, not the routed experts': a fused GLU moves the
     hidden states by a bf16 ULP, which flips a near-tied top-k pick and rewrites one expert's
@@ -345,6 +347,9 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     modeling = importlib.import_module(spec.modeling_module)
     for name in spec.glu_mlp:
         assert getattr(modeling, name) is not originals[name], f"{name} was not swapped"
+    assert not any(value is LigerExperts for value in vars(modeling).values()), (
+        "upstream's LigerExperts swap reached the modeling module; the delegating spec must withhold swiglu"
+    )
 
     torch.manual_seed(SEED)
     fused = AutoModelForCausalLM.from_config(config).to(device=device, dtype=torch.bfloat16)

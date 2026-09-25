@@ -78,35 +78,38 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         gated_rms_norm=("Glm5NextTextRMSNormGated",),
     ),
     # Qwen3.5 / 3.6 (dense and MoE) and Qwen3-Next: upstream Liger owns their norms, rotary and head.
-    # Both toolkit roles here are ones it leaves eager — the gated-delta-net blocks' gated norm,
-    # applied per head on the attention output of three layers in every four, and (MoE only) the
-    # shared-expert MLP. The dense spec declares no `glu_mlp`: upstream's dense applier class-swaps
-    # `Qwen3_5MLP` itself, which the patch-time guard in the builder refuses to stack onto.
+    # The toolkit adds the gated-delta-net blocks' gated norm, applied per head on the attention
+    # output of three layers in every four, and (MoE only) takes over `swiglu`. The dense spec
+    # declares no `glu_mlp`: upstream's dense applier class-swaps `Qwen3_5MLP` itself, which the
+    # patch-time guard in the builder refuses to stack onto.
     LigerFamilySpec(
         model_types=("qwen3_5", "qwen3_5_text"),
         modeling_module="transformers.models.qwen3_5.modeling_qwen3_5",
         gated_rms_norm=("Qwen3_5RMSNormGated",),
         delegates_to_upstream=True,
     ),
-    # `Qwen3_5MoeMLP` is the sigmoid-gated shared expert (the gate lives in the block, so the MLP is
-    # the canonical GLU body) and the EP wrapper adopts it unchanged; upstream's class-level `swiglu`
-    # sets only `Qwen3_5MoeExperts`, which that wrapper replaces. Its instance branch, run when HF
-    # Trainer re-applies Liger, binds a kernel-equivalent SwiGLU forward over this class.
+    # Upstream's `swiglu` would also put `LigerExperts` in place of the routed experts, which the EP
+    # wrapper or the model's own experts implementation must run instead. Withheld, so the flag
+    # fuses only `Qwen3_5MoeMLP`, the sigmoid-gated shared expert (the gate lives in the block, so
+    # the MLP is the canonical GLU body), which the EP wrapper adopts unchanged.
     LigerFamilySpec(
         model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
         modeling_module="transformers.models.qwen3_5_moe.modeling_qwen3_5_moe",
         gated_rms_norm=("Qwen3_5MoeRMSNormGated",),
         glu_mlp=("Qwen3_5MoeMLP",),
         delegates_to_upstream=True,
+        upstream_off=("swiglu",),
     ),
-    # `Qwen3NextMLP` serves both the dense layers and every sparse block's shared expert. The family
-    # has no EP wrapper, so upstream's `Qwen3NextExperts` swap is its live routed-expert path.
+    # `Qwen3NextMLP` serves both the dense layers and every sparse block's shared expert. `swiglu`
+    # is withheld from upstream as above; the family has no EP wrapper, so its routed experts run
+    # the model's own experts implementation.
     LigerFamilySpec(
         model_types=("qwen3_next",),
         modeling_module="transformers.models.qwen3_next.modeling_qwen3_next",
         gated_rms_norm=("Qwen3NextRMSNormGated",),
         glu_mlp=("Qwen3NextMLP",),
         delegates_to_upstream=True,
+        upstream_off=("swiglu",),
     ),
     # GptOss: upstream owns the rotary (half-width cos/sin, algebraically `rotate_half`) and the head,
     # but applies the llama-cast `LigerRMSNorm` to a norm that multiplies its weight in fp32 before
@@ -198,7 +201,7 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         glu_mlp=("BailingMoeV2MLP",),
     ),
     # Ling 3.0 (remote code). Its KDA layers already run fla's fused gated norm, short convolutions
-    # and delta-rule recurrence, so only the attention/MoE norms and the shared-expert GLU are left.
+    # and delta-rule recurrence, so only the attention/MoE norms and the GLU MLPs are left.
     LigerFamilySpec(
         model_types=("bailing_hybrid",),
         remote_classes=("BailingMoeV3RMSNorm", "BailingMoeV3MLP"),

@@ -134,17 +134,22 @@ extraction is driven by part type. A new modality is an additive part type plus 
 ## Lifecycle
 
 ```python
+# Slots of the base the *args are forwarded to, read off its installed signature.
+_CTOR_POSITIONS = ctor_positions(SomeBaseTrainer, "model", "args")
+
+
 class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
     _supports_cp = True   # only the flips; EP/TP default on, CP/PP default off
     _supports_pp = False
 
     def __init__(self, *args, **kwargs):
-        kwargs = self._init_distributed_config(kwargs)  # extract parallelism kwargs
-        super().__init__(*args, **kwargs)               # base init: accelerator, model, optimizer
-        self._setup_distributed_modes()                 # apply parallelism after model exists
+        # Extract the parallelism kwargs; a positional model/config is read through the table.
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
+        super().__init__(*args, **kwargs)  # base init: accelerator, model, optimizer
+        self._setup_distributed_modes()    # apply parallelism after model exists
 ```
 
-**`_init_distributed_config(kwargs, training_args=None, ctor_args=(), **explicit)`** pops the toolkit-only kwargs
+**`_init_distributed_config(kwargs, training_args=None, ctor_args=(), ctor_positions=None, **explicit)`** pops the toolkit-only kwargs
 before the base trainer sees them: `parallelism_config` (a `ParallelismConfig`; passing `None`
 raises `ValueError`), the save flag `save_sharded_ep` (default `False`), `moe_balancing`,
 `dataset_presharded`, and `bf16_optimizer`. It also reconciles
@@ -153,9 +158,10 @@ raises `ValueError`), the save flag `save_sharded_ep` (default `False`), `moe_ba
 
 A trainer that forwards `**kwargs` calls it as above. One whose `__init__` names those parameters
 passes them through `**explicit` instead (SMPO, Classification, offline GRPO, teacher distillation);
-kwargs-style values win over explicit ones. `training_args` defaults to `kwargs["args"]`, so a
-trainer with an explicit `args` parameter passes `training_args=` (online and async GRPO)
-and `EmbeddingTrainer` passes a synthetic `{"args": args}`.
+kwargs-style values win over explicit ones. The model and `training_args` default to the ctor's
+`model` / `args`, read from `kwargs` or, for positionals, from their slots in `ctor_positions`
+(positionals without the table raise). Online and async GRPO pass `training_args=` as well, having
+resolved it first, and `EmbeddingTrainer` passes a synthetic `{"args": args}`.
 
 `ParallelismConfig` validates the combination and exposes mode-flag properties (`is_ep_mode`,
 `is_cp_mode`, `is_tp_mode`, `is_expert_tp_mode`, `is_ep_tp_mode`, `is_ep_cp_mode`, `is_pp_mode`);
@@ -319,6 +325,10 @@ consume the same batch.
 per DP rank passes `1` / `0` instead, so accelerate places batches on the device without re-sharding
 away `(N-1)/N` of each slice; offline GRPO passes the same pair, its `MultiGroupSampler` having
 already sharded.
+
+When the eval dataloader yields a different number of batches per rank (or has no length),
+`evaluate()` replaces the per-step metric gather with the identity to avoid a deadlock, and warns:
+the eval loss and `compute_metrics` values it logs are then rank 0's shard, not the global value.
 
 ## Training loop integration
 

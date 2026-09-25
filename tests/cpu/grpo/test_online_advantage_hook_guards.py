@@ -9,6 +9,8 @@
 * A hook computes on the FULL gathered set and slices this rank's rows the way TRL does, so a group
   spanning two ranks (TRL-valid: only ``generation_batch_size % num_generations == 0`` is required)
   must slice correctly rather than be refused.
+* An armed hook that finds no stashed rewards in train mode raises instead of returning, and every
+  generation batch clears the stash once its hooks have read it.
 
     python tests/cpu/grpo/test_online_advantage_hook_guards.py
 """
@@ -19,6 +21,7 @@ from collections import defaultdict, deque
 import numpy as np
 import pytest
 import torch
+from trl import GRPOTrainer
 
 from src.args.mixins import AdvantageShaping, RLRRConfig
 from src.trainers.grpo.objective.advantages import degenerate_group_mask
@@ -159,6 +162,47 @@ def test_degenerate_drop_on_a_spanning_group_masks_the_rows_of_each_rank():
         me._apply_degenerate_group_drop(result)
         kept.append([n > 0 for n in result["completion_mask"].sum(dim=1).tolist()])
     assert kept == [[False, False, True], [True, True, True]], kept
+
+
+# --- The gathered-rewards stash: present when a hook needs it, consumed once per batch ---
+
+
+@pytest.mark.parametrize(
+    ("hook", "armed"),
+    [
+        ("_apply_rlrr_advantages", {"rlrr": RLRRConfig()}),
+        ("_apply_degenerate_group_drop", {"drop": True}),
+    ],
+)
+def test_an_armed_hook_without_a_stash_raises_in_train(hook, armed):
+    """Returning early would leave TRL's advantages in place while the config says otherwise."""
+    me, result = _rank(0, 1, **armed)
+    me._last_rewards_per_func = None
+    with pytest.raises(RuntimeError, match="no gathered rewards were stashed"):
+        getattr(me, hook)(result)
+
+
+def test_a_missing_stash_is_not_needed_in_eval():
+    """The hooks are train-only; eval batches keep TRL's advantages by design."""
+    me, result = _rank(0, 1, rlrr=RLRRConfig())
+    me._last_rewards_per_func = None
+    me.model.training = False
+    before = result["advantages"].clone()
+    me._apply_rlrr_advantages(result)
+    assert torch.equal(result["advantages"], before)
+
+
+def test_the_generation_batch_consumes_the_stash(monkeypatch):
+    """A stash left in place would be read by the next batch's hooks if that batch's scoring skipped
+    ``_calculate_rewards``, applying one batch's rewards to another batch's rows."""
+    monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {})
+    me = object.__new__(DistributedGRPOTrainer)
+    me._rlrr_config, me._advantage_shaping, me._drop_degenerate_groups = None, None, False
+    me._scale_rewards_std_floor = 0.0
+    me.parallelism_config = types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
+    me._last_rewards_per_func = FULL_REWARDS
+    DistributedGRPOTrainer._generate_and_score_completions(me, [])
+    assert me._last_rewards_per_func is None
 
 
 if __name__ == "__main__":
