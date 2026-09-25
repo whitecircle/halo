@@ -22,12 +22,13 @@ import pytest
 from datasets import Dataset
 
 from scripts.before_training.s3_datasets import main as s3_cli_main
+from src.data.sources import s3_client as s3_client_mod
 from src.data.sources.dataset_cache import (
     _read_marker_fingerprint,
     _write_download_marker,
     compute_etag_fingerprint,
 )
-from src.data.sources.s3_client import DEFAULT_BUCKET, S3Client, build_s3_uri
+from src.data.sources.s3_client import S3Client, build_s3_uri
 from src.data.sources.s3_client import logger as s3_module_logger
 
 
@@ -598,20 +599,24 @@ def test_load_preprocessed_metadata_from_s3():
     print("  load_preprocessed_metadata S3: PASSED")
 
 
-def test_build_s3_uri():
+def test_build_s3_uri(monkeypatch):
     """Test the build_s3_uri helper."""
-    print("Testing build_s3_uri helper...")
+    monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", "team-bucket")
 
-    uri = build_s3_uri("my_dataset", "datasets")
-    assert uri == f"s3://{DEFAULT_BUCKET}/datasets/my_dataset", f"Got {uri}"
+    assert build_s3_uri("my_dataset", "datasets") == "s3://team-bucket/datasets/my_dataset"
+    assert build_s3_uri("my_dataset", None) == "s3://team-bucket/my_dataset"
+    assert build_s3_uri("nested/path/data") == "s3://team-bucket/nested/path/data"
 
-    uri = build_s3_uri("my_dataset", None)
-    assert uri == f"s3://{DEFAULT_BUCKET}/my_dataset", f"Got {uri}"
 
-    uri = build_s3_uri("nested/path/data")
-    assert uri == f"s3://{DEFAULT_BUCKET}/nested/path/data", f"Got {uri}"
+def test_a_key_only_path_without_a_configured_bucket_is_refused(monkeypatch):
+    """With ``HALO_S3_DEFAULT_BUCKET`` unset there is no bucket to address: a placeholder name would
+    read and write a real bucket the user does not own, so both key-only entry points refuse."""
+    monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", None)
 
-    print("  build_s3_uri: PASSED")
+    with pytest.raises(ValueError, match="HALO_S3_DEFAULT_BUCKET"):
+        build_s3_uri("my_dataset")
+    with pytest.raises(ValueError, match="HALO_S3_DEFAULT_BUCKET"):
+        S3Client()
 
 
 def test_s3_cache_dir_derives_from_scratch_root():

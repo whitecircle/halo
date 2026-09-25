@@ -136,9 +136,9 @@ run it is judging unless a flag says otherwise. A `rollout_stop_tokens` entry th
 tokenizer does not know raises here, where the trainer warns and skips a partially unresolved set.
 
 In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
-`build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (default `my-bucket` — set it to your own
-bucket) and `--subfolder` (default `datasets`, `None` to skip). The same flag names on
-`dataset_deduplication.py` are ordinary local paths.
+`build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
+(default `datasets`, `None` to skip). The same flag names on `dataset_deduplication.py` are ordinary
+local paths.
 
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
 — run under a shared SIGINT/SIGTERM handler
