@@ -32,6 +32,7 @@ from scripts.environments.preparation.prepare_code_dataset import (
 from src.environments.envs.tasks.coding.datasets import (
     CODE_DATASET_ADAPTERS,
     CodeDatasetAdapter,
+    ContestSelection,
     _hardtests_memory_limit_mb,
     decode_test_payload,
     format_hardtests_prompt,
@@ -243,7 +244,7 @@ def test_eval_examples_refuse_an_empty_yield():
     adapter = CodeDatasetAdapter(str, dict, lambda row: False, load=lambda dataset, config, split: [{"id": "x"}])
     args = type("Args", (), {"dataset": "d", "config": None, "split": "test", "num_examples": 0, "adapter": "stub"})()
     with pytest.raises(SystemExit, match="no gradable problem"):
-        build_examples(args, adapter)
+        build_examples(args, adapter, ContestSelection())
 
 
 def test_hardtests_adapter_is_registered_with_its_normalizer():

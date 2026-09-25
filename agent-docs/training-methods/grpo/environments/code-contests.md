@@ -47,6 +47,7 @@ rollout_thinking_budget_scope: episode
 | `stop_on_first_failure` | `false` | Stop at the first failing test; the pass fraction becomes a lower bound |
 | `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level |
 | `max_turns` | 15 | Backstop; the tool budgets are the tuning lever |
+| `eval_protocol` | `harness` | Evaluation contract; `leaderboard` pins both tool budgets ([Evaluation protocols](#evaluation-protocols)) |
 
 The objective's shape is the `environment` term's `exponent` in the top-level `rewards:` — above 1 it is convex, so half-right earns under half a solve ([Reward Terms](../rewards.md)).
 
@@ -66,6 +67,18 @@ This environment adds three profile keys, bound per episode:
 
 A value below its minimum raises at construction; where the level is undetermined at reset, the
 constructor's budgets stand.
+
+### Evaluation protocols
+
+`eval_protocol` names the contract a run is scored under (`EVAL_PROTOCOLS` in `code_contests.py`):
+
+- `harness` (default) pins nothing: the configured budgets stand. This is the agentic loop the recipes train, and its solve rate is attempts-until-accept within the budget.
+- `leaderboard` pins `max_submissions: 1` and `max_test_calls: 0`: one graded program per sample, the scratchpad refused. The prompt, tool-call format and grader stay this environment's, so its numbers are not a benchmark's published ones.
+
+A configured value that contradicts a pin raises at construction. An effort profile's
+`max_submissions` / `max_test_calls` are validated, then give way to the pins (logged): the level
+keeps its `thinking_tokens`, and a ladder that binds interaction still states the budgets in the task
+message ("1 graded submission, 0 scratchpad runs").
 
 ## Tools
 
@@ -163,7 +176,7 @@ Adapters (`src/environments/envs/tasks/coding/datasets.py`) map a source's rows 
 | `codeforces` | `open-r1/codeforces` | RL pool | `verifiable` config; `generated_checker` judges; interactive rows dropped; generated tests join via `--tests_table` |
 | `hardtests` | `sigcp/hardtests_problems` + `_tests` | RL pool | Difficulty mapped to Codeforces ratings; needs `--tests_table`; judging function becomes the checker |
 | `deepcoder` | `agentica-org/DeepCoder-Preview-Dataset` | RL pool | stdin/stdout tests; functional specs skipped; no report bucket |
-| `livecodebench` | `livecodebench/code_generation_lite` | benchmark | Release `test*.jsonl` read directly, newest first; functional rows skipped |
+| `livecodebench` | `livecodebench/code_generation_lite` | benchmark | Release `test*.jsonl` read directly, newest file first; functional rows skipped; contest-date window and platform filter |
 | `icpc` | `RUC-AIBOX/ICPC-Eval` | benchmark | Streamed; `traditional` graded, `spj` skipped |
 | `hlce` | `HumanLastCodeExam/icpc-world-finals` | benchmark | Streamed; stdin/stdout `test_cases` |
 
@@ -200,13 +213,45 @@ python scripts/environments/inference/run_code_contests.py --adapter codeforces 
     --num_examples 100 --num_samples 4 --reasoning_effort high
 ```
 
-It buckets `success@1` / `success@k` by the adapter's field (rating here); at the default
-`--success_threshold` a problem counts solved only when every test in the pool passes.
+It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a benchmark's
+mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation)).
+At the default `--success_threshold` a problem counts solved when every test in the pool passes. The
+threshold reads the episode's total reward, so under `--training_config` the recipe's shaping moves
+it both ways: `submission_reward` or `execution_progress_reward` can lift a partial solve over it,
+and `tool_error_penalty` (every scratchpad call under `leaderboard` is refused) or
+`length_cutoff_penalty` can sink a solve below it. The re-grader's `s@1` counts all-pass solves
+directly.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
 level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window
-must exceed. Grading knobs with no flag go through `--env_kwargs`, recorded in the trajectory meta.
+must exceed. `--eval_protocol` picks the [evaluation protocol](#evaluation-protocols), else the
+training config's, else `harness`; the report title and the trajectory meta name it. A training
+config written under another protocol gives up the `max_submissions` / `max_test_calls` the flag's
+protocol pins (logged); a config that names the protocol itself, or `--env_kwargs`, contradicting a
+pin raises. Grading knobs with no flag go through `--env_kwargs`, recorded in the trajectory meta.
 Flags, output files and re-grading: [Evaluating on an Environment](evaluation.md).
+
+### LiveCodeBench window
+
+A LiveCodeBench release is cumulative — every problem since May 2023 — so most of it predates a
+current model's training cutoff. Score a window after it:
+
+```bash
+python scripts/environments/inference/run_code_contests.py --adapter livecodebench \
+    --dataset livecodebench/code_generation_lite --config release_v6 \
+    --start_date 2025-01-01 --end_date 2025-04-30 --platform atcoder,codeforces \
+    --eval_protocol leaderboard --base_url http://localhost:8000/v1 --model <served-name> \
+    --num_examples 0 --num_samples 4
+```
+
+- `--start_date` / `--end_date` (`YYYY-MM-DD`) are both inclusive and compare the row's `contest_date` by calendar day; either may stay open.
+- `--platform` takes the platforms this adapter grades, as the dataset spells them: `atcoder`, `codeforces`. LeetCode rows are functional, which the stdin/stdout environment cannot grade, so `leetcode` is refused.
+- Rows come newest release file first, each file in its stored order, which is not newest-first (`test6.jsonl` opens on its 2025-01-04 contests). `--num_examples` (default 50) takes the first problems of the window in that order, not its newest; `0` scores the whole window.
+- Any other date spelling, a start after the end, a platform outside that list, or a window or platform filter on an adapter that declares none exits before a row is read. A row without a parsable `contest_date` raises under a window.
+
+The selection is recorded in the trajectory meta ([re-grading](evaluation.md#re-grading-recorded-trajectories)).
+Only `livecodebench` declares a contest date and platform (`contest_date`, `platform_field` and
+`platforms` on its `CodeDatasetAdapter`).
 
 ## Related pages
 

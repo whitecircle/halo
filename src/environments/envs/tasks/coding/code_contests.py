@@ -54,10 +54,40 @@ REASONING_EFFORT_PROFILES: dict[str, dict[str, int | float]] = {
 }
 DEFAULT_REASONING_EFFORT = "medium"
 
+# The knobs an evaluation protocol may pin, at the value a run takes when neither its config nor its
+# protocol sets one.
+EVAL_PROTOCOL_KNOB_DEFAULTS: dict[str, int] = {"max_submissions": 2, "max_test_calls": 5}
+# Evaluation protocol -> the knobs it pins. ``harness`` pins none: the configured budgets stand, the
+# agentic loop the environment trains, scored as attempts-until-accept. ``leaderboard`` grades one
+# program per sample with no scratchpad, the setting a benchmark's pass@k is measured in.
+EVAL_PROTOCOLS: dict[str, dict[str, int]] = {
+    "harness": {},
+    "leaderboard": {"max_submissions": 1, "max_test_calls": 0},
+}
+DEFAULT_EVAL_PROTOCOL = "harness"
+
 SUBMIT_TOOL = "submit_solution"
 # Pass fraction of each graded submission, in order: what the resubmission price reads improvement off.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 NO_STDIN_NOTE = "(No stdin was passed to this run; give the program its input in the `stdin` argument.)"
+
+
+def eval_protocol_pins(eval_protocol: str) -> dict[str, int]:
+    """The knobs ``eval_protocol`` pins; an unknown protocol raises."""
+    if eval_protocol not in EVAL_PROTOCOLS:
+        raise ValueError(f"eval_protocol must be one of {sorted(EVAL_PROTOCOLS)}, got {eval_protocol!r}")
+    return EVAL_PROTOCOLS[eval_protocol]
+
+
+def without_eval_protocol_pins(config: dict[str, Any], eval_protocol: str, source: str) -> dict[str, Any]:
+    """``config`` without the knobs ``eval_protocol`` pins, each dropped one logged. For a contract
+    written under another protocol (a training config's env options, an effort profile's budgets):
+    its values give way to the pins instead of contradicting them."""
+    pins = eval_protocol_pins(eval_protocol)
+    dropped = sorted(pins.keys() & config.keys())
+    if dropped:
+        logger.info("eval_protocol %r pins %s; the values %s sets give way", eval_protocol, dropped, source)
+    return {key: value for key, value in config.items() if key not in pins}
 
 
 class CodeContestsEnvironment(NativeToolUseEnvironment):
@@ -69,7 +99,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     to ``submit_solution``, the single graded channel; a never-submitted solution grades 0. Grading is
     data-driven: per-problem ``checker`` / ``time_limit`` from the
     ``answer`` payload (dict or JSON string, carrying ``tests``/``test_cases``) override the
-    ``output_comparison`` default, so one env covers exact-match and Codeforces sets.
+    ``output_comparison`` default, so one env covers exact-match and Codeforces sets. ``eval_protocol``
+    names the evaluation contract (:data:`EVAL_PROTOCOLS`), which pins the knobs it fixes.
     """
 
     # Agentic solvers iterate test→fix→submit, which the protocol's generic budget cuts mid-loop.
@@ -125,16 +156,22 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_time_limit: float = SANDBOX_DEFAULT_TIMEOUT,
         compiled_time_limit_scale: float = 1.0,
         max_grading_seconds: float | None = None,
-        max_submissions: int = 2,
-        max_test_calls: int = 5,
+        max_submissions: int | None = None,
+        max_test_calls: int | None = None,
         submission_reward: float = 0.0,
         execution_progress_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
         improved_resubmission_refund: float = 0.0,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
+        eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
         **kwargs,
     ):
+        knobs = self._resolve_eval_protocol_knobs(
+            eval_protocol, max_submissions=max_submissions, max_test_calls=max_test_calls
+        )
+        max_submissions, max_test_calls = knobs["max_submissions"], knobs["max_test_calls"]
+        self.eval_protocol = eval_protocol
         specs = self._resolve_languages(language)
         if output_comparison not in ("exact", "tokens"):
             raise ValueError(f"output_comparison must be 'exact' or 'tokens', got {output_comparison!r}")
@@ -254,6 +291,29 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             reasoning_effort_profiles=reasoning_effort_profiles,
             **kwargs,
         )
+        # After the base has validated every profile key, pinned ones included. A profile's interaction
+        # budgets make effort buy iteration; a protocol pinning them fixes the budget at every level,
+        # so effort buys thinking alone there (a training config's ladder keeps its thinking budgets).
+        self.reasoning_effort_profiles = {
+            level: without_eval_protocol_pins(entry, eval_protocol, f"reasoning_effort_profiles[{level!r}]")
+            for level, entry in self.reasoning_effort_profiles.items()
+        }
+
+    @staticmethod
+    def _resolve_eval_protocol_knobs(eval_protocol: str, **configured: int | None) -> dict[str, int]:
+        """Each :data:`EVAL_PROTOCOL_KNOB_DEFAULTS` knob under ``eval_protocol``: its pin, else the
+        configured value, else the default. A configured value contradicting a pin raises — the run
+        would carry the protocol's name without following it."""
+        pins = eval_protocol_pins(eval_protocol)
+        conflicts = {k: v for k, v in configured.items() if v is not None and k in pins and v != pins[k]}
+        if conflicts:
+            raise ValueError(
+                f"eval_protocol {eval_protocol!r} pins {pins}; the config contradicts it with {conflicts}"
+            )
+        return {
+            knob: pins.get(knob, default if configured.get(knob) is None else configured[knob])
+            for knob, default in EVAL_PROTOCOL_KNOB_DEFAULTS.items()
+        }
 
     @staticmethod
     def _resolve_languages(language: str | Sequence[str]) -> list[LanguageSpec]:

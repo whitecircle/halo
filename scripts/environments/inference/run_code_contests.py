@@ -5,8 +5,12 @@ OpenAI-compatible endpoint.
 
 Specific to the coding-contest task: it applies a dataset adapter that scores raw rows (every
 ``CODE_DATASET_ADAPTERS`` entry without a ``normalize`` step) to a contest dataset, prompts in a chosen
-solution `language`, and reports `success@1` / `success@k` bucketed by problem rating. The rollout loop
+solution `language`, and reports `success@1` / `success@k` bucketed by the adapter's report field
+(rating on Codeforces, difficulty on LiveCodeBench, contest on ICPC-Eval and HLCE). The rollout loop
 and reward aggregation are shared with the other eval scripts via :mod:`src.environments.eval_runner`.
+`--eval_protocol` names the evaluation contract (`harness`: the configured budgets; `leaderboard`: one
+graded program, no scratchpad), and on a benchmark that stamps contest dates
+`--start_date` / `--end_date` / `--platform` select the problems scored.
 
 The server must serve the model with tool calling enabled (e.g. vLLM
 `--tool-call-parser qwen3_xml --enable-auto-tool-choice`). A solution counts as solved when it passes
@@ -25,6 +29,12 @@ Examples:
         --dataset agentica-org/DeepCoder-Preview-Dataset --config taco --split train --adapter deepcoder \
         --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" \
         --model qwen/qwen3-235b-a22b --num_examples 100 --num_samples 4
+
+    # LiveCodeBench release_v6, AtCoder contests from 2025-01-04 on, leaderboard protocol, success@4
+    python scripts/environments/inference/run_code_contests.py \
+        --dataset livecodebench/code_generation_lite --config release_v6 --adapter livecodebench \
+        --start_date 2025-01-04 --platform atcoder --eval_protocol leaderboard \
+        --base_url http://localhost:8000/v1 --model <served-name> --num_examples 0 --num_samples 4
 """
 
 import argparse
@@ -41,8 +51,15 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_PROFILES
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter
+from src.environments.envs.tasks.coding.code_contests import (
+    DEFAULT_EVAL_PROTOCOL,
+    DEFAULT_REASONING_EFFORT,
+    EVAL_PROTOCOLS,
+    REASONING_EFFORT_PROFILES,
+    CodeContestsEnvironment,
+    without_eval_protocol_pins,
+)
+from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
@@ -59,30 +76,113 @@ logger = logging.getLogger(__name__)
 # the tool call carrying it from competing with the chain of thought for tokens.
 SOLUTION_HEADROOM_TOKENS = 4096
 
-# The coding envs this script's adapters, language prompt and rating buckets are written for.
+# The coding envs this script's adapters, language prompt and report buckets are written for.
 CODING_ENV_TYPES = ("codeforces", "code_contests")
 # Script defaults, applied where neither a flag nor ``--training_config`` sets the knob. No language
 # or turn budget among them: both are the env class's own, and a script-side copy would silently grade
 # under a different contract than the class ships once the class moves.
 DEFAULT_ENV_TYPE = "codeforces"
 DEFAULT_TEMPERATURE = 0.2
+# Env options with a flag of their own, the flag being their one spelling on this command line.
+FLAG_OWNED_ENV_KWARGS = ("max_turns", "language", "eval_protocol", "reasoning_effort")
+
+
+def parse_list_flag(flag: str, value: str) -> list[str]:
+    """A comma-separated flag's entries, stripped; a value naming none exits."""
+    entries = [entry.strip() for entry in value.split(",") if entry.strip()]
+    if not entries:
+        raise SystemExit(f"--{flag} names no {flag}: {value!r}")
+    return entries
 
 
 def parse_language_flag(value: str) -> str | list[str]:
     """``--language`` as the env's ``language``: one name, or the list a comma-separated value names."""
-    languages = [name.strip() for name in value.split(",") if name.strip()]
-    if not languages:
-        raise SystemExit(f"--language names no language: {value!r}")
+    languages = parse_list_flag("language", value)
     return languages if len(languages) > 1 else languages[0]
 
 
-def refuse_env_kwargs_language(env_kwargs: dict) -> None:
-    """``--language`` names the trajectory path and the re-grader rebuilds the env from it; a language
-    passed through ``--env_kwargs`` would run one set and record another."""
-    if "language" in env_kwargs:
-        raise SystemExit(
-            "set the language with --language, not --env_kwargs: the trajectory metadata records the flag"
-        )
+def refuse_flag_owned_env_kwargs(env_kwargs: dict) -> None:
+    """A :data:`FLAG_OWNED_ENV_KWARGS` option also passed through ``--env_kwargs`` would silently
+    override its flag, the JSON being laid over the flags."""
+    for key in FLAG_OWNED_ENV_KWARGS:
+        if key in env_kwargs:
+            raise SystemExit(f"set the {key} with --{key}, not --env_kwargs, which would override the flag")
+
+
+def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> ContestSelection:
+    """The contest window and platforms the run scores, validated against the adapter before any row
+    is read: an unparsable day, an empty window, an unknown platform, or a bound the dataset cannot
+    apply exits."""
+    platforms = parse_list_flag("platform", args.platform) if args.platform is not None else ()
+    try:
+        selection = ContestSelection.parse(args.start_date, args.end_date, platforms)
+        adapter.require_selectable(selection)
+    except ValueError as exc:
+        raise SystemExit(f"--start_date/--end_date/--platform on --adapter {args.adapter}: {exc}") from exc
+    return selection
+
+
+def resolve_eval_protocol(flag: str | None, trained_env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The run's protocol (the flag, else the training config's, else the default) and the training
+    config's env options under it. A config written under another protocol gives way to this run's
+    pins, as its effort profiles do; one that names this protocol itself keeps its values, so a
+    contradiction there raises in the env, as one in ``--env_kwargs`` does."""
+    eval_protocol = resolve_setting(flag, trained_env.get("eval_protocol"), DEFAULT_EVAL_PROTOCOL)
+    if trained_env.get("eval_protocol") == eval_protocol:
+        return eval_protocol, trained_env
+    return eval_protocol, without_eval_protocol_pins(trained_env, eval_protocol, "the training config")
+
+
+def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], env_kwargs: dict) -> dict[str, Any]:
+    """The run's environment config, built once: the environment is made from it and the meta line
+    records it, so the two cannot disagree. The training config's options come first (under the
+    resolved protocol), the resolved settings and flags over them: an eval under a contract grades as
+    the run did. An unset language is left out entirely, so the env class's own default applies."""
+    eval_protocol, trained_env = resolve_eval_protocol(args.eval_protocol, trained_env)
+    return {
+        **trained_env,
+        "max_turns": resolve_setting(args.max_turns, trained_env.get("max_turns"), None),
+        **({"language": parse_language_flag(args.language)} if args.language else {}),
+        "eval_protocol": eval_protocol,
+        "reasoning_effort": resolve_setting(
+            args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
+        ),
+        **env_kwargs,
+    }
+
+
+def run_trajectory_path(
+    args: argparse.Namespace, env: CodeContestsEnvironment, selection: ContestSelection
+) -> str | None:
+    """The run's trajectory file: ``<model>__<adapter>__<split>__<language>``, plus the protocol and the
+    selection only where they depart from the defaults, so a default run keeps its name. The meta line
+    records both either way."""
+    protocol = env.eval_protocol if env.eval_protocol != DEFAULT_EVAL_PROTOCOL else ""
+    return resolve_trajectory_path(args, args.adapter, args.split, ",".join(env.languages), protocol, selection.label)
+
+
+def contest_meta(
+    adapter_name: str,
+    selection: ContestSelection,
+    env: CodeContestsEnvironment,
+    reasoning_effort: str,
+    env_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """The code-contest keys of the trajectory meta line: what the offline re-grader rebuilds the run's
+    examples (by index, under the same selection) and environment from."""
+    return {
+        "adapter": adapter_name,
+        "selection": selection.to_meta(),
+        # The effective values, read back off the env that resolved the defaults.
+        "language": list(env.languages) if env.chooses_language else env.language,
+        "eval_protocol": env.eval_protocol,
+        "reasoning_effort": reasoning_effort,
+        "env_kwargs": env_kwargs,
+        # The run's whole grading contract, so an offline re-grade reproduces the same verdicts
+        # (per-problem checker/time_limit come from the dataset payload). Derived from the
+        # dataclass, so a knob added to GradingSpec cannot be defaulted offline.
+        "env_grading": env.grading_spec.to_meta(),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,8 +202,41 @@ def parse_args() -> argparse.Namespace:
         help="Adapter that composes raw contest rows into eval examples. This script always reads a raw "
         "dataset; one already prepared by scripts/environments/preparation/prepare_code_dataset.py is not its input.",
     )
-    p.add_argument("--num_examples", type=int, default=50, help="Cap on problems (0 = all).")
-    p.add_argument("--num_samples", type=int, default=1, help="Samples per problem (success@k).")
+    dated = ", ".join(sorted(name for name, a in CODE_DATASET_ADAPTERS.items() if a.contest_date))
+    p.add_argument(
+        "--start_date",
+        default=None,
+        help=f"Score only problems whose contest is dated on or after this day (YYYY-MM-DD, inclusive). "
+        f"Adapters stamping a contest date: {dated}.",
+    )
+    p.add_argument(
+        "--end_date",
+        default=None,
+        help="Score only problems whose contest is dated on or before this day (YYYY-MM-DD, inclusive).",
+    )
+    p.add_argument(
+        "--platform",
+        default=None,
+        help="Comma-separated platforms to score, spelled as the dataset spells them ("
+        + "; ".join(
+            f"{name}: {', '.join(a.platforms)}" for name, a in sorted(CODE_DATASET_ADAPTERS.items()) if a.platforms
+        )
+        + "). Default: every platform.",
+    )
+    p.add_argument(
+        "--eval_protocol",
+        default=None,
+        choices=sorted(EVAL_PROTOCOLS),
+        help="Evaluation protocol: harness runs the configured budgets (the agentic loop); leaderboard pins "
+        "one graded submission and no scratchpad runs at every effort level. Default: the training "
+        "config's under --training_config, else harness.",
+    )
+    p.add_argument(
+        "--num_examples", type=int, default=50, help="Cap on problems, taken in the adapter's order (0 = all)."
+    )
+    p.add_argument(
+        "--num_samples", type=int, default=1, help="Samples per problem (success@k; success@1 counts the first)."
+    )
     p.add_argument(
         "--language",
         default=None,
@@ -154,8 +287,11 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_examples(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> list[dict[str, Any]]:
-    """Compose raw contest rows into eval examples via the chosen adapter, bucketed by its group field.
+def build_examples(
+    args: argparse.Namespace, adapter: CodeDatasetAdapter, selection: ContestSelection
+) -> list[dict[str, Any]]:
+    """Compose the raw contest rows ``selection`` admits into eval examples via the chosen adapter,
+    bucketed by its group field and named by its id field.
 
     Loading goes through the adapter's own ``load`` when it has one (LiveCodeBench and ICPC-Eval
     cannot be read with a plain ``load_dataset``), otherwise the standard HF split loader.
@@ -166,34 +302,40 @@ def build_examples(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> lis
         else load_hf_split(args.dataset, args.config, args.split)
     )
     examples = []
-    for row in rows:
-        if not adapter.keep(row):
-            continue
+    for row in adapter.scored_rows(rows, selection):
         examples.append(
             {
                 "prompt": adapter.format_prompt(row),
                 "context": {"answer": json.dumps(adapter.pack_verification(row))},
                 "group": row.get(adapter.group_field),
-                "id": row.get("id") or row.get("problem_id") or row.get("name"),
+                "id": row.get(adapter.id_field),
             }
         )
         if args.num_examples and len(examples) >= args.num_examples:
             break
     if not examples:
         raise SystemExit(
-            f"{args.dataset} ({args.adapter}) yielded no gradable problem; check the adapter, config and split"
+            f"{args.dataset} ({args.adapter}) yielded no gradable problem; check the adapter, config, split "
+            f"and the contest selection"
         )
-    logger.info("Loaded %d problems from %s (%s)", len(examples), args.dataset, args.adapter)
+    logger.info(
+        "Loaded %d problems from %s (%s%s)",
+        len(examples),
+        args.dataset,
+        args.adapter,
+        f", {selection.label}" if selection.label else "",
+    )
     return examples
 
 
 def main() -> None:
     args = parse_args()
+    adapter = CODE_DATASET_ADAPTERS[args.adapter]
+    selection = resolve_selection(args, adapter)
+    env_kwargs = json.loads(args.env_kwargs)
+    refuse_flag_owned_env_kwargs(env_kwargs)
     contract = load_training_contract(args.training_config)
     trained_env = contract.env_config_dict() if contract is not None else {}
-    adapter = CODE_DATASET_ADAPTERS[args.adapter]
-    env_kwargs = json.loads(args.env_kwargs)
-    refuse_env_kwargs_language(env_kwargs)
     env_type = resolve_setting(
         args.env_type, contract.env_config.environment_type if contract else None, DEFAULT_ENV_TYPE
     )
@@ -201,29 +343,12 @@ def main() -> None:
         raise SystemExit(
             f"{args.training_config} trains environment_type={env_type!r}, not a coding env {CODING_ENV_TYPES}"
         )
-    reasoning_effort = resolve_setting(
-        args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
-    )
-    max_turns = resolve_setting(args.max_turns, trained_env.get("max_turns"), None)
-    # The training run's env config first, the resolved settings and flags over it: an eval under a
-    # contract grades as the run did. An unset language or turn budget is left out entirely, so the
-    # env class's own default applies.
-    env = resolve_environment(
-        env_type,
-        {
-            **trained_env,
-            "max_turns": max_turns,
-            **({"language": parse_language_flag(args.language)} if args.language else {}),
-            "reasoning_effort": reasoning_effort,
-            **env_kwargs,
-        },
-    )
-    # Read the effective language set back off the env, which resolved the default.
-    language = list(env.languages) if env.chooses_language else env.language
-    language_label = ",".join(env.languages)
+    env_config = resolve_env_config(args, trained_env, env_kwargs)
+    reasoning_effort, max_turns = env_config["reasoning_effort"], env_config["max_turns"]
+    env = resolve_environment(env_type, env_config)
     # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
     env.verify_backend()
-    examples = build_examples(args, adapter)
+    examples = build_examples(args, adapter, selection)
     client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
     # Without a training config the flag's effort level sets the generation budget unless --max_tokens
@@ -238,7 +363,7 @@ def main() -> None:
     )
     logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
 
-    traj_path = resolve_trajectory_path(args, args.adapter, args.split, language_label)
+    traj_path = run_trajectory_path(args, env, selection)
 
     results = asyncio.run(
         collect_results(
@@ -253,10 +378,11 @@ def main() -> None:
         )
     )
     env.close()
+    scope = ", ".join(part for part in (args.adapter, selection.label, f"{env.eval_protocol} protocol") if part)
     report(
         results,
         num_samples=args.num_samples,
-        title=f"{env_type} on {args.dataset} ({args.adapter})",
+        title=f"{env_type} on {args.dataset} ({scope})",
         group_label=adapter.group_label,
     )
     write_eval_outputs(
@@ -268,16 +394,7 @@ def main() -> None:
         max_turns=max_turns,
         rollout=rollout,
         num_samples=args.num_samples,
-        meta_extra={
-            "adapter": args.adapter,
-            "language": language,
-            "reasoning_effort": reasoning_effort,
-            "env_kwargs": {**trained_env, **env_kwargs},
-            # The run's whole grading contract, so an offline re-grade reproduces the same verdicts
-            # (per-problem checker/time_limit come from the dataset payload). Derived from the
-            # dataclass, so a knob added to GradingSpec cannot be defaulted offline.
-            "env_grading": env.grading_spec.to_meta(),
-        },
+        meta_extra=contest_meta(args.adapter, selection, env, reasoning_effort, env_config),
     )
 
 

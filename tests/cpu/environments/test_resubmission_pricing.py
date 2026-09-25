@@ -22,6 +22,7 @@ from src.environments.envs.tasks.coding.code_contests import (
 )
 from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
 from src.environments.tools.definitions import NativeToolCall
+from tests.common.code_contests import StubSandbox
 
 PENALTY = 0.2
 REFUND = 0.75
@@ -37,17 +38,6 @@ class _PassesSandbox(SandboxExecutor):
 
     def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
         return SandboxResult(stdout="ok\n" if stdin and stdin in code else "no\n", returncode=0)
-
-
-class _CannedSandbox(SandboxExecutor):
-    def __init__(self, result: SandboxResult):
-        self._result = result
-
-    def open_session(self):
-        raise NotImplementedError
-
-    def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
-        return self._result
 
 
 def _env(**kwargs):
@@ -152,7 +142,7 @@ def test_the_behavior_counter_is_the_share_of_resubmissions_that_improved():
     ],
 )
 def test_a_starved_scratchpad_run_names_the_missing_stdin(result, stdin, noted):
-    env = _env(sandbox=_CannedSandbox(result))
+    env = _env(sandbox=StubSandbox(result))
     arguments = {"code": "print(int(input()))", **({"stdin": stdin} if stdin else {})}
     observation = _call(env, _episode(env), "python_repl", **arguments)
     assert observation.endswith(NO_STDIN_NOTE) is noted, observation

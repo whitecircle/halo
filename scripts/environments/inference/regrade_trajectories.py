@@ -12,9 +12,10 @@ dedicated core and the wall-clock limit is real.
 
 This reads the JSONL files written by ``write_trajectories_jsonl`` (a ``{"type": "meta", ...}`` line
 then one episode per line), rebuilds each problem's hidden tests from its dataset by index — the same
-order ``build_examples`` used — and re-runs every recorded ``submit_solution`` through the *same*
-``grade_solution`` the environment uses, reproducing the env's comparison / checker / time-limit
-exactly. It reports first-submission and within-budget solve rates (``s@1`` / ``s@2``).
+order and contest selection ``build_examples`` used — and re-runs every recorded ``submit_solution``
+through the *same* ``grade_solution`` the environment uses, reproducing the env's comparison /
+checker / time-limit exactly. It reports first-submission and within-budget solve rates
+(``s@1`` / ``s@2``).
 
 Usage::
 
@@ -31,8 +32,13 @@ from functools import cache
 from typing import Any
 
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY
-from src.environments.envs.tasks.coding.code_contests import SUBMIT_TOOL
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS
+from src.environments.envs.tasks.coding.code_contests import (
+    DEFAULT_EVAL_PROTOCOL,
+    DEFAULT_REASONING_EFFORT,
+    SUBMIT_TOOL,
+    CodeContestsEnvironment,
+)
+from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, ContestSelection
 from src.environments.envs.tasks.coding.grading import grade_solution
 from src.environments.eval_runner import load_hf_split
 from src.environments.registry import resolve_environment
@@ -42,6 +48,9 @@ from src.environments.tools.definitions import NativeTool
 # tests, model/language name the row of the report. Only run_code_contests.py stamps the full set —
 # run_env.py writes the generic eval meta, without adapter/language.
 _REQUIRED_META_KEYS = ("env_type", "adapter", "dataset", "model", "language")
+# The env options the meta line records at its top level, as the env resolved them, and the re-grade
+# reads from there alone; ``env_kwargs`` supplies every other option.
+_TOP_LEVEL_ENV_KEYS = ("language", "reasoning_effort", "eval_protocol")
 
 
 def validate_meta(path: str, meta: dict[str, Any]) -> None:
@@ -74,17 +83,19 @@ def read_trajectories(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 
 
 @cache
-def _load_payloads(adapter_name: str, dataset: str, config: str | None, split: str) -> tuple[dict[str, Any], ...]:
+def _load_payloads(
+    adapter_name: str, dataset: str, config: str | None, split: str, selection: ContestSelection
+) -> tuple[dict[str, Any], ...]:
     """Rebuild a dataset's per-problem grading payloads (tests, checker, time limit) in the same order
-    ``build_examples`` produced — so an episode's ``index`` selects its problem. Cached so re-grading a
-    whole model × language matrix loads each dataset once."""
+    ``build_examples`` produced, under the same contest selection — so an episode's ``index`` selects
+    its problem. Cached so re-grading a whole model × language matrix loads each dataset once."""
     adapter = CODE_DATASET_ADAPTERS[adapter_name]
     if not adapter.scores_raw_rows:
         raise SystemExit(
             f"adapter {adapter_name!r} scores prepared pools only; its raw rows carry no gradable payload"
         )
     rows = adapter.load(dataset, config, split) if adapter.load else load_hf_split(dataset, config, split)
-    payloads = tuple(adapter.pack_verification(row) for row in rows if adapter.keep(row))
+    payloads = tuple(adapter.pack_verification(row) for row in adapter.scored_rows(rows, selection))
     if not payloads:
         raise SystemExit(f"{dataset} ({adapter_name}) yielded no gradable problem")
     return payloads
@@ -92,7 +103,31 @@ def _load_payloads(adapter_name: str, dataset: str, config: str | None, split: s
 
 def build_payloads(meta: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Grading payloads for a trajectory's dataset, keyed by example index (see :func:`_load_payloads`)."""
-    return _load_payloads(meta["adapter"], meta["dataset"], meta.get("config"), meta.get("split", "test"))
+    return _load_payloads(
+        meta["adapter"],
+        meta["dataset"],
+        meta.get("config"),
+        meta.get("split", "test"),
+        ContestSelection.from_meta(meta.get("selection")),
+    )
+
+
+def rebuild_environment(meta: dict[str, Any]) -> CodeContestsEnvironment:
+    """The environment the run used, not a default one: ``env_kwargs`` carries the interaction budgets
+    (``max_submissions``, ``reasoning_effort_profiles``) that decide how many submissions count, the
+    top-level :data:`_TOP_LEVEL_ENV_KEYS` the rest. A run that raised ``max_submissions`` re-graded
+    against the class default would report a lower s@k than the online number. A meta line naming no
+    protocol ran the harness."""
+    env_kwargs = {k: v for k, v in (meta.get("env_kwargs") or {}).items() if k not in _TOP_LEVEL_ENV_KEYS}
+    return resolve_environment(
+        meta["env_type"],
+        {
+            **env_kwargs,
+            "language": meta["language"],
+            "reasoning_effort": meta.get("reasoning_effort", DEFAULT_REASONING_EFFORT),
+            "eval_protocol": meta.get("eval_protocol") or DEFAULT_EVAL_PROTOCOL,
+        },
+    )
 
 
 def episode_submission_budget(episode: dict[str, Any], env: Any) -> int:
@@ -136,16 +171,7 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
     meta, episodes = read_trajectories(path)
     validate_meta(path, meta)
     payloads = build_payloads(meta)
-    # Reproduce the environment the run used, not a default one: env_kwargs carries the interaction
-    # budgets (max_submissions, reasoning_effort_profiles) that decide how many submissions count.
-    # Without them a run that raised max_submissions re-grades against the class default and reports
-    # a lower s@k than the online number.
-    env_config = {
-        **(meta.get("env_kwargs") or {}),
-        "language": meta.get("language", "python"),
-        "reasoning_effort": meta.get("reasoning_effort", "medium"),
-    }
-    env = resolve_environment(meta["env_type"], env_config)
+    env = rebuild_environment(meta)
     # The run's own grading contract off its meta line, minus the two knobs an offline re-grade must
     # not inherit. ``stop_on_first_failure``: s@1/s@2 need the all-pass verdict, not the pass
     # *fraction*, so short-circuiting is identical to full grading while sparing the remaining
@@ -192,6 +218,7 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
         "model": meta.get("model"),
         "adapter": meta.get("adapter"),
         "language": meta.get("language"),
+        "eval_protocol": env.eval_protocol,
         "n": n,
         "s@1": solved_first / n if n else 0.0,
         "s@2": solved_within / n if n else 0.0,
@@ -222,7 +249,7 @@ def main() -> None:
             # result as it lands, so progress is visible and partial runs are not lost.
             print(
                 f"{metrics['model']:28s} {metrics['adapter']:13s} {display_language(metrics['language']):6s} "
-                f"n={metrics['n']} s@1={metrics['s@1']:.0%} s@2={metrics['s@2']:.0%}",
+                f"{metrics['eval_protocol']:11s} n={metrics['n']} s@1={metrics['s@1']:.0%} s@2={metrics['s@2']:.0%}",
                 flush=True,
             )
             if output:

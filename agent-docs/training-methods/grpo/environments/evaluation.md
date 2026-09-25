@@ -25,9 +25,14 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 | `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding: the effort budget) / 180 s | Sampling, HTTP timeout |
 
 `run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through
-`--context_fields` and buckets by `--group_by`; `run_code_contests.py` instead takes `--adapter`,
-`--language` and `--reasoning_effort`, which also sets the default `--max_tokens`
-([Code Contests](code-contests.md)).
+`--context_fields`, buckets by `--group_by` and names each example by `--id_field` (default `id`);
+a field that names no column of the split exits before any row is read, except the default answer
+and id columns, which a dataset may lack. `run_code_contests.py` instead takes `--adapter` (which
+fixes the bucket and id fields per benchmark), `--language`, `--reasoning_effort` (which also sets
+the default `--max_tokens`), `--eval_protocol`, and `--start_date` / `--end_date` / `--platform` on a
+benchmark that stamps contest dates ([Code Contests](code-contests.md#evaluation)). There an option
+with a flag of its own (`--max_turns`, `--language`, `--eval_protocol`, `--reasoning_effort`) is
+refused in `--env_kwargs`, which would otherwise override the flag.
 
 `--training_config <yaml>` parses the YAML with the training script's own config classes: its
 `RolloutConfig` (template variables, stop tokens, thinking budget, sampling) and environment config
@@ -44,8 +49,10 @@ run one command with `--training_config`, dataset, split and `--num_samples` fix
 weights differ.
 
 The report logs mean reward, `success@1`, `success@k` and aggregate telemetry, so token
-starvation reads differently from wrong answers. Reasoning models need a large `--max_tokens`: too
-low cuts the chain of thought before any answer, scoring 0.
+starvation reads differently from wrong answers. `success@1` is the first sample's outcome and
+`success@k` whether any of the `--num_samples` succeeded; neither is the mean over samples a
+benchmark's pass@1 reports. Reasoning models need a large `--max_tokens`: too low cuts the chain of
+thought before any answer, scoring 0.
 
 ## Output files
 
@@ -55,11 +62,14 @@ recorded.
 
 `--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>` auto-names one
 file per run instead (`<model>__<env_type>__<split>.jsonl`, or
-`<model>__<adapter>__<split>__<language>.jsonl` for the coding script).
+`<model>__<adapter>__<split>__<language>.jsonl` for the coding script). The coding name adds
+`__<eval_protocol>` for a protocol other than `harness` and a part naming a contest selection when
+one is set, e.g. `__leaderboard__2025-01-01..2025-04-30_atcoder-codeforces`.
 
 Line 1 is a `meta` record: model, env type, dataset/config/split, effective `max_turns`, the
 generation contract (`rollout`), the `training_config`, `system_prompt` and tool schemas — for
-coding, also the adapter, language, effort and the `GradingSpec` (`env_grading`).
+coding, also the adapter, contest `selection`, language, `eval_protocol`, effort and the `GradingSpec`
+(`env_grading`).
 
 Each later line is an `episode`, addressed by `index` and `id`: `reward`, `success`, `stats`, the
 messages, `reasoning_effort` / `reasoning_budget`, `info`. The answer key (`_`-prefixed `info`
@@ -77,9 +87,12 @@ python scripts/environments/inference/regrade_trajectories.py \
     "$HALO_DATA_ROOT/eval/trajectories"/*.jsonl --workers 64 --output regraded.jsonl
 ```
 
-It rebuilds each problem's hidden tests by `index` and replays every recorded `submit_solution`, up
-to that episode's own budget, through `grade_solution` under the meta line's `env_grading` contract. Grading stops at the first failing test and `max_grading_seconds`
-does not apply. Reports `s@1` / `s@2` per file; keep `--workers` at or below the core count.
+It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection`, and
+replays every recorded `submit_solution`, up to that episode's own budget, through `grade_solution`
+under the meta line's `env_grading` contract. The meta's `eval_protocol` only rebuilds the
+environment, whose `max_submissions` is the budget of an episode that stamped none. Grading stops at
+the first failing test and `max_grading_seconds` does not apply. Reports `s@1` / `s@2` and the
+protocol per file; keep `--workers` at or below the core count.
 
 Only `run_code_contests.py` stamps the meta a re-grade needs (`env_type`, `adapter`, `dataset`,
 `model`, `language`); a `run_env.py` dump is refused.

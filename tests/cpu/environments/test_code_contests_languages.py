@@ -14,7 +14,7 @@ import shutil
 
 import pytest
 
-from scripts.environments.inference.run_code_contests import parse_language_flag, refuse_env_kwargs_language
+from scripts.environments.inference.run_code_contests import parse_language_flag, refuse_flag_owned_env_kwargs
 from src.environments.base import EPISODE_SLICES_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution
@@ -157,9 +157,9 @@ def test_the_eval_flag_normalizes_one_name_and_splits_a_list():
     assert parse_language_flag("python,cpp") == ["python", "cpp"]
     with pytest.raises(SystemExit, match="names no language"):
         parse_language_flag(" , ")
-    with pytest.raises(SystemExit, match="not --env_kwargs"):
-        refuse_env_kwargs_language({"language": "cpp"})
-    refuse_env_kwargs_language({"max_turns": 3})
+    with pytest.raises(SystemExit, match="--language, not --env_kwargs"):
+        refuse_flag_owned_env_kwargs({"language": "cpp"})
+    refuse_flag_owned_env_kwargs({"timeout_per_test": 3})
 
 
 def test_language_set_validation():

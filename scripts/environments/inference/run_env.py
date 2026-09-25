@@ -10,7 +10,7 @@ mean reward and success@k. The rollout loop and reporting are shared via
 
 For competitive programming (`code_contests` / `codeforces`) use
 `scripts/environments/inference/run_code_contests.py` instead; it carries the dataset adapters,
-solution language and rating-bucketed reporting, keeping that logic out of this generic runner.
+solution language and per-benchmark report buckets, keeping that logic out of this generic runner.
 
 Per-env settings go through `--env_kwargs` (a JSON dict merged into the env config), e.g.
 `--env_kwargs '{"search_backend": "duckduckgo"}'` or `'{"open_book": true}'`. Tool-using envs need a
@@ -53,6 +53,7 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
+from src.args.environmental_grpo_args import DEFAULT_ANSWER_FIELD
 from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS, DEFAULT_ROLLOUT_TEMPERATURE
 from src.environments.eval_runner import (
     collect_results,
@@ -65,6 +66,9 @@ from src.log import configure_cli_logging
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
+
+# The column naming an example when --id_field is not given; a dataset may carry none.
+DEFAULT_ID_FIELD = "id"
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,9 +83,19 @@ def parse_args() -> argparse.Namespace:
     )
     add_endpoint_args(p)
     p.add_argument("--prompt_field", default="prompt", help="Row field holding the prompt.")
-    p.add_argument("--answer_field", default="answer", help="Row field holding the expected answer.")
+    p.add_argument(
+        "--answer_field",
+        default=DEFAULT_ANSWER_FIELD,
+        help="Row field holding the expected answer. A renamed field must name a column; the default may be absent.",
+    )
     p.add_argument("--context_fields", nargs="*", default=[], help="Extra row fields to pass through as context.")
     p.add_argument("--group_by", default=None, help="Row field to bucket the report by.")
+    p.add_argument(
+        "--id_field",
+        default=DEFAULT_ID_FIELD,
+        help="Row field naming an example in the results and trajectories. A renamed field must name a column; "
+        "the default may be absent.",
+    )
     p.add_argument(
         "--env_kwargs", default="{}", help="JSON dict merged into the env config (e.g. search_backend, open_book)."
     )
@@ -109,9 +123,27 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def require_field_columns(args: argparse.Namespace, columns: list[str]) -> None:
+    """Refuse a field flag that names no column of the split, before a row is read: a mistyped
+    ``--prompt_field`` would skip every row, and a mistyped answer, context field, bucket or id would
+    vanish from every example. The default ``--answer_field`` and ``--id_field`` go unchecked: a dataset
+    may carry neither, and whether an answer is needed is the environment's ``requires_answer``."""
+    named = [("--prompt_field", args.prompt_field)]
+    named += [("--answer_field", args.answer_field)] if args.answer_field != DEFAULT_ANSWER_FIELD else []
+    named += [("--context_fields", field) for field in args.context_fields]
+    named += [("--group_by", args.group_by)] if args.group_by is not None else []
+    named += [("--id_field", args.id_field)] if args.id_field != DEFAULT_ID_FIELD else []
+    missing = [f"{flag} {column!r}" for flag, column in named if column not in columns]
+    if missing:
+        raise SystemExit(
+            f"{', '.join(missing)}: no such column in {args.dataset}; available columns: {sorted(columns)}"
+        )
+
+
 def build_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Read eval examples from the dataset's prompt/answer columns."""
+    """Read eval examples from the dataset's prompt/answer columns, every named field checked first."""
     split = load_hf_split(args.dataset, args.config, args.split)
+    require_field_columns(args, split.column_names)
     examples = []
     for row in split:
         prompt = row.get(args.prompt_field)
@@ -128,7 +160,7 @@ def build_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "prompt": prompt,
                 "context": context,
                 "group": row.get(args.group_by),
-                "id": row.get("id") or row.get("problem_id"),
+                "id": row.get(args.id_field),
             }
         )
         if args.num_examples and len(examples) >= args.num_examples:
