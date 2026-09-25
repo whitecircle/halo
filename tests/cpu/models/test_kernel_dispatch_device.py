@@ -130,6 +130,22 @@ def test_torch_capture_with_the_package_installed_warns(caplog, monkeypatch):
     )
 
 
+def test_a_kernel_package_that_fails_its_own_import_raises(tmp_path, monkeypatch):
+    """Only a missing module means "package absent or chain renamed". A package that is present but
+    breaks inside its kernel import (a Triton or ABI fault) must stop the load: swallowed, upstream
+    captures the torch body and every CUDA forward runs the slow scan."""
+    ensure_device_aware_kernel_dispatch()
+    ops = tmp_path / "halo_broken_kernel_pkg" / "ops"
+    ops.mkdir(parents=True)
+    (ops.parent / "__init__.py").write_text("")
+    (ops / "__init__.py").write_text("")
+    (ops / "scan.py").write_text("raise RuntimeError('simulated triton ABI fault')\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="simulated triton ABI fault"):
+        hub_kernels.use_kernel_func_from_hub_with_fallback("halo_probe_scan", "halo_broken_kernel_pkg", "ops.scan")
+
+
 def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
     """The install has to happen on ``src`` import, not on first use.
 

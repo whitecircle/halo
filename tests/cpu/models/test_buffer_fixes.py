@@ -15,6 +15,13 @@ import pytest
 import torch
 import torch.nn as nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
+from transformers.models.gemma3.modeling_gemma3 import Gemma3TextScaledWordEmbedding
+from transformers.models.gemma4 import Gemma4TextConfig, Gemma4VisionConfig
+from transformers.models.gemma4.modeling_gemma4 import (
+    Gemma4TextModel,
+    Gemma4TextScaledWordEmbedding,
+    Gemma4VisionRotaryEmbedding,
+)
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
 from src.models.patches import buffer_fixes
@@ -54,9 +61,6 @@ def test_per_layer_type_recompute_matches_model_init():
     config view, exactly as the module's own ``__init__`` does. A raw-config read raises
     ``AmbiguousGlobalPerLayerAttributeError`` on the sliding leg, and the proportional (global) leg
     sized off any single global field rebuilds a wrong-length table."""
-    from transformers.models.gemma4 import Gemma4TextConfig
-    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
-
     cfg = Gemma4TextConfig(
         num_hidden_layers=6,
         hidden_size=64,
@@ -80,6 +84,38 @@ def test_per_layer_type_recompute_matches_model_init():
     for name, expected in reference.items():
         assert rebuilt[name].shape == expected.shape, name
         assert torch.equal(rebuilt[name].float(), expected.float()), name
+
+
+def test_vision_rotary_recompute_matches_model_init():
+    """Gemma 4's vision rotary sizes ``inv_freq`` off ``head_dim // 2`` (one table per spatial axis);
+    the generic recompute reaches that formula through the module's own
+    ``compute_default_rope_parameters``, so the rebuilt table must equal the one ``__init__`` built."""
+    rotary = Gemma4VisionRotaryEmbedding(Gemma4VisionConfig())
+    reference = rotary.inv_freq.clone()
+    model = nn.Module()
+    model.rotary_emb = rotary
+    rotary.inv_freq.zero_()
+    rotary.original_inv_freq.zero_()
+
+    fix_rotary_inv_freq(model)
+
+    assert torch.equal(rotary.inv_freq, reference)
+    assert torch.equal(rotary.original_inv_freq, reference)
+
+
+@pytest.mark.parametrize("embedding_cls", [Gemma4TextScaledWordEmbedding, Gemma3TextScaledWordEmbedding])
+def test_scaled_embedding_scale_is_rebuilt_from_its_scalar(embedding_cls):
+    """Every Gemma-lineage scaled embedding keeps ``embed_scale`` as a non-persistent buffer beside the
+    ``scalar_embed_scale`` it was built from; the load leaves the buffer uninitialized, and a zero one
+    multiplies every input embedding by zero."""
+    embedding = embedding_cls(16, 8, padding_idx=0, embed_scale=8**0.5)
+    embedding.embed_scale.zero_()
+    model = nn.Module()
+    model.embed_tokens = embedding
+
+    finalize_loaded_model(model)
+
+    assert embedding.embed_scale.item() == pytest.approx(8**0.5)
 
 
 def test_recompute_preserves_declared_persistence():
@@ -200,14 +236,22 @@ class _ConfiglessLayerTypeRotary(nn.Module):
     rope_init_fns = {"full_attention": None}
 
 
+class _ConfiglessSingleRotary(nn.Module):
+    """A single-``inv_freq`` rotary with no config to size its table from."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("inv_freq", torch.empty(4), persistent=False)
+
+
 @pytest.mark.parametrize(
     "module",
     [
         _ConfiglessSlopeAttention(),
         _ConfiglessLayerTypeRotary(),
-        type("Gemma4VisionRotaryEmbedding", (nn.Module,), {})(),
+        _ConfiglessSingleRotary(),
     ],
-    ids=["alibi_slope", "per_layer_type_rope", "gemma4_vision_rope"],
+    ids=["alibi_slope", "per_layer_type_rope", "single_inv_freq_rope"],
 )
 def test_a_claimed_but_unfixable_buffer_warns(module, caplog, monkeypatch):
     """A fixer that claims a module it cannot rebuild leaves the load's uninitialized values in

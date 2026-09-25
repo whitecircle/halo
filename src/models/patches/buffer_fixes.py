@@ -1,8 +1,8 @@
 """Recompute HF model buffers the meta-device build leaves unset.
 
 Fixes buffers that ``device_map="meta"`` / ``init_empty_weights()`` leave uninitialized or stranded
-on meta. Architecture-specific (RoPE, Bailing Lightning-Attention slopes, Gemma4 ``embed_scale``),
-not EP-specific.
+on meta. Architecture-specific (RoPE, Bailing Lightning-Attention slopes, the Gemma scaled
+embeddings' ``embed_scale``), not EP-specific.
 """
 
 from __future__ import annotations
@@ -157,19 +157,6 @@ def _resolve_rope_init_fn(module: nn.Module, layer_type: str) -> Callable:
     return module.compute_default_rope_parameters if rope_type == "default" else ROPE_INIT_FUNCTIONS[rope_type]
 
 
-def _fix_gemma4_vision_rope(module: nn.Module, name: str) -> int | None:
-    """Gemma4's vision rotary, whose ``spatial_dim = head_dim // 2`` the generic formula doubles."""
-    if type(module).__name__ != "Gemma4VisionRotaryEmbedding":
-        return None
-    config = getattr(module, "config", None)
-    if config is None:
-        return _unfixable(module, name, "the module carries no config to size its rotary table from")
-    inv_freq, scaling = module.compute_default_rope_parameters(config)
-    _apply_recomputed_rope(module, "", inv_freq, scaling, mirror_twin=False, create_scaling=False)
-    logger.debug(f"Fixed vision inv_freq for {name} (spatial_dim formula)")
-    return 1
-
-
 def _fix_per_layer_type_rope(module: nn.Module, name: str) -> int | None:
     """Every rotated layer type of a rotary that keys inv_freq by layer type, claimed off the
     module's own ``rope_init_fns`` mapping or its ``layer_types`` plus dict ``rope_type`` rather than
@@ -265,8 +252,9 @@ def _fix_alibi_slope(module: nn.Module, name: str) -> int | None:
 
 
 def _fix_embed_scale(module: nn.Module, name: str) -> int | None:
-    """Gemma4's ``sqrt(hidden_dim)`` scaled-word-embedding factor."""
-    if type(module).__name__ != "Gemma4TextScaledWordEmbedding":
+    """A scaled word embedding's ``embed_scale`` buffer, which every Gemma-lineage class derives from
+    the ``scalar_embed_scale`` it keeps beside it."""
+    if not hasattr(module, "scalar_embed_scale") or "embed_scale" not in module._buffers:
         return None
     embed_scale = torch.tensor(module.scalar_embed_scale, device=_materialized_device(module.weight))
     module.register_buffer("embed_scale", embed_scale, persistent=False)
@@ -274,13 +262,12 @@ def _fix_embed_scale(module: nn.Module, name: str) -> int | None:
     return 1
 
 
-# One summary line per group, over a first-match chain: a specialized rotary layout must claim its
-# module before the single-``inv_freq`` fallback rebuilds a vision table with the generic formula or
-# warns a per-layer-type rotary for the ``inv_freq`` it legitimately lacks. Groups stay independent,
-# since a module may need fixes from more than one family.
+# One summary line per group, over a first-match chain: a per-layer-type rotary must claim its module
+# before the single-``inv_freq`` fallback warns it for the ``inv_freq`` it legitimately lacks. Groups
+# stay independent, since a module may need fixes from more than one family.
 _ROTARY_FIXERS: tuple[str, tuple[_Fixer, ...]] = (
     "rotary embedding inv_freq buffer(s) to float32",
-    (_fix_gemma4_vision_rope, _fix_per_layer_type_rope, _fix_single_inv_freq_rope),
+    (_fix_per_layer_type_rope, _fix_single_inv_freq_rope),
 )
 _NON_PERSISTENT_FIXERS: tuple[str, tuple[_Fixer, ...]] = (
     "non-persistent buffer(s)",
@@ -317,8 +304,8 @@ def fix_non_persistent_buffers(model: nn.Module) -> None:
     """Recompute non-persistent buffers ``from_pretrained`` / the lazy loaders leave unset.
 
     Non-persistent buffers (absent from state_dict) hold uninitialized memory after
-    ``init_empty_weights()`` or stay on meta. Handles Bailing MoE Lightning-Attention-2 slopes and
-    Gemma4 ``embed_scale``.
+    ``init_empty_weights()`` or stay on meta. Handles Bailing MoE Lightning-Attention-2 slopes and the
+    Gemma scaled embeddings' ``embed_scale``.
     """
     _walk_and_fix(model, (_NON_PERSISTENT_FIXERS,))
 

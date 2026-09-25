@@ -11,6 +11,8 @@ import contextlib
 import weakref
 from typing import Any
 
+from transformers.integrations.heterogeneity import AmbiguousGlobalPerLayerAttributeError
+
 _SPECIAL_TOKEN_ID_FIELDS = ("eos_token_id", "bos_token_id", "pad_token_id")
 
 # Sentinel for a level that did not declare the field at snapshot time: composite wrappers carry no
@@ -57,13 +59,10 @@ def get_config_field(cfg, field: str, default=None, *, per_layer_reduce=None):
     for source in config_sources(cfg):
         try:
             value = getattr(source, field, None)
-        except RuntimeError as e:
-            # transformers' AmbiguousGlobalPerLayerAttributeError (a RuntimeError, so the getattr
-            # default does not swallow it): the field is registered per-layer (Gemma 4's head_dim),
-            # and the declared value must still win where the per-layer configs agree. Matched by
-            # name to avoid importing transformers internals here.
-            if type(e).__name__ != "AmbiguousGlobalPerLayerAttributeError":
-                raise
+        except AmbiguousGlobalPerLayerAttributeError as e:
+            # A RuntimeError, so the getattr default does not swallow it: the field is registered
+            # per-layer (Gemma 4's head_dim), and the declared value must still win where the
+            # per-layer configs agree.
             per_layer = getattr(source, "per_layer_config", None) or ()
             distinct = {getattr(layer_cfg, field, None) for layer_cfg in per_layer} - {None}
             if len(distinct) > 1:

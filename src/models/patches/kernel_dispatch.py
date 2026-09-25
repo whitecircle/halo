@@ -105,7 +105,7 @@ def _import_mapped_chain(func_name: str, package: str, internal_path: str | None
         return
     try:
         importlib.import_module(f"{package}.{chain}")
-    except Exception:
+    except ModuleNotFoundError:
         return  # package absent or chain renamed — upstream falls back and the capture check reports it
 
 
