@@ -5,7 +5,8 @@ OpenAI-compatible endpoint.
 
 Specific to the coding-contest task: it applies a dataset adapter that scores raw rows (every
 ``CODE_DATASET_ADAPTERS`` entry without a ``normalize`` step) to a contest dataset, prompts in a chosen
-solution `language`, and reports `success@1` / `success@k` bucketed by problem rating. The rollout loop
+solution `language`, and reports `success@1` / `success@k` bucketed by the adapter's report field
+(rating on Codeforces, difficulty on LiveCodeBench, contest on ICPC-Eval and HLCE). The rollout loop
 and reward aggregation are shared with the other eval scripts via :mod:`src.environments.eval_runner`.
 `--eval_protocol` names the evaluation contract (`harness`: the configured budgets; `leaderboard`: one
 graded program, no scratchpad), and on a benchmark that stamps contest dates
@@ -75,7 +76,7 @@ logger = logging.getLogger(__name__)
 # the tool call carrying it from competing with the chain of thought for tokens.
 SOLUTION_HEADROOM_TOKENS = 4096
 
-# The coding envs this script's adapters, language prompt and rating buckets are written for.
+# The coding envs this script's adapters, language prompt and report buckets are written for.
 CODING_ENV_TYPES = ("codeforces", "code_contests")
 # Script defaults, applied where neither a flag nor ``--training_config`` sets the knob. No language
 # or turn budget among them: both are the env class's own, and a script-side copy would silently grade
@@ -83,7 +84,7 @@ CODING_ENV_TYPES = ("codeforces", "code_contests")
 DEFAULT_ENV_TYPE = "codeforces"
 DEFAULT_TEMPERATURE = 0.2
 # Env options with a flag of their own, the flag being their one spelling on this command line.
-FLAG_OWNED_ENV_KWARGS = ("language", "eval_protocol")
+FLAG_OWNED_ENV_KWARGS = ("max_turns", "language", "eval_protocol", "reasoning_effort")
 
 
 def parse_list_flag(flag: str, value: str) -> list[str]:
@@ -290,7 +291,7 @@ def build_examples(
     args: argparse.Namespace, adapter: CodeDatasetAdapter, selection: ContestSelection
 ) -> list[dict[str, Any]]:
     """Compose the raw contest rows ``selection`` admits into eval examples via the chosen adapter,
-    bucketed by its group field.
+    bucketed by its group field and named by its id field.
 
     Loading goes through the adapter's own ``load`` when it has one (LiveCodeBench and ICPC-Eval
     cannot be read with a plain ``load_dataset``), otherwise the standard HF split loader.
@@ -307,8 +308,7 @@ def build_examples(
                 "prompt": adapter.format_prompt(row),
                 "context": {"answer": json.dumps(adapter.pack_verification(row))},
                 "group": row.get(adapter.group_field),
-                # ``question_id`` last: LiveCodeBench and HLCE rows carry no other id.
-                "id": row.get("id") or row.get("problem_id") or row.get("name") or row.get("question_id"),
+                "id": row.get(adapter.id_field),
             }
         )
         if args.num_examples and len(examples) >= args.num_examples:

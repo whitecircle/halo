@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.environments.inference.run_code_contests import (
+    FLAG_OWNED_ENV_KWARGS,
     contest_meta,
     refuse_flag_owned_env_kwargs,
     resolve_env_config,
@@ -179,6 +180,19 @@ def test_a_contradiction_stated_for_this_run_is_refused():
 def test_the_eval_script_takes_the_protocol_from_its_flag_only():
     with pytest.raises(SystemExit, match="--eval_protocol, not --env_kwargs"):
         refuse_flag_owned_env_kwargs({"eval_protocol": "leaderboard"})
+
+
+def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
+    """``--env_kwargs`` is laid over the flags, so an option it shares with a flag silently beats it:
+    ``{"max_turns": 3}`` would cap a ``--max_turns 16`` run at three turns. Read off the resolver, so a
+    flag added to it without a refusal fails here."""
+    flags = SimpleNamespace(max_turns=16, language="python", eval_protocol="harness", reasoning_effort="high")
+    flag_set = set(resolve_env_config(flags, {}, {}))
+    assert flag_set <= set(FLAG_OWNED_ENV_KWARGS), sorted(flag_set - set(FLAG_OWNED_ENV_KWARGS))
+    for key in sorted(flag_set):
+        with pytest.raises(SystemExit, match=f"--{key}, not --env_kwargs"):
+            refuse_flag_owned_env_kwargs({key: 3})
+    refuse_flag_owned_env_kwargs({"timeout_per_test": 3})
 
 
 def test_a_default_run_keeps_its_trajectory_file_name():

@@ -523,8 +523,9 @@ class CodeDatasetAdapter:
     """How to turn a contest dataset's rows into the env's ``{prompt, answer}`` shape.
 
     ``format_prompt`` builds the prompt, ``pack_verification`` the grading payload, ``keep`` drops
-    ungradable rows. ``group_field``/``group_label`` name the raw-row field the eval report buckets by.
-    ``load`` is an optional custom row iterator; ``None`` => standard HF load.
+    ungradable rows. ``group_field``/``group_label`` name the raw-row field the eval report buckets by,
+    ``id_field`` the one naming a problem in the eval's results and trajectories. ``load`` is an
+    optional custom row iterator; ``None`` => standard HF load.
     """
 
     format_prompt: Callable[[dict[str, Any]], str]
@@ -532,6 +533,7 @@ class CodeDatasetAdapter:
     keep: Callable[[dict[str, Any]], bool]
     group_field: str = "rating"
     group_label: str = "rating"
+    id_field: str = "id"
     load: Callable[[str, str | None, str], Iterable[dict[str, Any]]] | None = None
     # Prepared-row fields a source spells differently (``id``/``rating``/``tags``), added by the
     # preparation script before its filters run; ``None`` => the raw row already carries them.
@@ -590,7 +592,8 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
     "hardtests": CodeDatasetAdapter(
         format_hardtests_prompt, pack_hardtests_verification, keep_hardtests, normalize=normalize_hardtests
     ),
-    # DeepCoder rows have no rating/difficulty column, so no report bucket (overall metrics only).
+    # DeepCoder rows have no rating/difficulty column, so no report bucket (overall metrics only), and
+    # no id column, so its examples go unnamed.
     "deepcoder": CodeDatasetAdapter(format_deepcoder_prompt, pack_deepcoder_verification, keep_deepcoder),
     "livecodebench": CodeDatasetAdapter(
         format_titled_statement,
@@ -598,6 +601,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         keep_livecodebench,
         group_field="difficulty",
         group_label="difficulty",
+        id_field="question_id",
         load=load_livecodebench,
         contest_date=livecodebench_contest_date,
         platform_field="platform",
@@ -617,6 +621,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         keep_hlce,
         group_field="platform",
         group_label="contest",
+        id_field="question_id",
         load=load_hlce,
     ),
 }

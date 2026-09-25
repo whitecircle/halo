@@ -10,7 +10,7 @@ mean reward and success@k. The rollout loop and reporting are shared via
 
 For competitive programming (`code_contests` / `codeforces`) use
 `scripts/environments/inference/run_code_contests.py` instead; it carries the dataset adapters,
-solution language and rating-bucketed reporting, keeping that logic out of this generic runner.
+solution language and per-benchmark report buckets, keeping that logic out of this generic runner.
 
 Per-env settings go through `--env_kwargs` (a JSON dict merged into the env config), e.g.
 `--env_kwargs '{"search_backend": "duckduckgo"}'` or `'{"open_book": true}'`. Tool-using envs need a
@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--answer_field", default="answer", help="Row field holding the expected answer.")
     p.add_argument("--context_fields", nargs="*", default=[], help="Extra row fields to pass through as context.")
     p.add_argument("--group_by", default=None, help="Row field to bucket the report by.")
+    p.add_argument("--id_field", default="id", help="Row field naming an example in the results and trajectories.")
     p.add_argument(
         "--env_kwargs", default="{}", help="JSON dict merged into the env config (e.g. search_backend, open_book)."
     )
@@ -128,7 +129,7 @@ def build_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "prompt": prompt,
                 "context": context,
                 "group": row.get(args.group_by),
-                "id": row.get("id") or row.get("problem_id"),
+                "id": row.get(args.id_field),
             }
         )
         if args.num_examples and len(examples) >= args.num_examples:

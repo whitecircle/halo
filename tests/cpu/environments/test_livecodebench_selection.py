@@ -245,16 +245,18 @@ def test_the_regrader_rebuilds_the_windowed_examples_from_the_meta_line_the_eval
     assert unselected[1] != payloads[1]
 
 
-def test_question_id_names_an_example_only_when_the_row_carries_no_other_id():
-    rows = [
-        {"id": "own", "question_id": "q1"},
-        {"problem_id": "prob", "question_id": "q2"},
-        {"name": "named", "question_id": "q3"},
-        {"question_id": "q4"},
-    ]
-    adapter = CodeDatasetAdapter(str, dict, lambda row: True, load=lambda dataset, config, split: rows)
-    examples = build_examples(_args(adapter="stub"), adapter, ContestSelection())
-    assert [example["id"] for example in examples] == ["own", "prob", "named", "q4"]
+def test_an_example_is_named_by_its_adapters_id_field():
+    """Each source names its problems in its own column; the adapter declares which, so a row carrying
+    another source's column as well is still named by its own."""
+    rows = [{"id": "other", "question_id": "q1"}, {"question_id": "q2"}]
+
+    def ids(**fields):
+        adapter = CodeDatasetAdapter(str, dict, lambda row: True, load=lambda *_: rows, **fields)
+        return [example["id"] for example in build_examples(_args(adapter="stub"), adapter, ContestSelection())]
+
+    assert ids(id_field="question_id") == ["q1", "q2"]
+    assert ids() == ["other", None]
+    assert CODE_DATASET_ADAPTERS["livecodebench"].id_field == CODE_DATASET_ADAPTERS["hlce"].id_field == "question_id"
 
 
 if __name__ == "__main__":
