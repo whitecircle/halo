@@ -24,8 +24,7 @@ HUB layout: no ``language_model`` prefix, per-layer fused-but-split ``moe.gate_p
      ``moe.router_bias`` carries a distinctive value written before the save at trained fp32 (a
      dropped key would reload as a zero buffer — so zeros prove nothing), and no module-tree
      spelling survives. Then reload the checkpoint as a PLAIN HF model — its loss must match the EP
-     model's post-training loss (a transposed expert axis, a swapped gate/up half, or a dropped
-     shared expert shifts it by >>1).
+     model's post-training loss.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -50,16 +49,18 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.models.moe_balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import fixed_batch_loss
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import ensure_model_downloaded
+from tests.common.distributed import ensure_model_downloaded, shared_scratch_dir
+from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log, safetensors_state_dict
 
 SEED = 42
 NUM_TRAIN_STEPS = 3
 MAX_SEQ_LENGTH = 256
-LOSS_TOL = 5e-2  # EP-vs-plain reload forward noise (bf16 + grouped-GEMM vs loop); dropped experts shift >>1
 
 _SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
 _HUB_MOE_KEYS = {
@@ -90,18 +91,6 @@ def _materialize_checkpoint(base_dir: str, tokenizer) -> None:
     tokenizer.save_pretrained(base_dir)
 
 
-def _fixed_batch(device, vocab_size: int):
-    torch.manual_seed(SEED + 7)
-    ids = torch.randint(0, vocab_size, (2, 64), device=device)
-    return ids, ids.clone()
-
-
-def _forward_loss(model, ids, labels) -> float:
-    model.eval()
-    with torch.no_grad():
-        return model(input_ids=ids, labels=labels).loss.item()
-
-
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
@@ -113,15 +102,12 @@ def run(ctx):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # setup_cache_dirs is per-rank; these must be rank-shared, keyed by port to avoid collisions.
-    tag = os.environ.get("MASTER_PORT", "0")
-    temp_root = os.path.dirname(ctx.output_dir.rstrip("/"))
-    base_dir = os.path.join(temp_root, f"step3p7_tiny_base_{tag}")
-    save_dir = os.path.join(temp_root, f"step3p7_tiny_trained_{tag}")
+    # Rank-shared: rank 0 writes the base checkpoint and the gathered save that every rank reads back.
+    scratch = shared_scratch_dir("step3p7_tiny")
+    base_dir, save_dir = os.path.join(scratch, "base"), os.path.join(scratch, "trained")
     if ctx.rank == 0:
-        for d in (base_dir, save_dir):
-            shutil.rmtree(d, ignore_errors=True)
-        ctx.on_teardown(lambda: [shutil.rmtree(d, ignore_errors=True) for d in (base_dir, save_dir)])
+        shutil.rmtree(scratch, ignore_errors=True)
+        ctx.on_teardown(lambda: shutil.rmtree(scratch, ignore_errors=True))
         _materialize_checkpoint(base_dir, tokenizer)
     barrier()
 
@@ -199,8 +185,8 @@ def run(ctx):
         for offset, ep in enumerate(ep_layers):
             ep.gate.e_score_correction_bias.copy_(torch.arange(ep.num_experts, device=device) * 0.125 + offset)
 
-    ids, labels = _fixed_batch(device, vocab_size)
-    ep_loss = _forward_loss(model, ids, labels)
+    ids, labels = random_token_batch(vocab_size, batch=2, seq=64, device=device, seed=SEED + 7)
+    ep_loss = fixed_batch_loss(model, ids, labels)
     metrics["ep_loss_post_train"] = ep_loss
     checks["ep_loss_finite"] = bool(torch.isfinite(torch.tensor(ep_loss)))
 
@@ -240,12 +226,15 @@ def run(ctx):
     checks["e_score_bias_roundtrip"] = torch.equal(
         reloaded_bias.float().cpu(), ep_layers[0].gate.e_score_correction_bias.float().cpu()
     )
-    rl_loss = _forward_loss(reloaded, ids, labels)
+    rl_loss = fixed_batch_loss(reloaded, ids, labels)
     metrics["reload_loss"] = rl_loss
     delta = abs(rl_loss - ep_loss)
     metrics["reload_loss_delta"] = delta
     log(f"EP loss {ep_loss:.6f} vs reloaded plain-HF loss {rl_loss:.6f} (|Δ|={delta:.2e})")
-    checks["reload_loss_matches"] = delta < LOSS_TOL
+    # Same weights on both sides: only the EP forward's numerics (grouped GEMM vs the plain expert
+    # loop) separate them. At this model scale an expert-layout bug moves the loss by less than the
+    # bound, so this pins the round-trip, not the expert layout.
+    checks["reload_loss_matches"] = delta < TOL.parallel_vs_baseline_loss_abs
 
     del reloaded
     cleanup_memory()

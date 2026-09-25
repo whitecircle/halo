@@ -34,6 +34,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -97,60 +98,6 @@ def _fixed_batch(tokenizer, device):
     enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
     ids = enc["input_ids"].to(device)
     return ids, ids.clone()
-
-
-def _forward_loss(trainer, ids, labels) -> float:
-    """Plain causal-LM forward loss on a fixed batch (probes weights, not the SMPO loss)."""
-    model = trainer.model
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.no_grad():
-            out = model(input_ids=ids, labels=labels, use_cache=False)
-    finally:
-        if was_training:
-            model.train()
-    return out.loss.item()
-
-
-def _optimizer_moments_stats(trainer) -> tuple[bool, bool, bool]:
-    """Scan this rank's local optimizer exp_avg_sq. Returns (materialized, nonzero, finite).
-
-    TP stores DTensors; ``.to_local()`` reads this rank's shard with no collective.
-    """
-    materialized = any_nonzero = False
-    all_finite = True
-    for state in trainer.optimizer.state.values():
-        sq = state.get("exp_avg_sq")
-        if sq is None:
-            continue
-        materialized = True
-        local = (sq.to_local() if hasattr(sq, "to_local") else sq).detach()
-        if (local != 0).any().item():
-            any_nonzero = True
-        if not torch.isfinite(local).all().item():
-            all_finite = False
-    return materialized, any_nonzero, all_finite
-
-
-def _make_resume_capture_callback(trainer_ref: dict, ids, labels):
-    """Callback snapshotting resumed state at on_train_begin (post-resume, pre-step)."""
-    from transformers import TrainerCallback
-
-    class _ResumeCaptureCallback(TrainerCallback):
-        def on_train_begin(self, args, state, control, **kwargs):
-            trainer = trainer_ref["trainer"]
-            materialized, nonzero, finite = _optimizer_moments_stats(trainer)
-            trainer_ref["capture"] = {
-                "l_post": _forward_loss(trainer, ids, labels),
-                "moments_materialized": materialized,
-                "moments_nonzero": nonzero,
-                "moments_finite": finite,
-                "sched_last_epoch": int(trainer.lr_scheduler.last_epoch),
-            }
-            return control
-
-    return _ResumeCaptureCallback()
 
 
 # Phase 1: Train + Save Checkpoint
@@ -230,7 +177,7 @@ def phase1_train_and_save(
 
         # Reference forward loss on a FIXED batch with the trained (== saved) weights.
         ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-        l_pre = _forward_loss(trainer, ids, labels)
+        l_pre = fixed_batch_loss(trainer.model, ids, labels)
         log(f"Phase 1 L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
         # The trainer should have saved a checkpoint at step SAVE_AT_STEP — assert per-file.
@@ -334,8 +281,8 @@ def phase2_resume_and_train(
 
         # Capture restored state at on_train_begin (post-resume, pre-first-step).
         ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-        trainer_ref: dict = {"trainer": trainer, "capture": None}
-        trainer.add_callback(_make_resume_capture_callback(trainer_ref, ids, labels))
+        resume_capture = ResumeCapture(trainer, ids, labels)
+        trainer.add_callback(resume_capture)
 
         log(f"Resuming from checkpoint: {checkpoint_path}")
         train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
@@ -359,7 +306,7 @@ def phase2_resume_and_train(
             log("ERROR: NaN/Inf in step losses")
 
         # ---- By-value resume continuity (TP DTensor gather→re-shard round-trip) ----
-        cap = trainer_ref["capture"]
+        cap = resume_capture.capture
         if cap is None:
             log("ERROR: resume-capture callback did not fire (on_train_begin missed)")
             weights_ok = optim_ok = False

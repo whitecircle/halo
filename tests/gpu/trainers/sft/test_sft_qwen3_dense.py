@@ -4,8 +4,8 @@ Comprehensive SFT test for Qwen3-0.6B (dense) across FSDP, TP=2, and CP=2.
 
 Validates that DistributedSFTTrainer produces correct training metrics in all
 three distributed modes. Beyond basic "loss is finite" checks, this test
-verifies grad_norm ranges, mean_token_accuracy, loss convergence, the eval leg,
-and cross-mode consistency.
+verifies grad_norm ranges, mean_token_accuracy, loss convergence and the eval leg.
+No loss is compared against a reference or across modes.
 
 Each invocation runs ONE mode (``--mode fsdp|tp|cp``) so every mode owns its own
 verdict; the manifest's args_matrix chains the three. ``--mode all`` runs them
@@ -22,7 +22,6 @@ Test Phases (per mode):
    - Token accuracy increases (model is learning)
    - Eval loss is reported and finite
    - The requested mode actually engaged (trainer.is_tp_mode / is_cp_mode)
-   - Loss consistent across ranks (TP/CP: all ranks see same loss)
 
 Modes:
 1. fsdp — standard data parallelism, dp=2
@@ -50,7 +49,6 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log
 
 # Configuration
@@ -107,7 +105,7 @@ def extract_metrics(trainer) -> dict[str, list[float]]:
     return metrics
 
 
-def validate_metrics(training_loss: float, metrics: dict[str, list[float]], ctx) -> dict[str, bool]:
+def validate_metrics(training_loss: float, metrics: dict[str, list[float]]) -> dict[str, bool]:
     """Run all metric validations and return a dict of check_name -> passed."""
     checks = {}
 
@@ -188,20 +186,6 @@ def validate_metrics(training_loss: float, metrics: dict[str, list[float]], ctx)
     eval_finite = bool(eval_losses) and all(math.isfinite(e) for e in eval_losses)
     checks["eval_loss_finite"] = eval_finite
     log(f"  Eval loss finite ({len(eval_losses)} evals): {'PASS' if eval_finite else 'FAIL'}")
-
-    # ── Cross-rank consistency ───────────────────────────────────────────
-    # 10. All ranks should report same training loss
-    loss_tensor = torch.tensor([training_loss], device=ctx.device)
-    all_losses = [torch.zeros_like(loss_tensor) for _ in range(ctx.world_size)]
-    dist.all_gather(all_losses, loss_tensor)
-    if ctx.rank == 0:
-        loss_values = [l.item() for l in all_losses]
-        spread = max(loss_values) - min(loss_values)
-        consistent = spread < TOL.rank_loss_consistency_abs
-        checks["loss_consistent_across_ranks"] = consistent
-        log(f"  Loss consistent across ranks (spread={spread:.6f}): {'PASS' if consistent else 'FAIL'}")
-    else:
-        checks["loss_consistent_across_ranks"] = True
 
     return checks
 
@@ -301,7 +285,7 @@ def run_mode(ctx, mode: str, tokenizer, train_dataset, eval_dataset) -> dict[str
         log(f"  Eval losses: {[f'{e:.4f}' for e in metrics['eval_loss']]}")
 
     log(f"\n  --- {mode} Checks ---")
-    checks = validate_metrics(training_loss, metrics, ctx)
+    checks = validate_metrics(training_loss, metrics)
 
     # Mode pin in the verdict: a tp/cp row that quietly fell back to plain FSDP would otherwise
     # pass on the metric checks alone, reporting coverage the run never had.

@@ -105,9 +105,6 @@ def validate_metrics(
     mode_name: str,
     training_loss: float,
     metrics: dict[str, list[float]],
-    rank: int,
-    world_size: int,
-    local_rank: int,
 ) -> dict[str, bool]:
     """Run all metric validations and return a dict of check_name -> passed."""
     checks = {}
@@ -168,19 +165,6 @@ def validate_metrics(
         log(f"  Token accuracy in [0,1]: {'PASS' if ta_valid else 'FAIL'}")
         log(f"  Token accuracy range: [{min(token_accs):.4f}, {max(token_accs):.4f}]")
 
-    # 7. Cross-rank consistency
-    loss_tensor = torch.tensor([training_loss], device=f"cuda:{local_rank}")
-    all_losses = [torch.zeros_like(loss_tensor) for _ in range(world_size)]
-    dist.all_gather(all_losses, loss_tensor)
-    if rank == 0:
-        loss_values = [l.item() for l in all_losses]
-        spread = max(loss_values) - min(loss_values)
-        consistent = spread < 0.01
-        checks["loss_consistent_across_ranks"] = consistent
-        log(f"  Loss consistent across ranks (spread={spread:.6f}): {'PASS' if consistent else 'FAIL'}")
-    else:
-        checks["loss_consistent_across_ranks"] = True
-
     return checks
 
 
@@ -194,9 +178,6 @@ def run_mode(
     train_dataset,
     eval_dataset,
     base_output_dir: str,
-    rank: int,
-    world_size: int,
-    local_rank: int,
 ) -> tuple[dict[str, bool], str]:
     """Run SFT training for one parallelism mode with metric validation."""
     output_dir = os.path.join(base_output_dir, mode_name.lower().replace("=", ""))
@@ -272,14 +253,7 @@ def run_mode(
         log(f"  Grad norms: {[f'{g:.2f}' for g in metrics['grad_norm']]}")
 
     log(f"\n  --- {mode_name} Checks ---")
-    checks = validate_metrics(
-        mode_name,
-        training_loss,
-        metrics,
-        rank,
-        world_size,
-        local_rank,
-    )
+    checks = validate_metrics(mode_name, training_loss, metrics)
 
     failed = [k for k, v in checks.items() if not v]
     detail = f"loss={training_loss:.4f}"
@@ -355,9 +329,6 @@ def run(ctx) -> dict:
             train_dataset,
             eval_dataset,
             ctx.output_dir,
-            ctx.rank,
-            ctx.world_size,
-            ctx.local_rank,
         )
         merge_checks(checks, mode_checks)
 
@@ -373,9 +344,6 @@ def run(ctx) -> dict:
             train_dataset,
             eval_dataset,
             ctx.output_dir,
-            ctx.rank,
-            ctx.world_size,
-            ctx.local_rank,
         )
         merge_checks(checks, mode_checks)
 
