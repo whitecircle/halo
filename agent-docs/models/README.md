@@ -21,7 +21,7 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 | [Gemma 4 MoE](gemma4.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes | `examples/sft/gemma4/*` |
 | [Bailing MoE / Ling](bailing.md) | Yes | Yes ³ | **No** ³ | Yes | untested ⁶ | **No** | Yes | `examples/sft/ling_mini_2/*` |
 | [LFM-2 MoE](lfm2.md) | Yes | **No** | Yes | Yes | **No** | Yes | Yes | `examples/sft/lfm2/*` |
-| [Mistral4 MoE](mistral4.md) | Yes | Yes | Yes | Yes | Yes ⁶ | Yes | Yes | `examples/sft/mistral4/*` |
+| [Mistral4 MoE](mistral4.md) | Yes | Yes | Yes | Yes | untested ⁶ | Yes | Yes | `examples/sft/mistral4/*` |
 | [DeepSeek-V4](deepseek-v4.md) | Yes | **No** ⁸ | **No** ⁸ | untested | **No** | **No** | Yes | `examples/sft/deepseek_v4/*` |
 | [Zaya (Zyphra/ZAYA1)](zaya.md) | Yes ⁴ | **No** ⁴ | **No** ⁴ | Yes | **No** | **No** | Yes | `examples/sft/zaya/*` |
 | [Cohere2 MoE (Command A+)](cohere2-moe.md) | Yes | Yes ⁹ | Yes ⁹ | Yes ⁹ | Yes ⁶ ⁹ | Yes ⁹ | untested | `examples/sft/cohere2_moe/*` |
@@ -29,15 +29,7 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 | [Step-3.7 Flash](step3p7.md) | Yes | **No** ¹¹ | **No** ¹¹ | Yes | **No** | **No** | Yes | `examples/sft/step3p7/*` |
 | Any other HF model with `tp_plan` (Llama, Mistral, Phi, …) | — | — | Yes | — | — | — | Yes | — |
 
-**Pipeline parallelism** is not a column above because it is [not yet available in this release](../parallelism/pipeline-parallelism.md) — the config surface and the per-family seams ship (specs, split gates, stage adapters), the schedule engine does not.
-
-Those shipped seams:
-
-- Zaya and Gemma 4 opt out by declaring `SUPPORTS_PP = False` on their `PPModelSpec`.
-- DeepSeek-V4 and GLM-5 Next split through a family spec that carries their widened hyper-connection stream as the boundary.
-- LFM-2 and Cohere2 MoE are refused by generic gates instead: tied embeddings for both, and for Cohere2 the stage loader's lazy-loading requirement, which its EP layer declares off.
-- Step-3.7 Flash and GLM-5 Next ship only their composite class, which the multimodal gate admits for a run that feeds no images (the vision tower and projector are held by no stage, stashed for the save) and refuses for image data.
-- Ling-3.0-flash is blocked by a config value its checkpoint ships (a live MTP tail layer), which `model_init_kwargs` turns off.
+**Pipeline parallelism** is not a column above because it is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 Trainer × parallelism support is tracked in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
@@ -53,7 +45,7 @@ Trainer × parallelism support is tracked in [Trainer Compatibility](../referenc
 
 ⁶ EP+CP is gated the same way for every family: `_validate_ep_cp` requires node-local EP with `ep_group_size == nvlink_domain_size` and rejects both a smaller `ep` within the domain and cross-domain EP (`ep_scope='global'`). On an 8-GPU node that pins `ep_size` to 8; `cp_size` only has to divide the domain, and the fully orthogonal shape is `cp_size == ep_group_size == nvlink_domain_size`.
 
-⁷ LoRA "Yes" means the family trains with adapters under FSDP/DP, EP, CP, and pure ETP. It is rejected at trainer construction under **TP** and **EP+TP** (adapters are plain tensors outside the TP DTensor graph). Under EP the adapters cover attention (PEFT) *and* the experts (native grouped adapters); the expert half is refused at `expert_tp_size > 1`, leaving attention-only LoRA there. PP rejects both halves. See [PEFT](../optimization/peft.md).
+⁷ LoRA "Yes" means the family trains with adapters under FSDP/DP, EP, CP, and pure ETP. It is rejected at trainer construction under **TP** and **EP+TP** (adapters are plain tensors outside the TP DTensor graph). Under EP the adapters cover attention (PEFT) *and* the experts (native grouped adapters); the expert half is refused at `expert_tp_size > 1`, leaving attention-only LoRA there. See [PEFT](../optimization/peft.md).
 
 ⁸ DeepSeek-V4 is eager-only (`head_dim=512` exceeds every FA kernel; sinks + compressor KV concat rule out SDPA/flex). Its CSA/HCA compressors pool token windows along the sequence axis (no CP), and shared-KV MQA is not shardable (`apply_tp_to_attention_only` raises). `padding_free` is rejected — no varlen kernel. See [deepseek-v4.md](deepseek-v4.md).
 
@@ -71,19 +63,7 @@ Every MoE family shares three settings:
 - **Expert compute** — [Grouped GEMM](../optimization/grouped-gemm.md) (`use_grouped_gemm`, default on at SM90+) batches the per-expert matmuls.
 - **Load balancing** — `moe_balancing`: `auto` (default), `aux_loss`, `bias_update` (DeepSeek-V3 auxiliary-loss-free bias, step size `router_balancing_rate`), `bias_update_transient`, or `none`.
 
-`auto` resolves per family:
-
-| `auto` verdict | Families | Why |
-|---|---|---|
-| `bias_update` | Zaya | native balancing-bias buffer |
-| `bias_update` | DeepSeek-V4, Inkling, Bailing/Ling | their EP wrappers sever the aux-loss path |
-| `bias_update` | GLM-4 MoE Lite, LFM-2, Step-3.7 Flash (under its EP wrapper) | no honored `output_router_logits` path, and the bias lands in a checkpoint-persistent tensor |
-| `none` + warning | Mistral-4, Cohere2 MoE, multimodal Qwen3.5/3.6 | no exportable slot; the explicit `bias_update_transient` opts into trainer-only balancing, and exported checkpoints serve without the bias |
-| `none` + warning | Gemma 4 | its forward never takes the flag and its EP wrapper accepts no bias, so no mode can balance it |
-| `none` + warning | GLM-4 MoE Lite, LFM-2, Step-3.7 Flash at `ep_size=1` + `use_grouped_gemm: false` | a tree carrying neither an aux-loss path nor an EP wrapper |
-| `aux_loss` | everything else, Laguna and GLM-5 Next included | their forwards honor the flag; the exported `e_score_correction_bias` slot of Laguna and GLM-5 Next still makes explicit `bias_update` legal |
-
-GPT-OSS takes an explicit `bias_update`, adopting its hub `router.bias`, which exports and serves; Qwen3 MoE and text-only Qwen3.5/3.6 take `bias_update_transient`. See [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+`auto` resolves per family ([Callbacks → `auto` resolution per family](../training-methods/callbacks.md#auto-resolution-per-family)); which families export an explicit `bias_update` is the slot table under [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
 
 `aux_loss` trains the routers only where the trainer's loss adds the term — SFT and KTO — and does so with or without gradient checkpointing ([Callbacks](../training-methods/callbacks.md#aux_loss-under-gradient-checkpointing)).
 
@@ -124,7 +104,7 @@ The matrix carries each family's supported modes; the per-family page covers mod
 | Dense Qwen3, long context | > 32K | [CP](../parallelism/context-parallelism.md) |
 | Dense, doesn't fit per GPU | any | [TP](../parallelism/tensor-parallelism.md) via native `tp_plan` |
 | MoE with full coverage (Qwen3 MoE, GPT-OSS, GLM-4, Mistral4, Cohere2 MoE) | ≤ 32K | [EP](../parallelism/expert-parallelism.md), or EP+TP at very large scale |
-| Same MoEs, long context | > 32K | EP+CP |
+| Same MoEs, long context | > 32K | EP+CP (untested on Mistral4) |
 | MoE without CP (Qwen3.5/3.6, LFM-2, Gemma 4, DeepSeek-V4, Laguna, Inkling, Ling 3.0, GLM-5 Next, Step-3.7 Flash) | any | EP; add EP+TP for Qwen3.5/3.6 and LFM-2, or pure ETP (`ep_size=1`) when expert memory is the bottleneck |
 | Ling 2.0, long context | > 32K | EP, plus CP once the sequence exceeds one GPU |
 | Zaya | any | EP without GC (optionally + ETP), or plain FSDP2 without GC |

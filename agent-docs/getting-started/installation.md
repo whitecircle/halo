@@ -32,7 +32,7 @@ For a host `.venv` that powers IDE go-to-definition (`uv sync`), see [Developmen
 
 | Image | ECR Public tag | Attention | GPUs |
 |---|---|---|---|
-| Blackwell | `blackwell` | FA2 + FA4 (CuTe DSL) + DeepEP | B200 (SM100) / B300 / GB200/GB300 (SM103) |
+| Blackwell | `blackwell` | FA2 + FA4 (CuTe DSL) + DeepEP | B200 (SM100) / B300 (SM103), x86_64 hosts only ([Docker](../infrastructure/docker.md)) |
 | Hopper | `hopper` | FA2 + FA3 + DeepEP | H100 / H200 (SM90) |
 
 **Pull from ECR Public** — anonymous, no AWS account or login:

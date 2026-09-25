@@ -9,11 +9,7 @@ A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSpars
 
 ¹ The full-attention block has a working CP wrapper; the hybrid linear-attention layers are the blocker — see [Why CP is blocked](#why-cp-is-blocked-on-real-checkpoints).
 
-² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md). Its shipped contract admits a text-only run of the multimodal checkpoints: the vision tower and projector are held by no stage, stashed on the save rank and re-emitted in every checkpoint, so the export reloads as the composite class. Only image evidence (an image column, embedded image parts, or a collator consuming one) refuses the run.
-
-The hub's `mtp_num_hidden_layers` is metadata (the MTP weights are dropped at load) and passes the live-MTP gate. Stage boundaries land on whole periods of the period-4 `layer_types` pattern.
-
-`packing` is refused under PP for this family: PP keeps the packed rows instead of flattening them, and the delta rule's varlen `cu_seq_lens` have no per-row convention ([Collators](../data/collators.md#document-isolation-under-packing)).
+² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 ## Architecture
 
@@ -65,7 +61,7 @@ On the multimodal checkpoints `aux_loss` cannot work either: `Qwen3_5MoeForCondi
 
 `text_only_model: true` loads a VLM checkpoint through that CausalLM class deliberately. The vision tower and MTP tail are dropped from the build **and from the export**: the artifact carries no `processor_config.json` and no vision token ids. `aux_loss` becomes the exported-by-construction balancing. The shipped 122B recipe keeps the multimodal class and sets `bias_update_transient` instead. A LoRA trained this way addresses `model.layers`, and `merge_peft_adapters.py` reads that off the adapter's keys and loads the base through the same CausalLM class, so the merged checkpoint is this text-only export.
 
-Image-bearing datasets are refused loudly (the text path would otherwise prune the column silently), and the PP VLM refusal does not apply, since the build carries no tower to strand.
+Image-bearing datasets are refused loudly (the text path would otherwise prune the column silently).
 
 The two pinned engines differ on that export. **vLLM 0.26.0** registers only `Qwen3_5ForConditionalGeneration` / `Qwen3_5MoeForConditionalGeneration`, so serving it there needs `scripts/after_training/reattach_vision_tower.py` first; it re-prefixes the trained text weights to `model.language_model.*` and streams the base's untrained vision tower and MTP tail back in. **SGLang 0.5.17** registers the text-only `Qwen3_5MoeForCausalLM` / `Qwen3_5ForCausalLM` beside the multimodal classes and serves the export unchanged.
 

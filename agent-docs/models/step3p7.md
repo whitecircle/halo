@@ -6,7 +6,7 @@
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
 | Step-3.7 Flash | Yes | **No** | **No** | Yes | — ¹ | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md) — the shipped split contract for the family is under [Limitations](#limitations).
+¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 ## Architecture
 
@@ -19,7 +19,7 @@
 
     Layers 43–44 clamp the routed SwiGLU at 7 (`swiglu_limits`, applied **after** the activation) and the shared expert at 16 (`swiglu_limits_shared`); every other layer runs unclamped.
 
-- **MTP** — the checkpoint ships 3 MTP tail layers (indices 45–47); transformers never builds them (their keys are ignored on load), so every export ships without them. The config field `num_nextn_predict_layers: 3` survives as metadata; the PP gate rejects only live MTP layers, so it passes.
+- **MTP** — the checkpoint ships 3 MTP tail layers (indices 45–47); transformers never builds them (their keys are ignored on load), so every export ships without them. The config field `num_nextn_predict_layers: 3` survives as metadata.
 
 ## Checkpoint
 
@@ -99,10 +99,6 @@ Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend 
 
 - **CP** — `Step3p7Attention` has no Ulysses wrapper registered, so validation rejects the model as having no supported attention module ([Context Parallelism](../parallelism/context-parallelism.md#supported-model-architectures)). Nothing architectural blocks a wrapper: both head counts (64 full / 96 sliding) and the 8 KV heads divide cp 2/4/8.
 - **TP** — the per-layer head counts fit no uniform q/k/v shard plan, so `Step3p7Attention` is outside the selective-TP accept-list and `tensor_parallel_size > 1` is rejected (zero shardable layers).
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md). The shipped contract admits the composite class (the only class the family ships) only for a run that feeds no images: the vision tower and projector are held by no stage and re-emitted unchanged in every checkpoint, and image data refuses the run.
-
-    The text tower splits with untied embeddings and a hidden-states-only residual; split offsets follow the period-4 `full,s,s,s` layer list.
-
 - **Packing** — isolated: the layers are plain full/sliding attention (no conv or linear-attention mixers) and the forward feeds `position_ids` into both mask constructions, verified bit-exact through dense layers on SDPA and eager; through MoE layers doc-B drift is expert-summation reduction noise (~1e-7 fp32).
 
     The isolation holds on the training path only (`use_cache=False`; a live cache suppresses the packed mask, as DeepSeek-V4). See [Collators](../data/collators.md#document-isolation-under-packing).

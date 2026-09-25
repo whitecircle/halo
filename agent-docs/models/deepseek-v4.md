@@ -11,10 +11,7 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 - **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `src/distributed/context_parallel/validation.py`.
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.
 - **ETP** — the experts use the shared fused-GLU storage, so `expert_tp_size > 1` mechanically works through `_init_fused_glu_params`; not yet validated on V4.
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md). The shipped `DeepSeekV4PPSpec` split contract carries the `hc_mult`-widened hyper-connection stream as the stage boundary, keeps `hc_head` on the last stage, and gives non-first stages a mirrored mid-chain forward.
-
-    Every `hash_moe` layer must sit on stage 0, since its router consumes `input_ids`, which only stage 0 receives; the split gate refuses a partition that strands one. The hub's `num_nextn_predict_layers: 1` is metadata and passes the live-MTP gate.
-
+- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
 - **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds trainer parameter names straight into the engine's `model.load_weights`, and neither pinned engine has a loader they land in ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
     vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original release checkpoint, not the HuggingFace module tree the toolkit trains: per-expert vs fused experts, fused vs separate attention projections, bare `embed.weight` vs `model.embed_tokens.weight`. Those weights are also fp8/fp4-packed and the o-projection reads a `weight_scale_inv` unconditionally, so the BF16 checkpoint is not servable there either.
@@ -40,7 +37,7 @@ Consequences:
 
 - **Top-k layers**: fp32 scores via `sqrtsoftplus(logits)`, selection on `scores + e_score_correction_bias` (+ the balancing bias when enabled), weights gathered from the unbiased scores, normalized (`+1e-20`), scaled by `routed_scaling_factor` (1.5).
 - **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the wrapper validates at init and raises).
-- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into the `_glu_combine` seam: one Triton kernel, `fused_clamped_silu_mul`, with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
+- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into `_fused_glu_mul`, the GLU-combine seam: one Triton kernel, `fused_clamped_silu_mul`, with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
 
     The fused form hardcodes SiLU, so it is armed by the same behavioral `is_silu_activation` gate as GLM-4 ([Fused SwiGLU](glm4.md#fused-swiglu)); any other `hidden_act` falls back to the generic clamp.
 
@@ -58,8 +55,9 @@ The update lands in the gate's own exported `e_score_correction_bias`, so the tr
 The hub checkpoints (`deepseek-ai/DeepSeek-V4-Flash[-Base]`) ship fine-grained FP8 dense weights (e4m3, 128×128 blocks, ue8m0 scales) with FP4-packed experts (`config.expert_dtype="fp4"`, two e2m1 nibbles per int8 byte, [1, 32] scale grid). EP requires plain BF16 experts, so convert once:
 
 ```bash
-HF_HOME=/mnt/hf python scripts/before_training/convert_deepseek_v4_bf16.py \
-    --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir /mnt/models/DeepSeek-V4-Flash-BF16
+D=/path/to/large/volume   # verified with df -h / findmnt
+HF_HOME=$D/hf python scripts/before_training/convert_deepseek_v4_bf16.py \
+    --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir $D/models/DeepSeek-V4-Flash-BF16
 ```
 
 Budget ~750 GB disk (~330 GB download cache + ~420 GB BF16 output) and ~420 GB of host RAM: the model is materialized on CPU. The script routes through transformers' dequantizing loader (`FineGrainedFP8Config(dequantize=True)`) and writes a **uniform BF16** checkpoint: transformers' `_keep_in_fp32_modules_strict` would keep the HC/norm modules fp32, whose fp32 outputs crash the eager bf16 forward on a dtype mismatch. Those modules upcast internally, so flattening is safe — the EP loader materializes uniform bf16 the same way.

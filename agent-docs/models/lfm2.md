@@ -4,11 +4,9 @@ Liquid AI's `Lfm2MoeForCausalLM` — a hybrid MoE (interleaved short-convolution
 
 | | EP | CP | TP | ETP | PP | EP+TP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
-| LFM-2 MoE | Yes | **No** | Yes | Yes | **No** | Yes |
+| LFM-2 MoE | Yes | **No** | Yes | Yes | — | Yes |
 
-PP is refused at load. `tie_word_embeddings` is `True` (the config-class default, which no released checkpoint overrides), and a tied checkpoint splits stage 0's embedding from the last stage's head with no reconcile, so the tie gate rejects it ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
-
-Setting the flag `false` is not a way around it: the released weights carry no `lm_head` tensor, so the untied head would train from random init.
+Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 ## EP wrapper
 

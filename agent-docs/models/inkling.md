@@ -10,7 +10,7 @@ Transformers ships `transformers.models.inkling` natively (the image pins 5.16.1
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | Inkling-Small | Yes | **No** ¹ | **No** ¹ | Yes | **No** ¹ | **No** ¹ | untested |
 
-¹ Architectural, not a missing registration — see [Why CP and TP are out](#why-cp-and-tp-are-out). PP is not yet available in this release — see [Pipeline parallelism](#pipeline-parallelism).
+¹ Architectural, not a missing registration — see [Why CP and TP are out](#why-cp-and-tp-are-out). Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
 ## EP wrapper
 
@@ -49,21 +49,6 @@ The `from_pretrained` fallback still works but materializes the full checkpoint 
 
 - **TP** — the selective-TP planner shards q/k/v/o structurally; Inkling's attention carries per-layer head geometry (`swa_*` on sliding layers), sequence convolutions on the projected K/V, and a per-head `rel_logits_proj`, none of which the planner can shard. The zero-shard raise names the class.
 
-## Pipeline parallelism
-
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
-The shipped seams target the **text decoder** (`InklingForCausalLM`): put a text-only `config.json`
-(`InklingTextConfig` fields, `architectures: ["InklingForCausalLM"]`) beside the hub weights and
-point `model_name_or_path` at that directory.
-
-The stage loader reads the TM-namespace safetensors through the conversion entry, drops the
-tower/MTP keys, and composes with EP inside each stage. The generic VLM gate refuses only a run that
-feeds images, so the composite class is admitted text-only as well, but the text-only config is the
-route the seams target.
-
-Layer types repeat with period 6 on Inkling-Small (42 layers), so the split contract binds stage
-boundaries to multiples of 6; EP must fit inside one stage, which puts `pp2` + EP16 at ≥ 4 nodes.
-
 ## Multimodal training
 
 The composite class trains under EP: patching finds `InklingMoE` under `model.language_model`, the
@@ -73,8 +58,8 @@ alongside the expert shards (`tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, 
 undistributed composite reference).
 
 Image-text SFT rides the VLM data path (`VLMDataCollator` + `processing_inkling`); text-only data
-through the same class is what the multi-node runs below validated. CP rejects the class outright and
-PP refuses any image-carrying run, so multimodal is EP/ETP-only.
+through the same class is what the multi-node runs below validated. CP rejects the class outright, so
+multimodal is EP/ETP-only.
 
 ## Multi-node EP
 

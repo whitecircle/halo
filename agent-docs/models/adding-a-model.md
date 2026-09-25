@@ -102,7 +102,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
     Undeclared, the export writes keys vLLM silently skips and the lazy loader leaves that submodule randomly initialized (Laguna's `shared_expert` ↔ `shared_experts`).
 
 - `_supports_weight_sync` / `_supports_gradient_checkpointing` / `_supports_lazy_loading` — all default `True`. Set one `False` and the owning gate rejects loudly instead of corrupting silently. Which family switches off which flag is published, pinned against the classes, in [Per-family EP restrictions](../parallelism/expert-parallelism.md#per-family-ep-restrictions).
-- `_supports_bias_balancing` — `True` when routing *selection* happens in-layer: add `self._balancing_bias(scores)` before top-k, gather gate weights from the **unbiased** scores, and call `self._record_expert_load(indices)` (`_deepseek_biased_route` does the whole pattern for logit-routed families).
+- `_supports_bias_balancing` — `True` when routing *selection* happens in-layer: add `self._balancing_bias(scores)` before top-k, gather gate weights from the **unbiased** scores, and call `self._record_expert_load(indices)`. For logit-routed families `_deepseek_biased_route` does the biased selection and the unbiased gate; the caller still records the load on its indices.
 
     A layer can refuse per-instance by overriding `enable_bias_balancing` (DeepSeek-V4 hash layers). Leave `False` when the router sits outside the wrapper (Gemma4) or the family's own gate owns a native balancing buffer (Zaya). An explicit `bias_update` on a model where no layer accepts the bias raises.
 

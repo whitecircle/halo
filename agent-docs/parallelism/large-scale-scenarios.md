@@ -5,19 +5,17 @@ Per-rank memory arithmetic, reachable parallelism layouts and launch recipes for
 is enforced in code and named by its symbol; the memory columns are arithmetic from the shape below,
 so treat them as a plan, not a measurement. Mechanism pages:
 [Multi-Node](multi-node.md), [Expert Parallelism](expert-parallelism.md),
-[Pipeline Parallelism](pipeline-parallelism.md), [Launch Recipes](launch-recipes.md),
-[Qwen3.5](../models/qwen3_5.md),
+[Launch Recipes](launch-recipes.md), [Qwen3.5](../models/qwen3_5.md),
 [GPU Training Theory](../reference/gpu-training-theory.md#why-n-gpus-is-not-n-throughput).
 
-Two facts set every cell and pull against each other. `nvlink_domain_size` decides which axis may
-cross the slow fabric: EP's per-layer all-to-all, or PP's per-boundary point-to-point. The routed
-experts are 386.5 B of the 396.8 B total, only ever sharded by `X = ep_size × expert_tp_size`, so
-they need `X ≥ 16` at 8 B/param to fit at all.
+Two facts set every cell and pull against each other. `nvlink_domain_size` decides whether EP's
+per-layer all-to-all crosses the slow fabric. The routed experts are 386.5 B of the 396.8 B total,
+only ever sharded by `X = ep_size × expert_tp_size`, so they need `X ≥ 16` at 8 B/param to fit at
+all.
 
 On an 8-GPU domain `X ≥ 16` forces the EP group across the domain boundary.
-[Pipeline parallelism](pipeline-parallelism.md) — the planned axis that would keep EP on NVLink by
-shortening each rank's layer range — is **not yet available in this release**; its rows below are
-forward-looking arithmetic.
+[Pipeline parallelism](pipeline-parallelism.md) is not available in this release, so no layout here
+uses it.
 
 ## First question: how wide is the NVLink domain?
 
@@ -29,20 +27,16 @@ decision off topology alone: `is_inter_node = num_nodes > 1 and not node_local`
 `num_nodes` counts NVLink **domains**, not OS nodes, so a group inside one NVL72 rack stays on NVLink
 even though it spans ~18 hosts.
 
-What each axis puts on that fabric per microbatch, at this model's 60 MoE layers — arithmetic from
-the layer count and the autograd graph, not a benchmark:
-
-| Axis | Crossing traffic per microbatch | Count |
-|---|---|---:|
-| EP, `ep_scope=global` across domains | all-to-all over the EP group per MoE layer: forward dispatch + combine, and their backward mirrors | **240** |
-| PP (planned — [not yet available](pipeline-parallelism.md)) | P2P boundary activation, plus its gradient on the way back, per stage edge | **2 × (pp_size − 1)** |
+What EP at `ep_scope=global` across domains puts on that fabric per microbatch, at this model's 60
+MoE layers, is **240** all-to-alls over the EP group: forward dispatch + combine per MoE layer, and
+their backward mirrors — arithmetic from the layer count and the autograd graph, not a benchmark.
 
 Four per layer, not two, because `DeepEPDispatchFunction.backward` *is* a combine and
 `DeepEPCombineFunction.backward` *is* a dispatch (`src/distributed/expert_parallel/autograd.py`).
 Gradient checkpointing does not multiply the count — recompute replays cached results rather than
 re-issuing the collective.
 
-The gap is worse than the counts suggest: cross-domain dispatch is **latency**-bound, so its fixed
+The cost is worse than the count suggests: cross-domain dispatch is **latency**-bound, so its fixed
 per-collective cost does not amortize as the message grows
 ([DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).
 
@@ -55,8 +49,7 @@ per-collective cost does not amortize as the message grows
 
     At 397B that does not fit (386 GB of experts per rank), so the EP group must cross the domain
     boundary at global scope; when the fabric is latency-bound, narrow the dispatch group with EP+ETP
-    ([Recommended cell](#recommended-cell)). PP, the planned escape that would keep EP node-local, is
-    [not yet available in this release](pipeline-parallelism.md).
+    ([Recommended cell](#recommended-cell)).
 
 - **Domain = 72** (GB200/GB300 NVL72). A node-scope EP group rides NVLink at any width that *divides*
   the declared domain, `requires_rdma` stays false, and wide EP becomes the attractive shape.
@@ -160,10 +153,9 @@ forward**, after the whole model has loaded, with nothing in the message naming 
 
 ## What loads at all
 
-Only three loaders shard at load time: `WeightAction.EXPERT_SHARD`
+Only two loaders shard at load time: `WeightAction.EXPERT_SHARD`
 (`src/models/loading/lazy_safetensors/`, planned by `EPWeightPlanner` in
-`src/distributed/expert_parallel/lazy_loader.py`), HF `tp_plan="auto"` for **dense** models, and the
-PP stage loader.
+`src/distributed/expert_parallel/lazy_loader.py`) and HF `tp_plan="auto"` for **dense** models.
 
 Every other branch of `_dispatch_model_loading` materializes all 396.8 B on one GPU: **794 GB, never
 starts**. That kills plain FSDP2, pure TP (MoE TP has no shard-aware load), pure ETP (`ep_size == 1`
@@ -177,12 +169,6 @@ the same experts at full intermediate width. The intermediate dim is split later
 copy alongside the new shard. So `ep2 + etp8` has the same steady state as `ep16` and a **407 GB**
 load peak.
 
-**The planned PP cells would ride the stage loader.** `load_pp_stage_model`
-(`src/distributed/pipeline_parallel/lazy_loader.py`) — a shipped seam — streams a stage's own
-decoder layers and composes with the EP expert slice (`PPWeightPlanner.filter(EPWeightPlanner(...))`),
-giving `2·(P_ne/pp + P_e/(pp·ep_size))` plus the embedding and head. The schedule engine that would
-use it does not ship ([Pipeline Parallelism](pipeline-parallelism.md)).
-
 ## Scenario matrix
 
 `X = ep_size × expert_tp_size`. `Steady` = experts + replicated + FSDP non-expert + activations at
@@ -193,9 +179,7 @@ and the meta shell exist.
 
 Read the `Layout` column for the fabric too: on an 8-GPU domain every **`global`** row above one node
 puts its dispatch and combine on RDMA, 240 times per microbatch; every **`node`** row keeps them on
-NVLink. The `pp*` rows are planned PP shapes kept as forward-looking arithmetic —
-[PP is not yet available in this release](pipeline-parallelism.md). Each is sized by stage 0 under
-the head-weighted default split, with an un-checkpointed activation estimate.
+NVLink.
 
 | Nodes | Layout | X | DP | Experts | Non-exp | Steady 8k | Steady 32k | Load | Verdict |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
@@ -205,9 +189,7 @@ the head-weighted default split, with an un-checkpointed activation estimate.
 | 2 | `ep16` global + `tp8` | 16 | 2 | 193 | 55 | **253** | 266 | 69 | ✗ TP collapses `F` to 2 |
 | 2 | `ep2` + `etp8` global | 16 | 2 | 193 | 31 | 228 | 242 | **407** | ✗ load peak |
 | 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386 | 31 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
-| 2 | `pp2` + `ep8` node | 8 | 8 | 206 | 21 | **≥306** | — | 66 | ✗ planned PP shape — not yet available |
-| **3** (24) | `pp3` + `ep8` node | 8 | 8 | 155 | 14 | **≥243** | — | 50 | ✗ planned PP shape — would be the only fit at 24 GPUs ([The 3-node case](#the-3-node-case)) |
-| 3 | `ep3/6/12/24` global | 3–24 | 24 | — | — | — | — | — | ✗ `512 % ep_size ≠ 0` at load |
+| **3** (24) | `ep3/6/12/24` global | 3–24 | 24 | — | — | — | — | — | ✗ `512 % ep_size ≠ 0` at load ([The 3-node case](#the-3-node-case)) |
 | 3 | `ep2/4/8` node | ≤8 | 24 | 386 | 31 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
 | 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 24 | 158 | 171 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
 | 3 | `ep2/4/8/16` global | — | — | — | — | — | — | — | ✗ rejected at config (`_validate_ep_group`) |
@@ -215,20 +197,16 @@ the head-weighted default split, with an un-checkpointed activation estimate.
 | 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 129 | 143 | **214** | ⚠ load peak, experimental axis |
 | 4 | `ep32` global + `tp8` | 32 | 4 | 97 | 39 | 140 | 154 | 45 | ✓ but strictly worse than `ep32` |
 | 4 | `ep16` global × 2 replicas | 16 | 32 | 193 | 31 | 228 | 242 | 69 | ⚠ half the sharding; both groups still span all 4 domains (4 contiguous ranks per domain — column-block layout), so dispatch stays on RDMA. The win is the narrower 16-rank dispatch group, not domain locality |
-| 4 | `pp4` + `ep8` node | 8 | 8 | 103 | 12 | ≥194 | — | 35 | ✗ planned PP shape — not yet available |
 | **8** (64) | **`ep64` global** | 64 | 64 | 48 | 27 | **80** | 93 | 33 | ✓ memory to spare; tokens/rank still capped at 8192 |
 | 8 | `ep8` + `etp8` global | 64 | 8 | 48 | 27 | 80 | 93 | 117 | ✓ EFA-latency pick, experimental axis |
 | 8 | `ep32` global × 2 replicas | 32 | 64 | 97 | 28 | 129 | 143 | 45 | ✓ narrower EP group |
 | 8 | `ep16` global × 4 replicas | 16 | 64 | 193 | 31 | 228 | 242 | 69 | ⚠ |
-| 8 | `pp8` + `ep8` node | 8 | 8 | 52 | 8 | ≥138 | — | 20 | ✗ planned PP shape — not yet available |
 | any | plain FSDP2 · pure TP · pure ETP · pure CP | — | — | — | — | — | — | **794** | ✗ no shard-aware load |
 | any | any EP + CP | — | — | — | — | — | — | — | ✗ `validate_model_for_ulysses` |
 
 **One node cannot train this model, in any shape.** Routed experts are only ever divided by `X`,
 which on 8 GPUs is at most 8, so every legal single-node shape puts the same 386 GB of expert state
-on each GPU against a ~260 GB practical ceiling. PP, the planned axis that would shorten a rank's
-layer range, is [not yet available](pipeline-parallelism.md), and would need a second NVLink domain
-anyway.
+on each GPU against a ~260 GB practical ceiling.
 
 Two nodes with `ep16 --ep_scope=global` is the floor; four is the first comfortable size. Freezing
 the experts is the single-node escape: LoRA on EP experts, or `unfreeze_layers_patterns`, drops them
@@ -280,11 +258,7 @@ divisor.
 0`, so `ep_size ∈ {2, 4, 8}` — and `8·P_e/8 = 386 GB` of experts per rank before anything else. The
 same ceiling makes node-scope EP useless at 2, 4 and 8 nodes too.
 
-**Nothing survives: 24 GPUs has no legal layout for this model in this release.** The shape that
-would survive is `pp3` + `ep8` — `pp_size=3` gives `stage_world_size = 8`, satisfying
-`stage_world_size % nvlink_domain_size == 0` where `pp2`, `pp4`, `pp6`, `pp8` and `pp12` at world 24
-all fail it — but pipeline parallelism is
-[not yet available in this release](pipeline-parallelism.md). Use 2 nodes (`ep16` global) or 4
+**Nothing survives: 24 GPUs has no legal layout for this model.** Use 2 nodes (`ep16` global) or 4
 (`ep32` global) instead.
 
 ## Recommended cell
@@ -295,12 +269,9 @@ and narrow the dispatch group (EP+ETP) when the fabric is latency-bound.
 | Nodes | Cell | Crosses on | Steady `b1 s8192` | Why |
 |---|---|---|---:|---|
 | 2 | `ep16 --ep_scope=global` + `unfreeze_layers_patterns` | RDMA all-to-all | 228 GB full FT / ≈120 GB partial | the only layout that loads and fits; no headroom for 32k or `b>1` |
-| 3 | — | — | — | no legal layout for this model in this release ([The 3-node case](#the-3-node-case)) |
+| 3 | — | — | — | no legal layout for this model ([The 3-node case](#the-3-node-case)) |
 | 4 | **`ep32 --ep_scope=global`** | RDMA all-to-all | 129 GB | first comfortable point on memory — but the binding limit is the 8192 tokens/rank cross-node dispatch ceiling, not the 120 GB spare |
 | 8 | **`ep64 --ep_scope=global`** | RDMA all-to-all | 80 GB | memory headroom to spare, same 8192 tokens/rank ceiling on `b × max_length`; `ep8 + etp8` if the fabric is EFA |
-
-Pipeline parallelism would add the alternative that keeps EP node-local and puts only P2P boundary
-activations on the fabric — [not yet available in this release](pipeline-parallelism.md).
 
 **On NVL72, declare a 64-GPU domain, not 72.** `_validate_ep_group` requires
 `nvlink_domain_size % ep_group_size == 0`, and `72 % 64 = 8`.
@@ -351,7 +322,7 @@ torchrun --nnodes=$NNODES --node_rank=$NODE_RANK --nproc_per_node=8 \
 | Nodes | Layout flags |
 |---|---|
 | 2 | `--expert_parallel_size=16 --ep_scope=global` |
-| 3 | — no legal layout for this model in this release ([The 3-node case](#the-3-node-case)) |
+| 3 | — no legal layout for this model ([The 3-node case](#the-3-node-case)) |
 | 4 | `--expert_parallel_size=32 --ep_scope=global` |
 | 8 | `--expert_parallel_size=64 --ep_scope=global` |
 | 8, EFA | `--expert_parallel_size=8 --expert_tensor_parallel_size=8 --ep_scope=global` |
@@ -389,11 +360,13 @@ Values that differ from it or are load-bearing at 397B:
 | `gradient_checkpointing` | `true` | the activation column assumes it |
 | `bf16` + `optim` | as shipped | AdamWBF16 auto-enables whenever `bf16: true` and `optim` is `adamw_torch_fused`/`adamw_torch` outside accelerate-managed DDP — both are already the defaults, so neither key has to be written to get the 8 B/param cost. `optim: muon` or `flash_adamw` opts out |
 | `fp32_experts` / `fp32_non_ep_params` | **omit** | the 35B configs set them; fp32 masters would take the expert term to 16 B/param and OOM every cell |
-| `moe_balancing` | `aux_loss` | Under `text_only_model: true` the model is `Qwen3_5MoeForCausalLM`, whose forward declares `output_router_logits`, so `aux_loss` trains and exports by construction. Strict `bias_update` raises: Qwen3.5 has no checkpoint slot for a routing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
-| `router_balancing_rate` | well below `1e-3` | the sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
+| `text_only_model` | `true` | loads `Qwen3_5MoeForCausalLM`, whose forward declares `output_router_logits` — what `aux_loss` needs. The 122B base keeps the multimodal class, where an explicit `aux_loss` raises; the export drops the vision tower ([Qwen3.5 → EP wrapper](../models/qwen3_5.md#ep-wrapper)) |
+| `moe_balancing` | `aux_loss` | trains and exports by construction under `text_only_model: true`. Strict `bias_update` raises: Qwen3.5 has no checkpoint slot for a routing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
+| `router_balancing_rate` | well below `1e-3`, only under `bias_update_transient` (the multimodal-class alternative) | inert under `aux_loss`. The sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
 | `fp32_router` | `true` | cheap, and 512 experts at top-10 is where bf16 routing logits start to tie |
 | `fp32_grad_reduce` | `true` | bf16 sums lose precision at 16–64 ranks; no storage cost |
-| `use_grouped_gemm` / `use_liger_kernel` / `fp32_output_conversion` | `true` / `true` / `false` (all defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100, and fused linear cross-entropy plus the disabled upcast keep `[b, S, 248320]` — 4 GB per copy at `S=8192` — off the card |
+| `use_grouped_gemm` / `use_liger_kernel` / `fp32_output_conversion` | `true` / `true` / `false` (all defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100; the disabled upcast keeps an fp32 copy of the logits off the card |
+| `liger_kernel_config.fused_linear_cross_entropy` | `true` | opt-in: this family defaults to Liger's plain cross-entropy. The fused loss never materializes `[b, S, 248320]` — 4 GB per copy at `S=8192` |
 | `max_concurrent_loading` | leave unset | node-local wave gate; unset adapts to the node (`min(4, max(1, local_world_size // 2))` — 4 on an 8-GPU node, 2 on a 4-GPU tray), and any explicit value is used verbatim. The lazy EP path bypasses it, so this only bounds the fallback |
 | `save_sharded_ep` | `true` on the pure-EP cells (`ep16`/`ep32`/`ep64`) | every rank writes its own shard instead of funneling 794 GB through one. Requires a single EP group spanning all ranks (`ep_group_size == world_size` — exactly these cells) and a shared output filesystem; **rejected under ETP**, so the `ep8+etp8` cell takes the layer-streaming gathered save instead. Merge before serving ([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)) |
 | `per_device_train_batch_size` | `1` | the activation column is `b=1`; raise only at 8 nodes and only after step 1's peak is known |
@@ -411,22 +384,16 @@ non-expert weights gathered whole under ZeRO-2) for the three other checkpoints 
 class, on 8 × B300 (≈260 GB usable — [Budget](#per-rank-memory-model)). Every figure is a plan, not
 a measurement.
 
-All three ship as composite VLMs with no text-only CausalLM sibling. The PP rows are planned shapes:
-pipeline parallelism is [not yet available in this release](pipeline-parallelism.md).
-
 | Checkpoint | Routed experts | Cell | Expert leg / rank | Static / rank | What binds |
 |---|---:|---|---:|---:|---|
 | **GLM-5.3-Flash** (321B; 42 MoE layers × 288 × `M=2048, H=4096`) | 304 B | 2 × 8, `ep16 --ep_scope=global` | 19.0 B → 152 GB | ~200 GB (+33 GB gathered non-expert bf16, +13 GB fp32 non-EP masters/state) | the 8192 tokens/rank cross-node dispatch ceiling; `ep8` on one node is 304 GB of experts alone. Needs the bf16 conversion (~650 GB) |
 | GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | same | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
-| GLM-5.3-Flash, planned PP shape ([not yet available](pipeline-parallelism.md)) | 304 B | 2 × 8, `pp2 --expert_parallel_size=8` (stage = one node) | 19.0 B → 152 GB | ~175 GB | forward-looking arithmetic: dispatch would stay on NVLink, bounding `max_length` by memory rather than the Gin ceiling |
 | **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~60 GB left for activations at `max_length: 8192` with checkpointing — marginal, unmeasured |
 | Step-3.7-Flash | 190 B | 2 × 8, `ep16 --ep_scope=global` | 11.9 B → 95 GB | ~115 GB | the 8192 tokens/rank dispatch ceiling |
 | **DeepSeek-V4-Flash** (284B; 43 MoE layers × 256 × `M=2048, H=4096`, 3 of them hash-routed) | 277 B | 2 × 8, `ep16 --ep_scope=global` | 17.3 B → 138 GB | ~155 GB | the 8192 tokens/rank dispatch ceiling. Needs the bf16 conversion (~750 GB) |
-| DeepSeek-V4-Flash, planned PP shape ([not yet available](pipeline-parallelism.md)) | 277 B | 2 × 8, `pp2 --expert_parallel_size=8` (stage = one node) | 17.3 B → 138 GB | ~155 GB | forward-looking arithmetic: dispatch would stay on NVLink, bounding `max_length` by memory rather than the Gin ceiling |
 
 The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch_size × max_length
-≤ 8192` contract; the two planned PP rows are forward-looking arithmetic for the shape that would
-keep every MoE all-to-all on NVLink.
+≤ 8192` contract.
 
 ## Pre-flight checklist
 
@@ -487,9 +454,9 @@ keep every MoE all-to-all on NVLink.
 |---|---|---|
 | Peak memory (`EfficiencyCallback`) | within ~15% of the matrix cell | recheck `P_e`/`P_ne`; the replicated `P_r` term is the usual surprise |
 | `grad_norm` | finite, same order as a 35B-A3B run of the same recipe | see [Debugging](../reference/debugging.md) |
-| `moe/*` metrics present and non-zero | `RouterBiasBalancingCallback` logs them under either bias-update mode | this checkpoint keeps its expert fields on `text_config`, and `detect_moe_experts_topk` resolves the text config before reading them. Silent `(0, 0)` means the model is not being seen as MoE and `moe_balancing` has resolved to `none` — the router is training unbalanced |
+| `moe/*` metrics present and non-zero | `MoEMetricsCallback` logs them under `aux_loss` (`RouterBiasBalancingCallback` under a bias-update mode) | this checkpoint keeps its expert fields on `text_config`, and `detect_moe_experts_topk` resolves the text config before reading them. Silent `(0, 0)` means the model is not being seen as MoE and `moe_balancing` has resolved to `none` — the router is training unbalanced |
 | Packing took the varlen path | no dense-mask warning from `select_data_collator` | a non-varlen `_attn_implementation` pays a dense mask over the flattened batch, and on some families it also stops isolating documents ([Document isolation](../data/collators.md#document-isolation-under-packing)). Pin `flash_attention_2` |
-| Expert balance (`MoEMetricsCallback`, or `RouterBiasBalancingCallback` under a bias-update mode) | no expert at 0 tokens across a step | raise `router_balancing_rate` — but see the 512-expert scale caveat in [Callbacks](../training-methods/callbacks.md#routerbiasbalancingcallback) before doubling it |
+| Expert balance (`MoEMetricsCallback`, or `RouterBiasBalancingCallback` under a bias-update mode) | no expert at 0 tokens across a step | raise `router_aux_loss_coef` under `aux_loss`; under `bias_update_transient` raise `router_balancing_rate` — but see the 512-expert scale caveat in [Callbacks](../training-methods/callbacks.md#routerbiasbalancingcallback) before doubling it |
 | tok/s/GPU | compare against the [MFU registry](../optimization/throughput-benchmarks.md) at 35B-A3B | a 2×+ shortfall on EFA is the proxy-Gin latency wall: narrow the dispatch group (`ep8 + etp8`) |
 | Step time variance | stable after 3 warmup steps | a slow rank is usually a degraded NVLink lane or a straggler NIC |
 | First checkpoint | written, and re-loadable with `from_pretrained` — on the `save_sharded_ep` cells only **after** `merge_ep_shards.py`; the artifact itself is per-rank (`format: "ep_sharded"`) and every loader refuses it unmerged. The gathered `ep8+etp8` row loads directly | raise `DIST_NCCL_TIMEOUT_MINUTES` before blaming the fabric |

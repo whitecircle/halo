@@ -17,7 +17,7 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 - **FSDP2** — default under both launchers.
 - **TP** — native HF `tp_plan="auto"` shards attention and MLP.
 - **CP** — `Qwen3Attention` uses the same `Qwen3MoeUlyssesAttention` wrapper as Qwen3 MoE and Qwen3-VL.
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md). The shipped split contract splits the family cleanly, but the small released checkpoints (0.6B, 1.7B, 4B-Instruct-2507) ship `tie_word_embeddings=True` and would hit the tie gate; Qwen3-8B is untied.
+- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
 - **LoRA** — under FSDP/DP and CP; rejected at construction under TP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ### Configs
