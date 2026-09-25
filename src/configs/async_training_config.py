@@ -338,6 +338,17 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         },
     )
 
+    truncation_alarm_rate: float | None = field(
+        default=0.25,
+        metadata={
+            "help": "Warn when the share of a rollout round's episodes that ended truncated "
+            "(`episode/truncation_rate`: the max_turns cap, or a cut turn past its recoveries) rises over "
+            "this, and log `episode/truncation_alarm` (1 over, 0 under) every round. Past it the turn or "
+            "token budget, not the task, ends a large share of episodes. The warning repeats only after the rate "
+            "has dropped back under. In [0, 1); None = off."
+        },
+    )
+
     # Default flipped vs AdvantageShapingArguments: on a sparse verifiable env reward the all-equal
     # groups dominate the batch.
     drop_degenerate_groups: bool = field(
@@ -457,14 +468,18 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
 
     request_timeout: float = field(
         default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
-        metadata={"help": "HTTP timeout per rollout-server request in seconds."},
+        metadata={
+            "help": "HTTP timeout per rollout-server request in seconds of engine-serving time: a weight-sync "
+            "pause is credited back, so a sync never expires a request."
+        },
     )
 
     episode_timeout: float = field(
         default=DEFAULT_EPISODE_TIMEOUT_SECONDS,
         metadata={
             "help": (
-                "Wall-clock deadline for one rollout episode in seconds. Bounds the WHOLE episode "
+                "Deadline for one rollout episode in seconds of engine-serving time (a weight-sync pause is "
+                "credited back). Bounds the WHOLE episode "
                 "(generation + tool execution + grading), unlike request_timeout which bounds a single "
                 "HTTP call. Without it a wedged tool/sandbox blocks its rank forever, and the other ranks "
                 "block behind it at the next collective. A timed-out episode is cancelled and counted in "
@@ -607,6 +622,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         # A fraction of the step's corrected trajectories/tokens; 0 would trip on every step, >1 never.
         if self.skip_update_masked_frac is not None and not 0.0 < self.skip_update_masked_frac <= 1.0:
             raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self.skip_update_masked_frac}")
+        # A rate is never above 1, so a threshold at 1 would never fire.
+        if self.truncation_alarm_rate is not None and not 0.0 <= self.truncation_alarm_rate < 1.0:
+            raise ValueError(f"truncation_alarm_rate must be in [0, 1) or null, got {self.truncation_alarm_rate}")
         if not isinstance(self.rollout_chat_template_kwargs, Mapping):
             raise ValueError(
                 "rollout_chat_template_kwargs must be a mapping of template variables, got "

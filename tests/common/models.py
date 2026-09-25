@@ -341,6 +341,56 @@ TINY_QWEN3_CONFIG = {
     "tie_word_embeddings": False,
 }
 
+# Tiny dense Granite for the head-transform contract: the forward divides the logits by
+# ``logits_scaling``, so a hidden-state head path that skips it scores 8x sharper logits. Four
+# layers so a pp2 split is exact; untied, since PP rejects tied embeddings.
+TINY_GRANITE_CONFIG = {
+    "vocab_size": 256,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "max_position_embeddings": 256,
+    "logits_scaling": 8.0,
+    "tie_word_embeddings": False,
+}
+
+# Tiny MiniCPM3 (MLA) for the head-transform contract: the forward divides the hidden state by
+# ``hidden_size / dim_model_base`` (64 / 24) before the output embedding. Four layers, untied (PP).
+TINY_MINICPM3_CONFIG = {
+    "vocab_size": 256,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 4,
+    "qk_nope_head_dim": 16,
+    "qk_rope_head_dim": 8,
+    "v_head_dim": 16,
+    "kv_lora_rank": 32,
+    "q_lora_rank": 32,
+    "dim_model_base": 24,
+    "max_position_embeddings": 256,
+    "tie_word_embeddings": False,
+}
+
+# Tiny Gemma 2 for the head-transform contract: ``final_logit_softcapping`` is small enough for
+# random-init logits to saturate the cap. Four layers so a pp2 cut lands on a whole period of the
+# sliding/full interleave; untied (PP).
+TINY_GEMMA2_CONFIG = {
+    "vocab_size": 256,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "max_position_embeddings": 256,
+    "final_logit_softcapping": 0.05,
+    "tie_word_embeddings": False,
+}
+
 # Inkling (Thinking Machines) tiny config. hidden_size=256 keeps the DeepEP transport pad (multiple
 # of 256) exact; n_routed_experts must stay divisible by the EP size under test. The routed/shared
 # joint normalisation needs n_shared_experts > 0 to be exercised at all.

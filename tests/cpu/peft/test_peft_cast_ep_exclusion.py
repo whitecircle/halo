@@ -82,7 +82,7 @@ def _fake_trainer(model: nn.Module) -> types.SimpleNamespace:
         parallelism_config=types.SimpleNamespace(fp32_non_ep_params=False),
         args=types.SimpleNamespace(bf16=True, fp16=False),
     )
-    me._find_ep_modules = types.MethodType(DistributedTrainerMixin._find_ep_modules, me)
+    me._get_ep_param_ids = types.MethodType(DistributedTrainerMixin._get_ep_param_ids, me)
     return me
 
 

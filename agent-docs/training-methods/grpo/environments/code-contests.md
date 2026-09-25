@@ -220,12 +220,14 @@ python scripts/environments/inference/run_code_contests.py --adapter codeforces 
 
 It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a benchmark's
 mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation)).
-At the default `--success_threshold` a problem counts solved when every test in the pool passes. The
-threshold reads the episode's total reward, so under `--training_config` the recipe's shaping moves
-it both ways: `submission_reward` or `execution_progress_reward` can lift a partial solve over it,
-and `tool_error_penalty` (every scratchpad call under `leaderboard` is refused) or
-`length_cutoff_penalty` can sink a solve below it. The re-grader's `s@1` counts all-pass solves
-directly.
+A problem counts solved when the submitted program passes every test in the pool — the environment's
+verdict, not the shaped total, so the recipe's shaping under `--training_config` (a
+`tool_error_penalty` on every refused scratchpad call under `leaderboard`, a submission bonus) moves
+it neither way, and the coding CLI takes no `--success_threshold`. The verdict is the episode's last
+graded submission and `success@1` each row's first scored sample, while the
+[re-grader](evaluation.md#re-grading-recorded-trajectories) scores every episode on its first
+submission (`s@1`) or any within its budget (`s@2`). The two score the same submission only on a
+`leaderboard` run at `--num_samples 1`, where each row is one episode with one submission.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
 level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window

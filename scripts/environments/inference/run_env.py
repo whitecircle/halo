@@ -102,7 +102,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num_examples", type=int, default=100, help="Cap on examples (0 = all).")
     p.add_argument("--num_samples", type=int, default=1, help="Episodes per example (success@k).")
-    p.add_argument("--success_threshold", type=float, default=1.0, help="Reward at/above which a sample is a success.")
+    p.add_argument(
+        "--success_threshold",
+        type=float,
+        default=1.0,
+        help="Reward at/above which a sample is a success, for an environment that reports no solve verdict "
+        "of its own (one that does is scored on it).",
+    )
     # No default: each env class carries its own, and passing one unconditionally would cap every env
     # at a number none of them chose.
     p.add_argument("--max_turns", type=int, default=None, help="Max env turns per episode (default: the env's own).")

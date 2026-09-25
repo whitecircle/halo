@@ -108,6 +108,13 @@ def resolve_reasoning_effort(effort: str | None) -> str | None:
     return effort
 
 
+def solve_verdict(metrics: Mapping[str, float]) -> bool | None:
+    """Whether an episode solved its task, read off its rollout metrics: the environment's own verdict
+    (:data:`SOLVE_RATE_KEY`), or ``None`` where the environment reports none."""
+    verdict = metrics.get(SOLVE_RATE_KEY)
+    return None if verdict is None else verdict >= 1.0
+
+
 def require_magnitudes(**knobs: float) -> None:
     """Reject a negative or non-finite value for any reward/penalty magnitude knob.
 

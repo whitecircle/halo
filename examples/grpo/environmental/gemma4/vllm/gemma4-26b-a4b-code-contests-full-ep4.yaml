@@ -71,9 +71,10 @@ rollout_server_configs:
 rollout_connection_timeout: 180.0
 request_timeout: 1200.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence decode
                               # speed at peak concurrency (agent-docs/training-methods/grpo/async-grpo/performance.md#sizing-a-run)
-max_retries: 1                # a timeout re-runs the WHOLE episode; attempts x request_timeout must stay
-                              # under the retry budget at DIST_NCCL_TIMEOUT_MINUTES=60
-episode_timeout: 2700         # whole-episode wall clock; must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
+max_retries: 1                # per turn: a failed or timed-out request is re-issued, not the episode;
+                              # (1 + max_retries) x request_timeout must fit inside episode_timeout
+episode_timeout: 2700         # whole-episode deadline in engine-serving time (a weight-sync pause is credited
+                              # back); must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
 
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature

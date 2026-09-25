@@ -34,6 +34,7 @@ from src.distributed.pipeline_parallel.split import (
     resolve_pp_spec,
     validate_model_supports_pp,
 )
+from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from src.models.loading.config_levels import text_config
 from src.models.structure import backbone_with_layers, decoder_layers
 
@@ -43,6 +44,9 @@ logger = logging.getLogger(__name__)
 # Set by the stage-aware loader on a model whose decoder-layer list is already this rank's slice, so
 # :func:`build_pipeline_stage` re-uses that partition instead of re-deriving it from the short list.
 PP_STAGE_PARTITION_ATTR = "_pp_stage_partition"
+
+# The fused last-stage loss contract: ``(head, head_transform, hidden_states, labels) -> summed loss``.
+FusedHeadLoss = Callable[[nn.Module, HeadTransform, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 def _join(*parts: str) -> str:
@@ -108,6 +112,7 @@ class PipelineStageModule(nn.Module):
         head_attr: str,
         layer_attr: str,
         layer_offset: int,
+        head_transform: HeadTransform = IDENTITY_HEAD_TRANSFORM,
     ):
         super().__init__()
         # Named ``model`` so ``backbone_with_layers`` finds the layer list through its ``.model`` probe.
@@ -115,11 +120,13 @@ class PipelineStageModule(nn.Module):
         self.head = head
         self.is_first = is_first
         self.is_last = is_last
-        # ``(head, hidden_states, labels) -> summed loss``, installed by :class:`PipelineRuntime` on
-        # the last stage when the objective decomposes over token chunks (the causal-LM CE). Forward
-        # then returns the scalar loss instead of logits, so no [mb, S, V] plane is built.
-        # ``None`` = return logits and let the schedule's ``loss_fn`` consume them.
-        self.fused_loss_fn: Callable[[nn.Module, torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+        # What the family's forward applies around its head; the stage replaces that forward.
+        self.head_transform = head_transform
+        # Installed by :class:`PipelineRuntime` on the last stage when the objective decomposes over
+        # token chunks (the causal-LM CE). Forward then returns the scalar loss instead of logits, so
+        # no [mb, S, V] plane is built. ``None`` = return logits and let the schedule's ``loss_fn``
+        # consume them.
+        self.fused_loss_fn: FusedHeadLoss | None = None
         # Slicing re-bases layer indices to 0, so without these a stage claims stage 0's names on save.
         self._backbone_prefix = backbone_prefix
         self._head_attr = head_attr
@@ -304,14 +311,14 @@ class PipelineStageModule(nn.Module):
         if not self.is_last:
             return hidden
         if self.fused_loss_fn is None:
-            return self.head(hidden)
+            return self.head_transform.project(self.head, hidden)
         if labels is None:
             raise RuntimeError(
                 "The last pipeline stage computes its loss inside forward (fused head) but received "
                 "no `labels` kwarg, so it has no targets to score. The runtime supplies them on "
                 "every call; a caller driving the schedule directly must do the same."
             )
-        return self.fused_loss_fn(self.head, hidden, labels)
+        return self.fused_loss_fn(self.head, self.head_transform, hidden, labels)
 
 
 def module_path(model: nn.Module, module: nn.Module) -> str:
@@ -496,6 +503,7 @@ def build_pipeline_stage(
 
     head_attr = resolve_module_attr(model, spec.HEAD_ATTRS, "task head")
     head = getattr(model, head_attr) if is_last else None
+    head_transform = resolve_head_transform(model) if is_last else IDENTITY_HEAD_TRANSFORM
     if not is_last:
         setattr(model, head_attr, None)
 
@@ -512,6 +520,7 @@ def build_pipeline_stage(
         head_attr=head_attr,
         layer_attr=layer_attr,
         layer_offset=lo,
+        head_transform=head_transform,
     )
     # HF Trainer and the checkpoint writers read ``model.config``; it is what a reassembled ckpt ships.
     stage.config = model.config

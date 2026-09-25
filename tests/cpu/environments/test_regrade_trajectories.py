@@ -196,6 +196,33 @@ def test_the_regrader_rebuilds_the_run_s_protocol_from_the_meta_line_the_eval_wr
     assert regrade_trajectories.rebuild_environment(unnamed).eval_protocol == "harness"
 
 
+def _submission(code: str) -> dict:
+    call = {
+        "id": "c",
+        "type": "function",
+        "function": {"name": "submit_solution", "arguments": json.dumps({"code": code})},
+    }
+    return {"role": "assistant", "content": "", "tool_calls": [call]}
+
+
+def test_an_episode_the_driver_lost_leaves_n_and_is_counted(tmp_path, monkeypatch):
+    """The eval leaves a generation-error sample out of every score; re-graded as an unsolved episode it
+    would pull ``s@1`` below the online number for an endpoint fault. The solved and the unsubmitted
+    episodes are what ``n`` counts."""
+    payload = {"tests": [{"input": "", "output": "X"}], "checker": None, "time_limit": None}
+    monkeypatch.setattr(regrade_trajectories, "build_payloads", lambda meta: (payload,))
+    episodes = [
+        {"type": "episode", "index": 0, "messages": [_submission("print('X')")], "generation_error": None},
+        {"type": "episode", "index": 0, "messages": [], "generation_error": "NotFoundError: gone"},
+        {"type": "episode", "index": 0, "messages": [], "generation_error": None},
+    ]
+    path = tmp_path / "run.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in [{"type": "meta", **_FULL_META}, *episodes]) + "\n")
+
+    metrics = regrade_trajectories.regrade_file(str(path), workers=1)
+    assert (metrics["n"], metrics["s@1"], metrics["generation_errors"]) == (2, 0.5, 1)
+
+
 def test_a_language_list_in_the_meta_rebuilds_the_choosing_environment():
     env = regrade_trajectories.resolve_environment("code_contests", {"language": ["python", "cpp"]})
     assert env.chooses_language and env.languages == ("python", "cpp")

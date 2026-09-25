@@ -28,10 +28,11 @@ class _MetricsHost(rm.RolloutMetricsMixin):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
 
 
-def _episode(latency: float, tokens: int):
+def _episode(latency: float, tokens: int, requests_expired_in_sync: int = 0):
     return types.SimpleNamespace(
         latency=latency,
         generation_tokens=tokens,
+        requests_expired_in_sync=requests_expired_in_sync,
         episode_length=1,
         success=True,
         trajectory=None,
@@ -94,6 +95,17 @@ def test_no_rollouts_yet_reports_zero_without_dividing_by_zero() -> None:
         "async/cumulative_mean_rollout_latency": 0.0,
         "async/total_generation_tokens": 0.0,
     }
+
+
+def test_requests_expired_in_sync_is_the_worlds_count_not_a_mean(monkeypatch) -> None:
+    """Each expiry is a turn the engine generated twice, so the round logs how many there were across
+    the world: two ranks of (1 + 0 + 2) is 6, where a per-episode mean would read 1."""
+    _fake_dp_world(monkeypatch, world=2)
+    host = _MetricsHost()
+
+    host._log_rollout_metrics([_episode(1.0, 10, 1), _episode(1.0, 10, 0), _episode(1.0, 10, 2)], "train")
+
+    assert host._metrics["train"]["async/requests_expired_in_sync"] == [6.0]
 
 
 if __name__ == "__main__":

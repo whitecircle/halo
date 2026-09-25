@@ -6,17 +6,17 @@ RolloutManager fans prompts across actors and server URLs round-robin under a bo
 Weight sync is separate, over NCCL (:mod:`src.trainers.grpo.rollout.weight_sync_clients`)."""
 
 import asyncio
+import inspect
 import logging
 import tempfile
 import time
-from collections.abc import Callable
-from dataclasses import replace
-from functools import cached_property
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
+from functools import cached_property, partial
 from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
-import backoff
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -28,20 +28,23 @@ from src.environments.episode import (
     RolloutResult,
     TurnGeneration,
     bind_episode_effort,
+    describe_exception,
+    generate_turn,
+    is_terminal_client_status,
     step_context_from_generation,
 )
 from src.environments.registry import create_environment
-from src.inference.response import FINISH_REASON_ABORT, get_finish_reason, get_reasoning_text
+from src.inference.response import get_finish_reason, get_reasoning_text
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
 
-_RETRYABLE_4XX = {408, 429}
-# vLLM answers 400 when a NaN log-prob keeps it from serialising its OWN response: the request was
-# valid and a fresh one succeeds, so it is retried like a 5xx rather than ending the episode.
-_ENGINE_SERIALIZATION_FAULT = "not JSON compliant"
 # Backends already warned that their completions carry no ``usage.completion_tokens`` (once per process).
 _COMPLETION_TOKENS_MISSING_WARNED: set[str] = set()
+
+# The engine-paused seconds a deadline credits: the count now, or an awaitable of the count as of the
+# call (a read of the Ray copy an actor process holds).
+PausedClock = Callable[[], float | Awaitable[float]]
 
 
 class RolloutHTTPError(RuntimeError):
@@ -58,14 +61,12 @@ class RolloutHTTPError(RuntimeError):
         self.body = body
 
 
-def _describe_exc(exc: BaseException) -> str:
-    """``Type: message``, keeping the type when the message is empty.
+class DeadlineExpired(TimeoutError):
+    """A deadline that ran out of engine-serving time; ``paused_seconds`` is the engine pause it credited."""
 
-    ``asyncio.TimeoutError``, the usual signature of a stalled engine, stringifies to ``""``, so
-    interpolating the exception alone carries no information.
-    """
-    text = str(exc)
-    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+    def __init__(self, message: str, paused_seconds: float):
+        super().__init__(message)
+        self.paused_seconds = paused_seconds
 
 
 def _is_client_error(exc: BaseException) -> bool:
@@ -76,11 +77,7 @@ def _is_client_error(exc: BaseException) -> bool:
     one body it does read names an engine fault reported under a client status; misreading it costs
     bounded retries of a request that then fails anyway, never an abandoned batch.
     """
-    if not isinstance(exc, RolloutHTTPError):
-        return False
-    if _ENGINE_SERIALIZATION_FAULT in exc.body:
-        return False
-    return 400 <= exc.status < 500 and exc.status not in _RETRYABLE_4XX
+    return isinstance(exc, RolloutHTTPError) and is_terminal_client_status(exc.status, exc.body)
 
 
 def _is_shutdown_error(exc: BaseException) -> bool:
@@ -98,39 +95,98 @@ def _should_giveup(exc: BaseException) -> bool:
     return _is_client_error(exc) or _is_shutdown_error(exc)
 
 
-async def _resolve_ref(ref):
+async def _awaited(awaitable):
     """``asyncio`` task bodies must be coroutines; a Ray ``ObjectRef`` is only awaitable."""
-    return await ref
+    return await awaitable
 
 
-async def _await_with_deadline(ref, timeout: float, paused_clock: Callable[[], float] | None = None):
-    """Await a Ray ``ObjectRef`` under ``timeout`` seconds of engine-serving time, raising ``TimeoutError``.
+async def _clock_reading(reading: float | Awaitable[float]) -> float:
+    return await reading if inspect.isawaitable(reading) else reading
 
-    ``paused_clock`` reads the manager's count of seconds the engines have spent paused for weight
-    syncs: a paused engine freezes every in-flight generation, so that window is credited back to
-    the episode instead of charged to it. The ref is awaited in one task, shielded across the re-arms
-    a credit forces; on expiry the task is cancelled.
+
+async def _await_with_deadline(
+    awaitable, timeout: float, paused_clock: PausedClock | None = None, *, what: str = "episode"
+):
+    """Await ``awaitable`` under ``timeout`` seconds of engine-serving time, raising :class:`DeadlineExpired`.
+
+    ``paused_clock`` reads the seconds the engines have spent paused for weight syncs: a paused engine
+    freezes every in-flight generation, so that window is credited back instead of charged. The clock
+    is read at the start and again only when the deadline runs out, so the happy path waits on no
+    read; the serving time used is taken when a read is issued, so a slow read (a Ray round trip)
+    never eats into the budget. The awaitable runs in one task, shielded across the re-arms a credit
+    forces; on expiry the task is cancelled.
     """
     loop = asyncio.get_running_loop()
     started = loop.time()
-    paused_at_start = paused_clock() if paused_clock is not None else 0.0
-    task = loop.create_task(_resolve_ref(ref))
+    at_start = paused_clock() if paused_clock is not None else 0.0
+    task = loop.create_task(_awaited(awaitable))
+    credit = 0.0
+    remaining = timeout
     try:
         while True:
-            credit = paused_clock() - paused_at_start if paused_clock is not None else 0.0
-            remaining = timeout - (loop.time() - started - credit)
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"episode exceeded its {timeout:.0f}s deadline ({credit:.0f}s of engine pause excluded)"
-                )
             try:
                 return await asyncio.wait_for(asyncio.shield(task), remaining)
             except TimeoutError:
                 if task.done():
-                    raise  # the episode's own TimeoutError, not the deadline's
+                    # Finished as the deadline fired: its own result, or its own TimeoutError.
+                    return task.result()
+            if paused_clock is not None:
+                issued = loop.time()
+                at_start = await _clock_reading(at_start)
+                credit = max(0.0, await _clock_reading(paused_clock()) - at_start)
+                remaining = timeout - (issued - started - credit)
+            else:
+                remaining = 0.0
+            if remaining <= 0:
+                if task.done():
+                    # Finished while the clock was being read: the result stands.
+                    return task.result()
+                raise DeadlineExpired(
+                    f"{what} exceeded its {timeout:.0f}s deadline ({credit:.0f}s of engine pause excluded)", credit
+                )
     finally:
         if not task.done():
             task.cancel()
+
+
+class EnginePauseClock:
+    """Seconds the rollout engines have spent paused for weight syncs, an open window included.
+
+    The trainer thread opens and closes each window while the episode loops read it, so the total and
+    the open window's start live in one tuple, replaced whole: a read never pairs one state's total with
+    another's window. A deadline credits the seconds paused while its work was in flight
+    (:func:`_await_with_deadline`).
+    """
+
+    def __init__(self):
+        self._state: tuple[float, float | None] = (0.0, None)
+
+    def begin(self) -> None:
+        self._state = (self._state[0], time.monotonic())
+
+    def end(self, seconds: float) -> None:
+        """Close the window, crediting ``seconds`` in place of the open window's own measure."""
+        self._state = (self._state[0] + seconds, None)
+
+    def paused_seconds(self) -> float:
+        total, opened_at = self._state
+        return total if opened_at is None else total + time.monotonic() - opened_at
+
+
+# The copy the actor processes read. A sync actor runs one submitter's calls in order, so a window's
+# begin never lands after its end; zero CPUs keeps it off the actor pool's slots.
+_RemoteEnginePauseClock = ray.remote(num_cpus=0, max_restarts=-1)(EnginePauseClock)
+
+
+@dataclass
+class _SyncExpiries:
+    """Request deadlines one episode saw expire on a request in flight across an engine pause."""
+
+    count: int = 0
+
+    def record(self, exc: BaseException) -> None:
+        if isinstance(exc, DeadlineExpired) and exc.paused_seconds > 0:
+            self.count += 1
 
 
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR
@@ -168,10 +224,16 @@ class EnvironmentActor:
         actor_id: int,
         env_type: str | tuple[type, dict[str, Any]],
         env_config: dict[str, Any],
+        pause_clock=None,
     ):
+        """``pause_clock`` is the manager's Ray copy of its :class:`EnginePauseClock`; each request's deadline
+        credits the pause it reads. Without one the deadline is wall-clock."""
         self.actor_id = actor_id
         self.env_type = env_type
         self.env_config = env_config
+        self._paused_clock: PausedClock | None = (
+            None if pause_clock is None else lambda: pause_clock.paused_seconds.remote()
+        )
 
         self._env = None
         self._http_client = None
@@ -186,14 +248,14 @@ class EnvironmentActor:
         """OpenAI-format tools list, or None if the env has no tools. Static per run."""
         return self._get_env().get_tools_schema()
 
-    async def _get_http_client(self, timeout: float) -> aiohttp.ClientSession:
+    async def _get_http_client(self) -> aiohttp.ClientSession:
         if self._http_client is None:
             # force_close: the server drops idle keepalives between batches, so a pooled socket
             # yields ServerDisconnectedError whose retries stall this rank at the next collective.
             connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
-            self._http_client = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=timeout), connector=connector
-            )
+            # No session timeout: aiohttp's would charge a weight-sync pause to the request, so each
+            # request runs under the pause-aware deadline in _generate instead.
+            self._http_client = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), connector=connector)
         return self._http_client
 
     async def run_episode(
@@ -208,10 +270,11 @@ class EnvironmentActor:
         generation_tokens = 0
         logp_sum, logp_count = 0.0, 0
         eid = None
+        sync_expiries = _SyncExpiries()
 
         try:
             env = self._get_env()
-            client = await self._get_http_client(config.request_timeout)
+            client = await self._get_http_client()
             episode = EpisodeDispatcher(env)
             episode_ids, steps = await episode.reset([prompt], [context])
             eid, step = episode_ids[0], steps[0]
@@ -236,7 +299,13 @@ class EnvironmentActor:
                 # The engine cap this turn: the level's budget, or under the episode scope what it has left.
                 turn_config = replace(ep_config, max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent))
                 gen = await self._generate_turn(
-                    client, server_url, step.observation, turn_config, effort.level, effort.thinking_budget
+                    client,
+                    server_url,
+                    step.observation,
+                    turn_config,
+                    effort.level,
+                    effort.thinking_budget,
+                    sync_expiries,
                 )
                 reasoning_spent += effort.spend_of(gen, config.reasoning_end_token_id)
                 generation_tokens += gen.tokens
@@ -265,6 +334,7 @@ class EnvironmentActor:
                 success=bool(traj and traj.done and not traj.truncated),
                 latency=time.time() - start,
                 generation_tokens=generation_tokens,
+                requests_expired_in_sync=sync_expiries.count,
             )
 
         except Exception as e:
@@ -277,7 +347,7 @@ class EnvironmentActor:
             # drops its tokens from the step. Accrued reward could therefore only reach the logged
             # reward mean, where a half-episode's partial credit is noise. Typed, never ``str(e)``: a
             # bare ``TimeoutError`` stringifies to "", which the mask reads as no error.
-            reason = _describe_exc(e)
+            reason = describe_exception(e)
             return RolloutResult(
                 prompt=prompt,
                 trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: reason}),
@@ -285,6 +355,7 @@ class EnvironmentActor:
                 success=False,
                 latency=time.time() - start,
                 error=reason,
+                requests_expired_in_sync=sync_expiries.count,
             )
 
         finally:
@@ -301,24 +372,20 @@ class EnvironmentActor:
         server_url: str,
         messages: list[dict[str, str]],
         config: RolloutConfig,
-        reasoning_effort: str | None = None,
-        reasoning_budget: int | None = None,
+        reasoning_effort: str | None,
+        reasoning_budget: int | None,
+        sync_expiries: _SyncExpiries,
     ) -> TurnGeneration:
-        """One turn's generation, re-issued for the same observation while the engine aborts it.
-
-        An abort is the engine's doing (SGLang's sync pause drops every in-flight request), so the
-        fragment never reaches the env: stepping it would spend the episode's length-cutoff recovery
-        cap on a cut the policy did not make. Bounded by ``config.max_retries`` re-issues per turn;
-        past that the episode errors into a masked row.
-        """
-        for _ in range(config.max_retries + 1):
-            gen = await self._generate(client, server_url, messages, config, reasoning_effort, reasoning_budget)
-            if gen.finish_reason != FINISH_REASON_ABORT:
-                return gen
-            logger.warning(f"Actor {self.actor_id}: the {config.backend} engine aborted the turn; re-issuing it")
-        raise RuntimeError(
-            f"the {config.backend} engine aborted the same turn {config.max_retries + 1} times in a row "
-            f"(finish_reason={FINISH_REASON_ABORT!r}); the episode is dropped rather than stepped with a fragment"
+        """One turn under the shared rollout retry policy (:func:`generate_turn`): transport and engine
+        faults are retried, a genuine client 4xx or a shutdown error is terminal, and an engine abort is
+        re-issued for the same observation. Past the retries the episode errors into a masked row."""
+        return await generate_turn(
+            partial(self._generate, client, server_url, messages, config, reasoning_effort, reasoning_budget),
+            config,
+            retry_on=(asyncio.TimeoutError, aiohttp.ClientError, RuntimeError),
+            giveup=_should_giveup,
+            log_prefix=f"Actor {self.actor_id}",
+            on_failure=sync_expiries.record,
         )
 
     async def _generate(
@@ -330,12 +397,13 @@ class EnvironmentActor:
         reasoning_effort: str | None = None,
         reasoning_budget: int | None = None,
     ) -> TurnGeneration:
-        """Call /v1/chat/completions with backoff-based retry; returns the turn's :class:`TurnGeneration`
-        (capture fields populated per the ``RolloutConfig`` flags).
+        """One /v1/chat/completions request; returns the turn's :class:`TurnGeneration` (capture fields
+        populated per the ``RolloutConfig`` flags).
 
-        Uses raw aiohttp rather than the shared OpenAI client: the training rollout load-balances each
-        request across a pool of server URLs chosen per call, and needs the actor-tagged backoff with
-        retryable-4xx classification.
+        The request gets ``config.request_timeout`` of engine-serving time: a weight sync that freezes it
+        (vLLM ``mode=keep``) is credited back, since expiring it would re-issue a turn the engine
+        resumes and completes anyway. Uses raw aiohttp rather than the shared OpenAI client: the
+        training rollout load-balances each request across a pool of server URLs chosen per call.
         """
         url = server_url.rstrip("/")
         if not url.startswith("http"):
@@ -343,72 +411,52 @@ class EnvironmentActor:
 
         payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget)
 
-        @backoff.on_exception(
-            backoff.expo,
-            (asyncio.TimeoutError, aiohttp.ClientError, RuntimeError),
-            # backoff counts total attempts: max_retries=0 would never match and retry forever.
-            max_tries=config.max_retries + 1,
-            factor=config.retry_base_wait,
-            giveup=_should_giveup,
-            logger=None,  # handlers below replace backoff's own logging
-            on_backoff=lambda d: logger.warning(
-                f"Actor {self.actor_id}: rollout retry {d['tries']}/{config.max_retries} "
-                f"after {d['wait']:.1f}s — {_describe_exc(d['exception'])}"
-            ),
-            on_giveup=lambda d: (
-                logger.debug(f"Actor {self.actor_id}: request abandoned at shutdown")
-                if _is_shutdown_error(d["exception"])
-                else logger.warning(
-                    f"Actor {self.actor_id}: gave up after {d['tries']} tries — {_describe_exc(d['exception'])}"
-                )
-            ),
-        )
-        async def _request():
+        async def _exchange() -> dict:
             async with client.post(f"{url}/v1/chat/completions", json=payload) as resp:
                 if resp.status != 200:
                     raise RolloutHTTPError(resp.status, config.backend, await resp.text())
-                data = await resp.json()
-            choice = data["choices"][0]
-            usage = data.get("usage", {})
-            msg = choice["message"]
-            text = msg.get("content") or ""
-            reasoning = get_reasoning_text(msg) or ""
-            tool_calls = msg.get("tool_calls") or []
-            if config.capture_token_ids:
-                token_ids, token_logprobs, prompt_token_ids = capture_generation_tokens(choice, data, config.backend)
-            else:
-                token_ids = token_logprobs = prompt_token_ids = None
-            tokens = usage.get("completion_tokens") or 0
-            if not tokens and text:
-                # The captured ids are the only honest length; a word count of the text is not one.
-                tokens = len(token_ids) if token_ids else 0
-                warn_once(
-                    logger,
-                    _COMPLETION_TOKENS_MISSING_WARNED,
-                    config.backend,
-                    "%s returned a completion without usage.completion_tokens; generation-token metrics "
-                    "count the captured token ids instead (0 when none are captured).",
-                    config.backend,
-                )
-            routing_mask = capture_routing_mask(choice, data) if config.capture_routed_experts else None
-            # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
-            routing_prompt_tokens = usage.get("prompt_tokens") if routing_mask else None
-            return TurnGeneration(
-                text=text,
-                tool_calls=tool_calls,
-                reasoning=reasoning,
-                tokens=tokens,
-                token_ids=token_ids,
-                token_logprobs=token_logprobs,
-                routing_mask=routing_mask,
-                routing_prompt_tokens=routing_prompt_tokens,
-                prompt_token_ids=prompt_token_ids,
-                finish_reason=get_finish_reason(
-                    choice, completion_tokens=usage.get("completion_tokens"), max_tokens=config.max_tokens
-                ),
-            )
+                return await resp.json()
 
-        return await _request()
+        data = await _await_with_deadline(_exchange(), config.request_timeout, self._paused_clock, what="request")
+        choice = data["choices"][0]
+        usage = data.get("usage", {})
+        msg = choice["message"]
+        text = msg.get("content") or ""
+        reasoning = get_reasoning_text(msg) or ""
+        tool_calls = msg.get("tool_calls") or []
+        if config.capture_token_ids:
+            token_ids, token_logprobs, prompt_token_ids = capture_generation_tokens(choice, data, config.backend)
+        else:
+            token_ids = token_logprobs = prompt_token_ids = None
+        tokens = usage.get("completion_tokens") or 0
+        if not tokens and text:
+            # The captured ids are the only honest length; a word count of the text is not one.
+            tokens = len(token_ids) if token_ids else 0
+            warn_once(
+                logger,
+                _COMPLETION_TOKENS_MISSING_WARNED,
+                config.backend,
+                "%s returned a completion without usage.completion_tokens; generation-token metrics "
+                "count the captured token ids instead (0 when none are captured).",
+                config.backend,
+            )
+        routing_mask = capture_routing_mask(choice, data) if config.capture_routed_experts else None
+        # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
+        routing_prompt_tokens = usage.get("prompt_tokens") if routing_mask else None
+        return TurnGeneration(
+            text=text,
+            tool_calls=tool_calls,
+            reasoning=reasoning,
+            tokens=tokens,
+            token_ids=token_ids,
+            token_logprobs=token_logprobs,
+            routing_mask=routing_mask,
+            routing_prompt_tokens=routing_prompt_tokens,
+            prompt_token_ids=prompt_token_ids,
+            finish_reason=get_finish_reason(
+                choice, completion_tokens=usage.get("completion_tokens"), max_tokens=config.max_tokens
+            ),
+        )
 
     def _build_payload(
         self,
@@ -469,10 +517,10 @@ class RolloutManager:
         self._started = False
         self._actor_idx = 0
         self._url_idx = 0
-        # Seconds the engines have spent paused for weight syncs, credited back to every in-flight
-        # episode's deadline. The trainer thread opens and closes each window; the episodes' loop reads it.
-        self._paused_seconds = 0.0
-        self._pause_started_at: float | None = None
+        # Credited back to every in-flight episode's deadline; the episodes' loop reads it. The actors
+        # run in their own processes, so their requests read a Ray copy this manager feeds alongside.
+        self._pause_clock = EnginePauseClock()
+        self._actor_pause_clock = None
 
         logger.info(
             f"RolloutManager: {self.num_workers} workers, "
@@ -480,26 +528,25 @@ class RolloutManager:
         )
 
     def begin_engine_pause(self) -> None:
-        """Mark the engines paused for a weight sync: in-flight episode deadlines stop counting."""
-        self._pause_started_at = time.monotonic()
+        """Mark the engines paused for a weight sync: in-flight episode and request deadlines stop counting."""
+        self._pause_clock.begin()
+        if self._actor_pause_clock is not None:
+            self._actor_pause_clock.begin.remote()
 
     def end_engine_pause(self, seconds: float) -> None:
         """Close the pause window, crediting the ``seconds`` the forwarding rank measured for its push.
 
         The measured figure replaces this rank's own estimate — the pause is the servers', timed
-        where the push ran. Credited before the window closes, so a deadline read between the two
-        statements never sees less than either.
+        where the push ran.
         """
-        self._paused_seconds += seconds
-        self._pause_started_at = None
+        self._pause_clock.end(seconds)
+        if self._actor_pause_clock is not None:
+            self._actor_pause_clock.end.remote(seconds)
 
     @property
     def paused_seconds(self) -> float:
         """Engine-paused seconds so far, an open window included."""
-        total = self._paused_seconds
-        if self._pause_started_at is not None:
-            total += time.monotonic() - self._pause_started_at
-        return total
+        return self._pause_clock.paused_seconds()
 
     def warn_if_servers_unreachable_from_actors(self, multinode: bool) -> None:
         """Warn when a rollout-server URL is loopback on a multi-node job. Call on a single rank.
@@ -540,14 +587,23 @@ class RolloutManager:
         # spilling. `_spill_on_unavailable` makes the affinity an actual preference.
         try:
             local_node_id = ray.get_runtime_context().get_node_id()
-            actor_cls = EnvironmentActor.options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=local_node_id, soft=True, _spill_on_unavailable=True
-                )
+            strategy = NodeAffinitySchedulingStrategy(node_id=local_node_id, soft=True, _spill_on_unavailable=True)
+        except (TypeError, ValueError) as exc:
+            # A Ray without the private spill argument (TypeError), or a node id it refuses (ValueError).
+            logger.warning(
+                "RolloutManager: node affinity unavailable (%s); the environment actors are placed anywhere in "
+                "the Ray cluster instead of preferring this node",
+                describe_exception(exc),
             )
-        except Exception:  # affinity is an optimization, not fatal
-            actor_cls = EnvironmentActor
-        self._actors = [actor_cls.remote(i, self.env_type, self.env_config) for i in range(self.num_workers)]
+            actor_cls, clock_cls = EnvironmentActor, _RemoteEnginePauseClock
+        else:
+            actor_cls = EnvironmentActor.options(scheduling_strategy=strategy)
+            clock_cls = _RemoteEnginePauseClock.options(scheduling_strategy=strategy)
+        self._actor_pause_clock = clock_cls.remote()
+        self._actors = [
+            actor_cls.remote(i, self.env_type, self.env_config, self._actor_pause_clock)
+            for i in range(self.num_workers)
+        ]
         self._started = True
         logger.info(f"Started {len(self._actors)} environment actors")
 
@@ -560,6 +616,9 @@ class RolloutManager:
                 await actor.shutdown.remote()
             except Exception as e:
                 logger.warning(f"Error shutting down actor: {e}", exc_info=True)
+        if self._actor_pause_clock is not None:
+            ray.kill(self._actor_pause_clock)
+            self._actor_pause_clock = None
         self._actors = []
         self._started = False
         logger.info("RolloutManager shutdown complete")
@@ -624,7 +683,7 @@ class RolloutManager:
             if r is None:
                 # Typed, never ``str(e)``: the deadline's bare ``TimeoutError`` stringifies to "", and an
                 # empty ``error`` is a VALID zero-reward group member to ``rollout_valid_mask``.
-                msg = _describe_exc(errors[i]) if errors[i] is not None else "Unknown error"
+                msg = describe_exception(errors[i]) if errors[i] is not None else "Unknown error"
                 r = RolloutResult(
                     prompt=prompts[i],
                     trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: msg}),

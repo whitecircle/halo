@@ -13,24 +13,38 @@ env's per-episode payload, ``group`` is an optional report bucketing key.
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import statistics
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 from datasets import Dataset, load_dataset, load_from_disk
-from openai import NOT_GIVEN, AsyncOpenAI
+from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from src.configs.rollout_config import RolloutConfig
 from src.data.sources.paths import parse_dataset_source
-from src.environments.base import EPISODE_ERROR_KEY, EPISODE_INVALID_REASON_KEY, BaseEnvironment, Trajectory
+from src.environments.base import (
+    EPISODE_ERROR_KEY,
+    EPISODE_INVALID_REASON_KEY,
+    BaseEnvironment,
+    Trajectory,
+    solve_verdict,
+)
 from src.environments.engine_wire import generation_control_fields
 from src.environments.episode import (
     EpisodeDispatcher,
+    EpisodeEffort,
     TurnGeneration,
     bind_episode_effort,
+    describe_exception,
+    generate_turn,
+    is_context_overflow,
+    is_engine_fault,
     step_context_from_generation,
     validate_thinking_budget_scope,
 )
@@ -45,6 +59,10 @@ DEFAULT_REQUEST_TIMEOUT_S = 180.0
 # ``info`` keys a persisted trajectory leaves out: the row payload and the raw tool-call log, which the
 # messages already carry; ``_``-prefixed grading stamps (hidden tests, checker source) go with them.
 _SERIALIZED_INFO_DROP = frozenset({"tool_calls", "context"})
+# The sample-record key of an episode that lost a generation on the driver's side past every retry: it
+# carries no verdict. Stamped on the trajectory under the private key, which the serializer drops.
+GENERATION_ERROR_KEY = "generation_error"
+_DRIVER_FAULT_KEY = "_driver_fault"
 
 
 def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
@@ -102,8 +120,9 @@ def write_trajectories_jsonl(path: str, meta: dict[str, Any], results: list[dict
     """Write a run's trajectories to ``path`` as JSONL, returning the episode count.
 
     Line 1 is a ``{"type": "meta", ...}`` record; each following line is a ``{"type": "episode", ...}``
-    with one sample's messages and grading verdict, addressable by ``index`` and dataset ``id``.
-    Episodes present only when ``collect_results`` ran with ``collect_trajectories=True``."""
+    with one sample's messages and grading verdict, addressable by ``index`` and dataset ``id``, and
+    :data:`GENERATION_ERROR_KEY` naming the failure of a sample that carries no verdict (``None`` on a
+    scored one). Episodes present only when ``collect_results`` ran with ``collect_trajectories=True``."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     count = 0
     with open(path, "w") as fh:
@@ -118,6 +137,7 @@ def write_trajectories_jsonl(path: str, meta: dict[str, Any], results: list[dict
                     "sample_index": i,
                     "reward": s.get("reward"),
                     "success": s.get("success"),
+                    GENERATION_ERROR_KEY: s.get(GENERATION_ERROR_KEY),
                     "stats": s.get("stats"),
                 }
                 traj = s.get("trajectory")
@@ -157,6 +177,57 @@ def require_answers(env: BaseEnvironment, examples: list[dict[str, Any]], source
         )
 
 
+def _is_terminal_for_eval(exc: BaseException) -> bool:
+    """Give-up predicate of the eval's turn retries: everything but an engine fault is terminal here.
+
+    The OpenAI client has already retried the transport (connection errors, 408/409/429, 5xx) under its
+    own ``max_retries``; the engine fault it cannot tell from a client error is the one left to retry.
+    """
+    return not (isinstance(exc, APIStatusError) and is_engine_fault(exc.status_code, exc.message))
+
+
+def _is_request_fault(exc: BaseException) -> bool:
+    """Whether a generation failed on the request the episode itself built: the conversation outgrew the
+    served context (:func:`is_context_overflow`), or a turn outran ``request_timeout`` on every client
+    retry. Both follow the episode's own length, so the sample is graded on what it earned. Any other
+    failure is the driver's, a rejected key, an unknown model or route and a malformed request among
+    them, and the sample carries no verdict."""
+    if isinstance(exc, APITimeoutError):
+        return True
+    return isinstance(exc, APIStatusError) and is_context_overflow(exc.status_code, exc.message)
+
+
+async def _request_turn(
+    client: AsyncOpenAI,
+    messages: str | list[dict[str, Any]],
+    tools: list[dict] | None,
+    rollout: RolloutConfig,
+    effort: EpisodeEffort,
+) -> TurnGeneration:
+    """One generation request for the turn ``rollout`` caps, as the turn the environment steps with."""
+    resp = await generate_openai_response(
+        model=rollout.model_name or NOT_GIVEN,
+        user_message=messages,
+        temperature=rollout.temperature,
+        max_tokens=rollout.max_tokens,
+        top_p=rollout.top_p,
+        custom_client=client,
+        tools=tools,
+        request_timeout=rollout.request_timeout,
+        extra_body=generation_control_fields(rollout, effort.level, effort.thinking_budget),
+    )
+    # The same stamp the training rollout uses, so an eval treats a turn cut off at the token cap the
+    # way training does instead of grading the fragment.
+    return TurnGeneration(
+        text=resp.answer or "",
+        tool_calls=serialize_tool_calls(resp.tool_calls),
+        reasoning=resp.reasoning or "",
+        tokens=resp.completion_tokens or 0,
+        finish_reason=get_finish_reason(resp, completion_tokens=resp.completion_tokens, max_tokens=rollout.max_tokens),
+        token_ids=resp.token_ids,
+    )
+
+
 async def run_episode(
     env: BaseEnvironment,
     prompt: str | list[dict[str, Any]],
@@ -168,8 +239,10 @@ async def run_episode(
     """Drive one episode: ``env.reset`` → (generate → ``env.step``)* until done; return the trajectory.
 
     ``env.reset``/``env.step`` run in a worker thread because submit/tool handlers block on sandboxed
-    execution; offloading keeps the event loop free so episodes overlap. A failed generation ends the
-    episode early with whatever reward it accrued. ``rollout.model_name`` unset means the endpoint
+    execution; offloading keeps the event loop free so episodes overlap. A turn runs under the training
+    rollout's retry policy (:func:`generate_turn`); a generation that still fails ends the episode
+    early, stamped :data:`EPISODE_ERROR_KEY`, and also :data:`_DRIVER_FAULT_KEY` unless the request
+    itself caused it (:func:`_is_request_fault`). ``rollout.model_name`` unset means the endpoint
     serves exactly one model.
     """
     # Bound through the same helper as the training rollout, so the level and its implied budget match
@@ -201,6 +274,7 @@ async def run_episode(
         finish_reasons: list[str | None] = []
         completion_tokens = 0
         generation_error: str | None = None
+        driver_fault = False
 
         for _ in range(env.max_turns):
             if step.done:
@@ -208,38 +282,22 @@ async def run_episode(
             # The engine cap this turn: the level's budget, or under the episode scope what it has left.
             turn_rollout = replace(episode_rollout, max_thinking_tokens=effort.turn_thinking_cap(reasoning_spent))
             try:
-                resp = await generate_openai_response(
-                    model=rollout.model_name or NOT_GIVEN,
-                    user_message=step.observation,
-                    temperature=rollout.temperature,
-                    max_tokens=episode_rollout.max_tokens,
-                    top_p=rollout.top_p,
-                    custom_client=client,
-                    tools=tools,
-                    request_timeout=rollout.request_timeout,
-                    extra_body=generation_control_fields(turn_rollout, effort.level, effort.thinking_budget),
+                gen = await generate_turn(
+                    partial(_request_turn, client, step.observation, tools, turn_rollout, effort),
+                    rollout,
+                    retry_on=(APIStatusError,),
+                    giveup=_is_terminal_for_eval,
+                    log_prefix="eval episode",
                 )
             except Exception as exc:
                 # Unlogged, this break yields an all-zero eval indistinguishable from a bad endpoint.
                 logger.warning("generation failed, ending episode early", exc_info=True)
-                generation_error = f"{type(exc).__name__}: {exc}"
+                generation_error = describe_exception(exc)
+                driver_fault = not _is_request_fault(exc)
                 break
 
-            finish_reason = get_finish_reason(
-                resp, completion_tokens=resp.completion_tokens, max_tokens=episode_rollout.max_tokens
-            )
-            finish_reasons.append(finish_reason)
-            completion_tokens += resp.completion_tokens or 0
-            # The same stamp the training rollout uses, so an eval treats a turn cut off at the token
-            # cap the way training does instead of grading the fragment.
-            gen = TurnGeneration(
-                text=resp.answer or "",
-                tool_calls=serialize_tool_calls(resp.tool_calls),
-                reasoning=resp.reasoning or "",
-                tokens=resp.completion_tokens or 0,
-                finish_reason=finish_reason,
-                token_ids=resp.token_ids,
-            )
+            finish_reasons.append(gen.finish_reason)
+            completion_tokens += gen.tokens
             reasoning_spent += effort.spend_of(gen, rollout.reasoning_end_token_id)
             steps = await episode.step([eid], [gen.text], [step_context_from_generation(context, gen)])
             step = steps[0]
@@ -254,6 +312,9 @@ async def run_episode(
                 traj.info[EPISODE_ERROR_KEY] = generation_error
             steps = await episode.finalize_truncated([eid])
             traj = steps[0].trajectory
+            # After the close: the environment drops the private info keys when it finalizes.
+            if driver_fault:
+                traj.info[_DRIVER_FAULT_KEY] = generation_error
 
         effort.stamp(traj, reasoning_spent)
         if traj is not None:
@@ -290,8 +351,10 @@ async def collect_results(
     way training does.
 
     Each result is ``{"group", "id", "samples": [{"reward", "success", "stats"}, ...]}``. A sample is a
-    success when reward ≥ ``success_threshold``; ``collect_trajectories=True`` adds a ``"trajectory"``
-    per sample for :func:`write_trajectories_jsonl`.
+    success on the environment's own solve verdict where it reports one (:func:`_solved`), else when
+    reward ≥ ``success_threshold``. A sample whose generation failed on the driver's side past every
+    retry carries :data:`GENERATION_ERROR_KEY` and no verdict (``reward`` and ``success`` are ``None``).
+    ``collect_trajectories=True`` adds a ``"trajectory"`` per sample for :func:`write_trajectories_jsonl`.
 
     The contract passes the trainer's thinking-scope gate first, so a gap refuses the run rather than
     scoring every episode that lands on it as an error sample.
@@ -312,22 +375,27 @@ async def collect_results(
                     traj = await run_episode(env, example["prompt"], example["context"], client, rollout=rollout)
                 reward = traj.total_reward if traj and traj.done else 0.0
                 stats = (traj.info.get("_eval_stats") if traj else None) or {}
-                rec: dict[str, Any] = {"reward": reward, "success": reward >= success_threshold, "stats": stats}
-                if traj is not None and traj.episode_invalid:
+                rec: dict[str, Any]
+                if traj is not None and _DRIVER_FAULT_KEY in traj.info:
+                    # The episode stopped on the driver's fault, not the policy's: what it earned before
+                    # is no verdict, so the sample leaves the scores, counted apart.
+                    rec = {"reward": None, "success": None, "stats": stats}
+                    rec[GENERATION_ERROR_KEY] = traj.info[_DRIVER_FAULT_KEY]
+                elif traj is not None and traj.episode_invalid:
                     # A grade with no signal (a grader outage, a dead judge) is an error row, not a
                     # score: the training baseline drops it. The eval keeps the row and scores it
                     # zero, so `error` is what separates a failed grade from a genuine miss.
-                    rec.update(
-                        reward=0.0,
-                        success=False,
-                        error=str(traj.info.get(EPISODE_INVALID_REASON_KEY, "episode invalid")),
-                    )
+                    reason = str(traj.info.get(EPISODE_INVALID_REASON_KEY, "episode invalid"))
+                    rec = {"reward": 0.0, "success": False, "stats": stats, "error": reason}
+                else:
+                    rec = {"reward": reward, "success": _solved(env, traj, reward, success_threshold), "stats": stats}
                 if collect_trajectories:
                     rec["trajectory"] = serialize_trajectory(traj)
                 return rec
             except Exception as e:  # one bad episode must not sink the batch
-                logger.warning(f"Eval episode failed (id={example.get('id')}): {e}")
-                return {"reward": 0.0, "success": False, "stats": {}, "error": str(e)}
+                reason = describe_exception(e)
+                logger.warning(f"Eval episode failed (id={example.get('id')}): {reason}")
+                return {"reward": 0.0, "success": False, "stats": {}, "error": reason}
 
         samples = await asyncio.gather(*[sample() for _ in range(num_samples)])
         return {"group": example.get("group"), "id": example.get("id"), "samples": samples}
@@ -335,19 +403,47 @@ async def collect_results(
     return await asyncio.gather(*[one(ex) for ex in examples])
 
 
+def _solved(env: BaseEnvironment, traj: Trajectory | None, reward: float, success_threshold: float) -> bool:
+    """Whether a sample solved its task: the environment's solve verdict (:func:`solve_verdict`, the flag
+    training's ``outcome/solve_rate`` averages) where it reports one, else ``reward >= success_threshold``.
+
+    A shaped total mixes the objective with prices a solve does not depend on — a tool-error or
+    length-cutoff penalty sinks a solved episode below the threshold, a submission bonus lifts a partial
+    one over it — so it decides only where the environment has no verdict of its own.
+    """
+    verdict = solve_verdict(env.rollout_metrics(traj)) if traj is not None else None
+    return reward >= success_threshold if verdict is None else verdict
+
+
+def _mean_or_nan(values: Iterable[float]) -> float:
+    """The mean, or NaN when a bucket has nothing left to average (every sample a generation error)."""
+    values = list(values)
+    return statistics.mean(values) if values else math.nan
+
+
 def summarize(rows: list[dict[str, Any]], num_samples: int) -> dict[str, float]:
-    """Mean reward, ``success@1`` (first sample), ``success@k`` (any sample) and the ``invalid`` sample
-    count over ``rows``."""
+    """Mean reward, ``success@1`` (first scored sample), ``success@k`` (any scored sample), and the
+    ``invalid`` and ``generation_errors`` sample counts over ``rows``.
+
+    A generation-error sample carries no verdict and leaves every score; each score reads the rows with
+    a scored sample left, one row set for all, so ``success@1`` never exceeds ``success@k``. A score
+    with no sample left reads NaN.
+    """
     if not rows:
         # Raise with the actual cause; the bare StatisticsError from mean([]) does not name it.
         raise ValueError("summarize() got no results — the eval produced zero episodes (empty dataset or all failed)")
-    mean_reward = statistics.mean(statistics.mean(s["reward"] for s in r["samples"]) for r in rows)
-    pass1 = statistics.mean(float(r["samples"][0]["success"]) for r in rows)
-    # Samples scored 0 with no signal (an invalid grade, a run that raised): kept in the means, counted apart.
-    invalid = sum(1 for r in rows for s in r["samples"] if "error" in s)
-    out = {"n": len(rows), "mean_reward": mean_reward, "success@1": pass1, "invalid": invalid}
+    scored = [[s for s in r["samples"] if GENERATION_ERROR_KEY not in s] for r in rows]
+    graded = [samples for samples in scored if samples]
+    out = {
+        "n": len(rows),
+        "mean_reward": _mean_or_nan(statistics.mean(s["reward"] for s in samples) for samples in graded),
+        "success@1": _mean_or_nan(float(samples[0]["success"]) for samples in graded),
+        # Samples scored 0 with no signal (an invalid grade, a run that raised): kept in the means, counted apart.
+        "invalid": sum(1 for r in rows for s in r["samples"] if "error" in s),
+        "generation_errors": sum(len(r["samples"]) - len(samples) for r, samples in zip(rows, scored, strict=True)),
+    }
     if num_samples > 1:
-        out[f"success@{num_samples}"] = statistics.mean(float(any(s["success"] for s in r["samples"])) for r in rows)
+        out[f"success@{num_samples}"] = _mean_or_nan(float(any(s["success"] for s in samples)) for samples in graded)
     return out
 
 
@@ -361,7 +457,7 @@ def report(results: list[dict[str, Any]], *, num_samples: int, title: str, group
     line = f"overall: n={overall['n']}  mean_reward={overall['mean_reward']:.3f}  success@1={overall['success@1']:.3f}"
     if k > 1:
         line += f"  success@{k}={overall[f'success@{k}']:.3f}"
-    lines.append(f"{line}  invalid={overall['invalid']}")
+    lines.append(f"{line}  invalid={overall['invalid']}  generation_errors={overall['generation_errors']}")
 
     stats = [s["stats"] for r in results for s in r["samples"] if s.get("stats")]
     if stats:

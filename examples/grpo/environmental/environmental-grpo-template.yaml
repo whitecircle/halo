@@ -42,8 +42,8 @@ vllm_group_port: 51216  # NCCL group port for weight sync
 rollout_connection_timeout: 120.0
 sync_weights_every_n_steps: 1
 # model_name: null         # model name sent in the rollout requests; null = model_name_or_path
-# request_timeout: 120.0   # seconds per rollout-server HTTP call
-# episode_timeout: 1200.0  # wall-clock deadline for one rollout episode in seconds; must stay below the NCCL watchdog
+# request_timeout: 120.0   # seconds of engine-serving time per rollout-server HTTP call (sync pauses credited)
+# episode_timeout: 1200.0  # one rollout episode's deadline in seconds of engine-serving time; below the NCCL watchdog
 # max_retries: 3           # retries after a failed rollout-server request (total attempts = max_retries + 1)
 # retry_base_wait: 1.0     # base wait in seconds for the exponential backoff between retries
 

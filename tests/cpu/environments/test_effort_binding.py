@@ -117,7 +117,7 @@ async def _drive_actor(env_cls, context, config, generations=None):
     actor.__init__(actor_id=0, env_type=(env_cls, {}), env_config={})
     seen = []
 
-    async def fake_client(timeout):
+    async def fake_client():
         return None
 
     async def fake_generate(client, url, messages, cfg, reasoning_effort=None, reasoning_budget=None):

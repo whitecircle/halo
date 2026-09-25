@@ -16,7 +16,6 @@ import shutil
 import tempfile
 
 from transformers.dynamic_module_utils import custom_object_save, get_relative_imports
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import CONFIG_NAME, cached_file
 
 from src.models.loading.config_levels import config_export_ready
@@ -25,6 +24,7 @@ from src.models.moe_balancing import (
     exports_source_config_schema,
     legacy_per_layer_config_keys,
 )
+from src.models.structure import transformers_model_class
 
 logger = logging.getLogger(__name__)
 
@@ -40,25 +40,16 @@ _CONFIG_KEY_ABSENT = object()
 def hf_architecture_name(model) -> str | None:
     """The class name a checkpoint's ``config.architectures`` should carry, or None.
 
-    First ``PreTrainedModel`` subclass in the MRO that is not torch's FSDP2 in-place class swap
-    (``FSDP<Name>``, module ``torch.*``); None for a non-HF carrier (a sentence-transformers shell,
-    a PP stage), whose config came from elsewhere and whose caller decides.
+    The name of :func:`~src.models.structure.transformers_model_class`; None for a non-HF carrier (a
+    sentence-transformers shell, a PP stage), whose config came from elsewhere and whose caller
+    decides.
 
     Re-derived because the load-time value is the hub's class, which a task-head swap invalidates: a
     reward run would ship ``*ForCausalLM`` and every ``architectures[0]``-keyed consumer (vLLM, TGI,
     ``Auto*``) would serve the wrong head.
     """
-    return next(
-        (
-            cls.__name__
-            for cls in type(model).__mro__
-            if isinstance(cls, type)
-            and issubclass(cls, PreTrainedModel)
-            and cls is not PreTrainedModel
-            and not cls.__module__.startswith("torch")
-        ),
-        None,
-    )
+    model_class = transformers_model_class(model)
+    return None if model_class is None else model_class.__name__
 
 
 def restore_model_type(config, output_dir: str) -> None:

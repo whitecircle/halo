@@ -1,5 +1,6 @@
 """Cohere2 MoE (Command A+) family contract: registrations, routing parity, balancing, CP rotary,
-packing isolation, and the PP logit-scale gate.
+packing isolation. The head-path logit scale is pinned with the other transform families in
+``tests/cpu/models/test_head_transform.py`` and ``tests/cpu/parallelism/test_pp_head_transform.py``.
 
 The family is native in transformers 5.14 (``cohere2_moe`` text backbone; the Command A+ checkpoint
 wraps it as ``cohere2_vision``). Its forward carries ``position_ids`` both into mask construction
@@ -29,7 +30,6 @@ from src.distributed.context_parallel.layers.registry import CP_SUPPORTED_ATTENT
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.distributed.pipeline_parallel.split import _reject_unapplied_logit_scale
 from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
 from src.models.moe_balancing import (
     accepts_native_balancing_bias,
@@ -291,18 +291,6 @@ def test_dense_packed_isolation():
         f"packed documents attend across each other ({drift:.2e}) — the position_ids-driven packed "
         f"mask regressed for cohere2_moe"
     )
-
-
-def test_pp_rejects_an_unapplied_logit_scale():
-    """The PP stage head computes the bare matmul, so a non-unit Cohere ``logit_scale`` must be
-    refused loudly (unit scale passes — Command A+ ships 1.0 and is instead refused by the generic
-    tied-embeddings gate)."""
-    scaled = _tiny_model(tie_word_embeddings=False)
-    with pytest.raises(ValueError, match="logit_scale"):
-        _reject_unapplied_logit_scale(scaled)
-
-    unit = _tiny_model(tie_word_embeddings=False, logit_scale=1.0)
-    _reject_unapplied_logit_scale(unit)
 
 
 if __name__ == "__main__":

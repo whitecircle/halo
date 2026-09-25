@@ -66,9 +66,10 @@ exit hangs.
 - **Lazy environment build**: the env is constructed inside the actor on its first episode. A broken
   environment constructor surfaces as per-episode errors, not a startup crash.
 
-The actor's episode loop shares the per-turn step-context stamp (`step_context_from_generation`,
-`src/environments/episode.py`) and the effort binding with the offline eval driver (`run_episode` in
-`src/environments/eval_runner.py`), but keeps its own aiohttp session, backoff with retryable-4xx
+The actor's episode loop shares three things with the offline eval driver (`run_episode` in
+`src/environments/eval_runner.py`), all in `src/environments/episode.py`: the per-turn step-context
+stamp (`step_context_from_generation`), the effort binding, and the turn retry policy
+(`generate_turn`: backoff, engine-abort re-issue). It keeps its own aiohttp session, retryable-4xx
 classification, and engine token/routing capture.
 
 A turn the engine **aborts** (SGLang's sync pause drops every in-flight request) is re-issued for the
@@ -80,9 +81,12 @@ semaphore of `max_concurrent_rollouts` (default 4× the actor count the rank act
 to at least that count; so with `ray_address` set it derives from `num_rollout_workers //
 world_size`, not from `num_rollout_workers`).
 
-Each episode carries an `episode_timeout` deadline that counts engine-serving time only (a
-weight-sync pause is credited back: [Rollout Servers](rollout-servers.md#weight-sync)); on expiry the
-task is canceled and the episode returns as a masked row.
+Each episode carries an `episode_timeout` deadline and each request a `request_timeout` deadline, both
+counting engine-serving time only (a weight-sync pause is credited back:
+[Rollout Servers](rollout-servers.md#weight-sync)). The actors read the pause off a zero-CPU clock
+actor that the rank's `RolloutManager` feeds at every sync; a request whose deadline reads a dead clock
+actor fails its episode into a masked row, and the actor restarts with no pause on record. On episode
+expiry the task is canceled and the episode returns as a masked row.
 
 The cancel is `ray.cancel(force=False)`, since Ray forbids force-cancel on async-actor tasks, so a
 hard-wedged task is not killable. Any actor failure, `RayActorError` included, also becomes a masked

@@ -34,13 +34,18 @@ argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline
 - **Stage, split, and loss seams.** `src/distributed/pipeline_parallel/` holds the stage module and
   stage↔global naming contract (`stage.py`), the per-family `PPModelSpec` registry with the
   layer-partition math and the model-structure gates — tied embeddings, live MTP tail layers,
-  `layer_types`-period split offsets (`split.py`) — the mid-chain stream forwards for the
-  hyper-connection families, whose inter-layer activation is the `hc_mult`-widened
-  `[batch, seq, hc_mult, hidden]` stream (DeepSeek-V4, GLM-5 Next — `stage_adapters.py`), the
+  `layer_types`-period split offsets, a head path the last stage cannot reproduce (`split.py`) —
+  the mid-chain stream forwards for the hyper-connection families, whose inter-layer activation is
+  the `hc_mult`-widened `[batch, seq, hc_mult, hidden]` stream (DeepSeek-V4, GLM-5 Next — `stage_adapters.py`), the
   pure-tensor loss/label helpers and the `PPLossAdapter` contract (`losses.py`), the group
   constructors (`groups.py`), and the stage-aware safetensors lazy loader (`lazy_loader.py`). The
   batch contract (`PP_BATCH_PAD_VALUES` in `runtime.py`) pins the keys and pad values a pipeline
   consumes.
+- **Head transform.** The last stage applies what the family's `*ForCausalLM.forward` does around
+  `lm_head` — Cohere's `logit_scale`, Gemma's softcap, Inkling's μP division and vocabulary cut — to
+  the logits it returns and inside the fused head loss. It is the transform the chunked GRPO
+  log-probs apply, verified against the family's forward (`src/models/head_transform.py`); a family
+  whose forward it does not reproduce is refused by the split gate on every rank.
 - **Checkpoint seam.** `save_pp_checkpoint` (`src/distributed/checkpoint/save.py`) defines the PP
   checkpoint layout: one complete-tensor safetensors shard per stage under the unsplit model's
   global names plus a merged standard HF index, loadable via plain `from_pretrained`; the
