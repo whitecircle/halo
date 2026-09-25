@@ -115,7 +115,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
 
 | Script | Description |
 |--------|-------------|
-| `scripts/inference/generation/openai_batched_generation.py` | Async batched generation with OpenAI-compatible API |
+| `scripts/inference/generation/openai_batched_generation.py` | Async batched generation with OpenAI-compatible API. Every request goes out as plain text, so rows carrying a structured `response_format` (any `type` but `text`) are refused before generation; the reward-model scripts honor one |
 | `scripts/inference/generation/dataset_deduplication.py` | FAISS-based semantic deduplication. Keyed on `--text_field` alone: two rows with the same text collapse to one however they differ elsewhere, so an images column does **not** make them distinct — deduplicate a VLM dataset before pairing its images, or on a field that carries the difference |
 | `scripts/inference/reward_model/rm_rejection_sampling.py` | vLLM + reward model preference dataset generation. A hypothesis the endpoint cut at `--max_gen_tokens` is dropped rather than scored as if it had finished, and a row left with fewer than two usable hypotheses is skipped; both counts are in the run summary |
 | `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_gen_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished |
@@ -212,7 +212,8 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     That is `merge_ep_shards.py`, `unfuse_moe_experts.py`, `quantize_to_lowp.py`, `merge_models.py`,
     `merge_peft_adapters.py`, `convert_to_bf16.py`, `reattach_vision_tower.py` (on both of its
     sources), `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, and
-    `patch_vocab.py`, whose pre-save sweep would otherwise leave nothing behind on a failed save.
+    `patch_vocab.py`, whose save would overwrite the source's shards in place with no undo, and
+    whose post-save sweep then deletes every source shard the save did not rewrite.
 
     `prepare_dataset.py` is not one of them: it materializes into a temp directory and publishes
     with a staged swap, so its `--output` is guarded by `--overwrite`, not by this refusal.
