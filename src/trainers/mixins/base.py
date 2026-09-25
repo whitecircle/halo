@@ -47,6 +47,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
 from src.distributed.runtime import (
     barrier,
+    collective_device,
     get_global_rank,
     get_global_world_size,
     is_global_main_process,
@@ -389,11 +390,6 @@ class DistributedTrainerMixin(
         """Whether accelerate manages DDP (MULTI_GPU, no custom parallelism): accelerate launcher
         detected without FSDP enabled."""
         return is_accelerate_launch() and not is_accelerate_fsdp_launch() and self._no_custom_parallelism()
-
-    def _enable_input_require_grads(self, model: nn.Module) -> None:
-        """Make embedding outputs require grad so gradient checkpointing keeps a grad path when the
-        embeddings are frozen (PEFT)."""
-        model.enable_input_require_grads()
 
     def _disable_dropout_for_onpolicy(self):
         """Force dropout off for on-policy RL. Must be called after ``_setup_distributed_modes`` so
@@ -1601,8 +1597,7 @@ class DistributedTrainerMixin(
         if not rank_consensus(measurable)[0]:
             return True
 
-        device = getattr(self.args, "device", None) or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        count = torch.tensor([local_batches], device=device, dtype=torch.long)
+        count = torch.tensor([local_batches], device=collective_device(), dtype=torch.long)
         cmin = count.clone()
         cmax = count.clone()
         dist.all_reduce(cmin, op=dist.ReduceOp.MIN)

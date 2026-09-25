@@ -7,11 +7,12 @@ ep_scope "node" keeps EP within one NVLink domain, "global" spans domains over R
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Optional, get_args
+from typing import Literal, Optional, get_args
 
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.expert_parallel.config import (
     EPConfig,
+    ExpertLoraSpec,
     ep_dispatch_capacity,
     padded_wire_hidden,
     reject_expert_lora_with_expert_tp,
@@ -55,9 +56,6 @@ from src.models.moe_balancing import (
     resolve_expert_ffn_shard_width,
     resolve_router_topk,
 )
-
-if TYPE_CHECKING:
-    from .expert_parallel.config import ExpertLoraSpec
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +279,7 @@ class ParallelismConfig:
     fp32_output_conversion: bool = False
 
     # Native grouped-LoRA on EP experts; assigned before load_distributed_model. None = no expert LoRA.
-    expert_lora: Optional["ExpertLoraSpec"] = None
+    expert_lora: Optional[ExpertLoraSpec] = None
 
     # On save, fold the grouped-LoRA delta into the base experts instead of a standalone adapter.
     merge_expert_lora_on_save: bool = False

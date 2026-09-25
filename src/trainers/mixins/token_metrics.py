@@ -1,4 +1,4 @@
-"""Per-batch token accounting: loss-contributing tokens (the ``train/total_output_tokens`` series)
+"""Per-batch token accounting: loss-contributing tokens (the ``num_unmasked_output_tokens_seen`` series)
 and the attention-score work each batch's documents cost.
 
 Two phases so nothing syncs the host on the per-micro-batch path: each step folds this rank's counts

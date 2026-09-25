@@ -232,7 +232,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         )
 
     def _get_unwrapped_model(self) -> nn.Module:
-        """Return the backbone the mixin needs (EP grad-norm, TP FSDP2 setup, etc.).
+        """The SentenceTransformer's transformer backbone (``auto_model``), for the backbone-specific
+        introspection the base contract limits this to; whole-model work uses ``_top_level_model``.
 
         SentenceTransformer is an ``nn.Sequential`` whose first module is the
         Transformer (carrying ``.auto_model``), followed by Pooling/Normalize.

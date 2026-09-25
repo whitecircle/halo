@@ -26,7 +26,12 @@ from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from src.distributed.runtime import reject_across_ranks, reject_divergent_settings
 from src.models.moe_balancing import config_has_experts
 from src.models.patches.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
-from src.models.structure import DECODER_LAYER_LIST_ATTRS, EMBEDDING_HEAD_MARKERS, is_normalization_module
+from src.models.structure import (
+    DECODER_LAYER_LIST_ATTRS,
+    EMBEDDING_HEAD_MARKERS,
+    is_kbit_quantized,
+    is_normalization_module,
+)
 
 logger = get_logger(__name__)
 
@@ -514,12 +519,7 @@ def prepare_peft_model(model, peft_config, args, *, merge_existing: bool = True)
             return model, False
         model = model.merge_and_unload()
 
-    quantized = (
-        getattr(model, "is_loaded_in_8bit", False)
-        or getattr(model, "is_loaded_in_4bit", False)
-        or getattr(model, "is_quantized", False)
-    )
-    if quantized:
+    if is_kbit_quantized(model):
         prepare_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
         gc_kwargs = getattr(args, "gradient_checkpointing_kwargs", None)
         if gc_kwargs is not None:

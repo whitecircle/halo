@@ -80,7 +80,7 @@ from src.models.segment_markers import (
     segment_marker_kwargs,
     segment_markers_for,
 )
-from src.models.structure import resolve_tokenizer
+from src.models.structure import is_kbit_quantized, resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.pp_gates import reject_pp_peft
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
@@ -320,20 +320,14 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         self._eos_token_ids = resolve_eos_token_ids(tokenizer, getattr(model, "config", None))
 
         self._peft_has_been_casted_to_bf16 = False
+        # Gradient checkpointing over frozen embeddings needs grad-requiring inputs. The hook must
+        # precede the PEFT wrap, whose k-bit preparation installs its own on a quantized model.
         if peft_config is not None:
-            # Same three flags prepare_peft_model tests: a torchao/quanto model sets only is_quantized,
-            # and missing it here re-enables the input-requires-grad hook the k-bit prep installs.
-            quantized = (
-                getattr(model, "is_loaded_in_8bit", False)
-                or getattr(model, "is_loaded_in_4bit", False)
-                or getattr(model, "is_quantized", False)
-            )
-            # The input-requires-grad hook must precede the PEFT wrap (which covers the k-bit path).
-            if not quantized and args.gradient_checkpointing:
-                self._enable_input_require_grads(model)
+            if not is_kbit_quantized(model) and args.gradient_checkpointing:
+                model.enable_input_require_grads()
             model, self._peft_has_been_casted_to_bf16 = prepare_peft_model(model, peft_config, args)
         elif args.gradient_checkpointing:
-            self._enable_input_require_grads(model)
+            model.enable_input_require_grads()
 
         if args.disable_dropout:
             disable_dropout_in_model(model)
@@ -980,7 +974,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         Order matters: the lower percentile runs before ``min_log_prob``, so the floor can only raise
         the tail further. Masked positions are never touched, and the input is left unmodified.
         """
-        clipped = per_token_logps.clone()  # avoid in-place mutation
+        clipped = per_token_logps
         chosen_valid = loss_mask & is_chosen
         rejected_valid = loss_mask & ~is_chosen
 

@@ -51,6 +51,10 @@ EMBEDDING_HEAD_MARKERS: tuple[str, ...] = (
 PEFT_BASE_MODEL_PREFIX = "base_model.model."
 _CP_WRAPPER_MODULE_LEVEL = "model."
 
+# The model-level flags a quantized load sets: bitsandbytes sets the 8/4-bit pair, torchao/quanto only
+# ``is_quantized``. peft's k-bit preparation keys on all three.
+_KBIT_QUANTIZED_FLAGS = ("is_loaded_in_8bit", "is_loaded_in_4bit", "is_quantized")
+
 
 def unwrap_framework_wrappers(model: torch.nn.Module) -> torch.nn.Module:
     """Peel accelerate/DDP/FSDP **and** ``torch.compile``, leaving toolkit wrappers in place.
@@ -122,6 +126,12 @@ def model_has_quantized_params(model: torch.nn.Module) -> bool:
     storage (QLoRA). Shared by the FSDP2 routing in the trainer mixin and the GRPO weight-sync
     construction gate."""
     return any(not p.dtype.is_floating_point for p in model.parameters())
+
+
+def is_kbit_quantized(model: torch.nn.Module) -> bool:
+    """Whether ``model`` was loaded quantized (any of :data:`_KBIT_QUANTIZED_FLAGS`), the condition
+    ``prepare_peft_model`` runs peft's k-bit preparation on."""
+    return any(getattr(model, flag, False) for flag in _KBIT_QUANTIZED_FLAGS)
 
 
 def unwrapped_module_name(name: str) -> str:

@@ -8,7 +8,6 @@ from __future__ import annotations
 import gc
 import os
 import time
-from typing import TYPE_CHECKING
 
 import torch
 from accelerate.logging import get_logger
@@ -39,7 +38,7 @@ from src.distributed.expert_parallel.patching import create_ep_buffers, patch_mo
 from src.distributed.filesystem import fs_aware_main_first, sequential_load_within_node
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
-from src.distributed.parallelism_config import accelerate_launch_rejection
+from src.distributed.parallelism_config import ParallelismConfig, accelerate_launch_rejection
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.runtime import (
     fs_aware_load_rank,
@@ -80,9 +79,6 @@ from src.models.patches.attention import (
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-
-if TYPE_CHECKING:
-    from src.distributed.parallelism_config import ParallelismConfig
 
 logger = get_logger(__name__)
 

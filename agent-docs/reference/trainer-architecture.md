@@ -15,7 +15,7 @@ composes its seven sibling sub-mixins:
 | `GradientSyncMixin` | The per-mode FSDP2 wrap, the QLoRA / deferred-EP / TP-replicated grad sweeps, the EP/DTensor-aware global-norm clips |
 | `ParallelismValidationMixin` | Mode and LoRA/EP/TP compatibility checks |
 | `PipelineTrainerMixin` | PP hooks, inert unless `pp_size > 1` |
-| `TokenMetricsMixin` | The loss-token counter behind `train/total_output_tokens`: an on-device per-step accumulator, gathered once per log |
+| `TokenMetricsMixin` | The loss-token counter behind `num_unmasked_output_tokens_seen`: an on-device per-step accumulator, gathered once per log |
 
 Each is a class because it reads live trainer state; the methods a test or a caller reaches as
 `DistributedTrainerMixin.<name>` resolve through the MRO unchanged. `CheckpointingMixin`'s zero-arg
