@@ -123,8 +123,8 @@ Notes that come straight from the Makefile recipes:
 
 ## 2. Raw detached `docker run` template (when `make` doesn't fit)
 
-This is the incantation from `CLAUDE.md`, parameterized. Use it for non-SFT
-scripts, custom flags, disjoint-GPU runs, or long detached jobs. Fill in `<job>`
+This is the incantation from `CLAUDE.md`, parameterized. Use it for custom flags,
+disjoint-GPU runs, or long detached jobs. Fill in `<job>`
 (container + log name), `<nproc>`, `<script>`, `<config>`, and any extra flags.
 `$D` is the scratch volume, **resolved dynamically — never hardcode a path**: a
 directory's name does not prove its capacity.
@@ -195,7 +195,7 @@ container's ephemeral filesystem and destroyed by `--rm`, and without the HF cac
 
 | GPU | Arch | Image |
 |-----|------|-------|
-| B200 / B300 / GB200 / GB300 | SM100 / SM103 (Blackwell) | `halo:blackwell` — FA4 (default) + FA2 + DeepEP, no FA3 |
+| B200 / B300 (x86_64 hosts; no arm64 image for GB200/GB300) | SM100 / SM103 (Blackwell) | `halo:blackwell` — FA4 (default) + FA2 + DeepEP, no FA3 |
 | H100 / H200 | SM90 (Hopper) | `halo:hopper` — FA2 + FA3 + DeepEP, no FA4 |
 
 Default to **blackwell** (the Makefile `IMAGE` default); confirm the host arch with `nvidia-smi`.

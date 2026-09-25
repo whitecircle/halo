@@ -127,8 +127,8 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/environments/base.py`, `episode.py`, `registry.py` | `agent-docs/training-methods/grpo/environments/README.md`, `custom-environments.md` |
-| `src/environments/envs/protocols/` (native, react, mcp) | `agent-docs/training-methods/grpo/environments/{native-tool-use,react}.md` |
-| `src/environments/envs/tasks/coding/` (swe, code_contests, grading, datasets), `tasks/qa.py` | `agent-docs/training-methods/grpo/environments/{swe-environment,code-contests,mcp,benchmarks}.md` |
+| `src/environments/envs/protocols/` (native, react, mcp) | `agent-docs/training-methods/grpo/environments/{native-tool-use,react,mcp}.md` |
+| `src/environments/envs/tasks/coding/` (swe, code_contests, grading, datasets), `tasks/qa.py` | `agent-docs/training-methods/grpo/environments/{swe-environment,code-contests,benchmarks}.md` |
 | `src/environments/sandbox/` (in-process + remote code execution) | `agent-docs/training-methods/grpo/environments/sandbox.md` |
 | `src/environments/tools/` | `agent-docs/training-methods/grpo/environments/{native-tool-use,swe-environment}.md` |
 | `src/environments/engine_wire.py` (the rollout request wire format: stop tokens, `thinking_token_budget`, reasoning effort) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/async-grpo/rollouts.md` |
@@ -141,7 +141,7 @@ changes.
 |---|---|
 | `src/configs/`, `src/args/` (config/arg dataclasses) | `agent-docs/reference/configuration-reference.md` + the method page that owns the config |
 | `src/training/parser.py` (H4ArgumentParser, toolkit defaults, the unknown-key raise) | `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
-| `src/env.py` (every `HALO_`/`DIST_`/`VLLM_`/`SGLANG_` knob and its default) | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
+| `src/env.py` (the `env_*` readers, `HALO_DATA_ROOT` / `data_path`) and any `HALO_`/`DIST_`/`VLLM_`/`SGLANG_` knob wherever it is read | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
 | `src/log.py` (root logging setup, CLI verbosity, `warn_once`) | `agent-docs/reference/debugging.md` |
 | `src/cli.py` (`halo launch` / `halo run` surface, tool aliases) | `README.md` quick start, `agent-docs/reference/scripts-reference.md` |
 
@@ -164,9 +164,12 @@ changes.
 | `scripts/environments/**` (env eval runners, their shared `_common.py` flags/output writer, trajectory re-grading, coding-dataset prep) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/environments/evaluation.md` |
 | `scripts/_common.py` (the checkpoint tools' shared flags: shard cap, Hub source block, `--trust_remote_code`) | `agent-docs/reference/scripts-reference.md` |
 | `scripts/after_training/merge_ep_shards.py` | `agent-docs/reference/checkpoints.md` |
-| `scripts/after_training/{quantize_to_lowp,convert_to_bf16}.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
+| `scripts/after_training/quantize_to_lowp.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
+| `scripts/after_training/convert_to_bf16.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/merge_models.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md` |
 | `Dockerfile*`, `docker-compose*`, `docker/sglang/patches/` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files and server patches (EFA overlays included) also `agent-docs/infrastructure/rollout-servers.md` |
+| `docker/vllm/patches/`, `docker/vllm/parity/`, `docker/vllm/plugins/` (server build patches, config-schema parity gate, gpt-oss parser plugins) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/infrastructure/docker.md`; plugins also `agent-docs/models/gpt-oss.md` |
+| `docker/nccl_pin.py` (the NCCL pin every image reads from `uv.lock`, the DeepEP-V2 floor) | `agent-docs/infrastructure/docker.md` |
 | `docker/efa/install_efa_userspace.sh` (the EFA userspace every image shares) | `agent-docs/infrastructure/docker.md` (RDMA networking), `agent-docs/infrastructure/rollout-servers.md` (Servers on other nodes), `agent-docs/parallelism/multi-node.md` (RDMA fabrics) |
 | AWS / S3 auth, `src/data/sources/s3_client.py` paths | `agent-docs/infrastructure/aws-auth.md`, `agent-docs/data/s3-utilities.md` |
 | DeepEP install / NVSHMEM / CDMC notes | `agent-docs/infrastructure/deepep.md` |

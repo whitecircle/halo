@@ -10,7 +10,7 @@ description: >-
   cp_size / tp_size / expert_tp_size / pp_size / nvlink_domain_size; asks "which parallelism
   for this MoE / dense model / seq len / 8-GPU node / multi-node" or how to compute
   data_parallel_size; or hits a parallelism error/hang (DeepEP combine deadlock,
-  NCCL hang, "must divide", "node-local", "not supported", ep4 crash ~30s,
+  NCCL hang, "must divide", "node-local", "not supported", ep4 "DeepEP dispatch groups" rejection,
   ParallelismConfig raise). Wrong advice wastes multi-GPU runs — this is the gate.
 allowed-tools:
   - Read
@@ -68,8 +68,8 @@ describes a validator or contract, never a launchable topology
 1. **Dense (non-MoE) model?** EP/ETP do nothing — use **TP** (memory/large hidden)
    or **CP** (long seq), else plain FSDP2 DDP (`dp_size = world_size`).
 2. **MoE model?** Start with **EP** (orthogonal to DP, keeps full DP). For finer
-   expert sharding add **TP** (EP+TP) or **ETP** (EP+ETP) — never both. For long
-   sequences on MoE use **EP+CP** (node-local EP only).
+   expert sharding add **ETP** (EP+ETP); EP+TP shards attention only, and TP+ETP is rejected.
+   For long sequences on MoE use **EP+CP** (node-local EP only).
 3. **Long sequence, OOM on activations?** add **CP** (Ulysses, node-local). CP
    reduces DP by `cp_size`.
 4. **Weights/attention too big for one GPU?** **TP** (node-local DTensor). TP
@@ -87,8 +87,7 @@ describes a validator or contract, never a launchable topology
 - `ep_group_size` must divide its scope and not exceed it: `nvlink_domain_size` for
   `node`; for `global`, `stage_world_size` (`world_size // pp_size`), which it must
   also tile as equal contiguous per-domain blocks.
-- EP+TP: `ep_size` must be a multiple of `tp_size`. Node-local EP+TP uses
-  `ep_size == tp_size`; cross-node EP uses `k*tp_size`.
+- EP+TP: `ep_size` must be a multiple of `tp_size`, so each EP group spans whole TP groups.
 - `world_size % gpus_per_node == 0` and `world_size % nvlink_domain_size == 0`.
 
 ## REJECT THESE (verdict = do not run)
@@ -149,7 +148,7 @@ describes a validator or contract, never a launchable topology
   first, but it is the gate a PP-capable trainer will be declared against.
 
 When rejecting, cite the exact reason and offer the nearest valid alternative
-(e.g. "ep_size=4 on 8 GPUs deadlocks → use ep_size=2, ep_size=8 (the whole domain), or
+(e.g. "ep_size=4 on 8 GPUs is rejected at config time → use ep_size=2, ep_size=8 (the whole domain), or
 ep4+etp2; EP+TP does not help — attention TP leaves `ep_group_size` at 4").
 
 ## Sources of truth

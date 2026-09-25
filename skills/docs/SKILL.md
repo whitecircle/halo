@@ -14,9 +14,9 @@ paths:
 # docs — author and maintain the Halo docs tree
 
 The `agent-docs/` tree is plain GitHub-rendered markdown (each section's `README.md` is its
-overview page). Two rules from `CLAUDE.md` govern this work: **Docs first** (docs are the source
-of truth for how the code behaves) and **Doc maintenance** (a significant `src/` change must
-update the owning doc page). This skill does both, to the house voice.
+overview page). Two rules from `CLAUDE.md` govern this work: **Docs first** (check `agent-docs/`
+before searching the code) and **Keep docs current** (a significant `src/` change updates its
+owning doc page). This skill does both, to the house voice.
 
 ## Workflow
 

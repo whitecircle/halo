@@ -44,7 +44,7 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   a loss curve that tracks the fp32 master. Auto-OFF under replicated DDP.
 - **CDMC=1** — baked into the image env; free win on ep8, neutral dense/ep2.
 - **Atomic-free expert permute** — auto for high-top_k MoE (`top_k ≥ ep_size`); win grows with sequence
-  length. gpt-oss (top-4) stays on the cheaper `index_add_` path.
+  length. gpt-oss (top-4) stays on the cheaper `index_add_` path at EP8.
 
 ## Throughput flow (raise tok/s/GPU)
 - **MoE/EP, any shape →** push **seq × batch as high as memory allows** first — EP at low token
@@ -74,12 +74,12 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   tens of GB at 32k at near-CE throughput; SFT-only, disables entropy logging, not CP-compatible.
 - **MoE activation OOM →** keep **GC on** (roughly half the GC-off activation footprint, and what makes
   32k fit at all — pure ep8 GC-off OOMs there) and/or **raise EP degree** (more ranks = less expert
-  memory/GPU; ep8 keeps ~4.2B local vs ep2 ~11.4B for gpt-oss-20b).
+  memory/GPU).
 - **Optimizer-state OOM →** AdamWBF16 (auto) is already half of fp32 AdamW's state. For more,
   `optim: flash_adamw` (quantized moments, convergence matches AdamW; needs `flashoptim`) — tens of GB
   at 70B+.
 - **Want exact fp32 on dense params with headroom →** `fp32_non_ep_params: true` (dense params fp32,
-  experts stay bf16+SR).
+  experts stay bf16+SR); refused on an `ep_size=1` MoE whose experts FSDP shards (the default).
 - **Fit on a small/consumer GPU →** **QLoRA**: far less memory than full FT and faster than bf16 LoRA
   (the 4-bit base is bandwidth-bound). With FLCE a Qwen3-8B 32k run fits a 24 GB GPU.
   Under EP, LoRA targets attention **plus** native grouped expert adapters (ETP is the

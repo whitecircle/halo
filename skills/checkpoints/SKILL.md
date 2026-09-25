@@ -31,18 +31,24 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 
 ## Two things people get wrong (read first)
 
-- **Resume EP/ETP/EP+TP/EP+CP/CP: point `model_name_or_path` at the gathered checkpoint dir.** Those
-  modes rebuild the model at `__init__` (EP fuses experts to 3-D, CP wraps attention in Ulysses), so
-  the gathered HF checkpoint can't be loaded back into the transformed tree — resume does **not**
-  reload weights. It does restore `trainer_state.json`, the LR scheduler from `scheduler.pt`, LoRA
-  adapters, wrapper-level trained params, the router-balancing biases, and the **optimizer state from
-  the per-rank shards when the topology fingerprint matches** (`OptimizerStateFingerprint`); a
-  mismatch warm-restarts instead. Point `model_name_or_path` elsewhere and the loader **refuses the
-  resume** rather than continuing on the base weights (`loader.py`); only an adapter-only checkpoint,
-  which ships no base weights to check against, still resumes quietly. `load_best_model_at_end` is
-  refused the same way under EP/CP full fine-tuning — export the best checkpoint directly. (TP-only
-  and dense FSDP2/DDP DO reload weights via `load_full_state_dict`; PP takes its own `_load_pp_stage`
-  path.)
+- **Resume: set `resume_from_checkpoint: true` (or a `checkpoint-N` path) and re-run the same
+  command; leave `model_name_or_path` at the base.** The scripts repoint the policy's weights at the
+  checkpoint themselves (`resolve_resume_weights_source`, `src/training/environment.py`) under
+  EP/ETP/EP+TP/EP+CP/CP/TP and, at the default `use_grouped_gemm: true`, every run, dense included
+  (an adapter-only checkpoint keeps the base and restores the adapter). The base keeps feeding the
+  DPO/KTO/SDPG reference and the dataset-compat check, so repointing `model_name_or_path` yourself
+  moves the reference onto trained weights. The model loads the
+  trained weights at construction and the loader skips the re-read; it restores `trainer_state.json`,
+  the LR scheduler from `scheduler.pt`, LoRA adapters, wrapper-level trained params, the
+  router-balancing biases, and the **optimizer state from the per-rank shards when the topology
+  fingerprint matches** (`OptimizerStateFingerprint`); a mismatch warm-restarts instead. Only a
+  `use_grouped_gemm: false` run with no EP/ETP/CP/TP reloads weights, via `load_full_state_dict`;
+  PP takes its own `_load_pp_stage` path. A model built from anything but the checkpoint (a custom
+  script) makes the loader **refuse the resume** under EP/CP and TP+DP rather than continue on the base
+  weights (`loader.py`); only an adapter-only checkpoint, which ships no base weights to check
+  against, still resumes quietly. `load_best_model_at_end` is refused under EP/CP full fine-tuning
+  and TP+DP — export the best checkpoint directly. Owner:
+  `agent-docs/reference/checkpoints.md#resuming-training`.
 - **A per-rank sharded checkpoint is NOT directly loadable.** `load_full_state_dict` refuses
   `metadata.format` `ep_sharded` and raises pointing at the merge tool. Run the merge first.
 
@@ -51,11 +57,11 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 | Trained with | Gathered save (default) | If you used the sharded option | To get one HF checkpoint |
 |---|---|---|---|
 | Dense FSDP2 / DDP | loadable | — | use directly |
-| LoRA / QLoRA (any mode) | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf) |
+| LoRA / QLoRA (any mode) | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
 | TP-only | loadable | — (no per-rank TP save) | use directly |
 | EP — every family (each layer class in `src/distributed/expert_parallel/layers/` declares its own `HF_MODEL_TYPES`; read them there, and `supported_ep_merge_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
 | CP / EP+CP | loadable | **rejected** — `save_sharded_ep` raises under Ulysses attention | use gathered directly |
-| ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — EP+TP and plain `ep2`-on-8 alike), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`validate_ep_sharded_save`, re-checked at save) | use gathered directly |
+| ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — EP+TP and plain `ep2`-on-8 alike), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), Step-3.7 Flash (`_EXPORTS_HUB_NAMESPACE`), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`validate_ep_sharded_save`, re-checked at save) | use gathered directly |
 | PP *(not producible — PP unavailable)* | one shard per stage + merged index, loadable | — | use directly |
 
 Extra normalizers: **`convert_to_bf16.py`** (fp32→bf16, keeps norms fp32), **`quantize_to_lowp.py`**
@@ -91,7 +97,7 @@ After a merge, confirm the output loads and has no leftover shard keys:
 ```bash
 python -c "from transformers import AutoModelForCausalLM as M; m=M.from_pretrained('<out>', trust_remote_code=True); print('loaded', sum(p.numel() for p in m.parameters()))"
 # MoE for vLLM: grep the index for the per-expert keys that family's server loader reads
-python -c "import json; ix=json.load(open('<out>/model.safetensors.index.json')); print(ix.get('metadata',{}))"
+python -c "import json; ix=json.load(open('<out>/model.safetensors.index.json')); print(ix.get('metadata',{}).get('format'), [k for k in ix['weight_map'] if '.shard_' in k][:5] or 'no shard keys')"
 ```
 
 ## Sources of truth
@@ -103,7 +109,8 @@ read the actual file before you assert or act. Save/load orchestration lives in
 incl. PP), `write.py` (the shared streaming writer every gathered save funnels through),
 `loader.py` (every resume path), `fingerprint.py` (the optimizer-shard topology gate),
 `optimizer.py` (the per-rank optimizer shards + LR scheduler), `peft.py` (`restore_adapters`),
-`context.py` / `coordination.py` (the rank-uniform predicates the ladder dispatches on).
+`context.py` (the trainer-state snapshot, mode flags included, the savers and loader read),
+`coordination.py` (the rank consensus shared by the resume paths).
 Per-mode mechanics:
 `src/distributed/expert_parallel/saving.py`, `expert_parallel/expert_weights.py`,
 `tensor_parallel/checkpoint.py`, `src/checkpoint/` (`format.py` layout + dtype, `config_export.py` the
