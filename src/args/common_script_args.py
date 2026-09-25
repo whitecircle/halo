@@ -6,13 +6,9 @@ from src.args.validation import RangeValidatedConfig
 from src.data.pipeline.tokenizer_backend import TokenizerBackend
 from src.env import torch_trace_dir
 from src.models.moe_balancing import BalancingMode
+from src.training.parser import is_null_string
 
 _DEFAULT_PROJECT = "default-project"
-
-# ``project_name`` is annotated ``str``, and the parser converts these spellings to ``None`` only on
-# Optional fields, so on the CLI they survive as literal text and would name the run's tracking
-# project. Compared lowercased, against the same spellings the parser's own null table uses.
-_NULL_SPELLINGS = frozenset({"none", "null"})
 
 
 @dataclass
@@ -155,40 +151,13 @@ class CommonScriptArguments(RangeValidatedConfig):
     moe_balancing: BalancingMode = field(
         default="auto",
         metadata={
-            "help": "MoE router balancing method. One of: "
-            "'auto' (default) — resolve per-model to bias_update on any of three signals: a router "
-            "carries a balancing_biases buffer (e.g. Zaya); the family's EP wrappers sever the "
-            "aux-loss path while accepting the bias (e.g. DeepSeek-V4); or the model's forward "
-            "never declares output_router_logits while a wrapper accepts the bias (e.g. GLM-4 MoE "
-            "Lite, LFM-2) — but only where the bias lands in checkpoint-EXPORTED state a serving "
-            "engine loads; where only a transient side-buffer would carry it (Mistral-4, Cohere2 "
-            "MoE, multimodal Qwen3.5/3.6) auto resolves to none with a warning, never silently to "
-            "an unexportable bias. Otherwise aux_loss for MoE, none for dense; "
-            "'bias_update' — DeepSeek-V3 sign update landing in the family's own checkpoint slot "
-            "(GPT-OSS router.bias, LFM-2 expert_bias, GLM-4/Laguna/DeepSeek-V4/Inkling "
-            "e_score_correction_bias, Bailing expert_bias, Zaya balancing_biases), so the exported "
-            "model serves exactly as trained. Forces router_aux_loss_coef=0 to avoid "
-            "double-balancing; raises when nothing on the model would carry the bias (Gemma 4, or a "
-            "run that builds no EP wrappers at all) AND when the family has no exportable slot "
-            "(Qwen3, Qwen3.5/3.6, Mistral-4, Cohere2 MoE) — use bias_update_transient there; "
-            "'bias_update_transient' — the same sign update on families WITHOUT an exportable "
-            "slot, held in a trainer-only side-buffer: balancing works during training, but every "
-            "exported checkpoint serves WITHOUT the bias (near-tied top-k picks flip between "
-            "trainer and server). An explicit opt-in; raises on families whose slot exports "
-            "natively; "
-            "'aux_loss' — keep the model's native switch-style aux loss at the config's "
-            "router_aux_loss_coef (forces output_router_logits=True; the term reaches the loss only "
-            "on trainers that add it — SFT and KTO — and trains the routers under gradient "
-            "checkpointing as without it; warns and stays off if router_aux_loss_coef<=0 or absent; "
-            "raises if the model's forward never declares output_router_logits, since the term "
-            "could never reach the loss); "
-            "'none' — no balancing intervention. "
-            "NOT available on the on-policy weight-sync RL scripts (online GRPO, "
-            "environmental GRPO): the routing bias is not forwarded by the vLLM weight sync "
-            "(parameters only — an adopted native slot is a buffer), so it would diverge "
-            "trainer↔generator routing and both bias modes are downgraded to 'none'. aux_loss is "
-            "inert there too (a policy-gradient loss never adds it), so those runs have NO router "
-            "balancing at all — including Zaya and DeepSeek-V4, which balance only via bias_update."
+            "help": "MoE router balancing: 'auto' (default; resolved per model), 'bias_update' "
+            "(DeepSeek-V3 sign update into the family's own checkpoint slot; raises where the family "
+            "has none), 'bias_update_transient' (the same update in a trainer-only side-buffer no "
+            "export carries), 'aux_loss' (the model's switch-style aux loss at "
+            "router_aux_loss_coef) or 'none'. Both bias modes are downgraded to 'none' on the "
+            "weight-sync RL scripts. Per-family resolution and slots: "
+            "agent-docs/training-methods/callbacks.md#moe-balancing-modes."
         },
     )
     router_balancing_rate: float = field(
@@ -260,7 +229,8 @@ class CommonScriptArguments(RangeValidatedConfig):
         """
         super()._validate_ranges()
         project = self.project_name
-        if not isinstance(project, str) or not project.strip() or project.strip().lower() in _NULL_SPELLINGS:
+        # Annotated ``str``, so the parser leaves a null spelling as literal text on the CLI.
+        if not isinstance(project, str) or not project.strip() or is_null_string(project):
             raise ValueError(
                 f"project_name must be a non-empty string and not a null spelling (it becomes "
                 f"WANDB_PROJECT / CLEARML_PROJECT), got {project!r}. Omit the key — from the YAML "
