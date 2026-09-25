@@ -1,7 +1,7 @@
 """Launch specs for the GPU test suite.
 
-GPU tests are external ``torchrun`` scripts (each ends in ``sys.exit(main())``), so
-pytest cannot read ``nproc`` / markers / timeout from inside them. This manifest maps
+GPU tests are external ``torchrun`` scripts (each ends in its ``gpu_test_main`` entry, or a
+``sys.exit(main())``), so pytest cannot read ``nproc`` / markers / timeout from inside them. This manifest maps
 each script (path relative to ``tests/gpu/``) to its launch spec; ``tests/gpu/conftest.py``
 reads it and generates one pytest node per ``(script, args)`` with the right markers,
 process count and timeout. The launcher shells out ``torchrun --nproc_per_node=<nproc>``
@@ -57,6 +57,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _GPU_DIR = Path(__file__).parent
+# Leading tag on every per-rank scratch dir a GPU script allocates (``setup_cache_dirs``). The root
+# conftest sweeps leaked dirs by this spelling alone, so it never matches another program's dirs in a
+# shared TMPDIR. Kept here, a torch-free module, because the launcher session must not import ``src``.
+SCRATCH_DIR_TAG = "halo-test-"
 
 
 @dataclass(frozen=True)
