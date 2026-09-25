@@ -25,7 +25,8 @@ from torch.distributed import distributed_c10d as c10d
 import src.distributed.nccl.clients.vllm as vllm_module
 import src.distributed.nccl.transport.stateless_group as stateless_group_module
 import src.distributed.nccl.transport.torch_group as torch_group_module
-from src.distributed.nccl.clients.base import _get_ip, _is_loopback
+from src.distributed.nccl.addresses import is_loopback
+from src.distributed.nccl.clients.base import _get_ip
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 
@@ -142,7 +143,7 @@ def test_the_listener_binds_the_advertised_address(client, engine_requests, adve
     expected = "127.0.0.1"
     if advertise_nic:
         expected = _get_ip()
-        if _is_loopback(expected):
+        if is_loopback(expected):
             pytest.skip("no default route: this host has no NIC address to advertise")
         client.group_host = expected
 

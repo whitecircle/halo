@@ -28,13 +28,13 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from urllib3.util.retry import Retry
 
+from src.distributed.nccl.addresses import is_loopback
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
 from src.env import env_flag, env_positive_int, env_str
 
 logger = logging.getLogger(__name__)
 
 
-_LOOPBACK_HOSTS = {"127.0.0.1", "0.0.0.0", "::1", "localhost"}
 _ALL_INTERFACES = "0.0.0.0"
 _WEIGHT_SYNC_BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
 # Bailing spellings whose checkpoints declare a model class neither pinned engine registers; each
@@ -200,13 +200,9 @@ def _get_ip() -> str:
             return "127.0.0.1"
 
 
-def _is_loopback(host: str) -> bool:
-    return host in _LOOPBACK_HOSTS or host.startswith("127.")
-
-
 def _is_local_address(host: str) -> bool:
     """True when ``host`` is a bindable address of this machine (covers same-host-by-routable-IP)."""
-    if _is_loopback(host):
+    if is_loopback(host):
         return True
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -588,7 +584,7 @@ class BaseWeightSyncClient:
             # Same-host groups stay on loopback: firewalls drop hairpin traffic on the external NIC.
             master_address = "127.0.0.1" if _is_local_address(self.host) else _get_ip()
 
-        if _is_loopback(master_address) and not _is_local_address(self.host):
+        if is_loopback(master_address) and not _is_local_address(self.host):
             raise RuntimeError(
                 f"{self.BACKEND_NAME} server {self.base_url} is on a remote host ({self.host}) but the "
                 f"NCCL weight-sync group address resolved to loopback ({master_address}). The server's "
@@ -635,7 +631,7 @@ class BaseWeightSyncClient:
         if (
             bind_address == _ALL_INTERFACES
             or not _is_local_address(bind_address)
-            or (_is_loopback(bind_address) and not _is_local_address(self.host))
+            or (is_loopback(bind_address) and not _is_local_address(self.host))
         ):
             raise RuntimeError(
                 f"{self.BACKEND_NAME} weight-sync group address {master_address} (resolves to "

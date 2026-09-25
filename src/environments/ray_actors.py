@@ -21,7 +21,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from src.configs.rollout_config import RolloutConfig
-from src.distributed.nccl.clients.base import _is_loopback
+from src.distributed.nccl.addresses import is_loopback
 from src.environments.base import EPISODE_ERROR_KEY, Trajectory
 from src.environments.engine_wire import build_payload, capture_generation_tokens, capture_routing_mask
 from src.environments.episode import (
@@ -560,7 +560,7 @@ class RolloutManager:
         """
         urls = self.server_urls
         hosts = [urlparse(u if "://" in u else f"http://{u}").hostname or "" for u in urls]
-        if not multinode or not any(_is_loopback(host) for host in hosts):
+        if not multinode or not any(is_loopback(host) for host in hosts):
             return
         backend = self.rollout_config.backend
         logger.warning(
