@@ -26,6 +26,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch.profiler import ProfilerActivity, profile
 from transformers import CONFIG_MAPPING
+from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 
 from tests.common.utils import load_script_module
 
@@ -289,8 +290,6 @@ _TINY_QWEN35 = {
 
 
 def _build_tiny_qwen35(out_dir: Path, seed: int) -> None:
-    from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
-
     torch.manual_seed(seed)
     config = Qwen3_5MoeTextConfig(**_TINY_QWEN35, layer_types=["full_attention"] * _TINY_QWEN35["num_hidden_layers"])
     Qwen3_5MoeForCausalLM(config).to(torch.bfloat16).save_pretrained(out_dir, safe_serialization=True)
@@ -300,8 +299,6 @@ def test_end_to_end_linear_merge_qwen3_5():
     """Merge two tiny Qwen3.5 checkpoints (linear 0.5/0.5), reload, verify average + a forward pass.
     Also pins that resume sidecars planted beside the tokenizer source do NOT ship: they describe
     one input run's state, and the merged artifact has no such run."""
-    from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM
-
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         a, b, out = Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         _build_tiny_qwen35(a, seed=0)
