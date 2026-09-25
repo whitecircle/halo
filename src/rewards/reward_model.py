@@ -10,15 +10,10 @@ import httpx
 from transformers import AutoTokenizer
 
 from src.rewards.samples import ScoringSample, scored_messages
-from src.rewards.scoring import Scorer, ScoreResult
+from src.rewards.scoring import PROBE_SAMPLE, Scorer, ScoreResult
 from src.rewards.spec import RewardModelTerm
 
 logger = logging.getLogger(__name__)
-
-_PROBE_SAMPLE = ScoringSample(
-    prompt=[{"role": "user", "content": "Reply with the single word: ready"}],
-    completion=[{"role": "assistant", "content": "ready"}],
-)
 
 
 class ServedRewardModel(Scorer):
@@ -133,7 +128,7 @@ class ServedRewardModel(Scorer):
         """Score a one-line probe through a fresh client; a request, shape or template failure raises."""
         client = self._create_client()
         try:
-            result = (await self._score_batch(client, [_PROBE_SAMPLE]))[0]
+            result = (await self._score_batch(client, [PROBE_SAMPLE]))[0]
         finally:
             await client.aclose()
         if result.score is None:

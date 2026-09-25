@@ -446,6 +446,22 @@ def test_verify_refuses_a_non_finite_weight(fmt, poison):
             quantize_checkpoint(src, out, fmt, verify=True)
 
 
+def test_verify_fails_past_the_format_tolerance(monkeypatch, tmp_path):
+    """A relerr past the format's own block-scaled error is structural (usually the contraction axis):
+    ``--verify`` must fail the run, not log a WARN at INFO under a success exit."""
+    monkeypatch.setattr(_quantize_to_lowp, "_VERIFY_RELERR_TOL", {"mxfp8": 0.0})
+    src = tmp_path / "src"
+    src.mkdir()
+    weight = torch.randn(64, 128, dtype=torch.bfloat16) * 0.02
+    save_file({"model.layers.0.mlp.down_proj.weight": weight}, os.path.join(src, "model.safetensors"))
+    (src / "config.json").write_text('{"model_type": "qwen3"}')
+
+    with pytest.raises(ValueError, match="down_proj.weight.*past the mxfp8 tolerance"):
+        quantize_checkpoint(str(src), str(tmp_path / "out"), "mxfp8", verify=True)
+    written = {path.name for path in (tmp_path / "out").iterdir()}
+    assert not written & {"config.json", "quantization_config.json"}, f"a refused export must not load: {written}"
+
+
 def _plant_previous_run(out_dir: str, *, single: bool, index_shards: tuple[str, ...] = ()) -> None:
     """Leave a previous quantization run's weight files in the output directory."""
     os.makedirs(out_dir, exist_ok=True)
@@ -538,6 +554,27 @@ def test_keep_window_refuses_two_interleaved_block_numberings():
         # exports: the guard must not become a blanket refusal of multi-stack checkpoints.
         quantize_checkpoint(src, out, "mxfp8")
         assert "model.mtp.layers.0.mlp.gate_proj.weight_packed" in load_file(os.path.join(out, "model.safetensors"))
+
+
+def test_an_unreadable_config_is_refused_before_any_write(tmp_path):
+    """A truncated ``config.json`` must not read as "no model_type": that skips the MoE expert gate
+    above, quantizes every shard, and fails only at the manifest stamp with a half-written output
+    directory. The config is read ahead of the output directory, so the refusal writes nothing."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    src.mkdir()
+    save_file(
+        {
+            "model.layers.0.mlp.gate_proj.weight": torch.randn(64, 64, dtype=torch.bfloat16),
+            "model.layers.0.mlp.experts.w13_weight": torch.randn(4, 128, 64, dtype=torch.bfloat16),
+        },
+        os.path.join(src, "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+    (src / "config.json").write_text('{"model_type": "qwen3_moe"')
+
+    with pytest.raises(json.JSONDecodeError):
+        quantize_checkpoint(str(src), str(out), "mxfp8")
+    assert not out.exists(), "an unreadable config must be refused before the output directory is created"
 
 
 def test_quantize_refuses_to_write_into_its_own_input_dir():

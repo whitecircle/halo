@@ -47,7 +47,7 @@ How it works:
 
 - **File locking**: `filelock.FileLock` prevents duplicate downloads across processes.
 
-- **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache.
+- **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache. A stale tree that cannot be renamed aside (a permission error, say) raises and discards the fresh download, rather than serving the stale rows.
 
 - **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a mismatch triggers a re-download. A marker carrying no fingerprint is trusted and upgraded in place.
 
@@ -146,4 +146,5 @@ push/download only). The other flags are per command:
 | `--max-keys/-n` | list | Default 100 here, unlike `list_objects`'s 1000 |
 
 CLI `delete` removes ONE object; a non-recursive delete aimed at a prefix is refused rather than
-reported as a no-op success.
+reported as a no-op success. That refusal, a `--recursive` delete aimed at a single object, and a
+failed delete all exit non-zero; a key with nothing behind it is reported and exits 0.

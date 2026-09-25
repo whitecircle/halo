@@ -37,6 +37,7 @@ from src.data.sources.paths import METADATA_FILE, parse_dataset_destination, par
 from src.data.sources.s3_client import S3Client
 from src.log import configure_cli_logging
 from src.models.loading.tokenizer_setup import load_chat_template
+from src.models.structure import resolve_tokenizer
 
 # The rank-aware accelerate logger, at INFO: the shared data helpers this tool drives log through it,
 # and ``configure_cli_logging`` in main() attaches the handler those records reach.
@@ -361,7 +362,7 @@ def setup_vlm_processor(args):
 
     processor = AutoProcessor.from_pretrained(args.model_name, **processor_kwargs)
 
-    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    tokenizer = resolve_tokenizer(processor)
 
     apply_tokenizer_overrides(tokenizer, args)
 

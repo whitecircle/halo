@@ -43,10 +43,11 @@ EMBEDDING_HEAD_MARKERS: tuple[str, ...] = (
     "score",
 )
 
-# The module level a ``PeftModel`` inserts above the base model, and the one
-# ``UlyssesCPModelWrapper`` inserts (its ``_toolkit_inner_model_attr``). Shared by every consumer
-# that maps a live path back to the hub tree; a second copy drifts into an unresolvable key.
-_PEFT_BASE_MODEL_PREFIX = "base_model.model."
+# The module level a ``PeftModel`` inserts above the base model, in live names and saved adapter
+# keys alike, and the one ``UlyssesCPModelWrapper`` inserts (its ``_toolkit_inner_model_attr``).
+# Shared by every consumer that maps such a path back to the hub tree; a second copy drifts into an
+# unresolvable key.
+PEFT_BASE_MODEL_PREFIX = "base_model.model."
 _CP_WRAPPER_MODULE_LEVEL = "model."
 
 
@@ -113,10 +114,10 @@ def unwrapped_module_name(name: str) -> str:
     if name.startswith(f"{_CP_WRAPPER_MODULE_LEVEL}{_CP_WRAPPER_MODULE_LEVEL}"):
         name = name.removeprefix(_CP_WRAPPER_MODULE_LEVEL)
     else:
-        cp_wrapped = f"{_PEFT_BASE_MODEL_PREFIX}{_CP_WRAPPER_MODULE_LEVEL}{_CP_WRAPPER_MODULE_LEVEL}"
+        cp_wrapped = f"{PEFT_BASE_MODEL_PREFIX}{_CP_WRAPPER_MODULE_LEVEL}{_CP_WRAPPER_MODULE_LEVEL}"
         if name.startswith(cp_wrapped):
-            name = name.replace(cp_wrapped, f"{_PEFT_BASE_MODEL_PREFIX}{_CP_WRAPPER_MODULE_LEVEL}", 1)
-    return name.removeprefix(_PEFT_BASE_MODEL_PREFIX)
+            name = name.replace(cp_wrapped, f"{PEFT_BASE_MODEL_PREFIX}{_CP_WRAPPER_MODULE_LEVEL}", 1)
+    return name.removeprefix(PEFT_BASE_MODEL_PREFIX)
 
 
 def normalize_peft_param_name(name: str, peft_prefix: str) -> str | None:
@@ -129,7 +130,7 @@ def normalize_peft_param_name(name: str, peft_prefix: str) -> str | None:
     """
     if peft_prefix in name or "original_module" in name:
         return None
-    name = name.removeprefix(_PEFT_BASE_MODEL_PREFIX).replace(".base_layer", "")
+    name = name.removeprefix(PEFT_BASE_MODEL_PREFIX).replace(".base_layer", "")
     return name.replace("modules_to_save.default.", "")
 
 

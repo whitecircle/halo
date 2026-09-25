@@ -100,7 +100,7 @@ Re-save a model in BF16, optionally merging a PEFT adapter in the same pass. Fla
 `--output_dir`, `--model_type {causal_lm,classifier,base}`, `--peft`, `--merge_adapter`,
 `--device_map`, `--verify`, `--check_inference`, `--max_shard_size`, `--trust_remote_code` /
 `--no-trust_remote_code` (default **True** — a local checkpoint source; Bailing/Ling need remote code.
-`scripts/before_training/patch_vocab.py` and `scripts/before_training/convert_deepseek_v4_bf16.py`
+`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `reattach_vision_tower.py` and `reset_sinks.py`
 read a Hub-capable `--model_id`, so those default **off**).
 **Forces `LayerNorm` / any `*norm*` module back to fp32** (BF16 body + fp32 norms), matching both
 merge scripts. Applies `apply_training_sidecars` to the loaded model (see below).
@@ -122,10 +122,10 @@ speedup** — bf16 stays optimal at these shapes.
 
 ### `reset_sinks.py`
 Set every `*.sinks` param to dtype-min (neutralize the attention sink), matching the GptOss FA2-finetune
-behavior. Flags: `--input_dir` (required; local dir or HF repo id), `--output_dir` (required unless
-`--in_place`), `--in_place` (rewrites `--input_dir`, no undo — never valid for a repo id),
-`--dry_run`, plus the shared `--max_shard_size` / `--trust_remote_code`. Direct
-safetensors edit when `model.safetensors`
+behavior. Flags: `--model_id` (required; local dir or HF repo id, no `--revision`), `--output_dir`
+(required unless `--in_place`), `--in_place` (rewrites the `--model_id` directory, no undo — never
+valid for a repo id), `--dry_run`, plus the shared `--max_shard_size` / `--trust_remote_code`
+(default **off** — a Hub-capable source). Direct safetensors edit when `model.safetensors`
 exists, else `from_pretrained` + `save_pretrained` for sharded checkpoints.
 
 ### `unfuse_moe_experts.py`

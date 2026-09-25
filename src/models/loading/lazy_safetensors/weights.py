@@ -173,8 +173,8 @@ class WeightPlan:
     shard_dim: int = 0
     shard_start: int = 0
     shard_end: int = 0
-    # Hub-conversion ops applied at materialization, after the ranged read (see the op classes above);
-    # a leading ``Concat`` reads its sibling keys through the same ranged slice first.
+    # Hub-conversion ops applied at materialization, after the ranged read (the op classes in
+    # ``conversion``); a leading ``Concat`` reads its sibling keys through the same ranged slice first.
     ops: tuple = ()
     # Full extent the model expects along ``shard_dim`` (the config's expert count); 0 is unknown.
     shard_total: int = 0

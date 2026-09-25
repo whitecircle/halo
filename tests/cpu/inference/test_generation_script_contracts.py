@@ -100,6 +100,33 @@ def test_batched_generation_raises_when_every_request_failed(monkeypatch):
     assert pushed == []
 
 
+def test_batched_generation_refuses_a_per_row_response_format(monkeypatch):
+    """No request here carries a schema, so a row's ``response_format`` would be generated as plain
+    text and then popped from the record: refused before any request goes out."""
+    rows = [{**_ROWS[0], "response_format": {"type": "json_object"}}, _ROWS[1]]
+    calls, pushed = _stub_module(
+        monkeypatch, batched, rows=rows, existing=[], request_impl=lambda messages: [_response("a")] * len(messages)
+    )
+    monkeypatch.setattr(sys, "argv", list(_BATCHED_ARGV))
+
+    with pytest.raises(ValueError, match="1 of 2 rows carry a structured response_format"):
+        asyncio.run(batched.main())
+    assert calls == [] and pushed == []
+
+
+def test_batched_generation_accepts_a_plain_text_response_format(monkeypatch):
+    """``{"type": "text"}`` (the reward-model scripts' default spelling) asks for the plain text this
+    tool produces; a dataset shared with those scripts must not be refused over it."""
+    rows = [{**row, "response_format": {"type": "text", "json_schema": None}} for row in _ROWS]
+    _, pushed = _stub_module(
+        monkeypatch, batched, rows=rows, existing=[], request_impl=lambda messages: [_response("a")] * len(messages)
+    )
+    monkeypatch.setattr(sys, "argv", list(_BATCHED_ARGV))
+
+    asyncio.run(batched.main())
+    assert len(pushed) == 1 and pushed[0].num_rows == 2
+
+
 def test_one_surviving_row_is_the_other_side_of_that_boundary(monkeypatch):
     """The abort keys on EVERY request failing, so exactly one usable response still publishes:
     a guard that keyed on "any failure" would throw the run away over a single bad row."""

@@ -117,10 +117,17 @@ def patch_transformers_flash_varlen_int_seqlen() -> None:
     varlen-backward JIT compile key hashes it by tensor identity, so the backward kernel recompiles
     on every call (~190 s/step against ~10 s; the forward already coerces it). Patching the kwargs
     builder covers whichever flash fn transformers dispatches, at one ``.item()`` per call.
-    Idempotent; no-op if the private helper is renamed by a transformers upgrade.
+    Idempotent; warns and no-ops if a transformers upgrade renames the private helper.
     """
     fn = getattr(flash_utils, "_process_flash_attention_kwargs", None)
-    if fn is None or getattr(fn, "_halo_int_seqlen", False):
+    if fn is None:
+        logger.warning(
+            "transformers exposes no _process_flash_attention_kwargs on this build, so the varlen "
+            "max_seqlen cannot be handed to FA4 as an int — its varlen backward recompiles on every "
+            "step. Use the transformers release this toolkit pins."
+        )
+        return
+    if getattr(fn, "_halo_int_seqlen", False):
         return
 
     @functools.wraps(fn)
@@ -192,9 +199,19 @@ def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targ
 
     ``owner_cls`` is the class whose forward carries the tensor: the attention module itself
     (Mistral4) or the model above it (Zaya). ``stash_targets`` maps that instance to the attention
-    modules the flash interface is called with. Idempotent: ``False`` when already installed.
+    modules the flash interface is called with. ``False`` when already installed, or when the module
+    has no attention registry to re-inject through (warned: packed rows then attend across documents).
     """
     if getattr(owner_cls.forward, "_halo_packed_position_ids", False):
+        return False
+    registry = getattr(modeling_module, "ALL_ATTENTION_FUNCTIONS", None)
+    if registry is None:
+        logger.warning(
+            f"{modeling_module.__name__} exposes no ALL_ATTENTION_FUNCTIONS registry on this transformers "
+            f"build, so {owner_cls.__name__}'s packed-document isolation cannot be applied — a packed row "
+            f"would attend across document boundaries on flash attention. Train unpacked, or use the "
+            f"transformers release this toolkit pins."
+        )
         return False
 
     original_forward = owner_cls.forward
@@ -215,8 +232,7 @@ def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targ
 
     forward._halo_packed_position_ids = True
     owner_cls.forward = forward
-    registry = getattr(modeling_module, "ALL_ATTENTION_FUNCTIONS", None)
-    if registry is not None and not isinstance(registry, PositionIdsInjectingRegistry):
+    if not isinstance(registry, PositionIdsInjectingRegistry):
         modeling_module.ALL_ATTENTION_FUNCTIONS = PositionIdsInjectingRegistry(registry)
     return True
 
@@ -227,17 +243,15 @@ def patch_mistral4_flash_packed_position_ids() -> None:
     ``Mistral4Attention.forward`` declares ``position_ids`` as an explicit parameter (it feeds the
     llama-4 attention scale) and hands only ``**kwargs`` to the attention interface, so the tensor
     never reaches ``_flash_attention_forward``. The stash therefore rides the attention forward
-    itself. No-ops if the internals it hooks are renamed.
+    itself. Warns and no-ops if the internals it hooks are renamed.
     """
-    if m4 is None:
+    attn_cls = getattr(m4, "Mistral4Attention", None) if m4 is not None else None
+    if attn_cls is None:
         logger.warning(
-            "transformers ships no mistral4 modeling module on this build, so the packed-document "
-            "isolation patch cannot be applied — a packed Mistral4 row would attend across document "
-            "boundaries. Train unpacked, or use a transformers build that carries the family."
+            "transformers ships no Mistral4Attention on this build, so the packed-document isolation "
+            "patch cannot be applied — a packed Mistral4 row would attend across document boundaries. "
+            "Train unpacked, or use a transformers build that carries the family."
         )
-        return
-    attn_cls = getattr(m4, "Mistral4Attention", None)
-    if attn_cls is None or getattr(m4, "ALL_ATTENTION_FUNCTIONS", None) is None:
         return
     if install_packed_position_ids_injection(m4, attn_cls, lambda attention: (attention,)):
         logger.info("Patched Mistral4 flash attention to receive position_ids (packed-document isolation)")

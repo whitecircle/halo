@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """Tests for EfficiencyCallback. Run: python tests/cpu/callbacks/test_efficiency_callback.py"""
 
+import logging
 import sys
 
 import pytest
 import torch
 
+from src.callbacks import efficiency
 from tests.common.parallelism import make_parallelism_config
 
 # Single-process topology: a test that exercises no parallel axis still owes the callback a real
@@ -202,7 +204,6 @@ def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_pre
     from the parameter dtype charges an fp8 run against the bf16 peak and every reported utilization
     reads ~2x high (4x for fp4). nvfp4 and mxfp4 share the 4-bit MMA, hence one peak.
     """
-    from src.callbacks import efficiency
     from src.hardware import GPU_PEAK_FLOPS
 
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "B300")
@@ -214,6 +215,21 @@ def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_pre
     assert callback.state.precision == expected
     assert callback.mfu.precision == expected
     assert callback.state.gpu_peak_flops == GPU_PEAK_FLOPS["B300"].flops[expected]
+
+
+def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, caplog):
+    """A detected SKU whose table entry lacks the run's precision zeroes MFU, S-MFU and TFLOP/s for
+    the whole run; the INFO line naming the GPU must not be the only trace of it."""
+
+    monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "A100")
+    callback = efficiency.EfficiencyCallback(
+        make_parallelism_config(world_size=1, gpus_per_node=1, lowp_precision="fp8")
+    )
+    with caplog.at_level(logging.WARNING, logger=efficiency.__name__):
+        callback._initialize_metrics(MockTrainingArgs(bf16=True))
+
+    assert callback.state.gpu_peak_flops is None, "test premise: A100 has no fp8 peak"
+    assert [r for r in caplog.records if "has no fp8 peak for A100" in r.getMessage()]
 
 
 def test_get_gpu_peak_flops():
@@ -457,7 +473,6 @@ def test_compute_smfu_sparse_value():
 
 def test_compute_token_metrics_per_gpu_and_cluster(monkeypatch):
     """Per-GPU tokens = cluster/world; cluster tokens = per_gpu * data_parallel_size * cp."""
-    from src.callbacks import efficiency
     from src.callbacks.efficiency import EfficiencyCallback
 
     cb = EfficiencyCallback(make_parallelism_config(tp_size=2, world_size=4, gpus_per_node=4))
@@ -481,7 +496,6 @@ def test_compute_token_metrics_per_gpu_and_cluster(monkeypatch):
 
 def test_compute_token_metrics_cp_divides_per_gpu(monkeypatch):
     """Under CP the Trainer over-counts (full sequence per rank) → divide by cp_size."""
-    from src.callbacks import efficiency
     from src.callbacks.efficiency import EfficiencyCallback
 
     cb = EfficiencyCallback(make_parallelism_config(cp_size=2, world_size=4, gpus_per_node=4))

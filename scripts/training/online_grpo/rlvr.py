@@ -19,7 +19,7 @@ from trl import GRPOConfig, ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.mixins import RLRRArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.data.pipeline.conversation import maybe_parse_json
+from src.data.pipeline.conversation import chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.sources.loading import reject_image_columns
@@ -109,25 +109,17 @@ def main():
         prompt_data = row[args.prompt_field]
         answer_data = row.get(args.answer_field)
 
-        if isinstance(prompt_data, list):
-            # Conversational rows: inject the system prompt only when the conversation does not already
-            # open with one (matches environmental_grpo); an unconditional insert stacks two.
-            messages = list(prompt_data)
-            if args.system_prompt and not (messages and messages[0].get("role") == "system"):
-                messages.insert(0, {"role": "system", "content": args.system_prompt})
-        elif isinstance(prompt_data, str):
-            messages = []
-            if args.system_prompt:
-                messages.append({"role": "system", "content": args.system_prompt})
-            messages.append({"role": "user", "content": prompt_data})
-        else:
+        if isinstance(prompt_data, str):
+            prompt_data = [{"role": "user", "content": prompt_data}]
+        elif not isinstance(prompt_data, list):
             raise ValueError(f"Invalid prompt format: {type(prompt_data)}")
+        # The system prompt leads only a conversation that does not already open with one; an
+        # unconditional insert stacks two.
+        messages = fold_system_into_conversation(
+            list(prompt_data), args.system_prompt, model_supports_system_role=True
+        )
 
-        template_kwargs = {}
-        if args.tools_field and args.tools_field in row:
-            tools = maybe_parse_json(row[args.tools_field])
-            if tools is not None:
-                template_kwargs["tools"] = tools
+        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
         # Reasoning-effort steer ("random" → a level sampled per prompt). Single-turn, so per-prompt is
         # the per-episode analogue of the env-GRPO rollout (src/environments/base.py).
         effort = resolve_reasoning_effort(args.reasoning_effort)

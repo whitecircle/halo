@@ -1821,5 +1821,12 @@ def test_build_completion_only_labels_stops_at_config_eos_markers():
     print("  PASS: test_build_completion_only_labels_stops_at_config_eos_markers")
 
 
+def test_flattening_completion_collator_refuses_a_missing_marker():
+    """Without a response marker the completion-mask collator would train on every token while its
+    name promises completion-only loss; construction must refuse instead."""
+    with pytest.raises(ValueError, match="requires assistant_message_template"):
+        DataCollatorWithFlatteningAndCompletionMask(response_prompt_template=None, tokenizer=make_tokenizer())
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

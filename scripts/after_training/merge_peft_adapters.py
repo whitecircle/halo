@@ -179,7 +179,8 @@ Examples:
     parser.add_argument(
         "--output_dir",
         required=True,
-        help="Path to save the merged model (any model*.safetensors/index already there is removed first)",
+        help="Path to save the merged model (every model*.safetensors/index the completed save did not "
+        "produce is removed afterwards)",
     )
     parser.add_argument(
         "--task",

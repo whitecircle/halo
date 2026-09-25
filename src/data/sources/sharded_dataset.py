@@ -235,18 +235,26 @@ class ShardedDatasetLoader:
         return dataset
 
     def load(self) -> DatasetDict:
-        """Load train and test splits for this rank (missing splits are skipped)."""
+        """Load train and test splits for this rank.
+
+        A split without a shard index is skipped; a shard its index lists but the source lacks raises,
+        since skipping it would silently drop the split.
+        """
         result = DatasetDict()
 
         try:
-            result["train"] = self.load_split("train")
+            self._load_shard_index("train")
         except FileNotFoundError:
             logger.warning("Train split not found")
+        else:
+            result["train"] = self.load_split("train")
 
         try:
-            result["test"] = self.load_split("test")
+            self._load_shard_index("test")
         except FileNotFoundError:
             logger.info("Test split not found (this is often expected)")
+        else:
+            result["test"] = self.load_split("test")
 
         return result
 

@@ -42,6 +42,17 @@ _TERA = 10**12
 # Decimals every reported metric is rounded to before it reaches the logs dict.
 _DISPLAY_DECIMALS = 2
 
+# What a utilization report degrades to when the FLOPS/token or the GPU peak is unknown: zeroed so an
+# unset report cannot republish the previous step's figures.
+_UNKNOWN_UTILIZATION = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+_PRECISION_KEY_BY_DTYPE = {torch.bfloat16: "bf16", torch.float16: "fp16"}
+
+# Peak-FLOPS key per ``lowp_precision`` mode: low-precision compute decides the peak the matmuls
+# actually issue at, whatever the master weights' dtype. Both fp4 recipes (nvfp4, mxfp4) run the same
+# 4-bit MMA. ``"bf16"`` (low precision off) is absent — the dtype decides there.
+_PRECISION_KEY_BY_LOWP = {"fp8": "fp8", "fp4": "fp4", "mxfp4": "fp4"}
+
 
 def resolve_max_seq_len(*sources) -> int | None:
     """Upper bound on tokens per sequence declared across ``sources``, or None when none declares one.
@@ -182,11 +193,6 @@ def _per_step_metrics(metrics) -> dict[str, float]:
     return {name: value for name, value in vars(metrics).items() if name.startswith(("step_", "avg_"))}
 
 
-# What a utilization report degrades to when the FLOPS/token or the GPU peak is unknown: zeroed so an
-# unset report cannot republish the previous step's figures.
-_UNKNOWN_UTILIZATION = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-
 def _utilization_report(
     step_flops: float,
     step_time: float,
@@ -220,14 +226,6 @@ def _utilization_report(
         round(avg_flops_per_sec / _TERA, _DISPLAY_DECIMALS),
         *efficiency,
     )
-
-
-_PRECISION_KEY_BY_DTYPE = {torch.bfloat16: "bf16", torch.float16: "fp16"}
-
-# Peak-FLOPS key per ``lowp_precision`` mode: low-precision compute decides the peak the matmuls
-# actually issue at, whatever the master weights' dtype. Both fp4 recipes (nvfp4, mxfp4) run the same
-# 4-bit MMA. ``"bf16"`` (low precision off) is absent — the dtype decides there.
-_PRECISION_KEY_BY_LOWP = {"fp8": "fp8", "fp4": "fp4", "mxfp4": "fp4"}
 
 
 def _fp32_compute_precision() -> str:
@@ -671,8 +669,13 @@ class EfficiencyCallback(transformers.TrainerCallback):
             logger.info(f"Detected GPU: {self.state.gpu_model}, Precision: {self.state.precision}")
             if self.state.gpu_peak_flops:
                 logger.info(f"GPU Peak FLOPS: {self.state.gpu_peak_flops / _TERA:.1f} TFLOPS")
+            else:
+                logger.warning(
+                    f"GPU_PEAK_FLOPS has no {self.state.precision} peak for {self.state.gpu_model}, so MFU, "
+                    f"S-MFU and TFLOP/s are reported as 0. Add the dense peak to src/hardware.py."
+                )
         else:
-            logger.warning("Could not detect GPU model, MFU calculation may be inaccurate")
+            logger.warning("Could not detect the GPU model, so MFU, S-MFU and TFLOP/s are reported as 0.")
 
         if self.state.model_flops_per_token:
             logger.info(f"Model FLOPS/token: {self.state.model_flops_per_token / 1e12:.4f} TFLOPS")

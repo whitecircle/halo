@@ -214,16 +214,14 @@ def _read_model_types(input_dir: str) -> list[str]:
     """The ``model_type`` spellings this checkpoint declares, most specific first.
 
     Both the top level and the nested ``text_config`` are read: multimodal wrappers nest the LM config,
-    and it is the LM's family that fixes the fused-expert layout.
+    and it is the LM's family that fixes the fused-expert layout. An unreadable ``config.json`` raises:
+    read as "no family", it would skip the MoE expert gate and fail only after the whole export ran.
     """
-    cfg_path = os.path.join(input_dir, "config.json")
+    cfg_path = os.path.join(input_dir, CONFIG_NAME)
     if not os.path.isfile(cfg_path):
         return []
-    try:
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return []
+    with open(cfg_path) as f:
+        cfg = json.load(f)
     candidates = [(cfg.get("text_config") or {}).get("model_type"), cfg.get("model_type")]
     return [candidate for candidate in candidates if candidate]
 
@@ -296,7 +294,7 @@ def quantize_checkpoint(
     inc, exc = re.compile(include), re.compile(exclude)
     reject_in_place_conversion(input_dir, output_dir)
 
-    quantized, copied, skipped, max_relerr = [], 0, [], 0.0
+    quantized, copied, skipped, max_relerr, worst_relerr_name = [], 0, [], 0.0, None
     weight_axes: dict[str, int] = {}
     weight_map: dict[str, str] = {}
     total_size = 0
@@ -373,11 +371,20 @@ def quantize_checkpoint(
                         f"contains inf/NaN (max |w| = {t.float().abs().max().item()}). Fix the "
                         f"checkpoint — quantizing it produces a corrupt export."
                     )
-                max_relerr = max(max_relerr, rel)
+                if rel > max_relerr:
+                    max_relerr, worst_relerr_name = rel, name
         save_file(out_tensors, os.path.join(output_dir, shard_name), metadata={"format": "pt"})
         for key, tensor in out_tensors.items():
             weight_map[key] = shard_name
             total_size += tensor.numel() * tensor.element_size()
+
+    # Refused before the index and the config are written, so the rejected export cannot be loaded.
+    if verify and max_relerr > _VERIFY_RELERR_TOL[fmt]:
+        raise ValueError(
+            f"--verify: {worst_relerr_name!r} round-trips with relerr {max_relerr:.4f}, past the {fmt} "
+            f"tolerance {_VERIFY_RELERR_TOL[fmt]}. Beyond the format's own error the cause is structural, "
+            f"usually the wrong --contraction_axis; {output_dir} was stopped before its index and config."
+        )
 
     # Anything but a single model.safetensors needs an index so the renamed weight_packed/scale keys
     # stay discoverable. Keyed on the emitted filenames: a lone model-00001-of-00001 input would
@@ -405,12 +412,13 @@ def quantize_checkpoint(
         f"quantized {len(quantized)} weights to {fmt}; copied {copied} tensors unchanged; "
         f"skipped {len(skipped)} (contraction axis not divisible by {block})."
     )
-    if verify:
-        tol = _VERIFY_RELERR_TOL[fmt]
-        status = "OK (inherent format error)" if max_relerr <= tol else "WARN — check --contraction_axis"
-        logger.info(f"round-trip dequant max relerr = {max_relerr:.4f} (warn above {tol}) — {status}")
     if skipped:
         logger.info(f"  left high-precision (not block-divisible): {skipped[:8]}{' …' if len(skipped) > 8 else ''}")
+    if verify:
+        logger.info(
+            f"round-trip dequant max relerr = {max_relerr:.4f} (tolerance {_VERIFY_RELERR_TOL[fmt]}) — "
+            f"OK (inherent format error)"
+        )
 
 
 def _write_manifest(
@@ -507,7 +515,11 @@ def parse_args():
         default=0,
         help="Trailing transformer blocks training kept in bf16 (lowp_keep_last_blocks).",
     )
-    p.add_argument("--verify", action="store_true", help="Report the max round-trip dequant relerr.")
+    p.add_argument(
+        "--verify",
+        action="store_true",
+        help="Report the max round-trip dequant relerr, and fail when it exceeds the format's tolerance.",
+    )
     return p.parse_args()
 
 

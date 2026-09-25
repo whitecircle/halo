@@ -167,11 +167,5 @@ def parallelism_config_from_args(
         ep_declared_max_length=int(getattr(training_config, "max_length", 0) or 0),
     )
     if allow_low_precision:
-        kwargs.update(
-            lowp_precision=dist_args.lowp_precision,
-            lowp_apply_dense_mlp=dist_args.lowp_apply_dense_mlp,
-            lowp_apply_moe_experts=dist_args.lowp_apply_moe_experts,
-            lowp_keep_first_blocks=dist_args.lowp_keep_first_blocks,
-            lowp_keep_last_blocks=dist_args.lowp_keep_last_blocks,
-        )
+        kwargs.update({name: getattr(dist_args, name) for name in _LOWP_KNOBS})
     return ParallelismConfig(**kwargs)

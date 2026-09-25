@@ -35,7 +35,7 @@ from src.checkpoint.tool_io import (
 )
 from src.models.loading.tokenizer_setup import resolve_peft_processing_class
 from src.models.moe_balancing import is_balancing_state_key
-from src.models.structure import strip_peft_adapter_segment
+from src.models.structure import PEFT_BASE_MODEL_PREFIX, strip_peft_adapter_segment
 
 logger = get_logger(__name__)
 
@@ -53,6 +53,9 @@ MERGED_ADAPTER_CONFIG_DIR = "original_adapter_config"
 EXPERT_LORA_PEFT_TYPE = "EXPERT_LORA"
 MIXED_EXPERT_LORA_PEFT_TYPE = "LORA_WITH_EP_EXPERT_LORA"
 EXPERT_LORA_PEFT_TYPES = frozenset({EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE})
+
+# What PEFT appends below the adapted module's own path in a saved key.
+_ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
 
 
 def is_expert_lora_key(key: str) -> bool:
@@ -79,17 +82,16 @@ def adapter_weight_paths(adapter_dir: str) -> tuple[str, ...]:
     return tuple(os.path.join(adapter_dir, name) for name in ADAPTER_WEIGHT_NAMES)
 
 
-def _adapter_tensor_keys(path: str) -> list[str]:
-    """The tensor names in an adapter file, without materializing its tensors."""
+def _adapter_tensor_keys(adapter_dir: str) -> list[str]:
+    """The tensor names in an adapter's first weight file present, without materializing its tensors;
+    empty when the directory holds none."""
+    path = next((path for path in adapter_weight_paths(adapter_dir) if os.path.isfile(path)), None)
+    if path is None:
+        return []
     if path.endswith(ADAPTER_SAFETENSORS_FILE):
         with safe_open(path, framework="pt") as handle:
             return list(handle.keys())
     return list(torch.load(path, map_location="cpu", weights_only=True))
-
-
-_ADAPTER_KEY_PREFIX = "base_model.model."
-# What PEFT appends below the adapted module's own path in a saved key.
-_ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
 
 
 def adapter_module_paths(adapter_dir: str) -> set[str]:
@@ -99,14 +101,10 @@ def adapter_module_paths(adapter_dir: str) -> set[str]:
     adds ``...embed_tokens.weight`` / ``...lm_head.weight``); its module is the key minus that leaf.
     """
     paths: set[str] = set()
-    for path in adapter_weight_paths(adapter_dir):
-        if not os.path.isfile(path):
-            continue
-        for key in _adapter_tensor_keys(path):
-            name = key.removeprefix(_ADAPTER_KEY_PREFIX)
-            cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
-            paths.add(name[:cut] if cut >= 0 else name.rpartition(".")[0])
-        break
+    for key in _adapter_tensor_keys(adapter_dir):
+        name = key.removeprefix(PEFT_BASE_MODEL_PREFIX)
+        cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
+        paths.add(name[:cut] if cut >= 0 else name.rpartition(".")[0])
     return paths
 
 
@@ -234,12 +232,7 @@ def assert_no_expert_lora_adapter(adapter_dir: str) -> None:
         if peft_type in EXPERT_LORA_PEFT_TYPES:
             raise ValueError(_expert_lora_merge_remedy(adapter_dir, mixed=peft_type == MIXED_EXPERT_LORA_PEFT_TYPE))
 
-    keys: list[str] = []
-    for path in adapter_weight_paths(adapter_dir):
-        if os.path.isfile(path):
-            keys = _adapter_tensor_keys(path)
-            break
-
+    keys = _adapter_tensor_keys(adapter_dir)
     expert_keys = [key for key in keys if is_expert_lora_key(key)]
     if expert_keys:
         # Unmarked but expert-shaped. Any non-expert adapter tensor means an attention PeftModel was

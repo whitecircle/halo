@@ -50,6 +50,9 @@ from src.training.script_runner import (
     run_trainer,
 )
 
+# The two column knobs KTO renames onto TRL's own spelling, as ``(knob, target)``.
+_KTO_RENAMED_FIELDS = (("completion_field", "completion"), ("label_field", "label"))
+
 
 def _reject_embedded_image_parts(dataset, completion_field: str) -> None:
     """Raise on image content parts in a dataset TRL would read as text-only.
@@ -75,10 +78,6 @@ def _reject_embedded_image_parts(dataset, completion_field: str) -> None:
         f"{{'type': 'image'}} placeholders in the messages; images_field renames any other column to "
         f"it) to take TRL's vision path, or drop the image parts and train the text."
     )
-
-
-# The two column knobs KTO renames onto TRL's own spelling, as ``(knob, target)``.
-_KTO_RENAMED_FIELDS = (("completion_field", "completion"), ("label_field", "label"))
 
 
 def _require_kto_columns(ds, args) -> None:

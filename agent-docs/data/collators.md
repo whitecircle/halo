@@ -28,9 +28,9 @@ You rarely construct these directly — `select_data_collator()` picks one from 
 Constructor notes that matter when you build one directly:
 
 - `response_prompt_template` (`str` or `List[int]`, the assistant-header template) is required for
-  `DataCollatorForCompletionOnlyLM` and `DataCollatorForCompletionOnlyLMWithPacking`. It is optional
-  for `DataCollatorWithFlatteningAndCompletionMask`, where `None` skips completion masking. An
-  **empty** template raises — it would match every position and train on all tokens.
+  `DataCollatorForCompletionOnlyLM`, `DataCollatorForCompletionOnlyLMWithPacking` and
+  `DataCollatorWithFlatteningAndCompletionMask`; the flattening one refuses `None` at construction.
+  An **empty** template raises — it would match every position and train on all tokens.
 - `tokenizer` is required for every collator except `DataCollatorWithFlattening`, which defaults it
   to `None` and never uses it.
 - `pad_to_multiple_of` is set to `cp_size` under CP; the masked-label fill value is `-100`

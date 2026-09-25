@@ -50,7 +50,7 @@ from tests.common.utils import REPO_ROOT, load_script_module
 
 # (tool, the default its input source earns). Every standalone tool that executes a checkpoint's own
 # modeling/config/tokenizer code is here, including convert_deepseek_v4_bf16 and reattach_vision_tower
-# (both reach from_pretrained/AutoConfig, which imports a remote config module). The three whose source
+# (both reach from_pretrained/AutoConfig, which imports a remote config module). The four whose source
 # is a Hub-capable --model_id are opt-in; the rest read a local checkpoint/adapter, or the run's
 # tokenizer, and default on. Tools that only stream safetensors (shard merges, unfuse_moe_experts,
 # quantize_to_lowp, convert_mistral4_bf16, convert_glm5_bf16) load no model code and expose no flag.
@@ -59,7 +59,7 @@ _TOOLS = (
     ("scripts/after_training/merge_models.py", True),
     ("scripts/after_training/merge_peft_adapters.py", True),
     ("scripts/after_training/reattach_vision_tower.py", False),
-    ("scripts/after_training/reset_sinks.py", True),
+    ("scripts/after_training/reset_sinks.py", False),
     ("scripts/before_training/convert_deepseek_v4_bf16.py", False),
     ("scripts/before_training/patch_vocab.py", False),
     ("scripts/before_training/prepare_dataset.py", True),
@@ -67,7 +67,7 @@ _TOOLS = (
 
 # Hub-source tools that thread no revision, so they must not advertise the pin. The helper's own
 # default is ``revision=True``: a tool is required to thread one until it is listed here.
-_NO_REVISION_TOOLS = frozenset({"scripts/before_training/patch_vocab.py"})
+_NO_REVISION_TOOLS = frozenset({"scripts/after_training/reset_sinks.py", "scripts/before_training/patch_vocab.py"})
 
 
 def _empty_source_dir(tmp_path: Path) -> str:

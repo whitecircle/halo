@@ -171,17 +171,55 @@ def test_unrecognized_rotary_warns_once_per_class(caplog, monkeypatch):
     caplog.set_level(logging.WARNING, logger=buffer_fixes.__name__)
     # A fresh set per arm, restored afterwards: clearing the module's own would leave a later test
     # in this worker silently un-warned.
-    monkeypatch.setattr(buffer_fixes, "_WARNED_ROTARY", set())
+    monkeypatch.setattr(buffer_fixes, "_WARNED_UNFIXED", set())
 
     fix_rotary_inv_freq(_model_with_unknown_rotaries(4))
 
     seen = [r for r in caplog.records if "_UnknownRotary" in r.message]
     assert len(seen) == 1, f"expected one line per rotary class, got {len(seen)}"
 
-    monkeypatch.setattr(buffer_fixes, "_WARNED_ROTARY", set())
+    monkeypatch.setattr(buffer_fixes, "_WARNED_UNFIXED", set())
     caplog.clear()
     fix_rotary_inv_freq(_model_with_unknown_rotaries(1))
     assert [r for r in caplog.records if "_UnknownRotary" in r.message], "anti-vacuity: it must still warn once"
+
+
+class _ConfiglessSlopeAttention(nn.Module):
+    """The Bailing slope shape with no config to read ``num_hidden_layers`` from."""
+
+    def __init__(self):
+        super().__init__()
+        self.num_heads = 4
+        self.layer_idx = 1
+        self.register_buffer("slope", torch.empty(4), persistent=False)
+
+
+class _ConfiglessLayerTypeRotary(nn.Module):
+    """A per-layer-type rotary with no config to size its tables from."""
+
+    rope_init_fns = {"full_attention": None}
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        _ConfiglessSlopeAttention(),
+        _ConfiglessLayerTypeRotary(),
+        type("Gemma4VisionRotaryEmbedding", (nn.Module,), {})(),
+    ],
+    ids=["alibi_slope", "per_layer_type_rope", "gemma4_vision_rope"],
+)
+def test_a_claimed_but_unfixable_buffer_warns(module, caplog, monkeypatch):
+    """A fixer that claims a module it cannot rebuild leaves the load's uninitialized values in
+    place; the one line naming the class is the only trace of it."""
+    caplog.set_level(logging.WARNING, logger=buffer_fixes.__name__)
+    monkeypatch.setattr(buffer_fixes, "_WARNED_UNFIXED", set())
+    model = nn.Module()
+    model.add_module("layer0", module)
+
+    finalize_loaded_model(model)
+
+    assert [r for r in caplog.records if type(module).__name__ in r.message and "Cannot recompute" in r.message]
 
 
 if __name__ == "__main__":

@@ -517,5 +517,25 @@ def test_warm_shard_cache_serves_without_aws_credentials(tmp_path):
     assert relaunched._s3_fingerprint_unavailable, "an unusable client must latch the probe off for the process"
 
 
+def test_load_raises_on_a_shard_its_index_lists_but_the_source_lacks(tmp_path):
+    """A missing shard is a broken dataset, not a missing split: ``load`` must raise, not drop train."""
+    create_test_sharded_dataset(40, 2, str(tmp_path))
+    index = ShardIndex.load(os.path.join(tmp_path, "train", SHARD_INDEX_FILE))
+    shutil.rmtree(os.path.join(tmp_path, index.shards[1].path))
+
+    loader = ShardedDatasetLoader(dataset_path=str(tmp_path), global_rank=0, world_size=1)
+    with pytest.raises(FileNotFoundError):
+        loader.load()
+
+
+def test_load_skips_a_split_without_an_index(tmp_path):
+    create_test_sharded_dataset(40, 2, str(tmp_path))
+
+    loaded = ShardedDatasetLoader(dataset_path=str(tmp_path), global_rank=0, world_size=1).load()
+
+    assert list(loaded) == ["train"]
+    assert len(loaded["train"]) == 40
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
