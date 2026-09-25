@@ -320,7 +320,8 @@ over NVLink) — which proves the rank math and the gradient algebra, not the fa
 
 An NVL72 rack spans the NVLink/NVSwitch fabric across up to 72 GPUs on ~18 OS nodes (4 GPUs each) as
 a single NVLink domain with direct GPU-to-GPU P2P across OS-node boundaries (MNNVL, 130 TB/s
-aggregate). TP, EP, and CP can run NVLink-wide with no RDMA.
+aggregate). TP, EP, and CP can run NVLink-wide with no RDMA. The rack's Grace hosts are aarch64, and
+the published images are x86_64-only ([Docker](../infrastructure/docker.md)).
 
 Here the NVLink domain exceeds the OS node, so the two units diverge: `gpus_per_node`
 (`LOCAL_WORLD_SIZE`, 4) keys filesystem coordination, while `nvlink_domain_size` keys node-local

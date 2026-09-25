@@ -87,7 +87,7 @@ Native service discovery (`provider = "nomad"`) means no Consul is required. `ch
 
 **The template is deliberately not `env = true`.** A `nomadService` query against an unregistered service renders an *empty file successfully* — it does not block — so reading it straight into the environment would start rank 1 with `MASTER_ADDR` unset instead of making it wait. Nomad keeps re-rendering the file as the service appears, so the entrypoint polls it and fails loud on a bounded timeout (`rendezvous_timeout_s`, default 1800 s) rather than idling on 8 GPUs. It guards `MASTER_PORT` alongside `MASTER_ADDR`, so a half-rendered file produces the same friendly failure rather than an `unbound variable` abort.
 
-Shell variables in that entrypoint are written brace-less (`$MASTER_ADDR`, not `${MASTER_ADDR:-}`). Nomad applies its own `${…}` interpolation to task `args`, and a name it does not recognise is replaced with the empty string — which would make the guard always true and rank 1 unable to ever rendezvous. The script pre-initialises both variables instead, so `set -u` is satisfied without braces.
+Shell variables in that entrypoint are written brace-less (`$MASTER_ADDR`, not `${MASTER_ADDR:-}`). Nomad applies its own `${…}` interpolation to task `args`, and a name it does not recognize is replaced with the empty string — which would make the guard always true and rank 1 unable to ever rendezvous. The script pre-initializes both variables instead, so `set -u` is satisfied without braces.
 
 Both ranks run one shared script, branching on `NODE_RANK`. Beyond that variable and the rendezvous template, only rank 0 carries the port reservation, the service registration and a `shutdown_delay`.
 

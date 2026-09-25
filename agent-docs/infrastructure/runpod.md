@@ -143,9 +143,9 @@ Formats, save modes, and resume mechanics are owned by
   each pod's local rank 0 writes a complete checkpoint to its own disk; re-run `torchrun` on every pod with
   `--resume_from_checkpoint=true`.
 
-    To resume *trained* EP/CP weights (not just trainer state), point
-    `model_name_or_path` at the gathered checkpoint directory
-    ([why](../reference/checkpoints.md#resume-by-parallelism-mode)).
+    Trained EP/CP weights reload with no manual step: the training scripts load the policy from the
+    resumed checkpoint, so leave `model_name_or_path` at the base, which reference and teacher models
+    still resolve ([why](../reference/checkpoints.md#resume-by-parallelism-mode)).
 
 - `WANDB_RUN_ID` is hashed from `output_dir` + launch timestamp and broadcast from rank 0, so it is
   consistent across a run's ranks but not across re-runs. Export the same `WANDB_RUN_ID` on every pod
