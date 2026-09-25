@@ -1,6 +1,6 @@
 # GPU Training Theory
 
-Every "should I use X?" reduces to one question: which bottleneck does X attack, and is that the one you have? The **roofline** ([§2](#2-the-roofline-arithmetic-intensity-and-the-ridge-point)) answers it; [§3](#3-the-four-bottlenecks-a-step-can-hit) names the four bottlenecks a step can hit. The [Optimization](../optimization/README.md) pages each describe one lever — this page describes the machine they pull on.
+Every "should I use X?" reduces to one question: which bottleneck does X attack, and is that the one you have? The **roofline** ([§2](#2-the-roofline--arithmetic-intensity-and-the-ridge-point)) answers it; [§3](#3-the-four-bottlenecks-a-step-can-hit) names the four bottlenecks a step can hit. The [Optimization](../optimization/README.md) pages each describe one lever — this page describes the machine they pull on.
 
 **How to read it.** §1–§2 build the one tool the rest of the page uses (the roofline); §3–§8 apply it on a single GPU; §9 adds GPUs and the communication wall; §10–§11 cover inference vs training and how to measure your own step. Read in order once; afterwards §3's table and the [rules of thumb](#rules-of-thumb) are the index.
 
@@ -54,7 +54,7 @@ A kernel therefore reaches its ceiling only once the problem is big enough to fi
 
 ---
 
-## 2. The roofline — arithmetic intensity and the ridge point {#2-the-roofline-arithmetic-intensity-and-the-ridge-point}
+## 2. The roofline — arithmetic intensity and the ridge point
 
 Everything below runs on one operation: the matrix multiply (**GEMM**) inside every linear layer. Its three dimensions recur on every page, so fix them now.
 
@@ -122,7 +122,7 @@ A step is thousands of kernels, and at any moment one of four resources limits i
 
 | Bottleneck | Signature | Lever |
 |---|---|---|
-| **Compute-bound** | tensor cores saturated, power near board limit | bigger dims, lower precision if it pays ([§7](#7-precision-low-precision-compute-and-bf16-numerics)) |
+| **Compute-bound** | tensor cores saturated, power near board limit | bigger dims, lower precision if it pays ([§7](#7-precision--low-precision-compute-and-bf16-numerics)) |
 | **Memory-bound** | high util %, **low power** (~50–70%), AI below ridge | move fewer bytes: **fusion**, **bigger M**, **flash attention** |
 | **Latency / launch-bound** | many tiny kernels, gaps between them | **batch** the work: grouped GEMM, CUDA graphs |
 | **Communication-bound** | GPUs idle on NCCL, util drops in bursts | bigger M, smaller parallel degree, compute–comm overlap |
@@ -181,7 +181,7 @@ A step leans on a handful of kernel kinds: standard matmuls (projections), fused
 - **CUTLASS** — open-source C++ GEMM building blocks for what cuBLAS doesn't ship: grouped GEMM, fused activations, block-scaled fp8/fp4. The bf16 grouped path (`torch.nn.functional.grouped_mm`) dispatches here.
 - **CuTe** — the layout abstraction inside CUTLASS 3.x; the **CuTe DSL** is its Python frontend, and FA4 is written in it.
 - **Triton** — a Python kernel DSL, easier than CUTLASS and right for elementwise/fusion (Liger is Triton). A hand-written Triton dense matmul tops out at ~0.6–0.7× cuBLAS on Blackwell: it cannot express the warp-specialized pipeline plus cluster MMA.
-- **DeepGEMM** — DeepSeek's fp8/fp4 grouped-GEMM library for MoE; the verdict on it waits for [§7](#7-precision-low-precision-compute-and-bf16-numerics).
+- **DeepGEMM** — DeepSeek's fp8/fp4 grouped-GEMM library for MoE; the verdict on it waits for [§7](#7-precision--low-precision-compute-and-bf16-numerics).
 
 ### Streams, launches, CUDA graphs
 
@@ -248,7 +248,7 @@ The versions are arch-tuning of one algorithm, each pairing the same math with i
 
 ---
 
-## 7. Precision — low-precision compute and bf16 numerics {#7-precision-low-precision-compute-and-bf16-numerics}
+## 7. Precision — low-precision compute and bf16 numerics
 
 ### When low-precision compute helps
 

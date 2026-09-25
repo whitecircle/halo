@@ -84,9 +84,9 @@ Run `tests/gpu/optimizers/bench_muon.py` or `tests/gpu/optimizers/bench_muon_qwe
 
 Works with FSDP2, gradient checkpointing, and all parallelism modes — the kernels operate on the local shard after `to_local` (`src/distributed/runtime.py`) unwraps DTensors.
 
-That implies an approximation: Newton-Schulz orthogonalization runs on each rank's local dim-0 shard, not the full matrix, so the Muon update depends on the sharding layout and world size. The same model sharded differently takes a different update.
+That implies an approximation: Newton-Schulz orthogonalization runs on each rank's local shard, not the full matrix, so the Muon update depends on the sharding layout and world size. The same model sharded differently takes a different update.
 
-Shard-local NS is the accepted trade-off, keeping the step communication-free, not equivalence with single-GPU Muon; re-tune Muon hyperparameters when the world size changes materially. 3D expert tensors are exempt: they shard on the expert dim, so each expert matrix orthogonalizes whole, and the approximation bites only dense 2D weights under FSDP2/TP.
+Shard-local NS is the accepted trade-off, keeping the step communication-free, not equivalence with single-GPU Muon; re-tune Muon hyperparameters when the world size changes materially. 3D expert tensors are exempt under EP and FSDP2: they shard on the expert dim, so each expert matrix orthogonalizes whole. The approximation bites every 2D weight a rank holds only part of — dense weights under FSDP2 and TP (either split dim), and 2D expert stacks such as gpt-oss's expert biases (`[E_local, M]` under EP, dim-0 shards under FSDP2) — and, under expert-TP (`expert_tp_size > 1`), every expert matrix, since each expert's FFN dim is split across the ETP group.
 
 Two further consequences: NS normalizes its input, so `max_grad_norm` clipping constrains only the scalar/embedding AdamW leg, not the Muon-routed 2D updates; and the NS-kernel availability probe is an all-ranks-agree reduction, so a rank that cannot JIT the kernels drops every rank to the pure-torch path — replica updates stay bitwise identical.
 

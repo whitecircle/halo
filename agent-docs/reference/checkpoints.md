@@ -249,7 +249,7 @@ config on SM100+ — serve with vLLM `--attention-backend CUTLASS_MLA` or SGLang
 
 ## Saving by parallelism mode
 
-### Expert parallelism (EP, EP+TP, EP+CP) {#expert-parallelism-ep}
+### Expert parallelism (EP, EP+TP, EP+CP)
 
 `save_ep_model()` (`src/distributed/expert_parallel/saving.py`) owns all three, over three param
 classes: EP expert weights, gathered by `gather_ep_layer_weights()` with local → global expert

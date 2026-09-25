@@ -251,9 +251,9 @@ def main():
         logger.info(f"Model: {model}")
         logger.info(f"Embedding dimension: {model.get_sentence_embedding_dimension()}")
 
-    # Inject LoRA with peft's inject_adapter_in_model, not SentenceTransformer.add_adapter (ST 5.5
-    # gates that on peft >= 0.18.2 while the image pins 0.18.1). It does not freeze, so freeze every
-    # non-adapter param below.
+    # Inject LoRA with peft's inject_adapter_in_model, not SentenceTransformer.add_adapter: that goes
+    # through transformers' adapter API, which requires peft >= 0.19.1 while the image pins 0.18.1.
+    # The loop below pins the trainable set to the adapter params alone.
     peft_config = build_peft_config(model, model_config)
     if peft_config is not None:
         # modules_to_save is unsupported here: the trainable copies are created, the freeze below

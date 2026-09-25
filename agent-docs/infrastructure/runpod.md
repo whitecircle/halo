@@ -176,7 +176,7 @@ gradient sync crosses the network.
 
 **Host OOM during gathered save.** Every gathered save streams: the EP path one MoE layer at a
 time, the dense/CP/TP paths one decoder layer at a time
-([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep)). Each pod's save rank peaks
+([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)). Each pod's save rank peaks
 at the replicated non-expert params plus one pending shard (`save_max_shard_size`, default `5GB`),
 not a model's worth.
 

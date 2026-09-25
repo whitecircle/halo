@@ -82,7 +82,7 @@ The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, p
 
 1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS — gpt-oss-20b 1,014 TFLOPS (FSDP) vs 218 (EP=8) at seq 4096 — but is memory-heavy (148 GB at b1, near OOM at larger batch). Use EP only when FSDP OOMs.
 2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs. gpt-oss EP2 (DP8) 516 TFLOPS vs EP8 218 at seq 4096.
-3. **GC off when the batch fits** — recompute is ~+19% overhead on 192 GB B300 at moderate seq.
+3. **GC off when the batch fits** — recompute is ~+19% overhead on a 288 GB B300 at moderate seq.
 4. **Atomic-free expert permute** (above) — automatic for `top_k ≥ ep_size`, +18% (seq 4k) to +65% (seq 16k) on qwen3.6.
 5. **Do not use low precision** (fp8/fp4) — measured net-slower (experts are tiny-M / bandwidth-bound, bf16 at the roofline). See [Low-Precision Kernels](low-precision-moe-kernels.md).
 
@@ -135,7 +135,7 @@ Families whose activation is a standard SiLU gate fuse the activation and the mu
 > [!NOTE]
 > **Expert Tensor Parallelism**
 >
-> When `expert_tp_size > 1`, GptOss falls back to the loop path (interleaved weights cannot be pre-de-interleaved once TP-sharded). The other families use grouped GEMM regardless of ETP, on the 3-call separate-projection path (`gate_up_proj` is split into `gate_proj`/`up_proj` before the intermediate dim is sharded).
+> When `expert_tp_size > 1`, GptOss runs the loop path: ETP stores its de-interleaved gate/up pair under the plain `gate_proj`/`up_proj` names the loop reads, not the `gate_proj_gmm`/`up_proj_gmm` pair the grouped path reads (the layer's init summary reports `grouped_mm=False`). The other families use grouped GEMM regardless of ETP, on the 3-call separate-projection path (`gate_up_proj` is split into `gate_proj`/`up_proj` before the intermediate dim is sharded).
 
 ## Standalone grouped GEMM mode
 

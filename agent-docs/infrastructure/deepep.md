@@ -216,7 +216,7 @@ single-group `ep16` on a 2-node, 16-GPU topology. Mechanism:
 division. `ParallelismConfig.validate_against_model_config` raises off `config.json` at the top of
 the model load; `EPConfig.finalize_expert_assignment` re-checks it once the EP groups exist.
 
-## Transport backend {#transport-backend}
+## Transport backend
 
 `ep_buffer_backend` selects the transport for the EP all-to-all. The dispatcher hides the choice behind one
 interface (`_DeepEPBackend`), so it is transparent to the MoE layer and the autograd path.
@@ -275,9 +275,9 @@ capacity-padded buffer.
 
 Levers: `HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN, and
 `HALO_DEEPEP_NUM_SMS` tunes the SM split. Per-config breakdown:
-[Throughput Benchmarks](../optimization/throughput-benchmarks.md#measured-bottleneck-case-study--gpt-oss-20b-ep-on-8-b300).
+[Throughput Benchmarks](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4).
 
-## Dispatch wire-index limit {#token-count-ceiling}
+## Dispatch wire-index limit
 
 ElasticBuffer **forwards** arbitrary sequence length intra-node (gpt-oss-20b ep8 to 65536); cross-node
 Gin has its own ~8k tokens/rank ceiling ([EFA](#expert-parallelism-over-aws-efa)).
@@ -297,12 +297,13 @@ trajectories.
 
 Both this ceiling and the cross-node Gin one are applied **at config time** as well, before any weight
 is read. `ParallelismConfig.validate_against_model_config` sizes the run's declared budget
-(`per_device_train_batch_size × max_length`, divided by `cp_size`) through the same
-`ep_dispatch_capacity` alignment the dispatcher uses and refuses it there, naming the budget, the
-capacity and the EP group.
+(`per_device_train_batch_size × max_length`, divided by `cp_size`, doubled for DPO, SMPO and reward,
+which forward chosen and rejected together) through the same `ep_dispatch_capacity` alignment the
+dispatcher uses and refuses it there, naming the budget, the capacity and the EP group.
 
-The dispatcher's check stays the backstop for the batch actually in hand. Whether the Gin ceiling
-applies is decided by the NVLink **domain**: a rack-wide NVL72 group is not bound by it.
+The dispatcher's check stays the backstop for the batch actually in hand, and is the only check for a
+training config with no `max_length` field (online and async GRPO), which declares no budget. Whether
+the Gin ceiling applies is decided by the NVLink **domain**: a rack-wide NVL72 group is not bound by it.
 
 There is **no lower "symmetric-window" ceiling.** What carries long-context ep8 is the int64 program
 offset in the fused GptOss SwiGLU kernel (`src/kernels/fused_glu.py`): the grouped expert activation
@@ -332,7 +333,8 @@ combined = self._gc_combine(output, recv_topk_weights, handle)
 Per-expert received token counts (for grouped GEMM) come from `recv_topk_idx` by a stable sort on the
 expert id, a `scatter_add_` histogram over the host-known `experts_per_rank`, then `cumsum` into the
 grouped-GEMM `offs` — sync-free, where `torch.unique_consecutive` would force a device read-back per
-MoE layer.
+MoE layer. The permute's one read-back is the compaction of DeepEP's `-1`-padded slots (a `nonzero` over
+the valid mask, `ep_size > 1` only), once per MoE layer per forward.
 
 `destroy_all_dispatchers()` must run **before** `dist.destroy_process_group()` — Gin frees the symmetric heap
 through the group communicator, and the reverse order raises `cudaErrorIllegalAddress`.
