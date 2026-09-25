@@ -417,4 +417,4 @@ def test_every_endpoint_flag_comes_from_the_shared_helper():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

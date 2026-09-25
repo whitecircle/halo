@@ -108,20 +108,25 @@ def run(ctx) -> dict:
     # off, gating through an unconditional softmax-over-gathered-logits stops being inert, and only
     # routing weights through the family's own _gate_weights_at stays exact.
     was_norm = [layer.gate.norm_topk_prob for layer in layers]
+    biases = [layer.balancing_biases for layer in layers]
     try:
         for layer in layers:
             layer.gate.norm_topk_prob = False
+            # The baseline has balancing off: a None side-buffer routes through the gate's own weights.
+            layer.balancing_biases = None
         unnormed_baseline = routed(model, hidden)
-        for layer in layers:
-            layer.balancing_biases[:] = 0.0
+        for layer, bias in zip(layers, biases, strict=True):
+            bias.zero_()
+            layer.balancing_biases = bias
         unnormed_zero = routed(model, hidden)
         (
             checks["unnormed_zero_bias_selection_unchanged"],
             checks["unnormed_zero_bias_weights_unchanged"],
         ) = compare_routes(unnormed_baseline, unnormed_zero, "zero bias, norm_topk_prob=False")
     finally:
-        for layer, flag in zip(layers, was_norm, strict=True):
+        for layer, flag, bias in zip(layers, was_norm, biases, strict=True):
             layer.gate.norm_topk_prob = flag
+            layer.balancing_biases = bias
 
     # A real bias must move selection, or the balancing state does nothing.
     victim = layers[0]

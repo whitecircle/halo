@@ -15,8 +15,6 @@ code.
 Run: pytest tests/cpu/parallelism/test_ep_all_gather_cat.py
 """
 
-import sys
-
 import pytest
 import torch
 
@@ -135,4 +133,4 @@ def test_non_contiguous_input_is_gathered_by_value(collectives):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -33,6 +33,7 @@ from src.distributed.context_parallel.patching import patch_attention_for_ulysse
 from src.distributed.context_parallel.validation import validate_model_for_ulysses
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log, log_all
 
 # Configuration
@@ -40,9 +41,8 @@ from tests.common.utils import cleanup_memory, log, log_all
 MODEL_NAME = QWEN3_0_6B
 SEQ_LEN = 128  # Must be divisible by cp_size=2
 SEED = 42
-# Tolerance for log probability comparison (bf16 precision limits)
-LOGPROB_ATOL = 0.05  # Absolute tolerance per token
-LOGPROB_RTOL = 0.02  # Relative tolerance
+# Per-token CP and baseline log-probs must also rank the tokens alike, not only sit within the atol.
+MIN_LOGPROB_CORRELATION = 0.95
 
 
 # Test-Specific Helpers
@@ -254,45 +254,35 @@ def run(ctx) -> dict:
 
     # Check 2: Log prob sums are close
     sum_diff = abs(cp_logprobs_sum - base_logprobs_sum)
-    sum_close = sum_diff < (LOGPROB_ATOL * SEQ_LEN)
+    sum_close = sum_diff < (TOL.logprob_atol * SEQ_LEN)
     checks["logprob_sum_close"] = sum_close
-    log(f"  Log prob sum diff: {sum_diff:.6f} (tolerance: {LOGPROB_ATOL * SEQ_LEN:.2f})")
+    log(f"  Log prob sum diff: {sum_diff:.6f} (tolerance: {TOL.logprob_atol * SEQ_LEN:.2f})")
     log(f"  Log prob sum close: {'PASS' if sum_close else 'FAIL'}")
 
     # Check 3: Per-token log probs are close (element-wise)
     per_token_diff = (cp_logprobs - base_logprobs).abs()
     max_diff = per_token_diff.max().item()
     mean_diff = per_token_diff.mean().item()
-    tokens_close = max_diff < LOGPROB_ATOL
+    tokens_close = max_diff < TOL.logprob_atol
     checks["per_token_close"] = tokens_close
     log(f"  Per-token max diff: {max_diff:.6f}")
     log(f"  Per-token mean diff: {mean_diff:.6f}")
-    log(f"  Per-token close (atol={LOGPROB_ATOL}): {'PASS' if tokens_close else 'FAIL'}")
+    log(f"  Per-token close (atol={TOL.logprob_atol}): {'PASS' if tokens_close else 'FAIL'}")
 
-    # Check 4: Log prob means are in reasonable range
-    base_mean = base_logprobs.mean().item()
-    cp_mean = cp_logprobs.mean().item()
-    # Log probs should be negative (log of probability < 1)
-    base_neg = base_mean < 0
-    cp_neg = cp_mean < 0
-    checks["base_mean_negative"] = base_neg
-    checks["cp_mean_negative"] = cp_neg
-    log(f"  Base mean log prob < 0: {'PASS' if base_neg else 'FAIL'} ({base_mean:.6f})")
-    log(f"  CP mean log prob < 0: {'PASS' if cp_neg else 'FAIL'} ({cp_mean:.6f})")
-
-    # Check 5: Correlation between base and CP log probs
+    # Check 4: Correlation between base and CP log probs
     # Even if absolute values differ slightly, the ordering should be preserved
     base_flat = base_logprobs.flatten().float()
     cp_flat = cp_logprobs.flatten().float()
     if base_flat.std() > 0 and cp_flat.std() > 0:
         correlation = torch.corrcoef(torch.stack([base_flat, cp_flat]))[0, 1].item()
-        corr_high = correlation > 0.95
+        corr_high = correlation > MIN_LOGPROB_CORRELATION
         checks["correlation_high"] = corr_high
         log(f"  Pearson correlation: {correlation:.6f}")
-        log(f"  Correlation > 0.95: {'PASS' if corr_high else 'FAIL'}")
+        log(f"  Correlation > {MIN_LOGPROB_CORRELATION}: {'PASS' if corr_high else 'FAIL'}")
     else:
-        checks["correlation_high"] = True
-        log("  Correlation: SKIP (zero variance)")
+        # Constant log-probs over random tokens mean a degenerate forward, not a match.
+        checks["correlation_high"] = False
+        log("  Correlation: FAIL (zero variance)")
 
     return {"checks": checks}
 

@@ -52,11 +52,11 @@ LEAK_CONTROLS = {
 }
 
 
-def tiny_model(family: str, attn_implementation: str, *, dtype=torch.float32, device="cpu", **overrides):
-    """A seeded random-init model of ``family`` on ``attn_implementation``; ``overrides`` edit its config."""
+def tiny_model(family: str, attn_implementation: str, *, dtype=torch.float32, device="cpu"):
+    """A seeded random-init model of ``family`` on ``attn_implementation``."""
     model_cls, config_cls, config = FAMILIES[family]
     torch.manual_seed(SEED)
-    model = model_cls(config_cls(**{**config, "initializer_range": INIT_RANGE, **overrides}))
+    model = model_cls(config_cls(**{**config, "initializer_range": INIT_RANGE}))
     model = model.to(device=device, dtype=dtype).eval()
     model.config._attn_implementation = attn_implementation
     return model

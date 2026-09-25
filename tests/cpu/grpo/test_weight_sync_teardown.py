@@ -21,7 +21,6 @@ Four facts are load-bearing and invisible in a passing run:
 """
 
 import inspect
-import sys
 import threading
 
 import pytest
@@ -165,4 +164,4 @@ def test_bookkeeping_drop_never_calls_destroy(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

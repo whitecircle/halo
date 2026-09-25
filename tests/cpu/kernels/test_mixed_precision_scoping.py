@@ -8,8 +8,6 @@ shift the kept set off the real text end-blocks.
     python tests/cpu/kernels/test_mixed_precision_scoping.py
 """
 
-import sys
-
 import pytest
 import torch
 import torch.nn as nn
@@ -91,4 +89,4 @@ def test_plain_text_model_unchanged():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

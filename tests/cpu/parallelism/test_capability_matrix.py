@@ -13,7 +13,6 @@ Usage:
 """
 
 import itertools
-import sys
 
 import pytest
 
@@ -160,4 +159,4 @@ def test_pp_knobs_at_their_defaults_are_accepted_at_pp_size_one():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

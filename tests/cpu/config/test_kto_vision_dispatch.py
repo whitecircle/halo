@@ -222,4 +222,4 @@ def test_images_field_naming_a_missing_column_raises(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

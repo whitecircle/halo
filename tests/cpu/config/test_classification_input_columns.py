@@ -9,8 +9,6 @@ first, naming what is missing.
 Run: pytest tests/cpu/config/test_classification_input_columns.py
 """
 
-import sys
-
 import pytest
 from accelerate import PartialState
 
@@ -54,4 +52,4 @@ def test_a_single_label_no_label_sentinel_is_refused_before_the_model_load(class
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

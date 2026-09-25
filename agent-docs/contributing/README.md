@@ -141,8 +141,8 @@ manifest.
   and rejection of unsupported configs — never on private internals.
 - **A CPU test file is a plain pytest module.** It ends in
   `if __name__ == "__main__": raise SystemExit(pytest.main([__file__, "-v"]))`, so a standalone
-  `python tests/cpu/<file>.py` runs exactly what `pytest` collects. The conventions test requires a
-  `pytest.main([__file__, …])` entry in every CPU test file.
+  `python tests/cpu/<file>.py` runs exactly what `pytest` collects. The conventions test requires
+  every CPU test file to end in exactly that block.
 
     A hand-listed runner silently drops any test missing from its list, and a printed pass/fail summary
     hides a FAIL from pytest; both are rejected by `tests/cpu/conventions/test_test_conventions.py`.
@@ -180,8 +180,9 @@ manifest.
 
 - **Run GPU tests through pytest**, not by hand: `make test-gpu-core`, or a narrower marker
   expression over the two entrypoints (`pytest -m "gpu and ep" tests/gpu/test_suite.py
-  tests/gpu/test_launcher_contract.py`). Name the entrypoints: pointed at `tests/gpu/` instead, pytest
-  collects the manifest scripts as modules and executes their top-level torchrun code.
+  tests/gpu/test_launcher_contract.py`). Those two are the only modules pytest collects under
+  `tests/gpu/`: `tests/gpu/conftest.py` ignores every manifest script, so no collection (a
+  `pytest -m cpu` from the repo root included) imports a torchrun program.
 
     The launcher allocates a free `--master_port` per node from `tests/common/ports.py` — a pool from
     20000 up to the kernel's ephemeral range, one slice per pytest-xdist worker — and points `TMPDIR`

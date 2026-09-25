@@ -9,8 +9,6 @@ Usage:
     python tests/data/test_path_parsing.py
 """
 
-import sys
-
 import pytest
 
 from src.data.sources.paths import (
@@ -169,4 +167,4 @@ def test_parse_hub_spec_config_then_split():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

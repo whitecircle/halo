@@ -13,7 +13,6 @@ comma/``$`` normalization on both sides.
     python tests/cpu/grpo/test_rlvr_accuracy_reward.py
 """
 
-import sys
 import time
 
 import pytest
@@ -163,4 +162,4 @@ def test_fewer_answers_than_completions_raises(accuracy_reward):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

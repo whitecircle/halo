@@ -18,28 +18,23 @@ wedging it.
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import os
-import time
 import types
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 NUM_GENERATIONS_EVAL = 2
 
 # A stuck rank must surface as a failed assertion, not a wedged worker: gloo aborts the blocked
-# collective at the group timeout and the bounded join covers the process itself. Both are far above
-# the work they bound, because the suite runs 8-way under xdist.
+# collective at the group timeout and the runner's join deadline covers the process itself. The group
+# timeout is far above the work it bounds, because the suite runs 8-way under xdist.
 PG_TIMEOUT = datetime.timedelta(seconds=90)
-JOIN_TIMEOUT_S = 420.0
 
 
 def _eval_trainer():
@@ -58,39 +53,24 @@ def _eval_trainer():
     return host
 
 
-def _worker(rank: int, tmp_dir: str, port: int, ragged: bool) -> None:
+def _worker(rank: int, tmp_dir: str, ragged: bool) -> None:
     """One rank of the batch build. Writes its verdict to a file — the failure under test is a rank
     that never returns at all, so an exception here cannot be the signal."""
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE, timeout=PG_TIMEOUT)
+    # The ragged tail: rank 0 gets an odd row count, its peer a whole number of groups.
+    rows = 3 if (ragged and rank == 0) else 4
+    host = _eval_trainer()
     try:
-        # The ragged tail: rank 0 gets an odd row count, its peer a whole number of groups.
-        rows = 3 if (ragged and rank == 0) else 4
-        host = _eval_trainer()
-        try:
-            host._extract_prompts_and_contexts([{"prompt": "solve it"} for _ in range(rows)])
-            host._raise_batch_error_uniformly(torch.device("cpu"))
-            result = "NO RAISE"
-        except Exception as e:
-            result = f"{type(e).__name__}: {e}"
-        with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
-            fh.write(result)
-    finally:
-        with contextlib.suppress(Exception):
-            dist.destroy_process_group()
+        host._extract_prompts_and_contexts([{"prompt": "solve it"} for _ in range(rows)])
+        host._raise_batch_error_uniformly(torch.device("cpu"))
+        result = "NO RAISE"
+    except Exception as e:
+        result = f"{type(e).__name__}: {e}"
+    with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
+        fh.write(result)
 
 
 def _run_ranks(tmp_path, ragged: bool) -> dict[int, str]:
-    ctx = mp.start_processes(
-        _worker, args=(str(tmp_path), free_port(), ragged), nprocs=WORLD_SIZE, join=False, start_method="spawn"
-    )
-    deadline = time.monotonic() + JOIN_TIMEOUT_S
-    while not ctx.join(timeout=max(0.1, deadline - time.monotonic())):
-        if time.monotonic() >= deadline:
-            for process in ctx.processes:
-                process.terminate()
-            pytest.fail(f"the ranks did not finish within {JOIN_TIMEOUT_S}s — a rank is stuck in a collective")
-
+    run_gloo_ranks(_worker, WORLD_SIZE, str(tmp_path), ragged, pg_timeout=PG_TIMEOUT)
     results = {}
     for rank in range(WORLD_SIZE):
         path = tmp_path / f"result_{rank}.txt"

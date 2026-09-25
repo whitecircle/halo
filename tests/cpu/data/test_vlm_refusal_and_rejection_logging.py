@@ -21,7 +21,6 @@ Run: pytest tests/cpu/data/test_vlm_refusal_and_rejection_logging.py
 import base64
 import io
 import logging
-import sys
 
 import numpy as np
 import pytest
@@ -291,6 +290,4 @@ def test_classification_over_length_filter_logs(caplog):
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

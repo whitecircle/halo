@@ -17,7 +17,6 @@
     python tests/cpu/grpo/test_grpo_failloud_guards.py
 """
 
-import sys
 import types
 
 import pytest
@@ -273,4 +272,4 @@ def test_pp_normalizer_refuses_an_unknown_loss_type():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

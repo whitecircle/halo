@@ -105,8 +105,8 @@ Checkpoints use standard PyTorch `state_dict()` / `load_state_dict()`, round-tri
 ## Tests
 
 ```bash
-# Unit tests (single GPU, no torchrun)
-CUDA_VISIBLE_DEVICES=0 python tests/gpu/optimizers/test_adamw_bf16.py
+# Unit tests (single GPU)
+torchrun --nproc_per_node=1 tests/gpu/optimizers/test_adamw_bf16.py
 
 # EP end-to-end + SR correctness under EP=8 (8 GPUs)
 torchrun --nproc_per_node=8 \

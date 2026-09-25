@@ -33,7 +33,8 @@ from transformers.models.glm4_moe_lite import (
 from src.distributed.context_parallel.layers.glm4 import Glm4MoeLiteUlyssesAttention
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.distributed import shared_scratch_dir
+from tests.common.distributed import shared_scratch_dir, world_mean
+from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.utils import cleanup_memory, log, log_all
 
@@ -83,14 +84,6 @@ def build_tiny_ckpt(out_dir: Path, rope_interleave: bool, seed: int = 0) -> Path
     model = Glm4MoeLiteForCausalLM(config).to(torch.bfloat16)
     model.save_pretrained(out_dir, safe_serialization=True)
     return out_dir
-
-
-def make_inputs(vocab_size: int, batch: int, seq: int, device: str):
-    torch.manual_seed(123)
-    ids = torch.randint(0, vocab_size, (batch, seq), device=device)
-    labels = ids.clone()
-    labels[:, ::4] = -100  # leave every rank some active labels
-    return ids, labels
 
 
 def reference_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, device: str) -> float:
@@ -157,7 +150,7 @@ def run_correctness(rope_interleave: bool, ctx) -> tuple[bool, float]:
         build_tiny_ckpt(Path(ckpt_dir), rope_interleave=rope_interleave)
     ctx.barrier()
 
-    ids, labels = make_inputs(TINY_CONFIG["vocab_size"], batch=2, seq=64, device=device)
+    ids, labels = random_token_batch(TINY_CONFIG["vocab_size"], batch=2, seq=64, device=device)
     dist.broadcast(ids, src=0)
     dist.broadcast(labels, src=0)
 
@@ -169,10 +162,7 @@ def run_correctness(rope_interleave: bool, ctx) -> tuple[bool, float]:
     ref_loss = ref_loss_t.item()
 
     cp_loss = cp_forward(ckpt_dir, ids, labels, ctx.rank, ctx.local_rank)
-    all_losses = [torch.zeros(1, device=device, dtype=torch.float64) for _ in range(ctx.world_size)]
-    dist.all_gather(all_losses, torch.tensor([cp_loss], device=device, dtype=torch.float64))
-    per_rank = [t.item() for t in all_losses]
-    cp_mean = sum(per_rank) / len(per_rank)
+    cp_mean = world_mean(cp_loss)
     delta = abs(cp_mean - ref_loss)
 
     ok = delta <= LOSS_TOLERANCE

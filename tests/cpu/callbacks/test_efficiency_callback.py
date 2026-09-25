@@ -2,7 +2,6 @@
 """Tests for EfficiencyCallback. Run: python tests/cpu/callbacks/test_efficiency_callback.py"""
 
 import logging
-import sys
 
 import pytest
 import torch
@@ -584,4 +583,4 @@ def test_on_log_skips_during_warmup():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

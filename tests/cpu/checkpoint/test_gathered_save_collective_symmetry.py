@@ -13,8 +13,6 @@ Counting is done by replacing the gather primitives where every branch reads the
 process group.
 """
 
-import sys
-
 import pytest
 import torch
 import torch.nn as nn
@@ -96,4 +94,4 @@ def test_only_the_retaining_rank_keeps_the_tensors(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -20,19 +20,16 @@ group and compares the AVG-reduced gradient against a single-process, non-TP ref
 """
 
 import copy
-import os
-import sys
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 KV_LORA_RANK = 16
@@ -83,54 +80,49 @@ def _kv_a_grads(model) -> list[torch.Tensor]:
     return grads
 
 
-def _worker(rank: int, out_path: str, port: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
-    try:
-        torch.manual_seed(0)
-        input_ids = torch.randint(0, 64, (2, 8))
+def _worker(rank: int, out_path: str) -> None:
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, 64, (2, 8))
 
-        model = _tiny_mla_model()
-        unsplit = copy.deepcopy(model)
-        _backward(unsplit, input_ids)
-        reference = [g.clone() for g in _kv_a_grads(unsplit)]
+    model = _tiny_mla_model()
+    unsplit = copy.deepcopy(model)
+    _backward(unsplit, input_ids)
+    reference = [g.clone() for g in _kv_a_grads(unsplit)]
 
-        tp_mesh = init_device_mesh("cpu", (WORLD_SIZE,), mesh_dim_names=("tp",))
-        apply_tp_to_attention_only(model, tp_mesh)
-        _backward(model, input_ids)
+    tp_mesh = init_device_mesh("cpu", (WORLD_SIZE,), mesh_dim_names=("tp",))
+    apply_tp_to_attention_only(model, tp_mesh)
+    _backward(model, input_ids)
 
-        failures = []
-        for layer_idx, (grad, ref_grad) in enumerate(zip(_kv_a_grads(model), reference, strict=True)):
-            if isinstance(model.model.layers[layer_idx].self_attn.kv_a_proj_with_mqa.weight, DTensor):
-                failures.append(f"layer {layer_idx}: weight became a DTensor — the AVG bucket would skip it")
-            # Exactly what _sync_tp_replicated_grads does to a plain replicated parameter.
-            averaged = grad.clone()
-            dist.all_reduce(averaged, op=dist.ReduceOp.AVG)
+    failures = []
+    for layer_idx, (grad, ref_grad) in enumerate(zip(_kv_a_grads(model), reference, strict=True)):
+        if isinstance(model.model.layers[layer_idx].self_attn.kv_a_proj_with_mqa.weight, DTensor):
+            failures.append(f"layer {layer_idx}: weight became a DTensor — the AVG bucket would skip it")
+        # Exactly what _sync_tp_replicated_grads does to a plain replicated parameter.
+        averaged = grad.clone()
+        dist.all_reduce(averaged, op=dist.ReduceOp.AVG)
 
-            for label, rows in (
-                ("lora", slice(0, KV_LORA_RANK)),
-                ("rope", slice(KV_LORA_RANK, None)),
-            ):
-                err = ((averaged[rows] - ref_grad[rows]).norm() / ref_grad[rows].norm().clamp_min(1e-30)).item()
-                if not (err < TOL):
-                    ratio = (ref_grad[rows].norm() / averaged[rows].norm().clamp_min(1e-30)).item()
-                    failures.append(
-                        f"layer {layer_idx} {label} rows: AVG-reduced grad differs from the non-TP "
-                        f"reference by rel_err={err:.3e} (||ref||/||avg||={ratio:.4f}; "
-                        f"{WORLD_SIZE:.4f} means the rank-partial rows were averaged, not summed)"
-                    )
+        for label, rows in (
+            ("lora", slice(0, KV_LORA_RANK)),
+            ("rope", slice(KV_LORA_RANK, None)),
+        ):
+            err = ((averaged[rows] - ref_grad[rows]).norm() / ref_grad[rows].norm().clamp_min(1e-30)).item()
+            if not (err < TOL):
+                ratio = (ref_grad[rows].norm() / averaged[rows].norm().clamp_min(1e-30)).item()
+                failures.append(
+                    f"layer {layer_idx} {label} rows: AVG-reduced grad differs from the non-TP "
+                    f"reference by rel_err={err:.3e} (||ref||/||avg||={ratio:.4f}; "
+                    f"{WORLD_SIZE:.4f} means the rank-partial rows were averaged, not summed)"
+                )
 
-        # EVERY rank writes its own verdict: each holds a different column shard, so a defect can
-        # show on one rank alone, and a rank-0-only artifact would report that run as green.
-        with open(f"{out_path}.{rank}", "w") as fh:
-            fh.write("PASS" if not failures else "FAIL: " + "; ".join(failures))
-    finally:
-        dist.destroy_process_group()
+    # EVERY rank writes its own verdict: each holds a different column shard, so a defect can
+    # show on one rank alone, and a rank-0-only artifact would report that run as green.
+    with open(f"{out_path}.{rank}", "w") as fh:
+        fh.write("PASS" if not failures else "FAIL: " + "; ".join(failures))
 
 
 def test_mla_kv_a_proj_rope_gradient_survives_the_replicated_avg(tmp_path):
     out = str(tmp_path / "result.txt")
-    mp.start_processes(_worker, args=(out, free_port()), nprocs=WORLD_SIZE, join=True, start_method="spawn")
+    run_gloo_ranks(_worker, WORLD_SIZE, out)
     results = {}
     for rank in range(WORLD_SIZE):
         with open(f"{out}.{rank}") as fh:
@@ -139,4 +131,4 @@ def test_mla_kv_a_proj_rope_gradient_survives_the_replicated_avg(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

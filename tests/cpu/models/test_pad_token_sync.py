@@ -347,6 +347,4 @@ def test_padded_batch_pools_at_the_last_content_token():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

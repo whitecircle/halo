@@ -18,7 +18,6 @@ Run: pytest tests/cpu/parallelism/test_output_fs_probe.py
 """
 
 import os
-import sys
 
 import pytest
 
@@ -122,4 +121,4 @@ def test_a_per_node_declaration_never_waits_out_the_poll(monkeypatch, tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

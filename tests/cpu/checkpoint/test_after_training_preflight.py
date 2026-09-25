@@ -9,7 +9,6 @@ route through the shared helper before their heavy phase.
 
 import json
 import os
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -132,4 +131,4 @@ def test_merge_ep_shards_routes_through_the_preflight_and_still_completes(monkey
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

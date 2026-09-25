@@ -22,7 +22,6 @@ Run: python tests/cpu/data/test_vlm_preference_collator.py  (or pytest)
 """
 
 import re
-import sys
 
 import pytest
 import torch
@@ -334,4 +333,4 @@ def test_collator_declares_the_columns_pruning_would_drop():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

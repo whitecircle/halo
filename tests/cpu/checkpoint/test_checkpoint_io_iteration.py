@@ -20,7 +20,6 @@ Run: pytest tests/cpu/checkpoint/test_checkpoint_io_iteration.py
 
 import contextlib
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -215,4 +214,4 @@ def test_detect_model_types_leads_with_the_language_family(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -37,10 +37,7 @@ Requirements:
     - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
 """
 
-import random
-
 import torch
-import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
@@ -51,7 +48,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
-from tests.common.ep_reference import full_grad
+from tests.common.ep_reference import fixed_chat_batch, full_grad
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, cos_sim, log, log_all
@@ -67,29 +64,6 @@ LOSS_ABS_TOL = 1e-4
 # bf16/fp32-reduce noise — tight enough to catch a doubled/dropped/per-rank sync.
 GRAD_COSINE_MIN = 0.999
 GRAD_REL_L2_MAX = 5e-3
-
-
-def create_fixed_batch(tokenizer, device):
-    """Deterministic input batch, identical on every rank."""
-    torch.manual_seed(SEED)
-    random.seed(SEED)
-    text = tokenizer.apply_chat_template(
-        [
-            {"role": "user", "content": "What is 42 + 58?"},
-            {"role": "assistant", "content": "The sum of 42 and 58 is 100."},
-        ],
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-    tokens = tokenizer(text, return_tensors="pt", padding="max_length", max_length=SEQ_LEN, truncation=True)
-    input_ids = tokens["input_ids"].to(device)
-    attention_mask = tokens["attention_mask"].to(device)
-    labels = input_ids.clone()
-    labels[attention_mask == 0] = -100
-    dist.broadcast(input_ids, src=0)
-    dist.broadcast(attention_mask, src=0)
-    dist.broadcast(labels, src=0)
-    return input_ids, attention_mask, labels
 
 
 def first_expert_weight(model):
@@ -169,7 +143,7 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
     is_dtensor = isinstance(expert_w, DTensor)
     log(f"  expert weight: {name}  DTensor={is_dtensor}  (FSDP-sharded={is_dtensor})")
 
-    input_ids, attention_mask, labels = create_fixed_batch(tokenizer, device)
+    input_ids, attention_mask, labels = fixed_chat_batch(tokenizer, SEQ_LEN, device, seed=SEED, broadcast=True)
     wrapped.train()
     wrapped.zero_grad(set_to_none=True)
     outputs = wrapped(input_ids=input_ids, attention_mask=attention_mask, labels=labels)

@@ -3,8 +3,9 @@
 
 A ProcessorMixin ``processing_class`` flips the trainer into VLM mode: rows are chat-templated with
 the prefix-strip invariant, images are processed at collation (``DataCollatorForVLMSMPO``), and the
-vision tensors ride the chosen|rejected concatenated forward duplicated row-major. Validates a real
-model forward/backward on that path — finite loss over several steps, margins logged.
+vision tensors ride the chosen|rejected concatenated forward duplicated row-major. Runs a real model
+forward/backward on that path and checks that VLM mode is entered, the final training loss is finite
+and SMPO's ``rewards/*`` metrics are logged. It does not compare the loss to a reference.
 
 Run with 1 GPU:
     torchrun --nproc_per_node=1 tests/gpu/trainers/preference/test_smpo_vlm.py
@@ -77,11 +78,10 @@ def run(ctx):
     loss = result.training_loss
     log(f"Training loss: {loss:.6f}")
 
-    logged = [e["loss"] for e in trainer.state.log_history if "loss" in e]
     margins = [e for e in trainer.state.log_history if any(k.startswith("rewards/") for k in e)]
     checks = {
         "training_loss_finite": bool(torch.isfinite(torch.tensor(loss))),
-        "enough_steps_logged": len(logged) >= 2,
+        "steps_completed": result.global_step == NUM_TRAIN_STEPS,
         # No rewards/* metrics means the SMPO loss path did not run.
         "reward_metrics_logged": bool(margins),
     }

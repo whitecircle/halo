@@ -1,15 +1,12 @@
 #!/usr/bin/env python
 """
-SMPO with Tensor Parallelism (TP=2) Training Test.
+SMPO with Tensor Parallelism (TP=2): smoke test.
 
-Validates that SmoothMarginPOTrainer works correctly with Tensor Parallelism
-enabled (tp_size=2). TP shards attention/embedding/lm_head weights across GPUs
-using DTensor, requiring FSDP2 for data parallel gradient sync when DP > 1.
-
-Test validates:
-1. Training completes without errors for 10 steps
-2. Final training loss is finite (no NaN/Inf)
-3. trainer.is_tp_mode is True (TP properly configured)
+Runs SmoothMarginPOTrainer for 10 steps with tp_size=2 (TP shards attention/embedding/lm_head
+weights as DTensors, FSDP2 syncs gradients when DP > 1). It checks only that training runs
+without raising, that ``trainer.is_tp_mode`` is set, and that the final training loss is finite.
+It does not compare the SMPO objective or gradients against a reference, so a wrong-but-finite
+TP loss passes.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -19,6 +16,8 @@ Requirements:
     - 2x GPUs
     - Model: Qwen/Qwen3-0.6B (auto-downloaded)
 """
+
+import math
 
 import torch
 from transformers import AutoTokenizer
@@ -141,13 +140,10 @@ def run(ctx) -> dict:
     train_result = trainer.train()
     log("Training complete!")
 
-    # ---- Check 2: Training completed with a loss reported ----
-    final_loss = train_result.metrics.get("train_loss", None)
+    # ---- Check 2: Loss is finite ----
+    final_loss = train_result.metrics["train_loss"]
     log(f"Final training loss: {final_loss}")
-    checks["train_loss_reported"] = final_loss is not None
-
-    # ---- Check 3: Loss is finite ----
-    checks["loss_finite"] = final_loss is not None and bool(torch.isfinite(torch.tensor(final_loss)))
+    checks["loss_finite"] = math.isfinite(final_loss)
 
     log(f"\n{'=' * 70}")
     log(f"  SMPO + TP={TP_SIZE} training test")

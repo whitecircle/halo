@@ -14,17 +14,14 @@ GEMM (``onehotᵀ @ grad``). This test pins it to the reference:
 These assertions FAIL if the backward is wired wrong (wrong reduction, wrong dtype, sort assumed),
 so the test is not vacuous. Single GPU; no DeepEP.
 
-    python tests/gpu/parallelism/ep/test_gptoss_expert_bias_grad.py
+    torchrun --nproc_per_node=1 tests/gpu/parallelism/ep/test_gptoss_expert_bias_grad.py
 """
 
-import sys
-
-import pytest
 import torch
 
 from src.distributed.expert_parallel.autograd import MoEExpertBiasGather
-
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+from tests.common.harness import gpu_test_main, record_check
+from tests.common.utils import max_abs_rel_err
 
 E, DIM, N = 32, 256, 512
 
@@ -63,14 +60,14 @@ def test_forward_is_plain_gather():
 def test_bias_grad_matches_reference_fp32():
     bias, eids, grad = _case(torch.float32)
     ref, fix = _reference_bias_grad(bias, eids, grad), _fix_bias_grad(bias, eids, grad)
-    rel = ((fix - ref).abs().max() / ref.abs().max()).item()
+    rel = max_abs_rel_err(fix, ref)
     assert rel < 1e-3, f"fp32 bias-grad rel error {rel:.2e} too large"
 
 
 def test_bias_grad_matches_reference_bf16():
     bias, eids, grad = _case(torch.bfloat16)
     ref, fix = _reference_bias_grad(bias, eids, grad), _fix_bias_grad(bias, eids, grad)
-    rel = ((fix.float() - ref.float()).abs().max() / ref.float().abs().max()).item()
+    rel = max_abs_rel_err(fix, ref)
     assert rel < 5e-2, f"bf16 bias-grad rel error {rel:.2e} exceeds accumulation tolerance"
 
 
@@ -82,26 +79,15 @@ def test_empty_expert_gets_zero_grad():
     assert fix[empty].abs().max().item() == 0.0
 
 
-def _main():
-    if not torch.cuda.is_available():
-        print("SKIP: no CUDA")  # the sentinel the launcher skips on; a bare exit 0 reads as a PASS
-        return 0
-    failed = 0
-    for fn in [
-        test_forward_is_plain_gather,
-        test_bias_grad_matches_reference_fp32,
-        test_bias_grad_matches_reference_bf16,
-        test_empty_expert_gets_zero_grad,
-    ]:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:
-            failed += 1
-            print(f"  FAIL  {fn.__name__}: {e}")
-    print(f"\n{'ALL PASSED' if not failed else f'{failed} FAILED'}")
-    return 1 if failed else 0
+@gpu_test_main(prefix="gptoss_expert_bias_grad", partial_state=False)
+def run(ctx):
+    checks: dict[str, bool] = {}
+    record_check(checks, "forward_is_plain_gather", test_forward_is_plain_gather)
+    record_check(checks, "bias_grad_matches_reference_fp32", test_bias_grad_matches_reference_fp32)
+    record_check(checks, "bias_grad_matches_reference_bf16", test_bias_grad_matches_reference_bf16)
+    record_check(checks, "empty_expert_gets_zero_grad", test_empty_expert_gets_zero_grad)
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    run()

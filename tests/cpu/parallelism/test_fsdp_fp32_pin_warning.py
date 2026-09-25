@@ -11,7 +11,6 @@ fp32-stored pinned params meet a low-precision policy — and stay silent for un
 """
 
 import logging
-import sys
 
 import pytest
 import torch
@@ -77,4 +76,4 @@ def test_fp32_policy_and_pinless_families_are_silent(caplog):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

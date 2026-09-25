@@ -32,28 +32,12 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import TINY_GPTOSS_CONFIG
+from tests.common.weight_sync import RecordingSender
 
 ETP_SIZE = 2
 NUM_EXPERTS = TINY_GPTOSS_CONFIG["num_local_experts"]
 N_LAYERS = TINY_GPTOSS_CONFIG["num_hidden_layers"]
 EXPERT_KEYS = ("experts.gate_up_proj", "experts.down_proj")
-
-
-class RecordingSender:
-    """Capture every (name, tensor) forwarded to vLLM — no NCCL, no server."""
-
-    def __init__(self):
-        self.params: list[tuple[str, torch.Tensor]] = []
-
-    def update_named_param(self, name: str, data: torch.Tensor) -> None:
-        self.params.append((name, data.detach().clone()))
-
-    def reset_prefix_cache(self) -> None:
-        pass
-
-    @property
-    def names(self) -> list[str]:
-        return [name for name, _ in self.params]
 
 
 def build_model() -> GptOssForCausalLM:
@@ -89,7 +73,7 @@ def run(ctx):
         for j in range(i + 1, NUM_EXPERTS)
     )
 
-    recorder = RecordingSender()
+    recorder = RecordingSender(keep_values=True)
     try:
         gather_and_send_weights(model, recorder)
         checks["sync_completed_under_expert_tp"] = True
@@ -98,7 +82,7 @@ def run(ctx):
         checks["sync_completed_under_expert_tp"] = False
         return {"checks": checks, "metrics": metrics}
 
-    gathered = {name: data.float().cpu() for name, data in recorder.params if name.endswith(EXPERT_KEYS)}
+    gathered = {p.name: p.value.float().cpu() for p in recorder.params if p.name.endswith(EXPERT_KEYS)}
     checks["gathered_all_expert_tensors"] = len(gathered) == N_LAYERS * len(EXPERT_KEYS)
     checks["dense_params_forwarded"] = any("lm_head" in name or "embed" in name for name in recorder.names)
 

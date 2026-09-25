@@ -5,11 +5,11 @@ Test: FlashAdamW optimizer (quantized states + master weights).
 Verifies that create_flash_adamw_optimizer:
 1. Creates a valid FlashAdamW instance with correct param groups
 2. Achieves loss descent on a simple regression task
-3. Handles weight decay parameter filtering correctly
+3. Routes exactly the named decay parameters into the decay group, the rest into the no-decay one
 4. Uses less memory than standard AdamW
 
-Usage (single GPU, no torchrun needed):
-    python tests/gpu/optimizers/test_flash_adamw.py
+Usage (single GPU):
+    torchrun --nproc_per_node=1 tests/gpu/optimizers/test_flash_adamw.py
 """
 
 import copy
@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from src.optimizers.flash_adamw import create_flash_adamw_optimizer
+from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import assert_optimizer_state_bit_exact
 
 # ─── Models ──────────────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ def test_loss_descends():
 
     losses = run_training(model, optimizer, num_steps=100)
 
-    assert not math.isnan(losses[-1]), "Loss is NaN"
+    assert math.isfinite(losses[-1]), f"Loss is not finite: {losses[-1]}"
     assert losses[-1] < losses[0], f"Loss should decrease: initial={losses[0]:.4f}, final={losses[-1]:.4f}"
     reduction = (losses[0] - losses[-1]) / losses[0]
     print(f"  Loss: {losses[0]:.4f} -> {losses[-1]:.4f} ({reduction * 100:.1f}% reduction)")
@@ -98,7 +99,7 @@ def test_loss_descends():
 
 
 def test_decay_parameter_names():
-    """Only named decay params should receive weight decay."""
+    """``decay_parameters`` reaches FlashAdamW as a decay group and a no-decay group, and both step."""
     print("\nTEST 3: Decay parameter name filtering")
     model = FFNModel(hidden=64, layers=1).to(device="cuda", dtype=torch.bfloat16)
     decay_names = {n for n, _ in model.named_parameters() if "weight" in n and "norm" not in n}
@@ -118,6 +119,11 @@ def test_decay_parameter_names():
     no_decay_group = optimizer.param_groups[1]
     assert decay_group["weight_decay"] == 0.1
     assert no_decay_group["weight_decay"] == 0.0
+    decayed = {id(p) for n, p in model.named_parameters() if n in decay_names}
+    assert {id(p) for p in decay_group["params"]} == decayed, "decay group holds other params than the named ones"
+    assert {id(p) for p in no_decay_group["params"]} == {id(p) for p in model.parameters()} - decayed, (
+        "no-decay group is not the complement of the named decay params"
+    )
 
     # Run a few steps to make sure it doesn't crash
     run_training(model, optimizer, num_steps=5, hidden=64)
@@ -225,21 +231,17 @@ def test_state_dict_roundtrip():
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
+
+@gpu_test_main(exact_world_size=1, prefix="flash_adamw", partial_state=False)
+def run(ctx) -> dict:
+    checks: dict[str, bool] = {}
+    record_check(checks, "creates_optimizer", test_creates_optimizer)
+    record_check(checks, "loss_descends", test_loss_descends)
+    record_check(checks, "decay_parameter_names", test_decay_parameter_names)
+    record_check(checks, "memory_savings", test_memory_savings)
+    record_check(checks, "state_dict_roundtrip", test_state_dict_roundtrip)
+    return {"checks": checks}
+
+
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        print("CUDA not available, cannot run test")
-        exit(1)
-
-    print(f"PyTorch: {torch.__version__}")
-    print(f"GPU:     {torch.cuda.get_device_name(0)}")
-    print()
-
-    test_creates_optimizer()
-    test_loss_descends()
-    test_decay_parameter_names()
-    test_memory_savings()
-    test_state_dict_roundtrip()
-
-    print("\n" + "=" * 50)
-    print("ALL TESTS PASSED")
-    print("=" * 50)
+    run()

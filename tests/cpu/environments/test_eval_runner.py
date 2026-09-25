@@ -17,7 +17,6 @@ Run:
 import json
 import logging
 import math
-import sys
 import types
 from typing import Any
 
@@ -760,4 +759,4 @@ def test_report_states_the_invalid_count_even_when_none_is(caplog):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

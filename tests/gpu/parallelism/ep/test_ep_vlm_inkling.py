@@ -19,16 +19,16 @@ from transformers.models.inkling.modeling_inkling import InklingForConditionalGe
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.distributed import world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log
 
 SEED = 42
 BATCH, SEQ = 2, 48
 N_PATCHES = 8
 IMAGE_TOKEN_ID = 500  # within the tiny text vocab (512); the real config uses a dedicated special
-LOSS_TOL = 5e-2
-RANK_LOSS_TOL = 1e-3
 
 # The upstream scale planner (`plan_out_scales`) rejects most tiny shapes; this one builds a valid
 # 4-layer pixel-shuffle stack. text_hidden_size must equal the text config's hidden_size.
@@ -103,14 +103,11 @@ def run(ctx):
     metrics["ref_loss"] = ref_loss
     metrics["ep_loss"] = ep_loss
     checks["ep_loss_finite"] = bool(torch.isfinite(out.loss))
-    checks["ep_loss_matches_ref"] = abs(ep_loss - ref_loss) < LOSS_TOL
+    checks["ep_loss_matches_ref"] = abs(ep_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
 
-    loss_t = torch.tensor([ep_loss], device=device)
-    gathered = [torch.zeros_like(loss_t) for _ in range(ctx.world_size)]
-    torch.distributed.all_gather(gathered, loss_t)
-    spread = max(abs(g.item() - gathered[0].item()) for g in gathered)
+    spread = world_spread(ep_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < RANK_LOSS_TOL
+    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
 
     vision_grad = sum(p.grad.abs().sum().item() for p in model.model.vision_tower.parameters() if p.grad is not None)
     metrics["vision_grad_mass"] = vision_grad

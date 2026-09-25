@@ -19,7 +19,6 @@ Run with 2 GPUs:
 """
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
@@ -28,6 +27,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, log, log_all
@@ -39,23 +39,9 @@ SEED = 42
 
 
 def _fixed_batch(tokenizer, device):
-    torch.manual_seed(SEED)
-    text = tokenizer.apply_chat_template(
-        [
-            {"role": "user", "content": "What is 42 + 58?"},
-            {"role": "assistant", "content": "The sum of 42 and 58 is 100."},
-        ],
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-    tokens = tokenizer([text] * BATCH, return_tensors="pt", padding="max_length", max_length=SEQ_LEN, truncation=True)
-    input_ids = tokens["input_ids"].to(device)
-    attention_mask = tokens["attention_mask"].to(device)
-    dist.broadcast(input_ids, src=0)
-    dist.broadcast(attention_mask, src=0)
-    labels = input_ids.clone()
-    labels[attention_mask == 0] = -100
-    return input_ids, attention_mask, labels
+    """The shared fixed chat batch as ``BATCH`` identical rows, the same on every rank."""
+    batch = fixed_chat_batch(tokenizer, SEQ_LEN, device, seed=SEED, broadcast=True)
+    return tuple(tensor.repeat(BATCH, 1) for tensor in batch)
 
 
 def _forward_loss(model, batch, grad=False):
@@ -118,7 +104,7 @@ def run(ctx) -> dict:
     injector.disarm()
     flip = injector.flip_rate()
     tol = max(noise * 4, 5e-2)  # DeepEP repeat-forward accumulation noise, measured in-run
-    eq_ok = abs(loss_forced - loss_a) <= tol and (flip is None or flip < 0.01)
+    eq_ok = abs(loss_forced - loss_a) <= tol and flip is not None and flip < 0.01
     log_all(
         f"  [2] natural replay: loss unforced={loss_a:.6f} forced={loss_forced:.6f} "
         f"noise={noise:.6f} flip_rate={flip} -> {'PASS' if eq_ok else 'FAIL'}"

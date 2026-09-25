@@ -19,12 +19,13 @@ Run with 1 GPU:
 """
 
 import contextlib
-import os
 from types import SimpleNamespace
 
 import torch
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from tests.common.harness import gpu_test_main
+from tests.common.utils import log
 
 EXPERTS_PER_RANK = 8
 TOP_K = 4
@@ -71,42 +72,43 @@ def run_sort(ep_size, device):
     return out
 
 
-def main():
-    device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
-    torch.cuda.set_device(device)
+@gpu_test_main(exact_world_size=1, prefix="ep_sort_sync_free", partial_state=False)
+def run(ctx):
+    checks: dict[str, bool] = {}
+    device = ctx.device
 
-    # ep_size == 1: no DeepEP padding to compact, so nothing in the sort may read the device back.
+    # ep_size == 1: no DeepEP padding to compact, so nothing in the sort may read the device back
+    # (a sync raises out of run_sort and fails the run).
     sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, _ = run_sort(1, device)
-    print(f"[ep1] sort ran sync-free: {sorted_tokens.shape[0]} rows, offs={offs.tolist()}")
+    log(f"[ep1] sort ran sync-free: {sorted_tokens.shape[0]} rows, offs={offs.tolist()}")
 
     # The counts must still be right — a sync-free histogram that miscounts is worse than a sync.
     reference = torch.zeros(EXPERTS_PER_RANK, device=device, dtype=torch.long)
     unique, counts = torch.unique_consecutive(sorted_expert_ids, return_counts=True)
     reference[unique.long()] = counts.long()
     expected_offs = torch.cumsum(reference, 0).to(torch.int32)
-    assert torch.equal(offs, expected_offs), f"offsets disagree: {offs.tolist()} vs {expected_offs.tolist()}"
-    assert int(offs[-1]) == NUM_TOKENS * TOP_K, (
-        f"every (token, slot) pair must land in some expert at ep1: {int(offs[-1])} != {NUM_TOKENS * TOP_K}"
-    )
-    assert sorted_token_idx.numel() == NUM_TOKENS * TOP_K
-    assert sorted_weights.numel() == NUM_TOKENS * TOP_K
+    checks["ep1_offsets_match_reference"] = torch.equal(offs, expected_offs)
+    # Every (token, slot) pair must land in some expert at ep1.
+    checks["ep1_every_slot_lands_in_an_expert"] = int(offs[-1]) == NUM_TOKENS * TOP_K
+    checks["ep1_sorted_index_covers_every_slot"] = sorted_token_idx.numel() == NUM_TOKENS * TOP_K
+    checks["ep1_sorted_weights_cover_every_slot"] = sorted_weights.numel() == NUM_TOKENS * TOP_K
 
     # ep_size > 1: exactly one sync remains, the nonzero that compacts the -1 padding. When that is
-    # removed, this assertion is what fails and tells you to update the claim.
+    # removed, this check is what fails and tells you to update the claim.
     try:
         run_sort(4, device)
     except RuntimeError as exc:
-        assert "synchroniz" in str(exc).lower(), f"unexpected failure at ep>1: {exc}"
-        print("[ep4] still synchronizes, as documented (nonzero padding compaction)")
+        checks["ep4_padding_compaction_still_syncs"] = "synchroniz" in str(exc).lower()
+        log(f"[ep4] {exc}")
     else:
-        raise AssertionError(
+        checks["ep4_padding_compaction_still_syncs"] = False
+        log(
             "the ep_size>1 sort no longer synchronizes — the padding-compaction sync was removed. "
             "That is the intended direction: update this test and the sync note in "
             "_sort_tokens_for_grouped_mm."
         )
-
-    print("\nPASS  the grouped-GEMM sort is sync-free at ep1 and its offsets match the reference")
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    main()
+    run()

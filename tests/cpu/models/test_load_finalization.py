@@ -22,7 +22,6 @@ Run: python tests/cpu/models/test_load_finalization.py  (or pytest)
 import ast
 import functools
 import pathlib
-import sys
 import types
 
 import pytest
@@ -367,4 +366,4 @@ def test_device_placement_accepts_a_materialized_model():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

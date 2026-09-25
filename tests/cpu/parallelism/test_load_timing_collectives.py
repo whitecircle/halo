@@ -14,18 +14,16 @@ own interval), and no barrier is issued.
 
 import datetime
 import os
-import sys
 
 import pytest
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from src.distributed.runtime import log_global_load_duration_seconds
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 
-# Bounded so a regression fails the suite instead of stalling it (mp.start_processes has no timeout).
+# Bounds a stuck collective, so its gloo error lands in the verdict before the join deadline.
 PG_TIMEOUT_SEC = 60
 
 # Deliberately skewed intervals: rank 0 starts first, rank 1 finishes last, and NEITHER rank's own
@@ -34,11 +32,7 @@ RANK_INTERVALS = {0: (100.0, 110.0), 1: (105.0, 130.0)}
 GLOBAL_SPAN_SEC = 30.0
 
 
-def _worker(rank: int, tmp_dir: str, port: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
+def _worker(rank: int, tmp_dir: str) -> None:
     barriers = 0
     real_barrier = dist.barrier
 
@@ -56,13 +50,12 @@ def _worker(rank: int, tmp_dir: str, port: int) -> None:
         result = f"{type(e).__name__}: {e}"
     finally:
         dist.barrier = real_barrier
-        dist.destroy_process_group()
     with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
         fh.write(result)
 
 
 def test_the_span_is_global_and_costs_no_barrier(tmp_path):
-    mp.start_processes(_worker, args=(str(tmp_path), free_port()), nprocs=WORLD_SIZE, join=True, start_method="spawn")
+    run_gloo_ranks(_worker, WORLD_SIZE, str(tmp_path), pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC))
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"result_{rank}.txt") as fh:
             result = fh.read()
@@ -70,4 +63,4 @@ def test_the_span_is_global_and_costs_no_barrier(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

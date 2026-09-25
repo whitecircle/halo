@@ -4,10 +4,8 @@
 - a forward->backward->optimizer loop converges with BOTH bf16 and fp32 master weights (the low-precision
   fake-quant path keeps the master unchanged — bf16 master, low-precision compute).
 
-Run: python tests/gpu/kernels/test_lowp_production.py
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_lowp_production.py
 """
-
-import sys
 
 import torch
 import torch.nn as nn
@@ -15,6 +13,7 @@ import torch.nn.functional as F
 
 from src.kernels.lowp.linear import LowPrecisionLinear
 from src.kernels.lowp.mixed_precision import apply_mixed_precision_compute
+from tests.common.harness import gpu_test_main, record_check
 
 DEV = "cuda"
 
@@ -112,12 +111,13 @@ def test_converges_both_masters():
         )
 
 
+@gpu_test_main(exact_world_size=1, prefix="lowp_production", partial_state=False)
+def run(ctx) -> dict:
+    checks: dict[str, bool] = {}
+    record_check(checks, "conversion_scope", test_conversion_scope)
+    record_check(checks, "converges_both_masters", test_converges_both_masters)
+    return {"checks": checks}
+
+
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        print("SKIP: no CUDA")
-        sys.exit(0)
-    print("test_conversion_scope")
-    test_conversion_scope()
-    print("test_converges_both_masters")
-    test_converges_both_masters()
-    print("ALL PASS")
+    run()

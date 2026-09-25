@@ -15,7 +15,6 @@ Run: python tests/cpu/parallelism/test_cp_flash_attn_probe_order.py  (or pytest)
 """
 
 import importlib.util
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -108,4 +107,4 @@ def test_hopper_prefers_fa3_over_everything_else():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

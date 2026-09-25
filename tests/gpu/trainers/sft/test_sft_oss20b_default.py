@@ -2,10 +2,11 @@
 """
 SFT training test with default mode (FSDP2, no EP/CP/TP) on GptOss-20B.
 
-Validates that DistributedSFTTrainer works correctly with FSDP2 (fully_shard)
-data parallelism on a MoE model. Tests per-layer FSDP2 wrapping with
-SHARD_GRAD_OP behavior for MoE models (no expert parallelism — all experts
-on every GPU). Also validates checkpoint saving with FSDP2.
+Smoke test: DistributedSFTTrainer trains a MoE model with FSDP2 (fully_shard) data parallelism,
+per-layer wrapping with SHARD_GRAD_OP behavior and no expert parallelism (all experts on every GPU),
+then saves it. Checks that no EP/CP/TP mode engages, that every logged loss and grad norm is finite,
+that the last-step loss is below the first, and that the save wrote weight files. No loss is compared
+against a reference and the saved weights are not reloaded.
 
 Model: unsloth/gpt-oss-20b-BF16 (MoE, 32 experts)
 
@@ -23,7 +24,6 @@ import math
 import os
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
@@ -35,7 +35,6 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.tolerances import TOL
 from tests.common.utils import log
 
 MODEL_NAME = GPT_OSS_20B
@@ -148,20 +147,6 @@ def run(ctx) -> dict:
     else:
         checks["loss_decreased"] = False
         log("Loss decreased: FAIL (not enough steps logged)")
-
-    loss_reasonable = training_loss < 100
-    checks["loss_reasonable"] = loss_reasonable
-    log(f"Loss reasonable (<100): {'PASS' if loss_reasonable else 'FAIL'}")
-
-    loss_tensor = torch.tensor([training_loss], device=ctx.device)
-    all_losses = [torch.zeros_like(loss_tensor) for _ in range(ctx.world_size)]
-    dist.all_gather(all_losses, loss_tensor)
-    if ctx.rank == 0:
-        spread = max(lv.item() for lv in all_losses) - min(lv.item() for lv in all_losses)
-        checks["loss_consistent"] = spread < TOL.rank_loss_consistency_abs
-        log(f"Loss consistent (spread={spread:.6f}): {'PASS' if checks['loss_consistent'] else 'FAIL'}")
-    else:
-        checks["loss_consistent"] = True
 
     if grad_norms:
         grad_ok = all(math.isfinite(g) for g in grad_norms)

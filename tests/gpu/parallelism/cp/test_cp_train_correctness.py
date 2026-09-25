@@ -5,7 +5,7 @@ Context Parallelism training correctness test for Qwen3.
 Validates that CP training produces *equivalent* results to non-CP training by
 comparing, step-by-step on the same Qwen3-0.6B model and data:
 
-Phase 1 — Forward pass loss equivalence (tighter than test_cp_correctness.py)
+Phase 1 — Forward pass loss equivalence
 Phase 2 — Gradient equivalence after forward+backward (core correctness proof)
 Phase 3 — Multi-step training trajectory and final weight convergence
 
@@ -32,9 +32,6 @@ Requirements:
 """
 
 import math
-import os
-import sys
-import traceback
 
 import torch
 import torch.distributed as dist
@@ -43,8 +40,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.validation import validate_model_for_ulysses
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
-from tests.common.distributed import init_distributed, teardown_distributed
+from tests.common.distributed import world_mean
+from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, cos_sim, log, log_all
 
 # Configuration
@@ -56,10 +55,8 @@ NUM_TRAIN_STEPS = 5
 LEARNING_RATE = 1e-4
 
 # Tolerances — calibrated for bf16 + Ulysses all-to-all precision
-LOSS_ATOL = 0.1  # Forward pass loss (bf16 rounding through all-to-all)
 GRAD_COSINE_MIN = 0.99  # Per-parameter gradient cosine similarity
 GRAD_NORM_RTOL = 0.10  # Gradient norm ratio tolerance (10%)
-TRAIN_LOSS_ATOL = 0.15  # Per-step training loss (compounds over steps)
 WEIGHT_COS_MIN = 0.9999  # Final weight cosine similarity after training
 
 
@@ -160,18 +157,17 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     # ── Phase 1: Compare losses ─────────────────────────────────────────
     log("\n  --- Phase 1: Loss Equivalence ---")
 
-    # Average CP losses across ranks
-    cp_loss_tensor = torch.tensor([cp_loss_val], device=device)
-    gathered = [torch.zeros(1, device=device) for _ in range(cp_size)]
-    dist.all_gather(gathered, cp_loss_tensor)
-    avg_cp_loss = sum(t.item() for t in gathered) / cp_size
+    # Each rank's cp_size * local_sum / global_tokens averages to the full-sequence mean.
+    avg_cp_loss = world_mean(cp_loss_val)
 
     loss_diff = abs(avg_cp_loss - base_loss_val)
-    loss_passed = loss_diff < LOSS_ATOL and math.isfinite(base_loss_val) and math.isfinite(avg_cp_loss)
+    loss_passed = (
+        loss_diff < TOL.parallel_vs_baseline_loss_abs and math.isfinite(base_loss_val) and math.isfinite(avg_cp_loss)
+    )
 
     log(f"      Baseline loss:    {base_loss_val:.6f}")
     log(f"      Avg CP loss:      {avg_cp_loss:.6f}")
-    log(f"      Difference:       {loss_diff:.6f} (tol: {LOSS_ATOL})")
+    log(f"      Difference:       {loss_diff:.6f} (tol: {TOL.parallel_vs_baseline_loss_abs})")
     log(f"      Phase 1 result:   {'PASS' if loss_passed else 'FAIL'}")
 
     # ── Phase 2: Compare gradients ──────────────────────────────────────
@@ -305,12 +301,7 @@ def test_training_equivalence(device, cp_size):
     del model_cp, optimizer_cp
     cleanup_memory()
 
-    # Average CP losses across ranks for each step
-    cp_avg_losses = []
-    for local_loss in cp_local_losses:
-        gathered = [torch.zeros(1, device=device) for _ in range(cp_size)]
-        dist.all_gather(gathered, torch.tensor([local_loss], device=device))
-        cp_avg_losses.append(sum(t.item() for t in gathered) / cp_size)
+    cp_avg_losses = [world_mean(local_loss) for local_loss in cp_local_losses]
 
     log(f"      CP losses (avg): {[f'{l:.4f}' for l in cp_avg_losses]}")
 
@@ -321,25 +312,22 @@ def test_training_equivalence(device, cp_size):
     # Check 1: Per-step loss closeness
     step_diffs = [abs(b - c) for b, c in zip(base_losses, cp_avg_losses, strict=False)]
     max_step_diff = max(step_diffs)
-    loss_close = max_step_diff < TRAIN_LOSS_ATOL
+    loss_close = max_step_diff < TOL.parallel_vs_baseline_train_loss_abs
     checks["loss_trajectory_close"] = loss_close
     log(f"      Per-step diffs: {[f'{d:.4f}' for d in step_diffs]}")
-    log(f"      Max step diff:  {max_step_diff:.6f} (tol: {TRAIN_LOSS_ATOL})")
+    log(f"      Max step diff:  {max_step_diff:.6f} (tol: {TOL.parallel_vs_baseline_train_loss_abs})")
     log(f"      Loss trajectory: {'PASS' if loss_close else 'FAIL'}")
 
     # Check 2: Loss trend correlation
-    if len(base_losses) >= 2:
-        base_t = torch.tensor(base_losses, dtype=torch.float)
-        cp_t = torch.tensor(cp_avg_losses, dtype=torch.float)
-        # A constant trajectory has no trend to correlate; five optimizer steps that leave the loss
-        # flat mean the updates were never applied, so it fails.
-        degenerate = not (base_t.std() > 0 and cp_t.std() > 0)
-        corr = float("nan") if degenerate else torch.corrcoef(torch.stack([base_t, cp_t]))[0, 1].item()
-        corr_ok = not degenerate and corr > 0.90
-        checks["loss_correlation"] = corr_ok
-        log(f"      Loss correlation: {corr:.4f} ({'PASS' if corr_ok else 'FAIL'})")
-    else:
-        checks["loss_correlation"] = True
+    base_t = torch.tensor(base_losses, dtype=torch.float)
+    cp_t = torch.tensor(cp_avg_losses, dtype=torch.float)
+    # A constant trajectory has no trend to correlate; five optimizer steps that leave the loss
+    # flat mean the updates were never applied, so it fails.
+    degenerate = not (base_t.std() > 0 and cp_t.std() > 0)
+    corr = float("nan") if degenerate else torch.corrcoef(torch.stack([base_t, cp_t]))[0, 1].item()
+    corr_ok = not degenerate and corr > 0.90
+    checks["loss_correlation"] = corr_ok
+    log(f"      Loss correlation: {corr:.4f} ({'PASS' if corr_ok else 'FAIL'})")
 
     # Check 3: Final weight similarity (cosine per param, then aggregate)
     common_params = sorted(set(base_weights.keys()) & set(cp_weights.keys()))
@@ -384,90 +372,33 @@ def test_training_equivalence(device, cp_size):
 # Main
 
 
-def run_all_tests() -> bool:
+@gpu_test_main(min_world_size=2, prefix="cp_train_correctness", partial_state=False)
+def run(ctx):
     """Run all CP training correctness phases."""
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    device = f"cuda:{local_rank}"
-    cp_size = world_size
+    device = f"cuda:{ctx.local_rank}"
+    cp_size = ctx.world_size
 
     log(f"\n{'=' * 70}")
     log("  CP Training Correctness Test (Qwen3)")
-    log(f"  World size: {world_size}, CP size: {cp_size}")
+    log(f"  World size: {ctx.world_size}, CP size: {cp_size}")
     log(f"  Model: {MODEL_NAME}")
     log(f"  Seq length: {SEQ_LEN}, Train steps: {NUM_TRAIN_STEPS}, LR: {LEARNING_RATE}")
-    log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"{'=' * 70}")
 
     if SEQ_LEN % cp_size != 0:
-        log(f"\nERROR: seq_len ({SEQ_LEN}) must be divisible by cp_size ({cp_size})")
-        return False
+        raise ValueError(f"seq_len ({SEQ_LEN}) must be divisible by cp_size ({cp_size})")
 
-    results = {}
-
-    # Phase 1+2: Loss and gradient equivalence
-    try:
-        loss_ok, grad_ok, info = test_loss_and_gradient_equivalence(device, cp_size)
-        results["loss_equivalence"] = loss_ok
-        results["gradient_equivalence"] = grad_ok
-    except Exception as e:
-        log(f"\n  Phase 1+2 FAILED with exception: {e}")
-        if rank == 0:
-            traceback.print_exc()
-        results["loss_equivalence"] = False
-        results["gradient_equivalence"] = False
-
-    # Phase 3: Multi-step training
-    try:
-        train_ok, info = test_training_equivalence(device, cp_size)
-        results["training_equivalence"] = train_ok
-    except Exception as e:
-        log(f"\n  Phase 3 FAILED with exception: {e}")
-        if rank == 0:
-            traceback.print_exc()
-        results["training_equivalence"] = False
-
-    # Summary
-    all_passed = all(results.values())
-
-    log(f"\n{'=' * 70}")
-    log("  SUMMARY")
-    log(f"{'=' * 70}")
-    for name, passed in results.items():
-        status = "PASS" if passed else "FAIL"
-        log(f"    {name}: {status}")
-
-    log(f"\n{'=' * 70}")
-    if all_passed:
-        log("  CP TRAINING CORRECTNESS TEST PASSED")
-    else:
-        failed = [k for k, v in results.items() if not v]
-        log(f"  CP TRAINING CORRECTNESS TEST FAILED: {failed}")
-    log(f"{'=' * 70}\n")
-
-    return all_passed
-
-
-def main() -> int:
-    """Run CP training correctness test. Returns 0 on success, 1 on failure."""
-    rank, world_size, local_rank = init_distributed()
-
-    try:
-        success = run_all_tests()
-    except Exception as e:
-        log(f"\nFATAL ERROR: {e}")
-        if rank == 0:
-            traceback.print_exc()
-        success = False
-    finally:
-        cleanup_memory()
-        if dist.is_initialized():
-            dist.barrier()
-        teardown_distributed()
-
-    return 0 if success else 1
+    loss_ok, grad_ok, _ = test_loss_and_gradient_equivalence(device, cp_size)
+    train_ok, _ = test_training_equivalence(device, cp_size)
+    return {
+        "checks": {
+            "loss_equivalence": loss_ok,
+            "gradient_equivalence": grad_ok,
+            "training_equivalence": train_ok,
+        }
+    }
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

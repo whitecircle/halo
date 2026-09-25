@@ -13,25 +13,21 @@ Tests:
 
 Checkpoint verification:
   - Adapter files exist (adapter_config.json, adapter_model.safetensors)
-  - Adapter reloads successfully via PeftModel.from_pretrained()
+  - PeftModel.from_pretrained() on a fresh base restores every trained LoRA tensor
   - Reloaded model produces finite logits on a sample input
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_qwen3_4b_lora.py
+        tests/gpu/trainers/lora/test_sft_qwen3_4b_lora.py
 """
 
 import math
 import os
-import sys
 import traceback
 from types import SimpleNamespace
 
 import torch
-import torch.distributed as dist
-from accelerate import PartialState
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig, get_quantization_config
 
 from src.distributed.loading.model_loading import load_distributed_model
@@ -40,14 +36,10 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import (
-    cleanup_dirs,
-    ensure_model_downloaded,
-    setup_cache_dirs,
-    teardown_distributed,
-)
+from tests.common.distributed import ensure_model_downloaded
+from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_4B_INSTRUCT
-from tests.common.peft_helpers import adapter_save_checks
+from tests.common.peft_helpers import adapter_save_checks, snapshot_adapters, unwrap, verify_adapter_reload
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 # Configuration
@@ -108,55 +100,6 @@ def _validate_training(train_result, trainer, max_steps):
     log(f"  Loss in band (0.05, 20): {'PASS' if loss_reasonable else 'FAIL'} ({training_loss:.4f})")
 
     return checks, step_losses
-
-
-def _verify_checkpoint_reload(
-    save_dir: str,
-    tokenizer,
-    rank: int,
-    local_rank: int,
-    quantization_config=None,
-) -> dict[str, bool]:
-    """Reload saved adapter and verify it produces finite logits. Rank 0 only."""
-    if rank != 0:
-        return {}
-
-    checks = {}
-    try:
-        log("  Reloading base model for checkpoint verification...")
-        load_kwargs = {
-            "dtype": torch.bfloat16,
-            "trust_remote_code": True,
-            "device_map": {"": local_rank},
-        }
-        if quantization_config is not None:
-            load_kwargs["quantization_config"] = quantization_config
-
-        base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **load_kwargs)
-
-        log(f"  Loading adapter from {save_dir}...")
-        reloaded = PeftModel.from_pretrained(base_model, save_dir)
-        checks["adapter_reload"] = True
-        log("  Adapter reload: PASS")
-
-        # Verify inference produces finite output
-        reloaded.eval()
-        test_input = tokenizer("What is 2 + 2?", return_tensors="pt").to(f"cuda:{local_rank}")
-        with torch.no_grad():
-            output = reloaded(**test_input)
-
-        logits_finite = torch.isfinite(output.logits).all().item()
-        checks["reload_logits_finite"] = logits_finite
-        log(f"  Reload logits finite: {'PASS' if logits_finite else 'FAIL'}")
-
-        del reloaded, base_model
-        cleanup_memory()
-
-    except Exception as e:
-        log(f"  Checkpoint reload FAILED: {e}")
-        checks["adapter_reload"] = False
-
-    return checks
 
 
 # Mode runner
@@ -255,6 +198,7 @@ def run_mode(
         log(f"  Saving model to {save_dir}...")
         trainer.save_model(save_dir)
         barrier()
+        trained_lora = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
 
         # Step 7: Validate training
         log(f"\n  --- Training Validation ({mode_name}) ---")
@@ -276,11 +220,13 @@ def run_mode(
         cleanup_memory()
         barrier()
 
-        reload_checks = _verify_checkpoint_reload(
+        reload_checks = verify_adapter_reload(
             save_dir,
-            tokenizer,
-            rank,
-            local_rank,
+            trained_lora,
+            model_name=MODEL_NAME,
+            tokenizer=tokenizer,
+            rank=rank,
+            local_rank=local_rank,
             quantization_config=quantization_config,
         )
         checks.update(reload_checks)
@@ -301,24 +247,12 @@ def run_mode(
         barrier()
 
 
-# Main
-
-
-def main() -> int:
-    """Run all SFT LoRA/QLoRA tests on Qwen3-4B. Returns 0 on success, 1 on failure."""
-    if "RANK" in os.environ and not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
-
-    state = PartialState()
-    rank = state.process_index
-    local_rank = state.local_process_index
-    world_size = state.num_processes
-
-    base_output_dir, cache_dir = setup_cache_dirs("test_sft_qwen3_4b_lora", rank)
+def run(ctx) -> dict:
+    rank, local_rank, base_output_dir = ctx.rank, ctx.local_rank, ctx.output_dir
 
     log(f"\n{'#' * 70}")
     log("  SFT LoRA/QLoRA Test on Qwen3-4B (FSDP + TP)")
-    log(f"  World size: {world_size}, Model: {MODEL_NAME}")
+    log(f"  World size: {ctx.world_size}, Model: {MODEL_NAME}")
     log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
     log(f"  Max steps: {MAX_STEPS}, Batch size: {BATCH_SIZE}, Seq length: {MAX_SEQ_LENGTH}")
     log("  Packing: enabled")
@@ -430,42 +364,35 @@ def main() -> int:
     # ── Test 3: LoRA + TP=2 must be REJECTED ─────────────────────────────
     # TP shards attention as DTensors; PEFT adapters are plain tensors outside the TP graph, so
     # the adapter would train rank-inconsistent. The trainer must fail fast at construction.
-    can_run_tp = world_size >= 2
-    if not can_run_tp:
-        log(f"\n{'=' * 70}")
-        log(f"  TEST 3: LoRA + TP=2 rejection -- SKIPPED (world_size={world_size})")
-        log(f"{'=' * 70}")
-        results["lora_tp2_rejected"] = (None, f"skipped (world_size={world_size})")
-    else:
-        log(f"\n{'=' * 70}")
-        log("  TEST 3: LoRA + TP=2 must be REJECTED (Qwen3-4B)")
-        log(f"{'=' * 70}")
+    log(f"\n{'=' * 70}")
+    log("  TEST 3: LoRA + TP=2 must be REJECTED (Qwen3-4B)")
+    log(f"{'=' * 70}")
 
-        parallelism_tp2 = ParallelismConfig(tp_size=2)
+    parallelism_tp2 = ParallelismConfig(tp_size=2)
 
-        lora_tp_model_config = ModelConfig(**lora_model_kwargs)
-        lora_tp_sft_config = SFTConfig(
-            output_dir=os.path.join(base_output_dir, "lora_tp2_train"),
-            learning_rate=LEARNING_RATE,
-            gradient_checkpointing_kwargs={"use_reentrant": False},
-            use_liger_kernel=True,
-            **shared_sft_kwargs,
-        )
+    lora_tp_model_config = ModelConfig(**lora_model_kwargs)
+    lora_tp_sft_config = SFTConfig(
+        output_dir=os.path.join(base_output_dir, "lora_tp2_train"),
+        learning_rate=LEARNING_RATE,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        use_liger_kernel=True,
+        **shared_sft_kwargs,
+    )
 
-        success, detail = run_mode(
-            "lora_tp2_rejected",
-            lora_tp_model_config,
-            lora_tp_sft_config,
-            parallelism_tp2,
-            tokenizer,
-            train_dataset,
-            eval_dataset,
-            rank,
-            local_rank,
-            save_dir=os.path.join(base_output_dir, "lora_tp2_save"),
-            expect_rejection=True,
-        )
-        results["lora_tp2_rejected"] = (success, detail)
+    success, detail = run_mode(
+        "lora_tp2_rejected",
+        lora_tp_model_config,
+        lora_tp_sft_config,
+        parallelism_tp2,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        rank,
+        local_rank,
+        save_dir=os.path.join(base_output_dir, "lora_tp2_save"),
+        expect_rejection=True,
+    )
+    results["lora_tp2_rejected"] = (success, detail)
 
     # ── Test 4: QLoRA + TP=2 ─────────────────────────────────────────────
     # QLoRA (4-bit quantization via BitsAndBytes) is incompatible with TP (DTensor).
@@ -475,26 +402,14 @@ def main() -> int:
     log(f"\n{'=' * 70}")
     log("  TEST 4: QLoRA + TP=2 -- SKIPPED (4-bit quantization incompatible with DTensor TP)")
     log(f"{'=' * 70}")
-    results["qlora_tp2"] = (None, "skipped (quantization incompatible with DTensor TP)")
 
-    # ── Summary ──────────────────────────────────────────────────────────
-    log(f"\n{'#' * 70}")
-    log("  FINAL RESULTS")
-    log(f"{'#' * 70}")
-    # None == did not run. Reporting a skipped mode as PASSED claims coverage the run never had.
     for name, (passed, detail) in results.items():
-        status = "SKIPPED" if passed is None else ("PASSED" if passed else "FAILED")
-        log(f"  {name:20s} {status} -- {detail}")
-    log(f"{'#' * 70}")
+        log(f"  {name:20s} {'PASSED' if passed else 'FAILED'} -- {detail}")
 
-    all_passed = all(p for p, _ in results.values() if p is not None)
-    log(f"\n  Overall: {'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'}")
+    return {"checks": {name: passed for name, (passed, _) in results.items()}}
 
-    cleanup_dirs(base_output_dir, cache_dir)
-    if dist.is_initialized():
-        teardown_distributed()
-    return 0 if all_passed else 1
 
+main = gpu_test_main(min_world_size=2, prefix="test_sft_qwen3_4b_lora")(run)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

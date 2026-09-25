@@ -237,4 +237,4 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

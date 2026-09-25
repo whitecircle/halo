@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 """Tests for GenerateExamplesCallback. Run: python tests/cpu/callbacks/test_generate_examples.py"""
 
-import sys
-
 import pytest
 import torch
 
@@ -434,4 +432,4 @@ def test_pretty_print_dataframe_truncates_long_prompt(caplog):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

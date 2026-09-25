@@ -278,6 +278,4 @@ def test_rlvr_rlrr_out_of_range_raises(kwargs, match):
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

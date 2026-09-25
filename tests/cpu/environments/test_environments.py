@@ -14,7 +14,6 @@ Tests cover:
 import asyncio
 import dataclasses
 import logging
-import sys
 import time
 
 import pytest
@@ -138,6 +137,20 @@ def test_trajectory():
     assert len(conv) == 2
     assert conv[0]["role"] == "user"
     assert conv[1]["role"] == "assistant"
+
+
+def test_trajectory_tool_messages_are_not_turns():
+    """A tool observation is not a model turn: counting it would spend a tool-using episode's
+    ``max_turns`` budget on its own observations, while the conversation still carries it."""
+
+    traj = Trajectory()
+    traj.add_message(Message.user("What is the square root of 144?"))
+    traj.add_message(Message.assistant('Action: calculate(expression="sqrt(144)")'))
+    traj.add_message(Message.tool("12.0", "call_001", "calculate"))
+    traj.add_message(Message.assistant("Final Answer: 12"))
+
+    assert traj.num_turns == 2
+    assert [m["role"] for m in traj.get_conversation()] == ["user", "assistant", "tool", "assistant"]
 
 
 def test_append_to_last_user_refuses_a_trajectory_without_a_user_message():
@@ -718,6 +731,8 @@ def test_registry_register_custom(isolated_registry):
         return TestCustomEnv(max_turns=config.get("max_turns", 5))
 
     register_environment("test_custom_env", factory)
+    # The entry script refuses any environment_type absent from this listing.
+    assert "test_custom_env" in get_registered_environments()
 
     env = resolve_environment("test_custom_env", {"max_turns": 3})
     assert env is not None
@@ -1137,6 +1152,24 @@ def test_create_environment_native_coding():
     tools_schema = env.get_tools_schema()
     tool_names = [t["function"]["name"] for t in tools_schema]
     assert "python_repl" in tool_names
+
+
+def test_create_environment_native_math():
+    """native_math advertises its calculator through the native tools= schema."""
+
+    env = create_environment("native_math", {"max_turns": 5})
+
+    tool_names = [t["function"]["name"] for t in env.get_tools_schema()]
+    assert "calculate" in tool_names
+
+
+def test_create_environment_react_math():
+    """react_math names its tools in the system prompt; it advertises no native tools= schema."""
+
+    env = create_environment("react_math", {"max_turns": 5})
+
+    assert env.get_tools_schema() is None
+    assert "calculate" in env.registry.names()
 
 
 def test_create_environment_native_combined():
@@ -2011,4 +2044,4 @@ def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog)
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

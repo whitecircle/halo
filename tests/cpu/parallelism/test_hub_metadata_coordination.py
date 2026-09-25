@@ -17,8 +17,6 @@ and a single process is untouched.
 Run: pytest tests/cpu/parallelism/test_hub_metadata_coordination.py
 """
 
-import sys
-
 import pytest
 import torch.distributed as dist
 
@@ -140,4 +138,4 @@ def test_the_scope_is_agreed_before_the_first_coordinated_phase(fake_job, monkey
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

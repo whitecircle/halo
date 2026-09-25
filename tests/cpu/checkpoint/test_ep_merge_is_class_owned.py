@@ -14,7 +14,6 @@ Run: pytest tests/cpu/checkpoint/test_ep_merge_is_class_owned.py
 """
 
 import gc
-import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -242,4 +241,4 @@ def test_gptoss_merge_refuses_unexpected_expert_params():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

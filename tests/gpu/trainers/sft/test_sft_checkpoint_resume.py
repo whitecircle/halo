@@ -39,7 +39,7 @@ from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
@@ -48,6 +48,7 @@ from src.distributed.runtime import barrier
 from src.env import env_flag, env_str
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import resolve_resume_weights_source
+from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -94,66 +95,6 @@ def _fixed_batch(tokenizer, device, seq_len: int = 64):
     if pad_id is not None:
         labels[ids == pad_id] = -100
     return ids, labels
-
-
-def _forward_loss(trainer, ids, labels) -> float:
-    """Forward loss on a fixed batch through the live (wrapped) trainer model, no step."""
-    model = trainer.model
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.no_grad():
-            out = model(input_ids=ids, labels=labels, use_cache=False)
-    finally:
-        if was_training:
-            model.train()
-    return out.loss.item()
-
-
-def _optimizer_moments_stats(trainer) -> tuple[bool, bool, bool]:
-    """Scan this rank's local optimizer 2nd moment (exp_avg_sq).
-
-    Returns (materialized, any_nonzero, all_finite). ``materialized`` is True if any
-    exp_avg_sq exists at all. Every sharded mode (fsdp/tp/cp/ep) restores its saved
-    optimizer moments on resume, so exp_avg_sq is populated → materialized True and
-    any_nonzero True before the first step. FSDP/TP/CP store DTensors; ``.to_local()``
-    reads this rank's shard with no collective (plain EP expert tensors need none).
-    """
-    materialized = False
-    any_nonzero = False
-    all_finite = True
-    for state in trainer.optimizer.state.values():
-        sq = state.get("exp_avg_sq")
-        if sq is None:
-            continue
-        materialized = True
-        local = sq.to_local() if hasattr(sq, "to_local") else sq
-        local = local.detach()
-        if (local != 0).any().item():
-            any_nonzero = True
-        if not torch.isfinite(local).all().item():
-            all_finite = False
-    return materialized, any_nonzero, all_finite
-
-
-def _make_resume_capture_callback(trainer_ref: dict, ids, labels):
-    """Callback snapshotting resumed state at on_train_begin (post-resume, pre-step)."""
-
-    class _ResumeCaptureCallback(TrainerCallback):
-        def on_train_begin(self, args, state, control, **kwargs):
-            trainer = trainer_ref["trainer"]
-            materialized, nonzero, finite = _optimizer_moments_stats(trainer)
-            sched = getattr(trainer, "lr_scheduler", None)
-            trainer_ref["capture"] = {
-                "l_post": _forward_loss(trainer, ids, labels),
-                "moments_materialized": materialized,
-                "moments_nonzero": nonzero,
-                "moments_finite": finite,
-                "sched_last_epoch": int(sched.last_epoch) if sched is not None else None,
-            }
-            return control
-
-    return _ResumeCaptureCallback()
 
 
 def model_for_mode(mode: str) -> str:
@@ -292,7 +233,7 @@ def phase1_train_and_save(
         log(f"  Step losses:   {[f'{l:.4f}' for l in step_losses]}")
 
         ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-        l_pre = _forward_loss(trainer, ids, labels)
+        l_pre = fixed_batch_loss(trainer.model, ids, labels)
         log(f"  L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
         if not math.isfinite(training_loss):
@@ -382,8 +323,8 @@ def phase2_resume_and_train(
         )
 
         ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-        trainer_ref: dict = {"trainer": trainer, "capture": None}
-        trainer.add_callback(_make_resume_capture_callback(trainer_ref, ids, labels))
+        resume_capture = ResumeCapture(trainer, ids, labels)
+        trainer.add_callback(resume_capture)
 
         log(f"  Resuming from: {checkpoint_path}")
         train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
@@ -407,7 +348,7 @@ def phase2_resume_and_train(
         if not all_finite:
             log(f"  ERROR: NaN/Inf in resumed step losses: {step_losses}")
 
-        cap = trainer_ref["capture"]
+        cap = resume_capture.capture
         if cap is None:
             log("  ERROR: resume-capture callback did not fire (on_train_begin missed)")
             return False, step_losses

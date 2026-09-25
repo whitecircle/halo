@@ -13,16 +13,14 @@ Two mechanisms with no other coverage:
   ``prompt_input_ids ++ completion_input_ids`` verbatim.
 """
 
-import os
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from src.trainers.preference.smpo import SmoothMarginPOTrainer, tokenize_preference_row
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 CP_WORLD_SIZE = 2
 
@@ -184,33 +182,28 @@ def test_merged_clip_reproduces_both_pre_merge_spellings(dtype):
     assert torch.equal(merged[~loss_mask], logps[~loss_mask]), "a masked (padding) position was clipped"
 
 
-def _cp_clip_worker(rank: int, out_path: str, port: int) -> None:
+def _cp_clip_worker(rank: int, out_path: str) -> None:
     """Rank-local slice + a real gloo CP group must clip exactly like one process holding it all."""
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(CP_WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=CP_WORLD_SIZE)
-    try:
-        num_chosen, seq = 2, 512
-        logps = _rejected_logps(rows=2 * num_chosen, seq=seq, seed=11)
-        loss_mask = torch.ones_like(logps, dtype=torch.bool)
-        row_is_chosen = (torch.arange(2 * num_chosen) < num_chosen).unsqueeze(1)
-        clipper = _Clipper(lower=0.05, upper=0.9, min_log_prob=-2.0)
+    num_chosen, seq = 2, 512
+    logps = _rejected_logps(rows=2 * num_chosen, seq=seq, seed=11)
+    loss_mask = torch.ones_like(logps, dtype=torch.bool)
+    row_is_chosen = (torch.arange(2 * num_chosen) < num_chosen).unsqueeze(1)
+    clipper = _Clipper(lower=0.05, upper=0.9, min_log_prob=-2.0)
 
-        whole = clipper._clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
+    whole = clipper._clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
 
-        chunk = seq // CP_WORLD_SIZE
-        sl = slice(rank * chunk, (rank + 1) * chunk)
-        local = clipper._clip_log_probs(
-            logps[:, sl],
-            loss_mask[:, sl],
-            row_is_chosen,
-            cp_config=SimpleNamespace(process_group=dist.group.WORLD),
-        )
-        ok = torch.equal(local, whole[:, sl])
-        if rank == 0:
-            with open(out_path, "w") as fh:
-                fh.write("PASS" if ok else "FAIL: CP-sliced clip differs from the whole-sequence clip")
-    finally:
-        dist.destroy_process_group()
+    chunk = seq // CP_WORLD_SIZE
+    sl = slice(rank * chunk, (rank + 1) * chunk)
+    local = clipper._clip_log_probs(
+        logps[:, sl],
+        loss_mask[:, sl],
+        row_is_chosen,
+        cp_config=SimpleNamespace(process_group=dist.group.WORLD),
+    )
+    ok = torch.equal(local, whole[:, sl])
+    if rank == 0:
+        with open(out_path, "w") as fh:
+            fh.write("PASS" if ok else "FAIL: CP-sliced clip differs from the whole-sequence clip")
 
 
 def test_cp_sliced_clip_matches_the_whole_sequence_clip(tmp_path):
@@ -221,7 +214,7 @@ def test_cp_sliced_clip_matches_the_whole_sequence_clip(tmp_path):
     taken before the gather) gives each rank a different floor and fails here.
     """
     out = str(tmp_path / "result.txt")
-    mp.start_processes(_cp_clip_worker, args=(out, free_port()), nprocs=CP_WORLD_SIZE, join=True, start_method="spawn")
+    run_gloo_ranks(_cp_clip_worker, CP_WORLD_SIZE, out)
     with open(out) as fh:
         assert fh.read() == "PASS"
 

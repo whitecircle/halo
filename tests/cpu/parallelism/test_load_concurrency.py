@@ -14,8 +14,6 @@ on a 4-GPU tray silently mean 2 — the opposite of what it says.
 Run: pytest tests/cpu/parallelism/test_load_concurrency.py
 """
 
-import sys
-
 import pytest
 import torch.distributed as dist
 
@@ -89,4 +87,4 @@ def test_the_throttle_actually_uses_the_resolved_width(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

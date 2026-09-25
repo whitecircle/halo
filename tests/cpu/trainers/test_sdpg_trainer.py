@@ -118,4 +118,4 @@ def test_a_batch_without_teacher_prompts_raises_while_opd_is_on(monkeypatch, bet
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

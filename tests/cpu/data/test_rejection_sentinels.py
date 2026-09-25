@@ -15,8 +15,6 @@ are legitimately None on text-only rows, so typing can never be left to batch-wi
 Run: pytest tests/cpu/data/test_rejection_sentinels.py
 """
 
-import sys
-
 import pyarrow as pa
 import pytest
 from datasets import Dataset
@@ -288,4 +286,4 @@ def test_tokenize_vlm_dataset_survives_all_rejected_writer_batch():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

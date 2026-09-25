@@ -107,4 +107,4 @@ def test_every_bound_name_is_absent_from_the_published_import_list():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -211,6 +211,4 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -38,7 +38,7 @@ from src.kernels.liger.orchestrator import resolve_liger_applier
 from tests.common.ep_reference import compare_grad, ep_layers
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN35_MOE_CONFIG
-from tests.common.utils import cos_sim, log
+from tests.common.utils import cos_sim, log, max_abs_rel_err
 
 SEED = 42
 BATCH, SEQ, HIDDEN, INTERMEDIATE, HEAD_DIM = 2, 64, 256, 512, 128
@@ -91,10 +91,6 @@ EP_SHARED_EXPERT_LOSS_TOL = 5e-3
 EP_SHARED_EXPERT_GRAD_RATIO_TOL = 2e-2
 
 
-def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    return ((a.float() - b.float()).abs().max() / b.float().abs().max().clamp(min=1e-9)).item()
-
-
 def _flags(applier, **requested) -> dict:
     """``requested``, restricted to the roles this family's applier offers, everything else off."""
     parameters = set(inspect.signature(applier).parameters) - {"model"}
@@ -112,12 +108,12 @@ def _fwd_bwd(module, x: torch.Tensor):
 def _compare(name: str, reference, patched, tol: float) -> None:
     ref_out, ref_dx, ref_dw = reference
     pat_out, pat_dx, pat_dw = patched
-    residuals = {"fwd": _rel(pat_out, ref_out), "dx": _rel(pat_dx, ref_dx)}
+    residuals = {"fwd": max_abs_rel_err(pat_out, ref_out), "dx": max_abs_rel_err(pat_dx, ref_dx)}
     for index, (ref_grad, pat_grad) in enumerate(zip(ref_dw, pat_dw, strict=True)):
-        residuals[f"dw{index}"] = _rel(pat_grad, ref_grad)
+        residuals[f"dw{index}"] = max_abs_rel_err(pat_grad, ref_grad)
     log(f"  {name}: " + " ".join(f"{key}={value:.1e}" for key, value in residuals.items()))
-    worst = max(residuals, key=residuals.get)
-    assert residuals[worst] < tol, f"{name} {worst} residual {residuals[worst]:.2e} exceeds {tol:.2e}"
+    failing = {key: value for key, value in residuals.items() if not value < tol}
+    assert not failing, f"{name} residuals {failing} exceed {tol:.2e}"
 
 
 def _snapshot_stock_classes(spec) -> dict[str, type]:
@@ -198,25 +194,24 @@ def _compare_gated_norm(name, original, patched, shape, weight_dtype, device) ->
     assert fused[3].dtype == weight_dtype, f"{name} returned a {fused[3].dtype} gradient for a {weight_dtype} weight"
 
     keys = ("fwd", "dx", "dgate", "dweight")
-    errors = {key: _rel(fused[i], oracle[i]) for i, key in enumerate(keys)}
+    errors = {key: max_abs_rel_err(fused[i], oracle[i]) for i, key in enumerate(keys)}
     ratios = {
-        key: errors[key] / max(_rel(eager[i], oracle[i]), GATED_ORACLE_ERROR_FLOOR) for i, key in enumerate(keys)
+        key: errors[key] / max(max_abs_rel_err(eager[i], oracle[i]), GATED_ORACLE_ERROR_FLOOR)
+        for i, key in enumerate(keys)
     }
-    agreement = max(_rel(fused[i], eager[i]) for i in range(len(keys)))
+    agreement = max(max_abs_rel_err(fused[i], eager[i]) for i in range(len(keys)))
     log(
         f"  {name} {tuple(shape)} w={weight_dtype}: "
         + " ".join(f"{key}={errors[key]:.1e}/{ratios[key]:.2f}x" for key in keys)
         + f" (vs eager {agreement:.1e})"
     )
 
-    worst = max(errors, key=errors.get)
-    assert errors[worst] < TOL_GATED_ORACLE, (
-        f"{name} {tuple(shape)} w={weight_dtype} {worst} error {errors[worst]:.2e} exceeds {TOL_GATED_ORACLE:.2e}"
-    )
-    worst_ratio = max(ratios, key=ratios.get)
-    assert ratios[worst_ratio] <= GATED_ORACLE_RATIO_MAX, (
-        f"{name} {tuple(shape)} w={weight_dtype} {worst_ratio} is {ratios[worst_ratio]:.2f}x less accurate than the "
-        f"eager module it replaces"
+    failing = {key: value for key, value in errors.items() if not value < TOL_GATED_ORACLE}
+    assert not failing, f"{name} {tuple(shape)} w={weight_dtype} errors {failing} exceed {TOL_GATED_ORACLE:.2e}"
+    less_accurate = {key: value for key, value in ratios.items() if not value <= GATED_ORACLE_RATIO_MAX}
+    assert not less_accurate, (
+        f"{name} {tuple(shape)} w={weight_dtype} is less accurate than the eager module it replaces by "
+        f"{less_accurate} (x the eager error)"
     )
 
 
@@ -422,10 +417,10 @@ def _check_rope(spec, device) -> None:
         (rotated_q.float().pow(2).sum() + rotated_k.float().pow(2).sum()).backward()
         outputs[name] = (rotated_q.detach(), rotated_k.detach(), q.grad, k.grad)
     for index, label in enumerate(("q", "k", "dq", "dk")):
-        residuals[label] = _rel(outputs["patched"][index], outputs["reference"][index])
+        residuals[label] = max_abs_rel_err(outputs["patched"][index], outputs["reference"][index])
     log(f"  {spec.model_types[0]} rope: " + " ".join(f"{k}={v:.1e}" for k, v in residuals.items()))
-    worst = max(residuals, key=residuals.get)
-    assert residuals[worst] < TOL_BF16, f"rope {worst} residual {residuals[worst]:.2e} exceeds {TOL_BF16:.2e}"
+    failing = {key: value for key, value in residuals.items() if not value < TOL_BF16}
+    assert not failing, f"rope residuals {failing} exceed {TOL_BF16:.2e}"
 
 
 def _check_fused_head(model_type, tiny_config, device) -> None:

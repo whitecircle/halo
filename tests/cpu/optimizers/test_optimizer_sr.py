@@ -9,11 +9,11 @@ These pin the *numerical* properties that justify SR over nearest rounding:
   2. The eager Adam step keeps ``exp_avg`` (the signed first moment) on NEAREST
      rounding -> bit-identical across two runs from identical state, while the
      weight and ``exp_avg_sq`` differ run-to-run (SR noise).
-  3. SR on ``exp_avg_sq`` removes the systematic +~50% upward bias that nearest
-     rounding inflicts on the always-positive second-moment accumulator near the
-     bf16 underflow floor. THIS is the test that bites if SR is dropped from the
-     second moment: AdamWBF16's exp_avg_sq tracks fp32 Adam, whereas a
-     nearest-rounded reference overshoots.
+  3. SR on ``exp_avg_sq`` removes the systematic bias, tens of percent with a
+     regime-dependent sign, that nearest rounding inflicts on the always-positive
+     second-moment accumulator near the bf16 underflow floor. THIS is the test that
+     bites if SR is dropped from the second moment: AdamWBF16's exp_avg_sq tracks
+     fp32 Adam, whereas a nearest-rounded reference misses it by more than 15%.
 
 Run: python tests/cpu/optimizers/test_optimizer_sr.py  (or pytest)
 """
@@ -140,13 +140,13 @@ def test_exp_avg_nearest_weight_and_easq_stochastic():
     assert not torch.equal(easq_a, easq_b), "exp_avg_sq write must carry SR noise (differs across seeds)"
 
 
-# 3. SR on exp_avg_sq removes the +~50% second-moment bias (THE bite test)
+# 3. SR on exp_avg_sq removes the nearest-rounding second-moment bias (THE bite test)
 
 
 def _adam_easq_reference(grad_val, n_steps, beta2, sr=False, seed=0):
     """fp32-accumulated second moment, then stored as bf16 each step.
 
-    sr=False -> nearest rounding (the buggy path that over-estimates).
+    sr=False -> nearest rounding (the biased path).
     sr=True  -> stochastic rounding (matches AdamWBF16's eager path).
     Returns the mean of the final bf16 exp_avg_sq.
     """

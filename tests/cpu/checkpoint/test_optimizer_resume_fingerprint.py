@@ -18,7 +18,6 @@ Consensus outcomes that cannot occur single-process are simulated by monkeypatch
 """
 
 import os
-import sys
 
 import pytest
 import torch
@@ -632,4 +631,4 @@ def test_restored_schedule_lr_is_applied_per_param_group(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

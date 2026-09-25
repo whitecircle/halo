@@ -14,10 +14,9 @@ minimal stub (the ``test_ep_sort_sync_free`` idiom — no dispatcher, no model):
 - forcing the adapter GEMMs back through the layer precision raises the r-not-divisible ValueError
   — the in-file non-vacuity control.
 
-Run: python tests/gpu/kernels/test_lowp_expert_lora.py  (1 GPU)
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_lowp_expert_lora.py
 """
 
-import sys
 from types import MethodType, SimpleNamespace
 
 import torch
@@ -27,6 +26,8 @@ import src.distributed.expert_parallel.base_layer as base_layer_mod
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.kernels.grouped_gemm import GroupedGemmPrecision
 from src.kernels.lowp.quantization import fake_quant
+from tests.common.harness import gpu_test_main, record_check
+from tests.common.utils import log
 
 DEV = "cuda"
 E, K, N, R, T_PER = 2, 64, 48, 16, 16  # r=16: NOT divisible by mxfp8's 32-element block
@@ -117,28 +118,15 @@ def test_forced_lowp_adapter_gemm_raises():
     print("  forced-lowp adapter GEMM raises the r%32 ValueError (control) PASS")
 
 
-def main() -> int:
-    if not torch.cuda.is_available():
-        print("SKIP: no CUDA")  # the sentinel the launcher skips on; a bare exit 0 reads as a PASS
-        return 0
-    print(f"lowp expert-LoRA tests on {torch.cuda.get_device_name()}")
-    failures = []
-    for test in (
-        test_fake_quant_refuses_sub_block_axis,
-        test_adapter_gemms_stay_bf16,
-        test_forced_lowp_adapter_gemm_raises,
-    ):
-        try:
-            test()
-        except Exception as exc:
-            failures.append((test.__name__, exc))
-            print(f"  FAIL {test.__name__}: {exc}")
-    if failures:
-        print(f"\n{len(failures)} test(s) FAILED")
-        return 1
-    print("\nAll lowp expert-LoRA tests PASSED")
-    return 0
+@gpu_test_main(exact_world_size=1, prefix="lowp_expert_lora", partial_state=False)
+def run(ctx) -> dict:
+    log(f"lowp expert-LoRA tests on {torch.cuda.get_device_name()}")
+    checks: dict[str, bool] = {}
+    record_check(checks, "fake_quant_refuses_sub_block_axis", test_fake_quant_refuses_sub_block_axis)
+    record_check(checks, "adapter_gemms_stay_bf16", test_adapter_gemms_stay_bf16)
+    record_check(checks, "forced_lowp_adapter_gemm_raises", test_forced_lowp_adapter_gemm_raises)
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

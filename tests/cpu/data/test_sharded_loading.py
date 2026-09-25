@@ -11,7 +11,6 @@ Usage:
 
 import os
 import shutil
-import sys
 import tempfile
 from unittest.mock import patch
 
@@ -538,4 +537,4 @@ def test_load_skips_a_split_without_an_index(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

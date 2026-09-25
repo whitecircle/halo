@@ -13,8 +13,6 @@ is why the draw may not consult numpy's global state.
 Run: pytest tests/cpu/data/test_dataset_ratio_seed.py
 """
 
-import sys
-
 import numpy as np
 import pytest
 from accelerate import PartialState
@@ -101,4 +99,4 @@ def test_default_seed_is_the_documented_one():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

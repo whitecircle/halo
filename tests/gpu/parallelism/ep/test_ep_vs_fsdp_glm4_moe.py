@@ -24,6 +24,7 @@ from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLite
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.distributed import world_spread
 from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
@@ -32,8 +33,6 @@ from tests.common.utils import log
 
 SEED = 42
 BATCH, SEQ = 2, 64
-LOSS_TOL = 5e-2  # bf16 dispatch/accumulation-order noise on a tiny model
-RANK_LOSS_TOL = 1e-3  # EP is orthogonal to DP: identical input → identical loss
 
 _DENSE_LAYERS = list(range(TINY_GLM4_MOE_LITE_CONFIG["first_k_dense_replace"]))
 _SPARSE_LAYERS = list(
@@ -114,15 +113,12 @@ def run(ctx):
     metrics["ref_loss"] = ref_loss
     metrics["ep_loss"] = ep_loss
     checks["loss_finite"] = bool(torch.isfinite(out.loss))
-    checks["ep_loss_matches_ref"] = abs(ep_loss - ref_loss) < LOSS_TOL
+    checks["ep_loss_matches_ref"] = abs(ep_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
 
     # Losses must agree across ranks (identical input; EP orthogonal to DP).
-    loss_t = torch.tensor([ep_loss], device=device)
-    gathered = [torch.zeros_like(loss_t) for _ in range(ctx.world_size)]
-    torch.distributed.all_gather(gathered, loss_t)
-    spread = max(abs(g.item() - gathered[0].item()) for g in gathered)
+    spread = world_spread(ep_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < RANK_LOSS_TOL
+    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
 
     # ── Gradient equivalence vs reference ─────────────────────────────────────
     for i, (ep, refs) in enumerate(zip(ep_layers, ref_grads, strict=True)):

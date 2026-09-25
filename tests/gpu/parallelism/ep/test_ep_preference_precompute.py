@@ -46,6 +46,8 @@ from trl import DPOConfig, KTOConfig
 
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from src.trainers.preference.dpo import DistributedDPOTrainer
+from src.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
 
@@ -177,9 +179,6 @@ def spying_trainer_class(kind: str, recorded: list[str]):
     subclass is a subclass of ``PrecomputeRefLogpsRankConsistentMixin``, which is exactly the class
     set ``_defining_module`` skips — so wrapping here cannot displace the guard it is measuring.
     """
-    from src.trainers.preference.dpo import DistributedDPOTrainer
-    from src.trainers.preference.kto import DistributedKTOTrainer
-
     base = DistributedDPOTrainer if kind == "dpo" else DistributedKTOTrainer
 
     class SpyingTrainer(base):
@@ -307,10 +306,6 @@ def run(ctx):
     losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
     checks["ran_all_steps"] = trainer.state.global_step == N_STEPS and len(losses) == N_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
-    local = torch.tensor(losses, device=ctx.device)
-    gathered = [torch.zeros_like(local) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, local)
-    checks["losses_identical_across_ranks"] = all(torch.allclose(local, peer, atol=1e-4) for peer in gathered)
     grad_norms = [entry["grad_norm"] for entry in trainer.state.log_history if "grad_norm" in entry]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]

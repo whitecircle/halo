@@ -26,15 +26,14 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
+from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
@@ -45,10 +44,12 @@ from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.save import save_pp_checkpoint
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
+from src.trainers.mixins.pipeline import stash_wrapper_state
 from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG, TINY_QWEN3_CONFIG
-from tests.common.ports import free_port
 
 _PC_MOD = "src.distributed.parallelism_config"
 
@@ -75,8 +76,6 @@ def _parallelism_config(pp_size: int = PP_SIZE):
     tests/cpu/checkpoint/test_pp_shard_writers.py); rank/world come from the live gloo group.
     """
     with patch(f"{_PC_MOD}.get_local_world_size", return_value=GPUS_PER_NODE):
-        from src.distributed.parallelism_config import ParallelismConfig
-
         return ParallelismConfig(pp_size=pp_size, nvlink_domain_size=GPUS_PER_NODE, max_concurrent_loading=0)
 
 
@@ -101,93 +100,83 @@ def _context(stage, config, max_shard_size: str = "5GB") -> CheckpointContext:
     )
 
 
-def _roundtrip_worker(rank: int, out_dir: str, verdict_path: str, port: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
-    try:
-        config = _parallelism_config()
-        stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
-        if rank == 0:
-            os.makedirs(out_dir, exist_ok=True)
-        dist.barrier()
+def _roundtrip_worker(rank: int, out_dir: str, verdict_path: str) -> None:
+    config = _parallelism_config()
+    stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    dist.barrier()
 
-        save_pp_checkpoint(_context(stage, config), out_dir)
+    save_pp_checkpoint(_context(stage, config), out_dir)
 
-        if rank != 0:
-            return
-        problems = []
-        files = sorted(f for f in os.listdir(out_dir) if f.endswith(".safetensors"))
-        # Parts per stage depend on save_max_shard_size; what must hold is that every stage is
-        # represented and none wrote outside its own prefix (concurrent writers must not collide).
-        for pp_rank in range(PP_SIZE):
-            prefix = f"model-pp{pp_rank:05d}-of-{PP_SIZE:05d}-"
-            if not any(f.startswith(prefix) for f in files):
-                problems.append(f"stage {pp_rank} wrote no shard (files={files})")
-        stray = [f for f in files if not f.startswith("model-pp")]
-        if stray:
-            problems.append(f"shards outside any stage prefix: {stray}")
+    if rank != 0:
+        return
+    problems = []
+    files = sorted(f for f in os.listdir(out_dir) if f.endswith(".safetensors"))
+    # Parts per stage depend on save_max_shard_size; what must hold is that every stage is
+    # represented and none wrote outside its own prefix (concurrent writers must not collide).
+    for pp_rank in range(PP_SIZE):
+        prefix = f"model-pp{pp_rank:05d}-of-{PP_SIZE:05d}-"
+        if not any(f.startswith(prefix) for f in files):
+            problems.append(f"stage {pp_rank} wrote no shard (files={files})")
+    stray = [f for f in files if not f.startswith("model-pp")]
+    if stray:
+        problems.append(f"shards outside any stage prefix: {stray}")
 
-        reference = _tiny_qwen3().state_dict()
-        with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
-            weight_map = json.load(fh)["weight_map"]
-        if set(weight_map) != set(reference):
-            missing = sorted(set(reference) - set(weight_map))
-            extra = sorted(set(weight_map) - set(reference))
-            problems.append(f"index key set differs: missing={missing[:5]} extra={extra[:5]}")
+    reference = _tiny_qwen3().state_dict()
+    with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
+        weight_map = json.load(fh)["weight_map"]
+    if set(weight_map) != set(reference):
+        missing = sorted(set(reference) - set(weight_map))
+        extra = sorted(set(weight_map) - set(reference))
+        problems.append(f"index key set differs: missing={missing[:5]} extra={extra[:5]}")
 
-        reloaded = Qwen3ForCausalLM.from_pretrained(out_dir, dtype=torch.float32).state_dict()
-        if set(reloaded) != set(reference):
-            problems.append(f"reloaded key set differs: {sorted(set(reference) ^ set(reloaded))[:5]}")
-        # The PP writer applies the shared artifact contract: save-dtype (bf16) cast with the
-        # norm/balancing/fp32-pin keep-sets at trained dtype — compare through the same caster.
-        cast = save_dtype_caster(_tiny_qwen3())
-        for name, expected in reference.items():
-            got = reloaded.get(name)
-            if got is None or not torch.equal(got, cast(name, expected).to(torch.float32)):
-                problems.append(f"{name} not restored")
-        with open(verdict_path, "w") as fh:
-            fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
-    finally:
-        dist.destroy_process_group()
+    reloaded = Qwen3ForCausalLM.from_pretrained(out_dir, dtype=torch.float32).state_dict()
+    if set(reloaded) != set(reference):
+        problems.append(f"reloaded key set differs: {sorted(set(reference) ^ set(reloaded))[:5]}")
+    # The PP writer applies the shared artifact contract: save-dtype (bf16) cast with the
+    # norm/balancing/fp32-pin keep-sets at trained dtype — compare through the same caster.
+    cast = save_dtype_caster(_tiny_qwen3())
+    for name, expected in reference.items():
+        got = reloaded.get(name)
+        if got is None or not torch.equal(got, cast(name, expected).to(torch.float32)):
+            problems.append(f"{name} not restored")
+    with open(verdict_path, "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
 
 
-def _multipart_worker(rank: int, out_dir: str, verdict_path: str, port: int) -> None:
+def _multipart_worker(rank: int, out_dir: str, verdict_path: str) -> None:
     """Same save, but at a shard limit small enough to force several parts per stage."""
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
-    try:
-        config = _parallelism_config()
-        stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
-        if rank == 0:
-            os.makedirs(out_dir, exist_ok=True)
-        dist.barrier()
+    config = _parallelism_config()
+    stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    dist.barrier()
 
-        save_pp_checkpoint(_context(stage, config, max_shard_size="64KB"), out_dir)
+    save_pp_checkpoint(_context(stage, config, max_shard_size="64KB"), out_dir)
 
-        if rank != 0:
-            return
-        problems = []
-        files = sorted(f for f in os.listdir(out_dir) if f.endswith(".safetensors"))
-        if len(files) <= PP_SIZE:
-            problems.append(f"64KB limit did not split any stage: {files}")
+    if rank != 0:
+        return
+    problems = []
+    files = sorted(f for f in os.listdir(out_dir) if f.endswith(".safetensors"))
+    if len(files) <= PP_SIZE:
+        problems.append(f"64KB limit did not split any stage: {files}")
 
-        with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
-            weight_map = json.load(fh)["weight_map"]
-        if set(weight_map.values()) != set(files):
-            problems.append(f"index names {sorted(set(weight_map.values()))} but disk holds {files}")
+    with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
+        weight_map = json.load(fh)["weight_map"]
+    if set(weight_map.values()) != set(files):
+        problems.append(f"index names {sorted(set(weight_map.values()))} but disk holds {files}")
 
-        # A multi-file stage layout is still a plain HF checkpoint (at the save-dtype contract).
-        reference = _tiny_qwen3().state_dict()
-        cast = save_dtype_caster(_tiny_qwen3())
-        reloaded = Qwen3ForCausalLM.from_pretrained(out_dir, dtype=torch.float32).state_dict()
-        for name, expected in reference.items():
-            got = reloaded.get(name)
-            if got is None or not torch.equal(got, cast(name, expected).to(torch.float32)):
-                problems.append(f"{name} not restored across parts")
-        with open(verdict_path, "w") as fh:
-            fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
-    finally:
-        dist.destroy_process_group()
+    # A multi-file stage layout is still a plain HF checkpoint (at the save-dtype contract).
+    reference = _tiny_qwen3().state_dict()
+    cast = save_dtype_caster(_tiny_qwen3())
+    reloaded = Qwen3ForCausalLM.from_pretrained(out_dir, dtype=torch.float32).state_dict()
+    for name, expected in reference.items():
+        got = reloaded.get(name)
+        if got is None or not torch.equal(got, cast(name, expected).to(torch.float32)):
+            problems.append(f"{name} not restored across parts")
+    with open(verdict_path, "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
 
 
 def test_pp_save_splits_parts_and_still_reloads(tmp_path):
@@ -198,13 +187,7 @@ def test_pp_save_splits_parts_and_still_reloads(tmp_path):
     pins that the split happens AND that the result is still a plain HF checkpoint.
     """
     verdict = str(tmp_path / "verdict.txt")
-    mp.start_processes(
-        _multipart_worker,
-        args=(str(tmp_path / "ckpt"), verdict, free_port()),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
-    )
+    run_gloo_ranks(_multipart_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
     with open(verdict) as fh:
         result = fh.read()
     assert result == "PASS", result
@@ -213,13 +196,7 @@ def test_pp_save_splits_parts_and_still_reloads(tmp_path):
 def test_pp_save_reloads_unsplit_with_from_pretrained(tmp_path):
     """The end-to-end contract: pp_size stage shards + one unioned index == the unsplit model."""
     verdict = str(tmp_path / "verdict.txt")
-    mp.start_processes(
-        _roundtrip_worker,
-        args=(str(tmp_path / "ckpt"), verdict, free_port()),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
-    )
+    run_gloo_ranks(_roundtrip_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
     with open(verdict) as fh:
         result = fh.read()
     assert result == "PASS", result
@@ -282,62 +259,49 @@ def _moe_stage(lo: int, hi: int, n_total: int) -> PipelineStageModule:
     return stage
 
 
-def _ep_worker(rank: int, out_dir: str, verdict_path: str, port: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
-    try:
-        config = _parallelism_config()
-        n_total = 4
-        partition = [(0, 2), (2, 4)]
-        stage = _moe_stage(*partition[config.pp_rank], n_total)
-        if rank == 0:
-            os.makedirs(out_dir, exist_ok=True)
-        dist.barrier()
+def _ep_worker(rank: int, out_dir: str, verdict_path: str) -> None:
+    config = _parallelism_config()
+    n_total = 4
+    partition = [(0, 2), (2, 4)]
+    stage = _moe_stage(*partition[config.pp_rank], n_total)
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    dist.barrier()
 
-        save_pp_checkpoint(_context(stage, config), out_dir)
+    save_pp_checkpoint(_context(stage, config), out_dir)
 
-        if rank != 0:
-            return
-        with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
-            weight_map = json.load(fh)["weight_map"]
-        problems = []
-        for layer in range(n_total):
-            for key in (
-                f"model.layers.{layer}.mlp.experts.gate_up_proj",
-                f"model.layers.{layer}.mlp.experts.down_proj",
-                f"model.layers.{layer}.mlp.router.weight",
-            ):
-                if key not in weight_map:
-                    problems.append(f"missing {key}")
-        leaked = [k for k in weight_map if k.endswith(".mlp.gate_up_proj") or k.endswith(".mlp.down_proj")]
-        if leaked:
-            problems.append(f"stage-local EP shards leaked: {leaked[:3]}")
+    if rank != 0:
+        return
+    with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
+        weight_map = json.load(fh)["weight_map"]
+    problems = []
+    for layer in range(n_total):
+        for key in (
+            f"model.layers.{layer}.mlp.experts.gate_up_proj",
+            f"model.layers.{layer}.mlp.experts.down_proj",
+            f"model.layers.{layer}.mlp.router.weight",
+        ):
+            if key not in weight_map:
+                problems.append(f"missing {key}")
+    leaked = [k for k in weight_map if k.endswith(".mlp.gate_up_proj") or k.endswith(".mlp.down_proj")]
+    if leaked:
+        problems.append(f"stage-local EP shards leaked: {leaked[:3]}")
 
-        from safetensors import safe_open
-
-        for name, shard in weight_map.items():
-            if not name.endswith("experts.gate_up_proj"):
-                continue
-            with safe_open(os.path.join(out_dir, shard), framework="pt") as f:
-                if f.get_slice(name).get_shape()[0] != NUM_EXPERTS:
-                    problems.append(f"{name} is not the full expert count")
-        with open(verdict_path, "w") as fh:
-            fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
-    finally:
-        dist.destroy_process_group()
+    for name, shard in weight_map.items():
+        if not name.endswith("experts.gate_up_proj"):
+            continue
+        with safe_open(os.path.join(out_dir, shard), framework="pt") as f:
+            if f.get_slice(name).get_shape()[0] != NUM_EXPERTS:
+                problems.append(f"{name} is not the full expert count")
+    with open(verdict_path, "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
 
 
 def test_pp_plus_ep_exports_full_experts_under_global_names(tmp_path):
     """PP+EP: every stage's experts land in the one index under re-based global layer names, at the
     FULL expert count, and no rank-local EP state_dict entry leaks through."""
     verdict = str(tmp_path / "verdict.txt")
-    mp.start_processes(
-        _ep_worker,
-        args=(str(tmp_path / "ckpt"), verdict, free_port()),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
-    )
+    run_gloo_ranks(_ep_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
     with open(verdict) as fh:
         result = fh.read()
     assert result == "PASS", result
@@ -352,56 +316,49 @@ def _tiny_composite():
     return Glm5NextForConditionalGeneration(config)
 
 
-def _composite_worker(rank: int, out_dir: str, verdict_path: str, port: int) -> None:
+def _composite_worker(rank: int, out_dir: str, verdict_path: str) -> None:
     """A text-only run of a multimodal wrapper: the save must re-emit the vision tower it dropped."""
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
-    try:
-        from src.trainers.mixins.pipeline import stash_wrapper_state
+    config = _parallelism_config()
+    model = _tiny_composite()
+    # What the trainer's gate stashes on the save rank, and only there (the others free it).
+    wrapper_state = stash_wrapper_state(model) if rank == 0 else {}
+    stage = build_pipeline_stage(model, config.pp_rank, PP_SIZE, moe_balancing="none")
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    dist.barrier()
 
-        config = _parallelism_config()
-        model = _tiny_composite()
-        # What the trainer's gate stashes on the save rank, and only there (the others free it).
-        wrapper_state = stash_wrapper_state(model) if rank == 0 else {}
-        stage = build_pipeline_stage(model, config.pp_rank, PP_SIZE, moe_balancing="none")
-        if rank == 0:
-            os.makedirs(out_dir, exist_ok=True)
-        dist.barrier()
+    ctx = _context(stage, config)
+    ctx.pp_wrapper_state = wrapper_state
+    save_pp_checkpoint(ctx, out_dir)
 
-        ctx = _context(stage, config)
-        ctx.pp_wrapper_state = wrapper_state
-        save_pp_checkpoint(ctx, out_dir)
+    if rank != 0:
+        return
+    problems = []
+    reference = _tiny_composite().state_dict()
+    vision_keys = {k for k in reference if k.startswith("model.visual.")}
+    if not vision_keys:
+        problems.append("fixture carries no vision tower — the test would prove nothing")
+    with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
+        weight_map = json.load(fh)["weight_map"]
+    if set(weight_map) != set(reference):
+        problems.append(f"index key set differs: {sorted(set(reference) ^ set(weight_map))[:5]}")
+    wrapper_files = {weight_map[k] for k in vision_keys if k in weight_map}
+    if not all(f.startswith("model-wrapper-") for f in wrapper_files):
+        problems.append(f"vision tensors landed in a stage shard: {sorted(wrapper_files)}")
 
-        if rank != 0:
-            return
-        problems = []
-        reference = _tiny_composite().state_dict()
-        vision_keys = {k for k in reference if k.startswith("model.visual.")}
-        if not vision_keys:
-            problems.append("fixture carries no vision tower — the test would prove nothing")
-        with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
-            weight_map = json.load(fh)["weight_map"]
-        if set(weight_map) != set(reference):
-            problems.append(f"index key set differs: {sorted(set(reference) ^ set(weight_map))[:5]}")
-        wrapper_files = {weight_map[k] for k in vision_keys if k in weight_map}
-        if not all(f.startswith("model-wrapper-") for f in wrapper_files):
-            problems.append(f"vision tensors landed in a stage shard: {sorted(wrapper_files)}")
-
-        reloaded, info = Glm5NextForConditionalGeneration.from_pretrained(
-            out_dir, dtype=torch.float32, output_loading_info=True
-        )
-        if info["missing_keys"]:
-            problems.append(f"from_pretrained random-initialized: {sorted(info['missing_keys'])[:5]}")
-        state = reloaded.state_dict()
-        cast = save_dtype_caster(_tiny_composite())
-        for name, expected in reference.items():
-            got = state.get(name)
-            if got is None or not torch.equal(got, cast(name, expected).to(torch.float32)):
-                problems.append(f"{name} not restored")
-        with open(verdict_path, "w") as fh:
-            fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
-    finally:
-        dist.destroy_process_group()
+    reloaded, info = Glm5NextForConditionalGeneration.from_pretrained(
+        out_dir, dtype=torch.float32, output_loading_info=True
+    )
+    if info["missing_keys"]:
+        problems.append(f"from_pretrained random-initialized: {sorted(info['missing_keys'])[:5]}")
+    state = reloaded.state_dict()
+    cast = save_dtype_caster(_tiny_composite())
+    for name, expected in reference.items():
+        got = state.get(name)
+        if got is None or not torch.equal(got, cast(name, expected).to(torch.float32)):
+            problems.append(f"{name} not restored")
+    with open(verdict_path, "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
 
 
 def test_pp_save_of_a_text_only_multimodal_wrapper_reloads_as_the_wrapper(tmp_path):
@@ -410,13 +367,7 @@ def test_pp_save_of_a_text_only_multimodal_wrapper_reloads_as_the_wrapper(tmp_pa
     servable wrapper-layout export with no reattach step, and a resumable one (the stage-aware
     loader plans those tensors)."""
     verdict = str(tmp_path / "verdict.txt")
-    mp.start_processes(
-        _composite_worker,
-        args=(str(tmp_path / "ckpt"), verdict, free_port()),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
-    )
+    run_gloo_ranks(_composite_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
     with open(verdict) as fh:
         result = fh.read()
     assert result == "PASS", result
@@ -451,46 +402,41 @@ def _stepped_optimizer(stage):
     return optimizer
 
 
-def _optimizer_worker(rank: int, out_dir: str, verdict_path: str, port: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
-    try:
-        config = _parallelism_config()
-        stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
-        optimizer = _stepped_optimizer(stage)
-        saved_moments = {
-            name: optimizer.state[param]["momentum_buffer"].clone()
-            for name, param in stage.named_parameters()
-            if "momentum_buffer" in optimizer.state[param]
-        }
-        if rank == 0:
-            os.makedirs(out_dir, exist_ok=True)
-        dist.barrier()
+def _optimizer_worker(rank: int, out_dir: str, verdict_path: str) -> None:
+    config = _parallelism_config()
+    stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
+    optimizer = _stepped_optimizer(stage)
+    saved_moments = {
+        name: optimizer.state[param]["momentum_buffer"].clone()
+        for name, param in stage.named_parameters()
+        if "momentum_buffer" in optimizer.state[param]
+    }
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    dist.barrier()
 
-        OptimizerShardStore(_load_context(stage, optimizer, config)).save(out_dir)
+    OptimizerShardStore(_load_context(stage, optimizer, config)).save(out_dir)
 
-        fresh_stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
-        fresh_optimizer = torch.optim.SGD(fresh_stage.parameters(), lr=0.1, momentum=0.9)
-        OptimizerShardStore(_load_context(fresh_stage, fresh_optimizer, config)).load(out_dir)
+    fresh_stage = build_pipeline_stage(_tiny_qwen3(), config.pp_rank, PP_SIZE)
+    fresh_optimizer = torch.optim.SGD(fresh_stage.parameters(), lr=0.1, momentum=0.9)
+    OptimizerShardStore(_load_context(fresh_stage, fresh_optimizer, config)).load(out_dir)
 
-        problems = []
-        if not saved_moments:
-            problems.append("no momentum buffers were produced — the test itself is vacuous")
-        restored = {
-            name: fresh_optimizer.state[param].get("momentum_buffer") for name, param in fresh_stage.named_parameters()
-        }
-        for name, expected in saved_moments.items():
-            got = restored.get(name)
-            if got is None or not torch.equal(got, expected):
-                problems.append(f"{name} momentum not restored")
-        # Hyperparameters must stay THIS run's, not the shard's rebuilt param_groups.
-        if any(group["lr"] != 0.1 for group in fresh_optimizer.param_groups):
-            problems.append("live param_group settings were overwritten by the shard")
-        # rank 0 has the only verdict file; every rank checks its own stage.
-        with open(f"{verdict_path}.{rank}", "w") as fh:
-            fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:6]))
-    finally:
-        dist.destroy_process_group()
+    problems = []
+    if not saved_moments:
+        problems.append("no momentum buffers were produced — the test itself is vacuous")
+    restored = {
+        name: fresh_optimizer.state[param].get("momentum_buffer") for name, param in fresh_stage.named_parameters()
+    }
+    for name, expected in saved_moments.items():
+        got = restored.get(name)
+        if got is None or not torch.equal(got, expected):
+            problems.append(f"{name} momentum not restored")
+    # Hyperparameters must stay THIS run's, not the shard's rebuilt param_groups.
+    if any(group["lr"] != 0.1 for group in fresh_optimizer.param_groups):
+        problems.append("live param_group settings were overwritten by the shard")
+    # rank 0 has the only verdict file; every rank checks its own stage.
+    with open(f"{verdict_path}.{rank}", "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:6]))
 
 
 def test_pp_optimizer_shards_round_trip(tmp_path):
@@ -498,13 +444,7 @@ def test_pp_optimizer_shards_round_trip(tmp_path):
     reload into a fresh one and compare momentum buffers. Every other PP optimizer test mocks
     ``set_optimizer_state_dict`` and so proves only that the gates allow the call."""
     verdict = str(tmp_path / "verdict")
-    mp.start_processes(
-        _optimizer_worker,
-        args=(str(tmp_path / "ckpt"), verdict, free_port()),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
-    )
+    run_gloo_ranks(_optimizer_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
     for rank in range(WORLD_SIZE):
         with open(f"{verdict}.{rank}") as fh:
             result = fh.read()
@@ -575,4 +515,4 @@ def test_pp_checkpoint_reloads_onto_a_different_pp_size(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

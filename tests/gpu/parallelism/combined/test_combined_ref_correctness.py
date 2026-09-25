@@ -4,19 +4,19 @@
 The sibling ``test_mistral4_all_parallelism.py`` proves each shape *runs* (finite loss,
 rank-consistent reduced loss, EP wrappers land, checkpoint roundtrips). It does **not**
 prove the shape computes the *same math* as the undistributed model. This test closes
-that gap for the non-CP combined shapes whose only other coverage is a smoke run —
-notably **EP+TP** and **EP+ETP** (the gpt-oss combined tests assert finiteness only) and
-**pure ETP=4** — by comparing each shape's forward loss to a plain single-GPU reference on
-byte-identical weights and inputs.
+that gap for the non-CP shapes on Mistral4 — EP, TP, pure ETP, **EP+TP** and **EP+ETP** —
+by comparing each shape's forward loss and first router gradient to a plain single-GPU
+reference on byte-identical weights and inputs.
 
 Reference: rank 0 loads the *same* synthetic checkpoint with a plain
-``Mistral4ForCausalLM.from_pretrained`` (no distribution) and runs one forward. The value
-is broadcast; every rank asserts its reduced loss matches within bf16 + grouped-mm +
-all-reduce reordering tolerance. Because these modes feed the FULL sequence to every rank
-(EP/TP/ETP do not shard the sequence — only CP does), the reduced per-rank loss must equal
-the reference; a sharding/gather/reduce bug moves it far outside tolerance. CP is covered
-separately (``cp/test_cp_train_correctness.py`` on Qwen3, ``cp/test_glm4_cp_correctness.py``)
-because its per-rank chunk losses require token-weighted aggregation to recover the reference.
+``Mistral4ForCausalLM.from_pretrained`` (no distribution) and runs one forward+backward. The
+loss and router gradient are broadcast; every rank asserts its reduced loss matches within
+bf16 + grouped-mm + all-reduce reordering tolerance. Because these modes feed the FULL
+sequence to every rank (EP/TP/ETP do not shard the sequence — only CP does), the reduced
+per-rank loss must equal the reference; a sharding/gather/reduce bug moves it far outside
+tolerance. CP is covered separately (``cp/test_cp_train_correctness.py`` on Qwen3,
+``cp/test_glm4_cp_correctness.py``) because its per-rank chunk losses require token-weighted
+aggregation to recover the reference.
 
 One shape per ``--mode`` invocation (a runner chains them):
 
@@ -35,14 +35,19 @@ from transformers.models.mistral4 import Mistral4ForCausalLM
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.distributed import shared_scratch_dir
-from tests.common.harness import gpu_test_main
-from tests.common.utils import cleanup_memory, log, log_all
-from tests.gpu.parallelism.test_mistral4_all_parallelism import (
-    TINY_CONFIG_KWARGS,
-    build_synthetic_checkpoint,
-    make_inputs,
+from tests.common.distributed import shared_scratch_dir, world_spread
+from tests.common.ep_reference import (
+    broadcast_reference,
+    ep_layers,
+    find_router_weight,
+    full_grad,
+    random_token_batch,
 )
+from tests.common.harness import gpu_test_main
+from tests.common.models import TINY_MISTRAL4_CONFIG
+from tests.common.tiny_models import build_tiny_mistral4_checkpoint
+from tests.common.tolerances import TOL
+from tests.common.utils import cleanup_memory, fro_rel_err, log, log_all
 
 # bf16 ulp near a loss of ~O(1-10) is ~1e-2. EP/TP/ETP each add extra all-reduce / grouped-mm
 # accumulation in a different float order than the dense reference. 3e-2 is tight enough to catch
@@ -57,14 +62,7 @@ LOSS_TOL = 3e-2
 # headroom over noise and 1.4x under the weakest bug signal.
 ROUTER_GRAD_TOL = 0.35
 
-
-def _first_router_weight(model) -> tuple[str, torch.Tensor]:
-    """First MoE router weight in module order. The EP wrapper adopts the HF layer's own ``gate``
-    module, so the parameter path is identical in the sharded and dense models."""
-    for name, param in model.named_parameters():
-        if name.endswith("gate.weight"):
-            return name, param
-    raise AssertionError("no '*.gate.weight' parameter found — the model has no MoE router to compare")
+_MODES = ("ep", "tp", "etp", "ep_tp", "ep_etp")
 
 
 def _reference_loss_and_router_grad(
@@ -73,7 +71,9 @@ def _reference_loss_and_router_grad(
     """Plain single-GPU forward+backward on the same weights (rank 0 only).
 
     Returns the loss and the router gradient. The gradient half is what catches a missing cross-rank
-    reduction: a dropped one leaves the loss exact and silently scales the router gradient.
+    reduction: a dropped one leaves the loss exact and silently scales the router gradient. Loads
+    ``Mistral4ForCausalLM`` directly because ``AutoModelForCausalLM``, which ``dense_reference`` goes
+    through, has no mistral4 mapping.
     """
     model = Mistral4ForCausalLM.from_pretrained(
         ckpt_dir,
@@ -85,21 +85,10 @@ def _reference_loss_and_router_grad(
     out = model(input_ids=ids, labels=labels, use_cache=False)
     out.loss.backward()
     loss = out.loss.item()
-    _, weight = _first_router_weight(model)
-    grad = weight.grad.detach().float().clone()
-    del model
+    grad = full_grad(find_router_weight(model)[1])
+    del model, out
     cleanup_memory()
     return loss, grad
-
-
-_MODES = {
-    #  mode        (ep, cp, tp, etp)
-    "ep": ("ep", None),
-    "tp": ("tp", None),
-    "etp": ("etp", None),
-    "ep_tp": ("ep_tp", None),
-    "ep_etp": ("ep_etp", None),
-}
 
 
 def run(ctx):
@@ -111,7 +100,7 @@ def run(ctx):
     # Build the tiny synthetic Mistral4 checkpoint on rank 0, then all ranks read it.
     ckpt_dir = shared_scratch_dir("combined_ref")
     if ctx.rank == 0:
-        build_synthetic_checkpoint(Path(ckpt_dir))
+        build_tiny_mistral4_checkpoint(Path(ckpt_dir))
     ctx.barrier()
 
     pc = ParallelismConfig(
@@ -127,29 +116,18 @@ def run(ctx):
     log(f"  data_parallel_size={pc.data_parallel_size}")
 
     # Identical inputs on every rank.
-    ids, labels = make_inputs(TINY_CONFIG_KWARGS["vocab_size"], batch=2, seq=64, device=device)
+    ids, labels = random_token_batch(TINY_MISTRAL4_CONFIG["vocab_size"], batch=2, seq=64, device=device)
     dist.broadcast(ids, src=0)
     dist.broadcast(labels, src=0)
 
     # ── Reference (rank 0, no distribution) ──────────────────────────────────
-    ref = torch.zeros(1, device=device)
-    ref_grad: torch.Tensor | None = None
+    ref_loss_local, ref_grad = 0.0, None
     if ctx.rank == 0:
-        ref_loss_value, ref_grad = _reference_loss_and_router_grad(ckpt_dir, ids, labels, device)
-        ref[0] = ref_loss_value
-        log(f"  Reference loss (single-GPU): {ref.item():.6f}  router grad norm: {ref_grad.norm():.6e}")
-    dist.broadcast(ref, src=0)
-    ref_loss = ref.item()
-    metrics["ref_loss"] = ref_loss
-
+        ref_loss_local, ref_grad = _reference_loss_and_router_grad(ckpt_dir, ids, labels, device)
+        log(f"  Reference loss (single-GPU): {ref_loss_local:.6f}  router grad norm: {ref_grad.norm():.6e}")
     # Every rank needs the reference gradient to compare against its own.
-    shape = torch.zeros(2, dtype=torch.long, device=device)
-    if ctx.rank == 0:
-        shape[0], shape[1] = ref_grad.shape
-    dist.broadcast(shape, src=0)
-    if ref_grad is None:
-        ref_grad = torch.zeros(int(shape[0]), int(shape[1]), dtype=torch.float32, device=device)
-    dist.broadcast(ref_grad, src=0)
+    ref_loss, ref_grad = broadcast_reference(ref_loss_local, ref_grad, device, ctx.rank)
+    metrics["ref_loss"] = ref_loss
 
     # ── Parallel shape ───────────────────────────────────────────────────────
     model, _ = load_distributed_model(
@@ -159,8 +137,11 @@ def run(ctx):
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     )
-    ep_layers = [m for m in model.modules() if hasattr(m, "ep_config")]
-    log(f"  EP/ETP wrapper layers: {len(ep_layers)}")
+    layers = ep_layers(model)
+    log(f"  EP/ETP wrapper layers: {len(layers)}")
+    # Every mode wraps each MoE block (at ep_size=1 for the grouped-GEMM expert compute), and
+    # first_k_dense_replace=0 makes every layer one; unwrapped, this compares the dense block to itself.
+    checks["moe_layers_wrapped"] = len(layers) == TINY_MISTRAL4_CONFIG["num_hidden_layers"]
 
     model.train()
     out = model(input_ids=ids, labels=labels, use_cache=False)
@@ -173,38 +154,33 @@ def run(ctx):
     checks["loss_matches_reference"] = abs(loss.item() - ref_loss) < LOSS_TOL
 
     # Every rank must agree on the reduced loss (a broken gather desyncs ranks).
-    gathered = [torch.zeros_like(loss.detach()) for _ in range(ctx.world_size)]
-    dist.all_gather(gathered, loss.detach())
-    spread = max(abs(g.item() - gathered[0].item()) for g in gathered)
+    spread = world_spread(loss.item())
     metrics["rank_loss_spread"] = spread
-    checks["losses_agree_across_ranks"] = spread < 1e-3
+    checks["losses_agree_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
 
-    # Backward must flow (router grad present on the EP path).
     loss.backward()
-    checks["backward_ok"] = True
-    if ep_layers:
-        g = ep_layers[0].gate.weight.grad
-        checks["router_grad_finite"] = g is not None and bool(torch.isfinite(g).all())
+    router_name, router_weight = find_router_weight(model)
+    got = full_grad(router_weight)
+    checks["router_grad_finite"] = bool(torch.isfinite(got).all())
 
-        # Every rank sees identical inputs, so after the router hook's cross-rank average each rank's
-        # router gradient must equal the single-GPU reference. A missing reduction on any axis shows up
-        # here as a clean 1/axis_size scale — and nowhere else, since the forward stays exact.
-        got = g.detach().float()
-        rel = (got - ref_grad).norm().item() / max(ref_grad.norm().item(), 1e-12)
-        metrics["router_grad_rel_err"] = rel
-        metrics["router_grad_norm_ratio"] = got.norm().item() / max(ref_grad.norm().item(), 1e-12)
-        log_all(
-            f"  [{args.mode}] router grad vs reference: rel_err={rel:.4e} "
-            f"norm_ratio={metrics['router_grad_norm_ratio']:.4f}"
-        )
-        checks["router_grad_matches_reference"] = rel < ROUTER_GRAD_TOL
+    # Every rank sees identical inputs, so after the router hook's cross-rank average each rank's
+    # router gradient must equal the single-GPU reference. A missing reduction on any axis shows up
+    # here as a clean 1/axis_size scale — and nowhere else, since the forward stays exact.
+    rel = fro_rel_err(got, ref_grad)
+    metrics["router_grad_rel_err"] = rel
+    metrics["router_grad_norm_ratio"] = got.norm().item() / ref_grad.norm().item()
+    log_all(
+        f"  [{args.mode}] router grad ({router_name}) vs reference: rel_err={rel:.4e} "
+        f"norm_ratio={metrics['router_grad_norm_ratio']:.4f}"
+    )
+    checks["router_grad_matches_reference"] = rel < ROUTER_GRAD_TOL
 
     return {"checks": checks, "metrics": metrics}
 
 
 def _parse():
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", required=True, choices=sorted(_MODES.keys()))
+    p.add_argument("--mode", required=True, choices=_MODES)
     p.add_argument("--ep", type=int, default=1)
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--etp", type=int, default=1)

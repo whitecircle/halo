@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Test: DistributedDPOTrainer with Qwen3-0.6B.
+Test: DistributedDPOTrainer with Qwen3-0.6B (smoke test).
 
-Validates that DPO training works end-to-end with:
+Runs DPO training end-to-end with:
 1. Synthetic math preference data (chosen vs rejected)
 2. 30% multi-turn conversations
 3. Liger kernels, gradient checkpointing, bf16
@@ -10,8 +10,9 @@ Validates that DPO training works end-to-end with:
 
 Assertions:
 - Training completes without errors
-- Final training loss is finite (not NaN/Inf)
-- Loss decreases from initial value
+- Final training loss and every logged step loss are finite (not NaN/Inf)
+
+It does not compare the DPO loss against a reference, so a wrong-but-finite objective passes.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \

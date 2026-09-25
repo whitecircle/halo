@@ -151,9 +151,10 @@ def record_check(checks: dict[str, bool], name: str, fn: Callable[[], None]) -> 
     the first failure and the harness would report a single error, hiding every later property.
     Recording keeps each verdict in the dict ``gpu_test_main`` reports and exits on.
 
-    Every ``fn`` therefore has to be rank-symmetric and collective-free: continuing past a failure is
-    only safe while no later check enters a collective the failed rank's peers would be misaligned on,
-    which is why ``gpu_test_main`` skips its own barrier for a body that raised.
+    Continuing past a failure is only safe while no rank is left misaligned on a later collective, so
+    every raise inside ``fn`` has to be rank-symmetric (every rank raises together, e.g. after an
+    agreed verdict) or come after ``fn``'s last collective. That is also why ``gpu_test_main`` skips its
+    own barrier for a body that raised.
     """
     try:
         fn()

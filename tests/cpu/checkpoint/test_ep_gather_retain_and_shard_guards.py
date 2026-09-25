@@ -20,7 +20,6 @@
 Run: pytest tests/cpu/checkpoint/test_ep_gather_retain_and_shard_guards.py
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -253,4 +252,4 @@ def test_topology_guards_do_not_pass_on_a_config_that_never_declared_the_field(m
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

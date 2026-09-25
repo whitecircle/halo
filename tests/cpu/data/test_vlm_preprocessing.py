@@ -14,7 +14,6 @@ Usage:
 import base64
 import io
 import logging
-import sys
 import tempfile
 from types import SimpleNamespace
 
@@ -629,4 +628,4 @@ def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch,
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

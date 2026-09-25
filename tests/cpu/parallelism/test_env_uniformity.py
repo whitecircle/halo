@@ -18,7 +18,6 @@ fact that the bucket knob is part of the compared set.
 """
 
 import importlib
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -153,4 +152,4 @@ def test_the_legacy_backend_timeout_warning_gates_on_the_parsed_value(monkeypatc
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

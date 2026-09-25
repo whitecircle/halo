@@ -192,6 +192,4 @@ def test_a_refused_attention_backend_fails_the_lazy_build():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

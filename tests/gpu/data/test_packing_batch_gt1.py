@@ -20,7 +20,8 @@ Two things only a GPU run can check:
    what fails when it does not.
 
 Both varlen kernels available on the host are covered, because the production default differs by
-architecture (FA4 on Blackwell, FA2 elsewhere) and the shape handling is per-kernel.
+architecture (FA4 on Blackwell, FA2 elsewhere) and the shape handling is per-kernel. On Blackwell an
+FA4 that fails to import fails the test rather than dropping out of the covered set.
 
 Usage::
 
@@ -51,14 +52,13 @@ def _varlen_impls() -> list[str]:
     """The varlen kernels this host can actually dispatch, production default first."""
     impls = []
     if is_blackwell_gpu():
-        try:
-            from flash_attn.cute import flash_attn_func  # noqa: F401
+        # Unguarded: the Blackwell image always ships FA4, its production default, so an import
+        # failure is a broken install, and swallowing it would cover FA2 alone and still pass.
+        from flash_attn.cute import flash_attn_func  # noqa: PLC0415, F401
 
-            impls.append("flash_attention_4")
-        except Exception:
-            pass
+        impls.append("flash_attention_4")
     try:
-        import flash_attn  # noqa: F401
+        import flash_attn  # noqa: PLC0415, F401
 
         impls.append("flash_attention_2")
     except ImportError:

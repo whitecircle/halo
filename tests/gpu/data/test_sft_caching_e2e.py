@@ -4,10 +4,13 @@ End-to-end test for SFT dataset caching: simulates the sft.py data pipeline.
 
 Verifies:
 1. First run: coordinated_map + coordinated_filter create cache files
-2. Second run: same pipeline loads from cache (no re-processing)
+2. Second run: same pipeline loads from cache (no new cache files)
 3. Both ranks get identical results after coordination
 4. Cache key changes when tokenizer/processor changes
 5. DatasetDict (train/test splits) cached correctly per-split
+
+Every test raises on failure and is recorded as its own check; each ends its collectives on every
+rank before it can raise, so a failure never strands a peer inside one.
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -16,7 +19,6 @@ Usage:
 
 import os
 import time
-import traceback
 
 import torch
 import torch.distributed as dist
@@ -26,7 +28,7 @@ from transformers import AutoTokenizer
 from src.data.pipeline.processing import process_dataset_with_map_and_filter
 from src.data.pipeline.row_processors import create_llm_processor
 from src.distributed.runtime import barrier
-from tests.common.harness import gpu_test_main
+from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
 
 # Configuration
@@ -42,7 +44,7 @@ CONVERSATION_FIELD = "prompt"
 # Utilities
 
 
-def create_sft_dataset(num_train: int = NUM_TRAIN, num_test: int = NUM_TEST) -> DatasetDict:
+def create_conversation_splits(num_train: int = NUM_TRAIN, num_test: int = NUM_TEST) -> DatasetDict:
     """Create a synthetic SFT dataset mimicking real training data format."""
 
     def make_conversations(n: int):
@@ -76,11 +78,9 @@ def count_cache_files(cache_dir: str) -> int:
 # Tests
 
 
-def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> bool:
+def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> None:
     """Test 1: Full sft.py pipeline creates cache files on first run."""
-    log("  [test_sft_pipeline_creates_cache] Running...")
-
-    ds = create_sft_dataset()
+    ds = create_conversation_splits()
 
     # Simulate sft.py: create_llm_processor -> process_dataset_with_map_and_filter
     processor = create_llm_processor(
@@ -99,49 +99,24 @@ def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> bool:
         desc="sft tokenization",
     )
 
-    # Verify results
-    if not isinstance(result, DatasetDict):
-        log(f"    FAIL: Expected DatasetDict, got {type(result)}")
-        return False
+    assert isinstance(result, DatasetDict), f"Expected DatasetDict, got {type(result)}"
+    assert "train" in result and "test" in result, f"Missing splits. Got: {list(result.keys())}"
+    assert len(result["train"]) > 0, "Empty train split"
+    assert len(result["test"]) > 0, "Empty test split"
 
-    if "train" not in result or "test" not in result:
-        log(f"    FAIL: Missing splits. Got: {list(result.keys())}")
-        return False
-
-    if len(result["train"]) == 0:
-        log("    FAIL: Empty train split")
-        return False
-
-    if len(result["test"]) == 0:
-        log("    FAIL: Empty test split")
-        return False
-
-    # Check that input_ids exist and are valid
     sample = result["train"][0]
-    if "input_ids" not in sample:
-        log(f"    FAIL: No input_ids in result. Keys: {list(sample.keys())}")
-        return False
+    assert "input_ids" in sample, f"No input_ids in result. Keys: {list(sample.keys())}"
+    assert len(sample["input_ids"]) > 0, "Empty input_ids"
 
-    if len(sample["input_ids"]) == 0:
-        log("    FAIL: Empty input_ids")
-        return False
-
-    # Check cache files were created
     num_cache = count_cache_files(cache_dir)
-    if num_cache == 0:
-        log(f"    FAIL: No cache files created in {cache_dir}")
-        return False
+    assert num_cache > 0, f"No cache files created in {cache_dir}"
 
-    log(f"    PASS: Pipeline produced train={len(result['train'])}, test={len(result['test'])}")
-    log(f"    Cache files: {num_cache}")
-    return True
+    log(f"    Pipeline produced train={len(result['train'])}, test={len(result['test'])}; cache files: {num_cache}")
 
 
-def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> bool:
-    """Test 2: Second run reuses cache (no re-processing)."""
-    log("  [test_sft_pipeline_reuses_cache] Running...")
-
-    ds = create_sft_dataset()
+def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
+    """Test 2: Second run reuses cache: it writes no new cache file."""
+    ds = create_conversation_splits()
 
     processor = create_llm_processor(
         tokenizer=tokenizer,
@@ -168,26 +143,17 @@ def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> bool:
     barrier()
     elapsed = time.monotonic() - start
 
-    # Count cache files after — should be the same (no new files)
+    # A reused cache is loaded, not rewritten: a new file means the cache key changed between runs.
     cache_after = count_cache_files(cache_dir)
+    assert cache_after == cache_before, f"cache not reused: .arrow files {cache_before} -> {cache_after}"
+    assert len(result["train"]) > 0, "Empty train split on cache reuse"
 
-    if cache_after != cache_before:
-        log(f"    WARN: Cache file count changed: {cache_before} -> {cache_after}")
-        log("    This may indicate cache was not reused")
-
-    if len(result["train"]) == 0:
-        log("    FAIL: Empty train split on cache reuse")
-        return False
-
-    log(f"    PASS: Cache reused in {elapsed:.3f}s (cache files: {cache_before} -> {cache_after})")
-    return True
+    log(f"    Cache reused in {elapsed:.3f}s (cache files: {cache_before} -> {cache_after})")
 
 
-def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> bool:
+def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> None:
     """Test 3: Both ranks produce identical results after coordination."""
-    log("  [test_both_ranks_get_identical_results] Running...", rank=None)
-
-    ds = create_sft_dataset()
+    ds = create_conversation_splits()
 
     processor = create_llm_processor(
         tokenizer=tokenizer,
@@ -205,49 +171,31 @@ def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> bool:
     )
 
     # Gather first example's input_ids from all ranks
-    rank = dist.get_rank()
+    device = torch.device("cuda", torch.cuda.current_device())
     local_ids = result["train"][0]["input_ids"]
-    local_tensor = torch.tensor(local_ids, device=f"cuda:{rank}")
 
-    # Pad to same length for all_gather
-    max_len = torch.tensor(len(local_ids), device=f"cuda:{rank}")
+    # Pad to same length for all_gather. -1 is no token id, so rows of different lengths never
+    # compare equal through the padding.
+    max_len = torch.tensor(len(local_ids), device=device)
     dist.all_reduce(max_len, op=dist.ReduceOp.MAX)
 
-    padded = torch.zeros(max_len.item(), dtype=torch.long, device=f"cuda:{rank}")
-    padded[: len(local_ids)] = local_tensor
+    padded = torch.full((int(max_len.item()),), -1, dtype=torch.long, device=device)
+    padded[: len(local_ids)] = torch.tensor(local_ids, device=device)
 
     gathered = [torch.zeros_like(padded) for _ in range(dist.get_world_size())]
     dist.all_gather(gathered, padded)
 
-    # Compare
-    if rank == 0:
-        match = all(torch.equal(gathered[0], gathered[i]) for i in range(1, len(gathered)))
-        if not match:
-            log("    FAIL: Ranks produced different input_ids")
-            for i, g in enumerate(gathered):
-                log(f"    Rank {i}: {g[:10].tolist()}...")
-            return False
-
-        log(f"    PASS: All ranks produced identical results (first 10 tokens: {gathered[0][:10].tolist()})")
-
-    # Broadcast result to all ranks
-    result_tensor = torch.tensor(
-        [
-            1
-            if rank != 0
-            else (1 if all(torch.equal(gathered[0], gathered[i]) for i in range(1, len(gathered))) else 0)
-        ],
-        device=f"cuda:{rank}",
+    # Every rank holds every row after the gather, so every rank reaches the same verdict.
+    mismatched = [i for i, g in enumerate(gathered) if not torch.equal(gathered[0], g)]
+    assert not mismatched, f"ranks {mismatched} produced input_ids differing from rank 0's: " + "; ".join(
+        f"rank {i}: {g[:10].tolist()}..." for i, g in enumerate(gathered)
     )
-    dist.broadcast(result_tensor, src=0)
-    return result_tensor.item() == 1
+    log(f"    All ranks produced identical results (first 10 tokens: {gathered[0][:10].tolist()})")
 
 
-def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer, alt_tokenizer) -> bool:
+def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer, alt_tokenizer) -> None:
     """Test 4: Different tokenizer produces different cache (no stale data)."""
-    log("  [test_different_tokenizer_produces_different_cache] Running...")
-
-    ds = create_sft_dataset(num_train=20, num_test=5)
+    ds = create_conversation_splits(num_train=20, num_test=5)
 
     # Process with primary tokenizer
     processor_a = create_llm_processor(
@@ -271,7 +219,7 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
         conversation_field=CONVERSATION_FIELD,
         use_padding=True,
     )
-    ds_b = create_sft_dataset(num_train=20, num_test=5)
+    ds_b = create_conversation_splits(num_train=20, num_test=5)
     extra_columns_b = list(set(ds_b["train"].column_names))
     result_b = process_dataset_with_map_and_filter(
         ds_b,
@@ -284,22 +232,14 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
     ids_a = result_a["train"][0]["input_ids"]
     ids_b = result_b["train"][0]["input_ids"]
 
-    if ids_a == ids_b:
-        log("    FAIL: Different tokenizers produced same token IDs!")
-        log("    This means stale cache was used.")
-        return False
+    assert ids_a != ids_b, "Different tokenizers produced the same token IDs: a stale cache was used"
 
-    log("    PASS: Different tokenizers -> different token IDs")
-    log(f"    Tokenizer A first 10: {ids_a[:10]}")
-    log(f"    Tokenizer B first 10: {ids_b[:10]}")
-    return True
+    log(f"    Different tokenizers -> different token IDs (A first 10: {ids_a[:10]}, B first 10: {ids_b[:10]})")
 
 
-def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> bool:
+def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
     """Test 5: Generate dataset (add_generation_prompt=True) uses separate cache."""
-    log("  [test_generate_dataset_separate_cache] Running...")
-
-    ds = create_sft_dataset()
+    ds = create_conversation_splits()
 
     # Train processor (no generation prompt)
     train_processor = create_llm_processor(
@@ -335,34 +275,23 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> bool:
         desc="generate processing",
     )
 
-    # Both should succeed
-    if len(train_result["train"]) == 0:
-        log("    FAIL: Empty train result")
-        return False
+    assert len(train_result["train"]) > 0, "Empty train result"
+    assert len(gen_result) > 0, "Empty generate result"
 
-    if len(gen_result) == 0:
-        log("    FAIL: Empty generate result")
-        return False
-
-    # The generate dataset should have different token sequences
-    # (generation prompt adds assistant prefix tokens at the end)
+    # The generation render drops the final assistant turn and appends the generation prompt, so the
+    # same row can only tokenize identically if the generate pass was served the training rows.
     train_ids = train_result["test"][0]["input_ids"]
     gen_ids = gen_result[0]["input_ids"]
-
-    if train_ids == gen_ids:
-        log("    WARN: Train and generate IDs are identical (may be correct for some templates)")
+    assert train_ids != gen_ids, "the generate pass returned the training rows' token IDs"
 
     log(
-        f"    PASS: Train ({len(train_result['train'])} examples) and generate ({len(gen_result)} examples) processed separately"
+        f"    Train ({len(train_result['train'])} examples) and generate ({len(gen_result)} examples) processed separately"
     )
-    return True
 
 
-def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> bool:
+def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
     """Test 6: Simulate process restart — cache from prior run is picked up."""
-    log("  [test_cache_survives_process_restart] Running...")
-
-    ds = create_sft_dataset(num_train=30, num_test=8)
+    ds = create_conversation_splits(num_train=30, num_test=8)
     processor = create_llm_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
@@ -381,7 +310,7 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> bool:
     cache_count_after_first = count_cache_files(cache_dir)
 
     # Second "run" with fresh dataset objects (simulates restart)
-    ds2 = create_sft_dataset(num_train=30, num_test=8)
+    ds2 = create_conversation_splits(num_train=30, num_test=8)
     processor2 = create_llm_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
@@ -409,29 +338,15 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> bool:
     ids1 = result1["train"][0]["input_ids"]
     ids2 = result2["train"][0]["input_ids"]
 
-    if ids1 != ids2:
-        log("    FAIL: Results differ after simulated restart")
-        return False
-
-    if cache_count_after_second != cache_count_after_first:
-        log(f"    WARN: Cache count changed {cache_count_after_first} -> {cache_count_after_second}")
+    assert ids1 == ids2, "Results differ after simulated restart"
+    assert cache_count_after_second == cache_count_after_first, (
+        f"cache not reused after the simulated restart: .arrow files "
+        f"{cache_count_after_first} -> {cache_count_after_second}"
+    )
 
     log(
-        f"    PASS: Cache reused after simulated restart ({elapsed:.3f}s, files: {cache_count_after_first} -> {cache_count_after_second})"
+        f"    Cache reused after simulated restart ({elapsed:.3f}s, files: {cache_count_after_first} -> {cache_count_after_second})"
     )
-    return True
-
-
-# Test Runner
-
-ALL_TESTS = [
-    "sft_pipeline_creates_cache",
-    "sft_pipeline_reuses_cache",
-    "both_ranks_get_identical_results",
-    "different_tokenizer_produces_different_cache",
-    "generate_dataset_separate_cache",
-    "cache_survives_process_restart",
-]
 
 
 def run(ctx) -> dict:
@@ -461,30 +376,26 @@ def run(ctx) -> dict:
     if alt_tokenizer.pad_token is None:
         alt_tokenizer.pad_token = alt_tokenizer.eos_token
 
-    test_fns = {
-        "sft_pipeline_creates_cache": lambda: test_sft_pipeline_creates_cache(cache_dir, tokenizer),
-        "sft_pipeline_reuses_cache": lambda: test_sft_pipeline_reuses_cache(cache_dir, tokenizer),
-        "both_ranks_get_identical_results": lambda: test_both_ranks_get_identical_results(cache_dir, tokenizer),
-        "different_tokenizer_produces_different_cache": lambda: test_different_tokenizer_produces_different_cache(
-            cache_dir, tokenizer, alt_tokenizer
-        ),
-        "generate_dataset_separate_cache": lambda: test_generate_dataset_separate_cache(cache_dir, tokenizer),
-        "cache_survives_process_restart": lambda: test_cache_survives_process_restart(cache_dir, tokenizer),
-    }
-
+    # Order matters: the reuse checks read the cache the creation check wrote.
     checks: dict[str, bool] = {}
-    for test_name in ALL_TESTS:
-        log(f"\n  [{test_name}]")
-        try:
-            # One failing test must not skip the rest: each owns its own check key.
-            result = test_fns[test_name]()
-        except Exception as e:
-            log(f"  [{test_name}] EXCEPTION: {e}")
-            if ctx.rank == 0:
-                traceback.print_exc()
-            result = False
-        checks[test_name] = result
-
+    record_check(checks, "sft_pipeline_creates_cache", lambda: test_sft_pipeline_creates_cache(cache_dir, tokenizer))
+    record_check(checks, "sft_pipeline_reuses_cache", lambda: test_sft_pipeline_reuses_cache(cache_dir, tokenizer))
+    record_check(
+        checks,
+        "both_ranks_get_identical_results",
+        lambda: test_both_ranks_get_identical_results(cache_dir, tokenizer),
+    )
+    record_check(
+        checks,
+        "different_tokenizer_produces_different_cache",
+        lambda: test_different_tokenizer_produces_different_cache(cache_dir, tokenizer, alt_tokenizer),
+    )
+    record_check(
+        checks, "generate_dataset_separate_cache", lambda: test_generate_dataset_separate_cache(cache_dir, tokenizer)
+    )
+    record_check(
+        checks, "cache_survives_process_restart", lambda: test_cache_survives_process_restart(cache_dir, tokenizer)
+    )
     return {"checks": checks}
 
 

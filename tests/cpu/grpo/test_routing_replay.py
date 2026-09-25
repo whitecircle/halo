@@ -6,7 +6,6 @@ the single-count expert-load accounting under GC recompute, and the trainer-side
 """
 
 import base64
-import sys
 
 import numpy as np
 import pytest
@@ -585,4 +584,4 @@ def test_assemble_rollout_masks_rejects_drift_and_counts_unresolved():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

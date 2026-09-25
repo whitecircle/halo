@@ -7,8 +7,6 @@ is applied where the observation is built, so the rollout and the trainer's reco
     python tests/cpu/environments/test_observation_truncation.py
 """
 
-import sys
-
 import pytest
 
 from src.environments.base import Trajectory
@@ -65,4 +63,4 @@ def test_execute_tool_calls_caps_huge_error():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v", "-s"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

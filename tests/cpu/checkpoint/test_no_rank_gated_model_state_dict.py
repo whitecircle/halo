@@ -21,7 +21,6 @@ surface. Run: ``pytest -m cpu tests/cpu/checkpoint/test_no_rank_gated_model_stat
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 
 import pytest
@@ -122,4 +121,4 @@ def test_detector_ignores_optimizer_state_dict():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

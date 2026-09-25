@@ -98,4 +98,4 @@ def test_terminated_row_under_collator_policy_keeps_its_span():
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -9,8 +9,6 @@ against. A real pass/fail verdict must NOT carry it.
     python tests/cpu/environments/test_swe_grader_crash_invalid.py
 """
 
-import sys
-
 import pytest
 
 from src.environments.base import Trajectory
@@ -58,4 +56,4 @@ def test_real_verdicts_stay_in_the_baseline():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

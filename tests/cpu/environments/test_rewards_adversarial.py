@@ -13,7 +13,6 @@ Run: python tests/cpu/environments/test_rewards_adversarial.py  (or pytest)
 """
 
 import re
-import sys
 import time
 
 import numpy as np
@@ -220,4 +219,4 @@ def test_rlrr_distinguishes_within_correct_group_by_length():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

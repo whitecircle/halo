@@ -6,7 +6,6 @@ magnitude and hijacks the whole optimizer step. Clamping the log-ratio bounds bo
 """
 
 import math
-import sys
 
 import pytest
 import torch
@@ -71,4 +70,4 @@ def test_gradient_wrt_policy_logp_is_bounded():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

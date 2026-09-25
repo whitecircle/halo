@@ -2,7 +2,6 @@
 """Tests for ParameterStatsCallback. Run: python tests/cpu/callbacks/test_parameter_stats.py"""
 
 import logging
-import sys
 
 import pytest
 import torch
@@ -214,4 +213,4 @@ def test_callback_non_main_process_skips(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

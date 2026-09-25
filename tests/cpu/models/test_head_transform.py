@@ -21,7 +21,6 @@ wrong distribution unless the path applies the same transform, and nothing raise
 import pytest
 import torch
 import transformers
-from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto import modeling_auto
 from trl.trainer.utils import selective_log_softmax
@@ -61,6 +60,7 @@ from tests.common.models import (
     TINY_STEP3P7_VISION_CONFIG,
     TINY_ZAYA_CONFIG,
 )
+from tests.common.tokenizers import load_cached_config
 
 apply_remote_code_compat_shims()
 
@@ -199,10 +199,7 @@ def test_every_roster_head_path_verifies_against_its_forward(model_type, class_n
 
 @pytest.mark.parametrize("repo", _REMOTE_ROSTER)
 def test_remote_code_roster_head_paths_verify(repo):
-    try:
-        config = AutoConfig.from_pretrained(repo, local_files_only=True, trust_remote_code=True)
-    except OSError:
-        pytest.skip(f"{repo} is not in the local HF cache")
+    config = load_cached_config(repo, trust_remote_code=True)
     model_class = get_class_from_dynamic_module(config.auto_map["AutoModelForCausalLM"], repo, local_files_only=True)
     assert verify_head_transform(model_class, config) == IDENTITY_HEAD_TRANSFORM
 

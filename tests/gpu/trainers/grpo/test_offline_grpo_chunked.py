@@ -23,10 +23,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
+from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
-from tests.gpu.trainers.grpo.test_offline_grpo import create_offline_grpo_dataset
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 4

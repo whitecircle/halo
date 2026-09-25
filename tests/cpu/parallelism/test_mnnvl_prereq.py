@@ -17,7 +17,6 @@ The reason string is a pure per-rank verdict, so the aggregation is the existing
     python tests/cpu/parallelism/test_mnnvl_prereq.py
 """
 
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -115,4 +114,4 @@ def test_outside_a_live_job_it_only_advises():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

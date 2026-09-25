@@ -16,15 +16,12 @@ not this rank's parameters carried a gradient), so a missing or ``None`` bucket 
     python tests/cpu/trainers/test_grad_norm_buckets.py
 """
 
-import os
-
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from src.trainers.mixins.grad_clip import bucketed_grad_norm_sq, local_grad_norm_sq
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 
@@ -88,35 +85,30 @@ def test_single_bucket_helper_agrees_with_the_bucketed_one():
     )
 
 
-def _worker(rank: int, out: str, port: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
-    try:
-        failures = []
-        for topology, names in TOPOLOGY_BUCKETS.items():
-            buckets = {name: _shards(rank, name, i) for i, name in enumerate(names)}
-            norm_sq = bucketed_grad_norm_sq(buckets, device="cpu")
-            for name in names:
-                summed = norm_sq[name].clone()
-                dist.all_reduce(summed, op=dist.ReduceOp.SUM)
-                # Ground truth: the shards of BOTH ranks form one tensor set, whose squared norm is
-                # what the clip threshold is judged against.
-                union = [s for r in range(WORLD_SIZE) for s in _shards(r, name, names.index(name))]
-                want = _reference_norm_sq(union)
-                if not torch.allclose(summed, want, rtol=1e-6, atol=0):
-                    failures.append(f"{topology}/{name}: summed={summed.item()} want={want.item()}")
-        result = "PASS" if not failures else "FAILURES: " + "; ".join(failures)
-        if rank == 0:
-            with open(out, "w") as fh:
-                fh.write(result)
-    finally:
-        dist.destroy_process_group()
+def _worker(rank: int, out: str) -> None:
+    failures = []
+    for topology, names in TOPOLOGY_BUCKETS.items():
+        buckets = {name: _shards(rank, name, i) for i, name in enumerate(names)}
+        norm_sq = bucketed_grad_norm_sq(buckets, device="cpu")
+        for name in names:
+            summed = norm_sq[name].clone()
+            dist.all_reduce(summed, op=dist.ReduceOp.SUM)
+            # Ground truth: the shards of BOTH ranks form one tensor set, whose squared norm is
+            # what the clip threshold is judged against.
+            union = [s for r in range(WORLD_SIZE) for s in _shards(r, name, names.index(name))]
+            want = _reference_norm_sq(union)
+            if not torch.allclose(summed, want, rtol=1e-6, atol=0):
+                failures.append(f"{topology}/{name}: summed={summed.item()} want={want.item()}")
+    result = "PASS" if not failures else "FAILURES: " + "; ".join(failures)
+    if rank == 0:
+        with open(out, "w") as fh:
+            fh.write(result)
 
 
 def test_buckets_are_additive_across_ranks(tmp_path):
     """Every caller sums its buckets over a process group, so the local squares must add up."""
     out = str(tmp_path / "result.txt")
-    mp.start_processes(_worker, args=(out, free_port()), nprocs=WORLD_SIZE, join=True, start_method="spawn")
+    run_gloo_ranks(_worker, WORLD_SIZE, out)
     with open(out) as fh:
         assert fh.read() == "PASS"
 

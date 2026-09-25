@@ -5,8 +5,6 @@ veto, OPSM). Both must be exact no-ops at their defaults — the default path is
     python tests/cpu/grpo/test_grpo_advantage_shaping.py
 """
 
-import sys
-
 import pytest
 import torch
 
@@ -237,4 +235,4 @@ def test_opsm_masks_only_drifted_negative_trajectories():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

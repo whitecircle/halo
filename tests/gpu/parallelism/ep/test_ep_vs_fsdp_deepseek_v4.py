@@ -26,27 +26,16 @@ from transformers.models.deepseek_v4 import DeepseekV4Config
 from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.distributed import world_spread
 from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.tiny_models import randomize_tid2eid
 from tests.common.tolerances import TOL
 from tests.common.utils import log
 
 SEED = 42
 BATCH, SEQ = 2, 64
-LOSS_TOL = 5e-2  # bf16 dispatch/accumulation-order noise on a tiny model
-RANK_LOSS_TOL = 1e-3  # EP is orthogonal to DP: identical input → identical loss
-
-
-def _randomize_tid2eid(model) -> None:
-    """DISTINCT experts per token id (random-init leaves the table all-zero; DeepEP dispatch and
-    the wrapper's init guard both require distinct top-k experts per token)."""
-    gen = torch.Generator().manual_seed(SEED)
-    for layer in model.model.layers:
-        if layer.mlp.is_hash:
-            table = layer.mlp.gate.tid2eid
-            perm = torch.rand(table.shape[0], model.config.n_routed_experts, generator=gen).argsort(dim=-1)
-            table.copy_(perm[:, : table.shape[1]])
 
 
 def _build_model(device):
@@ -54,7 +43,7 @@ def _build_model(device):
     torch.manual_seed(SEED)
     config = DeepseekV4Config(**{**TINY_DSV4_CONFIG, "attn_implementation": "eager"})
     model = AutoModelForCausalLM.from_config(config)
-    _randomize_tid2eid(model)
+    randomize_tid2eid(model, seed=SEED)
     return model.to(device=device, dtype=torch.bfloat16)
 
 
@@ -112,15 +101,12 @@ def run(ctx):
     metrics["ref_loss"] = ref_loss
     metrics["ep_loss"] = ep_loss
     checks["ep_loss_finite"] = bool(torch.isfinite(out.loss))
-    checks["ep_loss_matches_ref"] = abs(ep_loss - ref_loss) < LOSS_TOL
+    checks["ep_loss_matches_ref"] = abs(ep_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
 
     # Losses must agree across ranks (identical input; EP orthogonal to DP).
-    loss_t = torch.tensor([ep_loss], device=device)
-    gathered = [torch.zeros_like(loss_t) for _ in range(ctx.world_size)]
-    torch.distributed.all_gather(gathered, loss_t)
-    spread = max(abs(g.item() - gathered[0].item()) for g in gathered)
+    spread = world_spread(ep_loss)
     metrics["rank_loss_spread"] = spread
-    checks["losses_match_across_ranks"] = spread < RANK_LOSS_TOL
+    checks["losses_match_across_ranks"] = spread < TOL.ep_identical_batch_rank_spread_abs
 
     # ── 5. Hash-layer routing == tid2eid lookup (exact) ───────────────────────
     hash_layer._capture_routing = False

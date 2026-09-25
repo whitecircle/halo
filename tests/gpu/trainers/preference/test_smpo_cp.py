@@ -1,15 +1,12 @@
 #!/usr/bin/env python
 """
-SMPO with Context Parallelism (CP=2) Training Test.
+SMPO with Context Parallelism (CP=2): smoke test.
 
-Validates that SmoothMarginPOTrainer works correctly with Context Parallelism
-enabled (cp_size=2). CP splits sequences across GPUs using Ulysses attention,
-requiring proper cross-rank aggregation of log probabilities for the margin loss.
-
-Test validates:
-1. Training completes without errors for 10 steps
-2. Final training loss is finite (no NaN/Inf)
-3. trainer.is_cp_mode is True (CP properly configured)
+Runs SmoothMarginPOTrainer for 10 steps with cp_size=2 (Ulysses attention splits each sequence
+across GPUs). It checks only that training runs without raising, that ``trainer.is_cp_mode`` is
+set, and that the final training loss is finite; it does not compare the loss against a reference.
+tests/gpu/parallelism/cp/test_cp_smpo_logprobs.py pins the Ulysses logits only, so the trainer's
+cross-rank log-prob aggregation under CP has no reference check.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -19,6 +16,8 @@ Requirements:
     - 2x GPUs
     - Model: Qwen/Qwen3-0.6B (auto-downloaded)
 """
+
+import math
 
 import torch
 import torch.distributed as dist
@@ -143,10 +142,9 @@ def run(ctx) -> dict:
     train_result = trainer.train()
     log("Training complete!")
 
-    final_loss = train_result.metrics.get("train_loss", None)
+    final_loss = train_result.metrics["train_loss"]
     log(f"Final training loss: {final_loss}")
-    checks["train_loss_reported"] = final_loss is not None
-    checks["train_loss_finite"] = final_loss is not None and bool(torch.isfinite(torch.tensor(final_loss)))
+    checks["train_loss_finite"] = math.isfinite(final_loss)
     log(f"Steps completed: {trainer.state.global_step}")
 
     return {"checks": checks}

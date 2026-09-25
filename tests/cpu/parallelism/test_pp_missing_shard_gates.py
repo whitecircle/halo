@@ -10,8 +10,6 @@ verdict through ``reject_across_ranks`` instead.
 Run: ``python tests/cpu/parallelism/test_pp_missing_shard_gates.py`` (or ``pytest -m cpu``).
 """
 
-import sys
-
 import pytest
 
 from src.distributed.pipeline_parallel.lazy_loader import _missing_fusion_shards_reason
@@ -47,4 +45,4 @@ def test_no_tasks_or_no_missing_files_pass():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

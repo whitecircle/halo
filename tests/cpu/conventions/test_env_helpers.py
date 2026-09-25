@@ -155,4 +155,4 @@ def test_data_path_derives_from_scratch_root():
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

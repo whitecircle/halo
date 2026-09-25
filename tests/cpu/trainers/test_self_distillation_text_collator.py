@@ -258,4 +258,4 @@ def test_tools_field_reaches_the_chat_template():
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

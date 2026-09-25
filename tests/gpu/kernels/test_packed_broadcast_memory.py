@@ -7,20 +7,19 @@ stream handles — the production signature is 245 GiB reserved against a 72 GiB
 the forwarding rank. This drives the producer the way VLLMWeightSyncClient does (chunk tensors
 already staged on the device, client-owned streams) and asserts reserved memory stops growing after
 the first sync.
+
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_packed_broadcast_memory.py
 """
 
-import sys
 from types import SimpleNamespace
 from unittest import mock
 
-import pytest
 import torch
 
 import src.distributed.nccl.clients.vllm as vllm_client_module
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_NUM_BUFFERS, packed_broadcast_producer
-
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+from tests.common.harness import gpu_test_main, record_check
 
 _SYNCS = 12
 _PARAMS_PER_SYNC = 24
@@ -102,12 +101,13 @@ def test_client_reuses_one_stream_pair_across_syncs():
     assert len(captured[0]) == DEFAULT_PACKED_NUM_BUFFERS
 
 
-def main():
-    test_persistent_streams_bound_reserved_memory()
-    test_client_reuses_one_stream_pair_across_syncs()
-    print("test_packed_broadcast_memory: OK")
-    return 0
+@gpu_test_main(exact_world_size=1, prefix="packed_broadcast_memory", partial_state=False)
+def run(ctx) -> dict:
+    checks: dict[str, bool] = {}
+    record_check(checks, "persistent_streams_bound_reserved_memory", test_persistent_streams_bound_reserved_memory)
+    record_check(checks, "client_reuses_one_stream_pair_across_syncs", test_client_reuses_one_stream_pair_across_syncs)
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

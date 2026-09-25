@@ -10,7 +10,6 @@ tensors must never alias.
 """
 
 import gc
-import sys
 
 import pytest
 import torch
@@ -63,4 +62,4 @@ def test_cached_fake_quant_cache_evicts_end_to_end():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

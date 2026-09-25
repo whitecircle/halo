@@ -1,19 +1,19 @@
 #!/usr/bin/env python
 """
-Convergence test: LoRA and QLoRA with Expert Parallelism (EP=2) on GptOss-20B.
+Convergence test: LoRA with Expert Parallelism (EP=2) on GptOss-20B, plus QLoRA+EP rejection.
 
-Trains for 25 steps and verifies that loss consistently decreases, validating
-that LoRA/QLoRA gradients flow correctly through the EP routing mechanism.
+Trains LoRA for 25 steps and verifies that loss decreases, validating that LoRA gradients flow
+correctly through the EP routing mechanism.
 
 Convergence criteria:
   - Loss in the final 5 steps is lower than the first 5 steps (mean comparison)
-  - Loss is monotonically decreasing over 5-step windows (no divergence)
+  - No 5-step window mean exceeds 1.5x the first window's (no divergence)
   - All per-step losses are finite
   - LoRA adapter weights were updated
 
 Tests:
   1. LoRA + EP=2 convergence (25 steps)
-  2. QLoRA + EP=2 convergence (25 steps)
+  2. QLoRA + EP=2 must be rejected at load time (no training)
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -22,12 +22,9 @@ Run with 2 GPUs:
 
 import math
 import os
-import sys
 import traceback
 
 import torch
-import torch.distributed as dist
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig, get_quantization_config
@@ -37,12 +34,8 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import (
-    cleanup_dirs,
-    ensure_model_downloaded,
-    setup_cache_dirs,
-    teardown_distributed,
-)
+from tests.common.distributed import ensure_model_downloaded
+from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.peft_helpers import snapshot_adapters
 from tests.common.utils import cleanup_memory, log
@@ -70,7 +63,7 @@ def _analyze_convergence(step_losses: list[float], window_size: int = WINDOW_SIZ
     - all_finite: Every step loss is finite
     - loss_decreased: Mean of last window < mean of first window
     - no_divergence: No window has mean > first window mean * 1.5
-    - final_loss_reasonable: Final loss < 20 (not stuck at random baseline)
+    - final_loss_reasonable: Final loss < 20 (no late blow-up)
     """
     checks = {}
 
@@ -109,7 +102,7 @@ def _analyze_convergence(step_losses: list[float], window_size: int = WINDOW_SIZ
     else:
         log(f"  No divergence: PASS (all windows < {divergence_threshold:.4f})")
 
-    # <20 rules out a run stuck at the random baseline
+    # Catches a late blow-up only: the uniform baseline, ln(vocab) ~ 12.2 for GptOss, sits below 20.
     final_loss = step_losses[-1]
     final_reasonable = final_loss < 20
     checks["final_loss_reasonable"] = final_reasonable
@@ -300,33 +293,16 @@ def run_qlora_ep_convergence(
         barrier()
 
 
-def main() -> int:
-    """Run LoRA/QLoRA + EP convergence tests. Returns 0 on success, 1 on failure."""
-    if "RANK" in os.environ and not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
-
-    state = PartialState()
-    rank = state.process_index
-    local_rank = state.local_process_index
-    world_size = state.num_processes
-
-    base_output_dir, cache_dir = setup_cache_dirs("test_lora_ep_convergence", rank)
-
+def run(ctx) -> dict:
     log(f"\n{'#' * 70}")
     log("  LoRA/QLoRA + EP Convergence Test (GptOss-20B)")
-    log(f"  World size: {world_size}, EP size: {EP_SIZE}, Model: {MODEL_NAME}")
-    log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  World size: {ctx.world_size}, EP size: {EP_SIZE}, Model: {MODEL_NAME}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"  Max steps: {MAX_STEPS}, LR: {LEARNING_RATE}, Batch: {BATCH_SIZE}")
     log(f"  Convergence window: {WINDOW_SIZE} steps")
     log(f"{'#' * 70}")
 
-    if world_size != EP_SIZE:
-        log(f"\nERROR: This test requires exactly {EP_SIZE} GPUs, got {world_size}")
-        if dist.is_initialized():
-            teardown_distributed()
-        return 1
-
-    ensure_model_downloaded(MODEL_NAME, rank)
+    ensure_model_downloaded(MODEL_NAME, ctx.rank)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -348,14 +324,14 @@ def main() -> int:
         tokenizer,
         train_dataset,
         eval_dataset,
-        rank,
-        local_rank,
-        base_output_dir,
+        ctx.rank,
+        ctx.local_rank,
+        ctx.output_dir,
     )
     results["lora_ep_convergence"] = (success, detail)
 
     log(f"\n{'=' * 70}")
-    log("  TEST 2: QLoRA + EP=2 Convergence (25 steps)")
+    log("  TEST 2: QLoRA + EP=2 rejected at load time")
     log(f"{'=' * 70}")
 
     success, detail = run_qlora_ep_convergence(
@@ -363,28 +339,19 @@ def main() -> int:
         tokenizer,
         train_dataset,
         eval_dataset,
-        rank,
-        local_rank,
-        base_output_dir,
+        ctx.rank,
+        ctx.local_rank,
+        ctx.output_dir,
     )
     results["qlora_ep_convergence"] = (success, detail)
 
-    log(f"\n{'#' * 70}")
-    log("  CONVERGENCE TEST RESULTS")
-    log(f"{'#' * 70}")
     for name, (passed, detail) in results.items():
-        status = "PASSED" if passed else "FAILED"
-        log(f"  {name:30s} {status} -- {detail}")
-    log(f"{'#' * 70}")
+        log(f"  {name:30s} {'PASSED' if passed else 'FAILED'} -- {detail}")
 
-    all_passed = all(p for p, _ in results.values())
-    log(f"\n  Overall: {'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'}")
+    return {"checks": {name: passed for name, (passed, _) in results.items()}}
 
-    cleanup_dirs(base_output_dir, cache_dir)
-    if dist.is_initialized():
-        teardown_distributed()
-    return 0 if all_passed else 1
 
+main = gpu_test_main(exact_world_size=EP_SIZE, prefix="test_lora_ep_convergence")(run)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

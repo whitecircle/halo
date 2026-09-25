@@ -12,7 +12,6 @@ each declaring family's real mapping is pinned bitwise against ``from_pretrained
 """
 
 import json
-import sys
 from functools import cache
 from types import SimpleNamespace
 
@@ -564,4 +563,4 @@ def test_the_canonical_key_oracle_reaches_the_walker(model_type):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

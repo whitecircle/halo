@@ -17,7 +17,6 @@ Run: python tests/cpu/data/test_vlm_run_dispatch.py  (or pytest)
 
 import json
 import re
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -461,4 +460,4 @@ def test_vlm_run_keeps_the_processor_padding_side():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

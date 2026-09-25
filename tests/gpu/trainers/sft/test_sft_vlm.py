@@ -2,9 +2,9 @@
 """
 VLM (Vision Language Model) SFT Training Test.
 
-Validates that DistributedSFTTrainer works correctly with a VLM model
-(AutoModelForImageTextToText) using text-only synthetic conversations.
-This tests the VLM code path without requiring actual image data.
+Smoke test: DistributedSFTTrainer trains a VLM model (AutoModelForImageTextToText) on text-only
+synthetic conversations, exercising the VLM code path without image data. It checks only that the
+logged losses are finite; no loss is compared against a reference.
 
 Test Setup:
 - Model: Qwen/Qwen3-VL-2B-Instruct (VLM with text+vision capabilities)
@@ -240,13 +240,10 @@ def run(ctx):
     checks["all_steps_finite"] = all_finite
     log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
 
-    no_nan_inf = not any(math.isnan(l) or math.isinf(l) for l in step_losses)
-    checks["no_nan_inf"] = no_nan_inf
-    log(f"  No NaN/Inf in step losses: {'PASS' if no_nan_inf else 'FAIL'}")
-
-    loss_reasonable = training_loss < 100.0
-    checks["loss_reasonable"] = loss_reasonable
-    log(f"  Loss is reasonable (<100): {'PASS' if loss_reasonable else 'FAIL'} (loss={training_loss:.6f})")
+    checks["steps_completed"] = train_result.global_step == MAX_STEPS
+    log(
+        f"  Steps completed: {'PASS' if checks['steps_completed'] else 'FAIL'} ({train_result.global_step}/{MAX_STEPS})"
+    )
 
     return {"checks": checks}
 

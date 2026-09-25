@@ -8,8 +8,6 @@ element-wise regardless of the first element's type.
     python tests/cpu/diagnostics/test_dist_debug_hash.py
 """
 
-import sys
-
 import pytest
 import torch
 
@@ -58,4 +56,4 @@ def test_mixed_containers_hash_element_wise():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

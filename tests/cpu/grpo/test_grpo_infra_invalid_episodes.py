@@ -14,7 +14,6 @@ as a genuine wrong answer — biasing every sibling's advantage. The protocol-le
     python tests/cpu/grpo/test_grpo_infra_invalid_episodes.py
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -237,4 +236,4 @@ def test_one_survivor_resets_the_streak():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

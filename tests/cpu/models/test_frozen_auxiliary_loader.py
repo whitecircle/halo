@@ -19,7 +19,6 @@ import ast
 import contextlib
 import inspect
 import pathlib
-import sys
 import types
 from unittest.mock import patch
 
@@ -392,4 +391,4 @@ def test_an_untagged_fetch_opens_no_coordination_scope():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

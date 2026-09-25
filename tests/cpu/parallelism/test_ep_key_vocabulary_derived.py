@@ -13,7 +13,6 @@ Run: pytest tests/cpu/parallelism/test_ep_key_vocabulary_derived.py
 """
 
 import json
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -143,4 +142,4 @@ def test_unclaimed_model_type_still_falls_back_to_the_structural_probe(tmp_path)
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

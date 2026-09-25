@@ -21,17 +21,15 @@ Run: python tests/cpu/parallelism/test_freeze_pattern_rank_uniformity.py  (or py
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import os
 
 import pytest
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch import nn
 
 from src.distributed.loading.peft_setup import freeze_modules_by_patterns, unfreeze_modules_by_patterns
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 # Far below any plausible real wait: with a stage-local raise the surviving rank can only end in a
@@ -47,16 +45,8 @@ class _Stage(nn.Module):
         self.add_module(f"block_{rank}", nn.Linear(4, 4))
 
 
-def _init(rank: int, port: str) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
-
-
-def _worker(rank: int, tmp_dir: str, which: str, pattern: str, port: str) -> None:
+def _worker(rank: int, tmp_dir: str, which: str, pattern: str) -> None:
     """Apply the pattern to this rank's stage, then enter the collective a real load would next hit."""
-    _init(rank, port)
     model = _Stage(rank)
     reached_next_collective = False
     try:
@@ -74,17 +64,11 @@ def _worker(rank: int, tmp_dir: str, which: str, pattern: str, port: str) -> Non
 
     with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
         fh.write(f"{reached_next_collective}|{outcome}")
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 def _results(tmp_path, which: str, pattern: str) -> list[tuple[bool, str]]:
-    mp.start_processes(
-        _worker,
-        args=(str(tmp_path), which, pattern, str(free_port())),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
+    run_gloo_ranks(
+        _worker, WORLD_SIZE, str(tmp_path), which, pattern, pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
     )
     out = []
     for rank in range(WORLD_SIZE):

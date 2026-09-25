@@ -6,7 +6,6 @@ tests at the end drive a fake backend instead, so the guard that rejects a diver
 pinned in every environment (including images built before the extra landed)."""
 
 import pickle
-import sys
 
 import pytest
 from datasets import Dataset
@@ -227,10 +226,6 @@ def test_tokenize_dataset_backend_parity(mode):
     assert results["gigatoken"]["labels"] == results["hf"]["labels"]
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
-
-
 class _FakeGigatoken:
     """Stand-in for the optional ``gigatoken`` module.
 
@@ -293,3 +288,7 @@ def test_a_backend_that_diverges_on_special_tokens_is_rejected(monkeypatch):
     tokenizer = load_cached_tokenizer(MODEL_NAME)
     with pytest.raises(ValueError, match="diverges"):
         tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

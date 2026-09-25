@@ -25,7 +25,6 @@ Driven on the real writer and the real reader, this pins:
     python tests/cpu/checkpoint/test_nonshared_fs_resume.py
 """
 
-import contextlib
 import copy
 import datetime
 import hashlib
@@ -35,8 +34,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 
 from src.distributed import runtime
@@ -44,7 +41,7 @@ from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.runtime import fs_aware_makedirs, fs_aware_save_rank
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 from tests.common.utils import assert_optimizer_state_bit_exact
 
 WORLD_SIZE = 2  # two 1-rank "nodes"
@@ -57,9 +54,12 @@ SHARD_FILE_FMT = "optimizer_shard_{rank:05d}.pt"
 SHARD_FILE_GLOB = "optimizer_shard_*.pt"
 META_FILE = "optimizer_meta.pt"
 
-# Bounds a regression: ``mp.start_processes(join=True)`` has no timeout, so a rank that diverges from
-# a collective would otherwise stall CI for gloo's 30-minute default instead of failing.
+# A rank that diverges from a collective records gloo's error in its verdict at this bound, instead of
+# waiting out gloo's 30-minute default until the join deadline kills it.
 PG_TIMEOUT = datetime.timedelta(seconds=120)
+
+# One rank per "node": every rank is its node's local main, hence a checkpoint writer.
+TWO_NODE_ENV = {"LOCAL_RANK": "0", "LOCAL_WORLD_SIZE": "1", "DIST_OUTPUT_SHARED_FILESYSTEM": "0"}
 
 
 def _node_dir(root: str, rank: int) -> str:
@@ -143,18 +143,7 @@ def _load_ctx(model: nn.Module, optimizer: torch.optim.Optimizer) -> CheckpointL
     )
 
 
-def _worker(rank: int, root: str, port: int) -> None:
-    os.environ.update(
-        MASTER_ADDR="127.0.0.1",
-        MASTER_PORT=str(port),
-        RANK=str(rank),
-        WORLD_SIZE=str(WORLD_SIZE),
-        # One rank per "node": every rank is its node's local main, hence a checkpoint writer.
-        LOCAL_RANK="0",
-        LOCAL_WORLD_SIZE="1",
-        DIST_OUTPUT_SHARED_FILESYSTEM="0",
-    )
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE, timeout=PG_TIMEOUT)
+def _worker(rank: int, root: str) -> None:
     problems: list[str] = []
     try:
         runtime.resolve_shared_filesystem_consensus()  # what init_distributed does for a real run
@@ -185,16 +174,13 @@ def _worker(rank: int, root: str, port: int) -> None:
     with open(os.path.join(root, f"result_{rank}.txt"), "w") as fh:
         fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems))
     runtime.reset_shared_filesystem_consensus()
-    # Teardown of an already-aborted group must not mask the verdict written above.
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 @pytest.fixture(scope="module")
 def two_node_run(tmp_path_factory):
     """One 2-process gloo save→resume run; the tests below read the artifacts it left behind."""
     root = tmp_path_factory.mktemp("nonshared_fs_resume")
-    mp.start_processes(_worker, args=(str(root), free_port()), nprocs=WORLD_SIZE, join=True, start_method="spawn")
+    run_gloo_ranks(_worker, WORLD_SIZE, str(root), pg_timeout=PG_TIMEOUT, env=TWO_NODE_ENV)
     return root
 
 

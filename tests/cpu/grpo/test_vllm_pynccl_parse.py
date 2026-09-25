@@ -13,8 +13,6 @@ vars match their owner's parse, and this is the only place that rule is enforcea
 Run: pytest tests/cpu/grpo/test_vllm_pynccl_parse.py
 """
 
-import sys
-
 import pytest
 
 from src.distributed.nccl.transport.pynccl import vllm_pynccl_disabled
@@ -46,4 +44,4 @@ def test_absent_is_not_set(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

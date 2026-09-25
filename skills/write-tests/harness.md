@@ -68,9 +68,7 @@ Run: torchrun --nproc_per_node=2 tests/gpu/<area>/test_<name>.py
 """
 import math
 
-from tests.common.distributed import world_any, world_mean
 from tests.common.harness import gpu_test_main
-from tests.common.tolerances import TOL
 
 
 @gpu_test_main(min_world_size=2, prefix="test_sft_ep")
@@ -90,17 +88,15 @@ def run(ctx) -> dict:
     trainer.train()
     losses = [h["loss"] for h in trainer.state.log_history if "loss" in h]
 
-    # 3. Assert BEHAVIOR + cross-rank invariants (verdict computed on ALL ranks).
+    # 3. Assert BEHAVIOR (verdict computed on ALL ranks). A logged loss is already the world mean
+    #    (HF all-gathers it at every log step), so a cross-rank spread of it cannot fail.
     loss_finite = all(math.isfinite(x) for x in losses)
     loss_decreased = len(losses) >= 2 and losses[-1] < losses[0]
-    mean = world_mean(losses[-1])                            # tests/common/distributed.py
-    rank_loss_consistent = not world_any(abs(losses[-1] - mean) > TOL.rank_loss_consistency_abs)
 
     return {
         "checks": {
             "loss_finite": loss_finite,
             "loss_decreased": loss_decreased,
-            "rank_loss_consistent": rank_loss_consistent,
         },
         "metrics": ctx.metrics(trainer),   # headline tokens/s/GPU + peak mem + step time
     }
@@ -115,8 +111,9 @@ numerical equivalence with `TOL.kernel_atol` / `TOL.kernel_rtol`.
 
 `record_check(checks, name, fn)` (same module) is the sanctioned way to record many independent
 verdicts in one launch without aborting at the first failure — the conventions test names it as the
-replacement for a printed pass/fail summary. Every `fn` must be rank-symmetric and collective-free.
-Cross-rank verdicts come from `tests/common/distributed.py` (`world_mean`, `world_any`, `world_min`).
+replacement for a printed pass/fail summary. Every raise inside an `fn` must be rank-symmetric or come
+after its last collective, or the ranks desynchronize. Cross-rank verdicts come from
+`tests/common/distributed.py` (`world_mean`, `world_any`, `world_min`, `world_spread`).
 
 ## Register in the manifest (`tests/gpu/manifest.py`)
 
@@ -183,11 +180,10 @@ those, kept separate only so the manifest can attach its family markers, timeout
   offline run over it fails a cache miss (`HALO_TEST_REQUIRE_HUB_CACHE`; see
   [Contributing → Tests](../../agent-docs/contributing/README.md#tests)).
 - **Tolerances** (`tests/common/tolerances.py`) — `from tests.common.tolerances import TOL`,
-  then use the named constant: `TOL.rank_loss_consistency_abs`, `TOL.tp_grad_norm_spread_abs`,
+  then use the named constant: `TOL.ep_identical_batch_rank_spread_abs`,
   `TOL.parallel_vs_baseline_loss_abs`, `TOL.parallel_vs_baseline_train_loss_abs`,
-  `TOL.ep_rank_loss_abs`, `TOL.logprob_atol/rtol`, `TOL.weight_atol`, `TOL.resume_loss_abs`,
-  `TOL.grad_norm_rel`, `TOL.kernel_atol/rtol`. Never re-inline a literal — the name is the
-  contract. An EP-vs-reference gradient test scores its `name -> (EP grad, reference)` pairs with
+  `TOL.logprob_atol`, `TOL.weight_atol`, `TOL.resume_loss_abs`, `TOL.kernel_atol/rtol`. Never
+  re-inline a literal — the name is the contract. An EP-vs-reference gradient test scores its `name -> (EP grad, reference)` pairs with
   `tests.common.ep_reference.score_ep_grad_pairs(pairs, checks, metrics, cos_min=TOL.ep_grad_cosine_min)`;
   its norm-ratio band defaults to `TOL.ep_grad_norm_ratio_band`.
 - **Reporting** (`tests/common/reporting.py`):

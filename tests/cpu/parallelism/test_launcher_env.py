@@ -20,8 +20,6 @@ whole ALLOCATION without ever launching those tasks, so the count is only a worl
 Run: pytest tests/cpu/parallelism/test_launcher_env.py
 """
 
-import sys
-
 import pytest
 import torch
 
@@ -191,4 +189,4 @@ def test_single_task_srun_is_not_forced_into_a_process_group(pre_init, monkeypat
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

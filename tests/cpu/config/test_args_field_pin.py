@@ -14,7 +14,6 @@ Usage:
 import dataclasses
 import importlib
 import pkgutil
-import sys
 from unittest import mock
 
 import pytest
@@ -577,4 +576,4 @@ def test_fields_and_defaults_unchanged(cls_name):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

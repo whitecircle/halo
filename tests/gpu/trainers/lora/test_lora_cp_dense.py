@@ -2,12 +2,10 @@
 """
 Test: LoRA and QLoRA with Context Parallelism (CP=2) on a dense model (Qwen3-0.6B).
 
-Validates that PEFT LoRA/QLoRA adapters work correctly with Context Parallelism
-(Ulysses attention) on a dense (non-MoE) model.
-
-CP splits sequences across GPUs via Ulysses attention, requiring that LoRA
-adapters on attention projections produce correct gradients when operating on
-partial sequences per rank.
+Trains PEFT LoRA/QLoRA adapters under Context Parallelism (Ulysses attention, which splits
+each sequence across GPUs) on a dense (non-MoE) model and checks the loss stays finite, the
+adapters move, and the saved adapter reloads to its trained values. It does not compare the CP
+gradients against a non-CP reference.
 
 Tests:
   1. LoRA + CP=2 -> train 5 steps -> save -> verify checkpoint -> reload adapter
@@ -22,15 +20,13 @@ Run with 2 GPUs:
 
 import math
 import os
-import sys
 import traceback
 
 import torch
 import torch.distributed as dist
-from accelerate import PartialState
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig, get_quantization_config
 
 from src.distributed.checkpoint.peft import PeftAdapterSaver, restore_adapters
@@ -40,14 +36,15 @@ from src.distributed.runtime import barrier
 from src.env import env_str
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import (
-    cleanup_dirs,
-    ensure_model_downloaded,
-    setup_cache_dirs,
-    teardown_distributed,
-)
+from tests.common.distributed import ensure_model_downloaded
+from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import adapter_save_checks, snapshot_adapters
+from tests.common.peft_helpers import (
+    adapter_save_checks,
+    assert_adapters_moved,
+    snapshot_adapters,
+    verify_adapter_reload,
+)
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 # Configuration
@@ -72,18 +69,12 @@ LORA_ALPHA = 16
 # Helpers
 
 
-def _verify_lora_updated(before: dict, model) -> dict[str, bool]:
-    checks = {}
-    after = snapshot_adapters(model, expert_lora=False)
-    updated = sum(1 for name in before if name in after and not torch.equal(before[name], after[name]))
-    total = len(before)
-    # With few training steps, lora_A may not update initially because lora_B
-    # starts at zero (so d(loss)/d(lora_A) = lora_B^T @ ... = 0 in step 1).
-    # Require at least 25% of params to be updated as a reasonable threshold.
-    lora_ok = updated > 0 and updated >= total * 0.25
-    checks["lora_updated"] = lora_ok
-    log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({updated}/{total} params changed)")
-    return checks
+def _verify_lora_updated(before: dict, after: dict) -> dict[str, bool]:
+    # A zero-init lora_B must move: ``before`` is taken ahead of the trainer's bf16 cast of the fp32
+    # adapters, which alone changes every lora_A.
+    lora_ok, detail = assert_adapters_moved(before, after)
+    log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({detail})")
+    return {"lora_updated": lora_ok}
 
 
 def _validate_training(train_result, trainer, max_steps) -> tuple[dict[str, bool], list]:
@@ -114,55 +105,6 @@ def _validate_training(train_result, trainer, max_steps) -> tuple[dict[str, bool
     log(f"  Loss in band (0.05, 20): {'PASS' if loss_reasonable else 'FAIL'} ({training_loss:.4f})")
 
     return checks, step_losses
-
-
-def _verify_checkpoint_reload(
-    save_dir: str,
-    tokenizer,
-    rank: int,
-    local_rank: int,
-    quantization_config=None,
-) -> dict[str, bool]:
-    """Reload saved adapter and verify it produces finite logits. Rank 0 only."""
-    if rank != 0:
-        return {}
-
-    checks = {}
-    try:
-        log("  Reloading base model for checkpoint verification...")
-        load_kwargs = {
-            "dtype": torch.bfloat16,
-            "trust_remote_code": True,
-            "device_map": {"": local_rank},
-        }
-        if quantization_config is not None:
-            load_kwargs["quantization_config"] = quantization_config
-
-        base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **load_kwargs)
-
-        log(f"  Loading adapter from {save_dir}...")
-        reloaded = PeftModel.from_pretrained(base_model, save_dir)
-        checks["adapter_reload"] = True
-        log("  Adapter reload: PASS")
-
-        reloaded.eval()
-        test_input = tokenizer("What is 2 + 2?", return_tensors="pt").to(f"cuda:{local_rank}")
-        with torch.no_grad():
-            output = reloaded(**test_input)
-
-        logits_finite = torch.isfinite(output.logits).all().item()
-        checks["reload_logits_finite"] = logits_finite
-        log(f"  Reload logits finite: {'PASS' if logits_finite else 'FAIL'}")
-
-        del reloaded, base_model
-        cleanup_memory()
-
-    except Exception as e:
-        log(f"  Checkpoint reload FAILED: {e}")
-        traceback.print_exc()
-        checks["adapter_reload"] = False
-
-    return checks
 
 
 # Test runners
@@ -245,8 +187,8 @@ def run_lora_cp(
         checks, step_losses = _validate_training(train_result, trainer, MAX_STEPS)
         log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
 
-        lora_checks = _verify_lora_updated(lora_before, model)
-        checks.update(lora_checks)
+        lora_after = snapshot_adapters(model, expert_lora=False)
+        checks.update(_verify_lora_updated(lora_before, lora_after))
 
         # Save checkpoint
         save_dir = os.path.join(base_output_dir, "lora_cp_save")
@@ -258,7 +200,9 @@ def run_lora_cp(
         checks.update(save_checks)
 
         # Reload and verify on rank 0
-        reload_checks = _verify_checkpoint_reload(save_dir, tokenizer, rank, local_rank)
+        reload_checks = verify_adapter_reload(
+            save_dir, lora_after, model_name=MODEL_NAME, tokenizer=tokenizer, rank=rank, local_rank=local_rank
+        )
         checks.update(reload_checks)
         barrier()
 
@@ -370,8 +314,8 @@ def run_qlora_cp(
         checks, step_losses = _validate_training(train_result, trainer, MAX_STEPS)
         log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
 
-        lora_checks = _verify_lora_updated(lora_before, model)
-        checks.update(lora_checks)
+        lora_after = snapshot_adapters(model, expert_lora=False)
+        checks.update(_verify_lora_updated(lora_before, lora_after))
 
         # Save checkpoint
         save_dir = os.path.join(base_output_dir, "qlora_cp_save")
@@ -383,11 +327,13 @@ def run_qlora_cp(
         checks.update(save_checks)
 
         # Reload and verify on rank 0
-        reload_checks = _verify_checkpoint_reload(
+        reload_checks = verify_adapter_reload(
             save_dir,
-            tokenizer,
-            rank,
-            local_rank,
+            lora_after,
+            model_name=MODEL_NAME,
+            tokenizer=tokenizer,
+            rank=rank,
+            local_rank=local_rank,
             quantization_config=quantization_config,
         )
         checks.update(reload_checks)
@@ -516,40 +462,21 @@ def run_lora_cp_resume(
         barrier()
 
 
-# Main
-
-
-def main() -> int:
-    """Run LoRA/QLoRA + CP tests on Qwen3-0.6B dense model. Returns 0 on success, 1 on failure."""
-    if "RANK" in os.environ and not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
-
-    state = PartialState()
-    rank = state.process_index
-    local_rank = state.local_process_index
-    world_size = state.num_processes
-
-    base_output_dir, cache_dir = setup_cache_dirs("test_lora_cp_dense", rank)
+def run(ctx) -> dict:
     # setup_cache_dirs mkdtemps a DIFFERENT random dir per rank; saves and the resume leg's
     # cross-rank file consensus need one shared path — use rank 0's everywhere.
-    dirs = [base_output_dir]
+    dirs = [ctx.output_dir]
     dist.broadcast_object_list(dirs, src=0)
     base_output_dir = dirs[0]
 
     log(f"\n{'#' * 70}")
     log("  LoRA/QLoRA + CP Test on Dense Model")
-    log(f"  World size: {world_size}, CP size: {CP_SIZE}, Model: {MODEL_NAME}")
-    log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  World size: {ctx.world_size}, CP size: {CP_SIZE}, Model: {MODEL_NAME}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"  Max steps: {MAX_STEPS}, Batch size: {BATCH_SIZE}, Seq length: {MAX_SEQ_LENGTH}")
     log(f"{'#' * 70}")
 
-    if world_size != CP_SIZE:
-        log(f"\nERROR: This test requires exactly {CP_SIZE} GPUs, got {world_size}")
-        if dist.is_initialized():
-            teardown_distributed()
-        return 1
-
-    ensure_model_downloaded(MODEL_NAME, rank)
+    ensure_model_downloaded(MODEL_NAME, ctx.rank)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -567,64 +494,51 @@ def main() -> int:
     log("  TEST 1: LoRA + CP=2 (Qwen3-0.6B Dense)")
     log(f"{'=' * 70}")
 
-    success, detail = run_lora_cp(
+    results["lora_cp"] = run_lora_cp(
         parallelism_config,
         tokenizer,
         train_dataset,
         eval_dataset,
-        rank,
-        local_rank,
+        ctx.rank,
+        ctx.local_rank,
         base_output_dir,
     )
-    results["lora_cp"] = (success, detail)
 
     # ── Test 2: QLoRA + CP=2 ────────────────────────────────────────────
     log(f"\n{'=' * 70}")
     log("  TEST 2: QLoRA (4-bit) + CP=2 (Qwen3-0.6B Dense)")
     log(f"{'=' * 70}")
 
-    success, detail = run_qlora_cp(
+    results["qlora_cp"] = run_qlora_cp(
         parallelism_config,
         tokenizer,
         train_dataset,
         eval_dataset,
-        rank,
-        local_rank,
+        ctx.rank,
+        ctx.local_rank,
         base_output_dir,
     )
-    results["qlora_cp"] = (success, detail)
 
     # ── Test 3: LoRA + CP=2 adapter resume ──────────────────────────────
     log(f"\n{'=' * 70}")
     log("  TEST 3: LoRA + CP=2 adapter resume (save -> fresh model -> restore)")
     log(f"{'=' * 70}")
 
-    success, detail = run_lora_cp_resume(
+    results["lora_cp_resume"] = run_lora_cp_resume(
         parallelism_config,
         tokenizer,
         train_dataset,
         eval_dataset,
         base_output_dir,
     )
-    results["lora_cp_resume"] = (success, detail)
 
-    # ── Summary ──────────────────────────────────────────────────────────
-    log(f"\n{'#' * 70}")
-    log("  FINAL RESULTS")
-    log(f"{'#' * 70}")
     for name, (passed, detail) in results.items():
-        status = "PASSED" if passed else "FAILED"
-        log(f"  {name:20s} {status} -- {detail}")
-    log(f"{'#' * 70}")
+        log(f"  {name:20s} {'PASSED' if passed else 'FAILED'} -- {detail}")
 
-    all_passed = all(p for p, _ in results.values())
-    log(f"\n  Overall: {'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'}")
+    return {"checks": {name: passed for name, (passed, _) in results.items()}}
 
-    cleanup_dirs(base_output_dir, cache_dir)
-    if dist.is_initialized():
-        teardown_distributed()
-    return 0 if all_passed else 1
 
+main = gpu_test_main(exact_world_size=CP_SIZE, prefix="test_lora_cp_dense")(run)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

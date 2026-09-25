@@ -82,6 +82,4 @@ def test_no_shuffle_is_deterministic_and_seed_independent():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

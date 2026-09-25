@@ -27,11 +27,12 @@ import shutil
 
 import torch
 import torch.distributed as dist
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -69,81 +70,6 @@ def _fixed_batch(tokenizer, device):
     enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
     ids = enc["input_ids"].to(device)
     return ids, ids.clone()
-
-
-def _forward_loss(trainer, ids, labels) -> float:
-    """Forward loss on a fixed batch through the live (FSDP2-wrapped) trainer model.
-
-    Uses no optimizer step, so it reflects only the current weights.
-    """
-    model = trainer.model
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.no_grad():
-            out = model(input_ids=ids, labels=labels, use_cache=False)
-    finally:
-        if was_training:
-            model.train()
-    return out.loss.item()
-
-
-def _optimizer_moments_stats(trainer) -> tuple[bool, bool]:
-    """Scan this rank's local optimizer state for the 2nd moment (exp_avg_sq).
-
-    Returns (any_nonzero, all_finite) over the per-rank local shards. FSDP2/TP store
-    DTensors; ``.to_local()`` reads this rank's shard with no collective (so it is
-    safe to call independently per rank). A resume that reinitialised Adam to zero
-    leaves exp_avg_sq all-zero on every rank → any_nonzero is False.
-    """
-    any_nonzero = False
-    all_finite = True
-    seen = False
-    for state in trainer.optimizer.state.values():
-        sq = state.get("exp_avg_sq")
-        if sq is None:
-            continue
-        seen = True
-        local = sq.to_local() if hasattr(sq, "to_local") else sq
-        local = local.detach()
-        if (local != 0).any().item():
-            any_nonzero = True
-        if not torch.isfinite(local).all().item():
-            all_finite = False
-    if not seen:
-        # No exp_avg_sq materialised — cannot claim restored state; treat as failure.
-        return False, False
-    return any_nonzero, all_finite
-
-
-def _make_resume_capture_callback(trainer_ref: dict, ids, labels):
-    """Build a callback that snapshots resumed state at on_train_begin.
-
-    on_train_begin fires AFTER the resume hooks (model + optimizer + scheduler
-    restored) but BEFORE the first optimizer step, so it reflects the restored
-    state, not a freshly-stepped one. Captures into ``trainer_ref["capture"]``:
-      l_post           — fixed-batch forward loss with restored weights
-      moments_nonzero  — exp_avg_sq has a nonzero entry on this rank
-      moments_finite   — exp_avg_sq is finite on this rank
-      optimizer_state  — this rank's restored shard view, for the bit-exact compare
-      sched_last_epoch — lr_scheduler.last_epoch after resume
-    """
-
-    class _ResumeCaptureCallback(TrainerCallback):
-        def on_train_begin(self, args, state, control, **kwargs):
-            trainer = trainer_ref["trainer"]
-            l_post = _forward_loss(trainer, ids, labels)
-            nonzero, finite = _optimizer_moments_stats(trainer)
-            trainer_ref["capture"] = {
-                "l_post": l_post,
-                "moments_nonzero": nonzero,
-                "moments_finite": finite,
-                "optimizer_state": local_optimizer_state(trainer.model, trainer.optimizer),
-                "sched_last_epoch": int(trainer.lr_scheduler.last_epoch),
-            }
-            return control
-
-    return _ResumeCaptureCallback()
 
 
 # Checkpoint file verification
@@ -282,7 +208,7 @@ def phase1_train_and_save(
     # The checkpoint was written during train() at step SAVE_AT_STEP, so these are
     # exactly the weights resume must restore.
     ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-    l_pre = _forward_loss(trainer, ids, labels)
+    l_pre = fixed_batch_loss(trainer.model, ids, labels)
     log(f"  L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
     # The checkpoint was written at step SAVE_AT_STEP, the last step of this phase, and nothing
@@ -378,8 +304,8 @@ def phase2_resume_and_train(
 
     # Capture restored state at on_train_begin (post-resume, pre-first-step).
     ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-    trainer_ref: dict = {"trainer": trainer, "capture": None}
-    trainer.add_callback(_make_resume_capture_callback(trainer_ref, ids, labels))
+    resume_capture = ResumeCapture(trainer, ids, labels, optimizer_state=True)
+    trainer.add_callback(resume_capture)
 
     log(f"  Resuming from: {checkpoint_path}")
     train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
@@ -410,7 +336,7 @@ def phase2_resume_and_train(
     }
 
     # ---- By-value resume continuity (post-resume, pre-step snapshot) ----
-    cap = trainer_ref["capture"]
+    cap = resume_capture.capture
     checks["resume_capture_fired"] = cap is not None
     if cap is None:
         log("  ERROR: resume-capture callback did not fire (on_train_begin missed)")
@@ -421,16 +347,21 @@ def phase2_resume_and_train(
         # is stepped once per optimizer step, so last_epoch must be == SAVE_AT_STEP, not 0.
         sched_ok = cap["sched_last_epoch"] == SAVE_AT_STEP
         weights_ok = math.isfinite(l_post) and loss_delta < LOSS_TOL
-        moments_ok = cap["moments_nonzero"] and cap["moments_finite"]
+        moments_ok = cap["moments_materialized"] and cap["moments_nonzero"] and cap["moments_finite"]
 
         log(f"  L_pre={l_pre:.6f}  L_post={l_post:.6f}  |delta|={loss_delta:.6f} (tol {LOSS_TOL})")
-        log(f"  optimizer exp_avg_sq nonzero={cap['moments_nonzero']} finite={cap['moments_finite']}")
+        log(
+            f"  optimizer exp_avg_sq materialized={cap['moments_materialized']} "
+            f"nonzero={cap['moments_nonzero']} finite={cap['moments_finite']}"
+        )
         log(f"  lr_scheduler.last_epoch={cap['sched_last_epoch']} (expected {SAVE_AT_STEP})")
 
         if not weights_ok:
             log(f"  ERROR: weights not restored — |L_post - L_pre|={loss_delta:.6f} >= {LOSS_TOL}")
         if not moments_ok:
-            log("  ERROR: optimizer 2nd moment (exp_avg_sq) zero/non-finite after resume (Adam state not restored)")
+            log(
+                "  ERROR: optimizer 2nd moment (exp_avg_sq) absent/zero/non-finite after resume (Adam state not restored)"
+            )
         if not sched_ok:
             log(f"  ERROR: LR scheduler not restored — last_epoch={cap['sched_last_epoch']} (expected {SAVE_AT_STEP})")
 

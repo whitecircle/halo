@@ -474,4 +474,4 @@ def test_reward_trainer_declares_no_context_parallel_support():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

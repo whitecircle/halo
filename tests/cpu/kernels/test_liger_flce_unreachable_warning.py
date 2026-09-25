@@ -11,7 +11,6 @@ fires spuriously, or the GRPO trainers stop declaring the flag that routes to it
 """
 
 import logging
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -64,4 +63,4 @@ def test_grpo_family_declares_the_flag():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

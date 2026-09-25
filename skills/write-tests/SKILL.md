@@ -99,11 +99,11 @@ Rules:
   compared to a single-GPU reference).
 - **No hot-path downloads** — load from a cached snapshot / tiny local config; never hit the
   Hub mid-test.
-- **Cross-rank invariants** — the DP-averaged loss agrees across ranks
-  (`TOL.rank_loss_consistency_abs`); TP grad-norm is identical across the TP group
-  (`TOL.tp_grad_norm_spread_abs`). Compute the verdict on **all** ranks (all-gather /
-  broadcast) — setting `checks[...] = True` off rank 0 or on a `world_size < 2` fallback
-  masks rank-skew bugs.
+- **Cross-rank invariants** — an identical broadcast batch gives every rank the same loss
+  (`TOL.ep_identical_batch_rank_spread_abs`, via `world_spread`). A logged loss is already the world
+  mean (HF all-gathers it), so a spread of it cannot fail. Compute the verdict on **all** ranks
+  (all-gather / broadcast) — setting `checks[...] = True` off rank 0 or on a `world_size < 2`
+  fallback masks rank-skew bugs.
 - **Parallel-vs-reference** — EP/CP/TP/ETP step-0 loss matches the dense reference within
   `TOL.parallel_vs_baseline_loss_abs`; the trend within `TOL.parallel_vs_baseline_train_loss_abs`.
 

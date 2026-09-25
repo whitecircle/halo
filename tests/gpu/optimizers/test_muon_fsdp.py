@@ -15,15 +15,16 @@ Test Phases:
 3. FSDP2 weight decay: parameter norms shrink
 4. to_local DTensor unwrapping verification
 
+Each phase is recorded as its own check. Every assertion is either rank-symmetric or follows its
+phase's last collective, so a failed phase leaves the ranks aligned for the next.
+
 Run with 2 GPUs:
     CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 \
         tests/gpu/optimizers/test_muon_fsdp.py
 """
 
+import gc
 import math
-import os
-import sys
-import traceback
 
 import torch
 import torch.distributed as dist
@@ -33,6 +34,7 @@ from torch.distributed.tensor import DTensor
 
 from src.distributed.runtime import to_local
 from src.optimizers.muon import create_muon_optimizer
+from tests.common.harness import gpu_test_main, record_check
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -118,7 +120,6 @@ def test_muon_fsdp_ffn():
     optimizer = create_muon_optimizer(model, lr=LR)
     losses = train_steps(model, optimizer, NUM_STEPS)
 
-    assert not math.isnan(losses[-1]), "Loss is NaN"
     assert all(math.isfinite(l) for l in losses), "Non-finite loss detected"
     assert losses[-1] < losses[0], f"Loss should decrease: initial={losses[0]:.4f}, final={losses[-1]:.4f}"
     reduction = (losses[0] - losses[-1]) / losses[0]
@@ -151,7 +152,6 @@ def test_muon_fsdp_nobias():
 
     losses = train_steps(model, optimizer, NUM_STEPS)
 
-    assert not math.isnan(losses[-1]), "Loss is NaN"
     assert all(math.isfinite(l) for l in losses), "Non-finite loss detected"
     assert losses[-1] < losses[0], f"Loss should decrease: initial={losses[0]:.4f}, final={losses[-1]:.4f}"
     if rank == 0:
@@ -241,9 +241,9 @@ def test_dtensor_unwrapping():
                     "to_local should return plain Tensor for DTensor p.data"
                 )
 
+    assert dtensor_grad_count > 0, "Expected at least some DTensor gradients after FSDP2"
     if rank == 0:
         print(f"  DTensor gradients found: {dtensor_grad_count}")
-        assert dtensor_grad_count > 0, "Expected at least some DTensor gradients after FSDP2"
         print("  PASSED")
 
     del model
@@ -254,47 +254,23 @@ def test_dtensor_unwrapping():
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-def main() -> int:
-    if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
-
-    if rank == 0:
+@gpu_test_main(min_world_size=2, prefix="muon_fsdp", partial_state=False)
+def run(ctx) -> dict:
+    if ctx.rank == 0:
         print(f"\n{'=' * 70}")
         print("  Muon + FSDP2 Compatibility Test")
-        print(f"  World size: {world_size}, Rank: {rank}")
-        print(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+        print(f"  World size: {ctx.world_size}")
+        print(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
         print(f"  Free memory: {torch.cuda.mem_get_info()[0] / 1e9:.1f} GB")
         print(f"{'=' * 70}")
 
-    all_passed = True
-    try:
-        test_muon_fsdp_ffn()
-        test_muon_fsdp_nobias()
-        test_muon_fsdp_weight_decay()
-        test_dtensor_unwrapping()
+    checks: dict[str, bool] = {}
+    record_check(checks, "muon_fsdp_ffn", test_muon_fsdp_ffn)
+    record_check(checks, "muon_fsdp_nobias", test_muon_fsdp_nobias)
+    record_check(checks, "muon_fsdp_weight_decay", test_muon_fsdp_weight_decay)
+    record_check(checks, "dtensor_unwrapping", test_dtensor_unwrapping)
+    return {"checks": checks}
 
-        if rank == 0:
-            print(f"\n{'=' * 70}")
-            print("  ALL FSDP2 TESTS PASSED")
-            print(f"{'=' * 70}")
-
-    except Exception as e:
-        print(f"[Rank {rank}] TEST FAILED with exception: {e}")
-        traceback.print_exc()
-        all_passed = False
-
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-    return 0 if all_passed else 1
-
-
-import gc
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

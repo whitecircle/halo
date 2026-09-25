@@ -18,7 +18,6 @@ Run: pytest tests/cpu/checkpoint/test_after_training_tool_guards.py
 """
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -222,4 +221,4 @@ def test_known_additional_fields_still_narrow_the_output(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

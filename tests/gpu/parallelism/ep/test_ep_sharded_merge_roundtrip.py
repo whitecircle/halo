@@ -55,8 +55,8 @@ from tests.common.models import (
     TINY_GPTOSS_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
 )
+from tests.common.tiny_models import randomize_tid2eid
 from tests.common.utils import log, safetensors_state_dict
-from tests.cpu.models.test_deepseek_v4_support import randomize_tid2eid
 
 EP_SIZE = 2
 

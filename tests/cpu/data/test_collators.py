@@ -9,7 +9,6 @@ Usage:
     python tests/data/test_collators.py
 """
 
-import sys
 import warnings
 from unittest.mock import MagicMock
 
@@ -1829,4 +1828,4 @@ def test_flattening_completion_collator_refuses_a_missing_marker():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

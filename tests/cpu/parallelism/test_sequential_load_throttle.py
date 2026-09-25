@@ -14,8 +14,6 @@ simulated rank's call count advances exactly as its own process's would.
     python tests/cpu/parallelism/test_sequential_load_throttle.py
 """
 
-import sys
-
 import pytest
 import torch.distributed as dist
 
@@ -141,4 +139,4 @@ def test_unthrottled_shapes_touch_no_store(fake_node, monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -142,4 +142,4 @@ def test_the_yaml_path_captures_token_ids_where_a_hand_built_config_does_not():
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

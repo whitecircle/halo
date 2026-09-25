@@ -28,6 +28,7 @@ from transformers.models.zaya.modeling_zaya import ZayaSparseMoeBlock
 
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
 from tests.common.parallelism import single_process_ep_config
+from tests.common.utils import fro_rel_err
 
 E, H, M, ROUTER_H = 4, 64, 32, 32
 # ``ZayaRouter`` disables EDA on layer 0, so a chain from 0 covers the dead link and the live ones.
@@ -93,10 +94,6 @@ def _run_chain(layers, inputs: torch.Tensor) -> tuple[list[torch.Tensor], dict[s
     return outputs, grads
 
 
-def _relative(actual: torch.Tensor, expected: torch.Tensor) -> float:
-    return float((actual - expected).norm() / (expected.norm() + 1e-30))
-
-
 def test_ep_zaya_forward_matches_the_upstream_block():
     """The wrapper replaces the whole block, so its expert output must reproduce ``ZayaExperts`` —
     including the router's masked skip slot, whose tokens must contribute nothing."""
@@ -107,7 +104,7 @@ def test_ep_zaya_forward_matches_the_upstream_block():
 
     for index, (got, expected) in enumerate(zip(actual, reference, strict=True)):
         assert expected.abs().sum() > 0, f"L{index}: the reference output is all zeros — nothing is compared"
-        assert _relative(got, expected) < _TOLERANCE, f"L{index}: EP output differs from the upstream block"
+        assert fro_rel_err(got, expected) < _TOLERANCE, f"L{index}: EP output differs from the upstream block"
 
 
 def test_ep_zaya_router_gradient_matches_the_upstream_block():
@@ -123,7 +120,7 @@ def test_ep_zaya_router_gradient_matches_the_upstream_block():
         if expected is None:
             assert actual[key] is None, key
             continue
-        relative = _relative(actual[key], expected)
+        relative = fro_rel_err(actual[key], expected)
         assert relative < _TOLERANCE, f"{key}: EP router gradient differs by {relative:.3e} relative"
 
 

@@ -388,6 +388,4 @@ def test_resolve_num_key_value_heads_reduces_per_layer_heterogeneity():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

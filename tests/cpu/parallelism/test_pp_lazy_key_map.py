@@ -174,6 +174,4 @@ def test_manual_split_partitions_the_checkpoint_exactly():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

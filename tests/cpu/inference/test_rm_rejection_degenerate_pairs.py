@@ -15,7 +15,6 @@ Run: pytest tests/cpu/inference/test_rm_rejection_degenerate_pairs.py
 """
 
 import json
-import sys
 import types
 
 import numpy as np
@@ -148,4 +147,4 @@ def test_the_preference_pair_invents_no_id_its_source_row_lacks():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

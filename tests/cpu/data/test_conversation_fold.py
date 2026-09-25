@@ -14,8 +14,6 @@ Usage:
     python tests/cpu/data/test_conversation_fold.py
 """
 
-import sys
-
 import pytest
 
 from src.data.pipeline.conversation import fold_system_into_conversation
@@ -161,4 +159,4 @@ def test_render_system_prompt_folded_when_unsupported():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

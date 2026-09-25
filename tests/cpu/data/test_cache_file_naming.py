@@ -902,6 +902,4 @@ def test_render_library_versions_key_the_cache(monkeypatch):
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

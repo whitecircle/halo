@@ -12,7 +12,6 @@ the same contract the gathered-checkpoint writer holds for its own fallback.
 """
 
 import os
-import sys
 
 import pytest
 import torch
@@ -71,4 +70,4 @@ def test_bin_fallback_sweep_failure_is_loud_and_keeps_the_bin(tmp_path, monkeypa
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

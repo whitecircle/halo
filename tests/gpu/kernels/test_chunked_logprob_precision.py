@@ -14,6 +14,7 @@ import torch
 
 from src.trainers.grpo.mixins.chunked_logprobs import chunked_selective_log_softmax
 from tests.common.harness import gpu_test_main
+from tests.common.utils import fro_rel_err
 
 ROWS, HIDDEN, VOCAB = 5000, 1024, 40_000
 # Logit spread of a trained model's head: most mass on a few tokens, |logit| in the tens.
@@ -41,10 +42,6 @@ def _reference(hidden, weight, targets, grad):
     return logps.detach(), h.grad, w.grad
 
 
-def _rel_fro(a, b):
-    return ((a.double() - b).norm() / b.norm()).item()
-
-
 def run(ctx) -> dict:
     hidden, weight, targets, grad = _inputs(ctx.device)
     ref_logps, ref_dh, ref_dw = _reference(hidden, weight, targets, grad)
@@ -55,7 +52,7 @@ def run(ctx) -> dict:
     (logps * grad).sum().backward()
 
     logp_err = (logps.double() - ref_logps).abs().max().item()
-    dh_err, dw_err = _rel_fro(h.grad, ref_dh), _rel_fro(w.grad, ref_dw)
+    dh_err, dw_err = fro_rel_err(h.grad, ref_dh), fro_rel_err(w.grad, ref_dw)
     return {
         "checks": {
             "logprob_max_error_vs_fp64": logp_err < LOGP_MAX_ERR,

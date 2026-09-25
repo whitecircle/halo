@@ -22,7 +22,6 @@ Run with 2 GPUs:
 
 import json
 import os
-import tempfile
 
 import torch
 from transformers import AutoConfig
@@ -36,25 +35,25 @@ from transformers.models.inkling.modeling_inkling import InklingForCausalLM, Ink
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log
 
 SEED = 42
 BATCH, SEQ = 2, 64
-LOSS_TOL = 5e-2
 
 TINY_VISION = {"temporal_patch_size": 2, "patch_size": 4, "n_layers": 4, "hidden_size": 32, "text_hidden_size": 256}
 
 
 def _checkpoint_dirs() -> tuple[str, str]:
-    base = os.path.join(tempfile.gettempdir(), "inkling_lazy_tm_ckpt")
-    return base, base + "_text"
+    """Per-run dirs: a reused fixed path would keep a previous run's hard links in the text twin."""
+    return shared_scratch_dir("inkling_lazy_tm_ckpt"), shared_scratch_dir("inkling_lazy_tm_ckpt_text")
 
 
-def _build_checkpoints():
+def _build_checkpoints(composite_dir: str, text_dir: str):
     """Rank 0: save the tiny composite in TM layout, plus a text-only config twin of the weights."""
-    composite_dir, text_dir = _checkpoint_dirs()
     torch.manual_seed(SEED)
     config = InklingConfig(
         text_config=dict(TINY_INKLING_CONFIG),
@@ -79,20 +78,35 @@ def _build_checkpoints():
     cleanup_memory()
 
 
-def _state_dicts_match(loaded, reference_sd, ep) -> tuple[bool, str]:
-    """Every loaded tensor equals the reference (expert tensors: the local slice) bitwise."""
-    s, e = ep.expert_start, ep.expert_end
+def _state_dicts_match(model, reference_sd) -> tuple[bool, str]:
+    """Every reference tensor is loaded bitwise: each EP layer's experts as its local slice, in the
+    wrapper's matmul convention (``[E_local, H, 2M]`` / ``[E_local, M, H]``), everything else by name.
+
+    Only the expert tensors an EP layer re-wraps may be absent under their reference name; any other
+    missing key is a tensor the loader dropped.
+    """
+    rewrapped = set()
+    for name, module in model.named_modules():
+        if not isinstance(module, EPInklingMoELayer):
+            continue
+        s, e = module.expert_start, module.expert_end
+        for attr in ("gate_up_proj", "down_proj"):
+            key = f"{name}.experts.{attr}"
+            rewrapped.add(key)
+            want = reference_sd[key][s:e].transpose(1, 2).contiguous()
+            if not torch.equal(getattr(module, attr).data.cpu(), want.cpu()):
+                return False, f"{key} (expert slice {s}:{e})"
+    if not rewrapped:
+        return False, "no EP layer compared"
+    loaded = model.state_dict()
     for key, ref in reference_sd.items():
+        if key in rewrapped:
+            continue
         live = loaded.get(key)
         if live is None:
-            continue  # EP-rewrapped expert params are compared via the wrapper below
+            return False, f"{key} missing from the loaded model"
         if not torch.equal(live.cpu(), ref.cpu()):
             return False, key
-    for name, param in (("gate_up_proj", ep.gate_up_proj), ("down_proj", ep.down_proj)):
-        ref = reference_sd[f"model.language_model.layers.1.mlp.experts.{name}"]
-        want = ref[s:e].transpose(1, 2).contiguous()
-        if not torch.equal(param.data.cpu(), want.cpu()):
-            return False, f"expert shard {name}"
     return True, ""
 
 
@@ -103,7 +117,8 @@ def run(ctx):
     torch.cuda.set_device(device)
     composite_dir, text_dir = _checkpoint_dirs()
     if ctx.rank == 0:
-        _build_checkpoints()
+        ctx.on_teardown(lambda: cleanup_dirs(composite_dir, text_dir))
+        _build_checkpoints(composite_dir, text_dir)
     ctx.barrier()
 
     torch.manual_seed(SEED)
@@ -136,14 +151,14 @@ def run(ctx):
     )
     ep_layers = [m for m in model.modules() if isinstance(m, EPInklingMoELayer)]
     checks["ep_layers_patched"] = len(ep_layers) == TINY_INKLING_CONFIG["num_hidden_layers"]
-    ok, where = _state_dicts_match(dict(model.state_dict()), reference_sd, ep_layers[1])
+    ok, where = _state_dicts_match(model, reference_sd)
     checks["ep2_tensors_match_reference"] = ok
     if not ok:
         log(f"MISMATCH at {where}")
     model.train()
     ep_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["ep2_loss"] = ep_loss
-    checks["ep2_loss_matches_ref"] = abs(ep_loss - ref_loss) < LOSS_TOL
+    checks["ep2_loss_matches_ref"] = abs(ep_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
     log(f"EP2 lazy loss: {ep_loss:.6f}  |Δref| = {abs(ep_loss - ref_loss):.2e}")
     del model, ep_layers
     cleanup_memory()
@@ -159,13 +174,13 @@ def run(ctx):
         attn_implementation="eager",
     )
     etp_layers = [m for m in model.modules() if isinstance(m, EPInklingMoELayer)]
-    checks["etp_split_glu_storage"] = all(
+    checks["etp_split_glu_storage"] = bool(etp_layers) and all(
         hasattr(ep, "gate_proj") and not hasattr(ep, "gate_up_proj") for ep in etp_layers
     )
     model.train()
     etp_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["etp_loss"] = etp_loss
-    checks["etp_loss_matches_ref"] = abs(etp_loss - ref_loss) < LOSS_TOL
+    checks["etp_loss_matches_ref"] = abs(etp_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
     log(f"ETP lazy loss: {etp_loss:.6f}  |Δref| = {abs(etp_loss - ref_loss):.2e}")
     del model, etp_layers
     cleanup_memory()
@@ -188,7 +203,7 @@ def run(ctx):
     metrics["text_only_loss"] = text_loss
     # The composite reference's text loss on a text-only batch is the same computation: embeddings,
     # decoder and head all come from the shared weights.
-    checks["text_only_loss_matches_ref"] = abs(text_loss - ref_loss) < LOSS_TOL
+    checks["text_only_loss_matches_ref"] = abs(text_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
     log(f"text-only lazy loss: {text_loss:.6f}  |Δref| = {abs(text_loss - ref_loss):.2e}")
 
     return {"checks": checks, "metrics": metrics}

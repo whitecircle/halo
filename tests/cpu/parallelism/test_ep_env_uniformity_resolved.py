@@ -15,7 +15,6 @@ differs. Run: ``pytest -m cpu tests/cpu/parallelism/test_ep_env_uniformity_resol
 from __future__ import annotations
 
 import importlib
-import sys
 
 import pytest
 
@@ -136,4 +135,4 @@ def test_every_resolved_knob_is_a_plain_value(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

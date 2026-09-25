@@ -5,7 +5,6 @@ Run: python -m pytest tests/cpu/config/test_training_environment.py
 """
 
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -136,5 +135,4 @@ def test_no_resume_returns_none(tmp_path):
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("RANK", "0")
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -1,7 +1,7 @@
 """Launch specs for the GPU test suite.
 
-GPU tests are external ``torchrun`` scripts (each ends in ``sys.exit(main())``), so
-pytest cannot read ``nproc`` / markers / timeout from inside them. This manifest maps
+GPU tests are external ``torchrun`` scripts (each ends in its ``gpu_test_main`` entry, or a
+``sys.exit(main())``), so pytest cannot read ``nproc`` / markers / timeout from inside them. This manifest maps
 each script (path relative to ``tests/gpu/``) to its launch spec; ``tests/gpu/conftest.py``
 reads it and generates one pytest node per ``(script, args)`` with the right markers,
 process count and timeout. The launcher shells out ``torchrun --nproc_per_node=<nproc>``
@@ -48,7 +48,7 @@ Markers (selection):
                                  trained: dense (Qwen3-0.6B) for the ``not moe`` half, Qwen3-30B-A3B
                                  for the ``moe`` half. No single server satisfies both; run two passes
                                  (``make test-gpu-vllm`` then ``... SERVER_TIER=moe``).
-    <model family>             — gptoss / qwen3 / glm4 / glm5 / gemma4 / mistral4 / mistral3 /
+    <model family>             — gptoss / qwen3 / glm4 / glm5 / gemma4 / mistral4 /
                                  bailing / lfm2 / zaya / deepseek_v4 / inkling / cohere2_moe /
                                  step3p7.
 """
@@ -57,6 +57,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _GPU_DIR = Path(__file__).parent
+# Leading tag on every per-rank scratch dir a GPU script allocates (``setup_cache_dirs``). The root
+# conftest sweeps leaked dirs by this spelling alone, so it never matches another program's dirs in a
+# shared TMPDIR. Kept here, a torch-free module, because the launcher session must not import ``src``.
+SCRATCH_DIR_TAG = "halo-test-"
 
 
 @dataclass(frozen=True)
@@ -179,7 +183,6 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/cp/test_cp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
     ),
-    "parallelism/cp/test_cp_rejection.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "cp"), timeout=600),
     "parallelism/cp/test_cp_smpo_logprobs.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
     ),
@@ -232,9 +235,6 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/ep/test_ep_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
-    ),
-    "parallelism/ep/test_ep_gradient_checkpointing.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1500
     ),
     "parallelism/ep/test_ep2_weight_sync_values.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
@@ -349,9 +349,6 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/test_fsdp_tied_embeddings.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
-    "parallelism/test_mistral3_vision_smoke.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "vlm", "mistral3"), timeout=600
-    ),
     "parallelism/test_mistral4_all_parallelism.py": TestSpec(
         nproc=8,
         markers=("gpu", "full", "8gpu", "ep", "cp", "tp", "etp", "moe", "mistral4"),
@@ -392,7 +389,6 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=2100,
     ),
-    "parallelism/test_parallelism_config.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "parallelism/tp/test_replay_mask_tp_broadcast.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp"), timeout=300
     ),
@@ -514,7 +510,6 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=2400,
         flaky=True,
     ),
-    "trainers/grpo/test_environmental_grpo_mock.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "trainers/grpo/test_offline_grpo.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
     "trainers/grpo/test_offline_grpo_bnpo.py": TestSpec(
         # FSDP then TP=2 in one process; 900s covers the one-time FA2 compile + both modes + evals.
@@ -536,9 +531,6 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "tp", "qwen3"),
         timeout=2400,
     ),
-    # No family marker: nothing here loads a checkpoint (online GRPO refuses to construct without a
-    # vLLM server), so the node is config/class-surface plus reward extraction.
-    "trainers/grpo/test_online_grpo_mock.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     # One node per leg: each leg holds its trainer-side weight-transfer port for the life of the
     # process (only close_communicator frees it, which a leg never calls), and the environmental legs
     # additionally stand up Ray actors.
@@ -979,7 +971,6 @@ ALL_MARKERS = (
     "glm4",
     "gemma4",
     "mistral4",
-    "mistral3",
     "bailing",
     "lfm2",
     "zaya",

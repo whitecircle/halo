@@ -10,8 +10,6 @@ architecture's persistent buffers must be captured and its non-persistent ones s
     python tests/cpu/checkpoint/test_persistent_buffers.py
 """
 
-import sys
-
 import pytest
 import torch
 import torch.nn as nn
@@ -122,4 +120,4 @@ def test_shared_buffer_is_yielded_once():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

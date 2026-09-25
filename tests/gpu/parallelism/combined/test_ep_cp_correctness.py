@@ -17,6 +17,8 @@ Requirements:
     - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
 """
 
+import math
+
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
@@ -24,10 +26,11 @@ from transformers import AutoTokenizer
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
-from tests.common.distributed import ensure_model_downloaded
+from tests.common.distributed import ensure_model_downloaded, world_mean, world_spread
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
 
 # Test Configuration
@@ -40,17 +43,13 @@ SEED = 42
 # A longer fixed conversation than the default, so the tokens fill more of the window CP splits.
 CONVERSATION = 1
 
-# Tolerances. gpt-oss MoE routing is numerically sensitive: near-tied top-k router scores flip
+# gpt-oss MoE routing is numerically sensitive: near-tied top-k router scores flip
 # expert selection under any bf16 kernel/order change (CP's chunked dispatch vs EP-only's full-batch
 # dispatch), and a flipped expert changes that token's logits outright. A per-position probe shows a
 # broad small logit drift (MAD ~0.5, growing with depth, no chunk-boundary spike) yielding ~5.5%
 # mean-CE difference on this 128-token input — routing noise, not a CP math error (EP+CP SFT
 # convergence is validated end-to-end by the trainer tests).
-LOSS_REL_TOL = 0.10
-LOSS_ABS_TOL = 0.5  # Absolute tolerance
-# EP-only rank consistency: with bf16 + DeepEP all-to-all the per-rank reduction
-# order isn't bit-identical, so a small spread is expected.
-EP_RANK_ABS_TOL = 0.15
+LOSS_ABS_TOL = 0.5
 
 
 # Test-Specific Helpers
@@ -85,7 +84,7 @@ def compute_ep_only_loss(tokenizer, local_rank):
     """Compute forward pass loss with EP=2 only (no CP).
 
     Returns:
-        list[float]: Losses from all ranks.
+        float: This rank's loss.
     """
     device = f"cuda:{local_rank}"
 
@@ -129,14 +128,11 @@ def compute_ep_only_loss(tokenizer, local_rank):
 
     log_all(f"  EP-only loss: {local_loss:.6f}")
 
-    all_losses = [None] * dist.get_world_size()
-    dist.all_gather_object(all_losses, local_loss)
-
     del model, outputs
     cleanup_memory()
     log(f"  GPU memory after cleanup: {gpu_mem_gb():.2f} GB")
 
-    return all_losses
+    return local_loss
 
 
 # Phase 2: EP+CP Forward Pass
@@ -149,7 +145,7 @@ def compute_ep_cp_loss(tokenizer, local_rank):
     this is the orthogonal mode where EP and CP share the same group.
 
     Returns:
-        list[float]: Losses from all ranks.
+        float: This rank's loss.
     """
     device = f"cuda:{local_rank}"
 
@@ -193,14 +189,11 @@ def compute_ep_cp_loss(tokenizer, local_rank):
 
     log_all(f"  EP+CP loss: {local_loss:.6f}")
 
-    all_losses = [None] * dist.get_world_size()
-    dist.all_gather_object(all_losses, local_loss)
-
     del model, outputs
     cleanup_memory()
     log(f"  GPU memory after cleanup: {gpu_mem_gb():.2f} GB")
 
-    return all_losses
+    return local_loss
 
 
 def run(ctx):
@@ -228,7 +221,7 @@ def run(ctx):
     log("PHASE 1: EP-Only Forward Pass (EP=2, CP=1)")
     log(f"{'=' * 70}")
 
-    ep_only_losses = compute_ep_only_loss(tokenizer, ctx.local_rank)
+    ep_only_loss = compute_ep_only_loss(tokenizer, ctx.local_rank)
 
     barrier()
     cleanup_memory()
@@ -238,70 +231,44 @@ def run(ctx):
     log("PHASE 2: EP+CP Forward Pass (EP=2, CP=2)")
     log(f"{'=' * 70}")
 
-    ep_cp_losses = compute_ep_cp_loss(tokenizer, ctx.local_rank)
+    ep_cp_loss = compute_ep_cp_loss(tokenizer, ctx.local_rank)
 
     barrier()
 
     # --- Validation ---
-    checks = {}
-    if ctx.rank == 0:
-        log(f"\n{'=' * 70}")
-        log("VALIDATION")
-        log(f"{'=' * 70}")
+    log(f"\n{'=' * 70}")
+    log("VALIDATION")
+    log(f"{'=' * 70}")
 
-        # Check 1: EP-only losses are finite
-        ep_finite = all(not (torch.isnan(torch.tensor(l)) or torch.isinf(torch.tensor(l))) for l in ep_only_losses)
-        checks["ep_only_finite"] = ep_finite
-        log(f"\n  EP-only losses finite: {'PASS' if ep_finite else 'FAIL'}")
-        log(f"    Losses: {[f'{l:.6f}' for l in ep_only_losses]}")
+    checks = {
+        "ep_only_finite": math.isfinite(ep_only_loss),
+        "ep_cp_finite": math.isfinite(ep_cp_loss),
+    }
 
-        # Check 2: EP+CP losses are finite
-        ep_cp_finite = all(not (torch.isnan(torch.tensor(l)) or torch.isinf(torch.tensor(l))) for l in ep_cp_losses)
-        checks["ep_cp_finite"] = ep_cp_finite
-        log(f"  EP+CP losses finite: {'PASS' if ep_cp_finite else 'FAIL'}")
-        log(f"    Losses: {[f'{l:.6f}' for l in ep_cp_losses]}")
+    # EP-only: every rank ran the identical broadcast batch, so only the combine reduction order
+    # separates their losses (inf when any rank is non-finite).
+    ep_spread = world_spread(ep_only_loss)
+    checks["ep_rank_consistency"] = ep_spread < TOL.ep_identical_batch_rank_spread_abs
+    log(f"  EP-only rank consistency (spread={ep_spread:.8f}): {'PASS' if checks['ep_rank_consistency'] else 'FAIL'}")
 
-        # Check 3: EP-only rank consistency
-        ep_spread = max(ep_only_losses) - min(ep_only_losses)
-        ep_consistent = ep_spread < EP_RANK_ABS_TOL
-        checks["ep_rank_consistency"] = ep_consistent
-        log(f"  EP-only rank consistency (spread={ep_spread:.8f}): {'PASS' if ep_consistent else 'FAIL'}")
+    # Under no_grad the CP wrapper all-reduces the chunk sums and returns the group mean, so every
+    # rank reports the same full-sequence loss, bit for bit.
+    ep_cp_spread = world_spread(ep_cp_loss)
+    checks["ep_cp_rank_uniform"] = ep_cp_spread == 0.0
+    log(f"  EP+CP per-rank loss spread: {ep_cp_spread:.6f}: {'PASS' if checks['ep_cp_rank_uniform'] else 'FAIL'}")
 
-        # Check 4: EP+CP per-rank losses are NOT expected to match.
-        # In CP mode each rank computes the loss only on its sequence chunk
-        # (the wrapper reports `local_sum * cp_size / global_tokens`), so
-        # different chunks → different per-rank values by design. Correctness
-        # of the aggregate is covered by Check 5 (mean vs. EP-only).
-        ep_cp_spread = max(ep_cp_losses) - min(ep_cp_losses)
-        log(
-            f"  EP+CP per-rank loss spread: {ep_cp_spread:.6f} "
-            f"(expected to differ — each rank holds a different sequence chunk)"
-        )
+    ep_avg = world_mean(ep_only_loss)
+    ep_cp_avg = world_mean(ep_cp_loss)
+    abs_diff = abs(ep_avg - ep_cp_avg)
+    checks["ep_vs_ep_cp_match"] = abs_diff < LOSS_ABS_TOL
 
-        # Check 5: EP-only vs EP+CP loss comparison
-        ep_avg = sum(ep_only_losses) / len(ep_only_losses)
-        ep_cp_avg = sum(ep_cp_losses) / len(ep_cp_losses)
-        abs_diff = abs(ep_avg - ep_cp_avg)
-        rel_diff = abs_diff / max(abs(ep_avg), 1e-10)
+    log("\n  --- EP-Only vs EP+CP Comparison ---")
+    log(f"  EP-only loss (avg):  {ep_avg:.6f}")
+    log(f"  EP+CP loss (avg):    {ep_cp_avg:.6f}")
+    log(f"  Abs diff:            {abs_diff:.6f} (tol: {LOSS_ABS_TOL})")
+    log(f"  Match: {'PASS' if checks['ep_vs_ep_cp_match'] else 'FAIL'}")
 
-        loss_match = abs_diff < LOSS_ABS_TOL or rel_diff < LOSS_REL_TOL
-        checks["ep_vs_ep_cp_match"] = loss_match
-
-        log("\n  --- EP-Only vs EP+CP Comparison ---")
-        log(f"  EP-only loss (avg):  {ep_avg:.6f}")
-        log(f"  EP+CP loss (avg):    {ep_cp_avg:.6f}")
-        log(f"  Abs diff:            {abs_diff:.6f} (tol: {LOSS_ABS_TOL})")
-        log(f"  Rel diff:            {rel_diff:.4%} (tol: {LOSS_REL_TOL:.4%})")
-        log(f"  Match: {'PASS' if loss_match else 'FAIL'}")
-
-        # Check 6: Losses are in reasonable range
-        all_losses = ep_only_losses + ep_cp_losses
-        reasonable = all(0 < l < 100 for l in all_losses)
-        checks["losses_reasonable"] = reasonable
-        log(f"  All losses in range (0, 100): {'PASS' if reasonable else 'FAIL'}")
-
-    # Only rank 0 gathers both phases' per-rank losses into a verdict.
-    return {"checks": ctx.broadcast_checks(checks)}
+    return {"checks": checks}
 
 
 main = gpu_test_main(exact_world_size=EP_SIZE, prefix="ep_cp_correctness")(run)

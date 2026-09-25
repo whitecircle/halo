@@ -14,8 +14,6 @@ Usage:
     python tests/cpu/data/test_grpo_smpo_tokenization.py
 """
 
-import sys
-
 import pytest
 from accelerate import PartialState
 
@@ -242,4 +240,4 @@ def test_smpo_tokenize_bos_kept_for_postprocessing_tokenizer():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

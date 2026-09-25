@@ -29,7 +29,6 @@ Run: ``python tests/cpu/parallelism/test_ep_capacity_dedup_generation.py`` (or `
 from __future__ import annotations
 
 import importlib
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -262,4 +261,4 @@ def test_disabled_dedup_writes_nothing_to_the_cache(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

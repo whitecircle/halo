@@ -14,7 +14,6 @@ Usage:
 
 import os
 import shutil
-import sys
 import tempfile
 
 # Cache dir must be pinned before datasets/processing modules read it.
@@ -142,4 +141,4 @@ def test_same_shape_different_content_changes_cache_key():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

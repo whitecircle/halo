@@ -16,12 +16,10 @@ Usage:
 """
 
 import math
-import sys
+import os
 import traceback
 
 import torch
-import torch.distributed as dist
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer
 from trl import SFTConfig
@@ -30,13 +28,8 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import (
-    cleanup_dirs,
-    ensure_model_downloaded,
-    init_distributed,
-    setup_cache_dirs,
-    teardown_distributed,
-)
+from tests.common.distributed import ensure_model_downloaded
+from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
@@ -106,13 +99,13 @@ def verify_lora_updated(before: dict, after: dict) -> tuple:
 # Sub-test A: LoRA + CP=2
 
 
-def run_lora_cp_test(rank: int, local_rank: int, world_size: int) -> bool:
+def run_lora_cp_test(rank: int, base_output_dir: str) -> bool:
     """Test LoRA adapters with Context Parallelism (CP=2)."""
     log("\n" + "=" * 70)
     log("  SUB-TEST A: LoRA + CP=2 (Context Parallelism)")
     log("=" * 70)
 
-    output_dir, cache_dir = setup_cache_dirs("lora_cp", rank)
+    output_dir = os.path.join(base_output_dir, "lora_cp")
 
     try:
         # Load model via load_distributed_model
@@ -219,13 +212,12 @@ def run_lora_cp_test(rank: int, local_rank: int, world_size: int) -> bool:
 
     finally:
         cleanup_memory()
-        cleanup_dirs(output_dir, cache_dir)
 
 
 # Sub-test B: LoRA + TP=2
 
 
-def run_lora_tp_test(rank: int, local_rank: int, world_size: int) -> bool:
+def run_lora_tp_test(rank: int, base_output_dir: str) -> bool:
     """LoRA + TP=2 must be REJECTED at trainer construction.
 
     TP shards the attention base layers as DTensors; PEFT adapters are plain tensors outside the
@@ -237,7 +229,7 @@ def run_lora_tp_test(rank: int, local_rank: int, world_size: int) -> bool:
     log("  SUB-TEST B: LoRA + TP=2 must be REJECTED")
     log("=" * 70)
 
-    output_dir, cache_dir = setup_cache_dirs("lora_tp", rank)
+    output_dir = os.path.join(base_output_dir, "lora_tp")
 
     try:
         # Load tokenizer
@@ -328,61 +320,32 @@ def run_lora_tp_test(rank: int, local_rank: int, world_size: int) -> bool:
 
     finally:
         cleanup_memory()
-        cleanup_dirs(output_dir, cache_dir)
 
 
 # Main
 
 
-def main() -> int:
-    """Run both LoRA + CP and LoRA + TP tests. Returns 0 on success, 1 on failure."""
-    # Initialize distributed
-    rank, world_size, local_rank = init_distributed()
-
+def run(ctx) -> dict:
     log(f"\n{'=' * 70}")
     log("  LoRA + CP/TP Parallelism Test")
-    log(f"  World size: {world_size}, Model: {MODEL_NAME}")
-    log(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  World size: {ctx.world_size}, Model: {MODEL_NAME}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"{'=' * 70}")
 
-    if world_size != 2:
-        log(f"ERROR: This test requires exactly 2 GPUs, got {world_size}")
-        teardown_distributed()
-        return 1
+    ensure_model_downloaded(MODEL_NAME, ctx.rank)
 
-    # Ensure model is downloaded on rank 0 first
-    ensure_model_downloaded(MODEL_NAME, rank)
-    PartialState()
+    checks = {}
 
-    results = {}
-
-    # Sub-test A: LoRA + CP=2
-    results["lora_cp"] = run_lora_cp_test(rank, local_rank, world_size)
-    dist.barrier()
+    checks["lora_cp"] = run_lora_cp_test(ctx.rank, ctx.output_dir)
+    ctx.barrier()
     cleanup_memory()
 
-    # Sub-test B: LoRA + TP=2
-    results["lora_tp"] = run_lora_tp_test(rank, local_rank, world_size)
-    dist.barrier()
-    cleanup_memory()
+    checks["lora_tp"] = run_lora_tp_test(ctx.rank, ctx.output_dir)
 
-    # Summary
-    log(f"\n{'=' * 70}")
-    log("  RESULTS SUMMARY")
-    log(f"{'=' * 70}")
-    for name, passed in results.items():
-        log(f"  {name}: {'PASSED' if passed else 'FAILED'}")
+    return {"checks": checks}
 
-    all_passed = all(results.values())
-    log(f"\n  OVERALL: {'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'}")
-    log(f"{'=' * 70}\n")
 
-    if dist.is_initialized():
-        dist.barrier()
-    teardown_distributed()
-
-    return 0 if all_passed else 1
-
+main = gpu_test_main(exact_world_size=2, prefix="test_lora_cp_tp")(run)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

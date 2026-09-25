@@ -17,7 +17,6 @@ Usage:
     python tests/cpu/parallelism/test_param_id_cache_invalidation.py
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -136,4 +135,4 @@ def test_every_memoized_id_cache_is_dropped():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

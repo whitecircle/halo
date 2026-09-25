@@ -9,7 +9,6 @@ Run: python tests/cpu/diagnostics/test_profiler_artifacts.py
 
 import logging
 import os
-import sys
 
 import pytest
 import torch
@@ -96,4 +95,4 @@ def test_the_session_profiles_only_the_selected_ranks_region(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

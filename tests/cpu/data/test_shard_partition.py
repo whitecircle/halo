@@ -108,6 +108,4 @@ def test_num_shards_equals_world_size_load_does_not_raise():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

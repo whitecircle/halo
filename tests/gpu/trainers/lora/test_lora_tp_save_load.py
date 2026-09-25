@@ -39,12 +39,10 @@ Usage:
 import argparse
 import math
 import os
-import sys
 import traceback
 
 import torch
 import torch.distributed as dist
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file as safetensors_load_file
 from transformers import AutoTokenizer
@@ -55,14 +53,10 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import (
-    cleanup_dirs,
-    ensure_model_downloaded,
-    init_distributed,
-    setup_cache_dirs,
-    teardown_distributed,
-)
+from tests.common.distributed import ensure_model_downloaded
+from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 # Configuration
@@ -188,7 +182,7 @@ def verify_saved_adapters(checkpoint_dir: str, live_weights: dict, rank: int) ->
         normalized_saved = normalize_key(saved_key)
         if normalized_saved in live_by_normalized:
             _, live_tensor = live_by_normalized[normalized_saved]
-            if torch.allclose(saved_tensor.float(), live_tensor.float(), atol=1e-6):
+            if torch.allclose(saved_tensor.float(), live_tensor.float(), atol=TOL.weight_atol):
                 match_count += 1
             else:
                 mismatch_count += 1
@@ -211,7 +205,7 @@ def verify_saved_adapters(checkpoint_dir: str, live_weights: dict, rank: int) ->
 # Sub-test A: Qwen3-0.6B with TP=2
 
 
-def run_qwen3_tp_rejected(rank: int, local_rank: int, world_size: int) -> bool:
+def run_qwen3_tp_rejected(rank: int, local_rank: int, base_output_dir: str) -> bool:
     """LoRA + TP=2 must be REJECTED at trainer construction.
 
     TP shards the attention base layers as DTensors, but PEFT adds lora_A/lora_B as plain tensors
@@ -226,7 +220,7 @@ def run_qwen3_tp_rejected(rank: int, local_rank: int, world_size: int) -> bool:
     log(f"  SUB-TEST A: {QWEN3_MODEL} — LoRA + TP=2 must be REJECTED")
     log(f"{'=' * 70}")
 
-    output_dir, cache_dir = setup_cache_dirs("lora_tp_reject_qwen3", rank)
+    output_dir = os.path.join(base_output_dir, "lora_tp_reject_qwen3")
     model = None
 
     try:
@@ -299,19 +293,18 @@ def run_qwen3_tp_rejected(rank: int, local_rank: int, world_size: int) -> bool:
     finally:
         del model
         cleanup_memory()
-        cleanup_dirs(output_dir, cache_dir)
 
 
 # Sub-test C: GptOss-20B with EP=2 (no TP)
 
 
-def run_gptoss_ep_save_load(rank: int, local_rank: int, world_size: int) -> bool:
+def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) -> bool:
     """Test LoRA save/load with EP=2 on GptOss-20B (MoE model, no TP)."""
     log(f"\n{'=' * 70}")
     log("  SUB-TEST C: GptOss-20B — LoRA + EP=2 Save/Load")
     log(f"{'=' * 70}")
 
-    output_dir, cache_dir = setup_cache_dirs("lora_ep_save_gptoss", rank)
+    output_dir = os.path.join(base_output_dir, "lora_ep_save_gptoss")
     model = None
     trainer = None
 
@@ -427,8 +420,6 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, world_size: int) -> bool
             checks["save_load"] = save_ok
             log(save_details)
             log(f"  Save/load roundtrip: {'PASS' if save_ok else 'FAIL'}")
-        else:
-            checks["save_load"] = True
 
         # MIN, not broadcast: rank 0 owns save_load, but every other check is per-rank, and a
         # broadcast overwrites each peer's verdict with rank 0's — a failure seen only on rank 1
@@ -452,19 +443,18 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, world_size: int) -> bool
         del trainer
         del model
         cleanup_memory()
-        cleanup_dirs(output_dir, cache_dir)
 
 
 # Sub-test D: Qwen3-0.6B with FSDP2 (standard data parallelism)
 
 
-def run_qwen3_fsdp_save_load(rank: int, local_rank: int, world_size: int) -> bool:
+def run_qwen3_fsdp_save_load(rank: int, local_rank: int, base_output_dir: str) -> bool:
     """Test LoRA save/load with FSDP2 on Qwen3-0.6B (dense model, no EP/TP/CP)."""
     log(f"\n{'=' * 70}")
     log(f"  SUB-TEST D: {QWEN3_MODEL} — LoRA + FSDP2 Save/Load")
     log(f"{'=' * 70}")
 
-    output_dir, cache_dir = setup_cache_dirs("lora_fsdp_save_qwen3", rank)
+    output_dir = os.path.join(base_output_dir, "lora_fsdp_save_qwen3")
     model = None
     trainer = None
 
@@ -573,8 +563,6 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, world_size: int) -> boo
             checks["save_load"] = save_ok
             log(save_details)
             log(f"  Save/load roundtrip: {'PASS' if save_ok else 'FAIL'}")
-        else:
-            checks["save_load"] = True
 
         # MIN, not broadcast: rank 0 owns save_load, but every other check is per-rank, and a
         # broadcast overwrites each peer's verdict with rank 0's — a failure seen only on rank 1
@@ -596,7 +584,6 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, world_size: int) -> boo
         del trainer
         del model
         cleanup_memory()
-        cleanup_dirs(output_dir, cache_dir)
 
 
 # Main
@@ -604,8 +591,7 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, world_size: int) -> boo
 ALL_MODES = ["qwen3_tp", "gptoss_ep", "qwen3_fsdp"]
 
 
-def main() -> int:
-    """Run LoRA save/load tests across parallelism modes. Returns 0 on success, 1 on failure."""
+def run(ctx) -> dict:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
@@ -614,54 +600,34 @@ def main() -> int:
     )
     args, _ = parser.parse_known_args()
 
-    rank, world_size, local_rank = init_distributed()
-    PartialState()
-
     modes = ALL_MODES if args.mode == "all" else [args.mode]
 
     log(f"\n{'#' * 70}")
     log("  LoRA Save/Load Test (Parallelism Modes)")
-    log(f"  World size: {world_size}, GPU: {torch.cuda.get_device_name(local_rank)}")
+    log(f"  World size: {ctx.world_size}, GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"  Modes: {modes}")
     log(f"{'#' * 70}")
 
-    if world_size < 2:
-        log(f"\nERROR: This test requires at least 2 GPUs, got {world_size}")
-        teardown_distributed()
-        return 1
-
-    results = {}
+    checks = {}
 
     for mode in modes:
         if mode == "qwen3_tp":
-            ensure_model_downloaded(QWEN3_MODEL, rank)
-            results["qwen3_tp"] = run_qwen3_tp_rejected(rank, local_rank, world_size)
+            ensure_model_downloaded(QWEN3_MODEL, ctx.rank)
+            checks["qwen3_tp"] = run_qwen3_tp_rejected(ctx.rank, ctx.local_rank, ctx.output_dir)
         elif mode == "gptoss_ep":
-            ensure_model_downloaded(GPT_OSS_20B, rank)
-            results["gptoss_ep"] = run_gptoss_ep_save_load(rank, local_rank, world_size)
+            ensure_model_downloaded(GPT_OSS_20B, ctx.rank)
+            checks["gptoss_ep"] = run_gptoss_ep_save_load(ctx.rank, ctx.local_rank, ctx.output_dir)
         elif mode == "qwen3_fsdp":
-            ensure_model_downloaded(QWEN3_MODEL, rank)
-            results["qwen3_fsdp"] = run_qwen3_fsdp_save_load(rank, local_rank, world_size)
+            ensure_model_downloaded(QWEN3_MODEL, ctx.rank)
+            checks["qwen3_fsdp"] = run_qwen3_fsdp_save_load(ctx.rank, ctx.local_rank, ctx.output_dir)
 
-        dist.barrier()
+        ctx.barrier()
         cleanup_memory()
 
-    # Summary
-    log(f"\n{'#' * 70}")
-    log("  RESULTS SUMMARY")
-    log(f"{'#' * 70}")
-    for name, passed in results.items():
-        log(f"  {name}: {'PASSED' if passed else 'FAILED'}")
+    return {"checks": checks}
 
-    all_passed = all(results.values())
-    log(f"\n  OVERALL: {'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'}")
-    log(f"{'#' * 70}\n")
 
-    if dist.is_initialized():
-        dist.barrier()
-    teardown_distributed()
-    return 0 if all_passed else 1
-
+main = gpu_test_main(min_world_size=2, prefix="test_lora_tp_save_load")(run)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

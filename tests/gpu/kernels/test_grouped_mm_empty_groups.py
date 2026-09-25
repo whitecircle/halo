@@ -19,16 +19,16 @@ production router builds ``offs`` with it; ``F.grouped_mm`` rejects int64 outrig
 (``RuntimeError: Offsets have to be int32``), so dropping the cast at ``grouped_mm.py:37-38`` takes
 every MoE forward down.
 
-Run: python tests/gpu/kernels/test_grouped_mm_empty_groups.py
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_mm_empty_groups.py
 """
-
-import sys
 
 import torch
 import torch.nn.functional as F
 
 from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
 from src.kernels.grouped_mm_autograd import grouped_mm
+from tests.common.harness import gpu_test_main, record_check
+from tests.common.utils import fro_rel_err, log
 
 DEV = "cuda"
 K, N = 128, 96
@@ -164,7 +164,7 @@ def test_the_precision_dispatch_survives_empty_groups():
         assert out.shape == (sum(SKEWED_COUNTS), N)
         assert torch.isfinite(out).all(), f"{precision.value}: empty groups produced non-finite output"
         assert torch.isfinite(w.grad).all(), f"{precision.value}: empty groups produced non-finite grads"
-        rel = ((out.detach().float() - reference).norm() / reference.norm()).item()
+        rel = fro_rel_err(out.detach(), reference)
         assert rel < 0.3, f"{precision.value}: rel {rel:.3f} — empty groups broke the quantized path"
         for expert, count in enumerate(SKEWED_COUNTS):
             if count == 0:
@@ -189,32 +189,29 @@ def test_zero_total_tokens_with_a_broadcast_grad_backpropagates():
     print("  zero-total-token broadcast-grad backward PASS")
 
 
-def main() -> int:
-    if not torch.cuda.is_available():
-        print("SKIP: no CUDA")  # the sentinel the launcher skips on; a bare exit 0 reads as a PASS
-        return 0
-    print(f"Grouped-GEMM empty-group tests on {torch.cuda.get_device_name()}")
-    failures = []
-    for test in (
-        test_empty_groups_forward_matches_the_per_expert_loop,
+@gpu_test_main(exact_world_size=1, prefix="grouped_mm_empty_groups", partial_state=False)
+def run(ctx) -> dict:
+    log(f"Grouped-GEMM empty-group tests on {torch.cuda.get_device_name()}")
+    checks: dict[str, bool] = {}
+    record_check(checks, "forward_matches_the_per_expert_loop", test_empty_groups_forward_matches_the_per_expert_loop)
+    record_check(
+        checks,
+        "empty_expert_gets_an_allocated_all_zero_weight_gradient",
         test_an_empty_expert_gets_an_allocated_all_zero_weight_gradient,
-        test_empty_group_gradients_match_the_per_expert_loop,
-        test_a_single_expert_holding_every_token_is_still_correct,
-        test_int64_offsets_are_normalized_by_the_wrapper,
-        test_the_precision_dispatch_survives_empty_groups,
+    )
+    record_check(checks, "gradients_match_the_per_expert_loop", test_empty_group_gradients_match_the_per_expert_loop)
+    record_check(
+        checks, "single_expert_holding_every_token", test_a_single_expert_holding_every_token_is_still_correct
+    )
+    record_check(checks, "int64_offsets_normalized_by_the_wrapper", test_int64_offsets_are_normalized_by_the_wrapper)
+    record_check(checks, "precision_dispatch_survives_empty_groups", test_the_precision_dispatch_survives_empty_groups)
+    record_check(
+        checks,
+        "zero_total_tokens_with_a_broadcast_grad",
         test_zero_total_tokens_with_a_broadcast_grad_backpropagates,
-    ):
-        try:
-            test()
-        except Exception as exc:
-            failures.append((test.__name__, exc))
-            print(f"  FAIL {test.__name__}: {exc}")
-    if failures:
-        print(f"\n{len(failures)} test(s) FAILED")
-        return 1
-    print("\nAll empty-group grouped-GEMM tests PASSED")
-    return 0
+    )
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

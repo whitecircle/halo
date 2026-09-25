@@ -14,7 +14,6 @@ Run: ``python tests/cpu/parallelism/test_cp_grouped_gemm_wrappers.py`` (or ``pyt
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -67,4 +66,4 @@ def test_moe_under_pure_cp_with_grouped_gemm_off_gets_no_ep_config():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

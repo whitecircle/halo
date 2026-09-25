@@ -840,4 +840,4 @@ def test_cli_delete_confirmed_deletes():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -8,8 +8,6 @@ offsets tensor or a mismatched grad dtype into the GEMM fails here exactly like 
     python tests/cpu/kernels/test_grouped_mm_backward.py
 """
 
-import sys
-
 import pytest
 import torch
 import torch.nn.functional
@@ -57,4 +55,4 @@ def test_int64_offsets_are_normalized_and_grads_keep_input_dtype():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

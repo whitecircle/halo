@@ -30,6 +30,7 @@ Run (2 GPUs):
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import torch
@@ -38,21 +39,20 @@ from transformers.models.mistral4 import Mistral4ForCausalLM
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.distributed import shared_scratch_dir
+from tests.common.distributed import shared_scratch_dir, world_spread
+from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
+from tests.common.models import TINY_MISTRAL4_CONFIG
+from tests.common.tiny_models import build_tiny_mistral4_checkpoint
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
-from tests.gpu.parallelism.test_mistral4_all_parallelism import (
-    TINY_CONFIG_KWARGS,
-    build_synthetic_checkpoint,
-    make_inputs,
-)
 
-# bf16 ulp at ~1.0 is ~7.8e-3; with ETP we add one extra all-reduce per layer
-# (4 layers in the tiny config), and bf16 grouped-mm accumulates extra noise.
-# 1e-2 is comfortably tight enough to catch the contiguous-halves split bug
-# (which produced >100% error on the CPU repro) but loose enough that legit
-# bf16 + grouped-mm reordering doesn't trip it.
+# bf16 ulp at ~1.0 is ~7.8e-3; ETP adds one all-reduce per layer (4 layers in the tiny config) and
+# bf16 grouped-mm reorders accumulation. 1e-2 sits above that noise and far below the shift of the
+# gate/up pairs the contiguous-halves split bug mismatches.
 LOSS_TOLERANCE = 1e-2
+# Both ETP partners end every layer on the same all-reduced sum of the same batch, so their losses
+# agree to reduction order.
+ETP_RANK_SPREAD_ABS = 1e-4
 
 
 def reference_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, device: str) -> float:
@@ -97,26 +97,28 @@ def etp_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, ra
 
     log(f"  GPU memory after load: {gpu_mem_gb():.2f}GB")
 
-    ep_layers = [m for m in model.modules() if hasattr(m, "ep_config")]
-    etp_layers = [m for m in ep_layers if getattr(m, "expert_tp_size", 1) > 1]
-    log(f"  EP layers: {len(ep_layers)}, ETP layers: {len(etp_layers)}")
-    # Confirm we landed on the split-shard path
-    if etp_layers:
-        first = etp_layers[0]
-        assert hasattr(first, "gate_proj") and hasattr(first, "up_proj"), (
-            "ETP fused-GLU path must store gate_proj/up_proj separately, "
-            f"got attrs: {[n for n, _ in first.named_parameters()]}"
-        )
-        assert not hasattr(first, "gate_up_proj"), (
-            "ETP path should not retain the fused gate_up_proj parameter "
-            "(slicing the fused tensor splits gate/up across ranks)"
-        )
-        log(
-            f"  ✓ ETP layer has split gate_proj/up_proj shards: "
-            f"gate_proj.shape={tuple(first.gate_proj.shape)}, "
-            f"up_proj.shape={tuple(first.up_proj.shape)}, "
-            f"down_proj.shape={tuple(first.down_proj.shape)}"
-        )
+    layers = ep_layers(model)
+    etp_layers = [m for m in layers if getattr(m, "expert_tp_size", 1) > 1]
+    log(f"  EP layers: {len(layers)}, ETP layers: {len(etp_layers)}")
+    # Without ETP-wrapped layers the loss comparison below measures the plain dense MoE block.
+    assert etp_layers and len(etp_layers) == len(layers), (
+        f"expected every MoE layer ETP-wrapped, got {len(etp_layers)} of {len(layers)}"
+    )
+    first = etp_layers[0]
+    assert hasattr(first, "gate_proj") and hasattr(first, "up_proj"), (
+        "ETP fused-GLU path must store gate_proj/up_proj separately, "
+        f"got attrs: {[n for n, _ in first.named_parameters()]}"
+    )
+    assert not hasattr(first, "gate_up_proj"), (
+        "ETP path should not retain the fused gate_up_proj parameter "
+        "(slicing the fused tensor splits gate/up across ranks)"
+    )
+    log(
+        f"  ✓ ETP layer has split gate_proj/up_proj shards: "
+        f"gate_proj.shape={tuple(first.gate_proj.shape)}, "
+        f"up_proj.shape={tuple(first.up_proj.shape)}, "
+        f"down_proj.shape={tuple(first.down_proj.shape)}"
+    )
 
     model.eval()
     with torch.no_grad():
@@ -140,12 +142,12 @@ def run(ctx):
 
     if ctx.rank == 0:
         log(f"\nBuilding synthetic Mistral4 checkpoint at {ckpt_dir}")
-        build_synthetic_checkpoint(Path(ckpt_dir))
+        build_tiny_mistral4_checkpoint(Path(ckpt_dir))
     ctx.barrier()
 
     # Same input on every rank.
-    ids, labels = make_inputs(
-        TINY_CONFIG_KWARGS["vocab_size"],
+    ids, labels = random_token_batch(
+        TINY_MISTRAL4_CONFIG["vocab_size"],
         batch=2,
         seq=64,
         device=device,
@@ -167,39 +169,33 @@ def run(ctx):
     etp_loss = etp_forward(ckpt_dir, ids, labels, ctx.rank)
 
     # All ranks should agree on the ETP loss (same input, ETP reduces inside).
-    all_losses = [torch.zeros(1, device=device, dtype=torch.float64) for _ in range(ctx.world_size)]
-    dist.all_gather(all_losses, torch.tensor([etp_loss], device=device, dtype=torch.float64))
-    per_rank = [l.item() for l in all_losses]
+    cross_rank_diff = world_spread(etp_loss)
+    ref_vs_etp = abs(etp_loss - ref_loss)
 
-    cross_rank_diff = max(abs(l - per_rank[0]) for l in per_rank)
-    ref_vs_etp = abs(per_rank[0] - ref_loss)
+    log("\n" + "=" * 70)
+    log(f"  Reference loss:         {ref_loss:.6f}")
+    log(f"  Cross-rank ETP spread:  {cross_rank_diff:.3e}")
+    log(f"  |ETP - reference|:      {ref_vs_etp:.3e}")
+    log(f"  Tolerance:              {LOSS_TOLERANCE:.3e}")
+    log("=" * 70)
 
-    if ctx.rank == 0:
-        log("\n" + "=" * 70)
-        log(f"  Reference loss:         {ref_loss:.6f}")
-        log(f"  ETP loss (per rank):    {[f'{l:.6f}' for l in per_rank]}")
-        log(f"  Cross-rank ETP diff:    {cross_rank_diff:.3e}")
-        log(f"  |ETP - reference|:      {ref_vs_etp:.3e}")
-        log(f"  Tolerance:              {LOSS_TOLERANCE:.3e}")
-        log("=" * 70)
-
+    # Every rank holds the broadcast reference, so each judges its own ETP loss against it.
     checks = {
-        "etp_ranks_agree": not (cross_rank_diff > 1e-4),
-        "etp_matches_reference": not (ref_vs_etp > LOSS_TOLERANCE),
+        "losses_finite": math.isfinite(ref_loss) and math.isfinite(etp_loss),
+        "etp_ranks_agree": cross_rank_diff < ETP_RANK_SPREAD_ABS,
+        "etp_matches_reference": ref_vs_etp < LOSS_TOLERANCE,
     }
-    if ctx.rank == 0:
-        if not checks["etp_ranks_agree"]:
-            log(f"  FAIL: ETP losses inconsistent across ranks (max diff {cross_rank_diff:.3e})")
-        if not checks["etp_matches_reference"]:
-            log(
-                f"  FAIL: ETP loss disagrees with reference "
-                f"(|{per_rank[0]:.6f} - {ref_loss:.6f}| > {LOSS_TOLERANCE:.3e}). "
-                f"This is the contiguous-halves slicing bug "
-                f"(gate_proj/up_proj must be sharded separately, not gate_up_proj)."
-            )
+    if not checks["etp_ranks_agree"]:
+        log(f"  FAIL: ETP losses inconsistent across ranks (spread {cross_rank_diff:.3e})")
+    if not checks["etp_matches_reference"]:
+        log_all(
+            f"  FAIL: ETP loss disagrees with reference "
+            f"(|{etp_loss:.6f} - {ref_loss:.6f}| >= {LOSS_TOLERANCE:.3e}). "
+            f"This is the contiguous-halves slicing bug "
+            f"(gate_proj/up_proj must be sharded separately, not gate_up_proj)."
+        )
 
-    # Rank 0 owns the reference leg, so its verdict is what every rank reports.
-    return {"checks": ctx.broadcast_checks(checks)}
+    return {"checks": checks}
 
 
 main = gpu_test_main(exact_world_size=2, prefix="ep_etp_fused_glu_correctness")(run)

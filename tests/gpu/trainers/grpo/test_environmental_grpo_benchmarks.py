@@ -25,16 +25,12 @@ Prerequisites:
 Usage:
     # Trainer on a different GPU than the server. On a host WITHOUT InfiniBand the image's OFI/Gin
     # NCCL defaults wedge the cross-container group — override them:
-    CUDA_VISIBLE_DEVICES=0 NCCL_IB_DISABLE=1 NCCL_NET=Socket python \
+    CUDA_VISIBLE_DEVICES=0 NCCL_IB_DISABLE=1 NCCL_NET=Socket torchrun --nproc_per_node=1 \
         tests/gpu/trainers/grpo/test_environmental_grpo_benchmarks.py --test react_math
 
     # All four environments:
-    CUDA_VISIBLE_DEVICES=0 NCCL_IB_DISABLE=1 NCCL_NET=Socket python \
-        tests/gpu/trainers/grpo/test_environmental_grpo_benchmarks.py --test all
-
-    # With torchrun:
     CUDA_VISIBLE_DEVICES=0 NCCL_IB_DISABLE=1 NCCL_NET=Socket torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/grpo/test_environmental_grpo_benchmarks.py --test react_math
+        tests/gpu/trainers/grpo/test_environmental_grpo_benchmarks.py --test all
 """
 
 import argparse
@@ -43,17 +39,27 @@ import math
 import os
 import re
 import shutil
-import sys
 import tempfile
 import time
 import traceback
+import urllib.request
 from typing import Any
 
 import torch
-import torch.distributed as dist
 from datasets import Dataset, load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import GRPOConfig
 
+from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.environment_config import EnvironmentConfig
+from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
+from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.envs.tasks.qa import ExamQAEnvironment
+from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory
 from tests.common.utils import log as rank0_log
@@ -91,8 +97,6 @@ def log(msg: str) -> None:
 
 def check_vllm_server() -> bool:
     """Check if vLLM server is healthy."""
-    import urllib.request
-
     try:
         req = urllib.request.Request(f"{VLLM_SERVER_URL}/health/")
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -228,14 +232,7 @@ def run_env_grpo_training(
 
     Returns dict with metrics and status.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from trl import GRPOConfig
-
-    from src.configs.async_training_config import AsyncTrainingConfig
-    from src.distributed.parallelism_config import ParallelismConfig
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-
-    # Resolved here, not as a def-time default: ``--max-steps`` rebinds the module global in main(),
+    # Resolved here, not as a def-time default: ``--max-steps`` rebinds the module global in run(),
     # which a default bound at import time would never see.
     max_steps = MAX_STEPS if max_steps is None else max_steps
 
@@ -310,8 +307,6 @@ def run_env_grpo_training(
         # arrive as registry names and must go through EnvironmentConfig instead.
         log("  Creating DistributedAsyncEnvironmentalGRPOTrainer...")
         if isinstance(environment_cls, str):
-            from src.configs.environment_config import EnvironmentConfig
-
             env_selector = {
                 "environment_config": EnvironmentConfig(
                     environment_type=environment_cls, environment_kwargs=environment_kwargs
@@ -406,9 +401,6 @@ def run_env_grpo_training(
 
 def test_react_math():
     """ReAct Math environment with GSM8K dataset."""
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
-
     log("=" * 70)
     log("TEST: ReAct Math Environment + GSM8K")
     log("=" * 70)
@@ -450,8 +442,6 @@ def test_search_qa():
 
 def test_exam_qa():
     """ExamQA environment with MMLU-Pro dataset."""
-    from src.environments.envs.tasks.qa import ExamQAEnvironment
-
     log("=" * 70)
     log("TEST: ExamQA Environment + MMLU-Pro")
     log("=" * 70)
@@ -471,8 +461,6 @@ def test_exam_qa():
 
 def test_code_contests():
     """CodeContests environment with Codeforces dataset."""
-    from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-
     log("=" * 70)
     log("TEST: CodeContests Environment + Codeforces")
     log("=" * 70)
@@ -493,98 +481,59 @@ def test_code_contests():
     )
 
 
-TEST_MAP = {
-    "react_math": test_react_math,
-    "search_qa": test_search_qa,
-    "exam_qa": test_exam_qa,
-    "code_contests": test_code_contests,
-}
+BENCHMARKS = ("react_math", "search_qa", "exam_qa", "code_contests")
 
 
-def main():
+def _run_benchmark(name: str, benchmark) -> None:
+    """Run one benchmark and raise with its own diagnosis unless it ran healthy.
+
+    Health is re-checked first so a server that died mid-suite reports as such rather than as the
+    downstream failures of every later benchmark (no restart between them: each forms a fresh
+    weight-transfer group on the same port).
+    """
+    if not check_vllm_server():
+        raise RuntimeError(f"vLLM server at {VLLM_SERVER_URL} stopped answering /health before {name}")
+    result = benchmark()
+    if not result["success"]:
+        raise AssertionError(result.get("error") or f"{name} did not run healthy")
+
+
+@gpu_test_main(exact_world_size=1, prefix="env_grpo_benchmarks")
+def run(ctx) -> dict:
     parser = argparse.ArgumentParser(description="Environmental GRPO Benchmark Tests")
-    parser.add_argument(
-        "--test", type=str, default="all", choices=list(TEST_MAP.keys()) + ["all"], help="Which test to run"
-    )
+    parser.add_argument("--test", type=str, default="all", choices=[*BENCHMARKS, "all"], help="Which test to run")
     parser.add_argument("--max-steps", type=int, default=None, help="Override HALO_TEST_MAX_STEPS")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     if args.max_steps:
         global MAX_STEPS
         MAX_STEPS = args.max_steps
 
-    if "RANK" in os.environ:
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-    elif torch.cuda.is_available():
-        torch.cuda.set_device(0)
-
     log(f"\n{'=' * 70}")
     log("  Environmental GRPO Benchmark Training Tests")
     log(f"  Model: {MODEL_NAME}")
     log(f"  vLLM: {VLLM_SERVER_URL}")
-    log(f"  GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
     log(f"  Max steps per test: {MAX_STEPS}")
     log(f"{'=' * 70}")
 
     if not check_vllm_server():
-        log("ERROR: vLLM server not reachable at " + VLLM_SERVER_URL)
-        log("Start it with: docker run -d --name vllm-qwen3-4b ...")
-        sys.exit(1)
+        raise RuntimeError(f"vLLM server not reachable at {VLLM_SERVER_URL}")
     log("vLLM server is healthy")
 
-    test_names = list(TEST_MAP.keys()) if args.test == "all" else [args.test]
-
-    # No server restart between benchmarks — each forms a fresh weight-transfer group on the same
-    # port. Re-checking health first reports a dead server as such, not as N downstream failures.
-    results = []
-    for name in test_names:
-        if not check_vllm_server():
-            log(f"ERROR: vLLM server at {VLLM_SERVER_URL} stopped answering /health before {name}")
-            results.append({"env": name, "success": False, "error": "vLLM server unreachable"})
-            continue
-
-        result = TEST_MAP[name]()
-        results.append(result)
-
-    log(f"\n{'=' * 70}")
-    log("  RESULTS SUMMARY")
-    log(f"{'=' * 70}")
-
-    all_passed = True
-    for r in results:
-        status = "PASS" if r["success"] else "FAIL"
-        if not r["success"]:
-            all_passed = False
-
-        extras = []
-        if "elapsed" in r:
-            extras.append(f"time={format_duration(r['elapsed'])}")
-        if "last_loss" in r:
-            extras.append(f"loss={r['last_loss']:.4f}")
-        if "last_reward" in r:
-            extras.append(f"reward={r['last_reward']:.4f}")
-        if "peak_mem_gb" in r:
-            extras.append(f"peak_mem={r['peak_mem_gb']:.1f}GB")
-        if r.get("error"):
-            extras.append(f"error={r['error'][:80]}")
-
-        extra_str = f" ({', '.join(extras)})" if extras else ""
-        log(f"  [{status}] {r['env']}{extra_str}")
-
-    log(f"{'=' * 70}")
-    log(f"  {sum(1 for r in results if r['success'])}/{len(results)} tests passed")
-    log(f"{'=' * 70}")
-
-    if dist.is_initialized():
-        dist.barrier()
-        dist.destroy_process_group()
-
-    sys.exit(0 if all_passed else 1)
+    selected = BENCHMARKS if args.test == "all" else (args.test,)
+    checks: dict[str, bool] = {}
+    if "react_math" in selected:
+        record_check(checks, "react_math", lambda: _run_benchmark("react_math", test_react_math))
+    if "search_qa" in selected:
+        record_check(checks, "search_qa", lambda: _run_benchmark("search_qa", test_search_qa))
+    if "exam_qa" in selected:
+        record_check(checks, "exam_qa", lambda: _run_benchmark("exam_qa", test_exam_qa))
+    if "code_contests" in selected:
+        record_check(checks, "code_contests", lambda: _run_benchmark("code_contests", test_code_contests))
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    main()
+    run()

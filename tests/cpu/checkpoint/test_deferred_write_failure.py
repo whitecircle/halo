@@ -14,8 +14,6 @@ still raises afterwards carrying the original cause (so the failure is never swa
 Run: pytest tests/cpu/checkpoint/test_deferred_write_failure.py
 """
 
-import sys
-
 import pytest
 
 from src.distributed.runtime import DeferredRankFailure
@@ -96,4 +94,4 @@ def test_reject_uses_the_callers_exception_type():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

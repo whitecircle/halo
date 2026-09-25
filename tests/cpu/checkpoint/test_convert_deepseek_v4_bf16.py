@@ -31,7 +31,7 @@ from transformers import DeepseekV4Config, DeepseekV4ForCausalLM, PreTrainedToke
 
 from scripts.before_training.convert_deepseek_v4_bf16 import main, reject_uneven_fp8_blocks
 from tests.common.models import TINY_DSV4_CONFIG
-from tests.cpu.models.test_deepseek_v4_support import randomize_tid2eid
+from tests.common.tiny_models import randomize_tid2eid
 
 _BLOCK = (128, 128)
 _FP8_MAX = 448.0

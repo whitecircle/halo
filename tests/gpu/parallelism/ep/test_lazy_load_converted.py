@@ -19,9 +19,7 @@ Run with 2 GPUs:
         tests/gpu/parallelism/ep/test_lazy_load_converted.py --family glm5_next
 """
 
-import os
 import sys
-import tempfile
 
 import torch
 from transformers import AutoConfig
@@ -33,6 +31,7 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGe
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
     TINY_GLM5_CONFIG,
@@ -40,12 +39,12 @@ from tests.common.models import (
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log, tensors_equal_at_narrower_dtype
 
 FAMILY = "glm5_next"
 SEED = 42
 BATCH, SEQ = 2, 64
-LOSS_TOL = 5e-2
 
 _FAMILIES = {
     "glm5_next": (
@@ -64,7 +63,7 @@ _FAMILIES = {
 
 
 def _checkpoint_dir() -> str:
-    return os.path.join(tempfile.gettempdir(), f"{FAMILY}_lazy_hub_ckpt")
+    return shared_scratch_dir(f"{FAMILY}_lazy_hub_ckpt")
 
 
 def _build_checkpoint(model_class, make_config) -> None:
@@ -106,6 +105,7 @@ def run(ctx):
     torch.cuda.set_device(device)
     ckpt = _checkpoint_dir()
     if ctx.rank == 0:
+        ctx.on_teardown(lambda: cleanup_dirs(ckpt))
         _build_checkpoint(model_class, make_config)
     ctx.barrier()
 
@@ -144,7 +144,7 @@ def run(ctx):
     model.train()
     ep_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["ep2_loss"] = ep_loss
-    checks["ep2_loss_matches_ref"] = abs(ep_loss - ref_loss) < LOSS_TOL
+    checks["ep2_loss_matches_ref"] = abs(ep_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
     log(f"EP2 lazy loss: {ep_loss:.6f}  |Δref| = {abs(ep_loss - ref_loss):.2e}")
     del model, ep_layers
     cleanup_memory()
@@ -166,7 +166,7 @@ def run(ctx):
     model.train()
     etp_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["etp_loss"] = etp_loss
-    checks["etp_loss_matches_ref"] = abs(etp_loss - ref_loss) < LOSS_TOL
+    checks["etp_loss_matches_ref"] = abs(etp_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
     log(f"ETP lazy loss: {etp_loss:.6f}  |Δref| = {abs(etp_loss - ref_loss):.2e}")
 
     return {"checks": checks, "metrics": metrics}

@@ -17,7 +17,6 @@ Run: pytest tests/cpu/parallelism/test_local_rank_resolution.py
 """
 
 import logging
-import sys
 
 import pytest
 import torch
@@ -96,4 +95,4 @@ def test_single_process_run_is_rank_zero_and_silent(pre_init, caplog):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

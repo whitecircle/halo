@@ -22,7 +22,6 @@ Requirements:
 """
 
 import argparse
-import glob
 import math
 import os
 import traceback
@@ -33,21 +32,19 @@ from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 
 apply_remote_code_compat_shims()
 
-from peft import LoraConfig, PeftModel, get_peft_model
-from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
-from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_MOE_RING_MINI
-from tests.common.peft_helpers import adapter_save_checks, snapshot_adapters
+from tests.common.peft_helpers import adapter_save_checks, snapshot_adapters, verify_adapter_reload
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 MODEL_NAME = BAILING_MOE_RING_MINI
@@ -64,81 +61,6 @@ SEED = 42
 LORA_TARGET_MODULES = ["query_key_value", "dense", "g_proj"]
 LORA_R = 8
 LORA_ALPHA = 16
-
-
-def _verify_checkpoint_reload(
-    save_dir: str,
-    tokenizer,
-    rank: int,
-    local_rank: int,
-    trained_lora: dict[str, torch.Tensor],
-) -> dict[str, bool]:
-    if rank != 0:
-        return {}
-    checks = {}
-    try:
-        log("  Reloading base model for checkpoint verification...")
-        base_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            device_map={"": local_rank},
-        )
-        # A bare load leaves this family's non-persistent buffers (Lightning-Attention ``slope``,
-        # rotary ``inv_freq``) on transformers-5's uninitialized memory, so the reload control runs the
-        # seam every toolkit load path runs — without it it measures the allocator, not the checkpoint.
-        finalize_loaded_model(base_model)
-        log(f"  Loading adapter from {save_dir}...")
-        reloaded = PeftModel.from_pretrained(base_model, save_dir)
-
-        # "from_pretrained did not raise" is vacuous: lora_B is zero-init, so an all-zero adapter
-        # loads cleanly and gives finite logits — the trained values must be compared to what returned.
-        restored = {
-            n.replace(".default.", "."): p.detach().cpu() for n, p in reloaded.named_parameters() if "lora_" in n
-        }
-        matched = [k for k in trained_lora if k.replace(".default.", ".") in restored]
-        checks["adapter_reload"] = bool(matched) and all(
-            torch.allclose(trained_lora[k].float(), restored[k.replace(".default.", ".")].float(), atol=1e-6)
-            for k in matched
-        )
-        log(f"  Adapter reload: {'PASS' if checks['adapter_reload'] else 'FAIL'} ({len(matched)} tensors compared)")
-
-        reloaded.eval()
-        test_input = tokenizer("What is 2 + 2?", return_tensors="pt").to(f"cuda:{local_rank}")
-        with torch.no_grad():
-            output = reloaded(**test_input)
-        logits_finite = torch.isfinite(output.logits).all().item()
-        checks["reload_logits_finite"] = logits_finite
-        log(f"  Reload logits finite: {'PASS' if logits_finite else 'FAIL'}")
-
-        # Finiteness catches the reused-page reading of an unrepaired buffer but not the zeroed one:
-        # zeros are finite, and the model they build has a dead RoPE and no decay. Swept off the
-        # model's own non-persistent set, so it follows the load rather than this family's two names.
-        unset = [
-            name
-            for name, tensor in base_model.named_non_persistent_buffers()
-            if tensor.is_floating_point()
-            and tensor.numel()
-            and not (torch.isfinite(tensor).all().item() and tensor.abs().amax().item() > 0)
-        ]
-        checks["reload_buffers_initialized"] = not unset
-        log(f"  Reload buffers initialized: {'PASS' if not unset else f'FAIL {unset[:5]}'}")
-        if not logits_finite:
-            # separates a bad EP gather (non-finite saved tensor) from a bad reloaded forward
-            for shard in sorted(glob.glob(os.path.join(save_dir, "*.safetensors"))):
-                bad = {k: v for k, v in load_file(shard).items() if not torch.isfinite(v).all()}
-                log(f"  [diag] {os.path.basename(shard)}: {len(bad)} non-finite of {len(load_file(shard))} tensors")
-                for key, val in list(bad.items())[:10]:
-                    log(f"  [diag]   {key} shape={tuple(val.shape)} nan={val.isnan().sum().item()}")
-            log(f"  [diag] logits nan={output.logits.isnan().sum().item()} inf={output.logits.isinf().sum().item()}")
-
-        del reloaded, base_model
-        cleanup_memory()
-    except Exception as e:
-        log(f"  Checkpoint reload FAILED: {e}")
-        traceback.print_exc()
-        checks["adapter_reload"] = False
-    return checks
 
 
 def run_lora_ep(
@@ -242,7 +164,9 @@ def run_lora_ep(
 
         save_checks = adapter_save_checks(save_dir, rank)
         checks.update(save_checks)
-        reload_checks = _verify_checkpoint_reload(save_dir, tokenizer, rank, local_rank, lora_after)
+        reload_checks = verify_adapter_reload(
+            save_dir, lora_after, model_name=MODEL_NAME, tokenizer=tokenizer, rank=rank, local_rank=local_rank
+        )
         checks.update(reload_checks)
         barrier()
 
@@ -363,7 +287,9 @@ def run_lora_etp(
 
         save_checks = adapter_save_checks(save_dir, rank)
         checks.update(save_checks)
-        reload_checks = _verify_checkpoint_reload(save_dir, tokenizer, rank, local_rank, lora_after)
+        reload_checks = verify_adapter_reload(
+            save_dir, lora_after, model_name=MODEL_NAME, tokenizer=tokenizer, rank=rank, local_rank=local_rank
+        )
         checks.update(reload_checks)
         barrier()
 

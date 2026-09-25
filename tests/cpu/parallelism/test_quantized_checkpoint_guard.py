@@ -15,8 +15,6 @@ they cover the guard's depth AND a transformers relayout in one place: the refus
 Run: pytest tests/cpu/parallelism/test_quantized_checkpoint_guard.py
 """
 
-import sys
-
 import pytest
 import torch
 import torch.nn as nn
@@ -68,4 +66,4 @@ def test_float_experts_are_not_rejected():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

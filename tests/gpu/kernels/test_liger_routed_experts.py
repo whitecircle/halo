@@ -95,8 +95,8 @@ def _check_numerics(selected, stock, config, device) -> None:
         for name, actual, expected in zip(GRADIENTS, selected_path, reference, strict=True)
     }
     log("  relative error vs fp32 eager: " + " ".join(f"{name}={value:.4f}" for name, value in residuals.items()))
-    worst = max(residuals, key=residuals.get)
-    assert residuals[worst] < TOL, f"{worst} relative error {residuals[worst]:.4f} exceeds {TOL}"
+    failing = {name: value for name, value in residuals.items() if not value < TOL}
+    assert not failing, f"relative errors {failing} exceed {TOL}"
 
 
 @gpu_test_main(min_world_size=1, prefix="test_liger_routed_experts")

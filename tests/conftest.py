@@ -25,6 +25,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+# Below the insert it relies on.
+from tests.gpu.manifest import ALL_MARKERS, SCRATCH_DIR_TAG
+
 # Extra markers beyond the GPU manifest's set.
 _EXTRA_MARKERS = {
     "cpu": "CPU-only test (no GPU required)",
@@ -32,8 +35,6 @@ _EXTRA_MARKERS = {
 
 
 def pytest_configure(config):
-    from tests.gpu.manifest import ALL_MARKERS
-
     described = {
         "gpu": "launches a torchrun GPU script (see tests/gpu/manifest.py)",
         "core": "small/fast tier (PR gate)",
@@ -50,7 +51,7 @@ def pytest_collection_modifyitems(config, items):
 
     The CPU tests are plain pytest modules with no per-file marker, so ``-m cpu``
     (and ``make test-cpu``) would otherwise select nothing. Marking by path keeps the
-    selection in one place instead of decorating ~40 files. GPU tests get their markers
+    selection in one place instead of decorating every file. GPU tests get their markers
     from the manifest in ``tests/gpu/conftest.py``.
     """
     cpu_root = _PROJECT_ROOT / "tests" / "cpu"
@@ -69,16 +70,16 @@ def pytest_sessionstart(session):
 
     ``tests.common.distributed.setup_cache_dirs`` builds them with ``mkdtemp``, so they land under
     the launcher's ``TMPDIR`` — read it rather than name a host path, which is wrong on every box
-    whose large volume is not ``/mnt``.
+    whose large volume is not ``/mnt``. Only names carrying ``SCRATCH_DIR_TAG`` are touched, since
+    that ``TMPDIR`` may be shared with other programs.
     """
     cutoff = time.time() - 6 * 3600
-    for pat in ("*_cache_r*", "*_out_*"):
-        for path in glob.glob(os.path.join(tempfile.gettempdir(), pat)):
-            try:
-                if os.path.getmtime(path) < cutoff:
-                    shutil.rmtree(path, ignore_errors=True)
-            except OSError:
-                pass
+    for path in glob.glob(os.path.join(tempfile.gettempdir(), f"{SCRATCH_DIR_TAG}*")):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 @pytest.fixture(autouse=True)

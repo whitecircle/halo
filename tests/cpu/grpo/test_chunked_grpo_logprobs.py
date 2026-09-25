@@ -8,7 +8,6 @@ tolerance and FAIL if the chunked math drifts from the reference.
     python tests/cpu/grpo/test_chunked_grpo_logprobs.py
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -513,4 +512,4 @@ def test_the_sweep_reads_the_heads_softcap_off_the_model_config():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

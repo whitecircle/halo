@@ -1,9 +1,12 @@
-"""Weight-sync stand-ins shared by the CPU suites: an offline client, a recording wire, a stock model."""
+"""Weight-sync stand-ins shared by the suites: an offline client, a recording wire, a recording sender,
+a stock model."""
 
+from typing import NamedTuple
 from unittest.mock import patch
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
@@ -74,3 +77,35 @@ class Wire:
     @property
     def chunk_names(self) -> list[list[str]]:
         return [[name for name, _ in chunk] for chunk in self.chunks]
+
+
+class ForwardedParam(NamedTuple):
+    """One tensor ``gather_and_send_weights`` forwarded: its shape is the global one for a DTensor."""
+
+    name: str
+    shape: tuple[int, ...]
+    is_dtensor: bool
+    value: torch.Tensor | None
+
+
+class RecordingSender:
+    """The engine end of ``gather_and_send_weights``, with no NCCL and no server: records every forward.
+
+    ``keep_values`` also keeps a detached clone of each tensor, for a value comparison; leave it off on
+    a full-size checkpoint, whose forwarded weights the clones would hold a second time.
+    """
+
+    def __init__(self, keep_values: bool = False):
+        self.keep_values = keep_values
+        self.params: list[ForwardedParam] = []
+
+    def update_named_param(self, name: str, data: torch.Tensor) -> None:
+        value = data.detach().clone() if self.keep_values else None
+        self.params.append(ForwardedParam(name, tuple(data.shape), isinstance(data, DTensor), value))
+
+    def reset_prefix_cache(self) -> None:
+        pass
+
+    @property
+    def names(self) -> list[str]:
+        return [param.name for param in self.params]

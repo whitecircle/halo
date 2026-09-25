@@ -327,4 +327,4 @@ def test_every_settable_config_field_is_documented(config_field):
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -15,7 +15,6 @@ Run: python tests/cpu/checkpoint/test_resume_weights_source.py  (or: pytest -m c
 """
 
 import json
-import sys
 
 import pytest
 from accelerate import PartialState
@@ -176,4 +175,4 @@ def test_ep_empty_checkpoint_raises(tmp_path):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

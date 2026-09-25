@@ -23,12 +23,10 @@ import json
 import os
 import shutil
 import sys
-import traceback
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from accelerate import PartialState
 from safetensors import safe_open
 from transformers import AutoConfig, AutoTokenizer
 
@@ -37,10 +35,11 @@ from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.saving import save_ep_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier, is_global_main_process
 from src.env import env_flag, env_str
-from tests.common.distributed import init_distributed, setup_cache_dirs, teardown_distributed
+from tests.common.distributed import shared_scratch_dir
+from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B_PATCHED
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log
 
 MODEL = env_str("HALO_TEST_EP_CP_RT_MODEL", GPT_OSS_20B_PATCHED)
@@ -50,7 +49,7 @@ CP_SIZE = 2
 SEQ_LEN = 128  # must be divisible by cp_size
 # Same weights + same input + same EP+CP partition on both sides of the round-trip, so the loss
 # must match to bf16 serialization noise. Dropped/reinitialized experts shift it by >>1.
-LOSS_TOL = 5e-2
+LOSS_TOL = TOL.resume_loss_abs
 
 
 def _fixed_batch(tokenizer, device):
@@ -65,7 +64,8 @@ def _fixed_batch(tokenizer, device):
 
 
 def _per_rank_cp_loss(model, ids, labels) -> float:
-    """This rank's CP-chunk loss (the wrapper's forward is collective — every rank calls)."""
+    """The CP group's loss: under no_grad the wrapper returns the group mean on every rank. Its forward
+    is collective, so every rank calls."""
     model.eval()
     with torch.no_grad():
         out = model(input_ids=ids, labels=labels, use_cache=False)
@@ -115,110 +115,79 @@ def _assert_checkpoint_layout(save_dir: str, num_experts: int) -> list[str]:
     return problems
 
 
-def run():
-    rank, world_size, local_rank = init_distributed()
-    device = torch.device(f"cuda:{local_rank}")
-
+@gpu_test_main(exact_world_size=EP_SIZE, prefix="ep_cp_roundtrip")
+def run(ctx):
     log(f"\n{'=' * 70}\nEP+CP SAVE/RELOAD ROUNDTRIP: {MODEL} (EP={EP_SIZE}, CP={CP_SIZE}, attn={ATTN})\n{'=' * 70}")
 
-    if not os.path.isdir(MODEL):
-        log(f"SKIP: local model path missing: {MODEL} (set HALO_TEST_EP_CP_RT_MODEL to a present checkpoint)")
-        teardown_distributed()
-        return True  # skip, not fail — local-checkpoint-dependent test
-    if world_size != EP_SIZE:
-        log(f"ERROR: needs world_size == {EP_SIZE}, got {world_size}")
-        teardown_distributed()
-        return False
-
-    output_dir, _ = setup_cache_dirs("ep_cp_roundtrip", rank)
-    save_dir = str(Path(output_dir).parent / f"ep_cp_rt_ckpt_{Path(MODEL.rstrip('/')).name}")
+    save_dir = shared_scratch_dir(f"ep_cp_rt_ckpt_{Path(MODEL.rstrip('/')).name}")
+    if ctx.rank == 0 and not env_flag("HALO_TEST_EP_CP_RT_KEEP"):
+        ctx.on_teardown(lambda: shutil.rmtree(save_dir, ignore_errors=True))
     pc = ParallelismConfig(ep_size=EP_SIZE, cp_size=CP_SIZE)
     num_experts = getattr(AutoConfig.from_pretrained(MODEL, trust_remote_code=True), "num_local_experts", None)
     checks: dict[str, bool] = {}
 
-    try:
-        PartialState()
-        tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-        log("--- Loading model (EP+CP) ---")
-        model, _ = load_distributed_model(
-            model_name_or_path=MODEL,
-            parallelism_config=pc,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            attn_implementation=ATTN,
-            use_liger_kernel=False,
-        )
-        checks["cp_wrapped"] = isinstance(model, UlyssesCPModelWrapper)
-        checks["ep_patched"] = any(isinstance(m, EPMoELayerBase) for m in model.modules())
+    log("--- Loading model (EP+CP) ---")
+    model, _ = load_distributed_model(
+        model_name_or_path=MODEL,
+        parallelism_config=pc,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation=ATTN,
+        use_liger_kernel=False,
+    )
+    checks["cp_wrapped"] = isinstance(model, UlyssesCPModelWrapper)
+    checks["ep_patched"] = any(isinstance(m, EPMoELayerBase) for m in model.modules())
 
-        ids, labels = _fixed_batch(tokenizer, device)
-        ref_loss = _per_rank_cp_loss(model, ids, labels)
-        log(f"[rank {rank}] reference CP loss (pre-save): {ref_loss:.6f}")
-        checks["ref_loss_finite"] = bool(torch.isfinite(torch.tensor(ref_loss)))
+    ids, labels = _fixed_batch(tokenizer, ctx.device)
+    ref_loss = _per_rank_cp_loss(model, ids, labels)
+    log(f"[rank {ctx.rank}] reference CP loss (pre-save): {ref_loss:.6f}")
+    checks["ref_loss_finite"] = bool(torch.isfinite(torch.tensor(ref_loss)))
 
-        barrier()
-        if rank == 0:
-            shutil.rmtree(save_dir, ignore_errors=True)
-        barrier()
-        log(f"--- Saving (gathered, through the CP wrapper) → {save_dir} ---")
-        # The exact call save_ep_checkpoint makes: the CP WRAPPER with cp_key_remap=True.
-        save_ep_model(model, save_dir, tokenizer=tokenizer, sharded=False, cp_key_remap=True)
-        barrier()
+    ctx.barrier()
+    if ctx.rank == 0:
+        shutil.rmtree(save_dir, ignore_errors=True)
+    ctx.barrier()
+    log(f"--- Saving (gathered, through the CP wrapper) → {save_dir} ---")
+    # The exact call save_ep_checkpoint makes: the CP WRAPPER with cp_key_remap=True.
+    save_ep_model(model, save_dir, tokenizer=tokenizer, sharded=False, cp_key_remap=True)
+    ctx.barrier()
 
-        if is_global_main_process():
-            problems = _assert_checkpoint_layout(save_dir, num_experts)
-            checks["checkpoint_layout_ok"] = not problems
-            for p in problems:
-                log(f"  LAYOUT PROBLEM: {p}")
+    # Rank 0 alone reads the written checkpoint; the other ranks leave the key out.
+    if ctx.rank == 0:
+        problems = _assert_checkpoint_layout(save_dir, num_experts)
+        checks["checkpoint_layout_ok"] = not problems
+        for p in problems:
+            log(f"  LAYOUT PROBLEM: {p}")
 
-        del model
-        cleanup_memory()
+    del model
+    cleanup_memory()
 
-        log("--- Reloading from saved checkpoint (EP+CP) ---")
-        reloaded, _ = load_distributed_model(
-            model_name_or_path=save_dir,
-            parallelism_config=pc,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            attn_implementation=ATTN,
-            use_liger_kernel=False,
-        )
-        rl_loss = _per_rank_cp_loss(reloaded, ids, labels)
-        delta = abs(rl_loss - ref_loss)
-        log(f"[rank {rank}] reloaded CP loss: {rl_loss:.6f}  |Δ| = {delta:.6e} (tol {LOSS_TOL})")
-        checks["reload_loss_finite"] = bool(torch.isfinite(torch.tensor(rl_loss)))
-        checks["reload_loss_matches"] = delta < LOSS_TOL
-        del reloaded
-        cleanup_memory()
-
-        # A failure on ANY rank fails the test (per-rank losses differ by CP chunk).
-        local_ok = all(checks.values())
-        ok_tensor = torch.tensor([1 if local_ok else 0], device=device)
-        dist.all_reduce(ok_tensor, op=dist.ReduceOp.MIN)
-        ok = bool(ok_tensor.item())
-        log(f"\n{'=' * 70}\n{'PASSED' if ok else 'FAILED'}: {checks}\n{'=' * 70}")
-        return ok
-
-    except Exception as e:
-        log(f"\nERROR: {e}")
-        if rank == 0:
-            traceback.print_exc()
-        return False
-    finally:
-        barrier()
-        if is_global_main_process() and not env_flag("HALO_TEST_EP_CP_RT_KEEP"):
-            shutil.rmtree(save_dir, ignore_errors=True)
-        cleanup_memory()
-
-
-def main():
-    ok = run()
-    teardown_distributed()
-    sys.exit(0 if ok else 1)
+    log("--- Reloading from saved checkpoint (EP+CP) ---")
+    reloaded, _ = load_distributed_model(
+        model_name_or_path=save_dir,
+        parallelism_config=pc,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation=ATTN,
+        use_liger_kernel=False,
+    )
+    rl_loss = _per_rank_cp_loss(reloaded, ids, labels)
+    delta = abs(rl_loss - ref_loss)
+    log(f"[rank {ctx.rank}] reloaded CP loss: {rl_loss:.6f}  |Δ| = {delta:.6e} (tol {LOSS_TOL})")
+    checks["reload_loss_finite"] = bool(torch.isfinite(torch.tensor(rl_loss)))
+    # Every rank checks its own copy; the harness fails the run on any.
+    checks["reload_loss_matches"] = delta < LOSS_TOL
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    main()
+    # A local-checkpoint test declines to run before the harness starts: the launcher reports a
+    # ``SKIP:`` line with exit 0 and no result line as a skip.
+    if not os.path.isdir(MODEL):
+        log(f"SKIP: local model path missing: {MODEL} (set HALO_TEST_EP_CP_RT_MODEL to a present checkpoint)")
+        sys.exit(0)
+    run()

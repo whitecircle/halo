@@ -6,7 +6,6 @@ episode deadline the awaiting rank never reaches the next collective and every p
 """
 
 import asyncio
-import sys
 from dataclasses import fields
 
 import pytest
@@ -59,4 +58,4 @@ def test_episode_timeout_is_configurable_and_defaults_sanely():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

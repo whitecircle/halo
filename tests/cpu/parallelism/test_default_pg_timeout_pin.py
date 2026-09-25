@@ -13,7 +13,6 @@ must exist on this torch, and its absence must RAISE rather than pass.
 """
 
 import datetime
-import sys
 
 import pytest
 import torch.distributed.distributed_c10d as c10d
@@ -54,4 +53,4 @@ def test_a_renamed_symbol_raises_instead_of_pinning_nothing(monkeypatch):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))

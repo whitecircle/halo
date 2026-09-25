@@ -13,8 +13,6 @@ Usage:
     python tests/cpu/parallelism/test_experts_fsdp_managed.py
 """
 
-import sys
-
 import pytest
 
 from src.distributed.expert_parallel.config import EPConfig
@@ -79,4 +77,4 @@ def test_the_predicate_is_not_vacuous():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))
