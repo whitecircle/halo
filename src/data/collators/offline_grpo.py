@@ -33,11 +33,8 @@ class OfflineGRPODataCollatorWithPadding:
         has_ref_logps = REF_PER_TOKEN_LOGPS_COLUMN in features[0]
 
         for example in features:
-            prompt_ids = example["prompt_input_ids"]
-            if not prompt_ids:
-                logger.warning("Empty prompt_input_ids found, using pad token")
-                prompt_ids = [self.pad_token_id]
-            prompt_input_ids.append(torch.tensor(prompt_ids, dtype=torch.long))
+            # Never empty: the trainer's tokenize map refuses a prompt with no tokens.
+            prompt_input_ids.append(torch.tensor(example["prompt_input_ids"], dtype=torch.long))
 
             comp_ids = example["completion_input_ids"]
             substituted_completion.append(not comp_ids)

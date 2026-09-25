@@ -281,6 +281,13 @@ def tokenize_offline_grpo_rows(
                 is_encoder_decoder=is_encoder_decoder,
                 eos_token_ids=eos_token_ids,
             )
+            # Raised here, inside the coordinated map, so every rank aborts: the collator is the one
+            # rank that drew the row, and a raise there strands its peers in the next collective.
+            if not tokenized["prompt_input_ids"]:
+                raise ValueError(
+                    f"Offline GRPO row {idx}: the prompt tokenizes to no tokens, so its completions "
+                    f"would train against no context. Fix or drop the row."
+                )
 
             all_prompt_input_ids.append(tokenized["prompt_input_ids"])
             all_completion_input_ids.append(tokenized["completion_input_ids"])

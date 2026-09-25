@@ -22,7 +22,7 @@ Three conversational columns. A group is one **row**, keyed by row index: put ev
 {"prompt": [{"role": "user", "content": "What is 2+2?"}], "completions": [[{"role": "assistant", "content": "4"}], [{"role": "assistant", "content": "5"}]], "rewards": [1.0, -0.5]}
 ```
 
-A singleton group, and any exactly-tied one, normalizes to advantage 0 under every method. A `completions`/`rewards` length mismatch raises with the row index; a non-finite reward raises with the offending group.
+A singleton group, and any exactly-tied one, normalizes to advantage 0 under every method. A `completions`/`rewards` length mismatch raises with the row index, as does a prompt that tokenizes to no tokens; a non-finite reward raises with the offending group.
 
 `scripts/inference/reward_model/rm_rejection_sampling.py` emits this shape with `--output_format offline_grpo`.
 
