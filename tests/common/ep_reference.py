@@ -185,6 +185,19 @@ def fixed_chat_batch(
     return input_ids, attention_mask, labels
 
 
+def random_token_batch(vocab_size: int, batch: int, seq: int, device, seed: int = 123):
+    """Deterministic random ``(input_ids, labels)`` with every fourth label masked to ``-100``.
+
+    Seeds the global RNG. The mask is interleaved rather than a contiguous span so every CP rank's
+    sequence chunk keeps active labels, a non-zero loss and a gradient through its attention slice.
+    """
+    torch.manual_seed(seed)
+    ids = torch.randint(0, vocab_size, (batch, seq), device=device)
+    labels = ids.clone()
+    labels[:, ::4] = -100
+    return ids, labels
+
+
 def dense_reference(
     model_name: str,
     input_ids: torch.Tensor,
