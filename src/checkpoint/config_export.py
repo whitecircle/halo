@@ -173,7 +173,7 @@ def _source_config_payload(source: str) -> dict | None:
         config_file = cached_file(source, CONFIG_NAME)
         with open(str(config_file), encoding="utf-8") as handle:
             payload = json.load(handle)
-    except Exception as error:
+    except (OSError, ValueError) as error:  # unreachable or unparseable; anything else is a bug
         logger.warning(
             f"export_source_config_schema: could not read {CONFIG_NAME} from source {source!r} "
             f"({type(error).__name__}: {error}) — the export keeps transformers' native schema, "
