@@ -7,7 +7,7 @@ Halo's CI is GitHub Actions (`.github/workflows/`), split into two tiers by wher
 | Hosted | GitHub `ubuntu-latest` | `.github/workflows/lint.yml`, `.github/workflows/docs.yml` | every PR + push `main` | active |
 | Self-hosted | GPU box `[self-hosted, halo]` | `.github/workflows/cpu-tests.yml`, `.github/workflows/gpu-tests.yml` | `workflow_dispatch` | dispatch-only |
 
-Hosted jobs are pure lint/link checks (ruff, actionlint, the docs link check) and need no image. The test tiers import torch and run inside the prebuilt image — and GPU tests additionally need Blackwell (SM100) or Hopper (SM90) for FA3/FA4 + DeepEP, which no hosted runner provides. CodeQL (the default code-scanning setup) checks every PR to `main`, and the GitGuardian and CodeRabbit apps report on every PR; none of them lives in `.github/workflows/`.
+Hosted jobs are pure lint/link checks (ruff, actionlint, the docs link check) and need no image. The test tiers import torch and run inside the prebuilt image, built on the self-hosted box and never pulled or rebuilt by CI; GPU tests also need Blackwell (SM100) or Hopper (SM90) for FA3/FA4 + DeepEP, which no hosted runner provides. CodeQL (the default code-scanning setup) checks every PR to `main`, and the GitGuardian and CodeRabbit apps report on every PR; none of them lives in `.github/workflows/`.
 
 ## Hosted tier
 
@@ -44,11 +44,11 @@ The full GPU tier (`make test-gpu-full`) and the two inference-server tiers (`ma
 
 A per-family pass of either server tier serves the family's checkpoint and points the async GRPO wrapper at it: `HALO_TEST_ENV_GRPO_MODEL` for the vLLM tier, `HALO_TEST_ENV_GRPO_SGLANG_MODEL` for the SGLang tier. The rows move the served policy with an expert-only perturbation as well as a dense one.
 
-### Enabling the self-hosted tiers (repo admin)
+### Enabling the test tiers (repo admin)
 
 1. Register a self-hosted runner on the GPU box (repo → Settings → Actions → Runners → New self-hosted runner) with labels `self-hosted` and `halo`. Use runner version 2.327.1 or newer: the pinned `actions/checkout` and `actions/upload-artifact` run on Node 24. Run it as a systemd service under a dedicated non-root user in the `docker` group.
 2. Build the image on that box (`make build-blackwell`). CI reuses it and never rebuilds per run; refresh it when the `Dockerfile` or deps change.
-3. Repo → Settings → Actions → General: set fork-PR runs to require approval for **all outside collaborators** — the *first-time contributors* setting does not gate returning contributors. This must precede step 4: the self-hosted CPU tier has no label gate, so per-run approval is its only maintainer opt-in.
+3. Repo → Settings → Actions → General: set fork-PR runs to require approval for **all outside collaborators** — the *first-time contributors* setting does not gate returning contributors. This must precede step 4: the CPU tier has no label gate, so per-run approval is its only maintainer opt-in.
 4. Uncomment the `push` / `pull_request` triggers in `cpu-tests.yml` and the `pull_request` trigger in `gpu-tests.yml`.
 5. Create the `run-ci-gpu` label.
 
@@ -70,13 +70,13 @@ The self-hosted runner executes contributor code on your hardware, beside traini
 
     `HALO_SCRATCH` is the one home for that volume: the bind mount and the in-container `HF_HOME` / `HF_DATASETS_CACHE` / `TMPDIR` / `HALO_DATA_ROOT` all derive from it, so pointing the tier at another disk is one override. Narrowing `MNT_MOUNT` alone is not, since those env vars still resolve under `HALO_SCRATCH`. Inject `HF_TOKEN` from a repo secret only when a gated model is needed.
 
-- **The self-hosted CPU tier mounts the host's HF cache.** `DOCKER_RUN_CPU` bind-mounts `HF_CACHE` (default `$(HALO_SCRATCH)/hf`) read-write and points `HF_HOME` at it, so PR code can write into the cache every later job reads. CPU tests that call `from_pretrained` directly hard-fail when the cache is missing and the Hub is unreachable — a state a self-hosted runner can be in.
+- **The CPU tier mounts the host's HF cache.** `DOCKER_RUN_CPU` bind-mounts `HF_CACHE` (default `$(HALO_SCRATCH)/hf`) read-write and points `HF_HOME` at it, so PR code can write into the cache every later job reads. CPU tests that call `from_pretrained` directly hard-fail when the cache is missing and the Hub is unreachable — a state a self-hosted runner can be in.
 
     Tests going through `tests/common/tokenizers.py` skip instead. `HF_CACHE=` runs cache-less: those tests skip, and the guards that refuse an all-skipped file fail.
 
 - **No repository secrets to fork PR code.** The commented-out test triggers are `pull_request`, not `pull_request_target`, so enabling them still keeps repo secrets away from fork PR code (a same-repo branch is a maintainer's, and gets them). Whatever sits on the bind-mounted scratch volume is a separate matter — see the first bullet. `pr-gate.yml` uses `pull_request_target` on purpose and checks out nothing.
 - **Label gate (GPU tier).** A GPU PR run requires a maintainer to add `run-ci-gpu` — a per-PR opt-in, not the boundary: a `pull_request` run executes the PR's own copy of the workflow and the Makefile, and the label survives later pushes, so the fork-approval setting below is what keeps unreviewed code off the box.
-- **Fork approval (both self-hosted tiers, and the only gate on the self-hosted CPU tier).** Require approval for **all outside collaborators** (not just first-time) *before* enabling the self-hosted test triggers — that CPU tier has no label gate, and `pr-gate` closing an unapproved PR does not stop workflows the same `opened` event already started.
+- **Fork approval (both test tiers, and the only gate on the CPU tier).** Require approval for **all outside collaborators** (not just first-time) *before* enabling the test triggers — the CPU tier has no label gate, and `pr-gate` closing an unapproved PR does not stop workflows the same `opened` event already started.
 
 ## Repo hygiene
 

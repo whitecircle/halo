@@ -3,7 +3,8 @@
 
 ``tests.common.hub_seed`` derives what ``make seed-hf-cache`` downloads; ``HALO_TEST_REQUIRE_HUB_CACHE``
 turns a cache miss on any Hub repo the seed could hold into a failure, so a test that starts reading a
-new repo cannot pass that tier as a skip. Gated repos and local checkpoint paths still skip.
+new repo cannot pass an offline CPU-tier run over the seeded cache as a skip. Gated repos and local
+checkpoint paths still skip.
 
 Run: python tests/cpu/conventions/test_hub_seed.py
 """
