@@ -120,6 +120,51 @@ included; under ZeRO-2 the forward/backward peak already holds it. Plain-DP/CP/E
 path only; rejected with `fsdp_reshard_after_forward: true` (contradicts FULL_SHARD's purpose), TP,
 or PP.
 
+### Deferred gradient reduce (`fsdp_defer_grad_sync`)
+
+FSDP2 reduce-scatters every module's gradients after each microstep's backward (HSDP adds the
+cross-domain all-reduce), so a window pays `gradient_accumulation_steps` full-gradient reductions.
+`fsdp_defer_grad_sync: true` turns them off for microsteps 1..n-1 (torch
+`set_requires_gradient_sync`, toggled from `accelerator.sync_gradients` alongside the backward
+reshard): autograd accumulates the unsharded gradients locally and the window's last backward
+reduces them once. The sum is the same, taken in a different order (microsteps before ranks), so
+bf16 runs match the default to rounding: across the DP, HSDP, TP+DP, CP+DP and MoE (ep1, EP,
+multi-group EP) rows of `tests/gpu/trainers/sft/test_sft_fsdp_defer_grad_sync.py`, per-step loss
+stays within 3.4e-4 of the default and the final weights within 2% of their movement, under the
+1.2e-3 loss spread between DP and HSDP (both correct) on the same data.
+
+Measured with packed `sft.py` (4k tokens, batch 2, gradient checkpointing, B300; tok/s/GPU, mean
+of 3 runs unless noted):
+
+| Run | GA | default | `fsdp_defer_grad_sync` | + `fsdp_reshard_after_backward: false` | peak allocated |
+|---|---|---|---|---|---|
+| Qwen3-8B, 8 GPUs, NVLink | 4 | 16,160 | 16,637 (+3.0%) | 17,015 (+5.3%) | 32.6 → 46.0 GB |
+| Qwen3-8B, 8 GPUs, NVLink | 8 | 16,458 | 16,985 (+3.2%) | 17,673 (+7.4%) | 32.6 → 46.0 GB |
+| Qwen3-8B, 2 nodes × 2 GPUs, EFA | 4 | 14,794 | 16,107 (+8.9%) | — | 40.2 → 51.7 GB |
+| same, `use_hsdp` (1 run) | 4 | 14,945 | 16,910 (+13.1%) | — | 55.5 → 63.1 GB |
+| same, NCCL on TCP sockets (1 run) | 4 | 2,024 | 3,084 (+52%) | — | 40.2 → 51.7 GB |
+| Qwen3-30B-A3B, `ep_size: 1`, 8 GPUs, NVLink | 4 | 11,670 | 13,038 (+11.7%) | — | 95.2 → 145.0 GB |
+
+Over NVLink the dense reduce-scatters mostly overlap the backward, so the gain is a few percent; it
+grows with the gradient bytes per token (an `ep_size==1` MoE reduces every expert for 3B active
+params) and with the fabric's cost, and it pairs with `fsdp_reshard_after_backward: false`, which
+removes the matching per-microstep all-gathers. The three-run spread stays within 2.4% of the mean
+(1.3% on one node).
+
+The cost is one unsharded gradient copy per GPU held across the window, at the reduce dtype: 2
+B/param, or 4 B/param under `fp32_grad_reduce` (FSDP2 upcasts the accumulator). An `ep_size==1`
+MoE pays it for every expert, since FSDP2 owns them; at `ep_size>1` the experts are FSDP-ignored and
+only the non-expert params pay it. It saves nothing at `gradient_accumulation_steps: 1`. Use it when
+the reduction is a visible share of the step (large DP width, slow inter-node fabric, small
+microbatches) and the memory is there.
+
+The in-backward EP expert and router hooks gate on the same `sync_gradients`, and the deferred EP
+sweep, the TP replicated-gradient sweep and the gradient clip run after the window's last backward,
+so all of them read the same reduced gradients as before. Rejected under PP (the schedule already
+reduces once per step), TP at `data_parallel_size==1` (no FSDP2 wrap to defer) and QLoRA (no wrap;
+its sweep already runs once per step). Under `accelerate launch` it is warned and ignored:
+accelerate's `no_sync` already skips the reduce on non-final microsteps.
+
 ### EP1 expert sharding
 
 At `ep_group_size==1` (`ep_size==1` AND `expert_tp_size==1`) the MoE experts are replicated and the
@@ -161,7 +206,8 @@ order of magnitude below NVLink
 ([bandwidth ladder](../reference/gpu-training-theory.md#interconnect-tiers)).
 
 HSDP shards within each NVLink domain and **replicates** across domains, keeping the bandwidth-heavy
-collectives on NVLink so only one gradient all-reduce crosses RDMA per step.
+collectives on NVLink so only one gradient all-reduce crosses RDMA per backward — per optimizer step
+with [`fsdp_defer_grad_sync`](#deferred-gradient-reduce-fsdp_defer_grad_sync).
 
 Enable with `--use_hsdp`. The layout is derived from topology — no shard-size knob: shard width =
 `nvlink_domain_size`, replica count = `num_nvlink_domains`. `setup_fsdp2_for_dp()` applies FSDP2 over
@@ -264,7 +310,7 @@ FSDP2 shards over what is left. HSDP is the exception with a scope of its own: p
 | `use_grouped_gemm: true` + MoE + `accelerate launch` | rejected — the wrappers need the mixin-managed FSDP2 path. Use `torchrun`, or `use_grouped_gemm: false` | `_validate_gmm_launch_method` |
 | multi-device `device_map` (e.g. `"auto"`) under `torchrun` | rejected — the FSDP2 setup cannot skip a rank-local bail-out before a collective mesh build | `src/distributed/fsdp.py` |
 | `bf16_optimizer: false` on a MoE with `fsdp_shard_ep1_experts: false` | rejected — fused AdamW cannot mix the unsharded plain expert tensors with FSDP2 DTensors. At the default `fsdp_shard_ep1_experts: true` the experts are DTensors too and it is allowed | `mixins/base.py` |
-| `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fp32_grad_reduce` under `accelerate launch` | warned and ignored — accelerate owns the wrap | `_ACCELERATE_UNSUPPORTED_KNOBS` |
+| `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fsdp_defer_grad_sync`, `fp32_grad_reduce` under `accelerate launch` | warned and ignored — accelerate owns the wrap | `_ACCELERATE_UNSUPPORTED_KNOBS` |
 | `bf16_optimizer` auto-enable under accelerate DDP | warned and skipped — replicated DDP is outside the validated stochastic-rounding matrix; set it explicitly to override | `mixins/base.py` |
 | accelerate FSDP v1 sharding strategy | warned — a known PyTorch bug can corrupt model state after a save. Use the FSDP2 configs or DDP | `mixins/base.py` |
 | `use_hsdp` on a single NVLink domain | warned — no-op; the replica axis engages once the job spans domains | `_validate_hsdp` |

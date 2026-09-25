@@ -358,8 +358,8 @@ Under `torchrun` data parallelism the 4-bit base cannot be FSDP2-sharded (`fully
 the frozen base replicated per rank.
 
 Nothing wraps the model, so the FSDP2 sharding knobs cannot take effect: a non-default `use_hsdp`,
-`fsdp_reshard_after_forward` or `fsdp_reshard_after_backward` is rejected at trainer construction rather than
-silently ignored, naming the offending flags. QLoRA under CP takes the same gate. Under `accelerate launch`,
+`fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` or `fsdp_defer_grad_sync` is rejected at trainer
+construction rather than silently ignored, naming the offending flags. QLoRA under CP takes the same gate. Under `accelerate launch`,
 the other supported QLoRA launcher, accelerate owns the wrap and those knobs only warn.
 
 Pass a `BitsAndBytesConfig` through `load_distributed_model(..., quantization_config=bnb_config)`, or pass a

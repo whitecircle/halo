@@ -90,7 +90,12 @@ logger = get_logger(__name__, log_level="info")
 # FSDP2 shaping knobs the mixin's own wrap implements; names only. Each knob's "not requested"
 # value is its own ParallelismConfig dataclass default, read at call time so a flipped default
 # cannot leave a stale copy here gating on the wrong value.
-_FSDP_SHAPING_KNOBS = ("use_hsdp", "fsdp_reshard_after_forward", "fsdp_reshard_after_backward")
+_FSDP_SHAPING_KNOBS = (
+    "use_hsdp",
+    "fsdp_reshard_after_forward",
+    "fsdp_reshard_after_backward",
+    "fsdp_defer_grad_sync",
+)
 
 # ParallelismConfig knobs only the mixin-managed (torchrun) FSDP2 wrap implements.
 _ACCELERATE_UNSUPPORTED_KNOBS = (*_FSDP_SHAPING_KNOBS, "fp32_grad_reduce")
@@ -290,8 +295,8 @@ class DistributedTrainerMixin(
         self._ep_config = None
         self._device_mesh = None
         self._fsdp_wrapped = False
-        self._backward_reshard_modules = []
-        self._backward_reshard_armed = True
+        self._window_modules = []
+        self._window_end_armed = True
         self._warned_empty_labels = False
         self._memory_margin_checked = False
 
@@ -548,7 +553,7 @@ class DistributedTrainerMixin(
         self._invalidate_param_id_caches()
 
         # After every wrap, for the same reason: only fully_shard makes a module an FSDPModule.
-        self._setup_backward_reshard_window()
+        self._setup_grad_accum_window()
 
         self._setup_ep_gradient_checkpointing()
 
@@ -1307,8 +1312,8 @@ class DistributedTrainerMixin(
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         """Count loss-contributing tokens (accumulated as ``num_unmasked_output_tokens_seen``) and the
-        batch's attention-score work, and arm FSDP2's per-window backward reshard, before delegating
-        the actual step."""
+        batch's attention-score work, and arm FSDP2's per-window post-backward toggles, before
+        delegating the actual step."""
         self._accumulate_unmasked_output_tokens(self._extract_output_token_count(inputs))
         self._accumulate_attention_flops(inputs)
         if self._pp_runtime is not None:
@@ -1316,7 +1321,7 @@ class DistributedTrainerMixin(
             return self._pp_training_step(inputs)
         self._warn_once_on_thin_memory_margin()
         # HF sets sync_gradients before every training_step, so this is the window's last microbatch.
-        self._set_backward_reshard(self.accelerator.sync_gradients)
+        self._set_window_end(self.accelerator.sync_gradients)
         try:
             return super().training_step(model, inputs, num_items_in_batch)
         except torch.OutOfMemoryError as e:

@@ -981,6 +981,37 @@ def test_reshard_after_backward_false_is_gated():
             assert "fsdp_reshard_after_backward" in str(e)
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"world_size": 1, "gpus_per_node": 1},  # no peers: nothing to reduce, the toggle stays inert
+        {},  # pure DP
+        {"cp_size": 2},
+        {"tp_size": 2},  # TP+DP: FSDP2 reduces over the mesh's dp dimension
+        {"ep_size": 8},  # one EP group: expert/router hooks gate on the same window-end signal
+        {"ep_size": 2},  # multi-group EP: experts synced by the post-backward sweep, once per step
+        {"world_size": 16, "use_hsdp": True},
+        {"fsdp_reshard_after_backward": False},
+        {"fsdp_reshard_after_forward": True},
+        {"fp32_grad_reduce": True},
+    ],
+)
+def test_defer_grad_sync_accepted_wherever_fsdp2_reduces_per_microstep(shape):
+    create_config(fsdp_defer_grad_sync=True, **shape)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"world_size": 16, "pp_size": 2},  # the schedule already reduces once per optimizer step
+        {"tp_size": 8},  # pure TP: data_parallel_size=1 applies no FSDP2 wrap
+    ],
+)
+def test_defer_grad_sync_rejected_without_a_per_microstep_reduce(shape):
+    with pytest.raises(ValueError, match="fsdp_defer_grad_sync"):
+        create_config(fsdp_defer_grad_sync=True, **shape)
+
+
 def test_reshard_rejects_ep():
     """FULL_SHARD with real EP (ep_size>1) is rejected — its backward all-gather races DeepEP combine."""
     try:

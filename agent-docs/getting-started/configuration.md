@@ -115,6 +115,8 @@ Two resharding knobs, both `torchrun`-only:
 
     The saving is the per-microstep re-gather: about 4–10% throughput over NVLink, far more when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
 
+`fsdp_defer_grad_sync` (default `false`, `torchrun`-only) is the gradient-side counterpart: `true` reduce-scatters once per optimizer step instead of once per microstep, holding one unsharded gradient copy per GPU across the window. See [Deferred gradient reduce](../parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) for the measured trade-off.
+
 ## Example SFT config
 
 ```yaml

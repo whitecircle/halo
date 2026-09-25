@@ -264,6 +264,11 @@ class ParallelismConfig:
     # run over sockets. Costs one unsharded param copy per GPU; plain-DP torchrun path only.
     fsdp_reshard_after_backward: bool = True
 
+    # True skips FSDP2's gradient reduce on a grad-accum window's microsteps 1..n-1
+    # (set_requires_gradient_sync), so the window reduce-scatters once instead of once per microstep.
+    # Costs one unsharded gradient copy per GPU (at the reduce dtype) held across the window.
+    fsdp_defer_grad_sync: bool = False
+
     # ep_size==1 only: True shards the replicated experts via FSDP reduce-scatter (grad-equivalent,
     # frees DP-scaling memory); RL-safe — the vLLM weight-sync gather materializes shards first.
     fsdp_shard_ep1_experts: bool = True
@@ -904,6 +909,13 @@ class ParallelismConfig:
                 f"path (tp_size={self.tp_size}, pp_size={self.pp_size}): the TP setup shards through "
                 f"its own fully_shard calls and PP already pins params unsharded per stage. Remove "
                 f"the flag for those modes."
+            )
+        if self.fsdp_defer_grad_sync and (self.pp_size > 1 or (self.tp_size > 1 and self.data_parallel_size == 1)):
+            raise ValueError(
+                f"fsdp_defer_grad_sync=True has no per-microstep FSDP2 gradient reduce to defer "
+                f"(pp_size={self.pp_size}, tp_size={self.tp_size}, data_parallel_size="
+                f"{self.data_parallel_size}): the PP schedule already reduces once per optimizer step, "
+                f"and TP at data_parallel_size=1 applies no FSDP2 wrap. Remove the flag."
             )
         if not self.fsdp_shard_ep1_experts and (self.tp_size > 1 or self.cp_size > 1):
             # The TP and CP setup paths FSDP-shard ep1 experts unconditionally (their fully_shard

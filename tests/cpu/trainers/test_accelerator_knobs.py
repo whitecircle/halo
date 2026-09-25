@@ -31,6 +31,7 @@ def _fake_self(*, fp32_output_conversion=False, fp16=False, **knobs):
         use_hsdp=False,
         fsdp_reshard_after_forward=False,
         fsdp_reshard_after_backward=True,
+        fsdp_defer_grad_sync=False,
         fp32_grad_reduce=False,
     )
     for name, value in knobs.items():

@@ -2,9 +2,9 @@
 """QLoRA rejects FSDP-shaping knobs it can never honor.
 
 QLoRA skips FSDP2 entirely (``fully_shard`` cannot wrap bnb's non-float Params4bit), so ``use_hsdp`` /
-``fsdp_reshard_after_forward`` / ``fsdp_reshard_after_backward`` have nothing to act on — a
-multi-node run asking for use_hsdp would otherwise do a flat replicated all-reduce with only an info
-line about FSDP2 being skipped.
+``fsdp_reshard_after_forward`` / ``fsdp_reshard_after_backward`` / ``fsdp_defer_grad_sync`` have
+nothing to act on — a multi-node run asking for use_hsdp would otherwise do a flat replicated
+all-reduce with only an info line about FSDP2 being skipped.
 
     python tests/cpu/trainers/test_qlora_fsdp_knob_gate.py
 """
@@ -19,7 +19,12 @@ _reject = DistributedTrainerMixin._reject_fsdp_knobs_under_qlora
 
 
 def _me(**knobs):
-    config = types.SimpleNamespace(use_hsdp=False, fsdp_reshard_after_forward=False, fsdp_reshard_after_backward=True)
+    config = types.SimpleNamespace(
+        use_hsdp=False,
+        fsdp_reshard_after_forward=False,
+        fsdp_reshard_after_backward=True,
+        fsdp_defer_grad_sync=False,
+    )
     for name, value in knobs.items():
         setattr(config, name, value)
     return types.SimpleNamespace(parallelism_config=config)
@@ -31,7 +36,12 @@ def test_default_knobs_pass():
 
 @pytest.mark.parametrize(
     "knob, value",
-    [("use_hsdp", True), ("fsdp_reshard_after_forward", True), ("fsdp_reshard_after_backward", False)],
+    [
+        ("use_hsdp", True),
+        ("fsdp_reshard_after_forward", True),
+        ("fsdp_reshard_after_backward", False),
+        ("fsdp_defer_grad_sync", True),
+    ],
 )
 def test_non_default_knob_raises_naming_it(knob, value):
     with pytest.raises(ValueError, match=knob):

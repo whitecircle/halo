@@ -124,8 +124,8 @@ describes a validator or contract, never a launchable topology
   these PP-specific config-time raises: `pp_split` length mismatch or an entry < 1 (the
   sum-vs-layer-count check runs later, at model split); a stage that is
   not a whole NVLink domain; a 1-rank stage; `fsdp_shard_ep1_experts=False`; `use_hsdp=True`;
-  `fsdp_reshard_after_forward=True`; `fsdp_reshard_after_backward=False`; `lowp_precision != "bf16"`;
-  expert LoRA; and a PP-only knob (`pp_split`/`pp_microbatches`/`pp_schedule`) set at `pp_size=1`.
+  `fsdp_reshard_after_forward=True`; `fsdp_reshard_after_backward=False`; `fsdp_defer_grad_sync=True`;
+  `lowp_precision != "bf16"`; expert LoRA; and a PP-only knob (`pp_split`/`pp_microbatches`/`pp_schedule`) set at `pp_size=1`.
   At trainer construction PP also rejects `save_sharded_ep`, PEFT/LoRA, a live
   `ref_model`, `activation_offloading`, reentrant gradient checkpointing, `torch_compile`, a
   missing `max_length`, an image-bearing VLM run, and `per_device_eval_batch_size !=

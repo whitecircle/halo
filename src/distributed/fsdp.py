@@ -394,8 +394,8 @@ def _should_cast_forward_inputs(model: nn.Module) -> bool:
 def fsdp2_modules(model: nn.Module) -> list[FSDPModule]:
     """Every ``fully_shard``-wrapped module under ``model``, in ``modules()`` order.
 
-    Materialized rather than yielded so the per-microstep ``set_reshard_after_backward`` toggle
-    (:meth:`~src.trainers.mixins.grad_sync.GradientSyncMixin._set_backward_reshard`) can cache it
+    Materialized rather than yielded so the per-window FSDP2 toggle
+    (:meth:`~src.trainers.mixins.grad_sync.GradientSyncMixin._set_window_end`) can cache it
     instead of re-walking a large module tree every backward.
     """
     return [module for module in model.modules() if isinstance(module, FSDPModule)]

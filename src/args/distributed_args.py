@@ -365,6 +365,17 @@ class DistributedArguments:
             "rejected with fsdp_reshard_after_forward=True, TP, or PP."
         },
     )
+    fsdp_defer_grad_sync: bool = field(
+        default=False,
+        metadata={
+            "help": "True skips FSDP2's gradient reduce-scatter on a gradient-accumulation window's "
+            "microsteps 1..n-1 (torch set_requires_gradient_sync, re-armed for the window's last "
+            "backward), so each optimizer step reduces once instead of once per microstep. Does "
+            "nothing at gradient_accumulation_steps=1, and holds one full unsharded gradient copy "
+            "per GPU across the window (bf16, fp32 under fp32_grad_reduce). Torchrun FSDP2 path "
+            "only; rejected under PP, TP with data_parallel_size=1, and QLoRA."
+        },
+    )
     fsdp_shard_ep1_experts: bool = field(
         default=True,
         metadata={
