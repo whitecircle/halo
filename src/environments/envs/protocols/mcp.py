@@ -32,7 +32,6 @@ MCP_SERVERS = {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-brave-search"],
         "env": ["BRAVE_API_KEY"],
-        "description": "Brave web search",
     },
     "filesystem": {
         "command": "npx",
@@ -40,32 +39,27 @@ MCP_SERVERS = {
         # reach. Deliberately not HALO_DATA_ROOT, which holds the dataset cache and checkpoints.
         "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
         "env": [],
-        "description": "File system operations",
     },
     "fetch": {
         # Python package (uvx), not npm.
         "command": "uvx",
         "args": ["mcp-server-fetch"],
         "env": [],
-        "description": "HTTP fetch for web content",
     },
     "memory": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "env": [],
-        "description": "Knowledge graph memory",
     },
     "github": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-github"],
         "env": ["GITHUB_TOKEN"],
-        "description": "GitHub API",
     },
     "slack": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-slack"],
         "env": ["SLACK_TOKEN"],
-        "description": "Slack messaging",
     },
 }
 
