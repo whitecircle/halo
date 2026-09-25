@@ -5,8 +5,8 @@ Jensen-Shannon, earth-mover, alpha-beta) plus hard-label/attention masking helpe
 
 Every loss evaluates in fp32: the logits arrive bf16 and these objectives subtract nearly equal
 quantities (``log p - log q``, ``1 - cos``, ``CDF_s - CDF_t``), where bf16 cancellation can flip the
-sign of a non-negative divergence. The probability-space losses fold the upcast into the ``dtype``
-kwarg of ``softmax``/``log_softmax``, avoiding a second fp32 copy of the ``[B, S, V]`` input.
+sign of a non-negative divergence. ``kl_divergence`` is the forward KL of :mod:`losses`; the other
+probability-space losses fold the upcast into the ``dtype`` kwarg of ``softmax``/``log_softmax``.
 """
 
 import inspect
@@ -16,7 +16,7 @@ import torch
 from torch.nn.functional import cosine_similarity, kl_div, log_softmax, mse_loss, one_hot, softmax
 
 from src.data.spans import LABEL_IGNORE_INDEX
-from src.trainers.distillation.losses import masked_token_mean
+from src.trainers.distillation.losses import forward_kl_opd_loss, masked_token_mean, temperature_rescaled
 
 # Shape of the alpha-beta divergence (Cichocki, Cruces & Amari 2011). Fixed rather than configurable:
 # ``call_distillation_loss`` forwards only ``temperature``/``hard_labels``. The family requires
@@ -24,15 +24,8 @@ from src.trainers.distillation.losses import masked_token_mean
 _AB_DIVERGENCE_ALPHA = 1.0
 _AB_DIVERGENCE_BETA = 2.0
 
-
-def _temperature_rescaled(loss: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Hinton's ``T**2`` rescale, applied by every softened divergence in this module.
-
-    Softening by ``T`` shrinks the divergence and its gradient as ``1/T**2`` in the small-logit limit,
-    so multiplying back by ``T**2`` keeps the distillation term's weight against the hard-label term
-    fixed as ``distill_temperature`` varies. :func:`slim_loss` is the exception.
-    """
-    return loss * (temperature**2)
+# One forward-KL implementation for both distillation arms.
+kl_divergence_loss = forward_kl_opd_loss
 
 
 def apply_hard_labels_mask(loss: torch.Tensor, hard_labels: torch.Tensor) -> torch.Tensor:
@@ -57,20 +50,6 @@ def hard_labels_coefficient(
     return coef
 
 
-def kl_divergence_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Forward KL ``D_KL(q_teacher || p_student)``, per (token, vocab).
-
-    Same quantity as ``losses.forward_kl_opd_loss``, but folds the fp32 upcast into
-    ``softmax``/``log_softmax`` instead of materializing a second fp32 ``[B, S, V]``, and keeps
-    ``kl_div``'s exact zero at ``target == 0``.
-    """
-    student_logprobs = log_softmax(student_logits / temperature, dim=-1, dtype=torch.float32)
-    teacher_probs = softmax(teacher_logits / temperature, dim=-1, dtype=torch.float32)
-    return _temperature_rescaled(
-        kl_div(student_logprobs, teacher_probs, reduction="none", log_target=False), temperature
-    )
-
-
 def mse_loss_fn(student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> torch.Tensor:
     """MSE loss for distillation."""
     return mse_loss(student_logits.float(), teacher_logits.float(), reduction="none")
@@ -79,7 +58,7 @@ def mse_loss_fn(student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> t
 def _soft_target_cross_entropy(
     student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float
 ) -> torch.Tensor:
-    """Soft target cross entropy at ``temperature``, without the :func:`_temperature_rescaled` factor."""
+    """Soft target cross entropy at ``temperature``, without the :func:`temperature_rescaled` factor."""
     teacher_probs = softmax(teacher_logits / temperature, dim=-1, dtype=torch.float32)
     student_log_probs = log_softmax(student_logits / temperature, dim=-1, dtype=torch.float32)
     return -(teacher_probs * student_log_probs)
@@ -88,8 +67,8 @@ def _soft_target_cross_entropy(
 def soft_target_cross_entropy_loss(
     student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float
 ) -> torch.Tensor:
-    """Soft target cross entropy loss for distillation (:func:`_temperature_rescaled`)."""
-    return _temperature_rescaled(_soft_target_cross_entropy(student_logits, teacher_logits, temperature), temperature)
+    """Soft target cross entropy loss for distillation (:func:`temperature_rescaled`)."""
+    return temperature_rescaled(_soft_target_cross_entropy(student_logits, teacher_logits, temperature), temperature)
 
 
 def slim_loss(
@@ -125,7 +104,7 @@ def jensen_shannon_divergence(
 
     ``F.kl_div(input, target)`` computes ``KL(target||exp(input))``, so ``log M`` is the input and each
     distribution the target (swapping them gives the unbounded ``KL(M||P)+KL(M||Q)``). Log-space avoids
-    ``log(0)`` underflow. Rescaled like the other softened divergences (:func:`_temperature_rescaled`).
+    ``log(0)`` underflow. Rescaled like the other softened divergences (:func:`temperature_rescaled`).
     """
     student_logprobs = log_softmax(student_logits / temperature, dim=-1, dtype=torch.float32)
     teacher_logprobs = log_softmax(teacher_logits / temperature, dim=-1, dtype=torch.float32)
@@ -134,7 +113,7 @@ def jensen_shannon_divergence(
     m = 0.5 * (teacher_probs + student_probs)
     log_m = m.clamp_min(1e-12).log()
     jsd = 0.5 * (kl_div(log_m, student_probs, reduction="none") + kl_div(log_m, teacher_probs, reduction="none"))
-    return _temperature_rescaled(jsd, temperature)
+    return temperature_rescaled(jsd, temperature)
 
 
 def earth_mover_distance(student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> torch.Tensor:

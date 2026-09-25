@@ -59,23 +59,38 @@ def shifted_token_cross_entropy(shift_logits: torch.Tensor, shift_labels: torch.
     ).view(shift_labels.shape)
 
 
+def temperature_rescaled(loss: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Hinton's ``T**2`` rescale, applied by every softened divergence.
+
+    Softening by ``T`` shrinks the divergence and its gradient as ``1/T**2`` in the small-logit limit,
+    so multiplying back by ``T**2`` keeps the distillation term's weight against the hard-label term
+    fixed as the temperature varies. ``teacher_losses.slim_loss`` is the exception.
+    """
+    return loss * (temperature**2)
+
+
+def softened_log_probs(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """fp32 ``log_softmax(logits / T)``, divided after the upcast so a bf16 logit is rounded once.
+
+    fp32 because a bf16 log-sum-exp over a 100k+ vocab plus a bf16 log-prob difference biases the
+    distillation gradient. Folding the upcast into ``log_softmax``'s ``dtype`` would not save the fp32
+    copy: torch casts a bf16 input to fp32 first (only fp16 has a fused path).
+    """
+    return log_softmax(logits.float() / temperature, dim=-1)
+
+
 def reverse_kl_opd_loss(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
     temperature: float = 1.0,
 ) -> torch.Tensor:
-    """Student-to-teacher reverse KL ``D_KL(p || SG[q])`` (SDPG OPD objective).
+    """Student-to-teacher reverse KL ``D_KL(p || SG[q])`` (SDPG OPD objective), per (token, vocab).
 
-    Teacher detached, so gradient flows only through student ``p``. Per (token, vocab); scaled by
-    ``temperature ** 2`` to keep gradient magnitudes comparable across temperatures.
-
-    Logits are upcast to fp32: under autocast they arrive bf16, and a bf16 log-sum-exp over a
-    100k+ vocab plus a bf16 log-prob difference biases the distillation gradient.
+    Teacher detached, so gradient flows only through student ``p``; :func:`temperature_rescaled`.
     """
-    student_logprobs = log_softmax(student_logits.float() / temperature, dim=-1)
-    teacher_logprobs = log_softmax(teacher_logits.detach().float() / temperature, dim=-1)
-    student_probs = student_logprobs.exp()
-    return student_probs * (student_logprobs - teacher_logprobs) * (temperature**2)
+    student_logprobs = softened_log_probs(student_logits, temperature)
+    teacher_logprobs = softened_log_probs(teacher_logits.detach(), temperature)
+    return temperature_rescaled(student_logprobs.exp() * (student_logprobs - teacher_logprobs), temperature)
 
 
 def forward_kl_opd_loss(
@@ -83,13 +98,13 @@ def forward_kl_opd_loss(
     teacher_logits: torch.Tensor,
     temperature: float = 1.0,
 ) -> torch.Tensor:
-    """Teacher-to-student forward KL ``D_KL(SG[q] || p)`` (mode-covering variant). Per (token, vocab).
+    """Teacher-to-student forward KL ``D_KL(SG[q] || p)`` (mode-covering), per (token, vocab).
 
-    fp32 upcast for the same reason as :func:`reverse_kl_opd_loss`."""
-    student_logprobs = log_softmax(student_logits.float() / temperature, dim=-1)
-    teacher_logprobs = log_softmax(teacher_logits.detach().float() / temperature, dim=-1)
-    teacher_probs = teacher_logprobs.exp()
-    return teacher_probs * (teacher_logprobs - student_logprobs) * (temperature**2)
+    Also the teacher-distillation ``kl_divergence`` loss. :func:`temperature_rescaled`.
+    """
+    student_logprobs = softened_log_probs(student_logits, temperature)
+    teacher_logprobs = softened_log_probs(teacher_logits.detach(), temperature)
+    return temperature_rescaled(teacher_logprobs.exp() * (teacher_logprobs - student_logprobs), temperature)
 
 
 def unnormalized_kl_loss(
@@ -101,16 +116,13 @@ def unnormalized_kl_loss(
 
     Reverse-KL flavored (``P`` = student, ``Q`` = detached teacher); the ``(Q - P)`` mass-correction
     makes it non-negative element-wise and unbiased when summed. Returns ``[..., V]`` per-element.
-
-    fp32 upcast as in :func:`reverse_kl_opd_loss`, and because bf16 cancellation in
-    ``teacher_probs - student_probs`` would destroy the element-wise non-negativity.
+    The fp32 evaluation also keeps bf16 cancellation in ``Q - P`` from breaking that non-negativity.
     """
-    student_logprobs = log_softmax(student_logits.float() / temperature, dim=-1)
-    teacher_logprobs = log_softmax(teacher_logits.detach().float() / temperature, dim=-1)
+    student_logprobs = softened_log_probs(student_logits, temperature)
+    teacher_logprobs = softened_log_probs(teacher_logits.detach(), temperature)
     student_probs = student_logprobs.exp()
-    teacher_probs = teacher_logprobs.exp()
     log_ratio = student_logprobs - teacher_logprobs
-    return (student_probs * log_ratio + (teacher_probs - student_probs)) * (temperature**2)
+    return temperature_rescaled(student_probs * log_ratio + (teacher_logprobs.exp() - student_probs), temperature)
 
 
 _SELF_DISTILL_LOSSES = {
