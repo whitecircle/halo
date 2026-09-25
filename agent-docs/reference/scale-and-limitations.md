@@ -4,11 +4,9 @@ What the toolkit can and cannot do for very large models, long sequences, multi-
 corpora, and many nodes. Multi-node mechanics: [Multi-Node Training](../parallelism/multi-node.md).
 Debugging: [Debugging & Profiling](debugging.md).
 
-Which axis combinations may run at all is an **allowlist** (`SUPPORTED_AXIS_SETS` in
-`src/distributed/parallelism_config.py`): plain data parallelism; EP, ETP, TP, CP or PP alone; and
-EP+TP, EP+CP, EP+ETP, PP+EP, PP+ETP — the PP sets not yet runnable this release
-([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)). Anything else is rejected at
-config time, before any rank math.
+Which axis combinations may run at all is an **allowlist**
+([Supported combinations](../parallelism/README.md#supported-combinations)); anything else is
+rejected at config time, before any rank math.
 
 ## What works at scale
 
@@ -82,7 +80,6 @@ roadmap item.
 | **Full logits at long context** | GRPO without chunked log-probs, and SFT without fused linear cross-entropy (off by default on most families), materialize the full `[B, T, vocab]` logits, which EP does not shard. | `use_chunked_grpo_logprobs` ([The logits wall](../training-methods/grpo/async-grpo/performance.md#the-logits-wall)); `fused_linear_cross_entropy: true` for SFT where it is not forced off ([Liger configuration](../optimization/liger-kernels.md#configuration)). |
 | **Async GRPO trajectories are never truncated** | A trajectory grows across turns up to the context window; a row over it raises on every rank and ends the run. | Budget the episode under the served `max_model_len`: [Context budget](../training-methods/grpo/async-grpo/performance.md#context-budget); the rule: [Trajectory length](../training-methods/grpo/async-grpo/rollouts.md#trajectory-length). |
 | **Vision-language runs** | An image-bearing run refuses CP and PP and cannot pack. The toolkit's VLM collators do not truncate: a runtime batch over `max_length` raises, and offline preparation drops over-length rows. DPO's and KTO's TRL collators truncate. GRPO, classification and embedding have no vision path. | [SFT — VLMs](../training-methods/sft.md#vision-language-models), [Pre-Processing](../data/dataset-preparation.md) and [Modality support](trainer-architecture.md#modality-support). |
-| **EP+CP loss equivalence on short sequences (gpt-oss)** | The EP-vs-EP+CP forward-loss correctness check (`tests/gpu/parallelism/combined/test_ep_cp_correctness.py`) can exceed its 10% relative tolerance on an occasional gpt-oss input at very short sequence length (128 tokens, cp=2 → 64/rank), where router top-k ties are more likely to flip between the two modes. Full-length training is unaffected. | Expected numerical edge at tiny seq len; use realistic sequence lengths for gpt-oss + CP. |
 
 ## Choosing a large-scale layout
 

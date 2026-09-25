@@ -59,7 +59,7 @@ Every non-weight file in `--tokenizer_source` is copied: config, tokenizer, the 
 
 The resume sidecars are the exception: `scheduler.pt`, `router_balancing_biases.pt` and `rng_state_*` describe one training run, which an N-way merge has none of, so they are dropped. The merged model therefore ships **no** balancing sidecar — a family whose balancing bias lives in a checkpoint slot keeps it through the merged weights, while a `bias_update_transient` run's bias is gone (see [Checkpoints](checkpoints.md#resume-by-parallelism-mode)).
 
-The result loads with `from_pretrained` and serves on vLLM with no conversion. A `--tokenizer_source` that ships no tokenizer files **raises** once the weights are written, since no `from_pretrained`-based consumer could build a tokenizer from the output — re-point it at a directory or Hub id that carries one, or pass `--allow_missing_tokenizer` to accept the tokenizer-less artifact.
+The merge keeps its inputs' key layout, so the result loads with `from_pretrained` and serves wherever its inputs would ([serving rules](checkpoints.md#serving-on-vllm--sglang)). A `--tokenizer_source` that ships no tokenizer files **raises** once the weights are written, since no `from_pretrained`-based consumer could build a tokenizer from the output — re-point it at a directory or Hub id that carries one, or pass `--allow_missing_tokenizer` to accept the tokenizer-less artifact.
 
 `slerp` falls back to linear interpolation when the two tensors are near-(anti-)colinear (`|cosine| > 0.9995`), where spherical interpolation is numerically unstable and ≈ equal anyway.
 

@@ -1,6 +1,6 @@
 # Scripts Reference
 
-Catalog of toolkit scripts by category. For config fields see [Configuration](configuration-reference.md); for parallelism flags see [Expert Parallelism](../parallelism/expert-parallelism.md).
+Catalog of toolkit scripts by category. For config fields see [Configuration](configuration-reference.md); for parallelism flags see [ParallelismConfig](configuration-reference.md#parallelismconfig).
 
 Every entry script answers `python <script> --help` with its full flag list, including the CLI overrides for any YAML field.
 
@@ -14,7 +14,7 @@ Those helpers are the shared flag surfaces:
 
 | Helper | Flags |
 |---|---|
-| `scripts/_common.py` | The shard cap, the Hub source block and `--trust_remote_code`; taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/` |
+| `scripts/_common.py` | The shard cap, the Hub source block and `--trust_remote_code`; taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/`, and `--trust_remote_code` by `inference/generation/dataset_deduplication.py` |
 | `scripts/inference/_common.py` | The OpenAI endpoint, resume and Gradio blocks |
 | `scripts/inference/reward_model/_common.py` | The reward-model scoring block, on top of the previous two |
 | `scripts/environments/_common.py` | The env-eval dataset/endpoint/trajectory flags, `--training_config`, and the output writer |
@@ -27,7 +27,7 @@ Three tools keep a differently-shaped source because it is a different thing: `m
 
 `merge_peft_adapters.py` selects the head with `--task {causal_lm,classification}`.
 
-Launcher: `torchrun` for all multi-GPU work — every parallel axis **and** plain FSDP2 data parallelism; `python` for single-GPU and LoRA. `accelerate launch` with the `launcher-configs/accelerate/*.yaml` configs stays supported for plain data parallelism only.
+Launcher choice: [Launcher selection](../getting-started/configuration.md#launcher-selection).
 
 ## Training scripts
 
@@ -137,8 +137,8 @@ tokenizer does not know raises here, where the trainer warns and skips a partial
 
 In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
 `build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (default `my-bucket` — set it to your own
-bucket) and `--subfolder` (default `datasets`, `None` to skip). The same flag names on
-`dataset_deduplication.py` are ordinary local paths.
+bucket) and `--subfolder` (default `datasets`, `None` to skip). On `dataset_deduplication.py`, `--input_path` is a
+local file or a Hub dataset id and `--output_path` a local path.
 
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
 — run under a shared SIGINT/SIGTERM handler
@@ -170,7 +170,7 @@ python scripts/inference/reward_model/rm_scoring.py \
 |--------|-------------|
 | `scripts/after_training/merge_peft_adapters.py` | Merge LoRA/PEFT adapters into the base model, loaded through the class the adapter's keys address (the text-only class after a `text_only_model` run); refuses a native EP expert-LoRA directory and an adapter whose keys name no module of the base — PEFT would merge nothing there and the tool would write the bare base |
 | `scripts/after_training/merge_models.py` | Merge same-architecture checkpoints in weight space (linear / slerp / task_arithmetic / ties). Streams one tensor at a time across the inputs (each key loaded from every model, merged, written), so peak host memory scales with the largest tensor, never the merged model ([Model Merging](model-merging.md#memory-and-output)) |
-| `scripts/after_training/merge_ep_shards.py` | Merge EP sharded checkpoints into a single model (`--max_shard_size` caps the output shards, default `5GB`). `--delete_input_shards` frees the per-rank inputs once the merged checkpoint is complete — until then peak disk holds both. Refuses an input holding a PEFT adapter beside the shards: the aux copy carries `adapter_config.json` but no weight file, so the merged directory would claim an adapter it does not hold |
+| `scripts/after_training/merge_ep_shards.py` | Merge EP sharded checkpoints into a single model (`--max_shard_size` caps the output shards, default `5GB`). `--delete_input_shards` frees the per-rank inputs once the merged checkpoint is complete — until then peak disk holds both. Refuses an input holding a PEFT adapter beside the shards ([why](checkpoints.md#expert-parallelism-ep-eptp-epcp)) |
 | `scripts/after_training/convert_to_bf16.py` | Convert model weights to BF16, norm leaves kept fp32. Re-applies the source's training sidecars to a full model before saving (neutralized GptOss sinks, balancing tensors re-read from the source shards at their trained fp32) and carries `router_balancing_biases.pt` / `training_provenance.json` into the output either way, so an unmerged adapter conversion still hands them to the later merge; `--merge_adapter` without `--peft` is refused. Both `--peft` paths load the base through the class the adapter's keys address, as `merge_peft_adapters.py` does. `--model_type` (`causal_lm` default, `classifier`, `base`) picks the class the checkpoint loads with and gates the PEFT refusal. `--verify` asserts the STORED dtypes read from the saved safetensors headers — never a `from_pretrained` reload, which casts on the way in and so can never fail — weighted by parameter count, not tensor count. An unmerged PEFT save is exempt: PEFT restores LoRA A/B to fp32 as it writes them. `--check_inference` is the separate diagnostic: it reloads the saved checkpoint and prints what it generates, returning no verdict — `--verify` is the gate that raises |
 | `scripts/after_training/quantize_to_lowp.py` | Quantize a bf16/fp32 checkpoint to block-scaled mxfp8/mxfp4/nvfp4 (pairs with QAT — see [Mixed-Precision Training](../optimization/low-precision-moe-kernels.md)). `--format {mxfp8,mxfp4,nvfp4}` is required — the checkpoint names no target. The training run's lowp **scope** is not recorded in the checkpoint either, so four more flags restate it under the `ParallelismConfig` names and defaults — a config's values transfer verbatim: `--lowp_apply_dense_mlp` / `--lowp_apply_moe_experts` (both on; `--no-` prefix to disable) and `--lowp_keep_first_blocks` / `--lowp_keep_last_blocks` (both `0`) |
 | `scripts/after_training/reset_sinks.py` | Reset attention sink tokens in `--model_id` (a local checkpoint directory or a Hub repo id). `--dry_run` prints every sink tensor without writing. `--output_dir` is required for a write unless `--in_place` is given (the two are mutually exclusive; `--in_place` takes a local directory only); a `--dry_run` only reads and needs neither. Both branches stage the write — a sibling temp file for a single-file checkpoint, a sibling staging directory for a sharded one — verify every sink tensor sits at its dtype min, and only then replace the target, so a write that kept live sinks raises with the target untouched. It writes no `training_provenance.json` — both branches carry the source's record over verbatim, so a checkpoint whose sinks it just neutralized can still claim `live` to the merge tools that trust that record. Only `PeftAdapterSaver` writes the file |
@@ -229,8 +229,9 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
   takes one `--trust_remote_code`, spelled once (`add_trust_remote_code_arg` in
   `scripts/_common.py`): `merge_peft_adapters.py`, `merge_models.py`,
   `convert_to_bf16.py`, `reset_sinks.py`, `reattach_vision_tower.py`, `patch_vocab.py`,
-  `prepare_dataset.py`, `convert_deepseek_v4_bf16.py`, and the reward-model scoring CLIs
-  (`rm_scoring.py`, `rm_rejection_sampling.py`) through `scripts/inference/reward_model/_common.py`.
+  `prepare_dataset.py`, `convert_deepseek_v4_bf16.py`, the reward-model scoring CLIs
+  (`rm_scoring.py`, `rm_rejection_sampling.py`) through `scripts/inference/reward_model/_common.py`,
+  and `dataset_deduplication.py`.
 
     **The default follows the input source.** A local checkpoint or adapter (`--input_dir`,
     `--adapter_dir`, `--models`, `--rm_model_path`, or the tokenizer of the run being prepared) defaults **on**: the
@@ -238,7 +239,8 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     already produced that artifact.
 
     A Hub-capable `--model_id` source (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`,
-    `reattach_vision_tower.py`, `reset_sinks.py`) defaults **off**: a freshly downloaded
+    `reattach_vision_tower.py`, `reset_sinks.py`), like `dataset_deduplication.py`'s Hub-capable
+    `--model_name`, defaults **off**: a freshly downloaded
     third-party repo must not execute its own code merely because a tool was pointed at it. Either
     way the opposite is one flag away (`--trust_remote_code` / `--no-trust_remote_code`).
 
@@ -276,17 +278,8 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     Both checks run after the sharded-input refusal and after the already-per-expert copy-through,
     so those keep their own diagnosis.
 
-- **Asymmetric key sets.** `merge_models.py` refuses models whose tensor key sets differ — a key present
-  in only one model would otherwise be dropped from the merge (typically one checkpoint saved untied,
-  carrying `lm_head.weight`, and another tied).
-
-- **Tokenizer-less source.** `merge_models.py` refuses a `--tokenizer_source` (default: the base model,
-  else the first input) that ships no tokenizer files, since every `from_pretrained`-based consumer of
-  the merged checkpoint would fail to build a tokenizer.
-
-    This one raises *after* the merged weights are written (the source is only read at the aux-file
-    copy). Re-point `--tokenizer_source` at a directory or Hub id that carries one, or pass
-    `--allow_missing_tokenizer` if a tokenizer-less artifact is intended.
+- **`merge_models.py` inputs.** Asymmetric key sets and a tokenizer-less `--tokenizer_source` are
+  refused ([Model Merging](model-merging.md)).
 
 ## Preparation scripts
 
