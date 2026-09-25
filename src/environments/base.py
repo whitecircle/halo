@@ -1067,7 +1067,7 @@ class BaseEnvironment(ABC):
             contexts = [None] * len(prompts)
 
         results = []
-        for prompt, context in zip(prompts, contexts, strict=False):
+        for prompt, context in zip(prompts, contexts, strict=True):
             episode_id = self._get_next_episode_id()
             trajectory = self._reset_single(prompt, context)
             self._bind_effort_profile(trajectory, context)
@@ -1089,7 +1089,7 @@ class BaseEnvironment(ABC):
             contexts = [None] * len(episode_ids)
 
         steps = []
-        for episode_id, action, context in zip(episode_ids, actions, contexts, strict=False):
+        for episode_id, action, context in zip(episode_ids, actions, contexts, strict=True):
             trajectory = self._trajectories.get(episode_id)
             if trajectory is None:
                 raise ValueError(f"Episode {episode_id} not found")
@@ -1188,7 +1188,7 @@ class AsyncBaseEnvironment(BaseEnvironment):
 
             return episode_id, self._first_step(trajectory)
 
-        results = await asyncio.gather(*[reset_one(p, c) for p, c in zip(prompts, contexts, strict=False)])
+        results = await asyncio.gather(*[reset_one(p, c) for p, c in zip(prompts, contexts, strict=True)])
 
         return [r[0] for r in results], [r[1] for r in results]
 
@@ -1212,5 +1212,5 @@ class AsyncBaseEnvironment(BaseEnvironment):
             return self._finalize_step(episode_id, trajectory, reward, done, truncated, info, context)
 
         return await asyncio.gather(
-            *[step_one(eid, act, ctx) for eid, act, ctx in zip(episode_ids, actions, contexts, strict=False)]
+            *[step_one(eid, act, ctx) for eid, act, ctx in zip(episode_ids, actions, contexts, strict=True)]
         )

@@ -17,6 +17,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.environments import ray_actors
+from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment
+from src.environments.registry import create_environment
+from src.environments.tools.factories import create_native_math_tools
 
 # Test: Environment Actor (Direct - Without Ray)
 
@@ -35,6 +38,24 @@ def test_env_reset_yields_one_episode_per_prompt():
     assert len(episode_ids) == len(steps) == 2
     assert len(set(episode_ids)) == 2, "episode ids must be distinct, else trajectories overwrite"
     assert [t.info["episode_id"] for t in env.get_trajectories(episode_ids)] == episode_ids
+
+
+async def test_env_batch_calls_refuse_contexts_that_do_not_pair():
+    """A context list shorter than the batch must raise, sync and async: truncating to the shorter
+    list drops the unpaired episodes, which the caller only finds as missing results."""
+    env = create_environment("react_math", {"max_turns": 5})
+    with pytest.raises(ValueError, match="shorter"):
+        env.reset(["2+2?", "3+3?"], [{"answer": "4"}])
+    episode_ids, _ = env.reset(["2+2?"], [{"answer": "4"}])
+    with pytest.raises(ValueError, match="shorter"):
+        env.step(episode_ids, ["Final Answer: 4"], [])
+
+    async_env = AsyncNativeToolUseEnvironment(tool_registry=create_native_math_tools())
+    with pytest.raises(ValueError, match="shorter"):
+        await async_env.reset_async(["2+2?", "3+3?"], [{}])
+    episode_ids, _ = await async_env.reset_async(["2+2?"], [{}])
+    with pytest.raises(ValueError, match="shorter"):
+        await async_env.step_async(episode_ids, ["4"], [])
 
 
 # Test: Rollout Manager (Mocked Ray)
@@ -284,6 +305,42 @@ async def test_collect_rollouts_yields_one_result_per_prompt_when_every_episode_
     assert [r.prompt for r in results] == prompts
     assert all(isinstance(r, RolloutResult) and not r.success for r in results)
     assert all("no rollout server" in (r.error or "") for r in results)
+
+
+async def test_collect_rollouts_refuses_contexts_that_do_not_pair_with_prompts():
+    """One context per prompt. A short list must raise before any episode is submitted: truncating
+    leaves the unpaired prompts as masked "Unknown error" rows, and a raise after the first tasks
+    started would leave those episodes running on the actors."""
+    actor = _RecordingActor()
+    manager = _manager_over_fake_actors(actor)
+
+    with pytest.raises(ValueError, match="shorter"):
+        await manager.collect_rollouts(["a", "b", "c"], [{"answer": "1"}])
+    await asyncio.sleep(0.05)  # an orphaned task would run its episode here
+    assert actor.peak == 0
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8000", "127.0.1.1:8000", "http://[::1]:8000"])
+def test_a_loopback_server_url_warns_on_a_multinode_job(url, caplog):
+    """Every loopback spelling the weight-sync client treats as loopback, ``127.x`` included, reaches
+    no engine from an actor placed on another node."""
+
+    def manager(*urls):
+        return ray_actors.RolloutManager(
+            num_workers=1,
+            env_type="react_math",
+            env_config={},
+            server_urls=list(urls),
+            rollout_config=ray_actors.RolloutConfig(),
+        )
+
+    with caplog.at_level(logging.WARNING, logger=ray_actors.__name__):
+        manager("http://10.0.0.2:8000", url).warn_if_servers_unreachable_from_actors(multinode=True)
+        assert "loopback" in caplog.text
+        caplog.clear()
+        manager("http://10.0.0.2:8000", url).warn_if_servers_unreachable_from_actors(multinode=False)
+        manager("http://10.0.0.2:8000").warn_if_servers_unreachable_from_actors(multinode=True)
+    assert "loopback" not in caplog.text
 
 
 # Test: Tool Schema Detection

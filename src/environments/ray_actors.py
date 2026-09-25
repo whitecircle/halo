@@ -21,6 +21,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from src.configs.rollout_config import RolloutConfig
+from src.distributed.nccl.clients.base import _is_loopback
 from src.environments.base import EPISODE_ERROR_KEY, Trajectory
 from src.environments.engine_wire import build_payload, capture_generation_tokens, capture_routing_mask
 from src.environments.episode import (
@@ -557,9 +558,9 @@ class RolloutManager:
         the GRPO baseline: the effective batch shrinks until the all-masked guard halts the run. A
         loopback URL is valid only if an engine runs on every node.
         """
-        loopback = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
         urls = self.server_urls
-        if not multinode or not any(urlparse(u if "://" in u else f"http://{u}").hostname in loopback for u in urls):
+        hosts = [urlparse(u if "://" in u else f"http://{u}").hostname or "" for u in urls]
+        if not multinode or not any(_is_loopback(host) for host in hosts):
             return
         backend = self.rollout_config.backend
         logger.warning(
@@ -674,7 +675,9 @@ class RolloutManager:
                         logger.error(f"Rollout {idx} failed: {e}", exc_info=True)
                     errors[idx] = e
 
-        tasks = [asyncio.create_task(_run(i, p, c)) for i, (p, c) in enumerate(zip(prompts, contexts, strict=False))]
+        # Paired before the first task starts, so a length mismatch submits no episode.
+        episodes = list(zip(prompts, contexts, strict=True))
+        tasks = [asyncio.create_task(_run(i, p, c)) for i, (p, c) in enumerate(episodes)]
         await asyncio.gather(*tasks, return_exceptions=True)
 
         final = []
