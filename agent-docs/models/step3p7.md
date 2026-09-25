@@ -45,7 +45,9 @@ A source that itself declares no `auto_map` (a synthetic checkpoint) has no sche
 
 The checkpoint is a composite VLM with **no text-only CausalLM sibling** in transformers, so `text_only_model` is refused for this family — and the refusal sees through the hub config's poisoned `auto_map`, whose `AutoModelForCausalLM` entry is the remote-code *conditional-generation* class itself, not a text-only sibling (`resolve_auto_model_class` rejects a masquerading entry). The composite class loads through the shared VLM path; a text-only dataset still takes the text data path ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
-Native `AutoProcessor` is broken for the repo (it ships no `preprocessor_config.json`; the only processor is remote code). Text-only training needs neither: the text path uses the native `AutoTokenizer`, which carries the chat template (`<|im_start|>`/`<|im_end|>` roles, a `reasoning_effort` template variable, and a generation prompt that forces `<think>`).
+Train with `trust_remote_code: false` (the default). The repo's `auto_map` names remote-code config, processor and modeling classes for the serving engines; trusting it makes `AutoConfig` return the remote config, which the native class cannot build from (`StepRoboticsVisionEncoderConfig` has no `hidden_size`).
+
+The repo ships no native processor config (`processor_config.json` / `preprocessor_config.json`; its only processor is remote code), so a text run takes the native `AutoTokenizer` as its processing class ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). It carries the chat template: `<|im_start|>`/`<|im_end|>` roles, a `reasoning_effort` template variable, and a generation prompt that forces `<think>`. An image-data run requires the native `Step3p7Processor` and stops at its load unless a processor config sits beside the checkpoint; no test covers the family's image path.
 
 Two tokenizer facts to hold:
 
