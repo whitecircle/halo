@@ -287,6 +287,11 @@ Maintainers publish with `make push-public-all` (`ecr-public-login` + the four `
 targets). To host the images in your own registry, `docker tag` and `docker push` the locally built
 images wherever you like — the build is credential-free, so nothing sensitive rides along.
 
+`tests/cpu/config/test_release_version_in_sync.py` holds every statement of the release to
+`pyproject.toml`'s `[project] version`: its `uv.lock` entry, the `Makefile` `VERSION` default, each
+Dockerfile's `ARG VERSION`, `CITATION.cff`'s `version`, the README's newest release entry (dated as
+`CITATION.cff`'s `date-released`), and every documented `-X.Y.Z` image pin.
+
 ## Verifying and debugging
 
 ```bash
