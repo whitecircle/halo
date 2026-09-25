@@ -12,11 +12,15 @@ Run:
     python tests/cpu/environments/test_codeforces.py
 """
 
+import base64
 import json
+import pickle
+import zlib
 
 import pytest
 
 from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
+from src.configs.environment_config import EnvironmentConfig
 from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT, CodeContestsEnvironment
 from src.environments.envs.tasks.coding.datasets import (
@@ -32,8 +36,14 @@ from src.environments.envs.tasks.coding.datasets import (
     pack_icpc_verification,
     pack_livecodebench_verification,
 )
-from src.environments.envs.tasks.coding.grading import GradingSpec, compare_tokens, grade_solution
-from src.environments.sandbox.base import SandboxExecutor
+from src.environments.envs.tasks.coding.grading import (
+    GradingSpec,
+    compare_tokens,
+    grade_solution,
+    run_solution_against_tests,
+)
+from src.environments.registry import get_registered_environments, resolve_environment
+from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.sandbox.resolve import resolve_sandbox
 
 # A tolerance special-judge: accept any float within 1e-4 of the reference (argv = 3 file paths).
@@ -123,8 +133,6 @@ def test_backend_outage_counts_infra_errors():
     """A sandbox backend/transport failure is infrastructure's fault, not the program's: GradeResult
     must report it as infra_errors so the reward layer can withhold every rung (an all-infra-error
     grade carries no signal about the code)."""
-    from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-    from src.environments.sandbox.base import SandboxResult
 
     class _DownSandbox:
         def run(self, code, **kwargs):
@@ -186,10 +194,6 @@ def test_verification_falls_back_to_examples():
 
 def _encode_lcb_private(tests):
     """Reproduce LiveCodeBench's private_test_cases encoding: base64(zlib(pickle(json_str)))."""
-    import base64
-    import pickle
-    import zlib
-
     return base64.b64encode(zlib.compress(pickle.dumps(json.dumps(tests)))).decode("utf-8")
 
 
@@ -591,9 +595,6 @@ def test_max_time_limit_below_the_per_test_floor_is_refused():
 
 
 def test_registry_codeforces_is_token_comparison_preset():
-    from src.configs.environment_config import EnvironmentConfig
-    from src.environments.registry import get_registered_environments, resolve_environment
-
     assert "codeforces" in get_registered_environments()
     env = resolve_environment(
         "codeforces", EnvironmentConfig(environment_type="codeforces", max_turns=4).to_env_config()
@@ -620,8 +621,6 @@ def test_invalid_reasoning_effort_rejected():
 
 def test_codeforces_preset_forwards_reasoning_effort():
     """The codeforces/code_contests registry presets thread reasoning_effort onto the env."""
-    from src.environments.registry import resolve_environment
-
     env = resolve_environment("codeforces", {"max_turns": 4, "reasoning_effort": "high"})
     assert env.reasoning_effort == "high"
     assert resolve_environment("code_contests", {}).reasoning_effort == "medium"
@@ -629,8 +628,6 @@ def test_codeforces_preset_forwards_reasoning_effort():
 
 def test_non_coding_env_defines_no_reasoning_effort():
     """Only the coding env opts in; other envs leave the attribute unset so getattr(...) is None."""
-    from src.environments.registry import resolve_environment
-
     env = resolve_environment("native_math", {"max_turns": 2})
     assert getattr(env, "reasoning_effort", None) is None
 

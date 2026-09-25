@@ -28,6 +28,7 @@ Usage (8x B300):
 """
 
 import sys
+import traceback
 
 import torch
 from torch.distributed.optim import ZeroRedundancyOptimizer
@@ -263,8 +264,6 @@ def main() -> int:
         failed = True
         log(f"\nBENCHMARK FAILED: {type(e).__name__}: {e}")
         if rank == 0:
-            import traceback
-
             traceback.print_exc()
 
     finally:

@@ -29,6 +29,7 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 
 from src.optimizers.adamw_bf16 import AdamWBF16
+from src.optimizers.flash_adamw import create_flash_adamw_optimizer
 from src.optimizers.muon import create_muon_optimizer
 
 BASE_LR = 1e-2
@@ -85,7 +86,6 @@ def test_flash_adamw_scheduler_compat():
     pytest.importorskip("flashoptim", reason="flashoptim not installed")
     if not torch.cuda.is_available():
         pytest.skip("flashoptim refuses CPU params at construction (quantized states need CUDA)")
-    from src.optimizers.flash_adamw import create_flash_adamw_optimizer
 
     model = _tiny_model().cuda()
     opt = create_flash_adamw_optimizer(model, lr=BASE_LR)

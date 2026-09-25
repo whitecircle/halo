@@ -21,6 +21,7 @@ from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.episode import TurnGeneration, step_context_from_generation
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 
 # Token ids of the synthetic prefix-monotone template the whole-trajectory tests render with.
 _ROLE_TOKENS = {"system": 100, "user": 101, "assistant": 102, "tool": 103}
@@ -387,8 +388,6 @@ def test_a_tools_own_not_found_message_is_not_a_model_rejection():
 
 
 def test_trainer_skips_the_cut_off_turn_row():
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._rollout_routing_replay = False
     trainer._batch_build_error = None
@@ -430,8 +429,6 @@ def _flat_render(msgs, add_generation_prompt, _include_thinking):
 
 
 def _render_trainer():
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._batch_build_error = None
     trainer._rollout_template_kwargs = {}
@@ -520,8 +517,6 @@ def test_all_turns_excluded_trains_a_zero_weight_row():
     invented call it exists to suppress. The row must survive (rank-uniform row counts) at zero loss
     weight, and this is not a batch error — the episode was simply unusable.
     """
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._rollout_routing_replay = False
     trainer._batch_build_error = None

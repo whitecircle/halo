@@ -55,10 +55,8 @@ def test_transformers_still_keys_capability_off_the_varlen_function():
 def test_the_probe_returns_the_function_transformers_would_bind():
     """Identity, not just spelling: the probe and transformers must reach the same object for the
     installed FA4 build."""
-    pytest.importorskip("flash_attn.cute")
-    from flash_attn.cute import flash_attn_varlen_func
-
-    assert flash_varlen_fn("flash_attention_4") is flash_attn_varlen_func
+    cute = pytest.importorskip("flash_attn.cute")
+    assert flash_varlen_fn("flash_attention_4") is cute.flash_attn_varlen_func
 
 
 def test_the_sink_argument_names_match_transformers_alias_table():

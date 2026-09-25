@@ -1,8 +1,21 @@
 #!/usr/bin/env python
 """Tests for GenerateExamplesCallback. Run: python tests/cpu/callbacks/test_generate_examples.py"""
 
+import itertools
+import logging
+from unittest.mock import patch
+
+import pandas as pd
 import pytest
 import torch
+
+import src.callbacks.generate_examples as cb_module
+from src.callbacks.generate_examples import (
+    _MAX_PRINTED_PROMPT_CHARS,
+    GenerateExamplesCallback,
+    _is_distributed_parallel_model,
+    _pretty_print_dataframe,
+)
 
 # Mock helpers
 
@@ -87,8 +100,6 @@ class MockDataset:
 
 def test_is_distributed_parallel_model():
     """Test _is_distributed_parallel_model with mock objects."""
-    from src.callbacks.generate_examples import _is_distributed_parallel_model
-
     # Model without EP/TP
     plain_model = MockModule(has_ep_config=False)
     assert _is_distributed_parallel_model(plain_model) is False
@@ -104,8 +115,6 @@ def test_is_distributed_parallel_model():
 
 def test_callback_init():
     """Test GenerateExamplesCallback deterministic sample selection with seed=42."""
-    from src.callbacks.generate_examples import GenerateExamplesCallback
-
     # Create a dataset with 20 examples
     data = []
     for i in range(20):
@@ -152,10 +161,6 @@ def test_callback_init():
 
 def test_has_tp_dtensor_params():
     """Test _has_tp_dtensor_params distinguishes TP DTensors from FSDP2 DTensors."""
-    from unittest.mock import patch
-
-    import src.callbacks.generate_examples as cb_module
-
     # Plain model (no DTensors) — both should return False
     plain_model = MockModule()
     assert cb_module._has_tp_dtensor_params(plain_model) is False
@@ -209,9 +214,6 @@ def test_has_tp_dtensor_params():
 
 def test_fsdp2_routes_to_all_ranks():
     """Test that FSDP2 DTensor models route to all-ranks generation (not split)."""
-    from unittest.mock import patch
-
-    import src.callbacks.generate_examples as cb_module
 
     class FakeDTensorBase:
         pass
@@ -245,8 +247,6 @@ def test_fsdp2_routes_to_all_ranks():
 
 def test_generate_single_with_chosen_rejected():
     """Test _generate_single includes chosen/rejected when present."""
-    from src.callbacks.generate_examples import GenerateExamplesCallback
-
     data = [
         {
             "input_ids": [1, 2, 3],
@@ -282,9 +282,6 @@ def test_generate_single_with_chosen_rejected():
 def test_is_cp_wrapped_sees_a_wrapper_nested_under_peft():
     """PEFT keeps the CP wrapper at ``base_model.model`` and delegates ``generate`` down to it, so a
     root-only isinstance misses it and the callback would generate on sequence-sharded ranks."""
-    from unittest.mock import patch
-
-    import src.callbacks.generate_examples as cb_module
 
     class FakeCPWrapper(torch.nn.Module):
         pass
@@ -305,7 +302,6 @@ def test_is_fsdp2_model():
     """FSDP2 is detected by the ``_is_fsdp_managed_module`` flag ``fully_shard`` stamps on every
     module it manages — not by the ``FSDP<Name>`` class rename, which covers only the roots and
     would misread any unrelated class whose name happens to start with FSDP."""
-    import src.callbacks.generate_examples as cb_module
 
     class Plain:
         pass
@@ -327,9 +323,6 @@ def test_gradient_checkpointing_disable_restore_is_an_exact_inverse():
     off silently changes memory and step time for the remainder of the run. Checked over every
     on/off pattern rather than the uniform all-on case, which cannot distinguish the two.
     """
-    import itertools
-
-    import src.callbacks.generate_examples as cb_module
 
     class Layer:
         def __init__(self, gc):
@@ -356,7 +349,6 @@ def test_gradient_checkpointing_disable_restore_is_an_exact_inverse():
 
 def test_gradient_checkpointing_restored_when_generation_raises():
     """The finally-block contract: a failed generation must not leave GC off for the rest of training."""
-    from src.callbacks.generate_examples import GenerateExamplesCallback
 
     class RaisingModel(MockGenerateModel):
         def __init__(self):
@@ -377,8 +369,6 @@ def test_gradient_checkpointing_restored_when_generation_raises():
 
 def test_build_record_plain_and_preference():
     """_build_record carries chosen/rejected content only when those keys exist."""
-    from src.callbacks.generate_examples import GenerateExamplesCallback
-
     plain = GenerateExamplesCallback._build_record("P", "C", {"input_ids": [1]})
     assert plain == {"Prompt": "P", "Completion": "C"}
 
@@ -397,8 +387,6 @@ def test_generate_single_strips_prompt_prefix():
     The mock tokenizer decodes ``decoded:<ids>``; the prompt decode is a strict
     prefix of the full-output decode, so the completion is exactly the new ids.
     """
-    from src.callbacks.generate_examples import GenerateExamplesCallback
-
     dataset = MockDataset([{"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}])
     cb = GenerateExamplesCallback(preprocessed_dataset=dataset, tokenizer=MockTokenizer(), num_examples=1)
     record = cb._generate_single(MockGenerateModel(), dataset[0])
@@ -413,12 +401,6 @@ def test_generate_single_strips_prompt_prefix():
 def test_pretty_print_dataframe_truncates_long_prompt(caplog):
     """Long prompts are tail-truncated to the module's character budget with a leading ellipsis, so
     the completion stays readable in the log table; the caller's frame is left untouched."""
-    import logging
-
-    import pandas as pd
-
-    from src.callbacks.generate_examples import _MAX_PRINTED_PROMPT_CHARS, _pretty_print_dataframe
-
     long_prompt = "y" * (_MAX_PRINTED_PROMPT_CHARS + 1) + "x" * _MAX_PRINTED_PROMPT_CHARS
     df = pd.DataFrame([{"Prompt": long_prompt, "Completion": "c"}])
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import tempfile
 
 import pytest
 
@@ -45,8 +46,6 @@ def test_falls_back_to_tempdir_without_hf_home(monkeypatch, tmp_path):
     monkeypatch.delenv("HF_HOME", raising=False)
     monkeypatch.delenv(_TRITON_VAR, raising=False)
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    import tempfile
-
     tempfile.tempdir = None  # gettempdir caches; force a re-read of TMPDIR
     try:
         anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)

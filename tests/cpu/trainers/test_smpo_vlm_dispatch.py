@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from accelerate import PartialState
 from datasets import Dataset
 from transformers import ProcessorMixin
 
@@ -47,8 +48,6 @@ class ProcessorStub(StubProcessor, ProcessorMixin):
 
 @pytest.fixture(autouse=True)
 def _accelerate_state():
-    from accelerate import PartialState
-
     PartialState()  # the accelerate logger inside _prepare_dataset requires an initialized state
 
 

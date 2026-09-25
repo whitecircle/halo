@@ -15,6 +15,7 @@ from collections import UserDict
 import pytest
 import torch
 
+from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
 
 _extract = DistributedTrainerMixin._extract_output_token_count
@@ -246,7 +247,6 @@ def test_non_dp_replication_factor_matches_the_ranks_sharing_a_batch():
     ``pp_size * max(tp, cp, expert_tp)`` — the ranks that see the SAME batch — on every axis
     combination, with EP orthogonal to DP.
     """
-    from src.distributed.parallelism_config import ParallelismConfig
 
     def _config(**kwargs):
         return ParallelismConfig(world_size=8, gpus_per_node=8, nvlink_domain_size=8, **kwargs)

@@ -27,6 +27,7 @@ from unittest import mock
 
 import pytest
 import torch.nn as nn
+from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
@@ -61,8 +62,6 @@ class StubTextTokenizer(StubTokenizer):
 
 @pytest.fixture(autouse=True)
 def _accelerate_state(monkeypatch):
-    from accelerate import PartialState
-
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     PartialState()  # the coordinated dataset ops and the accelerate logger need an initialized state
 

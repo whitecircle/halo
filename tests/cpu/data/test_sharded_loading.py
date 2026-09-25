@@ -12,6 +12,7 @@ Usage:
 import os
 import shutil
 import tempfile
+from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -22,9 +23,10 @@ from datasets import Dataset, DatasetDict, load_from_disk
 # load_preprocessed_dataset logs via the accelerate logger, which requires an initialized state.
 PartialState()
 
+import src.data.sources.loading as loading
 from src.data.pipeline.preprocessing import shard_dataset
 from src.data.shard_index import SHARD_INDEX_FILE, IncompatiblePreprocessedDataset, ShardIndex, ShardInfo
-from src.data.sources.loading import load_datasets
+from src.data.sources.loading import load_datasets, load_preprocessed_dataset
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 
 
@@ -140,8 +142,6 @@ def test_load_split_distributed():
 
     try:
         create_test_sharded_dataset(100, 4, temp_dir)
-
-        from collections import Counter
 
         all_example_ids = Counter()
 
@@ -364,8 +364,6 @@ def test_load_preprocessed_dataset_empty_test_split_raises():
     downstream or hung distributed eval. Mirrors load_datasets' empty-test guard. (Per-rank-only
     emptiness — fewer non-empty shards than DP ranks — is the trainer-side equalize-raise case.)
     """
-    from src.data.sources.loading import load_preprocessed_dataset
-
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # non-empty train
@@ -389,8 +387,6 @@ def test_load_preprocessed_dataset_empty_train_split_raises(monkeypatch):
     The empty split is handed over in memory: the pinned ``datasets`` writes no shard for a zero-row
     split, so ``save_to_disk`` cannot even produce the artifact this guard is for.
     """
-    import src.data.sources.loading as loading
-
     columns = ["input_ids", "attention_mask", "example_id"]
     ds = DatasetDict(
         {
@@ -409,8 +405,6 @@ def test_load_preprocessed_dataset_missing_test_split_fails_loud():
     """A preprocessed dataset with NO test split at all must raise the clear re-prepare error at the
     loader seam (mirroring load_datasets' guard), not surface later as a bare KeyError('test') at the
     consumer's unconditional ds["test"]."""
-    from src.data.sources.loading import load_preprocessed_dataset
-
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # writes only the train split
@@ -422,8 +416,6 @@ def test_load_preprocessed_dataset_missing_test_split_fails_loud():
 
 def test_load_preprocessed_dataset_nonempty_test_split_loads():
     """Positive control for the empty-test guard: a non-empty test split loads normally."""
-    from src.data.sources.loading import load_preprocessed_dataset
-
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)

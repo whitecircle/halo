@@ -26,8 +26,12 @@ import json
 import urllib.request
 
 import torch
+from transformers import AutoModelForCausalLM
 
+from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.env import env_int, env_str
+from src.environments.engine_wire import capture_generation_tokens
+from src.environments.ray_actors import EnvironmentActor, RolloutConfig
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
@@ -65,9 +69,6 @@ def _greedy_probe() -> list[tuple[int, float]]:
 
 def test_capture_via_production_path():
     """The real payload builder + capture reader must recover ids, logprobs and prompt ids."""
-    from src.environments.engine_wire import capture_generation_tokens
-    from src.environments.ray_actors import EnvironmentActor, RolloutConfig
-
     cls = EnvironmentActor.__ray_metadata__.modified_class
     actor = cls.__new__(cls)
     actor.__init__(actor_id=0, env_type="native_math", env_config={"max_turns": 3})
@@ -95,10 +96,6 @@ def test_capture_via_production_path():
 
 def test_weight_sync_changes_the_served_policy():
     """A sync must actually land: greedy output before != after a perturbation."""
-    from transformers import AutoModelForCausalLM
-
-    from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-
     baseline, repeat = _greedy_probe(), _greedy_probe()
     # Anti-vacuity: greedy decoding is deterministic, so a later difference is the sync, not sampling.
     assert baseline == repeat, "greedy probe is not deterministic; a post-sync difference would prove nothing"

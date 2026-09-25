@@ -28,6 +28,7 @@ from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,
     rollout_valid_mask,
 )
+from src.trainers.grpo.objective.application import expand_traj_to_rows
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
@@ -357,8 +358,6 @@ def test_an_invalid_episode_is_dropped_and_excluded_from_degeneracy():
 
 def test_shared_seam_traj_row_ids_dummy_fill():
     """expand_traj_to_rows with dummy_fill=-1 reproduces the traj_row_ids construction."""
-    from src.trainers.grpo.objective.application import expand_traj_to_rows
-
     ids = expand_traj_to_rows(torch.arange(3), [2, 1, 3], num_dummy_rows=2, expand=True, dummy_fill=-1)
     assert torch.equal(ids, torch.tensor([0, 0, 1, 2, 2, 2, -1, -1]))
     ids = expand_traj_to_rows(torch.arange(3), [2, 1, 3], num_dummy_rows=0, expand=False, dummy_fill=-1)

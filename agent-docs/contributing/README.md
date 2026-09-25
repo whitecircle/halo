@@ -110,11 +110,11 @@ make train METHOD=preference/smpo CONFIG=<config>    # METHOD defaults to sft
 - **ruff, line length 119.** Selected: `E, F, I, W, UP, B, C4, SIM, T20, PLC0415`. `make lint`
   enforces the full set, and the blocking CI job runs `ruff format --check` plus the same full set.
   See [Continuous Integration](../infrastructure/ci.md).
-- **No inline imports in `src/`** (`PLC0415`). A function-level import is reserved for a genuinely
-  optional or arch-specific dependency (`flash_attn`, `deep_ep`, `kernels`). A circular import is
-  never that exception — fix it structurally.
-- **No stray `print()` in `src/`** (`T20`). `tests/**` relaxes `PLC0415`, `E402`, `T20`, `E741`,
-  `B007`, `B023`, and `SIM117`; `scripts/**` relaxes `T20`.
+- **No inline imports** (`PLC0415`), in `tests/` as in `src/`. A function-level import is reserved
+  for a genuinely optional or arch-specific dependency (`flash_attn`, `deep_ep`, `kernels`). A
+  circular import is never that exception — fix it structurally.
+- **No stray `print()` in `src/`** (`T20`). `tests/**` relaxes `E402`, `T20`, `E741`, `B007`,
+  `B023`, and `SIM117`; `scripts/**` relaxes `T20`.
 - **Reuse over re-implementation.** New trainers extend `DistributedTrainerMixin`; new parallelism
   wrappers reuse the EP-layer base hooks. See
   [Trainer Architecture](../reference/trainer-architecture.md).

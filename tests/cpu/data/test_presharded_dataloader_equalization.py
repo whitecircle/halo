@@ -22,6 +22,9 @@ from datasets import Dataset
 # _equalize_presharded_length logs via the accelerate logger, which requires an initialized state.
 PartialState()
 
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from src.trainers.reward.classification import ClassificationTrainer
@@ -153,10 +156,6 @@ def test_grpo_trainers_inherit_mixin_eval_dataloader():
     """The GRPO dataloader mixin overrides only the TRAIN path; eval must resolve to
     DataParallelDataLoaderMixin.get_eval_dataloader through the MRO (ahead of TRL's GRPOTrainer),
     so the pre-sharded eval equalization applies to online + environmental GRPO too."""
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-    from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
-    from src.trainers.grpo.online import DistributedGRPOTrainer
-
     assert "get_eval_dataloader" not in vars(GRPOTrainDataLoaderMixin)
     for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert cls.get_eval_dataloader is DataParallelDataLoaderMixin.get_eval_dataloader, (

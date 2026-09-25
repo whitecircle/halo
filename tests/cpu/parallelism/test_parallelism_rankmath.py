@@ -16,6 +16,7 @@ Complements ``test_parallelism_config.py`` with the cases it does not cover:
 Run: python tests/cpu/parallelism/test_parallelism_rankmath.py
 """
 
+from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,6 +24,7 @@ import pytest
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
+from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from tests.common.parallelism import create_config
 
 
@@ -58,7 +60,6 @@ def _run_ep_gc_guard(config):
     path completes (logs + sets args.gradient_checkpointing=False) without needing a real model. A
     REJECT shape raises RuntimeError before reaching any of that.
     """
-    from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 
     class _Args:
         gradient_checkpointing = True
@@ -155,8 +156,6 @@ def test_h1_guard_skipped_when_no_ep_layers():
     mutate it into the ep4-on-8 reject shape (simulating a config that escaped validation) to prove
     the trainer guard is defense-in-depth: hot when _has_ep_layers is True, skipped when False.
     """
-    from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
-
     cfg = create_config(ep_size=2, world_size=8, gpus_per_node=8, ep_scope="node")
     cfg.ep_size = 4
     cfg.ep_group_size = 4  # stored in __post_init__, must track the mutated ep_size
@@ -223,8 +222,6 @@ def test_h2_ep_etp_dp_rank_partition_and_partners():
     assert distinct == {0, 1, 2, 3}, dp_by_rank  # contiguous 0..dp-1
 
     # Each dp-rank shared by exactly expert_tp_size ranks.
-    from collections import Counter
-
     counts = Counter(dp_by_rank.values())
     assert all(c == etp for c in counts.values()), dp_by_rank
 

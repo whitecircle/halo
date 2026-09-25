@@ -9,17 +9,20 @@ rejections and the payload gating that stand in the way.
 
 import logging
 import re
+from typing import get_args, get_type_hints
 from unittest.mock import patch
 
 import pytest
 
 import src.environments.engine_wire as engine_wire
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.rollout_config import RolloutConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
-from src.environments.ray_actors import RolloutConfig
+from src.environments.engine_wire import capture_generation_tokens
+from src.environments.ray_actors import EnvironmentActor
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
 from tests.common.weight_sync import StockModel
 
@@ -194,8 +197,6 @@ def test_rollout_backend_defaults_to_vllm():
 
 
 def _build_payload(backend: str, reasoning_effort: str | None = None, **rollout_kwargs) -> dict:
-    from src.environments.ray_actors import EnvironmentActor
-
     cls = EnvironmentActor.__ray_metadata__.modified_class
     actor = cls.__new__(cls)
     actor.__init__(actor_id=0, env_type="native_math", env_config={"max_turns": 3})
@@ -298,8 +299,6 @@ def test_routed_experts_opt_in_is_sglang_only():
 def test_sglang_capture_reads_ids_from_meta_info_on_the_choice():
     """Shapes taken from a live SGLang response: meta_info triples are
     [logprob, token_id, text], and the prompt ids sit on the CHOICE, not the response root."""
-    from src.environments.engine_wire import capture_generation_tokens
-
     choice = {
         # The OpenAI logprobs field reports text and drops the id — capturing from it would yield None.
         "logprobs": {"content": [{"token": "<think>", "logprob": -0.001}, {"token": "\n", "logprob": -1e-7}]},
@@ -319,8 +318,6 @@ def test_sglang_capture_reads_ids_from_meta_info_on_the_choice():
 def test_sglang_capture_falls_back_when_meta_info_absent():
     """Without return_meta_info the ids are unrecoverable — return None so the caller re-tokenizes
     rather than inventing ids from the text form."""
-    from src.environments.engine_wire import capture_generation_tokens
-
     choice = {"logprobs": {"content": [{"token": "hi", "logprob": -0.5}]}}
     ids, logprobs, _ = capture_generation_tokens(choice, {}, "sglang")
     assert ids is None and logprobs is None
@@ -328,8 +325,6 @@ def test_sglang_capture_falls_back_when_meta_info_absent():
 
 def test_vllm_capture_reads_token_id_strings_and_top_level_prompt_ids():
     """Anti-vacuity: the vLLM shape is genuinely different, so a single reader could not serve both."""
-    from src.environments.engine_wire import capture_generation_tokens
-
     choice = {"logprobs": {"content": [{"token": "token_id:42", "logprob": -0.25}]}}
     ids, logprobs, prompt_ids = capture_generation_tokens(choice, {"prompt_token_ids": [7, 8]}, "vllm")
     assert ids == [42]
@@ -339,8 +334,6 @@ def test_vllm_capture_reads_token_id_strings_and_top_level_prompt_ids():
 
 def test_each_backend_capture_rejects_the_other_shape():
     """The readers must not silently half-succeed on the wrong engine's payload."""
-    from src.environments.engine_wire import capture_generation_tokens
-
     sglang_choice = {"meta_info": {"output_token_logprobs": [[-0.1, 5, "a"]]}, "prompt_token_ids": [1]}
     assert capture_generation_tokens(sglang_choice, {}, "vllm")[0] is None
     vllm_choice = {"logprobs": {"content": [{"token": "token_id:42", "logprob": -0.25}]}}
@@ -367,12 +360,6 @@ def test_capture_flags_absent_when_capture_disabled():
 def test_rollout_config_backend_roster_matches_the_gate_and_the_readers():
     """``RolloutConfig.backend`` mirrors ``AsyncTrainingConfig.rollout_backend`` (the validated gate), and every
     selectable backend has a token-capture reader — the import-time guard in ``engine_wire`` depends on both."""
-    from typing import get_args, get_type_hints
-
-    from src.configs.async_training_config import AsyncTrainingConfig
-    from src.configs.rollout_config import RolloutConfig
-    from src.environments import engine_wire
-
     gate = set(get_args(get_type_hints(AsyncTrainingConfig)["rollout_backend"]))
     mirror = set(get_args(get_type_hints(RolloutConfig)["backend"]))
     assert gate and gate == mirror

@@ -38,6 +38,7 @@ Usage:
 """
 
 import sys
+import traceback
 
 import torch
 import torch.distributed as dist
@@ -204,8 +205,6 @@ def main() -> int:
         failed = True
         log(f"\nBENCHMARK FAILED: {e}")
         if rank == 0:
-            import traceback
-
             traceback.print_exc()
 
     finally:

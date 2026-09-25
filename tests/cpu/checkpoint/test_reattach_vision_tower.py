@@ -12,7 +12,9 @@ import os
 
 import pytest
 import torch
-from transformers import AutoConfig
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
+from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGeneration
 from transformers.models.qwen3_5_moe import (
     Qwen3_5MoeConfig,
     Qwen3_5MoeForCausalLM,
@@ -20,6 +22,7 @@ from transformers.models.qwen3_5_moe import (
 )
 
 from scripts.after_training.reattach_vision_tower import reattach_vision_tower
+from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 
 
 def _tiny_composite_config() -> Qwen3_5MoeConfig:
@@ -69,7 +72,6 @@ def _weight_map(directory: str) -> dict[str, str]:
     if os.path.isfile(index):
         with open(index) as f:
             return json.load(f)["weight_map"]
-    from safetensors import safe_open
 
     with safe_open(os.path.join(directory, "model.safetensors"), framework="pt") as f:
         return dict.fromkeys(f.keys(), "model.safetensors")
@@ -91,8 +93,6 @@ def test_reattach_rebuilds_wrapper_layout(artifacts, tmp_path):
     assert getattr(config, "vision_config", None) is not None
     assert config.text_config.vocab_size == 64
 
-    from safetensors import safe_open
-
     embed_key = "model.language_model.embed_tokens.weight"
     with safe_open(os.path.join(out, weight_map[embed_key]), framework="pt") as f:
         assert torch.all(f.get_tensor(embed_key) == 3.5), "trained export weights were not the ones written"
@@ -109,8 +109,6 @@ def test_a_base_storing_its_text_tower_under_another_prefix_is_refused(artifacts
     (renamed only inside ``from_pretrained``) has nothing under ``model.language_model.``, so every
     one of its text tensors was carried over beside the trained ones — two text towers colliding on
     load — and the run reported success. Refused before the output directory exists."""
-    from safetensors.torch import load_file, save_file
-
     base_dir, export_dir = artifacts
     vendor_base = tmp_path / "vendor_base"
     vendor_base.mkdir()
@@ -141,10 +139,6 @@ def test_an_output_aimed_at_the_base_is_refused(artifacts):
 def test_a_base_of_another_family_is_refused(artifacts, tmp_path):
     """The graft is a plain attribute assignment, so a Qwen3.5 text tower would slot into a GLM-5
     wrapper's config without complaint — a checkpoint that loads and serves garbage."""
-    from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration
-
-    from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
-
     _, export_dir = artifacts
     other_base = str(tmp_path / "glm5_base")
     Glm5NextForConditionalGeneration(

@@ -33,6 +33,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from accelerate import PartialState
+from transformers.models.zaya import modeling_zaya
 
 import src.callbacks.wiring as wiring
 import src.distributed.expert_parallel.balancing_strategy as balancing_strategy
@@ -50,6 +52,7 @@ from src.models.moe_balancing import (
     ROUTER_LOGITS_FORCED_OFF_ATTR,
     is_transient_balancing_router,
 )
+from src.models.patches.zaya import patch_zaya_router_load_recording
 
 
 class _Cfg:
@@ -361,11 +364,6 @@ def test_zaya_load_patch_declares_the_discard_slot_end_to_end() -> None:
     ``_has_discard_expert_slot`` on the hub router class, and ``_detect_moe`` must read it off an
     instance of that class. Break either and the discard slot is bias-balanced like a real expert.
     """
-    from accelerate import PartialState
-    from transformers.models.zaya import modeling_zaya
-
-    from src.models.patches.zaya import patch_zaya_router_load_recording
-
     PartialState()  # the patch logs through accelerate's logger, which needs an initialized state
     patch_zaya_router_load_recording()
     assert modeling_zaya.ZayaRouter._has_discard_expert_slot is True, (

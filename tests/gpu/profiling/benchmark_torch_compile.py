@@ -43,6 +43,7 @@ import torch.distributed as dist
 from accelerate import PartialState
 from datasets import Dataset
 from transformers import AutoTokenizer
+from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.loading.model_loading import load_distributed_model
@@ -233,8 +234,6 @@ def run_benchmark_mode(
 
     # --- SFT Config ---
     output_dir = f"/tmp/bench_compile_{mode}_{args.ep}_{args.seq}"
-
-    from trl import SFTConfig
 
     sft_config = SFTConfig(
         output_dir=output_dir,

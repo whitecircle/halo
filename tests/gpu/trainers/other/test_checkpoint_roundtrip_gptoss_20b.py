@@ -35,11 +35,13 @@ Run examples (2 GPUs, one mode at a time to manage memory):
 import argparse
 import math
 import os
+import shutil
 import sys
 import traceback
 
 import torch
 import torch.distributed as dist
+from accelerate import PartialState
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
@@ -368,7 +370,6 @@ def verify_checkpoint_on_rank0(
         details.append(f"    Max diff: {max_diff:.2e} ({max_diff_param})")
 
         del roundtrip_model, roundtrip_sd
-        import shutil
 
         shutil.rmtree(roundtrip_dir, ignore_errors=True)
 
@@ -481,8 +482,6 @@ def main() -> int:
     args, _ = parser.parse_known_args()
 
     rank, world_size, local_rank = init_distributed()
-
-    from accelerate import PartialState
 
     PartialState()
 

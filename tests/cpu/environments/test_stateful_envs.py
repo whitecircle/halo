@@ -16,21 +16,22 @@ Run: python tests/cpu/environments/test_stateful_envs.py
 """
 
 import json
+import os
 import shutil
+import unittest
 
 import pytest
 
 from src.environments.base import EPISODE_INVALID_REASON_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.swe import SweEnvironment
+from src.environments.sandbox.base import SandboxResult
 
 _HAS_GPP = shutil.which("g++") is not None
 
 
 def _skip(reason: str):
     """Register a genuine skip (not a silent pass): ``unittest.SkipTest`` is pytest's skip signal."""
-    import unittest
-
     raise unittest.SkipTest(reason)
 
 
@@ -118,8 +119,6 @@ def test_sandbox_backend_outage_voids_the_episode_unpriced():
     the policy's fault: it goes unpriced, ends the episode and marks it invalid, so the trainer drops
     it from the GRPO group baseline. A program-level failure (non-zero exit) stays a successful call.
     """
-    from src.environments.sandbox.base import SandboxResult
-
     env = SweEnvironment(max_turns=5, tool_success_reward=0.05, tool_error_penalty=0.1)
     try:
         episode_ids, _ = env.reset(["task"])
@@ -150,7 +149,6 @@ def test_code_env_cleanup_closes_sessions():
     workdir = env._sessions[eid].workdir
     env.step(episode_ids, ["done"], [None])
     env.cleanup(episode_ids)
-    import os
 
     assert eid not in env._sessions
     assert not os.path.exists(workdir), "cleanup must close the session and delete its workdir"
@@ -200,8 +198,6 @@ def test_bash_tool_timeout_is_an_observation_not_an_exception():
 def test_bash_tool_nonzero_exit_is_an_observation_and_a_backend_outage_is_not():
     """The ``run_code`` error split, which decides who pays ``tool_error_penalty``: the command's own
     non-zero exit is a successful observation, a backend failure is a FAILED call."""
-    from src.environments.sandbox.base import SandboxResult
-
     env = SweEnvironment(max_turns=5)
     try:
         episode_ids, _ = env.reset(["task"])

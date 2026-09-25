@@ -17,6 +17,7 @@ Run: python tests/cpu/environments/test_sandbox.py
 """
 
 import os
+import threading
 import time
 
 import pytest
@@ -25,7 +26,13 @@ import requests
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.sandbox.base import LOCAL_NPROC_LIMIT, ExecutionGate, SandboxInfraError, SandboxResult
+from src.environments.sandbox.base import (
+    LOCAL_NPROC_LIMIT,
+    ExecutionGate,
+    SandboxInfraError,
+    SandboxResult,
+    _resolve_execution_slots,
+)
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
@@ -148,8 +155,6 @@ def test_execution_gate_caps_concurrency():
     """The gate admits at most ``slots`` executions at once (a judge-style queue), so a wall-clock
     time limit is not distorted by oversubscription. One slot strictly serializes; three let runs
     overlap but never beyond the cap. Fails if the gate stops bounding concurrency."""
-    import threading
-    import time
 
     def peak_concurrency(gate: ExecutionGate, workers: int) -> int:
         live = 0
@@ -182,8 +187,6 @@ def test_execution_slots_env_override_via_env_int():
     """HALO_SANDBOX_MAX_CONCURRENCY parses through src.env.env_int (single home for env parsing):
     a valid override wins (clamped to >=1), a malformed value warns inside env_int and falls back
     to the CPU-count default instead of raising mid-run."""
-    from src.environments.sandbox.base import _resolve_execution_slots
-
     default_slots = max(1, os.cpu_count() or 1)
     saved = os.environ.get("HALO_SANDBOX_MAX_CONCURRENCY")
     try:

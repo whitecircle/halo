@@ -5,6 +5,7 @@ Covers the truthiness/parse-and-fallback contract every HALO_/DIST_ knob relies 
 (``HALO_S3_DATASET_CACHE_DIR`` → ``S3_DATASET_CACHE_DIR`` → home default).
 """
 
+import importlib
 import os
 
 import pytest
@@ -133,8 +134,6 @@ def test_env_str_nested_fallback_chain():
 def test_data_path_derives_from_scratch_root():
     """data_path joins under HALO_DATA_ROOT; the default is a home-dir cache (never the root FS or
     a hardcoded /mnt), and an explicit HALO_DATA_ROOT overrides it."""
-    import importlib
-
     os.environ.pop("HALO_DATA_ROOT", None)
     mod = importlib.reload(env_mod)
     try:

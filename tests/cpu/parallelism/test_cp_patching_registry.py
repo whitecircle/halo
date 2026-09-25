@@ -20,6 +20,7 @@ import inspect
 import pytest
 import torch.nn as nn
 
+from src.distributed.context_parallel import validation
 from src.distributed.context_parallel.layers.registry import (
     CP_SUPPORTED_ATTENTION_CLASSES,
     WRAPPER_CLASS_MAP,
@@ -38,8 +39,6 @@ def test_supported_classes_match_wrapper_registry_exactly():
 def test_validator_reads_the_derived_registry():
     """The validator must not carry its own copy of the list — importing it from anywhere else
     is what let the two drift."""
-    from src.distributed.context_parallel import validation
-
     assert validation.CP_SUPPORTED_ATTENTION_CLASSES is CP_SUPPORTED_ATTENTION_CLASSES
 
 

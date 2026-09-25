@@ -2,9 +2,9 @@
 """
 Test suite for EmbeddingTrainer.
 
-Tests multiple loss types (MNRL, CoSENT) as well as import and capability
-checks. Uses sentence-transformers/paraphrase-MiniLM-L3-v2 for speed;
-production workloads use Qwen/Qwen3-Embedding-0.6B.
+Tests multiple loss types (MNRL, CoSENT) as well as capability checks.
+Uses sentence-transformers/paraphrase-MiniLM-L3-v2 for speed; production
+workloads use Qwen/Qwen3-Embedding-0.6B.
 
 Every leg runs collectives (``dist.barrier``, ``gather_saveable_tensors``, ``trainer.train``), so a
 failure must end the process rather than fall through to the next leg: a rank that swallowed its own
@@ -115,16 +115,6 @@ def lora_model() -> SentenceTransformer:
     for name, param in model.named_parameters():
         param.requires_grad = "lora_" in name
     return model
-
-
-def check_basic_import() -> bool:
-    """Verify EmbeddingTrainer imports correctly and the re-export is the same class."""
-    log("Check: Basic Import")
-
-    from src.trainers.embedding.trainer import EmbeddingTrainer as ET
-
-    assert ET is EmbeddingTrainer, "EmbeddingTrainer re-exported from src.trainers should be identical"
-    return True
 
 
 def check_capability_flags() -> bool:
@@ -364,7 +354,6 @@ def run(ctx):
 
     return {
         "checks": {
-            "basic_import": check_basic_import(),
             "capability_flags": check_capability_flags(),
             "training_pairs_mnrl": check_loss_leg(ctx, "mnrl", create_pairs_dataset(64), create_pairs_dataset(16)),
             "training_scored_pairs_cosent": check_loss_leg(

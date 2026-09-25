@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from accelerate import PartialState
+from transformers import Mistral4Config
 from transformers.models.qwen3_next import Qwen3NextConfig
 
 from src.data.collators.factory import select_data_collator
@@ -91,8 +92,6 @@ def test_pp_keeps_rows_is_refused(monkeypatch):
 
 
 def test_other_families_get_no_segment_kwargs():
-    from transformers import Mistral4Config
-
     config = Mistral4Config(num_hidden_layers=1)
     config._attn_implementation = "flash_attention_2"
     collator = select_data_collator(make_tokenizer(), packing=True, model_config=config)
@@ -140,8 +139,6 @@ def test_packing_allowed_when_both_wheels_are_importable(monkeypatch):
 
 def test_other_families_are_not_gated_on_the_gdn_wheels(monkeypatch):
     """The fallbacks only matter where the model has a GatedDeltaNet: nothing else reads the markers."""
-    from transformers import Mistral4Config
-
     _backends(monkeypatch, missing=tuple(name for name, _ in GDN_SEGMENT_AWARE_BACKENDS))
     config = Mistral4Config(num_hidden_layers=1)
     config._attn_implementation = "flash_attention_2"

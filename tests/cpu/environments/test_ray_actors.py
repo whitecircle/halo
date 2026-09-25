@@ -8,17 +8,41 @@ Run with:
 These tests use Ray in local mode and mock the vLLM HTTP calls.
 """
 
+import ast
 import asyncio
+import dataclasses
 import json
 import logging
+import os
+import pickle
+import threading
+from contextvars import ContextVar
 from types import SimpleNamespace
 
 import pytest
+import ray
 
+from src.configs.async_training_config import AsyncTrainingConfig
 from src.environments import ray_actors
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment
+from src.environments.base import Trajectory
+from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.ray_actors import (
+    EnvironmentActor,
+    RolloutConfig,
+    RolloutHTTPError,
+    RolloutManager,
+    RolloutResult,
+    TurnGeneration,
+    _is_client_error,
+    _should_giveup,
+    ray_init_kwargs,
+)
 from src.environments.registry import create_environment
+from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.environments.tools.factories import create_native_math_tools
+from src.inference.response import FINISH_REASON_LENGTH
+from tests.common.utils import REPO_ROOT
 
 # Test: Environment Actor (Direct - Without Ray)
 
@@ -29,8 +53,6 @@ def test_env_reset_yields_one_episode_per_prompt():
     A reset that collapses or reorders prompts silently misattributes every reward the manager maps
     back positionally.
     """
-    from src.environments.registry import create_environment
-
     env = create_environment("react_math", {"max_turns": 5})
     episode_ids, steps = env.reset(["2+2?", "3+3?"], [{"answer": "4"}, {"answer": "6"}])
 
@@ -63,8 +85,6 @@ async def test_env_batch_calls_refuse_contexts_that_do_not_pair():
 def test_rollout_manager_round_robins_across_servers():
     """Multi-server rollout spreads load by cycling ``_next_url``. A selector that stopped advancing
     would pin every episode on one engine — same total throughput on paper, one server saturated."""
-    from src.environments.ray_actors import RolloutConfig, RolloutManager
-
     urls = ["http://server1:8000", "http://server2:8000", "http://server3:8000"]
     manager = RolloutManager(
         num_workers=1,
@@ -84,10 +104,6 @@ async def test_rollout_manager_start_shutdown():
     Note: Async Ray actors don't work in local_mode, so we skip the actual
     actor creation test when local_mode would be used.
     """
-    import ray
-
-    from src.environments.ray_actors import RolloutConfig, RolloutManager, ray_init_kwargs
-
     # Skip test if we can only use local mode (async actors not supported)
     # This test requires a real Ray cluster or non-local mode
     try:
@@ -204,8 +220,6 @@ def test_rollout_config_defaults():
     ``tests/cpu/config/test_rollout_config_mirror.py``. Echoing them here as well was the second
     source of truth that let the two sides drift 32x on ``max_tokens``.
     """
-    from src.environments.ray_actors import RolloutConfig
-
     config = RolloutConfig()
 
     # Must NOT have removed fields
@@ -215,8 +229,6 @@ def test_rollout_config_defaults():
     assert not hasattr(config, "max_concurrent_per_actor")
 
     # RolloutConfig should be fully picklable (no unpicklable callables)
-    import pickle
-
     pickled = pickle.dumps(config)
     restored = pickle.loads(pickled)
     assert restored.temperature == config.temperature
@@ -232,8 +244,6 @@ def test_rollout_config_defaults():
 
 def _manager_over_fake_actors(actor, *, num_workers=2, max_concurrent_rollouts=None):
     """A started RolloutManager whose pool is ``actor``, so ``collect_rollouts`` runs without Ray."""
-    from src.environments.ray_actors import RolloutConfig, RolloutManager
-
     manager = RolloutManager(
         num_workers=num_workers,
         env_type="react_math",
@@ -261,9 +271,6 @@ class _RecordingActor:
         self.run_episode = SimpleNamespace(remote=self._remote)
 
     def _remote(self, *, prompt, context, server_url, config):
-        from src.environments.base import Trajectory
-        from src.environments.ray_actors import RolloutResult
-
         async def _episode():
             self.inflight += 1
             self.peak = max(self.peak, self.inflight)
@@ -294,8 +301,6 @@ async def test_collect_rollouts_bounds_in_flight_episodes_by_max_concurrent():
 async def test_collect_rollouts_yields_one_result_per_prompt_when_every_episode_fails():
     """The trainer maps rollouts back to prompts positionally, so a failing server must still yield
     one RolloutResult per prompt, in order — dropping the failures shifts every reward by one."""
-    from src.environments.ray_actors import RolloutResult
-
     prompts = ["a", "b", "c"]
     manager = _manager_over_fake_actors(_RecordingActor(fail=True), num_workers=2)
 
@@ -348,8 +353,6 @@ def test_a_loopback_server_url_warns_on_a_multinode_job(url, caplog):
 def test_tools_schema_detection():
     """Native tool-use environments must emit OpenAI-format tool schemas — the server rejects any
     other shape, so the key VALUES matter, not just their presence."""
-    from src.environments.registry import create_environment
-
     native_env = create_environment("native_math", {"max_turns": 3})
     schema = native_env.get_tools_schema()
 
@@ -362,8 +365,6 @@ def test_tools_schema_detection():
 
 def test_tool_calls_in_step_context():
     """Test that tool_calls in context are attached to assistant messages."""
-    from src.environments.registry import create_environment
-
     # Create a native tool use environment
     env = create_environment("native_math", {"max_turns": 5})
 
@@ -397,8 +398,6 @@ def _make_actor(env_type="native_math", env_config=None):
     schema are lazy), so this is CPU-safe and lets us exercise the genuine ``_build_payload``
     rather than a hand-rebuilt copy of its logic.
     """
-    from src.environments.ray_actors import EnvironmentActor
-
     cls = EnvironmentActor.__ray_metadata__.modified_class
     actor = cls.__new__(cls)
     actor.__init__(actor_id=0, env_type=env_type, env_config=env_config or {"max_turns": 3})
@@ -407,8 +406,6 @@ def _make_actor(env_type="native_math", env_config=None):
 
 def test_build_payload_sends_only_supported_params_and_env_tools():
     """The real _build_payload forwards the supported sampling params + OpenAI tools, nothing else."""
-    from src.environments.ray_actors import RolloutConfig
-
     actor = _make_actor("native_math")  # native_math exposes OpenAI-format tools
     payload = actor._build_payload(
         [{"role": "user", "content": "2+2?"}],
@@ -427,8 +424,6 @@ def test_build_payload_sends_only_supported_params_and_env_tools():
 
 def test_build_payload_gates_model_and_omits_empty_tools():
     """model is added iff model_name is set; tools key is dropped when the env exposes none."""
-    from src.environments.ray_actors import RolloutConfig
-
     actor = _make_actor("native_math")
     actor._tools_schema = None  # prime the cache to the no-tools branch (skips env construction)
     payload = actor._build_payload([{"role": "user", "content": "hi"}], RolloutConfig(model_name="Qwen/Qwen3-4B"))
@@ -439,8 +434,6 @@ def test_build_payload_gates_model_and_omits_empty_tools():
 
 def test_build_payload_carries_the_chat_template_kwargs_only_when_set():
     """The run's template variables ride nested; the effort level never does (it travels top-level)."""
-    from src.environments.ray_actors import RolloutConfig
-
     actor = _make_actor("native_math")
     actor._tools_schema = None
     messages = [{"role": "user", "content": "hi"}]
@@ -456,8 +449,6 @@ def test_build_payload_sends_no_tools_for_a_react_env():
     Advertising them makes a server with a tool-call parser strip the call out of ``content``: ReAct
     then sees no ``Action:``, appends its format hint and burns the turn unpriced and uncounted.
     """
-    from src.environments.ray_actors import RolloutConfig
-
     react_payload = _make_actor("react_math")._build_payload([{"role": "user", "content": "2+2?"}], RolloutConfig())
     native_payload = _make_actor("native_math")._build_payload([{"role": "user", "content": "2+2?"}], RolloutConfig())
 
@@ -494,8 +485,6 @@ def _bare_local_attribute_reads(root):
     Bare locals only, ``self`` excluded: ``self.async_config.rollout_server_url`` reads a *config*
     field of the same name, and counting it would let a dead result field look consumed.
     """
-    import ast
-
     names = set()
     for path in root.rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
@@ -513,11 +502,6 @@ def test_rollout_result_carries_only_consumed_fields():
     the second fails when a field stops being read anywhere in the actor/trainer path. Neither passes
     on a field that only ever gets written.
     """
-    import dataclasses
-
-    from src.environments.ray_actors import RolloutResult
-    from tests.common.utils import REPO_ROOT
-
     declared = {f.name for f in dataclasses.fields(RolloutResult)}
     assert declared == CONSUMED_ROLLOUT_RESULT_FIELDS, (
         f"RolloutResult fields drifted from the consumed set: only in the class {declared - CONSUMED_ROLLOUT_RESULT_FIELDS}, "
@@ -560,9 +544,6 @@ async def test_sglang_length_cutoff_survives_the_rollout_transport():
     """SGLang spells the token-cap cut-off ``stop_reason``, and this transport reads the response body
     as a plain dict — so a reader that knows only ``finish_reason`` clears the truncation and the env
     grades an engine-cut fragment as a deliberate final answer."""
-    from src.environments.ray_actors import RolloutConfig
-    from src.inference.response import FINISH_REASON_LENGTH
-
     actor = _make_actor("native_math")
     session = _FakeChatCompletionsSession(
         {
@@ -585,9 +566,6 @@ async def test_a_turn_that_used_its_whole_cap_is_a_cut_even_when_vllm_says_tool_
     """vLLM labels the finish ``tool_calls`` whenever its parser extracted a call, including one it
     salvaged from a turn max_tokens cut mid-call (the name survives, the arguments come back ``{}``).
     The transport reads the cap off ``usage.completion_tokens`` so the env takes the cut path."""
-    from src.environments.ray_actors import RolloutConfig
-    from src.inference.response import FINISH_REASON_LENGTH
-
     actor = _make_actor("native_math")
     salvaged = {"id": "c1", "type": "function", "function": {"name": "python_repl", "arguments": "{}"}}
     session = _FakeChatCompletionsSession(
@@ -618,10 +596,6 @@ async def test_actor_releases_session_when_episode_errors():
     """A stateful SweEnvironment episode that errors mid-way must still release its sandbox
     session + temp dir — run_episode cleans up in a finally, so a long-lived actor doesn't leak a
     working directory per failed rollout."""
-    import os
-
-    from src.environments.ray_actors import RolloutConfig, TurnGeneration
-
     actor = _make_actor("swe", {"max_turns": 5})
     env = actor._get_env()  # force construction so we can inspect its sessions
 
@@ -659,10 +633,6 @@ async def test_actor_drives_async_env_via_step_async():
     reset_async/step_async by the rollout — a sync step would hit NativeTool.execute's 'no sync
     handler' and the tool would never run. Verifies the actor detects AsyncBaseEnvironment and the
     async tool actually executes."""
-    from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment
-    from src.environments.ray_actors import RolloutConfig, TurnGeneration
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-
     ran = {"called": False}
 
     async def _async_handler(x):
@@ -716,8 +686,6 @@ async def test_run_episode_generation_tokens_sum_across_turns():
     aggregates into episode/generation_tokens, so a regression to per-turn accounting would silently mis-report
     per-episode generation length. Drives the real multi-turn loop in run_episode (native_math), mocking
     only the vLLM call so each turn reports a distinct token count."""
-    from src.environments.ray_actors import RolloutConfig, TurnGeneration
-
     actor = _make_actor("native_math", {"max_turns": 5})
 
     async def _fake_client():
@@ -762,9 +730,6 @@ async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
     the RL reward. Episode A's code only solves A's problem and B's only solves B's, so a leak flips
     at least one reward from full-pass to fail. This is the reward-critical Ray-actor property, so
     it runs the genuine sync env + local subprocess grader, no mocks below the HTTP boundary."""
-    from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-    from src.environments.ray_actors import RolloutConfig, TurnGeneration
-
     # A: double the input; B: increment it. Each problem's single hidden test is satisfied ONLY by
     # its own program — B's incrementing code scores 0 on A's doubling test and vice versa.
     problems = {
@@ -826,12 +791,6 @@ async def test_slow_sync_step_does_not_block_concurrent_episodes():
     offloaded to worker threads both are inside step simultaneously and pass; stepped inline on the
     loop, the first step blocks the loop, the second episode's step never starts, and the barrier
     times out — surfacing as broken-barrier episode errors."""
-    import threading
-
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.ray_actors import RolloutConfig, TurnGeneration
-    from src.environments.tools.definitions import NativeToolRegistry
-
     barrier = threading.Barrier(2, timeout=10.0)
 
     class _BarrierStepEnv(NativeToolUseEnvironment):
@@ -870,12 +829,6 @@ async def test_sync_step_offload_preserves_cross_turn_contextvars():
     per-episode store) stays visible on turn 2 of the SAME episode, and never leaks into a
     concurrent episode. A naive per-call ``asyncio.to_thread`` would drop turn-1 writes (fresh
     context copy each call); a shared context would leak markers across episodes."""
-    from contextvars import ContextVar
-
-    from src.environments.envs.protocols.native import NativeToolUseEnvironment
-    from src.environments.ray_actors import RolloutConfig, TurnGeneration
-    from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-
     turn_var: ContextVar = ContextVar("test_episode_marker", default=None)
     second_turn_reads: dict[str, str | None] = {}
 
@@ -934,7 +887,6 @@ async def test_sync_step_offload_preserves_cross_turn_contextvars():
 
 def test_is_client_error():
     """Only a genuine, non-transient 4xx from the rollout server abandons the batch."""
-    from src.environments.ray_actors import RolloutHTTPError, _is_client_error
 
     def _http(status, body="boom"):
         return RolloutHTTPError(status, "vllm", body)
@@ -962,8 +914,6 @@ def test_is_client_error():
 def test_an_engine_serialization_fault_under_a_400_is_retried():
     """vLLM reports a NaN log-prob it cannot serialise as a 400, though the request was valid and a fresh
     one succeeds: giving up on it ends every episode in flight on that engine when one decode step faults."""
-    from src.environments.ray_actors import RolloutHTTPError, _is_client_error, _should_giveup
-
     body = (
         '{"error":{"message":"Out of range float values are not JSON compliant: nan",'
         '"type":"BadRequestError","param":null,"code":400}}'
@@ -980,8 +930,6 @@ def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
     The response body is server-controlled text: a 503 from a proxy that quotes the upstream
     "status 400" it saw must not abandon the whole batch on the strength of that quote.
     """
-    from src.environments.ray_actors import RolloutHTTPError, _is_client_error
-
     exc = RolloutHTTPError(503, "vllm", "upstream returned status 400: bad request")
 
     assert "status 400" in str(exc)
@@ -995,8 +943,6 @@ def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
 
 def test_rollout_manager_max_concurrent_clamping():
     """Test that max_concurrent is clamped to at least num_workers."""
-    from src.environments.ray_actors import RolloutConfig, RolloutManager
-
     # max_concurrent_rollouts < num_workers should be clamped
     manager = RolloutManager(
         num_workers=8,
@@ -1024,8 +970,6 @@ def test_rollout_manager_max_concurrent_clamping():
 
 def test_async_training_config_to_rollout_config():
     """Test that AsyncTrainingConfig.get_rollout_config() maps all fields."""
-    from src.configs.async_training_config import AsyncTrainingConfig
-
     config = AsyncTrainingConfig(
         rollout_temperature=0.9,
         rollout_top_p=0.8,

@@ -18,9 +18,14 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
+from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
+from transformers.models.mistral4.modeling_mistral4 import Mistral4Experts
 
+from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
+from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.kernels.fused_glu import (
     fused_gelu_tanh_mul,
     fused_silu_mul,
@@ -105,9 +110,6 @@ def test_gemma4_fused_combine_matches_the_eager_activation():
 
 def test_real_mistral4_module_activation_passes_the_gate():
     """The exact production object: ``Mistral4Experts.act_fn`` is a ``SiLUActivation`` instance."""
-    from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
-    from transformers.models.mistral4.modeling_mistral4 import Mistral4Experts
-
     config = Mistral4Config(
         hidden_size=32,
         intermediate_size=64,
@@ -130,10 +132,6 @@ def test_a_family_owning_its_combine_latches_it_rather_than_forking_the_seam():
     families that are not eager; overriding both lets the two disagree. GptOss is the one family
     outside the seam entirely — its interleaved-bias paths never call ``_glu_combine``.
     """
-    from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-    from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-    from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-
     forked = [
         cls.__name__
         for cls in ep_layer_classes()

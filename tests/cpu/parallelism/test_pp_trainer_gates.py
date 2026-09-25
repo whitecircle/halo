@@ -16,9 +16,19 @@ import importlib
 from types import SimpleNamespace
 
 import pytest
+import torch
+import torch.nn as nn
+from accelerate import PartialState
+from datasets import Dataset
+from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
+from src.checkpoint.format import save_dtype_caster
+from src.distributed.loading.peft_setup import _reject_layer_indexed_patterns_under_pp as guard
+from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.mixins.pipeline import PipelineTrainerMixin, wrapper_state_outside_stages
 from src.trainers.mixins.validation import ParallelismValidationMixin
+from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
 # Explicit so a new trainer that never considered PP shows up as a missing entry, not an inherit.
@@ -67,8 +77,6 @@ def _pipeline_stub(**attrs):
     ``self``, so a bare namespace cannot stand in for a trainer; the mixin's own no-op hook is what
     a trainer that declares no extra gates inherits.
     """
-    from src.trainers.mixins.pipeline import PipelineTrainerMixin
-
     stub = object.__new__(PipelineTrainerMixin)
     stub.__dict__.update(attrs)
     return stub
@@ -153,11 +161,6 @@ def test_layer_indexed_freeze_patterns_rejected_on_a_stage():
     freeze path has no matched-nothing check, so it is silent. Index-free patterns are stage-invariant
     and must keep working, and nothing may change off PP.
     """
-    import torch.nn as nn
-
-    from src.distributed.loading.peft_setup import _reject_layer_indexed_patterns_under_pp as guard
-    from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
-
     model = nn.Sequential(nn.Linear(2, 2))
     # Off PP the patterns are resolved against the whole model, so indices are meaningful.
     guard(model, ["model.layers.30.*"], "freeze_layers_patterns")
@@ -179,11 +182,6 @@ def test_layer_ranges_written_as_glob_character_classes_are_rejected():
     index-free pattern catches, silently, because a co-occurring ``*.o_proj*`` keeps the
     matched-nothing raise from firing.
     """
-    import torch.nn as nn
-
-    from src.distributed.loading.peft_setup import _reject_layer_indexed_patterns_under_pp as guard
-    from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
-
     model = nn.Sequential(nn.Linear(2, 2))
     setattr(model, PP_STAGE_PARTITION_ATTR, (0, 47))
     for pattern in ("model.layers.5[6-9].*", "model.layers.[6-8][0-9].*", "model.layers.9[0-3].*"):
@@ -212,11 +210,6 @@ def _pp_args(**overrides):
 
 def _tiny_composite():
     """A tiny GLM-5 composite wrapper — a family that ships NO text-only CausalLM sibling."""
-    import torch
-    from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration
-
-    from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
-
     torch.manual_seed(0)
     config = Glm5NextConfig(
         text_config=dict(TINY_GLM5_CONFIG), vision_config=dict(TINY_GLM5_VISION_CONFIG), attn_implementation="sdpa"
@@ -226,10 +219,6 @@ def _tiny_composite():
 
 def _drive_composite_split(train_dataset=None, eval_dataset=None, data_collator=None):
     """``_maybe_prepare_pipeline_model`` on the tiny composite, as stage 0 of a pp2 x dp2 topology."""
-    from accelerate import PartialState
-
-    from src.trainers.mixins.pipeline import PipelineTrainerMixin
-
     PartialState()  # the gate's accelerate logger needs an initialized state
     mixin = _pipeline_stub(parallelism_config=_pc(pp_size=2), save_sharded_ep=False, _moe_balancing="none")
     kwargs = {"model": _tiny_composite(), "train_dataset": train_dataset, "eval_dataset": eval_dataset}
@@ -265,8 +254,6 @@ def test_image_bearing_vlm_run_is_rejected_under_pp(evidence):
     Driven through ``_maybe_prepare_pipeline_model`` itself. Asserting on ``is_vlm_model`` instead
     would pass with the entire gate deleted.
     """
-    from datasets import Dataset
-
     kwargs = {key: (Dataset.from_dict(value) if isinstance(value, dict) else value) for key, value in evidence.items()}
     with pytest.raises(ValueError, match="Vision-language training is not supported") as err:
         _drive_composite_split(**kwargs)
@@ -277,17 +264,12 @@ def test_text_only_run_of_a_multimodal_wrapper_splits_and_keeps_its_vision_tower
     """The same wrapper with text data is admitted: the text tower becomes the pipeline stage and
     the tensors no stage holds — the vision tower — are stashed, untouched, for the PP save to
     re-emit so the export keeps the wrapper layout (a resume plans for them too)."""
-    import torch
-    from datasets import Dataset
-
     mixin, kwargs = _drive_composite_split(
         train_dataset=Dataset.from_dict({"input_ids": [[1, 2]], "labels": [[1, 2]]})
     )
     stage = kwargs["model"]
     assert type(stage).__name__ == "PipelineStageModule"
     assert not any("visual" in name for name, _ in stage.named_parameters()), "the vision tower leaked into a stage"
-
-    from src.checkpoint.format import save_dtype_caster
 
     composite = _tiny_composite()
     reference = {k: v for k, v in composite.state_dict().items() if k.startswith("model.visual.")}
@@ -303,11 +285,6 @@ def test_text_only_run_of_a_multimodal_wrapper_splits_and_keeps_its_vision_tower
 def test_plain_causal_lm_drops_nothing_at_the_split():
     """Anti-vacuity for the stash: a model whose every tensor is stage-owned yields an empty set,
     so no PP save of a plain causal LM ever writes a wrapper part."""
-    from transformers import Qwen3Config, Qwen3ForCausalLM
-
-    from src.trainers.mixins.pipeline import wrapper_state_outside_stages
-    from tests.common.models import TINY_QWEN3_CONFIG
-
     assert wrapper_state_outside_stages(Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))) == {}
 
 
@@ -316,8 +293,6 @@ def test_sharded_ep_save_is_rejected_under_pp():
     stages would write ``layers.0.*`` shards that collide in the merged index — or merge under the
     wrong names. Documented as rejected in four places and enforced here, at the same gate the other
     PP blockers use, so the flag cannot quietly survive into a run's first save."""
-    from src.trainers.mixins.pipeline import PipelineTrainerMixin
-
     args = SimpleNamespace(
         max_length=128,
         gradient_checkpointing=False,

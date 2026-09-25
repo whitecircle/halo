@@ -12,6 +12,8 @@ Usage:
     python tests/cpu/data/test_s3_dataset_operations.py
 """
 
+import hashlib
+import importlib
 import logging
 import os
 import sys
@@ -21,7 +23,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from datasets import Dataset
 
+import src.data.sources.dataset_cache as s3_mod
+import src.env as env_mod
 from scripts.before_training.s3_datasets import main as s3_cli_main
+from src.data.pipeline.preprocessed_metadata import load_preprocessed_metadata
+from src.data.shard_index import PREPROCESSING_VERSION, ShardInfo
 from src.data.sources import s3_client as s3_client_mod
 from src.data.sources.dataset_cache import (
     _read_marker_fingerprint,
@@ -30,6 +36,7 @@ from src.data.sources.dataset_cache import (
 )
 from src.data.sources.s3_client import S3Client, build_s3_uri
 from src.data.sources.s3_client import logger as s3_module_logger
+from src.data.sources.sharded_dataset import ShardedDatasetLoader
 
 
 def test_get_storage_options_default():
@@ -161,8 +168,6 @@ def test_load_dataset_cache_hit():
 
     with tempfile.TemporaryDirectory() as cache_root:
         with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            import hashlib
-
             cache_key = hashlib.md5(b"test-bucket/my/dataset").hexdigest()
             cache_dir = os.path.join(cache_root, cache_key)
             cache_path = os.path.join(cache_dir, "dataset")
@@ -231,8 +236,6 @@ def _make_cached_dataset(cache_root: str, fingerprint: str | None) -> tuple[str,
 
     ``fingerprint=None`` writes a legacy marker (URI only, no content identity).
     """
-    import hashlib
-
     cache_key = hashlib.md5(b"test-bucket/my/dataset").hexdigest()
     cache_path = os.path.join(cache_root, cache_key, "dataset")
     os.makedirs(cache_path, exist_ok=True)
@@ -365,8 +368,6 @@ def test_load_dataset_legacy_marker_served_and_upgraded():
 
 def _make_s3_loader():
     """Build a ShardedDatasetLoader instance bypassing __init__ with an S3 source."""
-    from src.data.sources.sharded_dataset import ShardedDatasetLoader
-
     with patch.object(ShardedDatasetLoader, "__init__", lambda self, **kw: None):
         loader = ShardedDatasetLoader.__new__(ShardedDatasetLoader)
     loader.bucket = "test-bucket"
@@ -385,8 +386,6 @@ def test_load_shard_from_s3_caches_locally():
     download in parallel and TP/CP siblings (or reruns) reuse the cache without
     re-streaming S3.
     """
-    from src.data.shard_index import ShardInfo
-
     real_ds = Dataset.from_dict({"x": [1, 2, 3]})
     shard = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=1024)
 
@@ -406,7 +405,6 @@ def test_load_shard_from_s3_caches_locally():
                 loader._load_shard_from_s3(shard)
 
                 assert mock_load.call_args_list[0][0][0] == ("s3://test-bucket/preprocessed/dataset/train/shard_0000")
-                import hashlib
 
                 key = hashlib.md5(b"test-bucket/preprocessed/dataset/train/shard_0000").hexdigest()
                 marker = os.path.join(cache_root, "shards", key, "shard", ".download_complete")
@@ -416,8 +414,6 @@ def test_load_shard_from_s3_caches_locally():
 
 def _make_cached_shard(cache_root: str, fingerprint: str | None) -> tuple[str, str]:
     """Create a complete per-shard cache for train/shard_0000; returns (cache_path, marker)."""
-    import hashlib
-
     key = hashlib.md5(b"test-bucket/preprocessed/dataset/train/shard_0000").hexdigest()
     cache_path = os.path.join(cache_root, "shards", key, "shard")
     os.makedirs(cache_path, exist_ok=True)
@@ -433,8 +429,6 @@ def test_load_shard_from_s3_stale_cache_redownloads():
     Marker holds the old fingerprint, live S3 reports a new one → the shard is re-downloaded
     instead of silently training on OLD data.
     """
-    from src.data.shard_index import ShardInfo
-
     shard = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=1024)
     real_ds = Dataset.from_dict({"x": [1, 2, 3]})
 
@@ -463,8 +457,6 @@ def test_load_shard_from_s3_stale_cache_redownloads():
 
 def test_load_shard_from_s3_offline_serves_cache():
     """S3 unreachable (shard fingerprint probe returns None) → the complete shard cache is served."""
-    from src.data.shard_index import ShardInfo
-
     shard = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=1024)
 
     with tempfile.TemporaryDirectory() as cache_root:
@@ -526,8 +518,6 @@ def test_load_shard_index_from_s3():
     """_load_shard_index_from_s3 reads JSON from S3 via s3fs."""
     print("Testing ShardedDatasetLoader._load_shard_index_from_s3...")
 
-    from src.data.sources.sharded_dataset import ShardedDatasetLoader
-
     index_data = {
         "version": "1.0",
         "num_shards": 2,
@@ -565,9 +555,6 @@ def test_load_shard_index_from_s3():
 def test_load_preprocessed_metadata_from_s3():
     """load_preprocessed_metadata reads JSON from S3 via s3fs."""
     print("Testing load_preprocessed_metadata (S3)...")
-
-    from src.data.pipeline.preprocessed_metadata import load_preprocessed_metadata
-    from src.data.shard_index import PREPROCESSING_VERSION
 
     metadata_dict = {
         # Every written metadata.json carries the stamp (dataclass default) and the load compares it.
@@ -622,11 +609,6 @@ def test_a_key_only_path_without_a_configured_bucket_is_refused(monkeypatch):
 def test_s3_cache_dir_derives_from_scratch_root():
     """No explicit S3 cache override → the cache dir derives from HALO_DATA_ROOT (one scratch knob);
     an explicit HALO_S3_DATASET_CACHE_DIR still wins."""
-    import importlib
-
-    import src.data.sources.dataset_cache as s3_mod
-    import src.env as env_mod
-
     keys = ("HALO_S3_DATASET_CACHE_DIR", "HALO_DATA_ROOT")
     saved = {k: os.environ.pop(k, None) for k in keys}
     try:
@@ -727,11 +709,6 @@ def test_non_positive_cache_lock_timeout_warns_and_falls_back(raw, caplog):
     """``filelock`` reads the extremes as its own modes — 0 fails immediately, a negative waits
     forever — so a non-positive override must be REFUSED out loud and fall back to the store budget,
     never silently redefine the peer-download wait. A positive value is still honoured verbatim."""
-    import importlib
-
-    import src.data.sources.dataset_cache as s3_mod
-    import src.env as env_mod
-
     saved = os.environ.get("HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS")
     try:
         os.environ["HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS"] = raw

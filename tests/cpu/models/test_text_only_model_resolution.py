@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
+from src.distributed.loading import vlm_setup
 from src.models.loading.model_preparation import resolve_auto_model_class
 
 
@@ -97,8 +98,6 @@ def test_text_only_skips_the_vlm_branch_in_load_model_for_training(monkeypatch):
     """The flag must divert BEFORE the VLM probe: the probe enters a rank-coordinated store phase,
     and the wrapper class it leads to is exactly what text_only_model exists to avoid — patching
     the resolver alone is not enough, since sft.py loads through this entry point."""
-    from src.distributed.loading import vlm_setup
-
     calls = {}
     monkeypatch.setattr(vlm_setup, "is_vlm_model", lambda *a, **k: calls.setdefault("probe", True) or True)
     monkeypatch.setattr(

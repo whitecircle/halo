@@ -20,7 +20,7 @@ from sklearn.metrics import matthews_corrcoef, roc_auc_score
 from transformers.trainer_utils import EvalPrediction
 
 from src.configs.classification_config import ClassificationConfig
-from src.trainers.reward.classification import ClassificationTrainer
+from src.trainers.reward.classification import ClassificationTrainer, _validate_best_model_metric
 
 # Binary fixture: labels are 4 positives then 6 negatives; argmax gives TP=3 FN=1 FP=2 TN=4, an
 # asymmetric confusion matrix (so the two per-class rows differ). The logit-0 column varies, so
@@ -218,8 +218,6 @@ def test_omitted_auc_roc_raises_when_checkpoints_are_ranked_by_it(tmp_path, labe
 
 def test_ranking_on_auc_roc_with_the_knob_off_is_refused_at_construction(tmp_path):
     """`compute_auc_roc: false` + `metric_for_best_model: auc_roc` can never report the key at all."""
-    from src.trainers.reward.classification import _validate_best_model_metric
-
     with pytest.raises(ValueError, match="compute_auc_roc is off"):
         _validate_best_model_metric(_config(tmp_path, compute_auc_roc=False, metric_for_best_model="auc_roc"))
 

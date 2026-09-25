@@ -20,6 +20,10 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
+from transformers import Mistral4Config
+from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
+from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteMoE
+from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
 
 from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
@@ -190,9 +194,6 @@ _REAL_KNOBS = {
 
 
 def _real_mistral4_block():
-    from transformers import Mistral4Config
-    from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
-
     config = Mistral4Config(
         vocab_size=64,
         hidden_size=H,
@@ -213,9 +214,6 @@ def _real_mistral4_block():
 
 
 def _real_glm4_block():
-    from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
-    from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteMoE
-
     config = Glm4MoeLiteConfig(
         vocab_size=64,
         hidden_size=H,

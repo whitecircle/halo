@@ -10,9 +10,6 @@ supported". This ``pytest_pyfunc_call`` hook runs any coroutine test through
 The environment registry is process-global module state. Tests that register a
 stub factory take ``isolated_registry`` to drop it again, so a later test that
 sweeps the registered types resolves real environments rather than the stubs.
-The fixture is opt-in, not autouse: several test modules import the registry
-lazily inside a test body, and a blanket teardown would roll back the built-in
-registrations that import performs.
 """
 
 import asyncio
@@ -20,17 +17,12 @@ import inspect
 
 import pytest
 
+from src.environments.registry import _ENVIRONMENT_REGISTRY
+
 
 @pytest.fixture
 def isolated_registry():
-    """Undo whatever env types the test registers, keeping other entries as the test left them.
-
-    The registry is imported here rather than at module scope: a conftest import runs before every
-    test in the tree, and pulling the environments package in that early reorders module
-    initialisation for unrelated suites.
-    """
-    from src.environments.registry import _ENVIRONMENT_REGISTRY
-
+    """Undo whatever env types the test registers, keeping other entries as the test left them."""
     before = dict(_ENVIRONMENT_REGISTRY)
     yield
     for name in set(_ENVIRONMENT_REGISTRY) - set(before):

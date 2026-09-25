@@ -35,17 +35,31 @@ Usage:
 """
 
 import argparse
+import json
 import math
 import os
 import random
 import shutil
 import tempfile
+import urllib.request
+from urllib.parse import urlparse
 
 import torch
+from accelerate.utils import is_peft_model
 from datasets import Dataset
+from peft import LoraConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import GRPOConfig
 
+from src.configs.async_training_config import AsyncTrainingConfig
+from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
+from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
 from src.rewards.matching import extract_last_boxed
+from src.trainers.distillation.sdpg import DistributedSDPGTrainer
+from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.on_policy_e2e import probe_top_logprobs
@@ -117,9 +131,6 @@ def create_grpo_dataset(num_samples: int, seed: int = SEED) -> Dataset:
 
 def test_vllm_server_reachable():
     """Verify vLLM server is running and healthy with weight transfer endpoints."""
-    import json
-    import urllib.request
-
     url = f"{VLLM_SERVER_URL}/health"
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -139,9 +150,6 @@ def test_vllm_server_reachable():
 
 def test_vllm_generation():
     """Test that vLLM can generate text."""
-    import json
-    import urllib.request
-
     url = f"{VLLM_SERVER_URL}/v1/chat/completions"
     payload = json.dumps(
         {
@@ -173,12 +181,6 @@ def test_online_grpo_e2e():
     use_vllm=True pointing to the Docker vLLM server, runs a few
     training steps, and verifies completion.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from trl import GRPOConfig
-
-    from src.distributed.parallelism_config import ParallelismConfig
-    from src.trainers.grpo.online import DistributedGRPOTrainer
-
     output_dir = tempfile.mkdtemp(prefix="test_grpo_vllm_e2e_")
 
     try:
@@ -191,8 +193,6 @@ def test_online_grpo_e2e():
             dtype=torch.bfloat16,
             trust_remote_code=True,
         )
-
-        from urllib.parse import urlparse
 
         parsed = urlparse(VLLM_SERVER_URL)
         vllm_host = parsed.hostname or "localhost"
@@ -266,12 +266,6 @@ def test_online_sdpg_e2e():
     It asserts the OPD term actually fired (the ``opd_loss``/``opd_beta`` metrics are recorded), so a
     regression that silently drops OPD (e.g. the fused-Liger loss bypass) fails here.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from trl import GRPOConfig
-
-    from src.distributed.parallelism_config import ParallelismConfig
-    from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-
     output_dir = tempfile.mkdtemp(prefix="test_sdpg_vllm_e2e_")
 
     try:
@@ -280,8 +274,6 @@ def test_online_sdpg_e2e():
             tokenizer.pad_token = tokenizer.eos_token
 
         model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True)
-
-        from urllib.parse import urlparse
 
         parsed = urlparse(VLLM_SERVER_URL)
         vllm_host = parsed.hostname or "localhost"
@@ -361,15 +353,6 @@ def test_environmental_grpo_e2e():
     Tests DistributedAsyncEnvironmentalGRPOTrainer with a ReAct math environment,
     using the Docker vLLM server for generation and weight sync.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from trl import GRPOConfig
-
-    from src.configs.async_training_config import AsyncTrainingConfig
-    from src.distributed.parallelism_config import ParallelismConfig
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-
     output_dir = tempfile.mkdtemp(prefix="test_env_grpo_vllm_e2e_")
 
     try:
@@ -487,16 +470,6 @@ def test_online_grpo_lora_e2e():
     un-adapted base — broken on-policy RL). A clean multi-step run with finite loss,
     on a confirmed PeftModel, exercises the merge→strip→unmerge sync path end-to-end.
     """
-    from urllib.parse import urlparse
-
-    from accelerate.utils import is_peft_model
-    from peft import LoraConfig
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from trl import GRPOConfig
-
-    from src.distributed.parallelism_config import ParallelismConfig
-    from src.trainers.grpo.online import DistributedGRPOTrainer
-
     output_dir = tempfile.mkdtemp(prefix="test_grpo_lora_vllm_e2e_")
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -556,17 +529,6 @@ def test_online_grpo_lora_e2e():
 
 def test_environmental_grpo_lora_e2e():
     """Environmental GRPO + LoRA against the live vLLM server — PEFT weight sync via the env path."""
-    from accelerate.utils import is_peft_model
-    from peft import LoraConfig
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from trl import GRPOConfig
-
-    from src.configs.async_training_config import AsyncTrainingConfig
-    from src.distributed.parallelism_config import ParallelismConfig
-    from src.environments.envs.protocols.react import ReActEnvironment
-    from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
-    from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-
     output_dir = tempfile.mkdtemp(prefix="test_env_grpo_lora_vllm_e2e_")
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)

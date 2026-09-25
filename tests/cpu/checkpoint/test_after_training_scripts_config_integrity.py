@@ -32,6 +32,7 @@ from peft import LoraConfig, get_peft_model
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
+from src.checkpoint import tool_io
 from tests.common.checkpoint_io import weight_files
 from tests.common.utils import load_script_module
 
@@ -387,8 +388,6 @@ def test_patch_vocab_honours_max_shard_size():
 def test_patch_vocab_preflights_the_full_model_load(monkeypatch, capsys):
     """The whole model lands in host RAM before the patch; the shared preflight must warn ahead of it
     (silence means the tool stopped calling the helper) and must not abort the run."""
-    from src.checkpoint import tool_io
-
     monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)
     with tempfile.TemporaryDirectory() as tmp:
         src, out = Path(tmp) / "src", Path(tmp) / "out"

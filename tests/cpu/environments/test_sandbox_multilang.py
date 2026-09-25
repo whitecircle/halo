@@ -29,10 +29,13 @@ Run: python tests/cpu/environments/test_sandbox_multilang.py
 
 import os
 import shutil
+import tempfile
 import threading
+import unittest
 
 import pytest
 
+from src.environments.sandbox import base as _base
 from src.environments.sandbox.base import LANGUAGES, resolve_language, supported_languages
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
@@ -74,8 +77,6 @@ def _skip(reason: str):
     ``unittest.SkipTest`` is what pytest treats as a skip, so a bubblewrap functional test that
     cannot run here is reported as skipped, never as a passing test that exercised nothing.
     """
-    import unittest
-
     raise unittest.SkipTest(reason)
 
 
@@ -205,7 +206,6 @@ def test_cpp_memory_cap_applies_to_binary():
 def test_missing_compiler_is_backend_error():
     """Pointing the spec at a non-existent compiler surfaces a backend error, not a crash."""
     sb = LocalSubprocessSandbox()
-    from src.environments.sandbox import base as _base
 
     original = _base.LANGUAGES["cpp"]
     _base.LANGUAGES["cpp"] = _base.LanguageSpec(
@@ -571,9 +571,6 @@ def test_bubblewrap_probe_fails_fast_when_cannot_sandbox(tmp_path=None):
     namespace), so the construction probe detects it deterministically without needing a real
     namespace failure.
     """
-    import os
-    import tempfile
-
     d = tempfile.mkdtemp()
     fake = os.path.join(d, "bwrap")
     with open(fake, "w") as fh:

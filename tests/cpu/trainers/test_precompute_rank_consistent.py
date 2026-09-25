@@ -14,11 +14,17 @@ broadcast both inputs and restore the patched ``hash_module``.
 Run: python tests/cpu/trainers/test_precompute_rank_consistent.py
 """
 
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
+from accelerate import PartialState
 
+import src.trainers.preference.precompute as precompute_mod
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
+from src.trainers.preference.dpo import DistributedDPOTrainer
+from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.preference.precompute import (
     PrecomputeRefLogpsRankConsistentMixin,
     _defining_module,
@@ -64,8 +70,6 @@ class _FakeDataset:
 
 def _install_rank0_broadcast(monkeypatch):
     """Simulate the collective: every rank receives rank 0's authoritative value ``"R0"``."""
-    import src.trainers.preference.precompute as precompute_mod
-
     monkeypatch.setattr(precompute_mod, "broadcast_from_rank0", lambda _value: "R0")
 
 
@@ -97,15 +101,11 @@ def test_hash_module_restored_after_precompute(monkeypatch):
     _install_rank0_broadcast(monkeypatch)
     original = hash_module
     _FakeTrainer()._precompute_ref_logps(_FakeDataset("FP1"), "train", 2)
-    import tests.cpu.trainers.test_precompute_rank_consistent as this_mod
-
-    assert this_mod.hash_module is original
+    assert sys.modules[__name__].hash_module is original
 
 
 def test_context_manager_no_hash_module_symbol_is_noop():
     """A module without a ``hash_module`` symbol must not raise (pure-DP TRL versions)."""
-    import types
-
     empty = types.ModuleType("empty")
     with _rank0_authoritative_module_hash(empty):
         pass
@@ -131,9 +131,6 @@ def test_distributed_trainers_use_the_mixin():
     module that owns ``hash_module`` (a subclass override must never capture that lookup, or the
     hash patch silently no-ops and the EP/TP deadlock returns).
     """
-    from src.trainers.preference.dpo import DistributedDPOTrainer
-    from src.trainers.preference.kto import DistributedKTOTrainer
-
     for trainer_cls in (DistributedDPOTrainer, DistributedKTOTrainer):
         assert issubclass(trainer_cls, PrecomputeRefLogpsRankConsistentMixin)
         mro = list(trainer_cls.__mro__)
@@ -153,11 +150,6 @@ def test_dpo_skips_sweep_when_ref_columns_present(monkeypatch):
     """Dataset-supplied ref columns must short-circuit the sweep (dataset returned unchanged, no
     broadcast) — the seam PP relies on; a dataset missing a column must fall through INTO the
     rank-consistent mixin (its first act is the fingerprint broadcast)."""
-    from accelerate import PartialState
-
-    import src.trainers.preference.precompute as precompute_mod
-    from src.trainers.preference.dpo import DistributedDPOTrainer
-
     PartialState()  # the skip path logs through accelerate's logger, which needs the state
 
     class _Sentinel(Exception):

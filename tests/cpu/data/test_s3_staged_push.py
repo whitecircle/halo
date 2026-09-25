@@ -19,6 +19,7 @@ and a completed push sweeps stale objects and every staging tree.
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 from datasets import Dataset
 
 from src.data.sources.s3_client import _PUSH_COMPLETE_MARKER, _STAGING_INFIX, S3Client
@@ -104,8 +105,6 @@ class FakeBoto:
 
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
-            from botocore.exceptions import ClientError
-
             raise ClientError({"Error": {"Code": "404", "Message": "NotFound"}}, "HeadObject")
 
     def list_objects_v2(self, Bucket, Prefix="", MaxKeys=1000):

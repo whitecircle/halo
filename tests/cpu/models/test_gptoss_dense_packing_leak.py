@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from accelerate import PartialState
-from transformers import GptOssConfig
+from transformers import GptOssConfig, Mistral4Config
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
 from src.data.collators.factory import select_data_collator
@@ -125,8 +125,6 @@ def test_factory_allows_varlen_packing_for_gpt_oss():
 def test_factory_only_warns_for_isolating_families_on_dense():
     """A family whose dense mask path DOES isolate (mistral4, drift 0.0 — see
     test_mistral4_packed_isolation) keeps the warn-not-raise behavior."""
-    from transformers import Mistral4Config
-
     config = Mistral4Config(num_hidden_layers=1)
     config._attn_implementation = "sdpa"
     assert config.model_type not in DENSE_PACKING_LEAK_MODEL_TYPES

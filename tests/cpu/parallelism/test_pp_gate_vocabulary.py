@@ -25,6 +25,8 @@ from types import SimpleNamespace
 import pytest
 
 from src.data.spans import LABEL_IGNORE_INDEX
+from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.pp_gates import (
     reject_pp_activation_offloading,
     reject_pp_compute_metrics,
@@ -34,6 +36,9 @@ from src.trainers.mixins.pp_gates import (
     require_precomputed_columns,
     require_precomputed_reference,
 )
+from src.trainers.preference.dpo import DistributedDPOTrainer
+from src.trainers.preference.kto import DistributedKTOTrainer
+from src.trainers.preference.smpo import SmoothMarginPOTrainer
 
 PEFT_SENTINEL = object()
 """Stand-in for a ``peft_config``: the gates test identity against ``None``, never structure."""
@@ -208,8 +213,6 @@ def _drive_gates(trainer_cls, **kwargs):
     walk has to run on the trainer class itself. The two attributes below are all it reads before
     the gates under test.
     """
-    from src.trainers.mixins.pipeline import PipelineTrainerMixin
-
     stub = object.__new__(trainer_cls)
     stub.parallelism_config = kwargs.pop("parallelism_config")
     stub.save_sharded_ep = False
@@ -217,8 +220,6 @@ def _drive_gates(trainer_cls, **kwargs):
 
 
 def _drive_dpo(**overrides):
-    from src.trainers.preference.dpo import DistributedDPOTrainer
-
     kwargs = {
         "model": object(),
         "args": _dpo_args(),
@@ -230,8 +231,6 @@ def _drive_dpo(**overrides):
 
 
 def _drive_kto(**overrides):
-    from src.trainers.preference.kto import DistributedKTOTrainer
-
     kwargs = {
         "model": object(),
         "args": _kto_args(),
@@ -244,8 +243,6 @@ def _drive_kto(**overrides):
 
 def _drive_smpo(peft_config=None):
     """SMPO gates its explicit ctor parameters itself — the mixin's kwargs hook never sees them."""
-    from src.trainers.preference.smpo import SmoothMarginPOTrainer
-
     trainer = SimpleNamespace(
         is_vlm=False,
         padding_free=False,
@@ -258,8 +255,6 @@ def _drive_smpo(peft_config=None):
 
 def _drive_offline_grpo(peft_config=None, compute_metrics=None):
     """Offline GRPO likewise: ``peft_config`` and ``compute_metrics`` are explicit ctor parameters."""
-    from src.trainers.grpo.offline import OfflineGRPOTrainer
-
     trainer = SimpleNamespace(
         loss_type="grpo", policy_gradient_formulation="prob_weighted", max_prompt_length=64, max_completion_length=64
     )
@@ -270,8 +265,6 @@ def _drive_offline_grpo(peft_config=None, compute_metrics=None):
 
 def _drive_pipeline_mixin(**overrides):
     """``PipelineTrainerMixin._maybe_prepare_pipeline_model`` — the shared gate SFT/reward ride."""
-    from src.trainers.mixins.pipeline import PipelineTrainerMixin
-
     kwargs = {
         "model": SimpleNamespace(config=SimpleNamespace()),
         "args": _training_args(),

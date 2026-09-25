@@ -27,6 +27,7 @@ from src.distributed.expert_parallel.expert_weights import (
     resolve_ep_merge_layer_class,
     supported_ep_merge_model_types,
 )
+from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.expert_parallel.saving import _check_ep_merge_family_supported
 
 E, H, M = 3, 8, 5
@@ -232,10 +233,6 @@ def test_gptoss_merge_refuses_unexpected_expert_params():
     """GptOss's own merge mirrors the base guard: an expert param outside the two layouts it
     re-interleaves (an ETP-only shard name, a future root) raises instead of being silently
     dropped into a checkpoint that loads and is wrong."""
-    from src.distributed.expert_parallel.layers.gpt_oss import (
-        EPGptOssMoELayer,
-    )
-
     with pytest.raises(ValueError, match="unexpected expert params"):
         EPGptOssMoELayer.merge_shards_to_hf("model.layers.0.mlp", {"gate_proj": torch.zeros(E, H, M)})
 

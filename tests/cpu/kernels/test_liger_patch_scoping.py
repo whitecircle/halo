@@ -17,11 +17,13 @@ import torch
 import torch.nn.functional as F
 from transformers.loss import loss_utils
 
+import src.kernels.liger.cross_entropy as ce_module
 from src.kernels.liger.cross_entropy import (
     _TORCH_CROSS_ENTROPY,
     liger_cross_entropy,
     patch_loss_utils_cross_entropy,
 )
+from tests.common.utils import probe_findings
 
 
 @pytest.fixture
@@ -59,8 +61,6 @@ def test_hf_loss_really_reaches_the_override():
     with that assertion still green. A sentinel installed the same way the patch installs its override
     catches that.
     """
-    import src.kernels.liger.cross_entropy as ce_module
-
     calls = []
 
     def _sentinel(*args, **kwargs):
@@ -133,8 +133,6 @@ def test_an_upstream_family_leaves_the_process_wide_function_alone():
 
     Subprocess: applying a real upstream applier rebinds the family's classes for the process.
     """
-    from tests.common.utils import probe_findings
-
     script = """
 import torch.nn.functional as F
 from accelerate import PartialState

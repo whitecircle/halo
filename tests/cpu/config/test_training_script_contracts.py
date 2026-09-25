@@ -32,6 +32,7 @@ import pytest
 
 from src.cli import training_methods
 from src.data.collators import completions_only
+from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, validate_preprocessing_compatibility
 from tests.common.utils import load_script_module
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -219,14 +220,10 @@ def test_no_src_load_forces_trust_remote_code():
 
 @pytest.fixture(scope="module")
 def metadata_cls():
-    from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata
-
     return PreprocessedDatasetMetadata
 
 
 def _validate_masking(metadata_cls, baked: bool | None, runtime: bool):
-    from src.data.pipeline.preprocessed_metadata import validate_preprocessing_compatibility
-
     config = {} if baked is None else {"train_on_completions_only": baked}
     metadata = metadata_cls(max_length=4096, train_on_completions_only=bool(baked), config=config)
     validate_preprocessing_compatibility(

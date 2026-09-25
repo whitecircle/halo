@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from peft import LoraConfig, get_peft_model
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor, init_device_mesh
 
 from src.distributed.parallelism_config import ParallelismConfig
@@ -131,7 +132,6 @@ def test_peft_multi_server_takes_the_gather_not_the_raw_fan_out():
     ``base_model.model.*`` / ``lora_A``-named tensors vLLM cannot map. The gather merges the adapters
     first, so the branch predicate (not just the branch body) is what this pins.
     """
-    from peft import LoraConfig, get_peft_model
 
     class _Tiny(nn.Module):
         def __init__(self):

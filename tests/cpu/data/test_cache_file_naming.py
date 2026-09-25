@@ -14,7 +14,7 @@ import inspect
 from pathlib import Path
 
 import pytest
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.processors import TemplateProcessing
@@ -167,8 +167,6 @@ def test_different_fn_kwargs_keys():
 
 def test_dataset_dict_includes_split_keys():
     """DatasetDict cache name must depend on split names."""
-    from datasets import DatasetDict
-
     dd_ab = DatasetDict(
         {
             "train": _make_dataset(5),
@@ -188,8 +186,6 @@ def test_dataset_dict_includes_split_keys():
 
 def test_dataset_vs_dataset_dict():
     """A Dataset and a DatasetDict (even with same total size) must differ."""
-    from datasets import DatasetDict
-
     ds = _make_dataset(10)
     dd = DatasetDict({"train": _make_dataset(10)})
     name_ds = _build_cache_file_name("map", _add_one, ds, "d", {})
@@ -205,8 +201,6 @@ def test_dataset_dict_different_content_same_splits():
     updated underlying source (e.g., re-uploaded S3 dataset) silently reuse the
     old tokenized cache.
     """
-    from datasets import DatasetDict
-
     dd_v1 = DatasetDict(
         {
             "train": _make_dataset(10, seed=0),
@@ -232,8 +226,6 @@ def test_dataset_dict_different_content_same_splits():
 
 def test_dataset_dict_same_content_stable():
     """Identical DatasetDicts must produce the same cache name (determinism)."""
-    from datasets import DatasetDict
-
     dd_a = DatasetDict(
         {
             "train": _make_dataset(10, seed=7),

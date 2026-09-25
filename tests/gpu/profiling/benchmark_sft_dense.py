@@ -38,6 +38,7 @@ Usage:
 """
 
 import sys
+import traceback
 
 import torch
 from accelerate import PartialState
@@ -310,8 +311,6 @@ def main() -> int:
         failed = True
         log(f"\nBENCHMARK FAILED: {e}")
         if rank == 0:
-            import traceback
-
             traceback.print_exc()
 
     finally:

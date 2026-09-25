@@ -20,8 +20,10 @@ import pytest
 import torch
 import torch.nn as nn
 from accelerate import PartialState
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextConfig, Glm5NextTextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextModel
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
 from src.data.collators.factory import select_data_collator
 from src.distributed.context_parallel.validation import (
@@ -174,9 +176,6 @@ def test_attention_resolution_lands_on_sdpa():
 def test_attention_flash_gate_reads_the_class_flag_not_a_family_list():
     """The same derivation must refuse flash for every family whose class declares it unsupported
     (DeepSeek-V4: no sdpa either, so it lands on eager) and keep it for one that does not."""
-    from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
-    from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
-
     assert validate_attn_implementation(DeepseekV4Config(), "flash_attention_2") == "eager"
     assert validate_attn_implementation(Qwen3Config(), "flash_attention_2") == "flash_attention_2"
 

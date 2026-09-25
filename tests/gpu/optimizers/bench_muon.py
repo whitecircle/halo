@@ -12,6 +12,7 @@ Usage (single GPU, no torchrun needed):
 """
 
 import argparse
+import copy
 import gc
 import time
 
@@ -92,8 +93,6 @@ def make_optimizers(model, lr):
 
 def create_model_copy(model):
     """Deep copy model on same device with same init weights."""
-    import copy
-
     return copy.deepcopy(model)
 
 

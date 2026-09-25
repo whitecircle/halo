@@ -17,9 +17,11 @@
     python tests/cpu/grpo/test_grpo_failloud_guards.py
 """
 
+import math
 import types
 
 import pytest
+import torch
 from accelerate import PartialState
 
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer, batch_reward_std
@@ -168,7 +170,6 @@ def test_a_prompt_with_no_user_turn_raises_before_any_rollout_is_submitted():
     that rejects an empty task raises inside the Ray actor first — replacing a clean config error with
     an actor traceback.
     """
-    import torch
 
     class _NoRollouts:
         def collect_rollouts(self, *args, **kwargs):
@@ -208,10 +209,6 @@ def test_last_user_turn_is_the_task_text():
 
 
 def test_reward_std_of_a_single_rollout_is_finite():
-    import math
-
-    import torch
-
     # torch's .std() is correction=1, so an unguarded call on one reward is NaN and, once appended,
     # NaNs the mean of the whole logging window.
     assert batch_reward_std(torch.tensor([1.5])) == 0.0
@@ -263,8 +260,6 @@ def test_unknown_pg_formulation_is_rejected_at_construction_without_pp():
 
 def test_pp_normalizer_refuses_an_unknown_loss_type():
     # Without a terminal branch an unknown loss type silently takes the dr_grpo denominator.
-    import torch
-
     host = types.SimpleNamespace(loss_type="nonsense", max_completion_length=64)
     normalizer = OfflineGRPOTrainer._pp_normalizer.__get__(host)
     with pytest.raises(ValueError, match="Unknown loss type"):

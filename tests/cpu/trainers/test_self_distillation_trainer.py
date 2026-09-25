@@ -9,14 +9,22 @@ The loss equations themselves are covered by test_distillation_shared_losses.py.
 Run: python tests/cpu/trainers/test_self_distillation_trainer.py
 """
 
+import logging
+import types
+from unittest.mock import patch
+
 import pytest
 import torch
 
+import src.trainers.distillation.self_distillation as sd
+from src.args.self_distill_args import SelfDistillationArguments
+from src.data.collators.vlm import SelfDistillVLMDataCollator
+from src.trainers.distillation.losses import masked_token_mean
+from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from src.trainers.sft import DistributedSFTTrainer
+
 
 def test_trainer_mro_and_flags():
-    from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-    from src.trainers.sft import DistributedSFTTrainer
-
     assert issubclass(DistributedSelfDistillationTrainer, DistributedSFTTrainer)
     # Privileged teacher uses a second, longer sequence => CP unsupported; EP/TP fine.
     assert DistributedSelfDistillationTrainer._supports_ep is True
@@ -25,8 +33,6 @@ def test_trainer_mro_and_flags():
 
 
 def test_args_defaults():
-    from src.args.self_distill_args import SelfDistillationArguments
-
     a = SelfDistillationArguments()
     assert a.sdpg_loss == "reverse_kl"
     assert a.sdpg_beta_base == 1.0
@@ -35,10 +41,6 @@ def test_args_defaults():
 
 
 def test_collator_inject_hint_string_and_list():
-    import types
-
-    from src.data.collators.vlm import SelfDistillVLMDataCollator
-
     # _teacher_history needs only hint_template; the stub tokenizer just satisfies the base __init__,
     # which resolves the eos set and the image-token ids once at construction.
     tokenizer = types.SimpleNamespace(eos_token_id=2, pad_token_id=0, get_vocab=dict)
@@ -61,8 +63,6 @@ def test_collator_inject_hint_string_and_list():
 
 def test_opd_gating_zero_weight_contributes_nothing():
     """SDPG gates OPD on positive advantage; a zero-weight sample must add 0 to the mean."""
-    from src.trainers.distillation.losses import masked_token_mean
-
     torch.manual_seed(0)
     per_token_vocab = torch.rand(2, 3, 5)  # [B, S, V]
     mask = torch.ones(2, 3)
@@ -77,12 +77,6 @@ def _vision_reuse_probe(model_type):
 
     Returns ``(activated, wrapper_installed)``.
     """
-    import logging
-    import types
-    from unittest.mock import patch
-
-    import src.trainers.distillation.self_distillation as sd
-    from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 
     def original_get_image_features(*args, **kwargs):
         return "features"

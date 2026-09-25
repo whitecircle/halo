@@ -19,10 +19,12 @@ import pytest
 from datasets import Dataset, DatasetDict
 
 from scripts.environments.inference.run_code_contests import build_examples
+from scripts.environments.preparation import compact_code_tests as cct
 from scripts.environments.preparation.compact_code_tests import _flatten_indices, cap_tests
 from scripts.environments.preparation.prepare_code_dataset import (
     RATING_BANDS,
     band_configs,
+    band_of,
     carve_holdout,
     checker_is_sound,
     excluded_by,
@@ -294,8 +296,6 @@ def test_holdout_takes_the_same_rows_from_every_band_and_the_rows_below():
 def test_recompaction_that_keeps_no_rows_removes_the_old_part(tmp_path, monkeypatch):
     """A part written under wider caps must not survive a rebuild that empties the shard, or the next
     tests-table join reads tests the current caps excluded."""
-    from scripts.environments.preparation import compact_code_tests as cct
-
     part = tmp_path / "shard-0.parquet"
     stale = pa.Table.from_pylist([], schema=cct._OUTPUT_SCHEMA).replace_schema_metadata(
         {cct._CAPS_METADATA_KEY: json.dumps({"max_tests": 40}).encode()}
@@ -307,8 +307,6 @@ def test_recompaction_that_keeps_no_rows_removes_the_old_part(tmp_path, monkeypa
 
 
 def band_of_all(ratings):
-    from scripts.environments.preparation.prepare_code_dataset import band_of
-
     return [band_of(r) or "below" for r in ratings]
 
 

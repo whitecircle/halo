@@ -22,11 +22,14 @@ import pytest
 import torch
 import torch.nn as nn
 import transformers
+from accelerate import PartialState
+from transformers.models.zaya import modeling_zaya
 
 from src.distributed.fsdp import _should_cast_forward_inputs
 from src.distributed.loading.peft_setup import _peft_module_casting_to_bf16
 from src.models.patches.attention import model_fa4_backward_nan_prone
 from src.models.patches.buffer_fixes import fix_rotary_inv_freq
+from src.models.patches.zaya import patch_zaya_fp32_interlayer_residual
 
 
 def _config(model_type: str):
@@ -90,11 +93,6 @@ def test_the_zaya_load_patch_declares_the_fp32_residual_on_its_decoder_layer():
 
     Without the stamp the wrap would cast Zaya's residual and GC would fault in recompute.
     """
-    from accelerate import PartialState
-    from transformers.models.zaya import modeling_zaya
-
-    from src.models.patches.zaya import patch_zaya_fp32_interlayer_residual
-
     PartialState()  # the zaya patch module logs through accelerate's logger
     patch_zaya_fp32_interlayer_residual()
     assert modeling_zaya.ZayaDecoderLayer._fp32_interlayer_residual is True

@@ -7,8 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
+from transformers import GptOssConfig, GptOssForCausalLM, GptOssModel
 
 import src.distributed.expert_parallel.lazy_loader as lazy_loader  # noqa: E402
 from src.distributed.expert_parallel.lazy_loader import (  # noqa: E402
@@ -195,8 +197,6 @@ def test_replicate_loads_full(tmp_path):
 
 
 def test_assign_replaces_parameter():
-    import torch.nn as nn
-
     model = nn.Sequential(nn.Linear(4, 8))
     real_weight = torch.randn(8, 4)
     assign_tensor_to_model(model, "0.weight", real_weight)
@@ -204,8 +204,6 @@ def test_assign_replaces_parameter():
 
 
 def test_assign_nested_module():
-    import torch.nn as nn
-
     class Inner(nn.Module):
         def __init__(self):
             super().__init__()
@@ -292,8 +290,6 @@ def test_load_ep_model_lazy_raises_on_unmapped_fused_experts(monkeypatch):
 
 
 def _write_index(tmp_path, weight_map):
-    import json
-
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
     return str(tmp_path)
 
@@ -412,8 +408,6 @@ def test_key_mapping_covers_every_key_of_a_bare_moe_backbone():
     is dropped by :class:`EPWeightPlanner` without a word, so an unstripped prefix leaves the ENTIRE
     backbone unplanned — every weight random. Without the strip the intersection below is empty.
     """
-    from transformers import GptOssConfig, GptOssForCausalLM, GptOssModel
-
     config = GptOssConfig(**TINY_GPTOSS_CONFIG)
     with torch.device("meta"):
         disk_keys = sorted(GptOssForCausalLM(config).state_dict())
@@ -623,8 +617,6 @@ def test_fuser_handles_routed_experts_prefix():
 
 
 def test_load_skips_ignore_plans(tmp_path):
-    import torch.nn as nn
-
     save_file({"w": torch.randn(4, 4)}, str(tmp_path / "model.safetensors"))
     model = nn.Sequential(nn.Linear(4, 4, bias=False))
     # Sentinel proves IGNORE left the param untouched.

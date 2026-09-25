@@ -13,6 +13,7 @@ import copy
 
 import pytest
 
+from src.data.pipeline import preferences as prefs
 from src.data.pipeline.preferences import (
     apply_chat_template_to_preference_data,
     build_reward_preprocess_fn,
@@ -172,8 +173,6 @@ def test_generative_prep_normalizes_hub_shapes_before_templating(monkeypatch):
     """The eval-generation prep receives RAW hub rows; a string prompt (tulu-3 mixtures) must go
     through the same contract normalizer as the training path — the chat template dies on a bare
     string. Asserted at the seam: the row that reaches ``prepare_generative_row`` is normalized."""
-    from src.data.pipeline import preferences as prefs
-
     seen = {}
 
     def fake_prepare(row, tokenizer, max_length, tools_field=None):

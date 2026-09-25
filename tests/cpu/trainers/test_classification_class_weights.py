@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+from datasets import Dataset
 from sklearn.utils.class_weight import compute_class_weight
 
 from src.trainers.reward.classification import ClassificationTrainer
@@ -165,8 +166,6 @@ def test_resolves_singular_label_column_from_script_dataset():
     construction on a script-produced Dataset. Uses a real HF Dataset (not the {"labels": ...} dict
     the other tests feed) so the column name is load-bearing.
     """
-    from datasets import Dataset
-
     ds = Dataset.from_dict({"input_ids": [[1], [2], [3], [4]], "label": [0, 0, 0, 1]})
     weights = ClassificationTrainer._balanced_class_weights(ds, None)
     # counts [3, 1], n=4, 2 present -> balanced 4/(2*count) = [2/3, 2].

@@ -36,12 +36,17 @@ import types
 import warnings
 from pathlib import Path
 
+import gradio as gr
 import httpx
 import pytest
 import torch
 from openai import AsyncOpenAI
 
 from scripts._common import add_openai_endpoint_args
+from scripts.inference import _common as inference_common
+from scripts.inference.playground import gradio_environment_playground
+from scripts.inference.reward_model import _common as reward_model_common
+from scripts.inference.reward_model._common import build_generation_parser
 from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL
 from tests.common.ports import free_port
 from tests.common.utils import load_script_module
@@ -91,8 +96,6 @@ def _argparse_default(source: str, flag: str):
 
 
 def _rm_args(*extra: str):
-    from scripts.inference.reward_model._common import build_generation_parser
-
     parser = build_generation_parser("test", temperature_default=0.0)
     return parser.parse_args(["--model", "gen", "--prompts_source", "p.jsonl", "--rm_model_path", "org/rm", *extra])
 
@@ -104,8 +107,6 @@ def test_reward_model_dtype_defaults_to_bfloat16():
 @pytest.mark.parametrize(("requested", "expected"), [(None, torch.bfloat16), ("fp16", torch.float16)])
 def test_reward_model_loader_applies_the_requested_dtype(monkeypatch, requested, expected):
     """The knob has to reach the model — a parsed-and-ignored dtype is worse than no knob."""
-    from scripts.inference.reward_model import _common
-
     captured = {}
 
     class _Model(torch.nn.Module):
@@ -118,14 +119,16 @@ def test_reward_model_loader_applies_the_requested_dtype(monkeypatch, requested,
         def eval(self):
             return self
 
-    monkeypatch.setattr(_common, "reject_sharded_checkpoint", lambda path: None)
+    monkeypatch.setattr(reward_model_common, "reject_sharded_checkpoint", lambda path: None)
     monkeypatch.setattr(
-        _common, "AutoTokenizer", types.SimpleNamespace(from_pretrained=lambda *a, **k: types.SimpleNamespace())
+        reward_model_common,
+        "AutoTokenizer",
+        types.SimpleNamespace(from_pretrained=lambda *a, **k: types.SimpleNamespace()),
     )
-    monkeypatch.setattr(_common, "from_pretrained_verified", lambda *a, **k: _Model())
+    monkeypatch.setattr(reward_model_common, "from_pretrained_verified", lambda *a, **k: _Model())
 
     args = _rm_args(*(["--rm_dtype", requested] if requested else []))
-    _common.load_reward_model(
+    reward_model_common.load_reward_model(
         args.rm_model_path,
         args.rm_model_atten_impl,
         args.rm_max_seq_len,
@@ -201,8 +204,6 @@ def test_a_gradio_app_builds_and_serves_under_the_pinned_gradio(app):
     accepted with a warning and silently dropped, which is the same regression as a removed
     argument, only quieter.
     """
-    import gradio as gr
-
     build = _DEMO_BUILDERS.get(app.name)
     assert build is not None, f"{app.name} has no demo builder here, so its gradio API surface goes untested"
 
@@ -225,8 +226,6 @@ def test_a_gradio_app_builds_and_serves_under_the_pinned_gradio(app):
 
 
 def _playground():
-    from scripts.inference.playground import gradio_environment_playground
-
     return gradio_environment_playground
 
 
@@ -344,8 +343,6 @@ def test_the_generation_clis_share_one_concurrency_and_checkpoint_default():
     throttles a sibling's throughput and widens what an interrupted run must regenerate, with
     nothing claiming the difference is deliberate.
     """
-    from scripts.inference import _common
-
     expected = {"--n_parallel": "DEFAULT_N_PARALLEL", "--checkpoint_interval": "DEFAULT_CHECKPOINT_INTERVAL"}
     declared: dict[str, list] = {flag: [] for flag in expected}
     for script in sorted(_INFERENCE_ROOT.rglob("*.py")):
@@ -356,7 +353,7 @@ def test_the_generation_clis_share_one_concurrency_and_checkpoint_default():
                 declared[flag].append((script.name, default))
 
     for flag, constant in expected.items():
-        assert getattr(_common, constant), f"{constant} is not defined in scripts/inference/_common.py"
+        assert getattr(inference_common, constant), f"{constant} is not defined in scripts/inference/_common.py"
         assert declared[flag], f"no inference CLI declares {flag} — this check covers nothing"
         literal = sorted(entry for entry in declared[flag] if entry[1] != constant)
         assert not literal, (

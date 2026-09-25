@@ -22,12 +22,13 @@ import pytest
 import torch
 from datasets import Dataset, DatasetDict
 from PIL import Image
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dataset
-from src.data.vlm import VLM_IMAGE_COLUMNS, is_vlm_run
+from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_COLUMNS, VLM_OUTPUT_FEATURES, is_vlm_run
 from src.models import modality
 from src.models.modality import is_vlm_model
 from tests.common.models import QWEN2_5_VL_3B
@@ -118,8 +119,6 @@ def test_the_preprocessed_vlm_schema_is_the_declared_column_set():
     (pixel_values_shape, attention_mask, …) before collation and the first batch crashes. Changing
     the stored schema means changing this literal, deliberately.
     """
-    from src.data.vlm import VLM_OUTPUT_COLUMNS, VLM_OUTPUT_FEATURES
-
     expected = {
         "input_ids",
         "attention_mask",
@@ -573,8 +572,6 @@ def test_an_unregistered_model_type_still_defers_to_the_name_hint():
     silence there must not be read as text-only — that would drop a VLM's images silently, where a
     false positive from the name heuristic fails loud.
     """
-    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
-
     assert "custom_remote_vlm" not in CONFIG_MAPPING_NAMES
     unregistered = SimpleNamespace(model_type="custom_remote_vlm", vision_config=None)
     assert is_vlm_model("org/Custom-VL-7B", config=unregistered)

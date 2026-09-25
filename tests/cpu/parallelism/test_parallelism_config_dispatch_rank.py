@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.group_layout import etp_dispatch_coords
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.parallelism import make_parallelism_config
 
@@ -152,8 +153,6 @@ def test_leaf_function_matches_group_construction():
     the stubbed ``new_group``) are exactly the EP-group members the leaf assigns this rank's
     dispatch coordinate. EPConfig assigns its own coords THROUGH the leaf, so comparing those would
     certify nothing — the constructed membership is the only independent spelling."""
-    from src.distributed.group_layout import etp_dispatch_coords
-
     for world_size, gpus_per_node, ep_size, expert_tp_size, node_local in EP_SHAPES:
         for rank in range(world_size):
             ep = _make_ep_config(

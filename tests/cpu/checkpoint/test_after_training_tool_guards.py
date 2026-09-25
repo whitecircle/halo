@@ -20,6 +20,7 @@ Run: pytest tests/cpu/checkpoint/test_after_training_tool_guards.py
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 from datasets import Dataset
 
@@ -199,7 +200,7 @@ def test_an_unknown_additional_field_raises(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         dataset_deduplication.save_deduplicated_dataset(
             dataset,
-            __import__("numpy").array([0, 1]),
+            np.array([0, 1]),
             str(tmp_path / "out.jsonl"),
             additional_fields=["text", "sorce"],
         )
@@ -209,8 +210,6 @@ def test_an_unknown_additional_field_raises(tmp_path):
 
 def test_known_additional_fields_still_narrow_the_output(tmp_path):
     """Anti-vacuity: the guard must not refuse the working case it exists around."""
-    import numpy as np
-
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
     output = tmp_path / "out.jsonl"
 

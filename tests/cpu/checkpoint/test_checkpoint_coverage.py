@@ -31,6 +31,7 @@ from src.models.loading.checkpoint_coverage import (
     unexpected_missing_keys,
     verify_checkpoint_coverage,
 )
+from src.models.loading.model_preparation import auto_load_model
 
 
 def _tiny_config(tie_word_embeddings: bool = False):
@@ -208,8 +209,6 @@ def test_error_names_the_absent_tensors(tmp_path):
 def test_gate_runs_on_the_reference_and_teacher_model_path(tmp_path):
     """``auto_load_model`` is the bypass used for DPO/KTO reference and distillation teacher models —
     a silently random reference shifts every logratio."""
-    from src.models.loading.model_preparation import auto_load_model
-
     path = _write_checkpoint(tmp_path / "trunc", drop="layers.0.self_attn")
     with pytest.raises(RuntimeError, match="absent from the checkpoint"):
         auto_load_model(path, dtype=torch.float32)

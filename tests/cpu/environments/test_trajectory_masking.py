@@ -15,6 +15,7 @@ import pytest
 
 from src.environments.base import BaseEnvironment, Message, Trajectory
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.rollout.rollout_metrics import _summarize_episode_generation_tokens
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -226,8 +227,6 @@ def test_render_omits_effort_when_unset():
 
 def test_summarize_episode_generation_tokens_mean_max_p90():
     # Guards the aggregation the trainer logs as episode/generation_tokens{,_max,_p90}.
-    from src.trainers.grpo.rollout.rollout_metrics import _summarize_episode_generation_tokens
-
     vals = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # each = one episode's total (summed over turns)
     s = _summarize_episode_generation_tokens(vals)
     assert s["episode/generation_tokens"] == 55.0  # mean, NOT the max/last

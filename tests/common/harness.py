@@ -53,18 +53,21 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
-from tests.common.reporting import (
-    emit_result,
-    extract_efficiency_callback,
-    format_table,
-    snapshot_efficiency,
-)
+from tests.common.reporting import emit_result, format_table, snapshot_efficiency
 from tests.common.utils import cleanup_memory, log, log_all
 
 # Exit codes the launcher keys on.
 _EXIT_PASS = 0
 _EXIT_FAIL = 1
 _EXIT_BAD_LAUNCH = 2
+
+
+def _efficiency_callback(trainer) -> EfficiencyCallback | None:
+    """The first ``EfficiencyCallback`` attached to ``trainer``, or None."""
+    handler = getattr(trainer, "callback_handler", None)
+    if handler is None:
+        return None
+    return next((cb for cb in handler.callbacks if isinstance(cb, EfficiencyCallback)), None)
 
 
 class Ctx:
@@ -126,11 +129,7 @@ class Ctx:
         Returns ``{}`` if no ``EfficiencyCallback`` is attached; metrics are
         optional and correctness tests can omit them.
         """
-        cb = (
-            trainer_or_cb
-            if isinstance(trainer_or_cb, EfficiencyCallback)
-            else extract_efficiency_callback(trainer_or_cb)
-        )
+        cb = trainer_or_cb if isinstance(trainer_or_cb, EfficiencyCallback) else _efficiency_callback(trainer_or_cb)
         return snapshot_efficiency(cb) if cb is not None else {}
 
     def _run_finalizers(self) -> None:

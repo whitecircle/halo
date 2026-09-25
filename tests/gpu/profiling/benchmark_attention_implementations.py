@@ -39,6 +39,7 @@ Usage (1 GPU):
 
 import argparse
 import contextlib
+import importlib.util
 import sys
 import time
 import traceback
@@ -81,32 +82,27 @@ def check_backend_available(backend: str) -> bool:
         # FA4 (Blackwell, CuTe DSL) lives in the flash_attn.cute submodule and
         # co-exists with FA2 under the same flash_attn namespace.
         try:
-            import flash_attn.cute
+            import flash_attn.cute  # noqa: PLC0415
 
             return True
         except ImportError:
             return False
     elif backend == "flash_attention_3":
         try:
-            import flash_attn_3  # noqa: F401
+            import flash_attn_3  # noqa: F401, PLC0415
 
             return True
         except ImportError:
             return False
     elif backend == "flash_attention_2":
         try:
-            import flash_attn  # noqa: F401
+            import flash_attn  # noqa: F401, PLC0415
 
             return True
         except ImportError:
             return False
     elif backend == "flex_attention":
-        try:
-            from torch.nn.attention.flex_attention import flex_attention  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("torch.nn.attention.flex_attention") is not None
     elif backend == "sdpa":
         return hasattr(torch.nn.functional, "scaled_dot_product_attention")
     elif backend == "eager":

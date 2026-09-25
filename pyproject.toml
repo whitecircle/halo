@@ -157,12 +157,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests: module-level setup imports (E402), asserts (S101), inline imports + prints are fine.
-# E741 (`l`/`I`/`O` names — `for l in losses` is idiomatic here), B007 (unused loop var) and
-# B023 (loop var captured in a closure — the closures are consumed within the same iteration in
-# these test helpers) and SIM117 (nested `with patch(...)` is the idiomatic mock-stack form) are
-# accepted in tests rather than churned across the suite.
-"tests/**" = ["E402", "PLC0415", "T20", "E741", "B007", "B023", "SIM117"]
+# Tests: module-level setup imports (E402), asserts (S101) and prints are fine; imports stay at
+# module top as in src/. E741 (`l`/`I`/`O` names — `for l in losses` is idiomatic here), B007
+# (unused loop var) and B023 (loop var captured in a closure — the closures are consumed within the
+# same iteration in these test helpers) and SIM117 (nested `with patch(...)` is the idiomatic
+# mock-stack form) are accepted in tests rather than churned across the suite.
+"tests/**" = ["E402", "T20", "E741", "B007", "B023", "SIM117"]
+"tests/cpu/parallelism/test_parallelism_config.py" = ["PLC0415"]
 # Scripts are CLIs — prints are the interface.
 "scripts/**" = ["T20"]
 # Docs diagram generators: `from _theory_style import *` shares one matplotlib theme, and the

@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import pytest
 
+from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP, build_wrapper_class_map
+from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
+from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, build_moe_layer_map
 from src.distributed.module_registry import build_class_claim_map, build_hf_module_name_map, iter_subclasses
 
 
@@ -96,9 +100,6 @@ def test_ep_layer_classes_is_the_shared_walk_not_a_second_copy():
     and the ``model_type`` roster must see exactly the tree the registry walks, or a family can be
     covered by one and missed by the other.
     """
-    from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-    from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
-
     assert ep_layer_classes() == iter_subclasses(EPMoELayerBase)
 
     ep_layer_class_by_model_type.cache_clear()  # compare live trees, not a map cached before this test
@@ -106,10 +107,6 @@ def test_ep_layer_classes_is_the_shared_walk_not_a_second_copy():
 
 
 def test_ep_and_cp_registries_are_derived_and_cover_the_wired_families():
-    from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP, build_wrapper_class_map
-    from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-    from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, build_moe_layer_map
-
     assert build_moe_layer_map() == MOE_LAYER_MAP
     assert build_wrapper_class_map() == WRAPPER_CLASS_MAP
 

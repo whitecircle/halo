@@ -10,6 +10,7 @@ import json
 import pytest
 from transformers import PretrainedConfig
 
+import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster, as every real writer path does
 from src.checkpoint.config_export import finalize_exported_config
 from src.models import moe_balancing
 
@@ -28,8 +29,6 @@ def test_an_unregistered_roster_is_refused(tmp_path, monkeypatch):
 
 
 def test_the_registered_roster_finalizes_a_family_that_needs_nothing(tmp_path):
-    import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster, as every real writer path does
-
     assert moe_balancing.ep_roster_registered()
     config = _write_config(tmp_path, "qwen3")
     finalize_exported_config(config, str(tmp_path), source=None)

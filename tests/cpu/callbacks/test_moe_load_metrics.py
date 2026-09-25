@@ -23,6 +23,7 @@ import math
 import pytest
 import torch
 
+import src.callbacks.moe_metrics as mm
 from src.callbacks.moe_metrics import (
     MoEMetricsCallback,
     _extract_router_logits,
@@ -343,8 +344,6 @@ def test_callback_warns_once_when_no_router_logits() -> None:
 
     Fails if the loud-no-op guard is removed (then it would silently no-op as before).
     """
-    import src.callbacks.moe_metrics as mm
-
     cb = MoEMetricsCallback(topk=1)
     model = _CfgModel(router_aux_loss_coef=0.0)
     model.config.output_router_logits = True  # wiring proceeds; only the CAPTURE comes up empty
@@ -408,8 +407,6 @@ def test_unwired_callback_does_not_warn_about_a_cause_that_does_not_apply() -> N
     model = _CfgModel(router_aux_loss_coef=0.0)
     cb.on_train_begin(args=None, state=None, control=None, model=model)
     assert cb._hook_handles == []
-
-    import src.callbacks.moe_metrics as mm
 
     calls: list[str] = []
     orig = mm.logger.warning

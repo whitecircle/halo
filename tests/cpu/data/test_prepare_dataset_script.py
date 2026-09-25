@@ -34,6 +34,8 @@ from datasets import Dataset
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
+from src.data.sources.loading import load_preprocessed_dataset
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _SCRIPT = os.path.join(REPO, "scripts", "before_training", "prepare_dataset.py")
 
@@ -202,8 +204,6 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
     artifact must load through ``load_preprocessed_dataset`` for each of 4 data-parallel ranks, and
     the four slices must be a partition of the corpus — a gap silently drops data, an overlap silently
     double-trains it, and neither shows up as an error at training time."""
-    from src.data.sources.loading import load_preprocessed_dataset
-
     PartialState()  # the loaders log through accelerate's rank-aware logger
     num_shards, num_docs = 4, 16
     with tempfile.TemporaryDirectory() as directory:

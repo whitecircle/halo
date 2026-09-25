@@ -15,6 +15,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
+from src.trainers.distillation.losses import positive_advantage_gate
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.models import QWEN3_0_6B
@@ -91,8 +92,6 @@ def test_a_missing_answer_yields_no_hint_instead_of_a_blank_one(answer):
 def test_positive_advantage_gate_zeroes_nonpositive_rows():
     """The real gate, not a transcription of it: a zero advantage is a tied/unscorable group, so a
     ``>= 0`` there would pull the student toward the teacher on rows the verifier did not prefer."""
-    from src.trainers.distillation.losses import positive_advantage_gate
-
     completion_mask = torch.ones(3, 2)
     advantages = torch.tensor([0.5, -0.3, 0.0])  # only row 0 is strictly positive
     gate = positive_advantage_gate(completion_mask, advantages, enabled=True)

@@ -13,6 +13,7 @@ Run: python tests/cpu/parallelism/test_pp_stage_split.py
 import pytest
 import torch
 from transformers import (
+    GptOssConfig,
     Qwen3Config,
     Qwen3ForCausalLM,
     Qwen3ForSequenceClassification,
@@ -22,10 +23,12 @@ from transformers import (
     Qwen3VLMoeConfig,
     Qwen3VLMoeForConditionalGeneration,
 )
+from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 
 from src.distributed.pipeline_parallel import split
 from src.distributed.pipeline_parallel.split import (
     MTP_LAYER_COUNT_FIELDS,
+    PP_SPEC_MAP,
     PPModelSpec,
     compute_layer_partition,
     head_cost_layer_equivalents,
@@ -37,7 +40,7 @@ from src.distributed.pipeline_parallel.stage import build_pipeline_stage, module
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from src.models.moe_balancing import ROUTER_TOPK_FIELDS
 from src.models.structure import persistent_buffers
-from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
+from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
 
 # Qwen3 MoE balances through the HF router aux loss (auto → aux_loss) — the path a stage severs, so
 # this file needs the coefficient LIVE at its transformers default. Deliberately NOT tests/common's
@@ -170,8 +173,6 @@ def test_pp_split_override_wins_and_is_validated():
 def test_head_cost_layer_equivalents_from_real_configs():
     """Dense qwen3-8B-scale: the 622M-param head is worth ~3 of its ~193M-param layers. A MoE
     counts per-token ACTIVATED expert params. A config missing the fields returns 0 (uniform)."""
-    from transformers import GptOssConfig, Qwen3Config
-
     dense = Qwen3Config(
         hidden_size=4096,
         vocab_size=151936,
@@ -231,8 +232,6 @@ def test_a_dense_config_is_never_routed_by_the_generation_top_k():
 
 
 def test_layer_types_period_detection():
-    from transformers import GptOssConfig, Qwen3Config
-
     assert layer_types_period(GptOssConfig(**TINY_GPTOSS_CONFIG)) == 2  # sliding/full alternation
     assert layer_types_period(Qwen3Config(num_hidden_layers=8)) == 1  # uniform full attention
     assert layer_types_period(None) == 1
@@ -273,10 +272,6 @@ def test_head_cost_survives_per_layer_heterogeneous_attention():
     AmbiguousGlobalPerLayerAttributeError — a RuntimeError the getattr default does not swallow.
     Pre-fix this crashed ``resolve_layer_partition`` before any PP gate could fire; the cost model
     must resolve through the per-layer-aware seam instead (max: it is a cost ceiling)."""
-    from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
-
-    from tests.common.models import TINY_STEP3P7_CONFIG
-
     config = Step3p7TextConfig(**TINY_STEP3P7_CONFIG)
     with pytest.raises(RuntimeError):
         _ = config.num_attention_heads  # premise: the global read is ambiguous on this family
@@ -518,8 +513,6 @@ def test_moe_without_an_aux_loss_term_is_accepted():
 
 
 def test_unsupported_families_are_rejected_with_a_mechanism():
-    from src.distributed.pipeline_parallel.split import PP_SPEC_MAP
-
     for backbone_name in ("ZayaModel", "Gemma4TextModel"):
         spec = PP_SPEC_MAP[backbone_name]
         assert spec.SUPPORTS_PP is False

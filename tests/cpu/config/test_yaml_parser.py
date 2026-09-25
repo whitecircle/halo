@@ -10,11 +10,16 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass, field, make_dataclass
+from datetime import datetime
 from typing import Literal
 
 import pytest
 from transformers import TrainingArguments
 
+from src.args.distributed_args import DistributedArguments
+from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
+from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.training.parser import (
     _TOOLKIT_DEFAULTS,
     H4ArgumentParser,
@@ -378,8 +383,6 @@ def test_empty_yaml():
 
 def test_format_output_dir_with_strftime():
     """output_dir containing strftime codes should be expanded."""
-    from datetime import datetime
-
     path = _write_yaml('output_dir: "output/run-%Y-%m-%d"\nname: fmt\n')
     try:
         parser = H4ArgumentParser((OutputDirConfig,))
@@ -433,8 +436,6 @@ def test_format_output_dir_percent_prose_survives():
 
 def test_format_output_dir_mixed_prose_and_directives():
     """Real directives expand while adjacent prose percents stay intact."""
-    from datetime import datetime
-
     path = _write_yaml('output_dir: "output/run-50%_subset-%Y%m%d"\n')
     try:
         parser = H4ArgumentParser((OutputDirConfig,))
@@ -540,8 +541,6 @@ def test_post_override_hook_skipped_without_overrides():
 
 def test_list_cli_override_replaces_yaml_list():
     """A CLI list override must fully replace the YAML list, never merge with it."""
-    from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-
     path = _write_yaml("context_fields:\n- old_field\n")
     try:
         parser = H4ArgumentParser((EnvironmentalGRPOScriptArguments,))
@@ -766,8 +765,6 @@ def test_literal_cli_override_validates_and_casts():
 def test_real_config_literal_field_validated():
     """Pin the real seam: OfflineGRPOConfig.advantage_method is Literal-annotated and must reject
     a typo at parse time."""
-    from src.configs.offline_grpo_config import OfflineGRPOConfig
-
     path = _write_yaml("output_dir: /tmp/h4_lit_real\nadvantage_method: banana\n")
     try:
         parser = H4ArgumentParser((OfflineGRPOConfig,))
@@ -939,8 +936,6 @@ def test_cli_override_list_of_dict_rejected():
 
 def test_cli_override_rollout_server_configs_rejected():
     """Pin the real seam: --rollout_server_configs=... must raise, not ship a list[str] into Ray."""
-    from src.configs.async_training_config import AsyncTrainingConfig
-
     path = _write_yaml("{}\n")
     try:
         parser = H4ArgumentParser((AsyncTrainingConfig,))
@@ -1018,9 +1013,6 @@ def test_help_keeps_argparse_default_placeholder():
 def test_help_renders_for_real_script_dataclasses():
     """Pin the real seam: every training script parses DistributedArguments, whose help carries a
     bare percent — ``--help`` must render for the shipped dataclasses, not just synthetic ones."""
-    from src.args.distributed_args import DistributedArguments
-    from src.configs.offline_grpo_config import OfflineGRPOConfig
-
     parser = H4ArgumentParser((DistributedArguments, OfflineGRPOConfig))
     text = parser.format_help()
     assert "--fsdp_shard_ep1_experts" in text

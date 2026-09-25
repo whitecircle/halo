@@ -10,6 +10,8 @@ These tests drive ``on_step_end`` with a stubbed process group and assert on the
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 import torch
 
@@ -93,8 +95,6 @@ def test_empty_and_populated_ranks_issue_the_same_collective_sequence(recording_
     """The two ranks' collective sequences must be comparable in count, or NCCL desynchronizes."""
     empty = _RecordingDist()
     populated = _RecordingDist()
-
-    import contextlib
 
     for stub, counters in ((empty, []), (populated, [torch.ones(3)])):
         with pytest.MonkeyPatch.context() as mp:

@@ -35,6 +35,7 @@ Run:
 import sys
 
 import torch
+from accelerate import PartialState
 from transformers import AutoConfig
 
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
@@ -63,8 +64,6 @@ def main() -> int:
     if not torch.cuda.is_available():
         log("SKIP: no CUDA")  # the sentinel the launcher skips on; a bare exit 0 reads as a PASS
         return 0
-
-    from accelerate import PartialState
 
     # Production always has accelerate state up before the loader (TrainingArguments initializes
     # it); the loader's hub-download path logs through accelerate's logger, which raises otherwise.

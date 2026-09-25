@@ -11,14 +11,14 @@ Run: python tests/cpu/trainers/test_kto_trainer.py
 """
 
 import pytest
+from trl import KTOTrainer
+
+from src.args.kto_args import KTOScriptArguments
+from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.preference.kto import DistributedKTOTrainer
 
 
 def test_kto_trainer_mro_and_flags():
-    from trl import KTOTrainer
-
-    from src.trainers.mixins.base import DistributedTrainerMixin
-    from src.trainers.preference.kto import DistributedKTOTrainer
-
     assert issubclass(DistributedKTOTrainer, DistributedTrainerMixin)
     assert issubclass(DistributedKTOTrainer, KTOTrainer)
     # KTO mirrors DPO: EP/TP yes, CP no (full-sequence log-prob pooling + KL ref),
@@ -31,8 +31,6 @@ def test_kto_trainer_mro_and_flags():
 
 
 def test_kto_args_defaults():
-    from src.args.kto_args import KTOScriptArguments
-
     args = KTOScriptArguments()
     assert args.completion_field == "completion"
     assert args.label_field == "label"

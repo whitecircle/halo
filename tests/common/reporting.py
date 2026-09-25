@@ -17,6 +17,8 @@ Two jobs:
 Golden baselines (``tests/baselines/<key>.json``) carry a :func:`emit_benchmark`
 payload. Nothing reads them automatically; the comparison is by hand, on the
 headline metrics only (``agent-docs/contributing/README.md``).
+
+Standard library only: the launcher process imports this module and stays free of torch.
 """
 
 import json
@@ -49,19 +51,6 @@ def snapshot_efficiency(cb) -> dict:
         "sparsity_factor": cb.smfu.sparsity_factor,
     }
     return {**headline, "diagnostics": diagnostics}
-
-
-def extract_efficiency_callback(trainer):
-    """Return the first ``EfficiencyCallback`` attached to ``trainer``, or None."""
-    from src.callbacks.efficiency import EfficiencyCallback
-
-    handler = getattr(trainer, "callback_handler", None)
-    if handler is None:
-        return None
-    for cb in handler.callbacks:
-        if isinstance(cb, EfficiencyCallback):
-            return cb
-    return None
 
 
 def format_table(payload: dict) -> str:
