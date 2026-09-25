@@ -33,7 +33,7 @@ Source: `parallelism_config.py` `__post_init__`.
 | **Standard DDP / FSDP2** | all sizes = 1 | `world_size` | — | `__post_init__` |
 | **Grouped-GEMM only** | `ep_size=1`, `use_grouped_gemm=True`, MoE | `world_size` | applies EP wrappers, no inter-rank comm (DeepEP no-op); needs torchrun | `needs_ep_wrappers`, CLAUDE.md grouped-GEMM note |
 | **EP only** | `ep_size>1` | `world_size` (EP orthogonal) | `ep_group_size` must divide & not exceed scope (domain for `node`, world for `global`). Single-domain pure EP: use **ep_size=2 or ep_size=nvlink_domain_size** only | `_validate_ep_group`; `_validate_single_domain_multigroup_ep` |
-| **Multi-group EP across nodes** | `num_ep_groups>1` AND `num_nodes>1`, `expert_tp_size==1` (node-local EP across domains, OR a cross-node EP group replicated within a larger cluster) | `world_size` (EP orthogonal) | **Supported via deferred cross-replica sync** (`EPConfig.is_deferred_dp`): FSDP shards non-expert params over the EP group; cross-replica DP average deferred to a post-backward sweep so nothing races the DeepEP combine | `config.py` `is_deferred_dp`; `mixin._sync_deferred_expert_grads`; `ep_introspection.py` |
+| **Multi-group EP across nodes** | `num_ep_groups>1` across more than one NVLink domain, `expert_tp_size==1` (node-local EP across domains, OR a cross-node EP group replicated within a larger cluster) | `world_size` (EP orthogonal) | **Supported via deferred cross-replica sync** (`EPConfig.is_deferred_dp`): FSDP shards non-expert params over the EP group; cross-replica DP average deferred to a post-backward sweep so nothing races the DeepEP combine | `config.py` `is_deferred_dp`; `mixin._sync_deferred_expert_grads`; `ep_introspection.py` |
 | **TP only** | `tp_size>1` | `world_size / tp_size` | `tp_size` divides world; node-local DTensor; attention heads must divide `tp_size` (`parallelize_attention.py`) | `_validate_tp` |
 | **CP only** | `cp_size>1` | `world_size / cp_size` | `cp_size <= domain` and divides domain (Ulysses node-local) | `_validate_cp_locality` |
 | **Pure ETP** (`ep_size=1`) | `expert_tp_size>1`, `ep_size=1` | `world_size / expert_tp_size` | MoE-only; ETP divides domain; node-local; experts replicated, FFN sharded. The verified ETP shape | `_validate_expert_tp`; CLAUDE.md table |
@@ -78,7 +78,7 @@ Notes:
 | **cross-node ETP off NVLink** | `ep_scope="global"` and `expert_tp_size != EP members per domain`, or `ep_size != domains spanned` | exactly one ETP group per NVLink domain is required, so the ETP all-reduce stays on NVLink | `_validate_expert_tp` (raises) |
 | **HSDP with TP / ETP / EP / PP** | `use_hsdp=True and (tp_size>1 or expert_tp_size>1 or ep_size>1 or pp_size>1)` | TP / ETP build their own (dp, tp) mesh; EP already shards over the EP group and HSDP would race the combine; a stage-sized 2-D mesh cannot be built from a rank block. HSDP wraps the standard DP path only — **pure DP or CP** | `_validate_hsdp`, `_validate_pipeline_parallel` (raise) |
 | **FSDP flags vs axes** | `fsdp_shard_ep1_experts=False` with TP or CP; `fsdp_reshard_after_forward=True` wherever `is_ep_mode` (`ep_group_size > 1` — EP **and** pure ETP at `ep_size=1`), or with TP at `dp_size>1`; `fsdp_reshard_after_backward=False` with TP or PP (wired through the plain-DP/CP/EP torchrun path only), or alongside `fsdp_reshard_after_forward=True`; `fsdp_defer_grad_sync=True` under PP (the schedule already reduces once per step) or TP at `data_parallel_size==1` (no FSDP2 wrap) | each raises with its own mechanism | `_validate_fsdp_settings` (raises) |
-| **expert LoRA with ETP** | `expert_tp_size>1` and `expert_lora` set | `reject_expert_lora_with_expert_tp()` — the expert adapters would have to be sharded along the expert-TP axis the reduce runs over | `_validate_expert_tp` (raises) |
+| **expert LoRA with ETP** | `expert_tp_size>1` and `expert_lora` set | `reject_expert_lora_with_expert_tp()` — the replicated adapter half would take a partial, never-synced gradient and drift across ranks | `_validate_expert_tp` (raises) |
 | **LoRA/PEFT with TP** | `tp_size>1` with any adapter — PEFT-wrapped, injected in place, **or** native EP expert LoRA | adapters are plain tensors outside the TP graph: the replicated matrix diverges per rank (per-rank init, never broadcast), the sharded one is corrupted by the TP replicated-grad sync. Expert LoRA gets its own message — it lives on the EP-distributed weights every TP gate skips by param identity | `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`, raises at trainer construction) |
 | **world not divisible by node/domain** | `world_size % gpus_per_node != 0` or `% nvlink_domain_size != 0` | floor division truncates `num_nodes` / orphans trailing ranks | `_validate_node_topology`, `__post_init__` |
 | **bad sizes / enums** | any `*_size < 1`; `ep_scope` not in {auto,node,global}; `nvlink_domain_size % gpus_per_node != 0`; bad `lowp_precision` | fail-fast sanity guards | `__post_init__`, `_validate_lowp` |
@@ -112,7 +112,7 @@ script additionally calls `parallelism_config_from_args(..., supports_cp=False)`
 error — passing CP there is a config error, not a silent no-op. There is no `_supports_etp`: ETP
 folds into `ep_group_size` and is gated by `_supports_ep`.
 
-### CP incompatibility list (CLAUDE.md)
+### CP incompatibility list (`agent-docs/reference/troubleshooting.md`, *Parallelism config rejections*)
 CP is incompatible with trainers/paths that use:
 - `logits_to_keep`
 - global log-probability sums
@@ -128,7 +128,7 @@ That is why DPO/GRPO/reward/classification/distillation/embedding reject CP.
 | DDP | 1 | 1 | 8 | yes |
 | ep_size=8 | 8 | 1 | 8 | yes (single intra-node group) |
 | ep_size=2 | 2 | 1 | 8 | yes (2-rank groups) |
-| ep_size=4 | 4 | 1 | 8 | **NO** — multi-group >2-rank pure EP deadlock (use 2 or 8) |
+| ep_size=4 | 4 | 1 | 8 | **NO** — multi-group >2-rank pure EP, rejected at config time (use 2 or 8) |
 | tp_size=8 | 1 | 8 | 1 | yes |
 | cp_size=2 | 1 | 2 | 4 | yes |
 | expert_tp_size=2 (ep_size=1) | 2 | 2 | 4 | yes (pure ETP) |
