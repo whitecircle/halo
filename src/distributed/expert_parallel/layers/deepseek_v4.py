@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.base_layer import TOPK_WEIGHT_NORM_EPS, EPMoELayerBase
 from src.kernels.fused_glu import fused_clamped_silu_mul, is_silu_activation
 
 
@@ -126,9 +126,9 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
         # Replay stays in lockstep across EP layers, so hash layers consume their identity slice too.
         indices = self._maybe_replace_selection(indices)
 
-        # Gate on the unbiased scores at the selected indices; V4 always normalizes (+1e-20 floor).
+        # Gate on the unbiased scores at the selected indices; V4 always normalizes (floored).
         weights = scores.gather(1, indices)
-        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + TOPK_WEIGHT_NORM_EPS)
         weights = weights * self.routed_scaling_factor
 
         self._record_expert_load(indices)

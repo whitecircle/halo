@@ -43,10 +43,10 @@ class EPQwen3MoELayer(EPSeparateGluMoELayerBase):
         self._store_separate_glu_params(gate, up, local_down)
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """``Qwen3MoeTopKRouter`` weights at ``indices``: the shared renormalized-softmax gating,
-        whose ``norm_topk_prob`` this family carries as a configurable (default-off) router
-        attribute."""
-        return self._softmax_gate_weights_at(router_logits, indices)
+        """``Qwen3MoeTopKRouter`` weights at ``indices``: the shared softmax gating, renormalized per the
+        router's own configurable (default-off) ``norm_topk_prob``, read live so routing replay matches
+        the router the forward just called."""
+        return self._softmax_gate_weights_at(router_logits, indices, normalize=self.gate.norm_topk_prob)
 
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         B, S, H = hidden_states.shape

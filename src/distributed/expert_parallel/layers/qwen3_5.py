@@ -91,10 +91,9 @@ class EPQwen3_5MoELayer(EPMoELayerBase):
         )
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """``Qwen3_5MoeTopKRouter`` weights at ``indices``: the shared renormalized-softmax gating.
-        This router carries no ``norm_topk_prob`` attribute and renormalizes unconditionally, which
-        is the helper's default."""
-        return self._softmax_gate_weights_at(router_logits, indices)
+        """``Qwen3_5MoeTopKRouter`` weights at ``indices``: the shared softmax gating. This router
+        carries no ``norm_topk_prob`` and renormalizes unconditionally."""
+        return self._softmax_gate_weights_at(router_logits, indices, normalize=True)
 
     def _shared_forward(self, residuals: torch.Tensor) -> torch.Tensor:
         """Always-active shared-expert FFN (sigmoid-gated), run on all tokens locally."""
