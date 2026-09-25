@@ -5,12 +5,13 @@ This is the after-training tool for an existing checkpoint; a training run does 
 ``reset_sinks: true`` (the default) applies the same reset to the freshly loaded model in every
 trainer, before the first step.
 
-Writes the reset checkpoint to ``--output_dir``. ``--dry_run`` reports what would change without
-writing; ``--in_place`` rewrites ``--input_dir`` itself (no undo, so it must be asked for).
+Reads ``--model_id`` (a local checkpoint directory or a Hub repo id) and writes the reset
+checkpoint to ``--output_dir``. ``--dry_run`` reports what would change without writing;
+``--in_place`` rewrites a local ``--model_id`` directory itself (no undo, so it must be asked for).
 
 Usage:
     python scripts/after_training/reset_sinks.py \\
-        --input_dir checkpoints/my-model --output_dir checkpoints/my-model-nosinks
+        --model_id checkpoints/my-model --output_dir checkpoints/my-model-nosinks
 """
 
 import argparse
@@ -25,7 +26,7 @@ from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
-from scripts._common import add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_WEIGHTS_FILE, sweep_after_full_save
 from src.checkpoint.tool_io import (
     STAGING_SUFFIX,
@@ -72,13 +73,9 @@ def _assert_sinks_at_min(tensors: dict[str, torch.Tensor], sink_keys: list[str],
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Reset attention sinks in a safetensors checkpoint")
-    parser.add_argument(
-        "--input_dir",
-        type=str,
-        required=True,
-        help="Checkpoint directory containing model.safetensors, or a Hub repo id to snapshot from "
-        "(a repo id pairs with --output_dir, never --in_place)",
-    )
+    # No --revision: the loads thread none, and an unread flag would advertise a pin they ignore.
+    # Pin by downloading the source first, then pointing --model_id at it.
+    add_hub_source_args(parser, source="The checkpoint whose attention sinks are reset", revision=False)
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -88,8 +85,8 @@ def parse_args():
     parser.add_argument(
         "--in_place",
         action="store_true",
-        help="Rewrite --input_dir itself instead of writing a copy. There is no undo, so it must "
-        "be asked for explicitly (local checkpoints only).",
+        help="Rewrite the --model_id directory itself instead of writing a copy. There is no undo, so "
+        "it must be asked for explicitly (a local directory only, never a Hub repo id).",
     )
     parser.add_argument(
         "--dry_run",
@@ -97,7 +94,8 @@ def parse_args():
         help="Only print sink values without modifying the checkpoint",
     )
     add_max_shard_size_arg(parser, note="A single-file checkpoint is rewritten as the one file it came in as.")
-    add_trust_remote_code_arg(parser)
+    # --model_id may be a Hub repo, so remote code stays opt-in.
+    add_trust_remote_code_arg(parser, default=False)
     return parser.parse_args()
 
 
@@ -230,8 +228,8 @@ def _reset_sinks_from_pretrained(
 ) -> int:
     """Reset sinks by loading the full model via from_pretrained (sharded checkpoints)."""
     logger.info(f"model.safetensors not found, loading full model from {checkpoint_dir}...")
-    # Sink models (gpt-oss patched checkpoints) are this script's target, so load with remote code
-    # allowed and the widest matching Auto* class.
+    # Sink models (gpt-oss and its patched derivatives) are this script's target, so load through the
+    # widest matching Auto* class.
     model = auto_load_model(
         str(checkpoint_dir),
         trust_remote_code=trust_remote_code,
@@ -334,7 +332,9 @@ def reset_sinks(
 
     if in_place:
         if output_dir is not None:
-            raise ValueError("--in_place rewrites --input_dir, so it cannot be combined with --output_dir.")
+            raise ValueError(
+                "--in_place rewrites the --model_id directory, so it cannot be combined with --output_dir."
+            )
         if _is_hf_repo(checkpoint_dir):
             raise ValueError(
                 f"--in_place cannot rewrite {checkpoint_dir!r}: it is a HuggingFace repo ID, not a local "
@@ -349,7 +349,7 @@ def reset_sinks(
             raise ValueError(
                 "--output_dir is required: this tool replaces a checkpoint's sink tensors, and defaulting "
                 "to the input meant a mistyped command rewrote the only copy with no undo. Pass "
-                "--output_dir <new dir>, or --in_place to rewrite --input_dir deliberately."
+                "--output_dir <new dir>, or --in_place to rewrite the --model_id directory deliberately."
             )
         output_dir = checkpoint_dir
     else:
@@ -388,7 +388,7 @@ if __name__ == "__main__":
     # main path.
     PartialState()
     reset_sinks(
-        args.input_dir,
+        args.model_id,
         output_dir=args.output_dir,
         dry_run=args.dry_run,
         in_place=args.in_place,
