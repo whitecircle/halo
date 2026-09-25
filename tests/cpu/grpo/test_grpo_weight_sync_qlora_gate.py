@@ -126,27 +126,36 @@ def test_both_trainers_reach_the_gate_through_the_shared_init_spine():
             for step in (
                 "_setup_distributed_modes",
                 "_validate_implicit_reference_model",
+                "_resolve_chunked_head_transform",
                 "_setup_weight_sync",
                 "_disable_dropout_for_onpolicy",
             )
-        }
+        },
+        _loss_logits_width=lambda: 7,
+        _check_full_logits_fit=lambda width: ran.append(f"_check_full_logits_fit({width})"),
     )
     OnPolicyGRPOInitMixin._finish_on_policy_init(host)
 
     # Order matters as much as presence: dropout must be killed on the modules the mode setup
-    # realized, and the gate must run before anything can push weights.
+    # realized, the logits plane is weighed against memory the placed model left free, and the gates
+    # must run before anything can push weights.
     assert ran == [
         "_setup_distributed_modes",
         "_validate_implicit_reference_model",
+        "_resolve_chunked_head_transform",
+        "_check_full_logits_fit(7)",
         "_setup_weight_sync",
         "_disable_dropout_for_onpolicy",
-    ], f"the shared init spine no longer runs the weight-sync gate in order: {ran}"
+    ], f"the shared init spine no longer runs its gates in order: {ran}"
     for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert "_finish_on_policy_init" in inspect.getsource(cls.__init__), (
             f"{cls.__name__}.__init__ no longer closes through the shared spine"
         )
         assert cls._setup_weight_sync is not OnPolicyGRPOInitMixin._setup_weight_sync, (
             f"{cls.__name__} never overrides the gate stub"
+        )
+        assert cls._loss_logits_width is not OnPolicyGRPOInitMixin._loss_logits_width, (
+            f"{cls.__name__} never states its logits width"
         )
 
 

@@ -14,8 +14,10 @@ This reads the JSONL files written by ``write_trajectories_jsonl`` (a ``{"type":
 then one episode per line), rebuilds each problem's hidden tests from its dataset by index — the same
 order and contest selection ``build_examples`` used — and re-runs every recorded ``submit_solution``
 through the *same* ``grade_solution`` the environment uses, reproducing the env's comparison /
-checker / time-limit exactly. It reports first-submission and within-budget solve rates
-(``s@1`` / ``s@2``).
+checker / time-limit exactly. It reports, over the episodes that carry a verdict, the fraction whose
+first admitted submission passes every test (``s@1``) and whose any submission within the episode's
+budget does (``s@2``); an episode recorded with a ``generation_error`` has no verdict to re-grade and is
+counted apart.
 
 Usage::
 
@@ -40,7 +42,7 @@ from src.environments.envs.tasks.coding.code_contests import (
 )
 from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, ContestSelection
 from src.environments.envs.tasks.coding.grading import grade_solution
-from src.environments.eval_runner import load_hf_split
+from src.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
 from src.environments.registry import resolve_environment
 from src.environments.tools.definitions import NativeTool
 
@@ -167,9 +169,12 @@ def display_language(language: str | list[str]) -> str:
 
 
 def regrade_file(path: str, workers: int) -> dict[str, Any]:
-    """Re-grade one trajectory file and return its corrected metrics."""
-    meta, episodes = read_trajectories(path)
+    """Re-grade one trajectory file and return its corrected metrics. An episode the eval recorded with
+    a ``generation_error`` stopped on the driver's fault, carries no verdict and leaves ``n``, as it
+    leaves the eval's scores; ``generation_errors`` counts it."""
+    meta, recorded = read_trajectories(path)
     validate_meta(path, meta)
+    episodes = [episode for episode in recorded if not episode.get(GENERATION_ERROR_KEY)]
     payloads = build_payloads(meta)
     env = rebuild_environment(meta)
     # The run's own grading contract off its meta line, minus the two knobs an offline re-grade must
@@ -222,6 +227,7 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
         "n": n,
         "s@1": solved_first / n if n else 0.0,
         "s@2": solved_within / n if n else 0.0,
+        "generation_errors": len(recorded) - n,
     }
 
 
@@ -249,7 +255,8 @@ def main() -> None:
             # result as it lands, so progress is visible and partial runs are not lost.
             print(
                 f"{metrics['model']:28s} {metrics['adapter']:13s} {display_language(metrics['language']):6s} "
-                f"{metrics['eval_protocol']:11s} n={metrics['n']} s@1={metrics['s@1']:.0%} s@2={metrics['s@2']:.0%}",
+                f"{metrics['eval_protocol']:11s} n={metrics['n']} s@1={metrics['s@1']:.0%} s@2={metrics['s@2']:.0%} "
+                f"generation_errors={metrics['generation_errors']}",
                 flush=True,
             )
             if output:

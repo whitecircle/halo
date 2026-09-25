@@ -1,6 +1,6 @@
 # Code Execution Sandboxes
 
-`SandboxExecutor` (`src/environments/sandbox/`) runs a complete untrusted program — Python, bash, C, or C++ — against stdin in a subprocess: under rlimits only on `local`, confined on `bubblewrap` and `remote`. It backs `submit_solution` hidden-test grading and the scratchpad test tool (`python_repl` for a Python-only run, else `run_code`) in `code_contests` / `codeforces`, the `swe` environment's `run_code`, `run_bash_command` and file tools, and checker verification in `scripts/environments/preparation/prepare_code_dataset.py`.
+`SandboxExecutor` (`src/environments/sandbox/`) runs a complete untrusted program — Python, bash, C, or C++ — against stdin in a subprocess: under rlimits only on `local`, confined on `remote` and on `bubblewrap` without `allow_network`. It backs `submit_solution` hidden-test grading and the scratchpad test tool (`python_repl` for a Python-only run, else `run_code`) in `code_contests` / `codeforces`, the `swe` environment's `run_code`, `run_bash_command` and file tools, and checker verification in `scripts/environments/preparation/prepare_code_dataset.py`.
 
 The in-process restricted REPL (`inprocess.py`) — restricted builtins, no imports, no OS isolation — is the other path, behind `calculate` and a standalone `python` / `python_repl` tool with no `sandbox=` executor.
 
@@ -23,6 +23,10 @@ environment_kwargs:
 `resolve_sandbox()` (`src/environments/sandbox/resolve.py`) takes **explicit argument > env var > default** for `HALO_SANDBOX_BACKEND` (`local`) and `HALO_SANDBOX_URL` (unset). `remote` with no URL raises; so does a URL against `local` or `bubblewrap`, which would be ignored while untrusted code ran here.
 
 `bubblewrap` needs the `bwrap` binary (the `bubblewrap` apt package, in the training image) **and** the right to create user and mount namespaces, which Docker's default seccomp denies — run the container `--privileged` on a host allowing them (`kernel.unprivileged_userns_clone=1`). Its constructor probes once, so a blocked jail fails at construction, not per run.
+
+An executor declares whether it confines the program (`SandboxExecutor.isolated`, `False` unless declared): kept from writing the host's filesystem and from its network, though it may still read what the backend exposes (`bubblewrap`'s read-only system paths and `extra_ro_binds`). `remote` does, `bubblewrap` does unless `allow_network`, `local` does not. On `local` the program has this process's filesystem and network, where a policy can read or rewrite what grades it and fetch a solution, and it reads the grader's launch environment (`/proc/<pid>/environ`): the secrets the trainer was started with (`--env-file`) reach it. `swe` and `code_contests` log one warning per process per backend class when built on an executor that does not confine it. Use `bubblewrap` without network, or `remote`, for RL on untrusted code, and whenever the trainer's environment carries secrets.
+
+An executor also declares whether a compile error may show under `verdict_detail: outcome` (`compiles_without_test_input`, `False` unless declared): only `bubblewrap` does, whose build runs before any test on an empty stdin and whose program can force no rebuild ([Grading rules](code-contests.md#grading-rules)).
 
 ## Using it from Python
 

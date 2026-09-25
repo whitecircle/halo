@@ -14,7 +14,7 @@ import sys
 import pytest
 
 from src.configs.environment_config import EnvironmentConfig
-from src.environments.base import BaseEnvironment
+from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, BaseEnvironment
 from src.environments.envs.protocols.react import create_react_math_environment
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.rewards.spec import EnvironmentTerm
@@ -45,7 +45,7 @@ _CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "e
 # without one (the native protocol and its presets grade against an answer where a row carries one).
 # Written out for the same reason as the table above: it is the roster the docs and the trainer's
 # dataset gate are held to, and deriving it from the classes would make the check agree with itself.
-_REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search"}
+_REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search", "swe"}
 
 
 def _base_default_max_turns() -> int:
@@ -130,6 +130,22 @@ def test_a_react_answer_validator_grades_in_place_of_the_answer_column():
     reward = env.step(ids, ["Thought: add\nFinal Answer: 8"], [{}])[0].trajectory.total_reward
     assert seen == [("8", None)]
     assert reward == 0.0
+
+
+def test_a_raising_react_validator_voids_the_episode_instead_of_paying_it():
+    """A validator clears the answer requirement, so its rows carry no expected answer and the default
+    check would pay any Final Answer the whole objective: a grader that raises voids the episode, as a
+    failed scorer does, rather than handing it a solve."""
+
+    def validator(answer, expected):
+        raise RuntimeError("grader down")
+
+    env = create_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
+    ids, _ = env.reset(["2 + 5?"])
+    trajectory = env.step(ids, ["Thought: add\nFinal Answer: 7"], [{}])[0].trajectory
+    assert trajectory.total_reward == 0.0
+    assert trajectory.info[EPISODE_INVALID_KEY] is True
+    assert trajectory.info[EPISODE_INVALID_REASON_KEY] == "answer_validator raised RuntimeError: grader down"
 
 
 def test_an_explicit_requires_answer_overrides_the_class_declaration():

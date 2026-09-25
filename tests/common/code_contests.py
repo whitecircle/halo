@@ -17,6 +17,9 @@ FINISHED_RUN = {"status": "Success", "run_result": {"status": "Finished", "stdou
 class StubSandbox(SandboxExecutor):
     """Always returns the same canned result; by default a clean run printing ``X``."""
 
+    # It runs nothing, so nothing escapes it.
+    isolated = True
+
     def __init__(self, result: SandboxResult | None = None):
         self._result = result or SandboxResult(stdout="X\n", returncode=0)
 

@@ -5,6 +5,7 @@ once, and a compile failure grades the whole pool once.
 Run: python tests/cpu/environments/test_grading_session.py  (or pytest)
 """
 
+import errno
 import logging
 
 import pytest
@@ -59,6 +60,34 @@ class _SessionSandbox(SandboxExecutor):
         return self.result
 
 
+class _DeniedSession(_Session):
+    """Fails at ``stage`` with a host-side exception whose text quotes a name the program chose."""
+
+    def __init__(self, stage):
+        super().__init__(None, _OK)
+        self.stage = stage
+
+    def _deny(self, stage):
+        if stage == self.stage:
+            raise PermissionError(errno.EACCES, "Permission denied", "/tmp/work/HIDDEN-4217")
+
+    def run(self, code, **kwargs):
+        self._deny("run")
+        return super().run(code, **kwargs)
+
+    def reset_to_staged(self):
+        self._deny("reset")
+
+
+class _DeniedSandbox(_SessionSandbox):
+    def __init__(self, stage):
+        super().__init__()
+        self.stage = stage
+
+    def open_session(self):
+        return _DeniedSession(self.stage)
+
+
 def test_a_grade_runs_every_test_through_one_session_and_closes_it():
     sandbox = _SessionSandbox()
     grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox, language="cpp")
@@ -68,6 +97,16 @@ def test_a_grade_runs_every_test_through_one_session_and_closes_it():
     assert session.runs == [("cpp", "0\n"), ("cpp", "1\n"), ("cpp", "2\n")]
     assert session.resets == 3, "the session is reset to its staged state after every test"
     assert session.closed
+
+
+@pytest.mark.parametrize("stage", ["run", "reset"])
+def test_a_host_fault_shows_its_class_alone_under_outcome(stage, caplog):
+    grade = run_solution_against_tests("code", _TESTS[:1], sandbox=_DeniedSandbox(stage))
+    assert grade.infra_errors == 1
+    assert grade.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], grade.details
+    assert "HIDDEN-4217" in caplog.text, "the log keeps what the verdict leaves out"
+    full = run_solution_against_tests("code", _TESTS[:1], sandbox=_DeniedSandbox(stage), verdict_detail="full")
+    assert "HIDDEN-4217" in full.details
 
 
 def test_garbage_output_is_a_wrong_answer_not_an_infra_error():
@@ -97,7 +136,7 @@ def test_an_executor_without_sessions_grades_one_shot_without_a_warning(caplog):
 def test_a_compile_failure_grades_the_whole_pool_once():
     failure = SandboxResult(compile_failed=True, returncode=1, stderr="main.cpp:1:11: error: expected ';'")
     sandbox = _SessionSandbox(result=failure)
-    grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox, language="cpp")
+    grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox, language="cpp", verdict_detail="full")
     assert (grade.passed, grade.total, grade.ran_ok, grade.graded, grade.infra_errors) == (0, 3, 0, 3, 0)
     assert not grade.budget_hit
     assert "COMPILATION ERROR (every test fails)" in grade.details

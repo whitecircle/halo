@@ -425,7 +425,6 @@ class PipelineTrainerMixin:
 
         self._pp_chain_group = create_pipeline_group(config)
 
-        # Also captures self._ep_config from the wrappers.
         ep_modules = self._find_ep_modules()
         # Deliberately unconditional: create_stage_group issues pp_size collective dist.new_group
         # calls while `ep_modules` is rank-dependent (a hybrid MoE with leading dense layers can give
@@ -550,15 +549,14 @@ class PipelineTrainerMixin:
             dist.all_reduce(count, group=self._pp_stage_group)
         return (count / self.parallelism_config.stage_world_size).clamp(min=1.0)
 
-    def _pp_training_step(self, inputs, num_items_in_batch=None) -> torch.Tensor:
+    def _pp_training_step(self, inputs) -> torch.Tensor:
         """One optimizer step's microbatches through the pipeline; loss broadcast for logging.
 
         The schedule already ran backward for every microbatch, so there is no
         ``accelerator.backward``: returning here hands HF a detached loss with gradients in place.
-        ``num_items_in_batch`` is accepted for signature compatibility but unused, since HF never
-        computes it for a stage; the normalizer below is derived directly.
+        HF's ``num_items_in_batch`` is not taken, since HF never computes it for a stage; the
+        normalizer below is derived directly.
         """
-        del num_items_in_batch
         self.model.train()
         inputs = self._prepare_inputs(inputs)
 
@@ -657,16 +655,9 @@ class PipelineTrainerMixin:
             )
         )
         reject_across_ranks(reason, "Pipeline metric key consensus", exc_type=ValueError)
-        # Checks the trainer has somewhere to put them before the first step rather than at it.
-        self._pp_record_metrics({}, "train")
-
-    def _pp_record_metrics(self, metrics: dict[str, torch.Tensor], train_eval: str) -> None:
-        """Hand the chain-shared metrics to this trainer's own store.
-
-        The default is ``StoredMetricsMixin.store_metrics``; a trainer keeping its metrics in a
-        different structure overrides this.
-        """
-        self.store_metrics(metrics, train_eval=train_eval)
+        # Checks the trainer has somewhere to put them (StoredMetricsMixin) before the first step
+        # rather than at it.
+        self.store_metrics({}, train_eval="train")
 
     def _pp_share_step_metrics(self, train_eval: str) -> None:
         """Broadcast the last stage's per-step metrics down the chain and record them everywhere.
@@ -691,7 +682,7 @@ class PipelineTrainerMixin:
             [torch.as_tensor(local[key], dtype=torch.float32).to(device) for key in self._pp_metric_keys]
         )
         dist.broadcast(values, src=self._pp_last_stage_rank, group=self._pp_chain_group)
-        self._pp_record_metrics(dict(zip(self._pp_metric_keys, values.unbind(), strict=True)), train_eval)
+        self.store_metrics(dict(zip(self._pp_metric_keys, values.unbind(), strict=True)), train_eval=train_eval)
 
     def _pp_stage_gather(self, tensor: torch.Tensor) -> torch.Tensor:
         """All-gather ``tensor`` over this stage's ranks — the DP scope under PP.

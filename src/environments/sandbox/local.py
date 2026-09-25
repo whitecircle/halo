@@ -255,6 +255,11 @@ class LocalSubprocessSandbox(SandboxExecutor):
     :meth:`_wrap_command` hook lets subclasses interpose an isolation wrapper.
     """
 
+    # A session builds once, on an empty stdin, but an unconfined program that read a test's input can
+    # write it to a host file, remove its working directory to force a rebuild, and have the rebuilt
+    # source include that file into the compiler's message.
+    compiles_without_test_input = False
+
     def __init__(
         self,
         memory_limit_mb: int = SANDBOX_DEFAULT_MEMORY_MB,

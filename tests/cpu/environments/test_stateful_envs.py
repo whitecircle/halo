@@ -144,7 +144,7 @@ def test_sandbox_backend_outage_voids_the_episode_unpriced():
 
 def test_code_env_cleanup_closes_sessions():
     env = SweEnvironment(max_turns=5)
-    episode_ids, _ = env.reset(["task"])
+    episode_ids, _ = env.reset(["task"], [{"answer": "done"}])
     env.step(episode_ids, ["w"], [{"tool_calls": [_tool_call("write_file", path="f.txt", content="x")]}])
     eid = episode_ids[0]
     workdir = env._sessions[eid].workdir

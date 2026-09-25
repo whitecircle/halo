@@ -23,7 +23,6 @@ environment_kwargs:
   language: python           # or cpp / c, or a list ([python, cpp]) the model picks from
   timeout_per_test: 5
   max_grading_seconds: 150
-  verdict_detail: outcome
   reasoning_effort: random
   reasoning_effort_profiles:   # thinking_tokens is the episode's total under the scope below
     low: {thinking_tokens: 24576, max_submissions: 1, max_test_calls: 2}
@@ -37,7 +36,7 @@ rollout_thinking_budget_scope: episode
 |---|---|---|
 | `language` | `python` | `python`, `cpp`, `c`, or a list the model picks from |
 | `output_comparison` | `exact` (`tokens` under `codeforces`) | `exact` is trimmed equality reading `\r\n` and `\r` as `\n` on both sides, `tokens` whitespace-token equality |
-| `verdict_detail` | `full` | `full` shows a failed test's expected and produced output; `outcome` the verdict alone |
+| `verdict_detail` | `outcome` | `outcome` states a failed test's verdict class alone (the compiler's first error too, on `bubblewrap`); `full` adds its expected and produced output, exit code, output size and stderr |
 | `timeout_per_test` | 15 s | Per-test cap when the problem declares none; also the interpreted floor. It and `max_time_limit` must be finite and > 0 |
 | `max_time_limit` | 15 s | Clamp on a declared limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's per-test limit; a non-finite or non-positive value raises at construction |
@@ -50,6 +49,8 @@ rollout_thinking_budget_scope: episode
 | `eval_protocol` | `harness` | Evaluation contract; `leaderboard` pins both tool budgets ([Evaluation protocols](#evaluation-protocols)) |
 
 The objective's shape is the `environment` term's `exponent` in the top-level `rewards:` — above 1 it is convex, so half-right earns under half a solve ([Reward Terms](../rewards.md)).
+
+`sandbox_backend` / `sandbox_url` pick the [sandbox](sandbox.md#choosing-a-backend) both tools and the grader run on; one that does not confine the program, `local` included, [warns](sandbox.md#choosing-a-backend).
 
 ### Reasoning effort
 
@@ -99,13 +100,16 @@ records the last language as its `language` slice, which the trainer slices metr
 Grading goes through `grade_solution` (`src/environments/envs/tasks/coding/grading.py`), shared with
 the offline re-grader, so a checkpoint scores identically online and offline. The verdict lists
 non-passing tests only, one entry per distinct verdict with the tests that failed the same way folded
-into it, capped at five; a runtime error shows the tail of stderr, where a traceback names the
-exception. One sandbox session serves the whole grade, so a compiled
-submission builds once, reset after every test. A compile failure is graded once against the whole
-pool.
+into it, capped at five. One sandbox session serves the whole grade, so a compiled submission builds
+once, reset after every test. A compile failure is graded once against the whole pool and shows the
+compiler's first error under `full`. Under `outcome` it shows it only on `bubblewrap`, whose build
+runs once before any test, on an empty stdin, and whose program can force no rebuild. On `local` and
+`remote` it shows the class alone: a `local` program can write a test's input to a host file and
+remove its working directory, forcing a rebuild that includes the file, and a `remote` build shares
+each test's request with its stdin.
 
 - **Comparison.** `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset. Token comparison accepts real-valued tokens within a 1e-6 relative tolerance, gated on a float-looking *expected* token, so integer answers stay exact.
-- **Verdict detail.** Under `full`, a second submission turns the judge into a free test oracle — probing out-earns scratchpad testing within a group. The recipes use `outcome`.
+- **Verdict detail.** `outcome` shows each failed test's verdict class (`FAIL`, `RUNTIME ERROR`, `TIME LIMIT EXCEEDED`, `OUTPUT LIMIT EXCEEDED`, `COMPILATION ERROR`, and `ERROR` for a test lost to infra, whose text goes to the log) and, save the compiler's first error on `bubblewrap`, nothing beyond it: stderr, an exit code and an output size can each carry the hidden input the program read. Which tests fail, and with which class, still reaches the policy; `stop_on_first_failure` narrows that to the first failing test, the Codeforces contract. `full` adds them (stderr as its tail, where a traceback names the exception), an infra error's text and a wrong answer's expected and produced output; a second submission then turns the judge into a free test oracle, and probing out-earns scratchpad testing within a group. Scratchpad runs on the model's own inputs show their output in both modes.
 - **Time limits.** The payload's `time_limit` is the per-test cap, else `timeout_per_test`. An interpreted language is floored at `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution; a compiled one is scaled by `compiled_time_limit_scale`. Both are clamped to `max_time_limit`, per graded language.
 - **Grading budget.** Tests run sequentially, so a several-hundred-test problem stalls the round. `max_grading_seconds` is checked between tests and keeps the full pool as denominator — an ungraded test counts as failed, so size it for an honest solution (the recipes: 150 s). `episode/tests_graded_frac` shows a partial grade.
 - **Special judges.** A per-problem `checker` (Python) in the payload overrides comparison: `python checker.py input.txt correct_output.txt solution_output.txt`, accepted only when it exits cleanly and its last stdout token is `1`. It runs at the 15 s infra default, never the solution's limit.
@@ -216,18 +220,28 @@ python scripts/environments/inference/run_code_contests.py --adapter codeforces 
 
 It buckets `success@1` / `success@k` by the adapter's field (rating here; neither is a benchmark's
 mean-over-samples pass@1, see [Evaluating on an Environment](evaluation.md#running-an-evaluation)).
-At the default `--success_threshold` a problem counts solved when every test in the pool passes. The
-threshold reads the episode's total reward, so under `--training_config` the recipe's shaping moves
-it both ways: `submission_reward` or `execution_progress_reward` can lift a partial solve over it,
-and `tool_error_penalty` (every scratchpad call under `leaderboard` is refused) or
-`length_cutoff_penalty` can sink a solve below it. The re-grader's `s@1` counts all-pass solves
-directly.
+A problem counts solved when the submitted program passes every test in the pool — the environment's
+verdict, not the shaped total, so the recipe's shaping under `--training_config` (a
+`tool_error_penalty` on every refused scratchpad call under `leaderboard`, a submission bonus) moves
+it neither way, and the coding CLI takes no `--success_threshold`. The verdict is the episode's last
+graded submission and `success@1` each row's first scored sample, while the
+[re-grader](evaluation.md#re-grading-recorded-trajectories) scores every episode on its first
+submission (`s@1`) or any within its budget (`s@2`). The two score the same submission only on a
+`leaderboard` run at `--num_samples 1`, where each row is one episode with one submission.
 
 Without `--training_config` or `--max_tokens`, `--reasoning_effort` sets the generation budget: the
 level's `thinking_tokens` plus 4096 tokens of solution headroom, which the served context window
-must exceed. `--eval_protocol` picks the [evaluation protocol](#evaluation-protocols), else the
-training config's, else `harness`; the report title and the trajectory meta name it. A training
-config written under another protocol gives up the `max_submissions` / `max_test_calls` the flag's
+must exceed. Every episode sends its level's thinking budget, so the vLLM server needs what the
+[reasoning budget](../async-grpo/rollouts.md#reasoning-budget) needs, a reasoning parser among it;
+without one vLLM rejects the request. A non-thinking model served with a think-tag parser gets its
+whole answer back as reasoning (no end marker reads as all reasoning), so evaluate one with
+`--env_kwargs '{"reasoning_effort": null}'`: no level, no budget, no parser needed. The eval knows
+the server is SGLang only from a `--training_config` naming `rollout_backend: sglang`, which drops
+the budget as [training does](../async-grpo/rollouts.md#reasoning-budget).
+
+`--eval_protocol` picks the [evaluation protocol](#evaluation-protocols), else the training
+config's, else `harness`; the report title and the trajectory meta name it. A training config
+written under another protocol gives up the `max_submissions` / `max_test_calls` the flag's
 protocol pins (logged); a config that names the protocol itself, or `--env_kwargs`, contradicting a
 pin raises. Grading knobs with no flag go through `--env_kwargs`, recorded in the trajectory meta.
 Flags, output files and re-grading: [Evaluating on an Environment](evaluation.md).

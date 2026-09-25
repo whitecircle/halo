@@ -1,11 +1,14 @@
 #!/usr/bin/env python
-"""CPU tests for the shared eval runner's dataset loading (load_hf_split) and trajectory recording
-(serialize_trajectory + write_trajectories_jsonl).
+"""CPU tests for the shared eval runner: dataset loading (``load_hf_split``), trajectory recording
+(``serialize_trajectory`` + ``write_trajectories_jsonl``), the episode driver's failure handling and
+retries (``run_episode``), and the scores (``collect_results`` + ``summarize`` + ``report``).
 
-The critical invariant: a recorded trajectory must keep the conversation and the grading verdict but
-must NOT leak the answer key (the hidden test cases live in ``info["_test_cases"]`` / the graded
-``info["context"]["answer"]`` payload). A drop-list that stops covering one of those keys writes it
-into the recorded file.
+- A recorded trajectory keeps the conversation and the grading verdict but never the answer key (the
+  hidden tests in ``info["_test_cases"]``, the graded ``info["context"]["answer"]`` payload).
+- A generation the episode's own request lost (a context overflow, a timeout past every retry) is
+  graded on what the episode earned; one the driver lost is a generation error: no verdict, out of
+  every score, counted and recorded apart.
+- A sample counts solved on the environment's own verdict where it reports one.
 
 Run:
     python tests/cpu/environments/test_eval_runner.py
@@ -13,13 +16,23 @@ Run:
 
 import json
 import logging
+import math
 import sys
 import types
 from typing import Any
 
+import httpx
 import pytest
 from datasets import Dataset, DatasetDict
-from openai import NOT_GIVEN
+from openai import (
+    NOT_GIVEN,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 
 import src.environments.eval_runner as eval_runner
 from src.configs.rollout_config import RolloutConfig
@@ -27,6 +40,7 @@ from src.environments.base import (
     EPISODE_ERROR_KEY,
     OBJECTIVE_REWARD_KEY,
     REWARD_COMPONENTS_KEY,
+    SOLVE_RATE_KEY,
     Message,
     Trajectory,
 )
@@ -119,6 +133,32 @@ def test_write_trajectories_jsonl_meta_then_episodes(tmp_path):
     assert ep["index"] == 0 and ep["id"] == "cf-1900-A"  # addressable per-episode
     assert [m["role"] for m in ep["messages"]] == ["system", "user", "assistant"]
     assert "EXPECTED_OUTPUT_42" not in json.dumps(lines)  # no leak through the writer either
+    assert ep[eval_runner.GENERATION_ERROR_KEY] is None
+
+
+def test_a_generation_error_is_recorded_with_its_episode(tmp_path):
+    """The file is what the offline re-grader reads: without the marker it could not tell a sample the
+    driver lost from a scored miss, and would count it in ``n``."""
+    lost = {"reward": None, "success": None, "stats": {}, eval_runner.GENERATION_ERROR_KEY: "NotFoundError: gone"}
+    path = str(tmp_path / "traj.jsonl")
+    write_trajectories_jsonl(path, {"model": "m"}, [{"group": None, "id": "p", "samples": [lost]}])
+    with open(path) as f:
+        episode = [json.loads(line) for line in f][1]
+    assert episode[eval_runner.GENERATION_ERROR_KEY] == "NotFoundError: gone"
+    assert episode["reward"] is None and episode["success"] is None
+
+
+async def test_an_episode_that_raises_records_its_exception_type(monkeypatch):
+    """A bare ``TimeoutError`` stringifies to ``""``: the error must still name what was raised."""
+
+    async def _raises(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(eval_runner, "run_episode", _raises)
+    (row,) = await collect_results(
+        _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
+    )
+    assert row["samples"][0]["error"] == "TimeoutError"
 
 
 # run_episode failure handling
@@ -471,15 +511,241 @@ def test_summarize_empty_results_fails_loud():
 
 
 def test_summarize_counts_the_samples_that_carry_no_signal():
-    """An invalid grade or a lost episode scores 0 and stays in the means; the report counts them apart,
-    so a sandbox outage does not read as a weak model."""
+    """An invalid grade, or an episode whose run raised, scores 0 and stays in the means; the report
+    counts them apart, so a sandbox outage does not read as a weak model."""
     rows = [
         {"samples": [{"reward": 1.0, "success": True}, {"reward": 0.0, "success": False, "error": "outage"}]},
-        {"samples": [{"reward": 0.0, "success": False}, {"reward": 0.0, "success": False, "error": "lost"}]},
+        {"samples": [{"reward": 0.0, "success": False}, {"reward": 0.0, "success": False, "error": "raised"}]},
     ]
     summary = summarize(rows, num_samples=2)
     assert summary["invalid"] == 2
     assert summary["mean_reward"] == pytest.approx(0.25)
+
+
+def _status_error(error_cls: type[APIStatusError], status: int, message: str) -> APIStatusError:
+    body = json.dumps({"object": "error", "message": message, "type": error_cls.__name__, "code": status})
+    response = httpx.Response(status, text=body, request=httpx.Request("POST", "http://x/v1/chat/completions"))
+    return error_cls(f"Error code: {status} - {body}", response=response, body=json.loads(body))
+
+
+def _bad_request(message: str) -> BadRequestError:
+    return _status_error(BadRequestError, 400, message)
+
+
+def _final(answer="done"):
+    return types.SimpleNamespace(
+        answer=answer, finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None, token_ids=None
+    )
+
+
+_RETRYING = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16, max_retries=2, retry_base_wait=0.0)
+
+
+async def _episode_under_retries(env, script, monkeypatch, rollout=_RETRYING):
+    calls = []
+    scripted = _scripted_generate(script)
+
+    async def _counting(**kwargs):
+        calls.append(kwargs)
+        return await scripted(**kwargs)
+
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _counting)
+    traj = await run_episode(env, "task", {}, client=object(), rollout=rollout)
+    return traj, len(calls)
+
+
+async def test_an_engine_serialization_fault_is_retried_like_a_training_rollout(monkeypatch):
+    """A 400 the engine returns for a NaN log-prob it could not serialise is its own fault: the training
+    rollout retries it, so the eval does too, instead of ending the episode on it."""
+    fault = _bad_request("Out of range float values are not JSON compliant: nan")
+    traj, calls = await _episode_under_retries(_tooled_env(), [fault, _final()], monkeypatch)
+
+    assert calls == 2
+    assert EPISODE_ERROR_KEY not in traj.info
+    assert traj.info["completed"] is True and traj.total_reward == pytest.approx(1.0)
+
+
+async def test_an_engine_abort_is_re_issued_not_stepped(monkeypatch):
+    aborted = types.SimpleNamespace(
+        answer="partial", finish_reason="abort", completion_tokens=3, tool_calls=None, reasoning=None, token_ids=None
+    )
+    traj, calls = await _episode_under_retries(_tooled_env(), [aborted, _final()], monkeypatch)
+
+    assert calls == 2
+    assert traj.info["completed"] is True
+    assert traj.info.get("length_cutoff_turns", 0) == 0, "the abort fragment reached the environment"
+
+
+async def test_a_genuine_client_error_is_terminal(monkeypatch):
+    traj, calls = await _episode_under_retries(
+        _tooled_env(), [_bad_request("max_tokens must be positive"), _final()], monkeypatch
+    )
+
+    assert calls == 1
+    assert "BadRequestError" in traj.info[EPISODE_ERROR_KEY]
+
+
+_TIMEOUT = APITimeoutError(request=httpx.Request("POST", "http://x/v1/chat/completions"))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [_bad_request("This model's maximum context length is 4096 tokens"), _TIMEOUT],
+    ids=["context-overflow", "timeout"],
+)
+async def test_a_failure_the_episode_itself_caused_is_graded_not_dropped(monkeypatch, failure):
+    """A conversation that outgrew the served context, or a turn that outran the timeout on every client
+    retry, follows the episode's own length: dropping those samples would score only the episodes short
+    enough to finish. They are graded on what they earned, as misses."""
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([_tool_call_response(), failure]))
+
+    (row,) = await collect_results(
+        _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
+    )
+
+    (sample,) = row["samples"]
+    assert eval_runner.GENERATION_ERROR_KEY not in sample
+    assert sample["success"] is False and sample["reward"] == pytest.approx(0.05)
+    assert summarize([row], num_samples=1)["generation_errors"] == 0
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _status_error(NotFoundError, 404, "The model `m` does not exist."),
+        _status_error(AuthenticationError, 401, "Invalid API key"),
+        _status_error(PermissionDeniedError, 403, "Forbidden"),
+        _bad_request("max_tokens must be positive"),
+    ],
+    ids=["unknown-model", "rejected-key", "forbidden", "malformed-request"],
+)
+async def test_a_client_error_the_episode_did_not_cause_is_a_generation_error(monkeypatch, failure):
+    """A terminal client error other than a context overflow says nothing about the episode: an unknown
+    model or route, a rejected key, a request the driver built wrong. Graded as a miss it would score
+    the endpoint's misconfiguration as the policy's failure."""
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([_tool_call_response(), failure]))
+
+    (row,) = await collect_results(
+        _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
+    )
+
+    (sample,) = row["samples"]
+    assert type(failure).__name__ in sample[eval_runner.GENERATION_ERROR_KEY]
+    assert sample["reward"] is None and sample["success"] is None
+    assert summarize([row], num_samples=1)["generation_errors"] == 1
+
+
+async def test_an_engine_fault_past_the_retries_is_a_generation_error_row(monkeypatch):
+    fault = _bad_request("Out of range float values are not JSON compliant: nan")
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([fault] * 3))
+
+    (row,) = await collect_results(
+        _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
+    )
+
+    (sample,) = row["samples"]
+    assert "BadRequestError" in sample[eval_runner.GENERATION_ERROR_KEY]
+    assert sample["reward"] is None and sample["success"] is None, "a lost generation is not a scored miss"
+    assert "error" not in sample, "a generation error is not an invalid grade"
+
+
+def test_generation_errors_leave_every_mean_and_are_counted():
+    lost = {"reward": None, "success": None, eval_runner.GENERATION_ERROR_KEY: "BadRequestError: nan"}
+    rows = [
+        {"samples": [lost, {"reward": 1.0, "success": True}]},
+        {"samples": [{"reward": 0.0, "success": False}, {"reward": 0.5, "success": False}]},
+        {"samples": [lost, lost]},
+    ]
+    summary = summarize(rows, num_samples=2)
+
+    assert summary["generation_errors"] == 3
+    assert summary["invalid"] == 0
+    assert summary["success@1"] == pytest.approx(0.5), "each row's first scored sample: solved, then missed"
+    assert summary["success@2"] == pytest.approx(0.5), "the all-error row leaves the denominator"
+    assert summary["mean_reward"] == pytest.approx((1.0 + 0.25) / 2)
+
+
+def test_success_at_one_never_exceeds_success_at_k():
+    lost = {"reward": None, "success": None, eval_runner.GENERATION_ERROR_KEY: "RuntimeError: gone"}
+    rows = [
+        {"samples": [{"reward": 1.0, "success": True}, lost]},
+        {"samples": [lost, {"reward": 0.0, "success": False}]},
+    ]
+    summary = summarize(rows, num_samples=2)
+    assert summary["success@1"] == pytest.approx(0.5) and summary["success@2"] == pytest.approx(0.5)
+
+
+def test_a_bucket_of_only_generation_errors_reads_nan_not_zero():
+    lost = {"reward": None, "success": None, eval_runner.GENERATION_ERROR_KEY: "RuntimeError: gone"}
+    summary = summarize([{"samples": [lost]}], num_samples=1)
+    assert math.isnan(summary["success@1"]) and math.isnan(summary["mean_reward"])
+    assert summary["generation_errors"] == 1
+
+
+class _VerdictEnv(NativeToolUseEnvironment):
+    """A native env that reports the solve verdict ``solved`` whatever its shaped reward."""
+
+    solved = 1.0
+
+    def rollout_metrics(self, trajectory):
+        return {**super().rollout_metrics(trajectory), SOLVE_RATE_KEY: self.solved}
+
+
+def _cut_then_final():
+    cut = types.SimpleNamespace(
+        answer="a thought that ran",
+        finish_reason="length",
+        completion_tokens=9,
+        tool_calls=None,
+        reasoning=None,
+        token_ids=None,
+    )
+    return [cut, _final()]
+
+
+async def _one_sample(env, monkeypatch, success_threshold=1.0):
+    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate(_cut_then_final()))
+    (row,) = await collect_results(
+        env,
+        [{"prompt": "q", "context": {}}],
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        success_threshold=success_threshold,
+    )
+    return row["samples"][0]
+
+
+def _verdict_env(solved: float) -> _VerdictEnv:
+    registry = NativeToolRegistry()
+    registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: "ok"))
+    env = _VerdictEnv(tool_registry=registry, tool_success_reward=0.05, length_cutoff_penalty=0.2)
+    env.solved = solved
+    return env
+
+
+async def test_a_solve_that_paid_a_shaping_penalty_counts_on_the_envs_verdict(monkeypatch):
+    sample = await _one_sample(_verdict_env(solved=1.0), monkeypatch)
+    assert sample["reward"] == pytest.approx(0.8), "the recovered cut must have paid its penalty"
+    assert sample["success"] is True, "a solved episode read as unsolved through its shaped total"
+
+
+async def test_the_verdict_also_refuses_a_total_that_clears_the_threshold(monkeypatch):
+    sample = await _one_sample(_verdict_env(solved=0.0), monkeypatch, success_threshold=0.5)
+    assert sample["reward"] >= 0.5
+    assert sample["success"] is False
+
+
+async def test_without_a_verdict_the_threshold_decides(monkeypatch):
+    sample = await _one_sample(_tooled_env(length_cutoff_penalty=0.2), monkeypatch)
+    assert sample["reward"] == pytest.approx(0.8)
+    assert sample["success"] is False
+
+
+def test_report_states_the_generation_error_count(caplog):
+    lost = {"reward": None, "success": None, eval_runner.GENERATION_ERROR_KEY: "RuntimeError: gone"}
+    with caplog.at_level(logging.INFO, logger="src.environments.eval_runner"):
+        report([{"samples": [lost, {"reward": 1.0, "success": True}]}], num_samples=2, title="lost")
+    assert "generation_errors=1" in caplog.records[-1].getMessage()
 
 
 def test_report_states_the_invalid_count_even_when_none_is(caplog):

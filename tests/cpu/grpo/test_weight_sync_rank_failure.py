@@ -73,6 +73,9 @@ class _FakeClient:
         self.flushes = 0
         self.aborts = 0
 
+    def scope_co_load_groups(self, module_names) -> None:
+        """Nothing in this policy is co-loaded; the forwarding rank scopes its client before the push."""
+
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         self.sent.append(name)
         if self._fail_send_at and len(self.sent) == self._fail_send_at:

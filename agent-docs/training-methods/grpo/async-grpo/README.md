@@ -27,7 +27,7 @@ One YAML, six dataclasses.
 
 ## Dataset
 
-`prompt` is the row; `answer` is carried whenever the dataset has it. The environment decides whether it is required: `code_contests` / `codeforces` read their hidden-test payload from it, and `exam_qa`, `qa_search` and the `react_*` presets grade the final answer against it, so a dataset without the column is refused at trainer construction. `native_*`, `swe` and `mcp` need none.
+`prompt` is the row; `answer` is carried whenever the dataset has it. The environment decides whether it is required: `code_contests` / `codeforces` read their hidden-test payload from it, and `exam_qa`, `qa_search` and the `react_*` presets grade the final answer against it, so a dataset without the column is refused at trainer construction, as is one for [`swe`](../environments/swe-environment.md#reward) unless judge-only. `native_*` and `mcp` need none.
 
 Rename columns with `prompt_field` / `answer_field`, forward extras with `context_fields`. A `context_field`, or an `answer_field` renamed away from `answer`, must name a real column: an unknown one raises at startup rather than yielding answer-less rows.
 

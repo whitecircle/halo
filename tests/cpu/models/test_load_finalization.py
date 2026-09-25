@@ -12,8 +12,9 @@ These tests pin (1) the seam's three legs — a seam that drops one silently bre
 relies on it; (2) that every load path reaches the seam, swept from the dispatcher's own
 ``_load_*`` roots so a NEW loader that forgets it fails here rather than in a silently-NoPE run; and
 (3) the trainer backstop: a buffer still meta at device placement is uninitialized memory and must
-raise, not be allocated as ``torch.empty``; and (4) the ``scripts/`` tool surface, where a loader
-that hands its model to a forward must finalize it and the save-only ones are pinned as such.
+raise, not be allocated as ``torch.empty``; (4) the ``scripts/`` tool surface, where a loader
+that hands its model to a forward must finalize it and the save-only ones are pinned as such; and
+(5) that no trainer loads a model of its own, since every model it holds arrives from a loader above.
 
 Run: python tests/cpu/models/test_load_finalization.py  (or pytest)
 """
@@ -93,6 +94,9 @@ CONVERSION_TOOL_LOADERS = (
 
 # How a file betrays that it runs the model it loaded, for the save-only half of the split above.
 _FORWARD_MARKERS = (".generate(", ".logits", "last_hidden_state")
+
+# Classes whose ``from_pretrained`` builds no model, so a trainer may call it (a fallback tokenizer).
+_NON_MODEL_PRETRAINED = frozenset({"AutoTokenizer", "AutoProcessor", "AutoConfig"})
 
 
 def _rotary_with_reference(theta: float = 1_000_000.0) -> tuple[Qwen3RotaryEmbedding, torch.Tensor]:
@@ -310,6 +314,35 @@ def test_conversion_tools_still_run_no_forward():
     assert not forwarding, (
         f"{forwarding} now run the model they load: move them to INFERENCE_TOOL_LOADERS and call "
         f"{SEAM} on the load, once the weights sit on their final device."
+    )
+
+
+def _loads_a_model(call: ast.Call) -> bool:
+    """Whether ``call`` materializes a model: an eager load entry point, or a ``from_pretrained`` on
+    anything but a tokenizer, processor or config class."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id in TOOL_LOAD_CALLS
+    if isinstance(func, ast.Attribute) and func.attr == "from_pretrained":
+        return not (isinstance(func.value, ast.Name) and func.value.id in _NON_MODEL_PRETRAINED)
+    return False
+
+
+def test_no_trainer_loads_a_model_itself():
+    """A trainer holds the models its caller loaded: the policy through the distributed loaders or
+    ``load_model_from_pretrained``, a frozen reference or teacher through ``load_frozen_auxiliary_model``
+    in its script. A load inside ``src/trainers`` skips the buffer repair, the sinks policy and the
+    family attention patches those loaders own, and takes none of the run's load flags."""
+    offenders = sorted(
+        f"{path.relative_to(REPO_ROOT).as_posix()}:{node.name}"
+        for path in (REPO_ROOT / "src/trainers").rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and any(isinstance(call, ast.Call) and _loads_a_model(call) for call in ast.walk(node))
+    )
+    assert not offenders, (
+        f"{offenders} load a model inside a trainer. Load it in the entry script through the loader "
+        f"that owns its kind ({SEAM} runs there) and pass it to the trainer."
     )
 
 

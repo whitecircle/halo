@@ -37,7 +37,7 @@ The knobs every environment shares are in the [overview](README.md#configuration
 
 ## Reward
 
-The grade is 1 when the final answer matches, 0 otherwise, priced by the reward's `environment` term as `reward/objective` ([Reward Terms](../rewards.md#environment-arm)). Matching is all-or-nothing — exact match after normalization (`\boxed{}`, bold, answer prefixes), then a numeric compare at 1% relative tolerance. `answer_validator`, a `(final_answer, expected) -> bool`, grades instead wherever one is passed and clears `requires_answer`; without it an answer-less context would grade any Final Answer 1, so the presets require the column.
+The grade is 1 when the final answer matches, 0 otherwise, priced by the reward's `environment` term as `reward/objective` ([Reward Terms](../rewards.md#environment-arm)). Matching is all-or-nothing — exact match after normalization (`\boxed{}`, bold, answer prefixes), then a numeric compare at 1% relative tolerance. `answer_validator`, a `(final_answer, expected) -> bool`, grades instead wherever one is passed and clears `requires_answer`; without it an answer-less context would grade any Final Answer 1, so the presets require the column. A validator that raises marks the episode `episode_invalid` (its exception as the `episode_invalid_reason`) and grades it 0: no check stands in for it, since the default one would pay a Final Answer on a row with no expected answer.
 
 Per turn: `+thought_reward` or `-no_thought_penalty` for the Thought, `+tool_success_reward` / `-tool_error_penalty` for the call, paid up to `tool_reward_cap`; these deltas log as `reward/turn_shaping`. Every magnitude must be ≥ 0; the minus is applied at the use site, so a negative value raises instead of paying a penalty as a bonus.
 

@@ -2,7 +2,8 @@
 
 Multi-turn and stateful: each episode gets its own persistent :class:`SandboxSession`, so files written
 on one turn are visible on the next. Tools bind to the active episode's session via a ``ContextVar``, so
-one env instance safely serves concurrent rollouts.
+one env instance safely serves concurrent rollouts. Every priced grade needs a grader — a
+``test_function``, or the row's ``answer`` / ``validator``: completing the episode earns nothing.
 """
 
 import logging
@@ -14,7 +15,7 @@ from typing import Any
 from src.environments.base import EPISODE_INVALID_KEY, EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
-from src.environments.sandbox.resolve import resolve_sandbox
+from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
 from src.environments.tools.definitions import NativeToolRegistry
 from src.environments.tools.factories import (
     create_session_bash_tools,
@@ -33,6 +34,11 @@ class SweEnvironment(NativeToolUseEnvironment):
 
     Persistent workspace tools (read/write/list files), a code-execution tool and a shell tool, all
     backed by a per-episode :class:`SandboxSession` so state carries across turns.
+
+    Graded by ``test_function`` when one is passed, else against the row's ``validator`` or ``answer``
+    (``requires_answer`` then defaults on, so the trainer refuses a dataset without the column).
+    Construction refuses ``requires_answer=False`` without a ``test_function`` while the reward prices
+    the environment's grade, since nothing would be graded.
     """
 
     # An agentic edit-run-test loop needs more turns than the protocol's generic budget.
@@ -60,6 +66,7 @@ Tips:
         **kwargs,
     ):
         self.sandbox = sandbox or resolve_sandbox(backend=sandbox_backend, url=sandbox_url)
+        warn_if_unisolated(self.sandbox, type(self).__name__)
         self._sessions: dict[int, SandboxSession] = {}
 
         # Session tools resolve the active episode's session per call, hence the getter not a session.
@@ -79,6 +86,19 @@ Tips:
             **kwargs,
         )
         self.test_function = test_function
+        if test_function is None and self._grades_objective:
+            if kwargs.get("requires_answer") is False:
+                raise ValueError(
+                    f"{type(self).__name__} has nothing to grade against: requires_answer is false and no "
+                    f"test_function is set. Grade against the dataset's answer column (requires_answer), "
+                    f"pass a test_function, or price the episode with an external reward term only."
+                )
+            self.requires_answer = True
+
+    @property
+    def _grades_objective(self) -> bool:
+        """Whether the reward prices this environment's own grade (its ``environment`` term)."""
+        return self._rewards.environment_term is not None
 
     def _session_for(self, trajectory: Trajectory) -> SandboxSession:
         """Return (creating on first use) the persistent session for this episode."""
@@ -114,9 +134,12 @@ Tips:
         super().close()
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
-        """Grade by the test function when one is configured, else by the protocol's answer path,
-        else by completion with at least one successful tool call."""
-        if not trajectory.info.get("completed"):
+        """Grade by the test function when one is configured, else by the protocol's answer path against
+        the row's ``validator`` or ``answer``. A row carrying neither raises: there is no completion
+        fallback, since running a command proves nothing. A reward without an ``environment`` term
+        prices no grade, so none is taken: a grader could only void the episode for a verdict no term
+        reads (a null ``answer``, a raising test function)."""
+        if not self._grades_objective or not trajectory.info.get("completed"):
             return EpisodeGrade(0.0)
 
         if self.test_function:
@@ -131,8 +154,11 @@ Tips:
                 return EpisodeGrade(0.0)
 
         ctx = context or trajectory.info.get("context") or {}
-        if ctx.get("validator") or ctx.get("answer") is not None:
+        # Key presence, not value: the protocol marks a null ``answer`` cell invalid instead of paying it.
+        if callable(ctx.get("validator")) or "answer" in ctx:
             return super()._grade_episode(trajectory, context)
-
-        # Ungraded: a zero-tool-call completion grades the FULL failure — softening it rewards the exploit.
-        return EpisodeGrade(1.0 if trajectory.info.get("successful_tool_calls", 0) > 0 else 0.0)
+        raise ValueError(
+            f"{type(self).__name__} has nothing to grade this episode against: no test_function, and the "
+            f"row carries no 'answer' or 'validator' (the trainer refuses such a dataset under "
+            f"requires_answer; this driver passed one)."
+        )

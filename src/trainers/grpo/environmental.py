@@ -30,6 +30,7 @@ from src.environments.base import (
     VALID_REASONING_EFFORTS,
     BaseEnvironment,
     resolve_reasoning_effort,
+    solve_verdict,
 )
 from src.environments.engine_wire import SGLANG_BACKEND
 from src.environments.episode import (
@@ -40,7 +41,12 @@ from src.environments.episode import (
     validate_thinking_budget_scope,
 )
 from src.models.structure import resolve_tokenizer
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, rows_forward_densely
+from src.trainers.grpo.mixins.chunked_logprobs import (
+    ChunkedGRPOLogprobsMixin,
+    LogitsWidth,
+    dense_row_spans,
+    rows_forward_densely,
+)
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.mixins.generation_buffer import GRPOGenerationBufferMixin
@@ -62,8 +68,14 @@ from src.trainers.grpo.objective.logratio import (
 )
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
 from src.trainers.grpo.rollout.completions_logging import log_with_decoupled_completions, unbounded_completion_logs
-from src.trainers.grpo.rollout.rollout_metrics import RolloutMetricsMixin, WorldMetrics, gathered_fractions
+from src.trainers.grpo.rollout.rollout_metrics import (
+    RolloutMetricsMixin,
+    WorldMetrics,
+    gathered_fractions,
+    group_solve_counts,
+)
 from src.trainers.grpo.rollout.routing_replay import (
+    ROLLOUT_COVERAGE_SHAPES,
     ROUTING_MASKS_KEY,
     RoutingReplayInjector,
     assemble_rollout_masks,
@@ -114,19 +126,20 @@ class BatchRows:
         return expand_traj_to_rows(values, self.turns_per_traj, self.num_dummy_rows, self.per_turn, dummy_fill)
 
 
-def rollout_valid_mask(rollout_results: list[RolloutResult], device: torch.device) -> torch.Tensor:
-    """Per-rollout bool mask (True = counts toward the GRPO group baseline).
+def rollout_is_valid(result: RolloutResult) -> bool:
+    """Whether an episode counts toward the GRPO group baseline.
 
     An episode is excluded when the rollout infrastructure errored (``RolloutResult.error``) or the
     environment marked its reward as carrying no learning signal (``Trajectory.episode_invalid``,
     e.g. a grading outage forced the failure reward). Either way the reward says nothing about the
     policy, so averaging it into the baseline would bias every sibling's advantage.
     """
-    return torch.tensor(
-        [not r.error and not (r.trajectory is not None and r.trajectory.episode_invalid) for r in rollout_results],
-        device=device,
-        dtype=torch.bool,
-    )
+    return not result.error and not (result.trajectory is not None and result.trajectory.episode_invalid)
+
+
+def rollout_valid_mask(rollout_results: list[RolloutResult], device: torch.device) -> torch.Tensor:
+    """Per-rollout bool mask of :func:`rollout_is_valid` (True = counts toward the GRPO group baseline)."""
+    return torch.tensor([rollout_is_valid(r) for r in rollout_results], device=device, dtype=torch.bool)
 
 
 def env_reward_func(prompts, _completions, **_kwargs) -> list[float]:
@@ -288,6 +301,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # An eval round is the whole eval set; TRL's one-generation-batch buffer would keep its tail only.
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
+        self._truncation_alarm_rate = self.async_config.truncation_alarm_rate
         self.drop_degenerate_groups = self.async_config.drop_degenerate_groups
         # Both range-validated by AsyncTrainingConfig._validate_ranges (finiteness included).
         self._scale_rewards_std_floor = self.async_config.scale_rewards_std_floor
@@ -399,6 +413,21 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         # After _setup_distributed_modes (needs the EP wrappers); eager, so an unsupported setup fails now.
         self._routing_injector = self._setup_routing_replay(self.async_config.routing_replay)
+
+    def _loss_logits_width(self) -> LogitsWidth:
+        """A per-turn row completes within one turn's cap; a whole-trajectory row runs to the row cap.
+        One logit past the completion is kept for the next-token shift.
+
+        Per-turn, this is the usual row, not a bound: a trajectory whose turns lost their captured ids
+        falls back to one whole-trajectory row, which widens its micro-batch to that row.
+        """
+        cfg = self.async_config
+        if self._train_on_sampled_tokens:
+            return LogitsWidth(cfg.rollout_max_tokens + 1, "rollout_max_tokens")
+        if cfg.max_train_row_tokens is not None:
+            return LogitsWidth(cfg.max_train_row_tokens + 1, "max_train_row_tokens")
+        context = self._context_limit()
+        return LogitsWidth(context + 1, f"max_train_row_tokens (unset: the {context}-token context window)")
 
     def _setup_weight_sync(self) -> None:
         """Gate the model and the rollout backend against what the NCCL sync can actually ship.
@@ -937,6 +966,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._metrics[mode]["reward/within_group_std"].append(
                 gathered_rewards.view(-1, num_generations).std(dim=1).mean().item()
             )
+        # After the breaker: the diagnostics read the advantages this step's gradient actually carries.
+        self._record_step_diagnostics(
+            rollout_results, num_generations, mode, recompute_logps, local_advantages, loss_mask
+        )
 
         # After the breaker, not before it: the completions record must report the advantages this
         # step's gradient actually used, which on a tripped step are zeros.
@@ -1043,11 +1076,18 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                         self._routing_injector.num_experts,
                     )
                     rollout_routing_masks = rollout_routing_masks.to(device)
-                    # prompt_len_mismatch is not a shape class, so it must stay out of the denominator.
-                    shape_keys = ("full", "engine_omits_last", "completion_only", "unresolved")
-                    total = sum(coverage[k] for k in shape_keys)
+                    total = sum(coverage[k] for k in ROLLOUT_COVERAGE_SHAPES)
                     for key, count in coverage.items():
                         self._world_metrics.fraction(f"routing/rollout_{key}_frac", count, total)
+                    if coverage["unresolved"] == total and self._batch_build_error is None:
+                        self._batch_build_error = (
+                            f"routing_replay='rollout': no routed row on this rank ({total} in the "
+                            f"batch) matched a known engine coverage convention, so every position "
+                            f"would replay natural routing and R3 would be inert. The engine's "
+                            f"routed_experts token count no longer lines up with the trainer's "
+                            f"prompt + completion lengths — check the engine version against the "
+                            f"conventions in assemble_rollout_masks."
+                        )
                 except ValueError as e:
                     if self._batch_build_error is None:
                         self._batch_build_error = f"routing_replay='rollout': {e}"
@@ -1141,6 +1181,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             )
             # Unclamped mean log-ratio (nats): ~0 when conditioning matches vLLM's exact prompt.
             self._world_metrics.fraction("sampling/logratio_mean", logps_diff.sum(), corrected_mask.sum())
+            clip_max = self.vllm_importance_sampling_clip_max
+            # Past the truncation point in either direction, on the raw trainer-vs-sampler ratio; the
+            # band [1/clip_max, clip_max] is empty at or below 1.
+            if clip_max > 1:
+                extreme = corrected_mask & (logps_diff.abs() > math.log(clip_max))
+                self._world_metrics.fraction("sampling/is_ratio_extreme_frac", extreme.sum(), corrected_mask.sum())
             # Policy tokens the sampler emitted with probability 1 (budget-forced closes): uncorrected.
             with_sampling = completion_mask.bool() & torch.tensor(row_has_sampling, device=device).unsqueeze(1)
             self._world_metrics.fraction(
@@ -1302,7 +1348,39 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         if surviving.numel():
             world.fraction("sampling/is_ratio_mean", surviving.sum(), surviving.numel())
             world.maximum("sampling/is_ratio_max", surviving.max())
+        # Over the weights the loss applies, masked ones as zeros: a thrown-away token is a lost sample.
+        world.effective_sample_frac("sampling/is_ess_frac", importance_sampling_ratio, eff_corrected)
         return eff_corrected
+
+    def _record_step_diagnostics(
+        self,
+        rollout_results: list[RolloutResult],
+        num_generations: int,
+        mode: str,
+        recompute_logps: torch.Tensor | None,
+        advantages: torch.Tensor,
+        loss_mask: torch.Tensor,
+    ) -> None:
+        """Record the step's solve-group split, eval success@k and log-prob/advantage covariance.
+
+        The groups are this rank's consecutive ``num_generations`` blocks, judged on the environment's
+        solve verdict: an episode outside the baseline or without a verdict does not vote, and no group
+        metric is recorded where no episode carries one. success@k is an eval round's share of groups any
+        member solved. The covariance pairs each loss token's pre-update log-prob with its row's
+        advantage; it needs the recompute forward, a config-derived gate.
+        """
+        world = self._world_metrics
+        solved = [solve_verdict(r.metrics) if rollout_is_valid(r) else None for r in rollout_results]
+        groups, all_pass, all_fail, any_pass = group_solve_counts(solved, num_generations)
+        if groups:
+            world.fraction("outcome/all_pass_group_frac", all_pass, groups)
+            world.fraction("outcome/all_fail_group_frac", all_fail, groups)
+            if mode == "eval" and num_generations > 1:
+                world.fraction(f"outcome/success@{num_generations}", any_pass, groups)
+        if recompute_logps is not None:
+            world.covariance(
+                "logps/advantage_cov", recompute_logps, advantages.unsqueeze(1).expand_as(recompute_logps), loss_mask
+            )
 
     def _validate_effort_length_terms(self) -> None:
         """A level the price table misses would be charged nothing, one it invents is a typo, and a

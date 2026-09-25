@@ -302,6 +302,16 @@ def test_the_environment_playground_sends_no_model_until_one_is_typed(monkeypatc
     assert named_body["model"] == "my-model", "a typed Model Name must still reach the server"
 
 
+def test_the_environment_playground_refuses_an_answer_graded_env_without_an_answer(monkeypatch):
+    """An environment that grades against the expected answer must be refused before any generation,
+    not after a whole episode that then cannot be graded."""
+    seen = []
+    mod = _mock_playground_client(monkeypatch, seen, content="done")
+    with pytest.raises(ValueError, match="Expected Answer"):
+        mod.run_playground_episode("swe", "fix it", "", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 2)
+    assert seen == []
+
+
 def test_the_environment_playground_reports_a_length_cut_turn_as_one(monkeypatch):
     """The playground drives the shared eval episode driver, so ``finish_reason`` reaches the env.
 

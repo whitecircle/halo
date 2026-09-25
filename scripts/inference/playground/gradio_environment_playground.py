@@ -25,7 +25,7 @@ import gradio as gr
 from scripts.inference._common import add_gradio_server_args, launch_gradio
 from src.configs.rollout_config import RolloutConfig
 from src.environments.base import Trajectory
-from src.environments.eval_runner import run_episode
+from src.environments.eval_runner import require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, create_openai_client, resolve_local_api_key
 
@@ -118,6 +118,8 @@ def run_playground_episode(
     binds the episode's reasoning-effort level and token budget, and finalizes a truncated episode.
     """
     env = resolve_environment(env_type, {"max_turns": int(max_turns)})
+    context = build_context(expected_answer)
+    require_answers(env, [{"context": context}], "the Expected Answer box")
     # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
     # full one, so the scheme is restored rather than refused.
     url = server_url if server_url.startswith("http") else f"http://{server_url}"
@@ -128,7 +130,7 @@ def run_playground_episode(
         run_episode(
             env,
             prompt,
-            build_context(expected_answer),
+            context,
             client,
             rollout=RolloutConfig(
                 # None rather than "": an unset model name is dropped from the body and a
@@ -190,7 +192,7 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
                 )
                 prompt = gr.Textbox(label="Prompt", lines=3, placeholder="The task the episode opens with")
                 expected_answer = gr.Textbox(
-                    label="Expected Answer (optional)",
+                    label="Expected Answer (required where the environment grades against one)",
                     placeholder='Plain text, or JSON for a structured answer (code_contests: {"test_cases": [...]})',
                 )
 

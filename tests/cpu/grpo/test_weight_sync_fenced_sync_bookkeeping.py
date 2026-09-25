@@ -41,25 +41,32 @@ def _manager() -> RolloutManager:
     )
 
 
+def _window_closed(manager: RolloutManager) -> bool:
+    """A closed window stops accruing: the credit reads the same a moment later."""
+    before = manager.paused_seconds
+    time.sleep(0.01)
+    return manager.paused_seconds == before
+
+
 def test_a_push_credits_its_duration_and_closes_the_window():
     manager = _manager()
     assert _Trainer(manager, "pushed")._sync_weights_to_engine_fenced() is True
     assert manager.paused_seconds >= _SYNC_S
-    assert manager._pause_started_at is None, "the window must close, or the credit grows forever"
+    assert _window_closed(manager), "the window must close, or the credit grows forever"
 
 
 def test_a_declined_step_credits_nothing():
     manager = _manager()
     assert _Trainer(manager, "declined")._sync_weights_to_engine_fenced() is False
     assert manager.paused_seconds == 0.0
-    assert manager._pause_started_at is None
+    assert _window_closed(manager)
 
 
 def test_a_failed_push_closes_the_window_before_raising():
     manager = _manager()
     with pytest.raises(RuntimeError, match="server gone"):
         _Trainer(manager, "fail")._sync_weights_to_engine_fenced()
-    assert manager._pause_started_at is None
+    assert _window_closed(manager)
     assert manager.paused_seconds == 0.0, "a push that never landed paused no engine"
 
 
