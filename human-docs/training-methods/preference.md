@@ -81,8 +81,8 @@ doing when log-probs collapse.
 
 **The reference model is where the memory goes.** DPO needs the frozen reference's log-probs. With
 `use_peft: true` no second model is loaded at all: the reference is the base model with the adapter
-switched off (native EP expert-LoRA also needs `precompute_ref_log_probs: true`, since grouped
-expert adapters cannot be toggled). Otherwise a second full model is loaded and stays resident for
+switched off (expert-only EP LoRA has no adapter wrapper to switch off, so it needs
+`precompute_ref_log_probs: true`). Otherwise a second full model is loaded and stays resident for
 the whole run — except under expert or tensor parallelism, where that copy is refused outright and
 `precompute_ref_log_probs: true`, which takes the log-probs once from the untrained policy before
 step 1, is the way through. SMPO and KTO differ here: SMPO never loads one, KTO follows DPO's rules.
