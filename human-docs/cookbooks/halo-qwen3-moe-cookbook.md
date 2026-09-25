@@ -195,6 +195,8 @@ rollout_backend: vllm
 rollout_server_url: http://localhost:8000
 train_on_sampled_tokens: true
 routing_replay: rollout
+beta: 0.0
+output_dir: /data/checkpoints/qwen3-30b-a3b-grpo
 ```
 
 Rollouts run on vLLM (the config default). SGLang 0.5.17 also serves and weight-syncs

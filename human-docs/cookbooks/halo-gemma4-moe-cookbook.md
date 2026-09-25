@@ -174,7 +174,8 @@ Keep TP disabled for LoRA.
 
 Use the shipped SGLang LoRA recipe. It trains from the base checkpoint by default.
 To continue from the SFT checkpoint, set `model_name_or_path` to its `/data` path.
-Set `SGLANG_MODEL` to the matching `$HALO_SCRATCH` path on the host.
+Set `SGLANG_MODEL` to the matching `$HALO_SCRATCH` path on the host. Point `output_dir`
+at `/data/checkpoints/` too; the recipe writes under the repo checkout.
 
 ```bash
 cp \
@@ -213,6 +214,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server; they cannot share a GPU.
 The shipped SGLang recipe uses `expert_parallel_size: 1`. For a shipped EP4 recipe,
-use a config under `examples/grpo/environmental/gemma4/vllm/` and serve it with
-`VLLM_TOOL_PARSER=gemma4` ([Rollout Servers](../rollout-servers.md)). Full setup:
+use a config under `examples/grpo/environmental/gemma4/vllm/`. Its effort profiles send a
+thinking budget, so serve it with `VLLM_TOOL_PARSER=gemma4`, `VLLM_REASONING_PARSER=gemma4`,
+`VLLM_USE_V2_MODEL_RUNNER=0` and `VLLM_CHAT_TEMPLATE=/data/gemma4-reasoning-effort.jinja`
+(the file copied above; [Rollout Servers](../rollout-servers.md)). Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.

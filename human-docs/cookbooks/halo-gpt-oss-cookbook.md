@@ -101,10 +101,10 @@ halo launch sft gpt-oss-20b-sft.yaml -n 8
 ```
 
 Halo selects the installed Flash Attention backend. SFT neutralizes the attention sinks by
-default (`reset_sinks: true`) and exports them that way, and a later stage keeps the sink
-policy of the checkpoint it starts from. If GRPO follows and should keep the pretrained
-sinks, set `reset_sinks: false` here (FA4 on Blackwell; the CP variant below then does not
-apply).
+default (`reset_sinks: true`) and exports them that way; a later stage with
+`reset_sinks: false`, such as GRPO, runs the sinks as saved. If GRPO should keep the
+pretrained sinks, set `reset_sinks: false` here too (FA4 on Blackwell; the CP variant below
+then does not apply).
 
 ## Change the parallelism layout
 
@@ -204,10 +204,11 @@ Halo sends the expert targets to its grouped LoRA path. Keep TP disabled for LoR
 ## Continue with GRPO
 
 Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `gpt-oss-grpo.yaml`,
-or start from a shipped GPT-OSS config: `examples/grpo/environmental/gptoss/sglang/` (full
-and LoRA, ep1) or `examples/grpo/environmental/gptoss/vllm/` (full and LoRA, ep1 and ep4).
-Point `model_name_or_path` at the SFT checkpoint's `/data` path, set the environment and
-reward fields for your task, and set:
+point `model_name_or_path` at the SFT checkpoint's `/data` path, set the environment and
+reward fields for your task, and set the keys below. The shipped GPT-OSS configs under
+`examples/grpo/environmental/gptoss/sglang/` (full and LoRA, ep1) and `.../vllm/` (full and
+LoRA, ep1 and ep4) are already wired for their engine but list two servers; start the
+ones their header names instead of the single server below.
 
 ```yaml
 rollout_backend: sglang
@@ -220,6 +221,8 @@ force_chat_template: true
 attn_implementation: flash_attention_4
 reset_sinks: false
 moe_balancing: none
+beta: 0.0
+output_dir: /data/checkpoints/gpt-oss-20b-grpo
 fsdp_reshard_after_backward: false
 ```
 
@@ -231,13 +234,17 @@ parameter copy per GPU (fine at 20B).
 `reset_sinks: false` keeps the checkpoint's sinks live and frozen so the trainer's log
 probabilities match the served policy. Live sinks need a sink-carrying attention
 implementation (FA4 on Blackwell); FA2 and SDPA are rejected and CP is unavailable
-([sink handling](../../agent-docs/models/gpt-oss.md#attention-sinks) ↗).
+([sink handling](../../agent-docs/models/gpt-oss.md#attention-sinks) ↗). `beta: 0.0`
+is required too: the reference model a nonzero `beta` builds cannot carry live sinks.
 
 Serve the same harmony file. On the host ([server setup](README.md#serve-from-the-host)),
-on GPUs the trainer will not use:
+copy it onto the scratch volume, then start the server on GPUs the trainer will not use:
 
 ```bash
 cp jinja-templates/gpt-oss/gpt-oss-harmony.jinja "$HALO_SCRATCH/"
+```
+
+```bash
 SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-ultrachat-ep8" \
 SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/gpt-oss-harmony.jinja" \
 SGLANG_REASONING_PARSER=gpt-oss SGLANG_ENABLE_R3=1 \

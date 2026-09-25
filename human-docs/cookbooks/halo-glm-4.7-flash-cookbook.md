@@ -222,6 +222,8 @@ reward fields for your task, and add:
 rollout_server_url: http://localhost:8000
 train_on_sampled_tokens: true
 routing_replay: rollout
+beta: 0.0
+output_dir: /data/checkpoints/glm-4.7-flash-grpo
 ```
 
 Rollouts run on vLLM (`rollout_backend: vllm`, the config default). Start the server on

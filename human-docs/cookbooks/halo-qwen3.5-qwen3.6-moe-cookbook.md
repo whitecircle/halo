@@ -190,8 +190,9 @@ Keep TP disabled for LoRA.
 
 ## Continue with GRPO
 
-Copy the shipped EP4 code-contests recipe and set `model_name_or_path` to the SFT
-checkpoint's `/data` path.
+Copy the shipped EP4 code-contests recipe, set `model_name_or_path` to the SFT
+checkpoint's `/data` path, and point `output_dir` at `/data/checkpoints/` too; the recipe
+writes under the repo checkout.
 
 ```bash
 cp examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep4.yaml \
@@ -235,7 +236,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
 
 SGLang 0.5.17 also serves and weight-syncs this family, from the ep1 configs under
 `examples/grpo/environmental/qwen3_5/sglang/` (ports 30000 and 30001). Serve them with
-`SGLANG_CHAT_TEMPLATE` on the same template and `SGLANG_REASONING_PARSER=qwen3`.
+`SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/qwen3.6-reasoning-effort.jinja"` and
+`SGLANG_REASONING_PARSER=qwen3`.
 `rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and
 `carry_reasoning` are vLLM-only ([Supported Matrix](../supported-matrix.md#rollout-engines)).
 Full setup:

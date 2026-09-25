@@ -65,10 +65,12 @@ at `$HALO_SCRATCH/checkpoints/<run>` on the host.
 ## Serve from the host
 
 Rollout and serving containers start on the host from the repo root, never inside
-the training container, on GPUs the trainer does not use. Set this up once per
-host shell:
+the training container, on GPUs the trainer does not use. Set this up once in each
+host shell that starts a server:
 
 ```bash
+cd halo
+export HALO_SCRATCH=/path/to/large/volume   # the same volume the training container mounts
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17
 docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0
 docker tag public.ecr.aws/whitecircle/halo:vllm-0.26.0 vllm-server:0.26.0
@@ -86,5 +88,5 @@ trainer uses. vLLM answers a request naming any model but the one it serves with
 The compose files already pass the MoE backend weight sync needs
 (`--moe-backend triton`, `--moe-runner-backend triton`); leave it. A run with
 `routing_replay: rollout` also needs `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` on
-the server. Plain serving works on any SGLang 0.5.17 image; weight sync needs
-these. Parsers, ports and the other variables: [Rollout Servers](../rollout-servers.md).
+the server. Plain serving works on any SGLang 0.5.17 image; weight sync needs this
+repo's server images. Parsers, ports and the other variables: [Rollout Servers](../rollout-servers.md).

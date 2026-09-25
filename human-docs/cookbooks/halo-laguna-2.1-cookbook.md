@@ -201,9 +201,13 @@ set `model_name_or_path` to the gathered checkpoint's `/data` path and the envir
 reward fields for your task, and add:
 
 ```yaml
+trust_remote_code: true
+attn_implementation: sdpa
 rollout_server_url: http://localhost:8000
 train_on_sampled_tokens: true
 routing_replay: rollout
+beta: 0.0
+output_dir: /data/checkpoints/laguna-s-2.1-grpo
 ```
 
 Laguna rollouts run on vLLM (`rollout_backend: vllm`, the config default). SGLang 0.5.17
