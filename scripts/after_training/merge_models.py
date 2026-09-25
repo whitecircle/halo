@@ -409,14 +409,15 @@ def _copy_aux_files(
 ) -> None:
     """Reproduce ``source_dir``'s non-weight files (config, tokenizer, processor, …) in ``output_dir``.
 
-    The merged model is the same architecture as the source, so all non-weight metadata is copied
-    verbatim, including the processor files for multimodal models (``preprocessor_config.json``,
+    The merged model is the same architecture as the source, so all non-weight metadata is copied,
+    including the processor files for multimodal models (``preprocessor_config.json``,
     ``processor_config.json``, ``chat_template.*``), ``generation_config.json`` and a remote-code
     family's ``.py`` modules, none of which a config plus tokenizer re-save emits. A Hub id is
     downloaded (weights excluded) and copied the same way: re-saving its config instead would write
     the source's ``auto_map`` while shipping none of the modules it names, leaving a directory that
-    raises ``does not appear to have a file named modeling_<x>.py``. The config's ``dtype`` is then
-    set to the merged dtype so ``from_pretrained`` loads it consistently.
+    raises ``does not appear to have a file named modeling_<x>.py``. Two files are rewritten after the
+    copy: the config's ``dtype`` is set to the merged dtype so ``from_pretrained`` loads it
+    consistently, and the ``README.md`` card gains the Halo Hub tag, or is created holding it.
     """
     # A hub --tokenizer_source may ship legacy .pth/.gguf/.h5/.tflite/.ot exports and a vendor weight
     # dump (``original/``), tens of GB that config and tokenizer resolution never needs. The same
