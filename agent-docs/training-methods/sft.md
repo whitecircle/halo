@@ -68,7 +68,7 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 ```
 
-Any YAML field overrides on the command line (`--learning_rate=1e-5`); `accelerate launch` with `accelerate/fsdp2_gradop_config.yaml` stays supported for plain data-parallel. Saves are gathered HF-standard checkpoints by default; per-rank `save_sharded_ep` ones need `scripts/after_training/merge_ep_shards.py` before resume or serving, and that merge drops optimizer state ([Checkpoints](../reference/checkpoints.md)).
+Any YAML field overrides on the command line (`--learning_rate=1e-5`); `accelerate launch` with `launcher-configs/accelerate/fsdp2_gradop_config.yaml` stays supported for plain data-parallel. Saves are gathered HF-standard checkpoints by default; per-rank `save_sharded_ep` ones need `scripts/after_training/merge_ep_shards.py` before resume or serving, and that merge drops optimizer state ([Checkpoints](../reference/checkpoints.md)).
 
 ## Learning rate and global batch size
 

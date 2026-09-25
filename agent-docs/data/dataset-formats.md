@@ -67,8 +67,8 @@ RNG API, algorithm or per-split seed would swap the training corpus under an unc
 |--------|--------|---------|-------|--------------|
 | SFT | `scripts/training/sft.py` | `prompt` | `List[Dict]` | `conversation_field` (default `"prompt"`) |
 | SFT-VLM | `scripts/training/sft.py` | `prompt` | `List[Dict]` (multimodal) | `conversation_field` |
-| DPO | `scripts/training/preference/dpo.py` | `prompt`, `chosen`, `rejected` | all `List[Dict]` | hardcoded |
-| SMPO | `scripts/training/preference/smpo.py` | `prompt`, `chosen`, `rejected` | all `List[Dict]` | hardcoded |
+| DPO | `scripts/training/preference/dpo.py` | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]` | hardcoded |
+| SMPO | `scripts/training/preference/smpo.py` | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]` | hardcoded |
 | KTO | `scripts/training/preference/kto.py` | `prompt`, `completion`, `label` | `List[Dict]`/`str`, bool | `completion_field`, `label_field` |
 | Offline GRPO | `scripts/training/offline_grpo.py` | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` | hardcoded |
 | Classification | `scripts/training/classification.py` | `prompt` or `text_field`, `label` | `List[Dict]` or `str`, `str`/`List[str]` | `text_field` (label hardcoded) |
@@ -81,9 +81,9 @@ VLM, below).
 `train`/`test` schemas at load and raises, naming the available columns. Without it a typo silently
 no-ops the empty-conversation filter and surfaces much later as a `KeyError` inside the tokenizer map.
 
-The check follows the *script*, not the YAML. SFT, prompt-tuning, distillation and both
+The check follows the *script*, not the YAML. SFT, both distillation scripts and both
 prompt-rendering GRPO scripts (offline, environmental) declare a conversation column — each with its
-own default, `prompt` for SFT and `messages` for distillation — so a dataset without it raises
+own default, `messages` for teacher distillation and `prompt` elsewhere — so a dataset without it raises
 whether or not the YAML names one; scripts that render no conversation (preference, reward,
 classification, online GRPO, embedding) declare none and skip the check.
 
@@ -155,7 +155,7 @@ Hub shape variants normalize to this contract automatically (`normalize_preferen
 
 Completions are rendered as `template(prompt + completion)` minus the rendered-prompt prefix, so strict chat templates (Qwen3.5) work and `prompt + chosen` always reconstructs the full conversation exactly.
 
-- **DPO** requires a reference model (PEFT adapters act as the implicit reference; under EP use PEFT or `precompute_ref_log_probs`, under TP only `precompute_ref_log_probs` since PEFT is rejected there — the reference is not parallelized). Supports EP and TP; **CP not supported** (`concatenated_forward` needs full sequences).
+- **DPO** requires a reference model ([DPO → Reference model](../training-methods/preference/dpo.md#reference-model)). Supports EP and TP; **CP not supported** (`concatenated_forward` needs full sequences).
 
 - **SMPO** is reference-model-free. Supports EP and TP for both modalities, CP for text only.
 
@@ -166,7 +166,7 @@ Completions are rendered as `template(prompt + completion)` minus the rendered-p
 
 **Vision DPO/KTO.** An `images`/`image` column routes to TRL's vision collators, and the rows must ALREADY be contract-shaped (prompt = message list, chosen/rejected = continuation-only) — the hub-shape normalization above runs only on the text path. Modality routing keys on the **dataset**, so a natively-multimodal model with text-only preference data trains through the normal text pipeline.
 
-TRL rejects `precompute_ref_log_probs` for vision datasets, so vision DPO under EP uses standard-PEFT adapters: an **expert-only** EP adapter requires precomputed ref logps and is therefore text-only, while a mixed attention+expert adapter keeps the implicit reference. Under TP, where PEFT and an explicit reference are both rejected, vision DPO has no supported shape.
+Reference-model shapes for vision rows: [DPO → Vision-language](../training-methods/preference/dpo.md#vision-language).
 
 ## Offline GRPO
 
@@ -178,16 +178,7 @@ TRL rejects `precompute_ref_log_probs` for vision datasets, so vision DPO under 
 - Provide one reward per completion. A length mismatch raises `ValueError` naming the offending row, rather than silently truncating to the shorter list.
 - Each group's rewards become group-relative advantages via `advantage_method` (default `quantile_norm`).
 
-Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); the values below are the defaults:
-
-```yaml
-max_prompt_length: 512
-max_completion_length: null      # null = no cap
-kl_beta: 0.0                     # KL penalty coefficient
-best_completion_emphasis: 0.0    # extra weight for best completion
-advantage_method: quantile_norm  # z_norm | minmax | quantile_norm | quantile_uniform | robust
-loss_type: bnpo                  # grpo | bnpo | dr_grpo
-```
+Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline-grpo.md#configuration).
 
 **CP not supported** — uses the `logits_to_keep` optimization, incompatible with sequence splitting.
 
@@ -200,7 +191,7 @@ Single-label uses a string; multi-label uses a list. The row carries a `prompt` 
 {"text": "A romantic comedy about time travel.", "label": ["comedy", "romance", "sci-fi"]}
 ```
 
-Labels are collected from the training data, stringified, and sorted alphabetically; the label set fixes the head's `num_labels` and shape (the config field is derived, never read from YAML). Labels seen only in validation/test are added with a warning. `-1` is dropped from the label set — it is the cross-entropy ignore sentinel on a row, not a class; the rows themselves are kept.
+Label-set rules, `-1` included: [Classification → Dataset](../training-methods/classification.md#dataset).
 
 ```yaml
 dataset: "path/to/classification/dataset"

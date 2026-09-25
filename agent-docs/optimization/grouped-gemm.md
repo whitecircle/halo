@@ -59,7 +59,7 @@ The atomic-free path runs the EP step at ~6,310 vs ~1,256 tok/s/GPU for the defa
 
 The token permute/unpermute (`MoEGatherPermute`, `MoEScatterUnpermute`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step: 4.3 ms/call vs gpt-oss (top-4, 4 local/rank) 0.38 ms/call (11× gap, pure collision rate).
 
-The fix expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded), turning the scatter into gather + reduction (numerically identical to `index_add_`, float64-checked fwd+bwd).
+The permute expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded), turning the scatter into gather + reduction (numerically identical to `index_add_`, float64-checked fwd+bwd).
 
 It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm` builds `inv_map` via `_build_inv_map`). Below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) the plain `index_select` + `index_add_` is kept, since the extra `top_k`× read would cost ~4%.
 

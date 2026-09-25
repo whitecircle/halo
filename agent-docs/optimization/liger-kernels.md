@@ -290,7 +290,7 @@ lose nothing: its shipped loss seam runs head + cross-entropy together over one 
 (`fused_causal_lm_token_loss`), leaving no full logits plane for FLCE to save.
 
 **The GRPO trainers get a warning, not a force-off.** Their objectives compute per-token log-probs outside
-the model's forward and never pass `labels`, so an applied FLCE (explicit, or Zaya's per-model default) is
+the model's forward and never pass `labels`, so an applied FLCE (explicit, or a [per-model default](#configuration)) is
 numerically neutral yet saves nothing.
 
 The load-time patch site cannot know the trainer and a construction-time re-apply would not unpatch

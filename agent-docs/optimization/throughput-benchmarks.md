@@ -234,15 +234,15 @@ Raising batch or sequence grows the compute term against the fixed comm cost; th
 | flex attention | 1,916 | 0.19× | FA4 ~5.2× faster; flex runs the unfused math path |
 | fp8 / fp4 | net-slower | — | bf16 is the throughput path at these shapes ([low-precision](low-precision-moe-kernels.md)) |
 
-`sdpa` silently drops GptOss attention sinks, so `validate_attn_implementation` orders it below flex and FA
-in the fallback chain; use FA4 or flex.
+SDPA runs GptOss only with the sinks reset (the neutralized column contributes 0) and raises with live
+sinks ([Flash Attention](flash-attention.md#model-specific-handling)); use FA4.
 
 The roofline crossover (gpt-oss expert K=N=2880: weight-bandwidth-bound below ≈256–512 tokens/expert,
 compute-bound above; ridge AI ≈ 275 on B300) is why bf16 stays optimal: the small-`M` experts sit in the
 bandwidth-bound regime where fp8/fp4 quant overhead only loses.
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is free as a default: neutral on dense/ep2, **+9.7%
-on ep8** ([DeepEP](../infrastructure/deepep.md#environment-variables)).
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image) is a free default that helps wide EP
+([DeepEP](../infrastructure/deepep.md#environment-variables)).
 
 > **Profiling EP.** `torch.profiler` (CUPTI) does not complete a step of a multi-GPU EP run with Flash
 > Attention active (the FA4 CuTe-DSL JIT interacts badly with CUPTI). Use `--attn_implementation sdpa`, a
@@ -283,7 +283,7 @@ GC-off: communication ≈93% @ s4096 → ≈88% @ s16384). Compute–comm overla
 | 8 | 1 | 6,401 | 253 | 41.1 GB | 0.64s |
 | 8 | 4 | 9,408 | 372 | 81.0 GB | 1.74s |
 
-ep2 keeps ~17.5B params local and reaches **1,410 TFLOPS at batch 4** — the highest of the MoE rosters here, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41 GB at batch 1 vs 128 GB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.1×; ep8 b1→b4 = 1.5×), since small-batch pure EP is all-to-all-bound.
+ep2 keeps ~17.5B params local and reaches **1,410 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41 GB at batch 1 vs 128 GB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.1×; ep8 b1→b4 = 1.5×), since small-batch pure EP is all-to-all-bound.
 
 At ep2 batch 4 the per-MoE-layer step splits ≈ **77% DeepEP dispatch all-to-all / 21% expert GEMM / 2% combine** (`--comm_profile`) — dispatch-bound on the top_k=8 token-count exchange. Raising sequence to 8192 amortizes the all-to-all to **13,484 tok/s/GPU** (b4).
 

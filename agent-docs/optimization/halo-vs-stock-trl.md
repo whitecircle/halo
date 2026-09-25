@@ -119,9 +119,9 @@ past ~64k tokens/rank nothing fits GC-off. EP8 32k·b1 GC-off needs the **legacy
 
 ## Long context: 64k → 256k
 
-*b1 · GC-on · FLCE on both sides · stock TRL ZeRO-3.* Dense Halo (EP1) is the **throughput** corner —
-2.1× TRL at 64k, 1.6× at 128k, 1.28× at 256k, each at less memory than TRL (the lead narrows as quadratic
-attention comes to dominate). `EP8+CP8` and dense `CP-only` are the **memory** corner at ≈½ TRL's memory.
+*b1 · GC-on · stock TRL ZeRO-3 with FLCE; Halo on Liger CE through 64k, FLCE at 128k/256k.* Dense Halo
+(EP1) is the **throughput** corner — 2.1× TRL at 64k, 1.6× at 128k, 1.28× at 256k, at less memory than
+TRL from 128k (the lead narrows as quadratic attention comes to dominate). `EP8+CP8` and dense `CP-only` are the **memory** corner at ≈½ TRL's memory.
 
 ![Long context throughput and memory at 64k/128k/256k](../assets/benchmarks/long_context.png)
 

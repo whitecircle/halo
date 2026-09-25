@@ -29,7 +29,7 @@ SR seeds come from a dedicated, rank-synchronized RNG (`_SR_RNG`, one per optimi
 
 ## Benchmarks
 
-**GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (Blackwell, SM100):** AdamWBF16 (Triton) steps in 51.6 ms vs 62.1 ms for `adamw_torch_fused` (**−17%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
+**GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (SM103):** AdamWBF16 (Triton) steps in 51.6 ms vs 62.1 ms for `adamw_torch_fused` (**−17%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
 
 The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element) and draws both SR noise streams from one `tl.randint4x` Philox call. This row compares two bf16-state optimizers; the 6-vs-12 B/param memory win is against fp32-state AdamW and is not visible here.
 
