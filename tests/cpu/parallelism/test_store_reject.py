@@ -17,19 +17,17 @@ logic and the empty-reason sentinel single-process.
     python tests/cpu/parallelism/test_store_reject.py
 """
 
-import contextlib
 import datetime
 import os
 import time
 
 import pytest
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from src.distributed import filesystem, runtime
 from src.distributed.filesystem import store_reject_across_ranks
 from tests.common.distributed import FakeStore
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 
@@ -40,33 +38,24 @@ WORLD_SIZE = 2
 PG_TIMEOUT_SEC = 5
 LATE_JOIN_SEC = 8
 
-# Every store wait is explicitly bounded: the 4 h production default would turn a regression into a
-# CI stall rather than a failure (mp.start_processes(join=True) has no timeout).
+# Every store wait is explicitly bounded: under the 4 h production default a regression would surface
+# only as a rank killed at the join deadline, not as the wait's own error.
 WAIT_TIMEOUT = datetime.timedelta(seconds=30)
 
 
-def _worker(rank: int, tmp_dir: str, port: int, failing_rank: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE)
+def _worker(rank: int, tmp_dir: str, failing_rank: int) -> None:
+    reason = "ValueError: boom" if rank == failing_rank else None
     try:
-        reason = "ValueError: boom" if rank == failing_rank else None
-        try:
-            store_reject_across_ranks("t", reason, "unit-test join", timeout=WAIT_TIMEOUT)
-            result = "NO RAISE"
-        except RuntimeError as e:
-            result = f"RuntimeError: {e}"
-        with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
-            fh.write(result)
-    finally:
-        dist.destroy_process_group()
+        store_reject_across_ranks("t", reason, "unit-test join", timeout=WAIT_TIMEOUT)
+        result = "NO RAISE"
+    except RuntimeError as e:
+        result = f"RuntimeError: {e}"
+    with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
+        fh.write(result)
 
 
-def _late_rank_worker(rank: int, tmp_dir: str, port: int) -> None:
+def _late_rank_worker(rank: int, tmp_dir: str) -> None:
     """Rank 0 arrives at the join LATE_JOIN_SEC late, past the PG timeout; both must still pass."""
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
     try:
         if rank == 0:
             time.sleep(LATE_JOIN_SEC)
@@ -76,23 +65,17 @@ def _late_rank_worker(rank: int, tmp_dir: str, port: int) -> None:
         result = f"FAIL: {type(e).__name__}: {str(e).splitlines()[0][:160]}"
     with open(os.path.join(tmp_dir, f"late_{rank}.txt"), "w") as fh:
         fh.write(result)
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 def test_clean_join_passes_on_both_ranks(tmp_path):
-    mp.start_processes(
-        _worker, args=(str(tmp_path), free_port(), -1), nprocs=WORLD_SIZE, join=True, start_method="spawn"
-    )
+    run_gloo_ranks(_worker, WORLD_SIZE, str(tmp_path), -1)
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"result_{rank}.txt") as fh:
             assert fh.read() == "NO RAISE", f"rank {rank} raised on a clean join"
 
 
 def test_one_ranks_reason_raises_on_every_rank_with_the_cause(tmp_path):
-    mp.start_processes(
-        _worker, args=(str(tmp_path), free_port(), 1), nprocs=WORLD_SIZE, join=True, start_method="spawn"
-    )
+    run_gloo_ranks(_worker, WORLD_SIZE, str(tmp_path), 1)
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"result_{rank}.txt") as fh:
             result = fh.read()
@@ -106,9 +89,7 @@ def test_late_rank_may_outlive_the_process_group_timeout(tmp_path):
     Fails when the join is a collective: gloo aborts the early rank's recv at PG_TIMEOUT_SEC — the
     30-min NCCL-watchdog kill of a real fresh-cache map, scaled down.
     """
-    mp.start_processes(
-        _late_rank_worker, args=(str(tmp_path), free_port()), nprocs=WORLD_SIZE, join=True, start_method="spawn"
-    )
+    run_gloo_ranks(_late_rank_worker, WORLD_SIZE, str(tmp_path), pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC))
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"late_{rank}.txt") as fh:
             result = fh.read()

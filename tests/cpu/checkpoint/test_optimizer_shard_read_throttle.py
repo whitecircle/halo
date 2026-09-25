@@ -18,19 +18,17 @@ the throttle is entered by every rank, not only the ones with a replica writer t
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import os
 import time
 
 import pytest
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 # The read each rank simulates. Long enough that concurrent reads would overlap unmistakably, short
@@ -63,18 +61,7 @@ def _context(model: nn.Module) -> CheckpointLoadContext:
     )
 
 
-def _worker(rank: int, tmp_dir: str, port: str) -> None:
-    os.environ.update(
-        MASTER_ADDR="127.0.0.1",
-        MASTER_PORT=port,
-        RANK=str(rank),
-        WORLD_SIZE=str(WORLD_SIZE),
-        LOCAL_RANK=str(rank),
-        LOCAL_WORLD_SIZE=str(WORLD_SIZE),
-    )
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
+def _worker(rank: int, tmp_dir: str) -> None:
     store = OptimizerShardStore(_context(nn.Linear(2, 2)))
     window = []
 
@@ -92,13 +79,11 @@ def _worker(rank: int, tmp_dir: str, port: str) -> None:
 
     with open(os.path.join(tmp_dir, f"window_{rank}.txt"), "w") as fh:
         fh.write(f"{ok}|{window[0]}|{window[1]}")
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 def _windows(tmp_path) -> list[tuple[float, float]]:
-    port = str(free_port())
-    mp.start_processes(_worker, args=(str(tmp_path), port), nprocs=WORLD_SIZE, join=True, start_method="spawn")
+    # The runner exports LOCAL_RANK/LOCAL_WORLD_SIZE, so both ranks share one node's throttle.
+    run_gloo_ranks(_worker, WORLD_SIZE, str(tmp_path), pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC))
     windows = []
     for rank in range(WORLD_SIZE):
         with open(os.path.join(str(tmp_path), f"window_{rank}.txt")) as fh:

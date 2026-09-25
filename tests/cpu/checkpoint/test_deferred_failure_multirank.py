@@ -14,16 +14,14 @@ The process-group timeout is deliberately short so a regression FAILS instead of
     python tests/cpu/checkpoint/test_deferred_failure_multirank.py
 """
 
-import contextlib
 import datetime
 import os
 
 import pytest
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from src.distributed.runtime import DeferredRankFailure
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 # Far below any plausible real wait: without the gather, the non-failing rank can only end in a gloo
@@ -33,16 +31,8 @@ PG_TIMEOUT_SEC = 15
 ENOSPC = "No space left on device"
 
 
-def _init(rank: int, port: str) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
-
-
-def _worker(rank: int, tmp_dir: str, failing_rank: int, port: str) -> None:
+def _worker(rank: int, tmp_dir: str, failing_rank: int) -> None:
     """Model the streaming save: every rank stages 'layers', one rank's write fails partway."""
-    _init(rank, port)
     guard = DeferredRankFailure("checkpoint write")
     collectives_entered = 0
 
@@ -64,16 +54,11 @@ def _worker(rank: int, tmp_dir: str, failing_rank: int, port: str) -> None:
 
     with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
         fh.write(f"{collectives_entered}|{outcome}")
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 def _results(tmp_path, failing_rank: int) -> list[tuple[int, str]]:
-    # One freshly allocated port per call — a named port races the previous run's lingering TCPStore
-    # and every other launch on the host.
-    port = str(free_port())
-    mp.start_processes(
-        _worker, args=(str(tmp_path), failing_rank, port), nprocs=WORLD_SIZE, join=True, start_method="spawn"
+    run_gloo_ranks(
+        _worker, WORLD_SIZE, str(tmp_path), failing_rank, pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
     )
     out = []
     for rank in range(WORLD_SIZE):

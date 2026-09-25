@@ -26,21 +26,17 @@ a regression fails this suite instead of wedging it.
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import os
-import time
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
 from src.distributed.runtime import DeferredRankFailure
 from src.trainers.grpo.rollout.weight_sync import _send_ep_expert_weights, sync_weights_to_client
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 NUM_PARAMS, ROWS, COLS = 5, 8, 4
@@ -48,11 +44,11 @@ NUM_PARAMS, ROWS, COLS = 5, 8, 4
 FAIL_AT = 3
 
 # A stuck rank must surface as a failed assertion, not a wedged worker: gloo aborts the blocked
-# collective at the group timeout, the rank writes what it saw, and the bounded join covers the
-# process itself. Both are far above the work they bound (spawn + torch import, then microseconds of
-# gloo) because the suite runs 8-way under xdist, where a starved rendezvous is not a regression.
+# collective at the group timeout, the rank writes what it saw, and the runner's join deadline covers
+# the process itself. The group timeout is far above the work it bounds (spawn + torch import, then
+# microseconds of gloo) because the suite runs 8-way under xdist, where a starved rendezvous is not a
+# regression.
 PG_TIMEOUT = datetime.timedelta(seconds=90)
-JOIN_TIMEOUT_S = 420.0
 
 
 class _EngineRejected(RuntimeError):
@@ -104,40 +100,25 @@ class _ShardedPolicy(nn.Module):
         return x
 
 
-def _worker(rank: int, tmp_dir: str, port: int, mode: str) -> None:
+def _worker(rank: int, tmp_dir: str, mode: str) -> None:
     """One rank of the sync. Writes its verdict to a file — an exception here must not be the signal,
     since the failure under test is a rank that never returns at all."""
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=WORLD_SIZE, timeout=PG_TIMEOUT)
+    model = _ShardedPolicy(init_device_mesh("cpu", (WORLD_SIZE,)))
+    client = _FakeClient(fail_send_at=FAIL_AT if mode == "send" else 0, fail_flush=mode == "flush")
     try:
-        model = _ShardedPolicy(init_device_mesh("cpu", (WORLD_SIZE,)))
-        client = _FakeClient(fail_send_at=FAIL_AT if mode == "send" else 0, fail_flush=mode == "flush")
-        try:
-            sync_weights_to_client(model, client, is_main=(rank == 0), is_tp_main=True)
-            result = "NO RAISE"
-        except Exception as e:
-            result = f"{type(e).__name__}: {e}"
-        with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
-            fh.write(result)
-        with open(os.path.join(tmp_dir, f"sent_{rank}.txt"), "w") as fh:
-            fh.write(f"{len(client.sent)} {client.flushes} {client.aborts}")
-    finally:
-        with contextlib.suppress(Exception):
-            dist.destroy_process_group()
+        sync_weights_to_client(model, client, is_main=(rank == 0), is_tp_main=True)
+        result = "NO RAISE"
+    except Exception as e:
+        result = f"{type(e).__name__}: {e}"
+    with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
+        fh.write(result)
+    with open(os.path.join(tmp_dir, f"sent_{rank}.txt"), "w") as fh:
+        fh.write(f"{len(client.sent)} {client.flushes} {client.aborts}")
 
 
 def _run_ranks(tmp_path, mode: str) -> tuple[dict[int, str], dict[int, tuple[int, int, int]]]:
     """Run both ranks to completion (bounded) and return their verdicts and client counters."""
-    ctx = mp.start_processes(
-        _worker, args=(str(tmp_path), free_port(), mode), nprocs=WORLD_SIZE, join=False, start_method="spawn"
-    )
-    deadline = time.monotonic() + JOIN_TIMEOUT_S
-    while not ctx.join(timeout=max(0.1, deadline - time.monotonic())):
-        if time.monotonic() >= deadline:
-            for process in ctx.processes:
-                process.terminate()
-            pytest.fail(f"the ranks did not finish within {JOIN_TIMEOUT_S}s — a rank is stuck in a collective")
-
+    run_gloo_ranks(_worker, WORLD_SIZE, str(tmp_path), mode, pg_timeout=PG_TIMEOUT)
     results, counters = {}, {}
     for rank in range(WORLD_SIZE):
         result_file, sent_file = tmp_path / f"result_{rank}.txt", tmp_path / f"sent_{rank}.txt"

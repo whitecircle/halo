@@ -19,15 +19,12 @@ acceptable fix.
 Run: pytest tests/cpu/peft/test_lora_targets_peft_cannot_adapt.py
 """
 
-import contextlib
 import datetime
 import os
 import types
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers.models.deepseek_v4 import DeepseekV4Config
@@ -38,8 +35,8 @@ from trl import ModelConfig
 import src.distributed.loading.peft_setup as peft_setup
 from src.distributed.loading.peft_setup import build_peft_config, setup_peft_model
 from src.kernels.lowp.linear import LowPrecisionLinear
+from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_DSV4_CONFIG
-from tests.common.ports import free_port
 
 ATTENTION_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -259,11 +256,7 @@ class _FaultsOnRankOne(nn.Linear):
         return nn.functional.linear(x, self.weight)
 
 
-def _divergent_worker(rank: int, tmp_dir: str, port: str) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
+def _divergent_worker(rank: int, tmp_dir: str) -> None:
     _FaultsOnRankOne.rank = rank
     model = _Multimodal(_PlainAttention())
     model.language_model.q_proj = _FaultsOnRankOne(8, 8, bias=False)
@@ -274,16 +267,12 @@ def _divergent_worker(rank: int, tmp_dir: str, port: str) -> None:
         outcome = f"{type(exc).__name__}: {exc}"
     with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
         fh.write(outcome)
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 def test_an_exclusion_list_that_differs_between_ranks_raises_on_every_rank(tmp_path):
     """One rank excluding what its peers adapt would train a different parameter set and surface only
     as a hang in the first collective; the disagreement is caught where it arises, on both ranks."""
-    mp.start_processes(
-        _divergent_worker, args=(str(tmp_path), str(free_port())), nprocs=WORLD_SIZE, join=True, start_method="spawn"
-    )
+    run_gloo_ranks(_divergent_worker, WORLD_SIZE, str(tmp_path), pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC))
 
     outcomes = [(tmp_path / f"result_{rank}.txt").read_text() for rank in range(WORLD_SIZE)]
     assert all(outcome.startswith("ValueError") and "differs across ranks" in outcome for outcome in outcomes), (

@@ -19,21 +19,19 @@ blocking teardown.
 """
 
 import builtins
-import contextlib
 import datetime
 import os
+import time
 
 import pytest
-import torch.distributed as dist
-import torch.multiprocessing as mp
 from datasets import Dataset
 
 from src.data.pipeline.processing import coordinated_dataset_operation
 from src.training import environment
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
-# One port per test — a reused port collides with the previous run's lingering TCPStore.
+CACHE_ENV = {"HF_DATASETS_CACHE": os.environ.get("TMPDIR", "/tmp") + "/coordinated_op_cache"}
 
 # Far below any plausible real barrier wait: without the propagation the waiting rank can only end in
 # a gloo timeout, and the suite must not sit on it.
@@ -42,22 +40,13 @@ PG_TIMEOUT_SEC = 15
 BOOM = "operation_fn blew up"
 
 
-def _init(rank: int, port: str) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    os.environ["HF_DATASETS_CACHE"] = os.environ.get("TMPDIR", "/tmp") + "/coordinated_op_cache"
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
-
-
 def _record(tmp_dir: str, rank: int, text: str) -> None:
     with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
         fh.write(text)
 
 
-def _worker(rank: int, tmp_dir: str, failing_rank: int, port: str, exc_name: str) -> None:
+def _worker(rank: int, tmp_dir: str, failing_rank: int, exc_name: str) -> None:
     """Fail ``operation_fn`` on ``failing_rank`` only; record what each rank ends up seeing."""
-    _init(rank, port)
     dataset = Dataset.from_dict({"text": ["a", "b"]})
     exc_type = getattr(builtins, exc_name)
 
@@ -72,17 +61,17 @@ def _worker(rank: int, tmp_dir: str, failing_rank: int, port: str, exc_name: str
         _record(tmp_dir, rank, "NO RAISE")
     except BaseException as e:
         _record(tmp_dir, rank, f"{type(e).__name__}: {e}")
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
-def _results(tmp_path, failing_rank: int, port: str, exc_name: str = "ValueError") -> list[str]:
-    mp.start_processes(
+def _results(tmp_path, failing_rank: int, exc_name: str = "ValueError") -> list[str]:
+    run_gloo_ranks(
         _worker,
-        args=(str(tmp_path), failing_rank, port, exc_name),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
+        WORLD_SIZE,
+        str(tmp_path),
+        failing_rank,
+        exc_name,
+        pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC),
+        env=CACHE_ENV,
     )
     out = []
     for rank in range(WORLD_SIZE):
@@ -95,7 +84,7 @@ def test_main_rank_failure_aborts_every_rank_with_the_cause(tmp_path):
     """Rank 0 owns the map; rank 1 waits. Rank 1 must raise, and its message must name the real
     error — a bare 'barrier timed out' sends the reader hunting the wrong subsystem."""
     failing_rank = 0
-    results = _results(tmp_path, failing_rank=failing_rank, port=str(free_port()))
+    results = _results(tmp_path, failing_rank=failing_rank)
 
     for rank, result in enumerate(results):
         assert result != "NO RAISE", f"rank {rank} sailed past a failed dataset operation"
@@ -111,7 +100,7 @@ def test_non_main_rank_failure_also_aborts_every_rank(tmp_path):
     """The second phase needs the same treatment: only the waiters read the cache back, so a torn or
     unreadable cache file fails on ranks the writer never hears from."""
     failing_rank = 1
-    results = _results(tmp_path, failing_rank=failing_rank, port=str(free_port()))
+    results = _results(tmp_path, failing_rank=failing_rank)
 
     for rank, result in enumerate(results):
         assert result != "NO RAISE", f"rank {rank} sailed past a failed dataset operation"
@@ -125,7 +114,7 @@ def test_base_exception_in_the_operation_still_aborts_the_peer(tmp_path):
     """A ``KeyboardInterrupt`` out of the map is the same hang: catching only ``Exception`` would let
     the interrupted rank exit past the join while its peer waits out the process-group timeout."""
     failing_rank = 0
-    results = _results(tmp_path, failing_rank=failing_rank, port=str(free_port()), exc_name="KeyboardInterrupt")
+    results = _results(tmp_path, failing_rank=failing_rank, exc_name="KeyboardInterrupt")
 
     assert results[failing_rank] == f"KeyboardInterrupt: {BOOM}", results[failing_rank]
     peer = results[1 - failing_rank]
@@ -137,15 +126,8 @@ def test_base_exception_in_the_operation_still_aborts_the_peer(tmp_path):
 SLOW_MAP_PG_TIMEOUT_SEC = 3
 
 
-def _slow_map_worker(rank: int, tmp_dir: str, port: str) -> None:
+def _slow_map_worker(rank: int, tmp_dir: str) -> None:
     """The writer's map outlives the PG timeout; the waiting rank must survive on the store join."""
-    import time
-
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    os.environ["HF_DATASETS_CACHE"] = os.environ.get("TMPDIR", "/tmp") + "/coordinated_op_cache"
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=SLOW_MAP_PG_TIMEOUT_SEC)
-    )
     dataset = Dataset.from_dict({"text": ["a", "b"]})
 
     def operation_fn(**kwargs):
@@ -159,17 +141,18 @@ def _slow_map_worker(rank: int, tmp_dir: str, port: str) -> None:
     except BaseException as e:
         result = f"FAIL: {type(e).__name__}: {str(e).splitlines()[0][:160]}"
     _record(tmp_dir, rank, result)
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 def test_writer_map_may_outlive_the_process_group_timeout(tmp_path):
     """The store join must let the writer's map run to completion: joins built on
     ``all_gather_object`` keep the waiting rank INSIDE the process group for the whole map, so a
     fresh-cache tokenization past DIST_NCCL_TIMEOUT_MINUTES kills the run blaming the collective."""
-    port = str(free_port())
-    mp.start_processes(
-        _slow_map_worker, args=(str(tmp_path), port), nprocs=WORLD_SIZE, join=True, start_method="spawn"
+    run_gloo_ranks(
+        _slow_map_worker,
+        WORLD_SIZE,
+        str(tmp_path),
+        pg_timeout=datetime.timedelta(seconds=SLOW_MAP_PG_TIMEOUT_SEC),
+        env=CACHE_ENV,
     )
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"result_{rank}.txt") as fh:

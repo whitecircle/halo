@@ -27,20 +27,17 @@ import datetime
 import os
 
 import pytest
-import torch.distributed as dist
-import torch.multiprocessing as mp
 from accelerate import PartialState
 from datasets import Dataset
 
 from src.data.pipeline.processing import coordinated_map
 from src.distributed import filesystem
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 SCANNED_ROOTS = ("src", "scripts")
 
 WORLD_SIZE = 2
-# One port per test — a reused port collides with the previous run's lingering TCPStore.
 
 # Well under any real dataset map: a diverged sequence can only end in a gloo timeout, and the suite
 # must not sit on one.
@@ -208,26 +205,16 @@ def test_detector_fires_on_the_smpo_shape(tmp_path):
     assert "trainer_like.py" in offenders[0] and "coordinated_map" in offenders[0]
 
 
-def _init(rank: int, port: str) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    os.environ.update(LOCAL_RANK=str(rank), LOCAL_WORLD_SIZE=str(WORLD_SIZE), ACCELERATE_USE_CPU="1")
-    os.environ["HF_DATASETS_CACHE"] = os.environ.get("TMPDIR", "/tmp") + "/main_first_op_cache"
-    # Bound the store joins like the process group: a diverged sequence must end in a loud timeout
-    # in seconds, not DIST_STORE_TIMEOUT_HOURS (hours-granular, min 1) of suite stall. Rebound on
-    # `filesystem`, which owns every store wait and resolves the getter in its own namespace.
-    filesystem.get_store_timeout = lambda timeout_hours=None: datetime.timedelta(seconds=PG_TIMEOUT_SEC + 5)
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
-
-
 def _identity(row):
     return row
 
 
-def _worker(rank: int, tmp_dir: str, wrapped: bool, port: str) -> None:
+def _worker(rank: int, tmp_dir: str, wrapped: bool) -> None:
     """Run one coordinated map, optionally inside a main-first block; record the outcome."""
-    _init(rank, port)
+    # Bound the store joins like the process group: a diverged sequence must end in a loud timeout
+    # in seconds, not DIST_STORE_TIMEOUT_HOURS (hours-granular, min 1) of suite stall. Rebound on
+    # `filesystem`, which owns every store wait and resolves the getter in its own namespace.
+    filesystem.get_store_timeout = lambda timeout_hours=None: datetime.timedelta(seconds=PG_TIMEOUT_SEC + 5)
     dataset = Dataset.from_dict({"text": ["a", "b"]})
 
     def run():
@@ -244,14 +231,20 @@ def _worker(rank: int, tmp_dir: str, wrapped: bool, port: str) -> None:
         outcome = f"{type(e).__name__}: {e}"
     with open(os.path.join(tmp_dir, f"outcome_{rank}.txt"), "w") as fh:
         fh.write(outcome)
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
-def _outcomes(tmp_path, wrapped: bool, port: str) -> list[str]:
+def _outcomes(tmp_path, wrapped: bool) -> list[str]:
     with contextlib.suppress(Exception):
-        mp.start_processes(
-            _worker, args=(str(tmp_path), wrapped, port), nprocs=WORLD_SIZE, join=True, start_method="spawn"
+        run_gloo_ranks(
+            _worker,
+            WORLD_SIZE,
+            str(tmp_path),
+            wrapped,
+            pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC),
+            env={
+                "ACCELERATE_USE_CPU": "1",
+                "HF_DATASETS_CACHE": os.environ.get("TMPDIR", "/tmp") + "/main_first_op_cache",
+            },
         )
     out = []
     for rank in range(WORLD_SIZE):
@@ -262,12 +255,12 @@ def _outcomes(tmp_path, wrapped: bool, port: str) -> list[str]:
 
 def test_unwrapped_coordinated_map_completes_on_every_rank(tmp_path):
     """The control: on its own the coordinated op orders the ranks and both finish."""
-    assert _outcomes(tmp_path, wrapped=False, port=str(free_port())) == ["OK", "OK"]
+    assert _outcomes(tmp_path, wrapped=False) == ["OK", "OK"]
 
 
 def test_main_first_wrapper_diverges_the_collective_sequence(tmp_path):
     """The mechanism: the same op wrapped in ``local_main_process_first`` cannot complete cleanly."""
-    outcomes = _outcomes(tmp_path, wrapped=True, port=str(free_port()))
+    outcomes = _outcomes(tmp_path, wrapped=True)
 
     assert all(outcome != "OK" for outcome in outcomes), (
         f"a rank completed the wrapped run ({outcomes}), so either accelerate stopped barriering "
