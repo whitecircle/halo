@@ -17,7 +17,6 @@ from transformers import GenerationConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from src.models.loading.lazy_safetensors.weights import resolve_run_dtype
-from src.models.patches.attention import validate_attn_implementation
 
 logger = logging.getLogger(__name__)
 
@@ -41,25 +40,6 @@ def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
     except Exception as exc:  # best-effort; fall back to the Auto class on any failure
         logger.warning(f"Could not pre-resolve remote-code class {auto_map[class_name]!r} from {ref!r}: {exc}")
         return model_class
-
-
-def _is_attn_dispatch_error(exc: Exception) -> bool:
-    """True when a from_pretrained failure is an attention-impl dispatch rejection.
-
-    Raised at model build when an architecture cannot dispatch the requested implementation (e.g.
-    linear-attention Bailing rejecting FlashAttention-4).
-    """
-    msg = str(exc)
-    return any(
-        marker in msg
-        for marker in (
-            "Flash Attention",
-            "flash_attention",
-            "scaled_dot_product",
-            "does not support",
-            "attn_implementation",
-        )
-    )
 
 
 def _restore_checkpoint_generation_config(model: nn.Module, model_name_or_path: str, revision=None) -> None:
@@ -183,33 +163,17 @@ def instantiate_on_meta(
         trust_remote_code=trust_remote_code,
         **model_kwargs,
     )
-    effective_kwargs = model_kwargs
     try:
         model = model_class.from_pretrained(model_name_or_path, device_map="meta", **common)
     except (AttributeError, ValueError) as e:
-        # Exotic architectures (e.g. Bailing) reject an auto-detected FA4 at build; retry on SDPA.
-        attn = model_kwargs.get("attn_implementation")
-        if isinstance(e, ValueError) and attn not in (None, "sdpa", "eager") and _is_attn_dispatch_error(e):
-            # Re-validated rather than assumed safe: sdpa drops unreset gpt-oss sinks.
-            retry_impl = validate_attn_implementation(config, "sdpa")
-            logger.warning(
-                f"{model_class.__name__} cannot dispatch attn_implementation={attn!r} ({e}); "
-                f"retrying with {retry_impl!r}."
-            )
-            model = model_class.from_pretrained(
-                model_name_or_path, device_map="meta", **dict(common, attn_implementation=retry_impl)
-            )
-            # The twin must build with the implementation that succeeded, not the one that failed.
-            effective_kwargs = dict(model_kwargs, attn_implementation=retry_impl)
-        else:
-            logger.warning(
-                f"from_pretrained(device_map='meta') failed for {model_class.__name__} "
-                f"({type(e).__name__}: {e}); building the shell from the config alone instead."
-            )
-            model = _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code, **model_kwargs)
-            _restore_checkpoint_generation_config(model, model_name_or_path, model_kwargs.get("revision"))
-            return model
+        logger.warning(
+            f"from_pretrained(device_map='meta') failed for {model_class.__name__} "
+            f"({type(e).__name__}: {e}); building the shell from the config alone instead."
+        )
+        model = _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code, **model_kwargs)
+        _restore_checkpoint_generation_config(model, model_name_or_path, model_kwargs.get("revision"))
+        return model
     _materialize_nonpersistent_buffers_from_config_twin(
-        model, model_class, config, dtype, trust_remote_code, **effective_kwargs
+        model, model_class, config, dtype, trust_remote_code, **model_kwargs
     )
     return model

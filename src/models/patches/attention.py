@@ -20,6 +20,9 @@ from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, PreTrainedModel
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.integrations import sdpa_attention as _sdpa_mod
+from transformers.integrations.flex_attention import WrappedFlexAttention, flex_attention
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
+from transformers.models.mistral4 import modeling_mistral4 as m4
 from transformers.utils import is_flash_attn_2_available
 
 from src.hardware import is_blackwell_gpu, is_hopper_gpu
@@ -28,26 +31,6 @@ from src.models.attention_geometry import (
     resolve_num_key_value_heads,
 )
 from src.models.loading.config_levels import set_config_field_run_scoped, text_config
-
-try:
-    # Version compatibility rather than an optional dependency: patch targets upstream may rename,
-    # and an absent one makes the owning patch warn and no-op rather than fail the run.
-    from transformers.integrations.flex_attention import WrappedFlexAttention, flex_attention
-except ImportError:
-    WrappedFlexAttention = flex_attention = None
-
-try:
-    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
-except ImportError:
-    GptOssPreTrainedModel = None
-
-try:
-    # Same version-compatibility guard as the two above: an unguarded family import would make this
-    # module, which every loader imports for attention dispatch, unimportable on a transformers build
-    # without that family, long before the per-model guard inside the patch could no-op.
-    from transformers.models.mistral4 import modeling_mistral4 as m4
-except ImportError:
-    m4 = None
 
 logger = get_logger(__name__)
 
@@ -75,6 +58,10 @@ _SINKS_RESET_ATTR = "_halo_sinks_reset"
 # that compiles rather than falling back to the full-attention path.
 _WARMUP_MIN_SEQ_LEN = 512
 _WARMUP_WINDOW_MARGIN = 8
+
+# The widest attention head the FlashAttention kernels take: FA2 caps at it and FA4's SM100 kernel
+# overflows tensor memory past it.
+FLASH_MAX_HEAD_DIM = 256
 
 
 def silence_cute_dsl_deprecations() -> None:
@@ -115,18 +102,10 @@ def patch_transformers_flash_varlen_int_seqlen() -> None:
 
     In eager, ``_process_flash_attention_kwargs`` forwards a fresh CUDA tensor each step, and FA4's
     varlen-backward JIT compile key hashes it by tensor identity, so the backward kernel recompiles
-    on every call (~190 s/step against ~10 s; the forward already coerces it). Patching the kwargs
-    builder covers whichever flash fn transformers dispatches, at one ``.item()`` per call.
-    Idempotent; warns and no-ops if a transformers upgrade renames the private helper.
+    on every call (the forward already coerces it). Patching the kwargs builder covers whichever
+    flash fn transformers dispatches, at one ``.item()`` per call. Idempotent.
     """
-    fn = getattr(flash_utils, "_process_flash_attention_kwargs", None)
-    if fn is None:
-        logger.warning(
-            "transformers exposes no _process_flash_attention_kwargs on this build, so the varlen "
-            "max_seqlen cannot be handed to FA4 as an int — its varlen backward recompiles on every "
-            "step. Use the transformers release this toolkit pins."
-        )
-        return
+    fn = flash_utils._process_flash_attention_kwargs
     if getattr(fn, "_halo_int_seqlen", False):
         return
 
@@ -199,20 +178,11 @@ def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targ
 
     ``owner_cls`` is the class whose forward carries the tensor: the attention module itself
     (Mistral4) or the model above it (Zaya). ``stash_targets`` maps that instance to the attention
-    modules the flash interface is called with. ``False`` when already installed, or when the module
-    has no attention registry to re-inject through (warned: packed rows then attend across documents).
+    modules the flash interface is called with. ``False`` when already installed.
     """
     if getattr(owner_cls.forward, "_halo_packed_position_ids", False):
         return False
-    registry = getattr(modeling_module, "ALL_ATTENTION_FUNCTIONS", None)
-    if registry is None:
-        logger.warning(
-            f"{modeling_module.__name__} exposes no ALL_ATTENTION_FUNCTIONS registry on this transformers "
-            f"build, so {owner_cls.__name__}'s packed-document isolation cannot be applied — a packed row "
-            f"would attend across document boundaries on flash attention. Train unpacked, or use the "
-            f"transformers release this toolkit pins."
-        )
-        return False
+    registry = modeling_module.ALL_ATTENTION_FUNCTIONS
 
     original_forward = owner_cls.forward
     signature = inspect.signature(original_forward)
@@ -243,17 +213,9 @@ def patch_mistral4_flash_packed_position_ids() -> None:
     ``Mistral4Attention.forward`` declares ``position_ids`` as an explicit parameter (it feeds the
     llama-4 attention scale) and hands only ``**kwargs`` to the attention interface, so the tensor
     never reaches ``_flash_attention_forward``. The stash therefore rides the attention forward
-    itself. Warns and no-ops if the internals it hooks are renamed.
+    itself.
     """
-    attn_cls = getattr(m4, "Mistral4Attention", None) if m4 is not None else None
-    if attn_cls is None:
-        logger.warning(
-            "transformers ships no Mistral4Attention on this build, so the packed-document isolation "
-            "patch cannot be applied — a packed Mistral4 row would attend across document boundaries. "
-            "Train unpacked, or use a transformers build that carries the family."
-        )
-        return
-    if install_packed_position_ids_injection(m4, attn_cls, lambda attention: (attention,)):
+    if install_packed_position_ids_injection(m4, m4.Mistral4Attention, lambda attention: (attention,)):
         logger.info("Patched Mistral4 flash attention to receive position_ids (packed-document isolation)")
 
 
@@ -333,8 +295,8 @@ def _detect_attention_impl() -> str:
     """Auto-detect best attention implementation from GPU capability.
 
     Blackwell (SM100+): FA4 when installed, else FA2. Hopper (SM90): FA3 when installed, else FA2. A
-    broken (as opposed to absent) accelerated build warns before degrading: FA2 is correct but costs
-    2-3x on the attention kernel, and an unreported degrade would carry through a whole campaign.
+    broken (as opposed to absent) accelerated build warns before degrading: FA2 is correct but slower
+    on the attention kernel, and nothing else would report the degrade.
     """
     if not torch.cuda.is_available():
         return "flash_attention_2"  # CPU host; the choice is re-validated against the model downstream
@@ -403,9 +365,10 @@ def model_has_sinks(model_config) -> bool:
     return model_type_matches(model_config, "gpt_oss")
 
 
-def model_is_gemma4(model_config) -> bool:
-    """Check whether this is a Gemma4 model (text-only or multimodal wrapper)."""
-    return model_type_matches(model_config, "gemma4")
+def head_dim_exceeds_flash(model_config) -> bool:
+    """Whether the model's widest attention head is past :data:`FLASH_MAX_HEAD_DIM` (Gemma 4's 512-wide
+    global heads), where no FlashAttention kernel runs and SDPA needs its mem-efficient kernel."""
+    return resolve_head_dim(model_config) > FLASH_MAX_HEAD_DIM
 
 
 def _model_is_deepseek_v4(model_config) -> bool:
@@ -472,17 +435,6 @@ def patch_flex_attention_compile(reason: str):
     Must run before the first flex_attention forward. The compile wrapper deadlocks with EP's NCCL
     all-to-all on seq-length recompiles, and produces NaNs in the FSDP2 + GptOss-sinks backward.
     """
-    if WrappedFlexAttention is None:
-        # Warn rather than fail: an upstream rename leaves the compile wrapper active, not gone.
-        logger.warning(
-            f"Could not patch transformers' WrappedFlexAttention (transformers.integrations."
-            f"flex_attention did not expose it). The flex-attention torch.compile wrapper stays "
-            f"ACTIVE if it still exists — known to deadlock with EP's NCCL all-to-all on "
-            f"seq-length recompiles and to NaN the FSDP2 + GptOss-sinks backward. Verify the "
-            f"installed transformers still needs this patch ({reason})."
-        )
-        return
-
     WrappedFlexAttention._is_flex_compiled = False
     WrappedFlexAttention._compiled_flex_attention = None
 
@@ -653,8 +605,10 @@ def validate_attn_implementation(model_config, attn_impl: str, sinks_reset: bool
             # Stop transformers swapping this FA2 for the SM90-only kernel-hub package.
             _disable_gpt_oss_fa_fallback(model_config)
         return candidate
-    logger.warning("Could not validate any attn_implementation, defaulting to 'eager'")
-    return "eager"
+    raise ValueError(
+        f"{type(model_config).__name__} accepts none of the attention implementations tried "
+        f"({', '.join(candidates)}); set attn_implementation to one this model's config accepts."
+    )
 
 
 def revalidate_attn_kwarg(model_kwargs: dict, model_config) -> None:
@@ -680,7 +634,7 @@ def resolve_attn_implementation(
     """Resolve the attention backend for ``model_config`` from the model's own capabilities.
 
     Auto-detects from GPU capability when ``attn_implementation`` is None, applies the per-family
-    kernel limits (fp32, FA4 backward NaN, DeepSeek-V4 eager-only, Gemma4 head_dim=512), then runs
+    kernel limits (fp32, FA4 backward NaN, DeepSeek-V4 eager-only, heads past the flash cap), then runs
     the sinks/``_supports_sdpa`` validator. Model-level only: parallelism-specific overrides (CP's
     flex-to-FA switch, EP's flex compile disable) stay with the caller that knows the topology.
     """
@@ -710,10 +664,11 @@ def resolve_attn_implementation(
         )
         attn_implementation = "eager"
 
-    if attn_implementation.startswith("flash_attention") and model_is_gemma4(model_config):
+    if attn_implementation.startswith("flash_attention") and head_dim_exceeds_flash(model_config):
         logger.warning(
-            f"Gemma4's head_dim=512 attention is unsupported by {attn_implementation} "
-            "(FA2 caps at 256; FA4 overflows tensor memory); falling back to attn_implementation='sdpa'."
+            f"head_dim={resolve_head_dim(model_config)} attention is unsupported by {attn_implementation} "
+            f"(FA2 caps at {FLASH_MAX_HEAD_DIM}; FA4 overflows tensor memory); falling back to "
+            f"attn_implementation='sdpa'."
         )
         attn_implementation = "sdpa"
 
@@ -727,15 +682,6 @@ def _disable_gpt_oss_fa_fallback(model_config: AutoConfig) -> None:
     ``None`` runs local flash_attn FA2. Must be called before ``from_pretrained``.
     """
     if not model_has_sinks(model_config):
-        return
-    if GptOssPreTrainedModel is None:
-        # Warn rather than fail: a moved class leaves the kernel-hub auto-fallback active, not gone.
-        logger.warning(
-            "Could not disable the GptOss flash-attn auto-fallback (GptOssPreTrainedModel is not "
-            "importable from transformers). If transformers still auto-swaps FA2 for the kernel-hub "
-            "vllm-flash-attn3 package, it will crash on Blackwell (SM 9.0-only binaries). Verify "
-            "the installed transformers still needs this patch."
-        )
         return
     if getattr(GptOssPreTrainedModel, "_compatible_flash_implementations", None) is not None:
         GptOssPreTrainedModel._compatible_flash_implementations = None
