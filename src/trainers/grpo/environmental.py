@@ -37,6 +37,7 @@ from src.environments.episode import (
     effort_length_floor,
     effort_length_penalty,
     resolve_reasoning_end_token_id,
+    validate_thinking_budget_scope,
 )
 from src.models.structure import resolve_tokenizer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, dense_row_spans, rows_forward_densely
@@ -1325,30 +1326,15 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             )
 
     def _validate_thinking_budget_scope(self) -> None:
-        """The episode scope shares a budget across turns, so a run must have one, and every level's budget
-        must hold the reserve a spent turn keeps — otherwise the scope is inert or the first turn already
-        exceeds the total the template states."""
+        """The run's rollout contract through :func:`validate_thinking_budget_scope`, the gate the eval
+        runner applies too: every episode the env can produce must bind a budget the reserve fits under."""
         cfg = self.async_config
-        if cfg.rollout_thinking_budget_scope != THINKING_SCOPE_EPISODE:
-            return
-        level_budgets = {
-            level: budget
-            for level in VALID_REASONING_EFFORTS
-            if (budget := self._rollout_env.thinking_budget_for_effort(level)) is not None
-        }
-        if not level_budgets and cfg.rollout_max_thinking_tokens is None:
-            raise ValueError(
-                "rollout_thinking_budget_scope='episode' with nothing to share: no effort level sets thinking_tokens "
-                "and rollout_max_thinking_tokens is unset, so no turn would be capped."
-            )
-        short = {
-            level: budget for level, budget in level_budgets.items() if budget < cfg.rollout_thinking_turn_reserve
-        }
-        if short:
-            raise ValueError(
-                f"rollout_thinking_turn_reserve ({cfg.rollout_thinking_turn_reserve}) exceeds the thinking_tokens of "
-                f"{short}: a turn's reserve cannot be more than the episode's whole budget."
-            )
+        validate_thinking_budget_scope(
+            self._rollout_env,
+            scope=cfg.rollout_thinking_budget_scope,
+            max_thinking_tokens=cfg.rollout_max_thinking_tokens,
+            turn_reserve=cfg.rollout_thinking_turn_reserve,
+        )
 
     def _apply_effort_length_terms(self, rewards: torch.Tensor, rollout_results: list[RolloutResult]) -> None:
         """Charge each episode its level's reasoning-length price and its under-use floor, in place.

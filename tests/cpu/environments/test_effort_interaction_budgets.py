@@ -340,24 +340,6 @@ def test_episode_scope_without_a_ceiling_hands_a_turn_the_whole_remainder():
     assert high.turn_thinking_cap(1000) == 30000 - 1000
 
 
-def test_a_reserve_above_the_level_budget_is_clamped_to_it():
-    """A reserve is the floor a spent episode's turn keeps, never a raise: a level whose whole budget is
-    below the reserve gets exactly its budget every turn and counts as exhausted from the start."""
-    env = _make_env(reasoning_effort_profiles={"low": {"thinking_tokens": 256}})
-    tiny = bind_episode_effort(
-        {"reasoning_effort": "low"},
-        env,
-        max_tokens=30000,
-        max_thinking_tokens=18000,
-        scope="episode",
-        turn_reserve=512,
-    )
-    assert tiny.thinking_budget == 256
-    assert tiny.turn_thinking_cap(0) == 256
-    assert tiny.turn_thinking_cap(200) == 256
-    assert tiny.budget_exhausted(0) is True
-
-
 def _gen(token_ids):
     return TurnGeneration(text="", tool_calls=[], reasoning="", tokens=5, token_ids=token_ids)
 

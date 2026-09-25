@@ -122,6 +122,22 @@ def test_overhead_renders_under_the_rollout_template_kwargs(env_grpo_module):
     assert steered == bare + len("preserve_thinking=True") + len("reasoning_effort=high")
 
 
+def test_the_probe_states_the_budget_an_episode_binds(env_grpo_module):
+    """The probe renders the budget variable the rollout requests carry, which is the episode's bound
+    budget: under the per-turn scope the level's 36000 clamped to the 18000 ceiling, under the episode
+    scope the level's whole 36000 beside the scope variable."""
+    env = types.SimpleNamespace(reasoning_effort="high", thinking_budget_for_effort=lambda level: 36000)
+    ceiling = {"rollout_max_tokens": 30000, "rollout_max_thinking_tokens": 18000}
+    per_turn = env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(**ceiling), env)
+    assert per_turn == {"reasoning_effort": "high", "reasoning_budget": 18000}
+    episode = AsyncTrainingConfig(**ceiling, rollout_thinking_budget_scope="episode")
+    assert env_grpo_module.probe_template_kwargs(episode, env) == {
+        "reasoning_budget_scope": "episode",
+        "reasoning_effort": "high",
+        "reasoning_budget": 36000,
+    }
+
+
 def test_overhead_without_env_system_prompt_still_measures(env_grpo_module):
     overhead = env_grpo_module.measure_env_prompt_overhead(_env(system_prompt=None), _Tokenizer(), {})
     assert overhead >= 0

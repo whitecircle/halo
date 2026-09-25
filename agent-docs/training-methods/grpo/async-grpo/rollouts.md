@@ -88,7 +88,9 @@ total: a turn's engine cap is the budget minus the reasoning the earlier turns s
 clamp on the level's budget. The per-turn total (`rollout_max_tokens`, narrowed per level to the first
 turn's cap plus the answer headroom) stays constant across the episode, and a recovery turn gets only
 what is left. `episode/thinking_budget_exhausted` is the fraction of episodes whose budget ran down to
-the reserve.
+the reserve. Trainer construction and the eval scripts refuse a scope some episode could not run
+under: with `rollout_max_thinking_tokens` unset, the environment must set `reasoning_effort` and
+every level's `thinking_tokens`, and no level's budget may sit below the reserve.
 
 A turn's spend is read off the engine's sampled ids as the ids up to and including
 `rollout_reasoning_end_token` (default `</think>`, resolved through the tokenizer; the engine's budget
@@ -136,9 +138,10 @@ is why it is capped and near zero at the highest level, and why the recipes neve
 **The floor** (`effort_length_floor_weight`, default `0` = off) is the one term that pays for more
 reasoning. Its reference is `effort_length_floor_budgets` (default `0.75`) times the thinking budget
 the episode ran under — a level's per-turn budget, or the episode's total under
-`rollout_thinking_budget_scope: episode`, so a recipe that doubles its budgets for that scope halves
-`effort_length_floor_budgets` to keep the same floor. The default sits below 1 so that an
-episode of a single assistant turn can clear its floor without running into the cap the engine
+`rollout_thinking_budget_scope: episode`. The floor moves with that budget, so the fraction is set
+against the budgets a recipe runs: the episode-scope Qwen3.6 code-contests recipes pair `0.375` with
+24,576–36,000-token budgets, a floor of 9,216–13,500 reasoning tokens. The default sits below 1 so
+that an episode of a single assistant turn can clear its floor without running into the cap the engine
 enforces per turn. An episode short of the floor pays `-weight × shortfall / floor`. It reads the episode's
 total, not a per-turn mean, so a terse repair turn after a verdict is not under-use and an extra tool
 turn never lowers the score. An episode with no thinking budget or no assistant turn pays nothing;

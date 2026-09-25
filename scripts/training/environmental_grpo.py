@@ -52,7 +52,7 @@ from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.runtime import barrier, broadcast_from_rank0, is_global_main_process
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.environments.base import resolve_reasoning_effort
+from src.environments.episode import bind_episode_effort
 from src.environments.registry import create_environment, get_registered_environments
 from src.models.loading.model_preparation import log_model_info
 from src.models.loading.tokenizer_setup import get_model_context_window, setup_model_and_tokenizer
@@ -114,6 +114,23 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
             f"{FALLBACK_ENV_PROMPT_OVERHEAD} tokens of overhead for the context-window check."
         )
         return FALLBACK_ENV_PROMPT_OVERHEAD
+
+
+def probe_template_kwargs(async_config: AsyncTrainingConfig, environment) -> dict:
+    """The chat-template kwargs a rollout request of this run carries, for the prompt-overhead probe:
+    the run's template variables plus the level and thinking budget an episode binds through
+    :func:`bind_episode_effort` (a ``'random'`` env setting draws one level, as an episode does), so the
+    probe renders the budget an episode's requests state: under the per-turn scope, the level's budget
+    clamped to ``rollout_max_thinking_tokens``."""
+    effort = bind_episode_effort(
+        None,
+        environment,
+        max_tokens=async_config.rollout_max_tokens,
+        max_thinking_tokens=async_config.rollout_max_thinking_tokens,
+        scope=async_config.rollout_thinking_budget_scope,
+        turn_reserve=async_config.rollout_thinking_turn_reserve,
+    )
+    return rollout_template_kwargs(async_config.rollout_template_variables(), effort.level, effort.thinking_budget)
 
 
 def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
@@ -287,14 +304,7 @@ def main():
     # the env class default.
     probe_env = create_environment(env_config.environment_type, env_config.to_env_config())
     max_turns = probe_env.max_turns
-    # The probe renders as a rollout request would: the run's template variables plus one concrete
-    # effort level (a 'random' env setting draws one, as an episode does).
-    probe_effort = resolve_reasoning_effort(probe_env.reasoning_effort)
-    template_kwargs = rollout_template_kwargs(
-        async_config.rollout_template_variables(),
-        probe_effort,
-        probe_env.thinking_budget_for_effort(probe_effort) if probe_effort is not None else None,
-    )
+    template_kwargs = probe_template_kwargs(async_config, probe_env)
     prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)
     verify_context_window_synced(
         async_config.get_server_urls(),

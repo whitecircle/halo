@@ -11,6 +11,12 @@ import os
 
 import pytest
 
+from src.configs.async_training_config import POSITIVE_ROLLOUT_FIELDS, AsyncTrainingConfig
+from src.configs.environment_config import EnvironmentConfig
+from src.configs.smpo_config import SmoothMarginPOConfig
+from src.rewards.spec import EnvironmentTerm
+from src.training.parser import H4ArgumentParser
+
 OUTPUT_DIR = "/tmp/test_output"
 
 # SmoothMarginPOConfig extends transformers.TrainingArguments, whose __post_init__ (called at the
@@ -37,7 +43,6 @@ _POSITIVE_ROLLOUT_KNOBS = (
 
 def test_smpo_defaults():
     """Default SMPO config should be valid."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     cfg = SmoothMarginPOConfig(**_CPU_OK)
     assert cfg.beta == 1.2
@@ -63,7 +68,6 @@ def test_smpo_defaults():
 
 def test_smpo_padding_free():
     """padding_free config field should be settable."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     cfg = SmoothMarginPOConfig(padding_free=True, **_CPU_OK)
     assert cfg.padding_free is True
@@ -71,7 +75,6 @@ def test_smpo_padding_free():
 
 def test_smpo_negative_target_margin():
     """target_margin < 0 should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     raised = False
     try:
@@ -84,7 +87,6 @@ def test_smpo_negative_target_margin():
 
 def test_smpo_margin_schedule_initial_ge_target():
     """initial_margin >= target_margin with use_margin_schedule should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     raised = False
     try:
@@ -102,7 +104,6 @@ def test_smpo_margin_schedule_initial_ge_target():
 
 def test_smpo_margin_schedule_equal():
     """initial_margin == target_margin with use_margin_schedule should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     # match=: without it, a weakened bound lets construction reach TrainingArguments'
     # own "no bf16 on this setup" ValueError on the GPU-less tier, which a bare except accepts.
@@ -117,7 +118,6 @@ def test_smpo_margin_schedule_equal():
 
 def test_smpo_margin_schedule_disabled_ok():
     """initial_margin >= target_margin is fine when use_margin_schedule=False."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     cfg = SmoothMarginPOConfig(
         use_margin_schedule=False,
@@ -130,7 +130,6 @@ def test_smpo_margin_schedule_disabled_ok():
 
 def test_smpo_lower_clip_percentile_zero():
     """lower_clip_percentile = 0 should raise ValueError (must be > 0)."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     raised = False
     try:
@@ -143,7 +142,6 @@ def test_smpo_lower_clip_percentile_zero():
 
 def test_smpo_lower_clip_percentile_too_high():
     """lower_clip_percentile > 0.5 should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     with pytest.raises(ValueError, match="lower_clip_percentile"):
         SmoothMarginPOConfig(output_dir=OUTPUT_DIR, lower_clip_percentile=0.6)
@@ -151,7 +149,6 @@ def test_smpo_lower_clip_percentile_too_high():
 
 def test_smpo_lower_clip_percentile_at_half():
     """lower_clip_percentile = 0.5 should be valid (boundary)."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     cfg = SmoothMarginPOConfig(lower_clip_percentile=0.5, **_CPU_OK)
     assert cfg.lower_clip_percentile == 0.5
@@ -159,7 +156,6 @@ def test_smpo_lower_clip_percentile_at_half():
 
 def test_smpo_upper_clip_percentile_below_half():
     """upper_clip_percentile < 0.5 should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     raised = False
     try:
@@ -172,7 +168,6 @@ def test_smpo_upper_clip_percentile_below_half():
 
 def test_smpo_upper_clip_percentile_at_one():
     """upper_clip_percentile = 1.0 should raise ValueError (must be < 1)."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     with pytest.raises(ValueError, match="upper_clip_percentile"):
         SmoothMarginPOConfig(output_dir=OUTPUT_DIR, upper_clip_percentile=1.0)
@@ -180,7 +175,6 @@ def test_smpo_upper_clip_percentile_at_one():
 
 def test_smpo_min_log_prob_positive():
     """min_log_prob >= 0 should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     raised = False
     try:
@@ -193,7 +187,6 @@ def test_smpo_min_log_prob_positive():
 
 def test_smpo_min_log_prob_zero():
     """min_log_prob = 0 should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     with pytest.raises(ValueError, match="min_log_prob"):
         SmoothMarginPOConfig(output_dir=OUTPUT_DIR, min_log_prob=0.0)
@@ -201,7 +194,6 @@ def test_smpo_min_log_prob_zero():
 
 def test_smpo_chosen_sft_ratio_out_of_range():
     """chosen_sft_ratio outside [0, 1] should raise ValueError."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     for bad_val in [-0.1, 1.1]:
         raised = False
@@ -215,7 +207,6 @@ def test_smpo_chosen_sft_ratio_out_of_range():
 
 def test_smpo_chosen_sft_ratio_boundaries():
     """chosen_sft_ratio = 0 and 1 should be valid."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     cfg0 = SmoothMarginPOConfig(chosen_sft_ratio=0.0, **_CPU_OK)
     assert cfg0.chosen_sft_ratio == 0.0
@@ -225,7 +216,6 @@ def test_smpo_chosen_sft_ratio_boundaries():
 
 def test_smpo_upper_clip_percentile_valid_boundary():
     """upper_clip_percentile = 0.5 (lower boundary) and 0.99 (interior) are valid."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     cfg_lo = SmoothMarginPOConfig(upper_clip_percentile=0.5, **_CPU_OK)
     assert cfg_lo.upper_clip_percentile == 0.5
@@ -235,7 +225,6 @@ def test_smpo_upper_clip_percentile_valid_boundary():
 
 def test_smpo_clip_percentiles_none_disables_validation():
     """Setting both clip percentiles to None disables the range checks (no raise)."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     cfg = SmoothMarginPOConfig(
         lower_clip_percentile=None,
@@ -250,7 +239,6 @@ def test_smpo_clip_percentiles_none_disables_validation():
 
 def test_smpo_bf16_defaults_true_when_fp16_false():
     """bf16=None resolves to ``not fp16`` in __post_init__ (toolkit bf16-by-default)."""
-    from src.configs.smpo_config import SmoothMarginPOConfig
 
     # fp16=True path: bf16 resolves to False.
     cfg = SmoothMarginPOConfig(output_dir=OUTPUT_DIR, bf16=None, fp16=True)
@@ -273,8 +261,6 @@ def test_smpo_invalid_loss_type_value():
     ``H4ArgumentParser`` instead, and that is the gate this pins: if the parser's Literal check
     stops firing, a typo'd loss_type reaches the loss dispatch as a live config.
     """
-    from src.configs.smpo_config import SmoothMarginPOConfig
-    from src.training.parser import H4ArgumentParser
 
     cfg = SmoothMarginPOConfig(loss_type="bogus", **_CPU_OK)
     assert cfg.loss_type == "bogus"
@@ -288,8 +274,6 @@ def test_smpo_invalid_loss_type_value():
 
 def test_env_config_defaults():
     """EnvironmentConfig should have sensible defaults."""
-    from src.configs.environment_config import EnvironmentConfig
-    from src.rewards.spec import EnvironmentTerm
 
     cfg = EnvironmentConfig()
     assert cfg.environment_type == "react_math"
@@ -305,7 +289,6 @@ def test_env_config_defaults():
 def test_env_config_refuses_per_env_reward_knobs():
     """A reward's magnitude is a term's ``weight``, not a per-environment field: such a knob must
     fail at construction rather than parse into a config that changes nothing about the run."""
-    from src.configs.environment_config import EnvironmentConfig
 
     for knob in ("success_reward", "failure_reward", "partial_reward"):
         with pytest.raises(TypeError, match=knob):
@@ -314,7 +297,6 @@ def test_env_config_refuses_per_env_reward_knobs():
 
 def test_env_config_to_env_config():
     """to_env_config() should merge the reward terms and turn cap with environment_kwargs."""
-    from src.configs.environment_config import EnvironmentConfig
 
     cfg = EnvironmentConfig(
         rewards=[{"source": "environment", "weight": 2.0}],
@@ -330,7 +312,6 @@ def test_env_config_to_env_config():
 
 def test_env_config_to_env_config_empty_kwargs():
     """to_env_config() with empty environment_kwargs should return the reward terms and turn cap only."""
-    from src.configs.environment_config import EnvironmentConfig
 
     cfg = EnvironmentConfig(rewards=[{"source": "environment", "weight": 1.5}], max_turns=5)
     result = cfg.to_env_config()
@@ -344,7 +325,6 @@ def test_env_config_kwargs_override_core_key():
     This is a real footgun: putting ``max_turns`` inside environment_kwargs shadows the
     top-level ``max_turns``. Pinning the precedence (kwargs win) documents it.
     """
-    from src.configs.environment_config import EnvironmentConfig
 
     cfg = EnvironmentConfig(max_turns=10, environment_kwargs={"max_turns": 99})
     result = cfg.to_env_config()
@@ -354,7 +334,6 @@ def test_env_config_kwargs_override_core_key():
 def test_env_config_rejects_non_positive_max_turns():
     """``max_turns: 0`` makes the rollout loop a no-op, so every episode returns reward 0 with no
     error — a silently all-zero batch. It must fail at parse time, not after Ray and vLLM are up."""
-    from src.configs.environment_config import EnvironmentConfig
 
     for bad in (0, -1):
         try:
@@ -370,7 +349,6 @@ def test_env_config_rejects_non_positive_max_turns():
 def test_env_config_max_turns_guard_survives_cli_override():
     """CLI overrides land via setattr, so ``__post_init__`` never re-runs; the RangeValidatedConfig
     seam must re-check them."""
-    from src.configs.environment_config import EnvironmentConfig
 
     cfg = EnvironmentConfig()
     cfg.max_turns = 0
@@ -384,7 +362,6 @@ def test_env_config_max_turns_guard_survives_cli_override():
 
 def test_env_config_custom_env_type_passthrough():
     """environment_type is stored verbatim (registry resolves it later, no validation here)."""
-    from src.configs.environment_config import EnvironmentConfig
 
     cfg = EnvironmentConfig(environment_type="code_contests", environment_kwargs={"timeout_per_test": 10})
     assert cfg.environment_type == "code_contests"
@@ -397,19 +374,8 @@ def test_env_config_custom_env_type_passthrough():
 # AsyncTrainingConfig tests
 
 
-def _import_async_training_config():
-    """Import AsyncTrainingConfig, skipping if ray/aiohttp unavailable."""
-    try:
-        from src.configs.async_training_config import AsyncTrainingConfig
-
-        return AsyncTrainingConfig
-    except ImportError as e:
-        raise RuntimeError(f"Cannot import AsyncTrainingConfig (missing dependency: {e})") from e
-
-
 def test_async_config_defaults():
     """AsyncTrainingConfig should have sensible defaults."""
-    AsyncTrainingConfig = _import_async_training_config()
     cfg = AsyncTrainingConfig()
     assert cfg.num_rollout_workers == 64
     assert cfg.max_concurrent_rollouts is None
@@ -425,7 +391,6 @@ def test_async_config_defaults():
 
 def test_async_config_get_server_urls_single():
     """get_server_urls() should return single URL when no multi-server config."""
-    AsyncTrainingConfig = _import_async_training_config()
     cfg = AsyncTrainingConfig(rollout_server_url="http://gpu1:8000")
     urls = cfg.get_server_urls()
     assert urls == ["http://gpu1:8000"]
@@ -433,7 +398,6 @@ def test_async_config_get_server_urls_single():
 
 def test_async_config_get_server_urls_multi():
     """get_server_urls() should return URLs from rollout_server_configs when set."""
-    AsyncTrainingConfig = _import_async_training_config()
     cfg = AsyncTrainingConfig(
         rollout_server_configs=[
             {"url": "http://node1:8000", "group_port": 51216},
@@ -446,14 +410,12 @@ def test_async_config_get_server_urls_multi():
 
 def test_async_config_get_server_urls_empty_list_falls_back():
     """An empty (falsy) rollout_server_configs list falls back to the single rollout_server_url."""
-    AsyncTrainingConfig = _import_async_training_config()
     cfg = AsyncTrainingConfig(rollout_server_url="http://gpu1:8000", rollout_server_configs=[])
     assert cfg.get_server_urls() == ["http://gpu1:8000"]
 
 
 def test_async_config_get_rollout_config_threads_fields():
     """get_rollout_config() forwards the rollout/retry knobs into RolloutConfig."""
-    AsyncTrainingConfig = _import_async_training_config()
     cfg = AsyncTrainingConfig(
         rollout_temperature=0.3,
         rollout_top_p=0.8,
@@ -493,7 +455,6 @@ def _nccl_watchdog_minutes(minutes: str | None):
 def test_async_config_episode_timeout_above_watchdog_raises():
     """episode_timeout > the NCCL watchdog must fail fast: a straggler would trip the peers' per-step
     collective before it is cancelled, aborting the run on an opaque watchdog timeout."""
-    AsyncTrainingConfig = _import_async_training_config()
     with _nccl_watchdog_minutes(None):  # default watchdog = 30 min = 1800s
         cfg = AsyncTrainingConfig(episode_timeout=2700.0)  # 2700 > 1800
         raised = False
@@ -508,7 +469,6 @@ def test_async_config_episode_timeout_above_watchdog_raises():
 def test_async_config_episode_timeout_below_watchdog_ok():
     """A raised watchdog admits a longer episode_timeout: 2700s < 3600s (60 min) builds cleanly and
     threads the value into RolloutConfig."""
-    AsyncTrainingConfig = _import_async_training_config()
     with _nccl_watchdog_minutes("60"):  # watchdog = 3600s
         cfg = AsyncTrainingConfig(episode_timeout=2700.0)
         rc = cfg.get_rollout_config()
@@ -518,7 +478,6 @@ def test_async_config_episode_timeout_below_watchdog_ok():
 def test_async_config_episode_timeout_equal_watchdog_does_not_raise():
     """The stock default (episode_timeout == watchdog == 1800s) is a race, not a certainty: it warns but
     must NOT raise, or every default env-GRPO run would break at construction."""
-    AsyncTrainingConfig = _import_async_training_config()
     with _nccl_watchdog_minutes(None):
         cfg = AsyncTrainingConfig(episode_timeout=1800.0)  # == default 1800s watchdog
         rc = cfg.get_rollout_config()  # no raise
@@ -527,7 +486,6 @@ def test_async_config_episode_timeout_equal_watchdog_does_not_raise():
 
 def test_positive_rollout_knob_sweep_covers_the_production_tuple():
     """The sweep below spells its fields out; this fails if the guarded tuple grows or shrinks."""
-    from src.configs.async_training_config import POSITIVE_ROLLOUT_FIELDS
 
     assert set(POSITIVE_ROLLOUT_FIELDS) == set(_POSITIVE_ROLLOUT_KNOBS)
 
@@ -545,7 +503,6 @@ def test_async_config_rejects_non_positive_or_non_finite_rollout_knobs(field, ba
     wall-clock, so a non-positive one cancels every episode on entry and the run halts two steps
     later reporting an empty batch instead of a bad config.
     """
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match=field):
         AsyncTrainingConfig(**{field: bad})
 
@@ -554,7 +511,6 @@ def test_async_config_rejects_non_positive_or_non_finite_rollout_knobs(field, ba
 def test_async_config_rejects_a_vanishing_concurrency_cap(bad):
     """``max_concurrent_rollouts`` is read as ``value or default``, so a 0 reads as "unset" and the
     per-rank semaphore cap disappears — every rollout of the round hits the servers at once."""
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="max_concurrent_rollouts"):
         AsyncTrainingConfig(max_concurrent_rollouts=bad)
 
@@ -563,7 +519,6 @@ def test_async_config_rejects_a_vanishing_concurrency_cap(bad):
 def test_async_config_rejects_out_of_range_top_p(bad):
     """``rollout_top_p`` is forwarded verbatim, so an out-of-range value is a per-request server
     rejection — every episode errors and the step reads as a dead environment."""
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="rollout_top_p"):
         AsyncTrainingConfig(rollout_top_p=bad)
 
@@ -572,7 +527,6 @@ def test_async_config_rejects_out_of_range_top_p(bad):
 def test_async_config_rejects_a_non_finite_or_negative_retry_base_wait(bad):
     """The retry backoff grows from ``retry_base_wait``: a negative base shrinks it, NaN slips past
     the sign check, and an infinite base parks the first retry forever."""
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="retry_base_wait"):
         AsyncTrainingConfig(retry_base_wait=bad)
     AsyncTrainingConfig(retry_base_wait=0.0)  # no raise: retry immediately
@@ -584,7 +538,6 @@ def test_async_config_rejects_a_thinking_budget_that_eats_the_whole_turn():
     At or above the turn cap the floor hides the mistake: every turn spends its whole budget on
     reasoning and is cut before the answer or tool call, which trains as a length-cut turn forever.
     """
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="rollout_max_thinking_tokens"):
         AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_thinking_tokens=4096)
     AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_thinking_tokens=4095)  # no raise
@@ -595,7 +548,6 @@ def test_async_config_rejects_a_negative_or_non_finite_thinking_budget(bad):
     """A negative budget is below every turn cap and NaN passes every ordered comparison, so the
     headroom check alone would pass either through to the engine as a nonsense ``thinking_token_budget``;
     ``null`` is the spelling for unbounded reasoning."""
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be a finite number >= 0"):
         AsyncTrainingConfig(rollout_max_thinking_tokens=bad)
     cfg = AsyncTrainingConfig()
@@ -607,7 +559,6 @@ def test_async_config_rejects_a_negative_or_non_finite_thinking_budget(bad):
 def test_async_config_range_guards_survive_a_cli_override():
     """``__post_init__`` never re-runs under ``--key=value``; the guards live in ``_validate_ranges``
     so the override path re-runs them whole."""
-    AsyncTrainingConfig = _import_async_training_config()
     cfg = AsyncTrainingConfig()
     cfg.rollout_temperature = 0.0
     with pytest.raises(ValueError, match="rollout_temperature"):
@@ -617,7 +568,6 @@ def test_async_config_range_guards_survive_a_cli_override():
 def test_async_config_rejects_an_unknown_thinking_budget_scope():
     """The drivers compare the scope against the two spellings by equality, so a misspelling would run
     as the per-turn scope while the YAML promised a shared budget."""
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="rollout_thinking_budget_scope must be one of"):
         AsyncTrainingConfig(rollout_thinking_budget_scope="task")
     cfg = AsyncTrainingConfig()
@@ -631,16 +581,14 @@ def test_async_config_rejects_a_thinking_turn_reserve_below_one(bad):
     """A reserve of 0 hands a spent episode's later turns an engine cap of 0, closing their reasoning
     before it opens; a bool is an int that spells a mistake, not a token count. Guarded under either
     scope, so flipping the scope later cannot uncover a stored bad value."""
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="rollout_thinking_turn_reserve must be an int >= 1"):
         AsyncTrainingConfig(rollout_thinking_turn_reserve=bad)
 
 
 def test_async_config_episode_scope_requires_what_the_reasoning_count_reads():
-    """The episode scope counts a turn's reasoning off the sampled ids up to the reasoning-end marker:
+    """The episode scope counts a turn's reasoning off the sampled ids up to and including the reasoning-end marker:
     without the capture or the marker there is nothing to count. A reserve above the per-turn ceiling
     would let a spent episode's turn exceed the ceiling the reserve is meant to sit beneath."""
-    AsyncTrainingConfig = _import_async_training_config()
     episode = {"rollout_thinking_budget_scope": "episode"}
     with pytest.raises(ValueError, match="requires train_on_sampled_tokens"):
         AsyncTrainingConfig(**episode, train_on_sampled_tokens=False)
@@ -664,7 +612,6 @@ def test_async_config_injects_the_scope_variable_only_under_the_episode_scope():
     """The effort templates read ``reasoning_budget_scope`` to state what the budget covers. The config
     owns it — a YAML copy could disagree with the scope the drivers narrow by — so every request and
     every trainer-side render sees it exactly when the scope is the episode's."""
-    AsyncTrainingConfig = _import_async_training_config()
     with pytest.raises(ValueError, match="must not carry 'reasoning_budget_scope'"):
         AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_budget_scope": "episode"})
     run_kwargs = {"preserve_thinking": True}

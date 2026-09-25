@@ -23,6 +23,7 @@ from src.configs.rollout_config import (
     THINKING_BUDGET_SCOPES,
     THINKING_SCOPE_EPISODE,
     RolloutConfig,
+    ThinkingBudgetScope,
 )
 from src.env import WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
 
@@ -175,7 +176,7 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         },
     )
 
-    rollout_thinking_budget_scope: str = field(
+    rollout_thinking_budget_scope: ThinkingBudgetScope = field(
         default=DEFAULT_THINKING_BUDGET_SCOPE,
         metadata={
             "help": "What a thinking budget (a level's thinking_tokens, else rollout_max_thinking_tokens) covers: "
@@ -184,7 +185,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
             "rollout_thinking_turn_reserve, never above rollout_max_thinking_tokens). Closes the loophole "
             "where a cut or empty turn plus its recovery nudge buys another full budget of reasoning. vLLM "
             "only; needs train_on_sampled_tokens (the spend is read off the sampled ids) and "
-            "rollout_reasoning_end_token. The effort templates state the scope to the model."
+            "rollout_reasoning_end_token. Without rollout_max_thinking_tokens the environment must set "
+            "reasoning_effort and every level's thinking_tokens, or trainer construction and the eval scripts "
+            "refuse the run. The effort templates state the scope to the model."
         },
     )
 
@@ -192,8 +195,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         default=DEFAULT_THINKING_TURN_RESERVE,
         metadata={
             "help": "Under rollout_thinking_budget_scope=episode: the reasoning a turn always gets once the "
-            "episode's budget is spent, so the model can still close its reasoning and act. Must be >= 1 and "
-            "at most rollout_max_thinking_tokens when that is set."
+            "episode's budget is spent, so the model can still close its reasoning and act. Must be >= 1, "
+            "at most rollout_max_thinking_tokens when that is set, and at most every level's thinking_tokens "
+            "(refused at trainer construction and by the eval scripts)."
         },
     )
 
@@ -201,8 +205,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
         default=DEFAULT_REASONING_END_TOKEN,
         metadata={
             "help": "The token that closes the model's reasoning (Qwen3.x '</think>'); under "
-            "rollout_thinking_budget_scope=episode a turn's reasoning is counted as the sampled ids before it. "
-            "Resolved through the tokenizer by the trainer and the eval scripts; it must be a token of it."
+            "rollout_thinking_budget_scope=episode a turn's reasoning is counted as the sampled ids up to and "
+            "including it. Resolved through the tokenizer by the trainer and the eval scripts; it must be a "
+            "token of it."
         },
     )
 

@@ -6,7 +6,7 @@ it pickled, so those imports must not be pulled into every ``import src.configs`
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 # ``AsyncTrainingConfig`` is the validated YAML surface and supplies every mirrored field below, so a
 # directly-built RolloutConfig defaults to what that path would produce; one shared constant per pair
@@ -34,9 +34,10 @@ REASONING_SCOPE_TEMPLATE_VAR = "reasoning_budget_scope"
 
 # What a thinking budget covers: each turn on its own, or the episode's turns together (each turn's
 # engine cap is then what the budget has left).
+ThinkingBudgetScope = Literal["turn", "episode"]
+THINKING_BUDGET_SCOPES: tuple[str, ...] = get_args(ThinkingBudgetScope)
 THINKING_SCOPE_TURN = "turn"
 THINKING_SCOPE_EPISODE = "episode"
-THINKING_BUDGET_SCOPES = (THINKING_SCOPE_TURN, THINKING_SCOPE_EPISODE)
 DEFAULT_THINKING_BUDGET_SCOPE = THINKING_SCOPE_TURN
 DEFAULT_THINKING_TURN_RESERVE = 512
 DEFAULT_REASONING_END_TOKEN = "</think>"
@@ -64,7 +65,7 @@ class RolloutConfig:
     the episode's budget has left. Requires a server-side reasoning parser. None = only ``max_tokens``
     caps the turn."""
 
-    thinking_budget_scope: str = DEFAULT_THINKING_BUDGET_SCOPE
+    thinking_budget_scope: ThinkingBudgetScope = DEFAULT_THINKING_BUDGET_SCOPE
     """What a thinking budget covers — ``turn`` (every turn gets it whole) or ``episode`` (the turns
     share it: a turn's engine cap is the budget minus the reasoning the earlier turns spent, never below
     ``thinking_turn_reserve``). Mirrors ``AsyncTrainingConfig.rollout_thinking_budget_scope``."""
@@ -76,7 +77,7 @@ class RolloutConfig:
     reasoning_end_token_id: int | None = None
     """The id of the token that closes reasoning, resolved from ``rollout_reasoning_end_token`` by the
     caller that owns the tokenizer. The ``episode`` scope counts a turn's reasoning as the sampled ids
-    before it; the ``turn`` scope never reads it."""
+    up to and including it; the ``turn`` scope never reads it."""
 
     capture_token_ids: bool = False
     """Request per-token logprobs so the sampled generation token ids can be captured (needs the

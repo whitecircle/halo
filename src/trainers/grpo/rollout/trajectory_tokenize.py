@@ -47,8 +47,10 @@ def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Ten
 def rollout_template_kwargs(
     rollout_kwargs: dict, reasoning_effort: str | None, reasoning_budget: int | None = None
 ) -> dict:
-    """Chat-template kwargs a rollout's requests carry: the run's ``rollout_chat_template_kwargs``
-    plus the ``reasoning_effort`` the episode ran under and its thinking budget, so a trainer-side
+    """Chat-template kwargs a rollout's requests carry: the run's template variables
+    (``AsyncTrainingConfig.rollout_template_variables``, which adds the episode scope's variable to
+    ``rollout_chat_template_kwargs``) plus the ``reasoning_effort`` the episode ran under and its
+    thinking budget (per turn, or the episode's total under the episode scope), so a trainer-side
     render reproduces the template's effort-dependent preamble. Either key is absent when the episode
     carries none. One owner for every render that stands in for the engine's."""
     kwargs = dict(rollout_kwargs)

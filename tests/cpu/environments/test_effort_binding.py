@@ -284,6 +284,29 @@ def test_episode_scope_refuses_a_level_with_nothing_to_share():
     assert episode.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS).thinking_budget is None
 
 
+async def test_the_eval_refuses_a_scope_gap_before_generating(monkeypatch):
+    """The eval runs the trainer's scope gate: an env that resolves no level under a ceiling-less episode
+    scope would otherwise fail every episode at its first turn, each recorded as a zero-reward error
+    sample, and the run would report a score of zero."""
+    calls = []
+
+    async def fake_generate(**kwargs):
+        calls.append(kwargs)
+        return _text_turn(token_ids=_ids_closing_reasoning_after(10))
+
+    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    config = ray_actors.RolloutConfig(
+        max_tokens=_MAX_TOKENS, thinking_budget_scope="episode", reasoning_end_token_id=_END
+    )
+    examples = [{"prompt": "solve it", "context": {}}]
+    with pytest.raises(ValueError, match="nothing to share"):
+        await eval_runner.collect_results(_BudgetEnv(), examples, None, rollout=config)
+    assert calls == [], "the gate must refuse before the first request"
+    # Anti-vacuity: the same contract runs once the env sets a level every episode can bind.
+    results = await eval_runner.collect_results(_BudgetEnv(reasoning_effort="high"), examples, None, rollout=config)
+    assert "error" not in results[0]["samples"][0] and len(calls) == 1
+
+
 def test_drivers_share_one_seam():
     # A re-forked local copy is exactly how the two drivers drifted apart before.
     assert eval_runner.bind_episode_effort is episode.bind_episode_effort

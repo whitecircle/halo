@@ -351,9 +351,9 @@ class BaseEnvironment(ABC):
 
     # Profile keys this class admits and the minimum each takes; a subclass declares only the keys it
     # adds, and the union over the MRO is what a profile may carry. ``thinking_tokens`` is the
-    # per-turn CoT budget, ``max_length_cutoff_recoveries`` tightens the env's recovery cap for the
-    # level. An int minimum declares a count (only ints admitted); a float minimum admits any finite
-    # number.
+    # level's CoT budget (per turn, or the episode's total under the episode thinking scope),
+    # ``max_length_cutoff_recoveries`` tightens the env's recovery cap for the level. An int minimum
+    # declares a count (only ints admitted); a float minimum admits any finite number.
     EFFORT_PROFILE_KEY_MINIMA: dict[str, int | float] = {
         "thinking_tokens": 1,
         "max_length_cutoff_recoveries": 0,

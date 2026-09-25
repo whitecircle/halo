@@ -9,8 +9,9 @@
 * A dataset with no ``answer`` column under an environment that grades against one scores a single
   constant — zero advantage in every GRPO group, nothing in the logs — so it is refused here, and
   ``remove_unused_columns`` is forced off because the rollout context IS the row's other columns.
-* The episode thinking scope needs a budget for the turns to share (a level's ``thinking_tokens`` or the
-  run's ceiling) and a per-turn reserve no level's budget falls below; either gap is refused.
+* The episode thinking scope needs a budget for every episode's turns to share (every level's
+  ``thinking_tokens`` under a set ``reasoning_effort``, or the run's ceiling) and a per-turn reserve no
+  level's budget falls below; either gap is refused.
 
     python tests/cpu/grpo/test_env_trainer_construction_gates.py
 """
@@ -144,37 +145,43 @@ def test_a_non_grading_environment_accepts_an_answer_less_dataset():
     _answer_host("native_math", {}, _dataset(), eval_dataset=_dataset())._reject_answerless_datasets()
 
 
-def _scope_host(budgets: dict, **config):
+def _scope_host(budgets: dict, effort: str | None = "random", **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncTrainingConfig(**config)
-    host._rollout_env = types.SimpleNamespace(thinking_budget_for_effort=budgets.get)
+    host._rollout_env = types.SimpleNamespace(reasoning_effort=effort, thinking_budget_for_effort=budgets.get)
     return host
 
 
-def test_episode_scope_refuses_a_run_with_no_budget_to_share():
-    """With no level setting ``thinking_tokens`` and no run ceiling the scope has no total: every
-    episode would bind at its first turn instead of here, after the servers are up."""
+_EVERY_LEVEL = {"low": 8192, "medium": 12288, "high": 16384}
+
+
+def test_episode_scope_refuses_a_run_where_an_episode_has_no_budget_to_share():
+    """Without the run's ceiling an episode's budget is its level's ``thinking_tokens`` alone, so an episode
+    that draws an unbudgeted level, or resolves no level, would fail at its first turn as a masked row,
+    after the servers are up. Every level budgeted under a set level, or the ceiling, is a whole contract."""
     episode = {"rollout_thinking_budget_scope": "episode"}
-    with pytest.raises(ValueError, match="nothing to share"):
+    with pytest.raises(ValueError, match=r"nothing to share.*unset for \['low', 'medium', 'high'\]"):
         _scope_host({}, **episode)._validate_thinking_budget_scope()
-    # One budgeted level is enough, and so is the run-wide ceiling.
-    _scope_host({"high": 16384}, **episode)._validate_thinking_budget_scope()
-    _scope_host({}, **episode, rollout_max_thinking_tokens=8000)._validate_thinking_budget_scope()
+    with pytest.raises(ValueError, match=r"unset for \['low', 'medium'\]"):
+        _scope_host({"high": 16384}, **episode)._validate_thinking_budget_scope()
+    with pytest.raises(ValueError, match="reasoning_effort, got None"):
+        _scope_host(_EVERY_LEVEL, effort=None, **episode)._validate_thinking_budget_scope()
+    _scope_host(_EVERY_LEVEL, **episode)._validate_thinking_budget_scope()
+    # The ceiling budgets an episode its level leaves unbudgeted, with or without a level.
+    _scope_host({"high": 16384}, **episode, rollout_max_thinking_tokens=8000)._validate_thinking_budget_scope()
+    _scope_host({}, effort=None, **episode, rollout_max_thinking_tokens=8000)._validate_thinking_budget_scope()
     # The per-turn scope shares nothing and runs uncapped as before.
-    _scope_host({})._validate_thinking_budget_scope()
+    _scope_host({}, effort=None)._validate_thinking_budget_scope()
 
 
-def test_episode_scope_refuses_a_reserve_no_level_budget_can_hold():
-    """A level whose whole budget sits below the reserve would be clamped to it silently, so the model
-    would be promised a budget it never gets a turn to spend."""
+def test_episode_scope_refuses_a_reserve_a_level_budget_cannot_hold():
+    """The reserve is what every turn keeps, so a level whose whole budget sits below it would hand its
+    first turn more reasoning than the episode total the template states."""
     episode = {"rollout_thinking_budget_scope": "episode"}
-    with pytest.raises(ValueError, match="exceeds the thinking_tokens"):
-        _scope_host(
-            {"low": 256, "high": 16384}, **episode, rollout_thinking_turn_reserve=512
-        )._validate_thinking_budget_scope()
-    _scope_host(
-        {"low": 256, "high": 16384}, **episode, rollout_thinking_turn_reserve=256
-    )._validate_thinking_budget_scope()
+    short_low = {**_EVERY_LEVEL, "low": 256}
+    with pytest.raises(ValueError, match=r"exceeds the thinking_tokens of \{'low': 256\}"):
+        _scope_host(short_low, **episode, rollout_thinking_turn_reserve=512)._validate_thinking_budget_scope()
+    _scope_host(short_low, **episode, rollout_thinking_turn_reserve=256)._validate_thinking_budget_scope()
     # Not a per-turn-scope concern: there the reserve is never read.
     _scope_host({"low": 256}, rollout_thinking_turn_reserve=512)._validate_thinking_budget_scope()
 

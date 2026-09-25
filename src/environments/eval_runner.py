@@ -32,6 +32,7 @@ from src.environments.episode import (
     TurnGeneration,
     bind_episode_effort,
     step_context_from_generation,
+    validate_thinking_budget_scope,
 )
 from src.inference.openai_client import generate_openai_response
 from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason
@@ -280,7 +281,16 @@ async def collect_results(
     Each result is ``{"group", "id", "samples": [{"reward", "success", "stats"}, ...]}``. A sample is a
     success when reward ≥ ``success_threshold``; ``collect_trajectories=True`` adds a ``"trajectory"``
     per sample for :func:`write_trajectories_jsonl`.
+
+    The contract passes the trainer's thinking-scope gate first, so a gap refuses the run rather than
+    scoring every episode that lands on it as an error sample.
     """
+    validate_thinking_budget_scope(
+        env,
+        scope=rollout.thinking_budget_scope,
+        max_thinking_tokens=rollout.max_thinking_tokens,
+        turn_reserve=rollout.thinking_turn_reserve,
+    )
     semaphore = asyncio.Semaphore(max_workers)
 
     async def one(example) -> dict[str, Any]:

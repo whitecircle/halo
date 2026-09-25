@@ -14,6 +14,7 @@ from typing import Any
 from src.configs.rollout_config import DEFAULT_THINKING_TURN_RESERVE, THINKING_SCOPE_EPISODE, THINKING_SCOPE_TURN
 from src.environments.base import (
     THINKING_BUDGET_EXHAUSTED_KEY,
+    VALID_REASONING_EFFORTS,
     AsyncBaseEnvironment,
     BaseEnvironment,
     EnvStep,
@@ -33,13 +34,10 @@ class EpisodeEffort:
     max_tokens: int
     scope: str = THINKING_SCOPE_TURN
     turn_reserve: int = DEFAULT_THINKING_TURN_RESERVE
+    """The reasoning a turn keeps once the episode's budget is spent; :func:`validate_thinking_budget_scope`
+    refuses one above a level's budget."""
     turn_ceiling: int | None = None
     """The run's per-turn reasoning ceiling (``rollout_max_thinking_tokens``), read under the episode scope."""
-
-    @property
-    def _reserve(self) -> int:
-        # A reserve above the budget would let the first turn exceed the total the template states.
-        return min(self.turn_reserve, self.thinking_budget)
 
     def turn_thinking_cap(self, reasoning_spent: int) -> int | None:
         """The engine's reasoning cap for the turn about to be generated.
@@ -49,7 +47,7 @@ class EpisodeEffort:
         close its reasoning and act) and never above the run's per-turn ceiling."""
         if self.thinking_budget is None or self.scope == THINKING_SCOPE_TURN:
             return self.thinking_budget
-        remaining = max(self.thinking_budget - reasoning_spent, self._reserve)
+        remaining = max(self.thinking_budget - reasoning_spent, self.turn_reserve)
         return remaining if self.turn_ceiling is None else min(remaining, self.turn_ceiling)
 
     def spend_of(self, gen: "TurnGeneration", reasoning_end_token_id: int | None) -> int:
@@ -64,7 +62,7 @@ class EpisodeEffort:
         return (
             self.scope == THINKING_SCOPE_EPISODE
             and self.thinking_budget is not None
-            and self.thinking_budget - reasoning_spent <= self._reserve
+            and self.thinking_budget - reasoning_spent <= self.turn_reserve
         )
 
     def stamp(self, trajectory: Trajectory | None, reasoning_spent: int | None = None) -> None:
@@ -154,6 +152,41 @@ def bind_episode_effort(
     )
 
 
+def validate_thinking_budget_scope(
+    env: BaseEnvironment, *, scope: str, max_thinking_tokens: int | None, turn_reserve: int
+) -> None:
+    """Refuse an episode thinking scope that some episode could not bind through :func:`bind_episode_effort`.
+
+    With ``max_thinking_tokens`` unset an episode's budget is its level's ``thinking_tokens`` alone, so the
+    env must resolve a level for every episode (``reasoning_effort`` set) and every level must carry a
+    budget: otherwise each episode that lands on the gap fails at its first turn, a masked row in
+    training and a zero-reward error sample in an eval. A level's budget must also hold ``turn_reserve``,
+    the reasoning a spent turn keeps: above the episode's whole budget the first turn would already take
+    more than the total the template states. The per-turn scope shares nothing and passes.
+
+    The trainer runs it at construction and the eval runner before its first episode, so a gap is
+    refused before any episode is generated.
+    """
+    if scope != THINKING_SCOPE_EPISODE:
+        return
+    budgets = {level: env.thinking_budget_for_effort(level) for level in VALID_REASONING_EFFORTS}
+    if max_thinking_tokens is None:
+        unbudgeted = [level for level, budget in budgets.items() if budget is None]
+        if env.reasoning_effort is None or unbudgeted:
+            raise ValueError(
+                "rollout_thinking_budget_scope='episode' would leave episodes with nothing to share: with "
+                "rollout_max_thinking_tokens unset, every episode needs a level (reasoning_effort, got "
+                f"{env.reasoning_effort!r}) whose profile sets thinking_tokens (unset for {unbudgeted}). Set both, "
+                "or set rollout_max_thinking_tokens, the budget of an episode its level leaves unbudgeted."
+            )
+    short = {level: budget for level, budget in budgets.items() if budget is not None and budget < turn_reserve}
+    if short:
+        raise ValueError(
+            f"rollout_thinking_turn_reserve ({turn_reserve}) exceeds the thinking_tokens of {short}: a turn's "
+            "reserve cannot be more than the episode's whole budget."
+        )
+
+
 def resolve_reasoning_end_token_id(tokenizer, token: str) -> int:
     """The id of ``token`` under the tokenizer, required to resolve: a marker the tokenizer does not
     know would count every turn's whole generation as reasoning and starve the episode of its budget
@@ -162,7 +195,8 @@ def resolve_reasoning_end_token_id(tokenizer, token: str) -> int:
     if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
         raise ValueError(
             f"rollout_reasoning_end_token {token!r} is not a token of this tokenizer; the episode thinking scope "
-            "counts a turn's reasoning as the sampled ids before that token, so name the model's own marker"
+            "counts a turn's reasoning as the sampled ids up to and including that token, so name the model's "
+            "own marker"
         )
     return tid
 

@@ -5,7 +5,8 @@ price and the under-use floor.
 The price is ``-min(c_max, k(effort) * reasoning_tokens / l_norm)`` with ``k`` falling by ``e`` per
 ``tau`` effort units, so one trace costs most at the lowest level and the cap keeps a long trace from
 outweighing the task reward. The floor is the only term that pays for MORE reasoning: it prices an
-episode's shortfall against a multiple of the per-turn thinking budget it ran under. Both read the
+episode's shortfall against a multiple of the thinking budget it ran under (per turn, or the episode's
+total under the episode scope). Both read the
 episode's reasoning summed over its turns — a short repair turn is not under-use.
 
 Run: python tests/cpu/grpo/test_effort_length_terms.py  (or pytest)
