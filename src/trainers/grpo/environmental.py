@@ -27,10 +27,10 @@ from src.distributed.runtime import is_multi_rank_run
 from src.environments.base import (
     EPISODE_INVALID_REASON_KEY,
     OBJECTIVE_REWARD_KEY,
-    SOLVE_RATE_KEY,
     VALID_REASONING_EFFORTS,
     BaseEnvironment,
     resolve_reasoning_effort,
+    solve_verdict,
 )
 from src.environments.engine_wire import SGLANG_BACKEND
 from src.environments.episode import (
@@ -1362,10 +1362,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         advantage; it needs the recompute forward, a config-derived gate.
         """
         world = self._world_metrics
-        solved = [
-            r.metrics[SOLVE_RATE_KEY] >= 1.0 if rollout_is_valid(r) and SOLVE_RATE_KEY in r.metrics else None
-            for r in rollout_results
-        ]
+        solved = [solve_verdict(r.metrics) if rollout_is_valid(r) else None for r in rollout_results]
         groups, all_pass, all_fail, any_pass = group_solve_counts(solved, num_generations)
         if groups:
             world.fraction("outcome/all_pass_group_frac", all_pass, groups)
