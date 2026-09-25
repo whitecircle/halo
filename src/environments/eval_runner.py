@@ -86,7 +86,9 @@ def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
     # A bare saved Dataset holds one unnamed split; membership would iterate rows, then fail.
     if isinstance(ds, Dataset):
         return ds
-    return ds[split] if split in ds else ds[next(iter(ds.keys()))]
+    if split not in ds:
+        raise ValueError(f"split {split!r} is not in {path}, which holds {list(ds)}")
+    return ds[split]
 
 
 def serialize_trajectory(traj: Trajectory | None) -> dict[str, Any] | None:
