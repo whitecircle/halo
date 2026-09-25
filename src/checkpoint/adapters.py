@@ -35,7 +35,7 @@ from src.checkpoint.tool_io import (
 )
 from src.models.loading.tokenizer_setup import resolve_peft_processing_class
 from src.models.moe_balancing import is_balancing_state_key
-from src.models.structure import strip_peft_adapter_segment
+from src.models.structure import PEFT_BASE_MODEL_PREFIX, strip_peft_adapter_segment
 
 logger = get_logger(__name__)
 
@@ -54,7 +54,6 @@ EXPERT_LORA_PEFT_TYPE = "EXPERT_LORA"
 MIXED_EXPERT_LORA_PEFT_TYPE = "LORA_WITH_EP_EXPERT_LORA"
 EXPERT_LORA_PEFT_TYPES = frozenset({EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE})
 
-_ADAPTER_KEY_PREFIX = "base_model.model."
 # What PEFT appends below the adapted module's own path in a saved key.
 _ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
 
@@ -103,7 +102,7 @@ def adapter_module_paths(adapter_dir: str) -> set[str]:
     """
     paths: set[str] = set()
     for key in _adapter_tensor_keys(adapter_dir):
-        name = key.removeprefix(_ADAPTER_KEY_PREFIX)
+        name = key.removeprefix(PEFT_BASE_MODEL_PREFIX)
         cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
         paths.add(name[:cut] if cut >= 0 else name.rpartition(".")[0])
     return paths
