@@ -96,6 +96,22 @@ def test_gate_fails_on_a_missing_anchor_and_passes_the_generated_one(tmp_path):
     ]
 
 
+def test_a_fragment_on_a_directory_link_is_checked_against_its_readme(tmp_path):
+    """GitHub renders a directory's ``README.md`` under its listing, so ``sub/#x`` lands in that page."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "README.md").write_text("# Sub\n\n## Deep section\n")
+    page = tmp_path / "page.md"
+    page.write_text("[a](sub/#deep-section) [b](sub#deep-section)\n")
+    result = _run_gate(tmp_path)
+    assert result.returncode == 0, result.stdout
+
+    page.write_text("[a](sub/#gone) [b](sub#gone)\n")
+    result = _run_gate(tmp_path)
+    assert result.returncode == 1
+    broken = sorted(line for line in result.stdout.splitlines() if line.startswith("BROKEN"))
+    assert broken == [f"BROKEN ANCHOR  {page}:1  ->  sub#gone", f"BROKEN ANCHOR  {page}:1  ->  sub/#gone"]
+
+
 def test_gate_fails_on_a_missing_target_and_a_heading_id(tmp_path):
     (tmp_path / "page.md").write_text("## Section {#section}\n\n[x](missing.md)\n")
     result = _run_gate(tmp_path)
