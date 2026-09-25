@@ -19,8 +19,9 @@ not a wall. Read this before opening an issue or PR; the full dev guide (build, 
    [`.github/APPROVED_CONTRIBUTORS`](https://github.com/whitecircle/halo/blob/allowlist/.github/APPROVED_CONTRIBUTORS)
    (kept on the `allowlist` branch) by commenting `/approve @your-handle` on an accepted issue. **PRs from anyone not on that list (and without write access) are auto-commented
    and closed.** A reaction, comment, branch, or draft does **not** reserve the work or approve your
-   PR path. Land one PR and you're added automatically — repeat contributors skip the gate. A PR the
-   gate closed before you were approved can be reopened once you are; the gate re-runs on reopen.
+   PR path. Land one PR and you're added automatically — repeat contributors skip the gate. Once you're
+   approved, reopen a PR the gate closed earlier, or ask on the issue and a maintainer will; the gate
+   re-runs on reopen.
 4. **Demand ≠ implementation.** Reactions and comments show interest; they don't guarantee implementation,
    priority, or maintainer attention.
 

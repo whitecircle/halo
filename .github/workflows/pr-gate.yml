@@ -70,7 +70,7 @@ jobs:
               `To get there:`,
               `1. Open an issue describing what you want to change and why — use the **Feature request / proposal** template (or **Bug report** for a fix).`,
               `2. If it's accepted, a maintainer comments \`/approve @${author}\` on it — that adds you to \`.github/APPROVED_CONTRIBUTORS\`.`,
-              `3. Open your PR against that issue (or reopen this one).`,
+              `3. Open your PR against that issue. To reuse this one, reopen it, or ask on the issue and a maintainer will.`,
               ``,
               `Details: [CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/${branch}/CONTRIBUTING.md). Thanks for understanding!`,
             ].join('\n');

@@ -356,9 +356,10 @@ first-class content — report it with the reason.
 ## Submitting a PR
 
 1. **Get approved first** — an accepted issue plus a maintainer's `/approve @your-handle` on it. An un-approved PR is closed by
-   `pr-gate.yml`; reopen it once approved — the gate re-runs on reopen. Merging a PR adds you to the
-   allowlist, so the gate applies once. `/approve` assigns you to the issue, which keeps it open
-   while you work; an unassigned idle issue goes stale after 30 days and closes 7 days later.
+   `pr-gate.yml`; once approved, reopen it, or ask on the issue and a maintainer will — the gate re-runs on
+   reopen. Merging a PR adds you to the allowlist, so the gate applies once. `/approve` assigns you to the
+   issue, which keeps it open while you work; an unassigned idle issue goes stale after 30 days and closes
+   7 days later.
 2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged;
    signed commits (SSH or GPG) are required only on branches of this repository, not in a fork.
 3. **Pass the gates.** `make lint`, `make format`, `make test-cpu` (plus `make test-gpu-core` for

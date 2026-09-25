@@ -19,9 +19,9 @@ go through an accepted issue and a maintainer approval first.
 | Code change | Accepted issue + a maintainer's `/approve @your-handle` on it first |
 
 Don't open a PR before a maintainer approves you on an accepted issue —
-unapproved PRs are closed automatically; a PR closed this way can be reopened
-once you are approved. Once you land one PR, you're added to the approved list
-and skip the gate next time.
+unapproved PRs are closed automatically. After approval, reopen a PR closed
+this way, or ask on the issue and a maintainer will. Once you land one PR,
+you're added to the approved list and skip the gate next time.
 
 Work from a **fork**: fork the repo, clone your fork, branch off `main`, push
 to your fork, and open the PR against `whitecircle/halo`.
