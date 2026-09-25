@@ -546,9 +546,19 @@ def iter_checkpoint_tensors(
             yield key, reader.get_tensor(key)
 
 
+def header_numel(header) -> int:
+    """Element count of a tensor from its ``safe_open`` slice header alone (no data read)."""
+    return math.prod(header.get_shape())
+
+
 def header_nbytes(header) -> int:
     """Storage size of a tensor from its ``safe_open`` slice header alone (no data read)."""
-    return math.prod(header.get_shape()) * _SAFETENSORS_DTYPE_BYTES.get(header.get_dtype(), 2)
+    return header_numel(header) * _SAFETENSORS_DTYPE_BYTES.get(header.get_dtype(), 2)
+
+
+def stored_tensor_numel(reader, key: str) -> int:
+    """Element count of one tensor in an open ``safe_open`` reader, from the header alone (no data read)."""
+    return header_numel(reader.get_slice(key))
 
 
 def stored_tensor_nbytes(reader, key: str) -> int:

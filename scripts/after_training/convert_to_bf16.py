@@ -13,7 +13,6 @@ Usage:
 
 import argparse
 import logging
-import math
 import os
 from collections import Counter
 
@@ -31,6 +30,7 @@ from src.checkpoint.tool_io import (
     apply_training_sidecars,
     checkpoint_shard_files,
     copy_training_sidecars,
+    header_numel,
     iter_checkpoint_shard_entries,
     preflight_model_load_resources,
     reject_in_place_conversion,
@@ -182,7 +182,7 @@ def verify_model_conversion(model_path):
     dtype_params: Counter[str] = Counter()
     for _shard, reader, key in iter_checkpoint_shard_entries(model_path):
         header = reader.get_slice(key)
-        dtype_params[header.get_dtype()] += math.prod(header.get_shape())
+        dtype_params[header.get_dtype()] += header_numel(header)
 
     # Float tensors only: an integer buffer can never be bf16, so counting it would dilute the share.
     # safetensors spells float dtypes F16/F32/F64/F8_*/BF16 and everything else I*/U*/BOOL.

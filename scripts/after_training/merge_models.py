@@ -12,11 +12,11 @@ common weight-space methods:
                         to the base (arXiv:2306.01708).
 
 Merging streams one tensor at a time across the input checkpoints (each key is loaded from every
-model, merged, then written), so peak host memory is a single layer plus one pending output shard
-rather than the merged model. Output is HF-sharded safetensors (``--max_shard_size`` sets the
-per-file cap). Config, tokenizer and any remote-code modules are copied from ``--tokenizer_source``
-(default: the base model, or the first model); a Hub id there is downloaded (weights excluded) and
-copied the same way.
+model, merged, then written), so peak host memory is every input's copy of the costliest tensor (the
+largest, in practice), the method's float32 working set over it, and one pending output shard, never
+the merged model. Output is HF-sharded safetensors (``--max_shard_size`` sets the per-file cap).
+Config, tokenizer and any remote-code modules are copied from ``--tokenizer_source`` (default: the base
+model, or the first model); a Hub id there is downloaded (weights excluded) and copied the same way.
 
 Examples:
     # Weighted linear average (weights normalized by their sum)
@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import keyword
 import logging
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -62,6 +63,7 @@ from src.checkpoint.tool_io import (
     preflight_resource_warning,
     reject_in_place_conversion,
     stored_tensor_nbytes,
+    stored_tensor_numel,
 )
 from src.log import configure_cli_logging
 from src.models.loading.dtype import DTYPE_BY_NAME
@@ -71,6 +73,15 @@ configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 _SLERP_DOT_THRESHOLD = 0.9995  # above this the vectors are ~colinear → lerp (slerp is unstable)
+
+# The range each scalar knob means something on. Outside it the ops do not raise, they merge something
+# else: a density outside (0, 1] skips the trim and keeps every delta, a t outside [0, 1] extrapolates
+# past both models, and a non-finite value writes non-finite weights.
+_KNOB_DOMAINS: dict[str, tuple[Callable[[float], bool], str]] = {
+    "t": (lambda value: 0.0 <= value <= 1.0, "in [0, 1]"),
+    "density": (lambda value: 0.0 < value <= 1.0, "in (0, 1]"),
+    "lambda": (math.isfinite, "finite"),
+}
 
 
 def _parse_model_spec(spec: str) -> tuple[str, float | None]:
@@ -115,6 +126,10 @@ class _TensorReader:
     def nbytes(self, key: str) -> int:
         """Storage size of ``key`` from the safetensors header alone — no tensor read."""
         return stored_tensor_nbytes(self._handle(key), key)
+
+    def numel(self, key: str) -> int:
+        """Element count of ``key`` from the safetensors header alone — no tensor read."""
+        return stored_tensor_numel(self._handle(key), key)
 
     def _handle(self, key: str):
         # The RAM preflight sizes the reference key set (the base's, under task_arithmetic/ties)
@@ -215,20 +230,28 @@ def _merge_ties(
 
 
 class _MergeMethod(NamedTuple):
-    """One merge method's contract: the op, the per-key tensors the loop hands it, and the scalar CLI
-    knobs it reads with their defaults. The ops declare no defaults; the gate, the dispatch and
-    ``--help`` all read them from this table."""
+    """One merge method's contract: the op, the per-key tensors the loop hands it, the scalar CLI
+    knobs it reads with their defaults, and its working set for the RAM preflight — the peak float32
+    copies of one tensor the op allocates beside its inputs, by model count. The ops declare no
+    defaults; the gate, the dispatch and ``--help`` all read them from this table."""
 
     op: Callable[..., torch.Tensor]
     tensor_args: tuple[str, ...]
     knobs: dict[str, float]
+    fp32_copies: Callable[[int], float]
 
 
+# fp32_copies: the allocator's peak with bf16 inputs (every ``.float()`` copies), as test_merge_models pins it.
 _METHODS: dict[str, _MergeMethod] = {
-    "linear": _MergeMethod(_merge_linear, ("tensors", "weights"), {}),
-    "slerp": _MergeMethod(_merge_slerp, ("t0", "t1"), {"t": 0.5}),
-    "task_arithmetic": _MergeMethod(_merge_task_arithmetic, ("base", "tensors", "weights"), {}),
-    "ties": _MergeMethod(_merge_ties, ("base", "tensors", "weights"), {"density": 0.6, "lambda": 1.0}),
+    "linear": _MergeMethod(_merge_linear, ("tensors", "weights"), {}, lambda n_models: 3),
+    "slerp": _MergeMethod(_merge_slerp, ("t0", "t1"), {"t": 0.5}, lambda n_models: 5),
+    "task_arithmetic": _MergeMethod(_merge_task_arithmetic, ("base", "tensors", "weights"), {}, lambda n_models: 4),
+    "ties": _MergeMethod(
+        _merge_ties,
+        ("base", "tensors", "weights"),
+        {"density": 0.6, "lambda": 1.0},
+        lambda n_models: 5.25 * n_models + 5,
+    ),
 }
 # Per-key tensor arguments the caller controls through a CLI knob rather than a value.
 _KNOB_BY_TENSOR_ARG = {"weights": "models:weight", "base": "base_model"}
@@ -264,6 +287,14 @@ def _check_method_knobs(method: str, explicit: set[str]) -> None:
         )
 
 
+def _check_knob_domains(method: str, values: dict[str, float]) -> None:
+    """Refuse a knob value outside the range the method's op is meaningful on."""
+    for knob in _METHODS[method].knobs:
+        accepts, domain = _KNOB_DOMAINS[knob]
+        if not accepts(values[knob]):
+            raise ValueError(f"--{knob} must be {domain} for --method {method}, got {values[knob]}")
+
+
 def merge_models(
     model_specs: list[str],
     output_dir: str,
@@ -295,7 +326,10 @@ def merge_models(
         explicit.add("models:weight")
     _check_method_knobs(method, explicit)
     weights = [1.0 if w is None else w for w in given_weights]
+    if not all(math.isfinite(w) for w in weights):
+        raise ValueError(f"--models weights must be finite, got {weights}")
     knob_values = {**_KNOB_DEFAULTS, **given_knobs}
+    _check_knob_domains(method, knob_values)
 
     if method == "slerp" and len(paths) != 2:
         raise ValueError(f"slerp merges exactly two models, got {len(paths)}")
@@ -342,15 +376,24 @@ def merge_models(
 
     writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
 
-    # Peak RAM is about one fp32 copy of the largest tensor per contributing model (TIES stacks them
-    # all) on top of the writer's pending output shard. On disk the artifact is one input's size.
-    contributors = len(readers) + (1 if base_reader is not None else 0)
-    largest_tensor = max((readers[0].nbytes(key) for key in ref_keys), default=0)
+    # Peak RAM is the costliest key, every contributor's copy as stored plus the method's fp32 working
+    # set over it (an integer pass-through key counted as if merged), and the writer's pending output
+    # shard. On disk the artifact is one input's size.
+    contributors = [*readers, *([base_reader] if base_reader is not None else [])]
+    working_bytes_per_element = spec.fp32_copies(len(readers)) * torch.float32.itemsize
+    costliest_key_bytes = max(
+        (
+            sum(reader.nbytes(key) for reader in contributors)
+            + math.ceil(working_bytes_per_element * readers[0].numel(key))
+            for key in ref_keys
+        ),
+        default=0,
+    )
     preflight_resource_warning(
         "merge_models",
         output_dir,
         disk_bytes=sum(os.path.getsize(shard) for shard in set(readers[0].weight_map.values())),
-        ram_bytes=2 * contributors * largest_tensor + writer.max_bytes,
+        ram_bytes=costliest_key_bytes + writer.max_bytes,
     )
 
     for i, key in enumerate(ref_keys):
@@ -370,6 +413,8 @@ def merge_models(
                     f"no meaningful average. Merge models that share it."
                 )
             writer.add(key, tensors[0])
+            # Left bound, the other models' copies would sit beside the next key's reads.
+            del tensors
             continue
 
         per_key = {"tensors": tensors, "t0": tensors[0], "t1": tensors[-1], "weights": weights}
@@ -380,7 +425,8 @@ def merge_models(
         # Balancing tensors export at their trained dtype as on every merge/gather path (mirrors
         # merge_ep_shards): casting the fp32 sign-update biases to --dtype quantizes the routing.
         writer.add(key, out.to(tensors[0].dtype if is_balancing_state_key(key) else out_dtype))
-        del out, tensors
+        # per_key holds the inputs too: left bound, they would sit beside the next key's reads.
+        del out, tensors, per_key
         if verbose and (i + 1) % 100 == 0:
             logger.info(f"  merged {i + 1}/{len(ref_keys)} tensors")
 
@@ -476,20 +522,20 @@ def main() -> int:
         "--density",
         type=float,
         default=None,
-        help=f"ties: fraction of deltas kept (default {_KNOB_DEFAULTS['density']}).",
+        help=f"ties: fraction of deltas kept, {_KNOB_DOMAINS['density'][1]} (default {_KNOB_DEFAULTS['density']}).",
     )
     parser.add_argument(
         "--lambda",
         dest=_knob_dest("lambda"),
         type=float,
         default=None,
-        help=f"ties: merged-delta scale (default {_KNOB_DEFAULTS['lambda']}).",
+        help=f"ties: merged-delta scale, {_KNOB_DOMAINS['lambda'][1]} (default {_KNOB_DEFAULTS['lambda']}).",
     )
     parser.add_argument(
         "--t",
         type=float,
         default=None,
-        help=f"slerp: interpolation factor in [0,1] (default {_KNOB_DEFAULTS['t']}).",
+        help=f"slerp: interpolation factor, {_KNOB_DOMAINS['t'][1]} (default {_KNOB_DEFAULTS['t']}).",
     )
     parser.add_argument(
         "--tokenizer_source",
