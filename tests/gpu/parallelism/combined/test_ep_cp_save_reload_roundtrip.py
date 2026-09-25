@@ -15,7 +15,7 @@ Usage (2 GPUs — ep_size=2, cp_size=2, dp=1):
         tests/gpu/parallelism/combined/test_ep_cp_save_reload_roundtrip.py
 
 Env:
-    HALO_TEST_EP_CP_RT_MODEL  local checkpoint dir (default: /mnt/models/gpt-oss-20b-BF16-patched)
+    HALO_TEST_EP_CP_RT_MODEL  local checkpoint dir (default: $HALO_DATA_ROOT/models/gpt-oss-20b-BF16-patched)
     HALO_TEST_EP_CP_RT_ATTN   attn_implementation (default: flash_attention_2)
 """
 

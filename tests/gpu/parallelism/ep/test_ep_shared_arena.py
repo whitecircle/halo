@@ -30,7 +30,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_30B_A3B
-from tests.common.utils import log
+from tests.common.utils import cos_sim, log
 
 MODEL_NAME = QWEN3_30B_A3B
 EP_SIZE = 2
@@ -101,19 +101,16 @@ def forward_backward(model, batch):
     return out.loss.item(), grads
 
 
-def cosine(a, b):
-    return torch.nn.functional.cosine_similarity(a.flatten().unsqueeze(0), b.flatten().unsqueeze(0)).item()
-
-
 def worst_cosine(left, right):
-    """The least-correlated gradient between two runs, as (name, cosine)."""
+    """The least-correlated gradient between two runs, as (name, cosine).
+
+    ``cos_sim`` raises on a NaN gradient, the corrupted-arena signature a ``<`` tracker would skip.
+    """
+    assert left, "no gradients to compare"
     assert set(left) == set(right), "gradient key sets differ"
-    worst_name, worst = None, 1.0
-    for name, g in left.items():
-        c = cosine(g, right[name])
-        if c < worst:
-            worst_name, worst = name, c
-    return worst_name, worst
+    cosines = {name: cos_sim(g, right[name], label=name) for name, g in left.items()}
+    worst_name = min(cosines, key=cosines.get)
+    return worst_name, cosines[worst_name]
 
 
 def run(ctx):
@@ -150,8 +147,6 @@ def run(ctx):
 
     # Noise floor: a second identical run. Any spread here is EP's own nondeterminism.
     _, grads_repeat = forward_backward(model, batch)
-    floor_name, floor_cos = worst_cosine(grads_shared, grads_repeat)
-    log(f"noise floor from two identical shared runs: {floor_cos:.6f} ({floor_name})")
 
     # ---- private arenas (pre-sharing behaviour) --------------------------
     # Capacity dedup is what pins one capacity per forward; without it a later layer may grow the
@@ -177,6 +172,10 @@ def run(ctx):
     checks["sharing_divides_the_arena_by_layer_count"] = private_arena_bytes == num_layers * shared_arena_bytes
 
     # ---- equivalence ------------------------------------------------------
+    # Every cosine runs after the last collective: cos_sim raises on a NaN or zero gradient, and a
+    # rank raising before the private run would leave its peers inside a DeepEP dispatch.
+    floor_name, floor_cos = worst_cosine(grads_shared, grads_repeat)
+    log(f"noise floor from two identical shared runs: {floor_cos:.6f} ({floor_name})")
     checks["loss_matches_private_arena"] = abs(loss_shared - loss_private) < LOSS_ABS_TOL
     worst_name, worst_cos = worst_cosine(grads_shared, grads_private)
     log(f"worst gradient cosine shared-vs-private {worst_cos:.6f} ({worst_name}) over {len(grads_shared)} tensors")

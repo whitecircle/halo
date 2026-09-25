@@ -2,8 +2,7 @@
 """
 Focused SFT test for Qwen3.5/Qwen3.6 MoE with Expert Parallelism.
 
-Single mode (EP only), env-configurable model path and EP size, 4-GPU
-friendly. Smoke-tests the local Qwen3.6-35B-A3B checkpoint produced by patching.
+Single mode (EP only), env-configurable model path and EP size, 4-GPU friendly.
 
 Note: Qwen3.5/3.6 attention uses M-RoPE whose varlen path crashes Flash
 Attention 2 (cudaErrorIllegalAddress). Use attn_implementation=sdpa.
@@ -15,8 +14,8 @@ Usage:
 Requirements:
     - 2-8 B200/B300 GPUs
     - DeepEP installed
-    - Local checkpoint at /mnt/models/Qwen3.6-35B-A3B-patched
-      (override via HALO_TEST_QWEN3_5_MODEL env var; falls back to HF Hub name)
+    - Model: Qwen/Qwen3.5-35B-A3B from the Hub; HALO_TEST_QWEN3_5_MODEL points it at another
+      Qwen3.5/3.6 MoE checkpoint (e.g. a local $HALO_DATA_ROOT/models/Qwen3.6-35B-A3B-patched)
 """
 
 import sys

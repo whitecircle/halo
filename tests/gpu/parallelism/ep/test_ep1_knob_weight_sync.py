@@ -25,8 +25,9 @@ Run with 2 GPUs (the sharded path needs >1 rank to shard across):
         tests/gpu/parallelism/ep/test_ep1_knob_weight_sync.py
 
 Other MoE families (validates the per-family gather path) via env:
-    HALO_TEST_EP1_KNOB_MODEL=/mnt/models/GLM-4.7-Flash-patched HALO_TEST_EP1_KNOB_ATTN=flash_attention_2  # fused-GLU
-    HALO_TEST_EP1_KNOB_MODEL=/mnt/models/ZAYA1-8B-patched HALO_TEST_EP1_KNOB_ATTN=sdpa                     # Zaya
+    HALO_TEST_EP1_KNOB_MODEL=$HALO_DATA_ROOT/models/GLM-4.7-Flash-patched \
+        HALO_TEST_EP1_KNOB_ATTN=flash_attention_2  # fused-GLU
+    HALO_TEST_EP1_KNOB_MODEL=$HALO_DATA_ROOT/models/ZAYA1-8B-patched HALO_TEST_EP1_KNOB_ATTN=sdpa  # Zaya
 
 Requirements:
     - 2x GPU with >=80GB memory; DeepEP installed
@@ -52,7 +53,7 @@ from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, log
 
 # Default gpt-oss; override HALO_TEST_EP1_KNOB_MODEL / HALO_TEST_EP1_KNOB_ATTN to validate another MoE family
-# (e.g. HALO_TEST_EP1_KNOB_MODEL=/mnt/models/GLM-4.7-Flash-patched for the fused-GLU base gather path).
+# (e.g. HALO_TEST_EP1_KNOB_MODEL=$HALO_DATA_ROOT/models/GLM-4.7-Flash-patched for the fused-GLU base gather path).
 MODEL_NAME = env_str("HALO_TEST_EP1_KNOB_MODEL", GPT_OSS_20B)
 ATTN = env_str("HALO_TEST_EP1_KNOB_ATTN", "flash_attention_2")
 SEQ_LEN = 128

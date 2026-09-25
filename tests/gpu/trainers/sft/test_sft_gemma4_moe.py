@@ -19,7 +19,7 @@ Usage:
 Requirements:
     - 2x B200/B300 GPUs (>=80GB)
     - DeepEP installed
-    - Local checkpoint at /mnt/models/gemma-4-26B-A4B-it-patched
+    - Local checkpoint at $HALO_DATA_ROOT/models/gemma-4-26B-A4B-it-patched
       (override via HALO_TEST_GEMMA4_MODEL env var)
 """
 

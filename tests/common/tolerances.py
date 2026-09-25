@@ -14,6 +14,7 @@ the bug signal it must stay under, rather than stretching a shared value to fit.
     assert abs(ep_loss - fsdp_loss) < TOL.parallel_vs_baseline_loss_abs
 """
 
+import math
 from dataclasses import dataclass
 
 
@@ -75,6 +76,13 @@ class _Tolerances:
     grad_norm_ratio_max: float = 1.25
     grad_direction_cosine_min: float = 0.90
 
+    # ── EP gradients vs a replicated reference, tiny random-init MoE ─────────
+    # bf16 grads on a ~128-token model carry real rounding noise, the paths accumulate in different
+    # orders and fp32 EP routing flips occasional bf16 near-ties, so direction is checked loosely while
+    # the norm ratio stays tight enough that a missing or doubled /world_size divide (2.0 / 0.5) fails.
+    ep_grad_cosine_min: float = 0.9
+    ep_grad_norm_ratio_band: tuple[float, float] = (0.67, 1.5)
+
     # ── Exact-objective pins ────────────────────────────────────────────────
     # Independent reimplementation vs the logged loss. The residual is dtype rather than objective:
     # an fp32 reference of a preference objective over bf16 sequence log-prob sums lands 4e-3 relative
@@ -85,6 +93,31 @@ class _Tolerances:
     # ── Generic finite-difference / numerical kernels ───────────────────────
     kernel_atol: float = 1e-2
     kernel_rtol: float = 1e-2
+
+    # ── Muon orthogonalization ──────────────────────────────────────────────
+    # Singular values of the Newton-Schulz output. In exact arithmetic the five composed Polar Express
+    # quintics map an input singular value of at least 1.22e-3 of the Frobenius norm into
+    # [0.846, 1.124]; inside each path's domain the bf16 output moves those extremes by under 3e-3,
+    # within the band's margin. Steps 1-3 only act on inputs below ~1e-2, so a dropped one shows only
+    # there. Without the safety factor, fp16 rounding overshoots the band on either path (to 1.2-1.4
+    # on the Gram path), which the rectangular cases catch.
+    muon_orthogonal_sv_min: float = 0.84
+    muon_orthogonal_sv_max: float = 1.13
+    # The smallest input singular value, relative to the Frobenius norm, each path holds the band from:
+    # a round margin over 1.22e-3 on the square (standard iteration) path, and a measured one on the
+    # rectangular (Gram iteration) path, which loses the band below ~4e-3.
+    muon_band_domain_square: float = 1.4e-3
+    muon_band_domain_rectangular: float = 4e-3
+
+    def muon_polar_cosine_min(self) -> float:
+        """Smallest cosine between an orthogonalized update and its source's polar factor ``U V^T``.
+
+        Derived from the singular-value band (the Kantorovich bound over spectra inside it), so the
+        two checks cannot drift apart. An update orthogonalized from another matrix's momentum sits
+        near 0.
+        """
+        low, high = self.muon_orthogonal_sv_min, self.muon_orthogonal_sv_max
+        return 2 * math.sqrt(low * high) / (low + high)
 
     def control_min_loss_shift(self, bound: float | None = None) -> float:
         """Minimum loss shift a negative control must produce for a match to be meaningful.

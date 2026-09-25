@@ -45,7 +45,7 @@ from src.distributed.context_parallel.validation import validate_model_for_ulyss
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log, log_all
+from tests.common.utils import cleanup_memory, cos_sim, log, log_all
 
 # Configuration
 
@@ -87,16 +87,6 @@ def create_input(vocab_size: int, device: str, seed: int = SEED):
     dist.broadcast(input_ids, src=0)
     dist.broadcast(labels, src=0)
     return input_ids, labels
-
-
-def cosine_similarity_flat(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Cosine similarity between two tensors (flattened to 1-D)."""
-    a_flat = a.flatten().float()
-    b_flat = b.flatten().float()
-    denom = a_flat.norm() * b_flat.norm()
-    if denom < 1e-12:
-        return 1.0  # Both near-zero → treat as equivalent
-    return (a_flat @ b_flat / denom).item()
 
 
 # Phase 1 + 2: Loss and Gradient Equivalence (combined to minimize loads)
@@ -190,10 +180,13 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     common_params = sorted(set(base_grads.keys()) & set(cp_grads.keys()))
     log(f"      Common parameters: {len(common_params)}")
 
+    # A parameter the CP backward leaves without a gradient drops out of the intersection, so the
+    # key sets must match exactly or the comparison below never sees it.
+    grad_keys_match = base_grads.keys() == cp_grads.keys()
+    if not grad_keys_match:
+        log(f"      ERROR: grads only in baseline: {sorted(base_grads.keys() - cp_grads.keys())[:5]}")
+        log(f"      ERROR: grads only in CP: {sorted(cp_grads.keys() - base_grads.keys())[:5]}")
     if not common_params:
-        log("      ERROR: No common parameters found!")
-        log(f"      Base keys (sample): {sorted(base_grads.keys())[:5]}")
-        log(f"      CP keys (sample): {sorted(cp_grads.keys())[:5]}")
         return loss_passed, False, {}
 
     cosine_sims = []
@@ -205,7 +198,7 @@ def test_loss_and_gradient_equivalence(device, cp_size):
         if bg.shape != cg.shape:
             low_cosine_params.append((name, "shape mismatch"))
             continue
-        cos = cosine_similarity_flat(bg, cg)
+        cos = cos_sim(bg, cg, label=name)
         cosine_sims.append(cos)
         if cos < GRAD_COSINE_MIN:
             low_cosine_params.append((name, f"cos={cos:.6f}"))
@@ -217,7 +210,7 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     norm_ratio = cp_grad_norm / base_grad_norm if base_grad_norm > 1e-12 else float("inf")
     norm_close = abs(norm_ratio - 1.0) < GRAD_NORM_RTOL
 
-    grad_passed = min_cosine >= GRAD_COSINE_MIN and norm_close
+    grad_passed = grad_keys_match and not low_cosine_params and norm_close
 
     log(f"      Avg cosine similarity:  {avg_cosine:.6f}")
     log(f"      Min cosine similarity:  {min_cosine:.6f} (threshold: {GRAD_COSINE_MIN})")
@@ -338,9 +331,11 @@ def test_training_equivalence(device, cp_size):
     if len(base_losses) >= 2:
         base_t = torch.tensor(base_losses, dtype=torch.float)
         cp_t = torch.tensor(cp_avg_losses, dtype=torch.float)
-        # Constant losses → same trend (corr = 1.0)
-        corr = torch.corrcoef(torch.stack([base_t, cp_t]))[0, 1].item() if base_t.std() > 0 and cp_t.std() > 0 else 1.0
-        corr_ok = corr > 0.90
+        # A constant trajectory has no trend to correlate; five optimizer steps that leave the loss
+        # flat mean the updates were never applied, so it fails.
+        degenerate = not (base_t.std() > 0 and cp_t.std() > 0)
+        corr = float("nan") if degenerate else torch.corrcoef(torch.stack([base_t, cp_t]))[0, 1].item()
+        corr_ok = not degenerate and corr > 0.90
         checks["loss_correlation"] = corr_ok
         log(f"      Loss correlation: {corr:.4f} ({'PASS' if corr_ok else 'FAIL'})")
     else:
@@ -353,12 +348,15 @@ def test_training_equivalence(device, cp_size):
         wb = base_weights[name]
         wc = cp_weights[name]
         if wb.shape == wc.shape:
-            weight_cosines.append(cosine_similarity_flat(wb, wc))
+            weight_cosines.append(cos_sim(wb, wc, label=name))
+    # Every parameter compared: a missing name or a shape mismatch is a failure, not a skip.
+    weights_covered = base_weights.keys() == cp_weights.keys() and len(weight_cosines) == len(common_params)
 
     if weight_cosines:
         avg_w_cos = sum(weight_cosines) / len(weight_cosines)
         min_w_cos = min(weight_cosines)
-        weights_ok = min_w_cos >= WEIGHT_COS_MIN
+        weights_ok = weights_covered and min_w_cos >= WEIGHT_COS_MIN
+        log(f"      Weights compared:    {len(weight_cosines)}/{len(base_weights)}")
         checks["weights_close"] = weights_ok
         log(f"      Weight cosine (avg): {avg_w_cos:.8f}")
         log(f"      Weight cosine (min): {min_w_cos:.8f} (threshold: {WEIGHT_COS_MIN})")

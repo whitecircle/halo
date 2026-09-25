@@ -42,7 +42,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_MOE_LING_MINI
-from tests.common.utils import cleanup_memory, log, log_all
+from tests.common.utils import cleanup_memory, cos_sim, log, log_all
 
 # Shrunk from the hub config so every family field the wrapper reads (partial_rotary_factor,
 # use_qk_norm, head_dim, sigmoid group-limited routing) keeps its real value. Heads: 8 Q → 4 per CP
@@ -122,15 +122,6 @@ def causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     return F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)
 
 
-def cosine_similarity_flat(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Cosine between two flattened tensors in fp32 (1.0 for a degenerate pair)."""
-    a, b = a.float().flatten(), b.float().flatten()
-    denom = a.norm() * b.norm()
-    if denom < 1e-12:
-        return 1.0
-    return (torch.dot(a, b) / denom).item()
-
-
 def check_validation_gates(model: nn.Module) -> bool:
     """The sdpa label is accepted; a Lightning-Attention-2 layer is rejected by name."""
     ok = True
@@ -205,7 +196,7 @@ def check_attention_equivalence(model: nn.Module, cp_group, rank: int, cp_size: 
     cp_out = torch.cat(gathered, dim=1)
 
     max_abs = (cp_out.float() - reference.float()).abs().max().item()
-    cosine = cosine_similarity_flat(cp_out, reference)
+    cosine = cos_sim(cp_out, reference, label="attention output")
     log(f"  attention: max|Δ|={max_abs:.3e} (tol {ATTN_ATOL:.1e})  cosine={cosine:.6f} (min {ATTN_COSINE_MIN})")
 
     return all(structural.values()) and max_abs <= ATTN_ATOL and cosine >= ATTN_COSINE_MIN
@@ -281,20 +272,39 @@ def run(ctx):
         if param.grad is not None:
             dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
 
+    # The wrapper's names, not the inner model's: the Ulysses layer holds each HF attention module as
+    # ``original_attention``, so the inner walk spells every attention weight differently from the
+    # reference and would leave the module under test out of the comparison.
+    cp_grads = {name: param.grad for name, param in cp_model.named_parameters() if param.grad is not None}
+    checks["cp_grads_cover_reference"] = cp_grads.keys() == reference_grads.keys()
+
     min_cosine, worst_name = 1.0, ""
     cp_sq, ref_sq = 0.0, 0.0
     all_finite = True
-    for name, param in model.named_parameters():
-        if param.grad is None or name not in reference_grads:
+    compared, unrouted = 0, 0
+    for name, reference in reference_grads.items():
+        grad = cp_grads.get(name)
+        if grad is None:
             continue
-        all_finite &= bool(torch.isfinite(param.grad).all().item())
-        cosine = cosine_similarity_flat(param.grad, reference_grads[name])
+        compared += 1
+        finite = bool(torch.isfinite(grad).all().item())
+        all_finite &= finite
+        cp_sq += grad.float().pow(2).sum().item()
+        ref_sq += reference.float().pow(2).sum().item()
+        if not finite:
+            continue  # reported through all_finite, which fails the check below
+        if ".experts." in name and not reference.any() and not grad.any():
+            # A routed expert no token reached: the remote code still calls it on an empty slice, so
+            # both sides hold an exactly-zero gradient, which has no direction to compare. Any other
+            # parameter always carries gradient, so a zero there reaches cos_sim and fails.
+            unrouted += 1
+            continue
+        cosine = cos_sim(grad, reference, label=name)
         if cosine < min_cosine:
             min_cosine, worst_name = cosine, name
-        cp_sq += param.grad.float().pow(2).sum().item()
-        ref_sq += reference_grads[name].float().pow(2).sum().item()
 
     norm_ratio = (cp_sq**0.5) / max(ref_sq**0.5, 1e-12)
+    log(f"  grads compared: {compared}/{len(reference_grads)} reference parameters ({unrouted} zero on both sides)")
     log(f"  grads: finite={all_finite}  min cosine={min_cosine:.6f} ({worst_name})  norm ratio={norm_ratio:.4f}")
     metrics["grad_min_cosine"] = min_cosine
     metrics["grad_norm_ratio"] = norm_ratio

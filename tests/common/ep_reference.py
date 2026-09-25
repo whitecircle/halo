@@ -21,13 +21,18 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
-from tests.common.utils import cleanup_memory, cos_sim
+from tests.common.tolerances import TOL
+from tests.common.utils import cleanup_memory, cos_sim, log_all
 
 # Router parameter suffixes across the MoE roster: GptOss/DeepSeek-V4 name it ``router``,
 # Qwen3/GLM4/Mistral4 name it ``gate``. The EP wrapper adopts the HF layer's own module
 # (``EPMoELayerBase._find_gate_or_router``), so the parameter path is identical in the sharded and
 # the dense model, which makes the two directly comparable.
 _ROUTER_SUFFIXES = ("router.weight", "gate.weight")
+
+# Norm ratio and cosine reported for an EP gradient with nothing to compare: no agreement bound accepts
+# it, which also makes it unfit for a negative control's upper bound.
+MISSING_GRAD_SCORE = -1.0
 
 # The clock every fixed batch is rendered against. gpt-oss's harmony template stamps
 # ``strftime_now("%Y-%m-%d")`` into its system message, so an unpinned batch, and every loss threshold
@@ -91,18 +96,54 @@ def full_grad(param: torch.nn.Parameter) -> torch.Tensor:
     return grad.detach().float().clone()
 
 
-def compare_grad(got: torch.Tensor, reference: torch.Tensor) -> tuple[float, float]:
-    """Compare a gradient to its single-GPU reference as (norm ratio, cosine similarity).
+def compare_grad(got: torch.Tensor, reference: torch.Tensor, label: str) -> tuple[float, float]:
+    """Compare ``label``'s gradient to its single-GPU reference as (norm ratio, cosine similarity).
 
     Split rather than collapsed into one relative error because the two bug classes are independent:
     a mis-scaled cross-rank reduction moves the ratio and leaves the cosine at 1, while a
     routing/permutation corruption moves the cosine and can leave the ratio at 1. A single bound would
-    have to be loosened past the weaker signal to absorb the other's noise.
+    have to be loosened past the weaker signal to absorb the other's noise. The cosine goes first: it
+    raises on a zero-norm or non-finite operand before the ratio could divide by a zero norm.
     """
-    ref_norm = reference.norm().item()
-    got_norm = got.norm().item()
-    ratio = got_norm / max(ref_norm, 1e-12)
-    return ratio, cos_sim(got, reference)
+    got, reference = got.float(), reference.float()
+    cosine = cos_sim(got, reference, label=label)
+    return got.norm().item() / reference.norm().item(), cosine
+
+
+def compare_ep_grad(got: torch.Tensor | None, reference: torch.Tensor, label: str) -> tuple[float, float]:
+    """:func:`compare_grad` for an EP-side gradient that may be missing or misshapen.
+
+    A severed backward leaves ``got`` None and layout drift changes its shape; either returns
+    ``MISSING_GRAD_SCORE`` for both scores, so the pair fails under its own name instead of raising.
+    """
+    if got is None or got.shape != reference.shape:
+        return MISSING_GRAD_SCORE, MISSING_GRAD_SCORE
+    return compare_grad(got, reference, label)
+
+
+def score_ep_grad_pairs(
+    pairs: dict[str, tuple[torch.Tensor | None, torch.Tensor]],
+    checks: dict[str, bool],
+    metrics: dict[str, float],
+    *,
+    cos_min: float,
+    ratio_band: tuple[float, float] = TOL.ep_grad_norm_ratio_band,
+) -> None:
+    """Record ``{name}_matches`` and its scores for each ``name -> (EP gradient, reference)`` pair.
+
+    Both scores gate: a routing or permutation corruption moves the cosine, a missing or doubled
+    cross-rank divide moves the norm ratio by the EP size. Mismatches are logged from every rank,
+    since an expert bank's gradient is rank-local.
+    """
+    low, high = ratio_band
+    for name, (got, reference) in pairs.items():
+        ratio, cosine = compare_ep_grad(got, reference, name)
+        metrics[f"{name}_cos"] = cosine
+        metrics[f"{name}_norm_ratio"] = ratio
+        checks[f"{name}_matches"] = cosine > cos_min and low < ratio < high
+        if not checks[f"{name}_matches"]:
+            shape = None if got is None else tuple(got.shape)
+            log_all(f"  GRAD MISMATCH {name}: cos={cosine:.5f} norm_ratio={ratio:.4f} shape={shape}")
 
 
 def fixed_chat_batch(

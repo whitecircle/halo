@@ -24,16 +24,16 @@ from transformers.models.cohere2_moe import Cohere2MoeConfig
 from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_COHERE2_MOE_CONFIG
-from tests.common.utils import cos_sim, log
+from tests.common.tolerances import TOL
+from tests.common.utils import log
 
 SEED = 42
 BATCH, SEQ = 2, 64
 LOSS_TOL = 5e-2  # bf16 dispatch/accumulation-order noise on a tiny model
 RANK_LOSS_TOL = 1e-3  # EP is orthogonal to DP: identical input → identical loss
-GRAD_COS_MIN = 0.9
-GRAD_NORM_RATIO = (0.67, 1.5)
 
 
 def _build_model(device):
@@ -113,21 +113,7 @@ def run(ctx):
             f"l{i}_gate_grad": (ep.gate.weight.grad, refs["gate"]),
             f"l{i}_shared_grad": (ep.shared_experts.gate_proj.weight.grad, refs["shared_gate"]),
         }
-        for name, (got, want) in pairs.items():
-            ok = got is not None and got.shape == want.shape
-            cos = cos_sim(got, want) if ok else -1.0
-            ratio = (got.float().norm() / want.float().norm().clamp_min(1e-12)).item() if ok else -1.0
-            metrics[f"{name}_cos"] = cos
-            metrics[f"{name}_norm_ratio"] = ratio
-            checks[f"{name}_matches"] = ok and cos > GRAD_COS_MIN and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
-            if not checks[f"{name}_matches"]:
-                log(
-                    f"  GRAD MISMATCH {name}: cos={cos:.5f} norm_ratio={ratio:.4f} "
-                    f"shape={None if got is None else tuple(got.shape)}"
-                )
-    checks["shared_grads_nonzero"] = all(
-        ep.shared_experts.gate_proj.weight.grad.abs().sum().item() > 0 for ep in ep_layers
-    )
+        score_ep_grad_pairs(pairs, checks, metrics, cos_min=TOL.ep_grad_cosine_min)
 
     # ── Transient bias balancing shifts selection ──────────────────────────────
     layer = ep_layers[0]

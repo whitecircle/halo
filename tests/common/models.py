@@ -4,6 +4,8 @@ One constant per checkpoint a test loads, per local patched-checkpoint path and 
 family's branches need. A test that inlines a model name or a tiny config splits the roster in two.
 """
 
+from src.env import data_path
+
 # Dense Models
 
 QWEN3_0_6B = "Qwen/Qwen3-0.6B"
@@ -32,11 +34,18 @@ MISTRAL3_119B_MOE = "mistralai/Mistral-Small-4-119B-2603"
 COMMAND_A_PLUS = "CohereLabs/command-a-plus-05-2026-bf16"
 ZAYA_8B = "Zyphra/ZAYA1-8B"
 
-# Vocab-patched local checkpoints (scripts/before_training/patch_vocab.py output). The hub copies
-# carry a vocab the toolkit's tokenizer alignment rejects, so these tests need the patched dir.
+# Local checkpoints (scripts/before_training/patch_vocab.py output) under the toolkit scratch root;
+# agent-docs/contributing/README.md gives the command that writes each one. A suite defaulting to one
+# skips when the directory is absent.
 
-GEMMA4_26B_A4B_PATCHED = "/mnt/models/gemma-4-26B-A4B-it-patched"
-GPT_OSS_20B_PATCHED = "/mnt/models/gpt-oss-20b-BF16-patched"
+
+def patched_checkpoint_dir(hub_id: str) -> str:
+    """``$HALO_DATA_ROOT/models/<repo name>-patched``, where the documented command writes ``hub_id``."""
+    return data_path("models", f"{hub_id.rsplit('/', 1)[-1]}-patched")
+
+
+GEMMA4_26B_A4B_PATCHED = patched_checkpoint_dir(GEMMA4_26B_A4B)
+GPT_OSS_20B_PATCHED = patched_checkpoint_dir(GPT_OSS_20B)
 
 # Tiny random-init configs (no hub checkpoint exists at test scale)
 

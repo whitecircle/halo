@@ -336,7 +336,9 @@ def _worst_relative_drift(handles: list[tuple[str, torch.nn.Parameter]], before:
         if reference.numel() == 0:
             continue
         moved = (local_view(param.data) - reference).abs().max()
-        worst = max(worst, float((moved / reference.abs().max().clamp(min=1e-6)).item()))
+        drift = float((moved / reference.abs().max().clamp(min=1e-6)).item())
+        # max() keeps its first argument over a NaN, so a non-finite drift is made the worst outright.
+        worst = max(worst, drift) if math.isfinite(drift) else math.inf
     return worst
 
 

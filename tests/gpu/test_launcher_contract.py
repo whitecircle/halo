@@ -149,6 +149,36 @@ def test_kill_launch_sweeps_workers_outside_the_agent_process_group():
             p.wait(timeout=10)
 
 
+def _socket_limit(monkeypatch, root, spare: int) -> None:
+    """Set the AF_UNIX cap so a directory directly under ``root`` has ``spare`` bytes past the budget."""
+    monkeypatch.setattr(launcher, "_AF_UNIX_MAX", len(str(root)) + spare + launcher._SOCKET_SUFFIX_BUDGET)
+
+
+def test_a_tmp_path_with_room_for_a_socket_is_used_as_is(monkeypatch, tmp_path):
+    _socket_limit(monkeypatch, tmp_path.parent, spare=len(tmp_path.name) + 1)
+    assert launcher._socket_safe_tmpdir(tmp_path) == tmp_path
+
+
+def test_a_deep_tmp_path_moves_to_a_short_sibling(monkeypatch, tmp_path):
+    deep = tmp_path / ("d" * 40)
+    deep.mkdir()
+    _socket_limit(monkeypatch, tmp_path, spare=12)  # "/h" + mkdtemp's 8 random characters fit
+    short = launcher._socket_safe_tmpdir(deep)
+    assert short.parent == tmp_path
+    assert len(str(short)) + launcher._SOCKET_SUFFIX_BUDGET <= launcher._AF_UNIX_MAX
+
+
+def test_a_basetemp_too_deep_for_any_socket_is_a_usage_error(monkeypatch, tmp_path):
+    """Even the short sibling overflows: every ``datasets`` map would die on a bare EOFError, so the
+    launcher refuses the run, names TMPDIR, and leaves no sibling behind."""
+    node = tmp_path / "node"
+    node.mkdir()
+    _socket_limit(monkeypatch, tmp_path, spare=4)
+    with pytest.raises(pytest.UsageError, match="TMPDIR"):
+        launcher._socket_safe_tmpdir(node)
+    assert list(tmp_path.iterdir()) == [node]
+
+
 def test_zero_visible_gpus_is_an_error_not_a_green_tier(monkeypatch):
     """0 GPUs must abort collection; skipping every node exits 0 and looks like a passing tier."""
 

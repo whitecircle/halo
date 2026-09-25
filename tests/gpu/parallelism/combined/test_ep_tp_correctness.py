@@ -156,7 +156,7 @@ def run(ctx):
     # ── Router gradient vs the reference ─────────────────────────────────────────────────────
     loss.backward()
     router_name, router_weight = find_router_weight(model)
-    ratio, cosine = compare_grad(full_grad(router_weight), ref_grad)
+    ratio, cosine = compare_grad(full_grad(router_weight), ref_grad, router_name)
     metrics["router_grad_norm_ratio"] = ratio
     metrics["router_grad_cosine"] = cosine
     log_all(f"  router grad ({router_name}) vs reference: norm_ratio={ratio:.4f} cosine={cosine:.4f}")
@@ -179,7 +179,7 @@ def run(ctx):
     control_out.loss.backward()
     control_loss = control_out.loss.item()
     control_shift = abs(control_loss - ref_loss)
-    _, control_cosine = compare_grad(full_grad(router_weight), ref_grad)
+    _, control_cosine = compare_grad(full_grad(router_weight), ref_grad, f"{router_name} (rotated experts)")
     log_all(
         f"  control (expert bank rotated by 1): loss={control_loss:.6f} |Δreference|={control_shift:.3e} "
         f"router grad cosine={control_cosine:.4f}"

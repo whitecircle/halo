@@ -26,20 +26,16 @@ from transformers.models.deepseek_v4 import DeepseekV4Config
 from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_DSV4_CONFIG
-from tests.common.utils import cos_sim, log
+from tests.common.tolerances import TOL
+from tests.common.utils import log
 
 SEED = 42
 BATCH, SEQ = 2, 64
 LOSS_TOL = 5e-2  # bf16 dispatch/accumulation-order noise on a tiny model
 RANK_LOSS_TOL = 1e-3  # EP is orthogonal to DP: identical input → identical loss
-# Grad equivalence: bf16 grads on a 128-token tiny model carry real rounding noise, and the EP
-# wrapper routes in fp32 while stock HF scores in bf16 (occasional near-tie selection flips) — so
-# direction is checked loosely (cos) while MAGNITUDE is checked tightly enough that a missing or
-# doubled /world_size grad-sync divide (ratio 2.0 / 0.5) fails.
-GRAD_COS_MIN = 0.9
-GRAD_NORM_RATIO = (0.67, 1.5)
 
 
 def _randomize_tid2eid(model) -> None:
@@ -143,21 +139,7 @@ def run(ctx):
             f"l{i}_gate_grad": (ep.gate.weight.grad, refs["gate"]),
             f"l{i}_shared_grad": (ep.shared_experts.gate_proj.weight.grad, refs["shared_gate"]),
         }
-        for name, (got, want) in pairs.items():
-            ok = got is not None and got.shape == want.shape
-            cos = cos_sim(got, want) if ok else -1.0
-            ratio = (got.float().norm() / want.float().norm().clamp_min(1e-12)).item() if ok else -1.0
-            metrics[f"{name}_cos"] = cos
-            metrics[f"{name}_norm_ratio"] = ratio
-            checks[f"{name}_matches"] = ok and cos > GRAD_COS_MIN and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
-            if not checks[f"{name}_matches"]:
-                log(
-                    f"  GRAD MISMATCH {name}: cos={cos:.5f} norm_ratio={ratio:.4f} "
-                    f"shape={None if got is None else tuple(got.shape)}"
-                )
-    checks["shared_grads_nonzero"] = all(
-        ep.shared_experts.gate_proj.weight.grad.abs().sum().item() > 0 for ep in ep_layers
-    )
+        score_ep_grad_pairs(pairs, checks, metrics, cos_min=TOL.ep_grad_cosine_min)
 
     # ── 6. Bias balancing: hash refuses, top-k accepts + bias shifts selection ─
     checks["hash_layer_refuses_bias"] = hash_layer.enable_bias_balancing() is False

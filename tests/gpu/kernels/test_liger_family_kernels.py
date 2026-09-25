@@ -373,7 +373,7 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     # four layers of bf16 rounding on top of the kernel's own — the same reason the fused-head check
     # above compares cosines. The pair still separates the two failures that matter, a mis-scaled
     # activation (ratio) from a wrong one (cosine).
-    compared = {name: compare_grad(fused_grads[name], reference_grads[name]) for name, _ in shared}
+    compared = {name: compare_grad(fused_grads[name], reference_grads[name], name) for name, _ in shared}
     worst_ratio = max(compared, key=lambda name: abs(compared[name][0] - 1.0))
     worst_cos = min(compared, key=lambda name: compared[name][1])
     log(
@@ -450,14 +450,17 @@ def _check_fused_head(model_type, tiny_config, device) -> None:
     log(f"  {model_type}: loss {reference_output.loss.item():.6f} vs {fused_output.loss.item():.6f} (Δ{delta:.2e})")
     assert delta < LOSS_ATOL, f"{model_type} fused loss differs by {delta:.3e}"
 
-    worst_name, worst_cos = None, 1.0
-    for name, p in fused.named_parameters():
-        if p.grad is None or name not in reference_grads:
-            continue
-        similarity = cos_sim(p.grad, reference_grads[name])
-        if similarity < worst_cos:
-            worst_name, worst_cos = name, similarity
-    log(f"  {model_type}: worst gradient cosine {worst_cos:.5f} at {worst_name}")
+    fused_grads = {name: p.grad for name, p in fused.named_parameters() if p.grad is not None}
+    # A parameter the fused head leaves without a gradient would otherwise drop out of the comparison.
+    assert fused_grads.keys() == reference_grads.keys(), (
+        f"{model_type} gradient coverage differs: only in the reference "
+        f"{sorted(reference_grads.keys() - fused_grads.keys())}, "
+        f"only fused {sorted(fused_grads.keys() - reference_grads.keys())}"
+    )
+    cosines = {name: cos_sim(grad, reference_grads[name], label=name) for name, grad in fused_grads.items()}
+    worst_name = min(cosines, key=cosines.get)
+    worst_cos = cosines[worst_name]
+    log(f"  {model_type}: worst gradient cosine {worst_cos:.5f} at {worst_name} over {len(cosines)} tensors")
     assert worst_cos > GRAD_COS_MIN, f"{model_type} gradient {worst_name} diverged (cos={worst_cos:.5f})"
 
 

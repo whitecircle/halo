@@ -20,6 +20,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimi
 
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.models.structure import unwrap_model
+from tests.common.tolerances import TOL
 
 # Repository root for tests that read source files (drift pins, AST sweeps). Self-locating rather
 # than cwd-derived: the training images bake a repo copy at /workspace, so a relative path can
@@ -142,15 +143,74 @@ def gpu_peak_mem_gb(device=None) -> float:
     return torch.cuda.max_memory_allocated(device) / 1e9
 
 
-def cos_sim(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Cosine similarity of two tensors, compared as flat fp32 vectors.
+def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:
+    """Cosine similarity of two tensors, compared as flat fp64 vectors.
 
     The direction half of a correctness comparison: a norm-preserving corruption (a wrong expert
     bank, a permuted dispatch) reorients the vector while an absolute-difference bound on bf16
-    tensors has to be loose enough to absorb accumulation noise. fp32 because the cosine of two
-    bf16 vectors rounds its own accumulation.
+    tensors has to be loose enough to absorb accumulation noise. fp64 because the cosine of two
+    bf16 vectors rounds its own accumulation, and a finite tensor near the bf16 range limit would
+    overflow an fp32 norm.
+
+    A zero-norm or non-finite operand raises, naming ``label``. A zero vector has no direction, and
+    any number returned for it passes one side of a threshold: 1.0 matches a dead gradient against a
+    live one, 0.0 lets a negative control whose gradient vanished read as decorrelated, and NaN slips
+    past every ``<`` and ``min`` tracker. A pair that is legitimately all-zero is the caller's to
+    handle explicitly.
     """
-    return torch.nn.functional.cosine_similarity(a.float().flatten(), b.float().flatten(), dim=0).item()
+    if not (torch.isfinite(a).all() and torch.isfinite(b).all()):
+        raise ValueError(f"{label}: cosine of a non-finite tensor")
+    a, b = a.double().flatten(), b.double().flatten()
+    norm_a, norm_b = a.norm().item(), b.norm().item()
+    if norm_a == 0.0 or norm_b == 0.0:
+        raise ValueError(f"{label}: cosine of a zero-norm tensor has no direction (norms {norm_a}, {norm_b})")
+    return torch.dot(a, b).item() / (norm_a * norm_b)
+
+
+def log_spectrum_matrix(rows: int, cols: int, generator: torch.Generator, decades: float = 1.0) -> torch.Tensor:
+    """A random fp64 ``rows x cols`` matrix whose singular values are log-spaced from 1 down ``decades``.
+
+    Random orthonormal factors around a prescribed spectrum, so a test controls the conditioning an
+    iterative method sees instead of inheriting a Gaussian matrix's near-zero tail. At one decade and
+    a few hundred singular values the smallest stays above 1e-2 of the Frobenius norm, inside the Muon
+    band's domain on either Newton-Schulz path (``TOL.muon_band_domain_*``).
+    """
+    rank = min(rows, cols)
+    spectrum = torch.logspace(0, -decades, rank, dtype=torch.float64)
+    left, _ = torch.linalg.qr(torch.randn(rows, rank, generator=generator, dtype=torch.float64))
+    right, _ = torch.linalg.qr(torch.randn(cols, rank, generator=generator, dtype=torch.float64))
+    return (left * spectrum) @ right.T
+
+
+def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str) -> None:
+    """Assert ``update`` is Muon's orthogonalization of the matrix ``source``.
+
+    Two independent properties: every singular value sits in the Newton-Schulz band, and the update
+    points along ``source``'s own polar factor ``U V^T``. The band alone passes an update
+    orthogonalized from the wrong matrix, which is the failure a batched step's restack produces.
+    A ``source`` whose spectrum leaves the band's domain for its path (the standard iteration for a
+    square matrix, the Gram iteration otherwise, under the default ``ns_algorithm``) is a broken
+    fixture and fails as such.
+    """
+    rows, cols = source.shape[-2:]
+    domain = TOL.muon_band_domain_square if rows == cols else TOL.muon_band_domain_rectangular
+    u, source_singular_values, vh = torch.linalg.svd(source.double(), full_matrices=False)
+    relative_min = (source_singular_values.min() / source_singular_values.norm()).item()
+    assert relative_min >= domain, (
+        f"{label}: premise: the source's smallest singular value is {relative_min:.2e} of its Frobenius "
+        f"norm, below the {domain:.1e} the Newton-Schulz band holds from on a {rows}x{cols} matrix"
+    )
+    assert torch.isfinite(update).all(), f"{label}: the update is not finite"
+    singular_values = torch.linalg.svdvals(update.double())
+    low, high = singular_values.min().item(), singular_values.max().item()
+    assert TOL.muon_orthogonal_sv_min <= low and high <= TOL.muon_orthogonal_sv_max, (
+        f"{label}: singular values span [{low:.4f}, {high:.4f}], outside the Newton-Schulz band "
+        f"[{TOL.muon_orthogonal_sv_min}, {TOL.muon_orthogonal_sv_max}]"
+    )
+    cosine = cos_sim(update, u @ vh, label=label)
+    assert cosine >= TOL.muon_polar_cosine_min(), (
+        f"{label}: cosine to the source's polar factor is {cosine:.4f} (min {TOL.muon_polar_cosine_min():.4f})"
+    )
 
 
 def local_optimizer_state(model, optimizer) -> dict:

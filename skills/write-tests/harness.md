@@ -187,7 +187,9 @@ those, kept separate only so the manifest can attach its family markers, timeout
   `TOL.parallel_vs_baseline_loss_abs`, `TOL.parallel_vs_baseline_train_loss_abs`,
   `TOL.ep_rank_loss_abs`, `TOL.logprob_atol/rtol`, `TOL.weight_atol`, `TOL.resume_loss_abs`,
   `TOL.grad_norm_rel`, `TOL.kernel_atol/rtol`. Never re-inline a literal — the name is the
-  contract.
+  contract. An EP-vs-reference gradient test scores its `name -> (EP grad, reference)` pairs with
+  `tests.common.ep_reference.score_ep_grad_pairs(pairs, checks, metrics, cos_min=TOL.ep_grad_cosine_min)`;
+  its norm-ratio band defaults to `TOL.ep_grad_norm_ratio_band`.
 - **Reporting** (`tests/common/reporting.py`):
   - Correctness: `ctx.metrics(trainer)` → `snapshot_efficiency(cb)` flat dict. Headline at
     top level: `tokens_per_second` (per-GPU), `cluster_tokens_per_second`, `peak_allocated_gb`,

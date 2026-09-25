@@ -37,6 +37,7 @@ from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_LING_3_TINY
 from tests.common.utils import cos_sim, log
@@ -123,7 +124,7 @@ def run(ctx):
     ep_out.sum().backward()
 
     max_abs = (ep_out.detach().float() - ref_out.float()).abs().max().item()
-    cosine = cos_sim(ep_out.detach(), ref_out)
+    cosine = cos_sim(ep_out.detach(), ref_out, label="MoE block output")
     metrics["out_max_abs_diff"] = max_abs
     metrics["out_cosine"] = cosine
     checks["ep_output_finite"] = bool(torch.isfinite(ep_out).all())
@@ -139,10 +140,7 @@ def run(ctx):
         "down_proj_grad": (ep_layer.down_proj.grad, ref_grads["down_proj"][s:e].transpose(1, 2)),
         "gate_grad": (ep_layer.gate.weight.grad, ref_grads["gate"]),
     }
-    for name, (got, want) in pairs.items():
-        cos = cos_sim(got, want)
-        metrics[f"{name}_cos"] = cos
-        checks[name] = cos > GRAD_COS_TOL
+    score_ep_grad_pairs(pairs, checks, metrics, cos_min=GRAD_COS_TOL)
 
     checks["shared_expert_grad_live"] = (
         ep_layer.shared_experts.gate_proj.weight.grad is not None

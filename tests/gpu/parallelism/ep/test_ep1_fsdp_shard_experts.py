@@ -54,7 +54,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import full_grad
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log, log_all
+from tests.common.utils import cleanup_memory, cos_sim, log, log_all
 
 MODEL_NAME = GPT_OSS_20B
 SEQ_LEN = 128
@@ -189,7 +189,14 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
     del trainer, model, wrapped, outputs, loss
     cleanup_memory()
 
-    return {"is_dtensor": is_dtensor, "loss": loss_val, "grad": grad, "grad_norm": grad_norm, "peak_gb": peak_gb}
+    return {
+        "name": name,
+        "is_dtensor": is_dtensor,
+        "loss": loss_val,
+        "grad": grad,
+        "grad_norm": grad_norm,
+        "peak_gb": peak_gb,
+    }
 
 
 def run(ctx) -> dict:
@@ -204,14 +211,13 @@ def run(ctx) -> dict:
     ctx.barrier()
 
     # ---- compare on rank 0 ----
-    cos = torch.nn.functional.cosine_similarity(
-        off["grad"].flatten().unsqueeze(0), on["grad"].flatten().unsqueeze(0)
-    ).item()
+    cos = cos_sim(off["grad"], on["grad"], label=off["name"])
     rel_l2 = ((on["grad"] - off["grad"]).norm() / (off["grad"].norm() + 1e-12)).item()
     loss_diff = abs(on["loss"] - off["loss"])
 
     checks = {}
     checks["flag_flips_fsdp_ownership"] = (on["is_dtensor"] is True) and (off["is_dtensor"] is False)
+    checks["same_expert_weight_compared"] = on["name"] == off["name"]
     checks["loss_parity"] = loss_diff <= LOSS_ABS_TOL
     checks["grad_cosine"] = cos >= GRAD_COSINE_MIN
     checks["grad_rel_l2"] = rel_l2 <= GRAD_REL_L2_MAX
