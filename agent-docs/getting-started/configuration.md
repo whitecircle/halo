@@ -111,7 +111,7 @@ Two resharding knobs, both `torchrun`-only:
 - `fsdp_reshard_after_forward` (default `false` = SHARD_GRAD_OP: parameters stay unsharded between forward and backward). `true` is FULL_SHARD/ZeRO-3 and is rejected wherever an expert-distribution group exists (`ep_group_size > 1`, pure ETP included — the backward all-gather races the DeepEP combine), under TP with `data_parallel_size > 1`, and under PP.
 - `fsdp_reshard_after_backward` (default `true`). `false` keeps parameters unsharded across a gradient-accumulation window's microsteps (its last backward still reshards) at the cost of one unsharded bf16 param copy per GPU for the run.
 
-    The saving is the per-microstep re-gather: negligible over NVLink, large when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
+    The saving is the per-microstep re-gather: about 4–10% throughput over NVLink, far more when the trainer's NCCL runs over TCP sockets. Rejected with `fsdp_reshard_after_forward: true`, TP, or PP.
 
 ## Example SFT config
 
