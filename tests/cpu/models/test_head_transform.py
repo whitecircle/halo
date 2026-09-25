@@ -7,10 +7,12 @@ Inkling's μP hidden division and vocabulary cut, Cohere's ``logit_scale``, Gran
 ``logits_scaling`` division, MiniCPM3's pre-head division, Gemma's softcap — is scored against the
 wrong distribution unless the path applies the same transform, and nothing raises. This file pins:
 
-* every roster family's head path verifies against its own forward — the roster is derived from the
-  EP layer registry plus the dense families, so a new family is swept without editing this file;
-* the chunked sweep reproduces each family's forward log-probs and every parameter gradient, the
-  transform families included, and those families' transforms are load-bearing here;
+* every roster family's head path verifies against its own forward — the MoE half is derived from
+  the EP layer registry, so a new native MoE family is swept without editing this file; the dense
+  families (``_DENSE_ROSTER``) and the remote-code ones (``_REMOTE_ROSTER``) are listed here;
+* the chunked sweep reproduces the forward log-probs and every parameter gradient of each tiny model
+  in ``_TINY_MODELS``, the transform families included, and those families' transforms are
+  load-bearing here; a new family's tiny model is added there;
 * a declaration removed makes its family refused, and an undeclared transform is refused.
 
     pytest -m cpu tests/cpu/models/test_head_transform.py

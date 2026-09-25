@@ -27,7 +27,7 @@ The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) and the last pipeline s
 
 Declare it with a `HeadTransformSpec` subclass in `src/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
 
-The declaration is verified, never trusted: `verify_head_transform` runs the family's own forward on a meta-device shell whose backbone emits a fixed hidden state and whose output embedding is a small stand-in, and raises when the declaration does not reproduce the logits. `tests/cpu/models/test_head_transform.py` runs that check over every roster class and compares the chunked sweep's log-probs and gradients with each family's forward; add the family's tiny model there.
+The declaration is verified, never trusted: `verify_head_transform` runs the family's own forward on a meta-device shell whose backbone emits a fixed hidden state and whose output embedding is a small stand-in, and raises when the declaration does not reproduce the logits. `tests/cpu/models/test_head_transform.py` runs that check over every roster class, the MoE ones derived from the EP layer registry, and compares the chunked sweep's log-probs and gradients with each listed tiny model's forward; add the family's tiny model there, and a dense family to the dense roster.
 
 ## Add EP support
 
