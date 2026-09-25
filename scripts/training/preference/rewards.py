@@ -81,7 +81,6 @@ def main():
         dist_args,
         script_prefix="reward",
         trainer_cls=DistributedRewardTrainer,
-        supports_cp=False,
         sync_tokens=("eos_token", "pad_token"),
     )
     parallelism_config = runtime.parallelism_config

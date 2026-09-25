@@ -23,8 +23,8 @@ from safetensors import safe_open
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
-from scripts._common import add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.adapters import assert_no_expert_lora_adapter, load_base_for_adapter, merge_adapter_into_base
+from scripts._common import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
+from src.checkpoint.adapters import adapter_input_gates, load_base_for_adapter, merge_adapter_into_base
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
 from src.checkpoint.model_card import tag_model_card
 from src.checkpoint.tool_io import (
@@ -311,28 +311,20 @@ def _convert_checkpoint_to_bf16(
     """A full checkpoint — or an adapter left unmerged — reloaded at bf16 and written back out."""
     # A per-rank EP/TP save reaches from_pretrained with expert keys under .shard_N: the real ones read
     # as missing and are randomly initialized (a warning, not a raise), which --verify's dtype count
-    # cannot catch. Both guards run ahead of the load and of os.makedirs(output_path), so a refusal
-    # leaves nothing behind.
-    if os.path.isdir(model_path):
-        reject_sharded_checkpoint(model_path)
-    reject_in_place_conversion(model_path, output_path)
-
+    # cannot catch. The guards run ahead of the load and of os.makedirs(output_path), so a refusal
+    # leaves nothing behind. An adapter goes through the merge's gates, since a later merge reads it
+    # and its weights come from the base.
+    #
     # Full processor for VLMs (keeps processor_config.json), else a plain tokenizer. A PEFT adapter
     # dir usually carries only a tokenizer, so resolve it against the base model too.
     if is_peft:
-        # A later merge_and_unload cannot fold native EP expert-LoRA, so refuse before re-saving one.
-        assert_no_expert_lora_adapter(model_path)
-        base_model_path = PeftConfig.from_pretrained(model_path).base_model_name_or_path
-        # Under --peft the weights come from the base, so the guards above covered the wrong
-        # directory: an --output_dir aimed at the base would overwrite the checkpoint being read.
-        if base_model_path and os.path.isdir(base_model_path):
-            reject_in_place_conversion(base_model_path, output_path)
-            reject_sharded_checkpoint(base_model_path)
-        weights_source = base_model_path
+        weights_source = adapter_input_gates(model_path, output_path).base_model_name_or_path
         processing_class = resolve_peft_processing_class(
-            model_path, base_model_path, trust_remote_code=trust_remote_code
+            model_path, weights_source, trust_remote_code=trust_remote_code
         )
     else:
+        reject_sharded_checkpoint(model_path)
+        reject_in_place_conversion(model_path, output_path)
         weights_source = model_path
         processing_class = load_processing_class(model_path, trust_remote_code=trust_remote_code)
 
@@ -474,12 +466,7 @@ def parse_args():
     parser.add_argument(
         "--merge_adapter", action="store_true", help="If using PEFT, whether to merge the adapter with the base model"
     )
-    parser.add_argument(
-        "--device_map",
-        type=str,
-        default=None,
-        help="Device map for model loading, e.g., 'auto' for automatic allocation",
-    )
+    add_device_map_arg(parser)
     parser.add_argument(
         "--verify",
         action="store_true",

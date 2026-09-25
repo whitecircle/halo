@@ -22,8 +22,6 @@ import tempfile
 from types import SimpleNamespace
 
 import pytest
-import torch
-import torch.distributed as dist
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
@@ -131,16 +129,13 @@ def test_an_empty_split_on_one_rank_raises_on_all_of_them(monkeypatch):
 def test_a_split_only_some_ranks_loaded_is_rejected(monkeypatch):
     """A transient shard-index read failure drops a split on one rank alone. Every consumer of
     ``ds.get("test")`` then runs a different number of coordinated operations, so the divergence
-    must raise — and raise on every rank, off the agreed MIN/MAX rather than the local shape."""
+    must raise — and raise on every rank, off the agreed verdict rather than the local shape."""
 
-    def fake_all_reduce(tensor, op=None, **_kwargs):
-        if op is dist.ReduceOp.MAX:
-            tensor.fill_(1)  # some rank loaded both splits
-        return None
+    def fake_rank_consensus(local_ok: bool) -> tuple[bool, bool]:
+        return local_ok, True  # the peer loaded both splits
 
     monkeypatch.setattr(loading_mod, "get_global_world_size", lambda: 2)
-    monkeypatch.setattr(loading_mod, "current_device", lambda: torch.device("cpu"))
-    monkeypatch.setattr(dist, "all_reduce", fake_all_reduce)
+    monkeypatch.setattr(loading_mod, "rank_consensus", fake_rank_consensus)
 
     only_train = DatasetDict({"train": Dataset.from_dict({"input_ids": [[1]]})})
     with pytest.raises(ValueError, match=r"loaded split\(s\) \['test'\]"):

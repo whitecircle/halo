@@ -4,15 +4,17 @@
 
 Validates storage shapes/dtypes, quantize->dequantize round-trip error within each
 format's tolerance, axis handling, divisibility guards, the NVFP4 saturating-scale
-outlier guard, the straight-through ``fake_quant`` estimator, and the per-step
-``cached_fake_quant`` weight cache.
+outlier guard, the straight-through ``fake_quant`` estimator, the per-step
+``cached_fake_quant`` weight cache, and which failures switch the compiled round trip to eager.
 
 Run: ``pytest tests/cpu/kernels/test_quantization.py``.
 """
 
 import pytest
 import torch
+from torch._dynamo.exc import TorchDynamoException
 
+from src.kernels.lowp import quantization
 from src.kernels.lowp.quantization import (
     E2M1_MAX,
     cached_fake_quant,
@@ -210,6 +212,35 @@ def test_cached_fake_quant_is_straight_through():
     w = torch.nn.Parameter(torch.randn(8, 64) * 0.3)
     (cached_fake_quant(w, "mxfp8", axis=-1) * 3.0).sum().backward()
     assert w.grad is not None and torch.allclose(w.grad, torch.full_like(w.grad, 3.0))
+
+
+# Compiled round trip: only a compile failure disables compile
+
+
+@pytest.fixture
+def fresh_compile_state(monkeypatch):
+    monkeypatch.setattr(quantization, "_compiled_round_trip", None)
+    monkeypatch.setattr(quantization, "_compile_failed", False)
+    monkeypatch.setenv("HALO_LOWP_COMPILE", "1")
+
+
+def test_a_callers_error_leaves_compile_on(fresh_compile_state):
+    """A shape the quantizer rejects is the caller's error: it must surface as that error, not switch
+    every later weight quantization in the process to the eager path."""
+    with pytest.raises(ValueError, match="not divisible"):
+        quantization._round_trip(torch.randn(4, 33), "mxfp8", -1)
+    assert quantization._compile_failed is False
+
+
+def test_a_compile_failure_falls_back_to_eager(fresh_compile_state, monkeypatch):
+    def fail_to_compile(*args):
+        raise TorchDynamoException("simulated backend failure")
+
+    monkeypatch.setattr(quantization, "_compiled_round_trip", fail_to_compile)
+    x = torch.randn(4, 64)
+    out = quantization._round_trip(x, "mxfp8", -1)
+    assert quantization._compile_failed is True
+    assert torch.equal(out, quantization._block_round_trip(x, "mxfp8", -1))
 
 
 if __name__ == "__main__":

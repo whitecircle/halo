@@ -28,6 +28,8 @@ from src.models.loading.tokenizer_setup import load_chat_template
 logger = logging.getLogger(__name__)
 
 _PREPROCESSING_MODES = ("chat", "text")
+# The strategies TRL's pack_dataset accepts.
+PACKING_STRATEGIES = ("bfd", "bfd_split", "wrapped")
 
 # Per-field metadata rather than hand-kept lists, so a new knob declares its own applicability where
 # it is defined. ``modes``: a knob set outside the mode that consumes it has no effect, and
@@ -79,8 +81,7 @@ class PreprocessingConfig:
     # No render check: covered by validate_preprocessing_compatibility's packed warning. The strategy
     # is baked into the rows and the collator follows metadata.packed rather than the runtime flag.
     pack_sequences: bool = field(default=False, metadata=_NO_RENDER_CHECK)
-    # TRL pack_dataset: "bfd", "bfd_split" or "wrapped"
-    packing_strategy: str = field(default="bfd", metadata=_NO_RENDER_CHECK)
+    packing_strategy: str = field(default="bfd", metadata=_NO_RENDER_CHECK)  # one of PACKING_STRATEGIES
 
     # Tokenizer mutations, recorded because they change the produced ids: an EOS override moves the
     # completion-mask boundaries and a template override re-renders every turn, while the artifact is
@@ -95,6 +96,8 @@ class PreprocessingConfig:
     num_shards: int = field(default=1, metadata=_NO_RENDER_CHECK)  # 1 = no sharding
     num_proc: int | None = field(default=None, metadata=_NO_RENDER_CHECK)  # None = the toolkit default
     tokenizer_backend: str = field(default="hf", metadata=_NO_RENDER_CHECK)  # "hf" or "gigatoken"
+    # Governs the model-config read for the label bake's eos set; the caller loads the tokenizer.
+    trust_remote_code: bool = field(default=False, metadata=_NO_RENDER_CHECK)
 
     # No render check: the consuming VLM branch already raises on a non-VLM artifact, and the pixel
     # budget is baked into the stored pixel_values.

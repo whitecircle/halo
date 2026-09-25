@@ -29,6 +29,7 @@ from transformers import AutoConfig
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
+from src.checkpoint import config_export
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR, save_model_config
 from src.checkpoint.tool_io import save_full_checkpoint
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
@@ -249,6 +250,31 @@ def test_a_source_without_remote_code_leaves_the_native_schema(cls, tmp_path, ca
     assert "auto_map" not in payload
     assert "n_routed_experts" in payload["text_config"]
     assert "declares no auto_map" in caplog.text
+
+
+@pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
+def test_only_an_unreadable_source_degrades_to_the_native_schema(cls, tmp_path, monkeypatch, caplog):
+    """A source the export cannot read keeps the native schema with a warning; any other failure in
+    the read is a bug and must surface rather than ship an unservable config with a log line."""
+    source = _write_source(tmp_path / "source", *FIXTURES[cls])
+    model = _model_from(source)
+    export = str(tmp_path / "export")
+    os.makedirs(export, exist_ok=True)
+
+    def _unreachable(*_args, **_kwargs):
+        raise OSError("hub unreachable")
+
+    monkeypatch.setattr(config_export, "cached_file", _unreachable)
+    with caplog.at_level("WARNING"):
+        save_model_config(model, export)
+    assert "could not read config.json" in caplog.text
+
+    def _bug(*_args, **_kwargs):
+        raise RuntimeError("not a read failure")
+
+    monkeypatch.setattr(config_export, "cached_file", _bug)
+    with pytest.raises(RuntimeError, match="not a read failure"):
+        save_model_config(model, export)
 
 
 if __name__ == "__main__":

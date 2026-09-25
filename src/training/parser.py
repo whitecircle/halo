@@ -64,6 +64,15 @@ def is_true_string(value: str) -> bool:
     return value.strip().lower() in _TRUE_STRINGS
 
 
+def is_null_string(value: str) -> bool:
+    """Whether a CLI/YAML string spells null in the parser's vocabulary, compared case-insensitively.
+
+    Exported for the non-Optional ``str`` fields, where the parser leaves such a spelling as literal
+    text.
+    """
+    return value.strip().lower() in {spelling.lower() for spelling in _NONE_STRINGS}
+
+
 class PercentSafeHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
     """Help formatter that renders a ``%`` in field help as a literal percent sign.
 

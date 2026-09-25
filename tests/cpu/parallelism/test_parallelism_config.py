@@ -16,6 +16,7 @@ import torch.multiprocessing as mp
 from src.args.distributed_args import DistributedArguments
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
+from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import create_config, make_parallelism_config
 from tests.common.ports import free_port
 
@@ -718,7 +719,7 @@ def test_parallelism_config_from_args_basic():
         args = _DistArgs()
         args.fp32_grad_reduce = True
         args.max_concurrent_loading = 3
-        cfg = parallelism_config_from_args(args)
+        cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin)
         assert cfg.ep_size == 8
         assert cfg.expert_tp_size == 1
         assert cfg.use_grouped_gemm is True
@@ -728,17 +729,18 @@ def test_parallelism_config_from_args_basic():
 
 
 def test_parallelism_config_from_args_rejects_pp_when_unsupported():
-    """supports_pp=False rejects a requested pipeline_parallel_size>1 at config time — BEFORE the
-    model (or a teacher/reference/vLLM probe) loads; the trainer's _supports_pp gate fires far later."""
+    """A trainer class declaring ``_supports_pp = False`` rejects a requested pipeline_parallel_size>1
+    at config time — BEFORE the model (or a teacher/reference/vLLM probe) loads; the trainer's own
+    gate fires far later."""
     args = _DistArgs()
     args.pipeline_parallel_size = 2
     from src.training.parallelism_args import parallelism_config_from_args
 
     try:
-        parallelism_config_from_args(args, supports_pp=False)
-        raise AssertionError("supports_pp=False must reject pipeline_parallel_size=2")
+        parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin)
+        raise AssertionError("a _supports_pp=False trainer must reject pipeline_parallel_size=2")
     except ValueError as e:
-        assert "does not support Pipeline Parallelism" in str(e)
+        assert "DistributedTrainerMixin does not support Pipeline Parallelism" in str(e)
 
 
 def test_parallelism_config_from_args_rejects_lowp_when_disallowed():
@@ -754,7 +756,7 @@ def test_parallelism_config_from_args_rejects_lowp_when_disallowed():
         from src.training.parallelism_args import parallelism_config_from_args
 
         try:
-            parallelism_config_from_args(args, allow_low_precision=False)
+            parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=False)
             raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "lowp_precision" in str(e)
@@ -772,7 +774,7 @@ def test_parallelism_config_from_args_lowp_allowed_for_sft():
     ):
         from src.training.parallelism_args import parallelism_config_from_args
 
-        cfg = parallelism_config_from_args(args, allow_low_precision=True)
+        cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=True)
         assert cfg.lowp_precision == "fp8"
 
 
@@ -1208,7 +1210,7 @@ def test_expert_lora_reaches_validation_through_the_builder():
         patch(f"{_MOD}.is_global_main_process", return_value=True),
     ):
         args = _DistArgs()
-        cfg = parallelism_config_from_args(args, expert_lora=spec)
+        cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, expert_lora=spec)
         assert cfg.expert_lora is spec, "the builder must forward expert_lora into the constructor"
         # The same spec under PP must be REJECTED, which only happens if it reached __post_init__.
         # Built directly: the from_args builder refuses pipeline_parallel_size > 1 outright in this
@@ -1227,9 +1229,9 @@ def test_expert_lora_reaches_validation_through_the_builder():
         args_etp = _DistArgs()
         args_etp.expert_parallel_size = 1
         args_etp.expert_tensor_parallel_size = 2
-        assert parallelism_config_from_args(args_etp).expert_lora is None
+        assert parallelism_config_from_args(args_etp, trainer_cls=DistributedTrainerMixin).expert_lora is None
         try:
-            parallelism_config_from_args(args_etp, expert_lora=spec)
+            parallelism_config_from_args(args_etp, trainer_cls=DistributedTrainerMixin, expert_lora=spec)
             raise AssertionError("expert LoRA under expert_tp_size > 1 must be rejected at config time")
         except ValueError as e:
             assert "Expert LoRA is not supported with expert_tp_size" in str(e), f"wrong validator fired: {e}"

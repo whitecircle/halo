@@ -39,7 +39,7 @@ def test_collator_inject_hint_string_and_list():
 
     from src.data.collators.vlm import SelfDistillVLMDataCollator
 
-    # _inject_hint needs only hint_template; the stub tokenizer just satisfies the base __init__,
+    # _teacher_history needs only hint_template; the stub tokenizer just satisfies the base __init__,
     # which resolves the eos set and the image-token ids once at construction.
     tokenizer = types.SimpleNamespace(eos_token_id=2, pad_token_id=0, get_vocab=dict)
     c = SelfDistillVLMDataCollator(None, tokenizer, hint_template="\n[Hint] {answer}\n")
@@ -49,13 +49,13 @@ def test_collator_inject_hint_string_and_list():
         {"role": "assistant", "content": "A1"},
         {"role": "user", "content": "Q2"},
     ]
-    out = c._inject_hint(hist, answer="B", solution=None)
+    out = c._teacher_history(hist, {"answer": "B"})
     assert out[0]["content"] == "Q1"
     assert out[2]["content"] == "Q2\n[Hint] B\n"
     assert hist[2]["content"] == "Q2"  # input row not mutated
 
     hist2 = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Q"}]}]
-    out2 = c._inject_hint(hist2, answer="7", solution=None)
+    out2 = c._teacher_history(hist2, {"answer": "7"})
     assert out2[0]["content"][-1] == {"type": "text", "text": "\n[Hint] 7\n"}
 
 

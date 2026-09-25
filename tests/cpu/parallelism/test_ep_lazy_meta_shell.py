@@ -16,7 +16,7 @@ load-bearing and neither is visible from a passing training run:
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, GptOssConfig, GptOssForCausalLM
+from transformers import AutoModelForCausalLM, GptOssConfig, GptOssForCausalLM, LlamaConfig
 
 from src.distributed.expert_parallel.lazy_loader import instantiate_on_meta
 from src.models.loading.lazy_safetensors.meta_shell import _instantiate_from_config_on_meta
@@ -154,6 +154,41 @@ def test_the_graft_leaves_persistent_meta_buffers_for_the_loader(config):
 
     assert shell.expert_bias.is_meta, "a checkpoint-carried buffer must stay meta for the loader"
     assert not shell.rotary.inv_freq.is_meta, "the non-persistent graft must still run alongside"
+
+
+class _FlashRefusingModel(_CtorBufferModel):
+    """Refuses every flash label at build, as a remote-code family declaring no v5 flash flag does."""
+
+    @staticmethod
+    def _refuse_flash(kwargs):
+        if str(kwargs.get("attn_implementation", "")).startswith("flash_attention"):
+            raise ValueError("_FlashRefusingModel does not support Flash Attention 2 yet")
+
+    @classmethod
+    def from_pretrained(cls, path, **kwargs):
+        cls._refuse_flash(kwargs)
+        with torch.device("meta"):
+            return cls(kwargs.get("config"))
+
+    @classmethod
+    def _from_config(cls, config, **kwargs):
+        cls._refuse_flash(kwargs)
+        return cls(config)
+
+
+def test_a_refused_attention_backend_fails_the_lazy_build():
+    """The backend is ``resolve_attn_implementation``'s choice on every load path. A lazy shell that
+    swapped a refused flash label for SDPA on its own would run a kernel the eager and CP loaders
+    refuse to pick for the same config, so the refusal has to reach the caller."""
+    with pytest.raises(RuntimeError, match="does not support Flash Attention"):
+        instantiate_on_meta(
+            NO_SUCH_CHECKPOINT,
+            _FlashRefusingModel,
+            LlamaConfig(),
+            dtype=torch.float32,
+            trust_remote_code=False,
+            attn_implementation="flash_attention_4",
+        )
 
 
 if __name__ == "__main__":

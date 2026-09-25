@@ -53,14 +53,16 @@ from safetensors.torch import save_file
 from transformers.utils import CONFIG_NAME
 
 from src.checkpoint.format import (
-    SAFETENSORS_INDEX_FILE,
+    SAFETENSORS_METADATA,
     SAFETENSORS_WEIGHTS_FILE,
     copy_checkpoint_aux_files,
     remove_stale_checkpoint_files,
+    write_merged_index,
 )
 from src.checkpoint.tool_io import (
     SAFETENSORS_FLOAT_DTYPES,
     checkpoint_shard_files,
+    detect_model_types,
     iter_checkpoint_shard_entries,
     reject_in_place_conversion,
 )
@@ -202,28 +204,12 @@ def _reject_unexportable_experts(
         expert_matches += _is_expert_weight(name, ndim)
     if moe_family and expert_matches == 0:
         raise ValueError(
-            f"{input_dir} is a MoE checkpoint (model_type {_read_model_types(input_dir)}), but no expert "
+            f"{input_dir} is a MoE checkpoint (model_type {detect_model_types(input_dir)}), but no expert "
             f"weight is in the low-precision scope: its expert spelling is none the EP layer roster "
             f"declares, so every expert would be copied through in bf16 under a quantization_config "
             f"that claims QAT parity. Declare the family's hub expert keys on its EP layer class, or "
             f"export with --lowp_apply_moe_experts=false if training left the experts in bf16."
         )
-
-
-def _read_model_types(input_dir: str) -> list[str]:
-    """The ``model_type`` spellings this checkpoint declares, most specific first.
-
-    Both the top level and the nested ``text_config`` are read: multimodal wrappers nest the LM config,
-    and it is the LM's family that fixes the fused-expert layout. An unreadable ``config.json`` raises:
-    read as "no family", it would skip the MoE expert gate and fail only after the whole export ran.
-    """
-    cfg_path = os.path.join(input_dir, CONFIG_NAME)
-    if not os.path.isfile(cfg_path):
-        return []
-    with open(cfg_path) as f:
-        cfg = json.load(f)
-    candidates = [(cfg.get("text_config") or {}).get("model_type"), cfg.get("model_type")]
-    return [candidate for candidate in candidates if candidate]
 
 
 def _fused_expert_axis(input_dir: str) -> int | None:
@@ -236,7 +222,7 @@ def _fused_expert_axis(input_dir: str) -> int | None:
     rather than guessing an axis, which would corrupt every dequantized expert.
     """
     by_model_type = ep_layer_class_by_model_type()
-    for model_type in _read_model_types(input_dir):
+    for model_type in detect_model_types(input_dir):
         layer_cls = by_model_type.get(model_type)
         if layer_cls is not None:
             return layer_cls.HF_FUSED_EXPERT_CONTRACTION_AXIS
@@ -338,7 +324,7 @@ def quantize_checkpoint(
                 if fused_expert_axis is None:
                     raise ValueError(
                         f"{name!r} is a fused 3-D expert tensor, but this checkpoint's model_type "
-                        f"{_read_model_types(input_dir) or ['<missing>']} matches no EP layer class, so its "
+                        f"{detect_model_types(input_dir) or ['<missing>']} matches no EP layer class, so its "
                         f"contraction axis is unknown. Block-scaling the wrong axis corrupts every "
                         f"dequantized expert. Register the family (HF_MODEL_TYPES + "
                         f"HF_FUSED_EXPERT_CONTRACTION_AXIS on its EP layer class in "
@@ -373,7 +359,7 @@ def quantize_checkpoint(
                     )
                 if rel > max_relerr:
                     max_relerr, worst_relerr_name = rel, name
-        save_file(out_tensors, os.path.join(output_dir, shard_name), metadata={"format": "pt"})
+        save_file(out_tensors, os.path.join(output_dir, shard_name), metadata=SAFETENSORS_METADATA)
         for key, tensor in out_tensors.items():
             weight_map[key] = shard_name
             total_size += tensor.numel() * tensor.element_size()
@@ -388,17 +374,12 @@ def quantize_checkpoint(
 
     # Anything but a single model.safetensors needs an index so the renamed weight_packed/scale keys
     # stay discoverable. Keyed on the emitted filenames: a lone model-00001-of-00001 input would
-    # otherwise get neither.
-    wrote_index = set(weight_map.values()) != {SAFETENSORS_WEIGHTS_FILE}
-    if wrote_index:
-        index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
-        with open(os.path.join(output_dir, SAFETENSORS_INDEX_FILE), "w") as fh:
-            json.dump(index, fh, indent=2)
-
-    # The index is in the keep-set only when this run wrote one, else a single-file run would leave a
-    # stale index behind.
-    keep = set(weight_map.values()) | ({SAFETENSORS_INDEX_FILE} if wrote_index else set())
-    remove_stale_checkpoint_files(output_dir, keep=keep)
+    # otherwise get neither. Either way the sweep drops what this run did not write, a stale index
+    # included.
+    if set(weight_map.values()) != {SAFETENSORS_WEIGHTS_FILE}:
+        write_merged_index(output_dir, weight_map, {"total_size": total_size})
+    else:
+        remove_stale_checkpoint_files(output_dir, keep={SAFETENSORS_WEIGHTS_FILE})
 
     scope = {
         "apply_dense_mlp": apply_dense_mlp,

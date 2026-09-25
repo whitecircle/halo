@@ -96,9 +96,10 @@ _FOREIGN_EXPORT_SUFFIXES = (".pth", ".gguf", ".h5", ".msgpack", ".onnx", ".onnx_
 _RESUME_SIDECAR_FILES = (SCHEDULER_STATE_FILE, ROUTER_BALANCING_BIASES_FILE)
 # Same exemption by prefix: losing ``rng_state_<rank>.pth`` re-draws every shuffle and dropout mask.
 _RESUME_SIDECAR_PREFIXES = ("rng_state",)
-# Vendor dumps of the same weights in a raw format: hundreds of GB the aux copy must not duplicate.
-# Exact names rather than prefixes, since ``original_adapter_config/`` is aux data the copy must keep.
-_WEIGHT_DUMP_DIRS = ("original", "consolidated")
+# Vendor dumps of the same weights in a raw format (gpt-oss ships ``original/`` and ``metal/``):
+# hundreds of GB the aux copy must not duplicate. Exact names rather than prefixes, since
+# ``original_adapter_config/`` is aux data the copy must keep.
+_WEIGHT_DUMP_DIRS = ("original", "consolidated", "metal")
 # Hub-download counterpart of copy_checkpoint_aux_files' skip: fetch an aux source minus its weights.
 WEIGHT_FILE_IGNORE_PATTERNS = tuple(
     f"*{suffix}" for suffix in (*_WEIGHT_FILE_SUFFIXES, *_FOREIGN_EXPORT_SUFFIXES)

@@ -109,7 +109,7 @@ def test_the_rewards_survive_json():
 
 _PREF_ARGS = types.SimpleNamespace(
     id_field="id",
-    model_name="gen-model",
+    model="gen-model",
     rm_model_path="rm-model",
 )
 _PREFERENCE_KEYS = {

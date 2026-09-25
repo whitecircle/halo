@@ -64,7 +64,7 @@ class RequestTools:
 def resolve_local_api_key() -> str:
     """Key for the local rollout server: ``VLLM_API_KEY`` → ``OPENAI_API_KEY`` → placeholder.
 
-    The CLI default for every ``--openai_api_key`` flag; an explicit key arrives as the flag's value
+    The CLI default for the shared ``--api_key`` flag; an explicit key arrives as the flag's value
     instead. ``VLLM_API_KEY`` is checked first because it is the server-side ``--api-key``
     convention.
     """
@@ -172,14 +172,7 @@ async def generate_openai_response(
     if extra_body:
         api_kwargs["extra_body"] = extra_body
 
-    try:
-        completion = await custom_client.chat.completions.create(**api_kwargs)
-    except TimeoutError:
-        logger.error("Timeout error for model %s", model)
-        raise
-    except Exception as e:
-        logger.error("Error calling OpenAI API: %s: %s", type(e).__name__, e)
-        raise
+    completion = await custom_client.chat.completions.create(**api_kwargs)
 
     message = completion.choices[0].message
     finish_reason = get_finish_reason(completion.choices[0]) or ""
@@ -340,7 +333,6 @@ async def parallel_openai_requests(
         if not disable_checkpoints:
             async with buffer_lock:
                 new_results_buffer.append((idx, result))
-            processed_indices.add(idx)
             completed_count += 1
             if completed_count % checkpoint_interval == 0:
                 await save_checkpoint_incremental()

@@ -9,7 +9,7 @@ Paths are S3 keys under ``HALO_S3_DEFAULT_BUCKET`` rather than full URIs; they a
 Usage:
     HALO_S3_DEFAULT_BUCKET=my-bucket \
     python scripts/inference/generation/openai_batched_generation.py \
-        --model_name my-model \
+        --model my-model \
         --input_path prompts \
         --output_path responses
 
@@ -26,13 +26,12 @@ Output dataset format:
 """
 
 import argparse
+import logging
 
-from loguru import logger
-
+from scripts._common import add_openai_endpoint_args
 from scripts.inference._common import (
     add_checkpoint_interval_arg,
     add_generation_args,
-    add_openai_endpoint_args,
     add_s3_dataset_args,
     assistant_message_from_response,
     load_prompts_with_resume,
@@ -43,6 +42,8 @@ from scripts.inference._common import (
 )
 from src.data.pipeline.conversation import build_base_prompt, resolve_system_prompt
 from src.inference.openai_client import create_openai_client, parallel_openai_requests
+
+logger = logging.getLogger(__name__)
 
 
 def reject_per_row_response_format(rows: list[dict]) -> None:
@@ -88,7 +89,7 @@ def process_response(
     Args:
         row: Original dataset row
         response: First OpenAI response
-        args: CLI arguments (for field names and model_name)
+        args: CLI arguments (for field names and the model)
         follow_up_response: Optional follow-up response
         initial_messages: Messages sent to API (including system prompt)
     """
@@ -122,7 +123,7 @@ def process_response(
 
     return {
         **record,
-        "model": args.model_name,
+        "model": args.model,
         "conversation": conversation,
         "generated_message_indices": generated_message_indices,
         "finish_reason": finish_reasons,
@@ -135,8 +136,8 @@ async def main() -> None:
     args = parse_args()
 
     client = create_openai_client(
-        base_url=args.openai_base_url,
-        api_key_override=args.openai_api_key,
+        base_url=args.base_url,
+        api_key_override=args.api_key,
     )
 
     rows, existing_results = load_prompts_with_resume(args)
@@ -158,7 +159,7 @@ async def main() -> None:
 
     logger.info("Generating first responses...")
     first_responses = await parallel_openai_requests(
-        model=args.model_name,
+        model=args.model,
         user_messages=messages,
         response_format=None,
         use_native_json_schema=False,
@@ -203,7 +204,7 @@ async def main() -> None:
             followup_tools.append(tools)
 
         followup_responses = await parallel_openai_requests(
-            model=args.model_name,
+            model=args.model,
             user_messages=followup_messages,
             response_format=None,
             use_native_json_schema=False,
@@ -234,14 +235,14 @@ async def main() -> None:
         logger.warning(
             f"Dropped {dropped_first_response} of {len(rows)} pending row(s) whose first request "
             f"failed — they are NOT in the dataset about to be written, and a resumed run will "
-            f"retry them. Check --openai_base_url / --model_name and the endpoint's logs."
+            f"retry them. Check --base_url / --model and the endpoint's logs."
         )
     reject_empty_results(
         len(results),
         len(rows),
         args.output_path,
         drops=f" (first-response failures={dropped_first_response})",
-        check="--openai_base_url / --model_name and the endpoint's logs",
+        check="--base_url / --model and the endpoint's logs",
     )
     save_results_to_s3(existing_results, results, output_path=args.output_path, subfolder=args.subfolder)
 

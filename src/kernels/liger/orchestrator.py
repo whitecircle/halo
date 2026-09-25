@@ -451,21 +451,3 @@ def _apply_liger_for_standard_models(
     apply_fn(**call_config)
     logger.info(f"✓ Liger Kernel applied for {model_type}")
     return filtered_config
-
-
-def apply_liger_kernel_for_direct_loading(
-    model_name_or_path: str,
-    training_config,
-    trust_remote_code: bool = True,
-) -> None:
-    """Apply Liger Kernel before direct ``from_pretrained`` loading (non-distributed path).
-
-    Applies toolkit defaults and disables TRL's re-application (prevents double-patching).
-    """
-    if not getattr(training_config, "use_liger_kernel", False):
-        return
-
-    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
-    apply_liger_kernel(config, liger_kernel_config=getattr(training_config, "liger_kernel_config", None))
-
-    training_config.use_liger_kernel = False  # prevent TRL re-applying

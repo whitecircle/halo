@@ -927,6 +927,18 @@ class BaseEnvironment(ABC):
         """Grade a finished episode: the objective in ``[0, 1]`` and the environment's own shaping terms."""
 
     @staticmethod
+    def _null_answer_grade(trajectory: Trajectory) -> EpisodeGrade:
+        """The grade of an episode whose row is answer-graded but whose ``answer`` cell is null.
+
+        Nothing was verified, so the completion payout would hand the full objective to any episode
+        that finished, and to its whole GRPO group, since every sibling finishes just as easily. The
+        episode leaves the baseline instead, the contract of a grading-infra outage.
+        """
+        logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
+        trajectory.info[EPISODE_INVALID_KEY] = True
+        return EpisodeGrade(0.0)
+
+    @staticmethod
     def _cut_short(trajectory: Trajectory) -> bool:
         """An episode its driver lost, or one a sandbox fault ended: graded on what it earned and never
         sent to an external scorer, since a verdict on the fragment would be paid for and taught."""
@@ -1067,7 +1079,7 @@ class BaseEnvironment(ABC):
             contexts = [None] * len(prompts)
 
         results = []
-        for prompt, context in zip(prompts, contexts, strict=False):
+        for prompt, context in zip(prompts, contexts, strict=True):
             episode_id = self._get_next_episode_id()
             trajectory = self._reset_single(prompt, context)
             self._bind_effort_profile(trajectory, context)
@@ -1089,7 +1101,7 @@ class BaseEnvironment(ABC):
             contexts = [None] * len(episode_ids)
 
         steps = []
-        for episode_id, action, context in zip(episode_ids, actions, contexts, strict=False):
+        for episode_id, action, context in zip(episode_ids, actions, contexts, strict=True):
             trajectory = self._trajectories.get(episode_id)
             if trajectory is None:
                 raise ValueError(f"Episode {episode_id} not found")
@@ -1188,7 +1200,7 @@ class AsyncBaseEnvironment(BaseEnvironment):
 
             return episode_id, self._first_step(trajectory)
 
-        results = await asyncio.gather(*[reset_one(p, c) for p, c in zip(prompts, contexts, strict=False)])
+        results = await asyncio.gather(*[reset_one(p, c) for p, c in zip(prompts, contexts, strict=True)])
 
         return [r[0] for r in results], [r[1] for r in results]
 
@@ -1212,5 +1224,5 @@ class AsyncBaseEnvironment(BaseEnvironment):
             return self._finalize_step(episode_id, trajectory, reward, done, truncated, info, context)
 
         return await asyncio.gather(
-            *[step_one(eid, act, ctx) for eid, act, ctx in zip(episode_ids, actions, contexts, strict=False)]
+            *[step_one(eid, act, ctx) for eid, act, ctx in zip(episode_ids, actions, contexts, strict=True)]
         )

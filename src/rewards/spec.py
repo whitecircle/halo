@@ -51,6 +51,22 @@ def _require_text(owner: str, **values: Any) -> None:
             raise ValueError(f"{owner}: {key} must be a non-blank string, got {value!r}")
 
 
+def _require_name(what: str, name: Any) -> None:
+    """A term or requirement name: its diagnostic key, so non-blank, unpadded and free of ``/``."""
+    if not isinstance(name, str) or not name or name != name.strip() or "/" in name:
+        raise ValueError(f"{what} name must be a non-blank string without '/', got {name!r}")
+
+
+def _require_transcript(owner: str, transcript: Any) -> None:
+    if transcript not in TRANSCRIPT_VIEWS:
+        raise ValueError(f"{owner}: transcript must be one of {TRANSCRIPT_VIEWS}, got {transcript!r}")
+
+
+def require_unique_names(what: str, names: list[str]) -> None:
+    if len(set(names)) != len(names):
+        raise ValueError(f"{what} names must be unique, got {names}")
+
+
 def _construct(cls: type, spec: Mapping[str, Any], what: str):
     """``cls(**spec)`` with an unknown key named up front, before the constructor's own checks run."""
     admitted = {f.name for f in fields(cls)}
@@ -76,8 +92,7 @@ class RewardTerm:
     exponent: float = 1.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name or self.name != self.name.strip() or "/" in self.name:
-            raise ValueError(f"reward term name must be a non-blank string without '/', got {self.name!r}")
+        _require_name("reward term", self.name)
         _require_finite(f"reward term {self.name!r}", weight=self.weight, exponent=self.exponent)
         if self.exponent <= 0:
             raise ValueError(f"reward term {self.name!r}: exponent must be > 0, got {self.exponent}")
@@ -129,8 +144,7 @@ class Requirement:
     weight: float = 1.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name or self.name != self.name.strip() or "/" in self.name:
-            raise ValueError(f"requirement name must be a non-blank string without '/', got {self.name!r}")
+        _require_name("requirement", self.name)
         _require_text(f"requirement {self.name!r}", description=self.description)
         _require_finite(f"requirement {self.name!r}", weight=self.weight)
         if self.weight <= 0:
@@ -175,9 +189,7 @@ class JudgeTerm(RewardTerm):
         owner = f"judge term {self.name!r}"
         if not self.requirements:
             raise ValueError(f"{owner}: 'requirements' must list at least one requirement")
-        names = [requirement.name for requirement in self.requirements]
-        if len(set(names)) != len(names):
-            raise ValueError(f"{owner}: requirement names must be unique, got {names}")
+        require_unique_names(f"{owner}: requirement", [requirement.name for requirement in self.requirements])
         _require_text(owner, model=self.model, base_url=self.base_url, api_key_env=self.api_key_env)
         _require_positive_int(
             owner,
@@ -192,8 +204,7 @@ class JudgeTerm(RewardTerm):
             _require_finite(owner, temperature=self.temperature)
             if self.temperature < 0:
                 raise ValueError(f"{owner}: temperature must be >= 0, got {self.temperature}")
-        if self.transcript not in TRANSCRIPT_VIEWS:
-            raise ValueError(f"{owner}: transcript must be one of {TRANSCRIPT_VIEWS}, got {self.transcript!r}")
+        _require_transcript(owner, self.transcript)
         # YAML 1.2 reads ``no``/``off`` as strings, which would pass a truthiness check as True.
         for key in ("include_reference", "structured_output"):
             if not isinstance(getattr(self, key), bool):
@@ -272,8 +283,7 @@ class RewardModelTerm(RewardTerm):
         )
         if self.logit_scale <= 0 or self.request_timeout <= 0:
             raise ValueError(f"{owner}: logit_scale and request_timeout must be > 0")
-        if self.transcript not in TRANSCRIPT_VIEWS:
-            raise ValueError(f"{owner}: transcript must be one of {TRANSCRIPT_VIEWS}, got {self.transcript!r}")
+        _require_transcript(owner, self.transcript)
         _require_positive_int(owner, batch_size=self.batch_size, max_concurrency=self.max_concurrency)
 
     @property
@@ -329,7 +339,5 @@ def parse_reward_terms(
             raise ValueError(f"{where} ({source}): {e}") from e
         except ValueError as e:
             raise ValueError(f"{where} ({source}): {e}") from e
-    names = [term.name for term in terms]
-    if len(set(names)) != len(names):
-        raise ValueError(f"reward term names must be unique, got {names}")
+    require_unique_names("reward term", [term.name for term in terms])
     return tuple(terms)

@@ -299,11 +299,6 @@ def _reset_sinks_from_pretrained(
     return len(sink_keys)
 
 
-def _is_hf_repo(checkpoint_dir: str) -> bool:
-    """Check if checkpoint_dir looks like a HuggingFace repo ID (e.g. 'org/model')."""
-    return not Path(checkpoint_dir).exists() and "/" in checkpoint_dir
-
-
 def reset_sinks(
     checkpoint_dir: str,
     output_dir: str | None = None,
@@ -331,19 +326,20 @@ def reset_sinks(
     """
     # The input gate runs first: a per-rank EP/TP save lands on the from_pretrained branch, where the
     # real expert keys read as missing and are randomly initialized. That diagnosis is more useful
-    # than a missing-destination error, and it holds whichever destination was named.
-    if not _is_hf_repo(checkpoint_dir):
-        reject_sharded_checkpoint(checkpoint_dir)
+    # than a missing-destination error, and it holds whichever destination was named. A Hub id has no
+    # local directory here and passes through to the load, where the coverage gate stands in.
+    reject_sharded_checkpoint(checkpoint_dir)
 
     if in_place:
         if output_dir is not None:
             raise ValueError(
                 "--in_place rewrites the --model_id directory, so it cannot be combined with --output_dir."
             )
-        if _is_hf_repo(checkpoint_dir):
+        # The same local-or-Hub rule resolve_checkpoint_source applies.
+        if not os.path.isdir(checkpoint_dir):
             raise ValueError(
-                f"--in_place cannot rewrite {checkpoint_dir!r}: it is a HuggingFace repo ID, not a local "
-                f"directory. Pass --output_dir instead."
+                f"--in_place cannot rewrite {checkpoint_dir!r}: it is not a local directory (a HuggingFace "
+                f"repo ID, or a path that does not exist). Pass --output_dir instead."
             )
         output_dir = checkpoint_dir
     elif output_dir is None:

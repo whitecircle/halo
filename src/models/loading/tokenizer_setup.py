@@ -117,8 +117,9 @@ def context_window_from_config(config) -> int | None:
 def get_model_context_window(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> int:
     """Resolve a model's max context window in tokens.
 
-    Reads model config first (:func:`context_window_from_config`), then
-    ``tokenizer.model_max_length``, rejecting HF's ~1e9 "unset" sentinel. Raises when nothing trustworthy.
+    Reads model config first (:func:`context_window_from_config`), then ``tokenizer.model_max_length``
+    below :data:`UNSET_MODEL_MAX_LENGTH`, which HF's "unset" sentinel exceeds. Raises when nothing
+    trustworthy.
     """
     window = context_window_from_config(model.config)
     if window is not None:

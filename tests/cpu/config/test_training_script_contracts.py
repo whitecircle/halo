@@ -170,6 +170,38 @@ def test_is_vlm_model_probe_is_revision_pinned(path: Path):
         )
 
 
+_VLM_SETUP = _REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(
+            p,
+            marks=pytest.mark.xfail(
+                strict=True, reason="load_model_for_training probes without model_config.trust_remote_code"
+            ),
+        )
+        if p == _VLM_SETUP
+        else p
+        for p in _VLM_PROBE_CALL_SITES
+    ],
+    ids=[str(p.relative_to(_REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
+)
+def test_is_vlm_model_probe_threads_trust_remote_code(path: Path):
+    """A probe that fetches the config must pass the run's ``trust_remote_code``: left at its
+    default it refuses a remote-code config the run trusted, and forced on it would execute code the
+    run never trusted, on the run's first hub contact."""
+    calls = _vlm_probe_calls(path)
+    if not calls:
+        pytest.skip("module does not probe the modality")
+    for call in calls:
+        kwargs = {kw.arg for kw in call.keywords}
+        assert "config" in kwargs or "trust_remote_code" in kwargs, (
+            f"{path}: modality probe fetches a config without the run's trust_remote_code="
+        )
+
+
 # sft.py: preprocessed completion-masking mismatch
 
 

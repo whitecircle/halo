@@ -14,12 +14,12 @@ Those helpers are the shared flag surfaces:
 
 | Helper | Flags |
 |---|---|
-| `scripts/_common.py` | The shard cap, the Hub source block and `--trust_remote_code`; taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/`, and `--trust_remote_code` by `inference/generation/dataset_deduplication.py` |
-| `scripts/inference/_common.py` | The OpenAI endpoint, resume and Gradio blocks |
+| `scripts/_common.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/`, and `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`, `--model`), taken by every generation, eval and playground CLI under `inference/` and `environments/` |
+| `scripts/inference/_common.py` | The generation, resume and Gradio blocks |
 | `scripts/inference/reward_model/_common.py` | The reward-model scoring block, on top of the previous two |
 | `scripts/environments/_common.py` | The env-eval dataset/endpoint/trajectory flags, `--training_config`, and the output writer |
 
-Flag spelling is per script and stable: the Gradio apps, `scripts/profiling/**`, `before_training/prepare_dataset.py` and `before_training/s3_datasets.py` spell their own multi-word flags with dashes (`--api-key`); every other script uses underscores (`--api_key`), matching the YAML field names a training flag overrides. The shared `--trust_remote_code` keeps its one spelling everywhere, `prepare_dataset.py` included.
+Flag spelling is per script and stable: `scripts/profiling/**`, `before_training/prepare_dataset.py` and `before_training/s3_datasets.py` spell their own multi-word flags with dashes (`--server-url`); every other script uses underscores (`--base_url`), matching the YAML field names a training flag overrides. The shared `--trust_remote_code` keeps its one spelling everywhere, `prepare_dataset.py` included.
 
 The checkpoint tools under `after_training/` and `before_training/` take one source/destination pair: `--input_dir` → `--output_dir` for a local checkpoint directory, `--model_id` → `--output_dir` where the source may also be a Hub repo (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, `reset_sinks.py`). `reattach_vision_tower.py` takes both: `--input_dir` for the text-only export, `--model_id` for the multimodal base.
 
@@ -119,8 +119,8 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
 | `scripts/inference/generation/dataset_deduplication.py` | FAISS-based semantic deduplication. Keyed on `--text_field` alone: two rows with the same text collapse to one however they differ elsewhere, so an images column does **not** make them distinct — deduplicate a VLM dataset before pairing its images, or on a field that carries the difference |
 | `scripts/inference/reward_model/rm_rejection_sampling.py` | Rejection-sampled preference (or offline-GRPO) dataset generation: hypotheses from any OpenAI-compatible endpoint, scored by a local reward model. A hypothesis the endpoint cut at `--max_gen_tokens` is dropped rather than scored as if it had finished, and a row left with fewer than two usable hypotheses is skipped; both counts are in the run summary |
 | `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_gen_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished |
-| `scripts/inference/playground/gradio_openai_chatbot.py` | Chatbot UI (Gradio + OpenAI API). `--api-key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder |
-| `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `src/environments/eval_runner.py`), so a turn the engine cut off at its token cap, or one the model ended on nothing, is recovered here exactly as in training. `--vllm-url` prefills the rollout server base URL; `--api-key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
+| `scripts/inference/playground/gradio_openai_chatbot.py` | Chatbot UI (Gradio + OpenAI API). `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder |
+| `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `src/environments/eval_runner.py`), so a turn the engine cut off at its token cap, or one the model ended on nothing, is recovered here exactly as in training. `--base_url` prefills the rollout server base URL; `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
 | `scripts/environments/inference/run_code_contests.py` | Evaluate on competitive programming: dataset adapter (every `CODE_DATASET_ADAPTERS` entry that scores raw rows: `codeforces`, `deepcoder`, `livecodebench`, `icpc`, `hlce`; `hardtests` is scored from its prepared pool) + language (python/cpp/c, or a comma-separated list the model chooses from per program) + success@k bucketed by adapter group field (rating/difficulty/contest), against vLLM or OpenRouter. `--env_type` picks `codeforces` or `code_contests`, falling back to `codeforces`. `--reasoning_effort` (low/medium/high, or `none` for no level; falls back to the training config's, where a `null` is `none`, else `medium`) sets the template effort and, unless `--max_tokens` or `--training_config` is given, the generation budget: the effort's thinking budget (4096/8192/16384) plus 4096 tokens of solution headroom → 8192/12288/20480, and 32768 at `none`. `--max_turns` falls back to 15. `--eval_protocol` (`harness` or `leaderboard`: one submission, no scratchpad; falls back to the training config's value, else `harness`) names the scoring contract ([what `success@k` counts](../training-methods/grpo/environments/evaluation.md#running-an-evaluation)). `--start_date` / `--end_date` (inclusive `YYYY-MM-DD`) and `--platform` select the problems of an adapter that stamps contest dates (`livecodebench`). `--env_kwargs` carries the env/grading knobs without a flag (`max_turns`, `language`, `eval_protocol` and `reasoning_effort` go through their flags); `--save_trajectories <path>` / `--trajectory_dir <folder>` record JSONL |
 | `scripts/environments/inference/run_env.py` | Generic eval runner for every other env (`--env_type qa_search`, `exam_qa`, `swe`, `mcp`, …; optional when `--training_config` names an `environment_type`) over an OpenAI endpoint; reads `--prompt_field` / `--answer_field` / `--context_fields` columns, names examples by `--id_field` (default `id`), exits on a field naming no column (the default answer and id columns may be absent), reports reward and success@k bucketed by `--group_by`; `--env_kwargs` merges per-env settings; `--save_trajectories` / `--trajectory_dir` record JSONL |
 | `scripts/environments/inference/regrade_trajectories.py` | Offline re-grader: replays saved JSONL (`<jsonl...> --workers --output`) through grading only, decoupled from generation. Needs the code-contest meta `run_code_contests.py` stamps (`adapter`/`language` on top of the generic eval meta); a `run_env.py` trajectory is rejected up front. Re-applies the recorded contest selection and protocol, and leaves an episode recorded with a `generation_error` out of `n`, counted in `generation_errors` |
@@ -136,8 +136,8 @@ run it is judging unless a flag says otherwise. A `rollout_stop_tokens` entry th
 tokenizer does not know raises here, where the trainer warns and skips a partially unresolved set.
 
 In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
-`build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (default `my-bucket` — set it to your own
-bucket) and `--subfolder` (default `datasets`, `None` to skip). On `dataset_deduplication.py`, `--input_path` is a
+`build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
+(default `datasets`, `None` to skip). On `dataset_deduplication.py`, `--input_path` is a
 local file or a Hub dataset id and `--output_path` a local path.
 
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
@@ -147,21 +147,21 @@ Progress is checkpointed, so re-running resumes; the non-zero exit is what stops
 `&&` chain from consuming a partial output dataset as a finished one.
 
 A run that produced no usable row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a
-wrong `--model_name` cannot republish the resumed rows as a finished job. Each CLI's summary line
+wrong `--model` cannot republish the resumed rows as a finished job. Each CLI's summary line
 names its per-reason drop counts (first-response failures, degenerate skips).
 
-Every endpoint these CLIs talk to is OpenAI-compatible (`--openai_base_url` / `--openai_api_key`),
+Every endpoint these CLIs talk to is OpenAI-compatible (`--base_url` / `--api_key`),
 reached through the one shared client (`create_openai_client`) with the toolkit's retry policy. There
-is no separate Azure mode — point `--openai_base_url` at the deployment's OpenAI-compatible route like
+is no separate Azure mode — point `--base_url` at the deployment's OpenAI-compatible route like
 any other endpoint.
 
 ```bash
 HALO_S3_DEFAULT_BUCKET=your-bucket \
 python scripts/inference/generation/openai_batched_generation.py \
-    --model_name my-model --input_path prompts --output_path responses
+    --model my-model --input_path prompts --output_path responses
 
 python scripts/inference/reward_model/rm_scoring.py \
-    --model_name my-model --prompts_source data/prompts.jsonl --rm_model_path path/to/reward-model
+    --model my-model --prompts_source data/prompts.jsonl --rm_model_path path/to/reward-model
 ```
 
 ## Post-training scripts

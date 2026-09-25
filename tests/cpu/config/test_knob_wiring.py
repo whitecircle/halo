@@ -47,7 +47,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 def test_bf16_optimizer_reaches_parallelism_config(requested):
     """The DistributedArguments knob must survive into ParallelismConfig — that object is the only
     thing every entry script threads into every trainer, so a drop here makes the knob unreachable."""
-    config = parallelism_config_from_args(DistributedArguments(bf16_optimizer=requested))
+    config = parallelism_config_from_args(
+        DistributedArguments(bf16_optimizer=requested), trainer_cls=DistributedTrainerMixin
+    )
     assert config.bf16_optimizer is requested
 
 

@@ -1,16 +1,11 @@
 #!/usr/bin/env python
 """CPU tests for the attention-backend dispatch in ``src/models/patches/attention.py``.
 
-Two things, both silent when they break:
+The arch and model gates that pick the kernel, all silent when they break: the SM100+ Blackwell
+predicate every backend choice shares, the per-model kernel limits ``resolve_attn_implementation``
+applies on top, and the validator's refusal to hand back a backend the config rejected.
 
-* the ImportError guards. ``patch_flex_attention_compile`` and ``_disable_gpt_oss_fa_fallback`` are
-  load-bearing patches (EP flex-attention deadlock/NaN; Blackwell kernel-hub crash). When a
-  transformers bump moves the patched symbol they must WARN loudly, naming the vanished symbol and
-  the consequence; a ``logger.debug`` or a bare ``return`` there loses the patch in silence.
-* the arch and family gates that pick the kernel — the SM100+ Blackwell predicate every backend
-  choice shares, and the per-family kernel limits ``resolve_attn_implementation`` applies on top.
-
-Run: ``python tests/cpu/models/test_attention_patch_import_guards.py`` (or ``pytest -m cpu``).
+Run: ``python tests/cpu/models/test_attention_dispatch.py`` (or ``pytest -m cpu``).
 """
 
 from __future__ import annotations
@@ -21,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src import hardware
 from src.distributed.context_parallel import base_layer as cp_base_layer
@@ -41,52 +37,6 @@ FA4_NAN_PRONE_MODEL_TYPES = (
     "qwen3_next",
     "glm4_moe_lite",
 )
-
-
-def test_flex_attention_patch_warns_loud_on_vanished_symbol():
-    # The symbol is resolved by a module-level try/except at import, so "vanished" IS the module
-    # global left at None — poisoning sys.modules would come too late to change anything.
-    with (
-        patch.object(attention_mod, "WrappedFlexAttention", None),
-        patch.object(attention_mod.logger, "warning") as warn,
-    ):
-        attention_mod.patch_flex_attention_compile("unit test")
-    assert warn.call_count == 1
-    message = warn.call_args.args[0]
-    assert "WrappedFlexAttention" in message
-    assert "deadlock" in message
-
-
-def test_gpt_oss_fa_fallback_guard_warns_loud_on_vanished_symbol():
-    config = SimpleNamespace(model_type="gpt_oss")
-    with (
-        patch.object(attention_mod, "GptOssPreTrainedModel", None),
-        patch.object(attention_mod.logger, "warning") as warn,
-    ):
-        attention_mod._disable_gpt_oss_fa_fallback(config)
-    assert warn.call_count == 1
-    message = warn.call_args.args[0]
-    assert "GptOssPreTrainedModel" in message
-    assert "Blackwell" in message
-
-
-def test_import_guards_resolve_the_symbols_on_this_transformers():
-    """Anti-vacuity: on the installed transformers both symbols must actually be present.
-
-    Without this the two tests above would keep passing if a bump made the module-level import fail
-    permanently — the patched-to-None state would be the real one, and every run would silently take
-    the warn-and-no-op branch that leaves the flex-attention compile wrapper and the GptOss
-    kernel-hub fallback ACTIVE.
-    """
-    assert attention_mod.WrappedFlexAttention is not None
-    assert attention_mod.flex_attention is not None
-    assert attention_mod.GptOssPreTrainedModel is not None
-
-
-def test_gpt_oss_fa_fallback_guard_silent_for_other_models():
-    with patch.object(attention_mod.logger, "warning") as warn:
-        attention_mod._disable_gpt_oss_fa_fallback(SimpleNamespace(model_type="qwen3"))
-    warn.assert_not_called()
 
 
 def _blackwell():
@@ -263,9 +213,54 @@ def test_fa4_survives_for_families_outside_the_nan_gate(model_type):
     """
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
         resolved = attention_mod.resolve_attn_implementation(
-            SimpleNamespace(model_type=model_type), "flash_attention_4", torch.bfloat16
+            CONFIG_MAPPING[model_type](), "flash_attention_4", torch.bfloat16
         )
     assert resolved == "flash_attention_4"
+
+
+@pytest.mark.parametrize(
+    ("model_type", "overrides"),
+    [("gemma4", {}), ("gemma4_text", {}), ("llama", {"head_dim": 512})],
+    ids=["gemma4", "gemma4_text", "llama_head_dim_512"],
+)
+@pytest.mark.parametrize("requested", ["flash_attention_2", "flash_attention_4"])
+def test_heads_past_the_flash_cap_fall_back_to_sdpa(model_type, overrides, requested):
+    """No FlashAttention kernel takes a head wider than 256, so the resolver must leave flash for such
+    a model whatever its family: Gemma 4's 512-wide global heads (read per-layer, through the
+    multimodal wrapper), and any other config declaring the same width."""
+    config = CONFIG_MAPPING[model_type](**overrides)
+    with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
+        assert attention_mod.resolve_attn_implementation(config, requested, torch.bfloat16) == "sdpa"
+
+
+def test_a_head_at_the_flash_cap_keeps_flash():
+    """The cap is inclusive: Qwen3-Next's 256-wide heads are within it (its FA4 demote is the NaN gate's)."""
+    config = CONFIG_MAPPING["qwen3_next"]()
+    assert attention_mod.resolve_head_dim(config) == attention_mod.FLASH_MAX_HEAD_DIM
+    assert not attention_mod.head_dim_exceeds_flash(config)
+    with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
+        assert attention_mod.resolve_attn_implementation(config, "flash_attention_2", torch.bfloat16) == (
+            "flash_attention_2"
+        )
+
+
+def test_a_config_rejecting_every_candidate_raises():
+    """The fallback chain ends at eager; a config whose setter refuses that too has no backend left,
+    and handing back the value it just rejected would fail later, inside the model build."""
+
+    class _RejectingConfig:
+        model_type = "llama"
+
+        @property
+        def _attn_implementation(self):
+            return None
+
+        @_attn_implementation.setter
+        def _attn_implementation(self, value):
+            raise ValueError(f"{value} rejected")
+
+    with pytest.raises(ValueError, match="accepts none of the attention implementations"):
+        attention_mod.validate_attn_implementation(_RejectingConfig(), "sdpa")
 
 
 def test_fa4_demote_reads_the_multimodal_text_tower_model_type():

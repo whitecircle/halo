@@ -86,7 +86,7 @@ GLM-4 MoE Lite) — and calls FA2 instead (`model_fa4_backward_nan_prone`).
 Leave `attn_implementation` at its auto-detected default: CP calls the non-varlen forward, which FA2
 serves poorly on both architectures, and the arch-matched kernel is worth 1.2–3× at ≥32k tokens on
 B300. Bailing is the exception — it needs an explicit `sdpa`, since transformers refuses the
-auto-detected FA4 at model build and the CP loader has no SDPA retry.
+auto-detected FA4 at model build.
 
 **Head divisibility** — `cp_size` must divide both the Q and the KV head count. GPT-OSS (64 Q, 8 KV):
 CP=8 → 8 Q / 1 KV; CP=4 → 16 Q / 2 KV; CP=3 rejected.

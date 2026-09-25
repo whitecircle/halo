@@ -229,8 +229,7 @@ def main():
         model_config,
         dist_args,
         script_prefix="embedding",
-        supports_cp=False,
-        supports_pp=False,
+        trainer_cls=EmbeddingTrainer,
         split_expert_lora=False,
     )
     parallelism_config = runtime.parallelism_config

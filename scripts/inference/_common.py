@@ -13,22 +13,24 @@ drives a server-side client holding a live key.
 
 import argparse
 import asyncio
+import logging
 import signal
 import sys
 from collections.abc import Callable, Coroutine, Sequence
 from typing import TYPE_CHECKING
 
 from datasets import Dataset
-from loguru import logger
 
 from src.data.sources.s3_client import build_s3_uri, exists, load_dataset_from_s3_uri, push_dataset_to_s3_uri
-from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
 from src.inference.response import OpenAIResponse
+from src.log import configure_cli_logging
 
 if TYPE_CHECKING:
     # Annotation only: the generation CLIs import this module too, and gradio takes seconds to
     # import.
     import gradio as gr
+
+logger = logging.getLogger(__name__)
 
 # The documented "write at the bucket root" spelling for --subfolder. argparse hands it over as the
 # string "None", which would read and write s3://bucket/None/<key> and so resume against an output
@@ -47,26 +49,6 @@ DEFAULT_MAX_GEN_TOKENS = 3072
 # no auth in front, so binding every interface would expose that key's spend to anything that can
 # route to the host. `--host 0.0.0.0` still publishes, explicitly.
 DEFAULT_GRADIO_HOST = "127.0.0.1"
-
-
-def add_openai_endpoint_args(parser: argparse.ArgumentParser, *, model_help: str) -> argparse.ArgumentParser:
-    """Add the OpenAI-compatible endpoint block every generation CLI here drives its rollout through.
-
-    One spelling and one key-resolution policy: these scripts all point at the same local server, and
-    a per-script copy would let ``--openai_base_url`` on one become ``--api_url`` on the next, so a
-    pinned command line would generate against the wrong endpoint. ``model_help`` is the only
-    per-script part.
-    """
-    parser.add_argument(
-        "--openai_api_key",
-        type=str,
-        default=resolve_local_api_key(),
-        help="API key for the generation endpoint (default: $VLLM_API_KEY, else $OPENAI_API_KEY, else the "
-        "placeholder a keyless local server accepts)",
-    )
-    parser.add_argument("--openai_base_url", type=str, default=DEFAULT_LOCAL_BASE_URL)
-    parser.add_argument("--model_name", type=str, required=True, help=model_help)
-    return parser
 
 
 def add_generation_args(parser: argparse.ArgumentParser, *, temperature_default: float) -> argparse.ArgumentParser:
@@ -357,6 +339,7 @@ def _signal_handler(signum, frame):
 
 def run_async_cli(main: Callable[[], Coroutine]) -> None:
     """Run an async CLI ``main`` under SIGINT/SIGTERM handling, exiting non-zero on a fatal error."""
+    configure_cli_logging()
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 

@@ -469,19 +469,32 @@ def _read_checkpoint_tensors(checkpoint_dir: str, wanted: Callable[[str], bool])
         return {}
 
 
+def detect_model_types(checkpoint_dir: str) -> list[str]:
+    """The ``model_type`` spellings a checkpoint's ``config.json`` declares, most specific first.
+
+    A composite (VLM) config nests the language model's under ``text_config``, and that is the family
+    fixing the expert layout, so it leads the top-level one. ``[]`` when the file is absent; an
+    unreadable one raises, since read as "no family" it would skip every family gate.
+    """
+    config_path = os.path.join(checkpoint_dir, CONFIG_NAME)
+    if not os.path.isfile(config_path):
+        return []
+    with open(config_path) as f:
+        config = json.load(f)
+    candidates = ((config.get("text_config") or {}).get("model_type"), config.get("model_type"))
+    return [candidate for candidate in candidates if candidate]
+
+
 def detect_model_type(checkpoint_dir: str) -> str:
-    """``config.model_type`` from a checkpoint's ``config.json`` (``""`` when absent or unreadable).
+    """``config.model_type`` from a checkpoint's ``config.json`` (``""`` when absent): the least
+    specific of :func:`detect_model_types`.
 
     Used by every family gate here, so a tool resolves the family the way the sharded merge does
     instead of sniffing key spellings. A composite VLM config with no top-level ``model_type`` falls
     back to its ``text_config``, where the language family lives.
     """
-    config_path = os.path.join(checkpoint_dir, CONFIG_NAME)
-    if not os.path.isfile(config_path):
-        return ""
-    with open(config_path) as f:
-        config = json.load(f)
-    return config.get("model_type") or config.get("text_config", {}).get("model_type", "") or ""
+    model_types = detect_model_types(checkpoint_dir)
+    return model_types[-1] if model_types else ""
 
 
 def checkpoint_shard_files(checkpoint_dir: str) -> list[str]:

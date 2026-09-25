@@ -29,18 +29,11 @@ from transformers import AutoModel, AutoTokenizer
 from scripts._common import add_trust_remote_code_arg
 from src.data.deduplication import faiss_deduplicate_mr, faiss_deduplicate_mr_multistep, process_texts
 from src.data.sources.paths import DATA_FILE_BUILDERS, parse_dataset_source
+from src.log import configure_cli_logging
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.patches.buffer_fixes import finalize_loaded_model
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-    # `src` configures the root logger at import, which makes an unforced basicConfig a no-op: root
-    # would stay at WARNING and every progress and summary line below (the dedup counts and the file
-    # log included) would be dropped.
-    force=True,
-)
+configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 

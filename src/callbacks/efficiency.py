@@ -13,6 +13,7 @@ from src.callbacks.model_flops import (
     ASSUMED_MAX_SEQ_LEN,
     compute_expert_params,
     estimate_linear_flops_per_token,
+    rank_attention_flops,
     resolve_attention_layout,
 )
 from src.callbacks.parameter_stats import count_model_parameters
@@ -458,19 +459,16 @@ class EfficiencyCallback(transformers.TrainerCallback):
         parallelism = self._parallelism_config
         world_size = get_global_world_size()
 
-        if state.num_input_tokens_seen is not None and self.state.step_start_tokens_seen is not None:
-            try:
-                step_tokens_cluster = state.num_input_tokens_seen - self.state.step_start_tokens_seen
-                # Clamp implausible deltas only against a real length bound (GRPO's 2048 guess is none).
-                _, has_len_bound = self._max_seq_len()
-                nominal_cluster = self._nominal_step_tokens() * world_size
-                upper_bound = nominal_cluster * _MAX_ROWS_PER_EXAMPLE * _TOKEN_COUNT_SANITY_FACTOR
-                if step_tokens_cluster <= 0 or (
-                    has_len_bound and nominal_cluster > 0 and step_tokens_cluster > upper_bound
-                ):
-                    step_tokens_cluster = self._fallback_step_tokens(world_size, step_tokens_cluster)
-            except (TypeError, AttributeError):
-                step_tokens_cluster = self._fallback_step_tokens(world_size, None)
+        if state.num_input_tokens_seen is not None:
+            step_tokens_cluster = state.num_input_tokens_seen - self.state.step_start_tokens_seen
+            # Clamp implausible deltas only against a real length bound (GRPO's 2048 guess is none).
+            _, has_len_bound = self._max_seq_len()
+            nominal_cluster = self._nominal_step_tokens() * world_size
+            upper_bound = nominal_cluster * _MAX_ROWS_PER_EXAMPLE * _TOKEN_COUNT_SANITY_FACTOR
+            if step_tokens_cluster <= 0 or (
+                has_len_bound and nominal_cluster > 0 and step_tokens_cluster > upper_bound
+            ):
+                step_tokens_cluster = self._fallback_step_tokens(world_size, step_tokens_cluster)
         else:
             step_tokens_cluster = self._fallback_step_tokens(world_size, None)
 
@@ -678,13 +676,13 @@ class EfficiencyCallback(transformers.TrainerCallback):
             logger.warning("Could not detect the GPU model, so MFU, S-MFU and TFLOP/s are reported as 0.")
 
         if self.state.model_flops_per_token:
-            logger.info(f"Model FLOPS/token: {self.state.model_flops_per_token / 1e12:.4f} TFLOPS")
+            logger.info(f"Model FLOPS/token: {self.state.model_flops_per_token / _TERA:.4f} TFLOPS")
             if self.state.attention_layout is not None:
                 max_seq, _ = self._max_seq_len()
                 logger.info(
                     f"  Attention layout (this rank): {self.state.attention_layout.describe()} — score term "
                     f"measured per document from each batch; config fallback at max_seq_len={max_seq}: "
-                    f"{(self.state.attention_flops_per_token or 0.0) / 1e12:.4f} TFLOPS/token"
+                    f"{(self.state.attention_flops_per_token or 0.0) / _TERA:.4f} TFLOPS/token"
                 )
             logger.info(f"Local params: {self.mfu.local_params / 1e9:.2f}B")
             if self.mfu.params_ratio > 1.0:
@@ -702,8 +700,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
                 )
                 logger.info(
                     f"  Active FLOPS/token: "
-                    f"{self.state.active_model_flops_per_token / 1e12:.4f} TFLOPS "
-                    f"(dense: {self.state.model_flops_per_token / 1e12:.4f} TFLOPS)"
+                    f"{self.state.active_model_flops_per_token / _TERA:.4f} TFLOPS "
+                    f"(dense: {self.state.model_flops_per_token / _TERA:.4f} TFLOPS)"
                 )
         else:
             logger.warning("Could not get model reference for FLOPS calculation")
@@ -719,11 +717,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
             self.state.attention_layout, self.state.attention_share, attn_flops = None, 1.0, 0.0
         else:
             self.state.attention_layout, self.state.attention_share = resolved
-            attn_flops = (
-                self.state.attention_layout.flops_per_token(seq_len)
-                * self.state.attention_share
-                / max(parallelism.tp_size, 1)
-            )
+            attn_flops = rank_attention_flops(*resolved, seq_len, parallelism.tp_size)
         self.state.attention_flops_per_token = attn_flops
         self.state.model_flops_per_token = estimate_linear_flops_per_token(model) + attn_flops
 

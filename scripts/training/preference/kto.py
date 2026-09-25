@@ -123,7 +123,6 @@ def main():
         dist_args,
         script_prefix="kto",
         trainer_cls=DistributedKTOTrainer,
-        supports_cp=False,
     )
     parallelism_config = runtime.parallelism_config
 

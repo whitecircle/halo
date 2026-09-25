@@ -15,6 +15,11 @@ from transformers.utils.import_utils import is_causal_conv1d_available, is_flash
 
 from src.models.patches.attention import GDN_MODEL_TYPE_PREFIXES, model_type_matches
 
+# Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend
+# (eager/SDPA/flex) a packed row runs as one causal sequence and documents attend across each other.
+# Packing is refused for them; a varlen kernel is their production path.
+DENSE_PACKING_LEAK_MODEL_TYPES = frozenset({"gpt_oss"})
+
 # Backends whose availability selects transformers' segment-aware GatedDeltaNet kernels; the torch
 # fallbacks ignore ``seq_idx``/``cu_seqlens`` and run a packed row as one document while attention
 # stays isolated. These are transformers' own fast-path predicates; re-spelling them as bare

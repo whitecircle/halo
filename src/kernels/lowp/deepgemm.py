@@ -1,8 +1,8 @@
 """Native fp8 / fp4 grouped MoE GEMM via DeepGEMM's on-device ``m_indices`` kernel: opt-in
-(``HALO_DEEPGEMM_NATIVE=1``) and not auto-selected, since it measures slower than bf16 at every shape
-tested here. Forward pads each expert's tokens to a 128-row segment (``m_indices`` maps rows to experts,
-``-1`` = pad); backward is bf16 ``F.grouped_mm`` on unpadded tokens. Requires the Blackwell image's
-``deep_gemm``.
+(``HALO_DEEPGEMM_NATIVE=1``) and not auto-selected, since its separate activation-quantization pass
+outweighs the low-precision matmul at training shapes. Forward pads each expert's tokens to a 128-row
+segment (``m_indices`` maps rows to experts, ``-1`` = pad); backward is bf16 ``F.grouped_mm`` on
+unpadded tokens. Requires the Blackwell image's ``deep_gemm``.
 """
 
 from __future__ import annotations

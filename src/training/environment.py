@@ -18,6 +18,7 @@ import datasets
 import torch.distributed as dist
 from accelerate.logging import get_logger
 from transformers import set_seed
+from transformers.trainer import TRAINER_STATE_NAME
 from transformers.trainer_utils import get_last_checkpoint
 
 from src.checkpoint.format import (
@@ -207,7 +208,7 @@ def detect_resume_checkpoint(training_config) -> str | None:
 
     # On a non-shared FS each node reads its own trainer_state.json, so verify everywhere.
     state_on_every_rank = (
-        checkpoint is None or rank_consensus(os.path.isfile(os.path.join(checkpoint, "trainer_state.json")))[0]
+        checkpoint is None or rank_consensus(os.path.isfile(os.path.join(checkpoint, TRAINER_STATE_NAME)))[0]
     )
     if not state_on_every_rank:
         raise RuntimeError(

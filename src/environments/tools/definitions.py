@@ -102,10 +102,10 @@ class NativeTool:
         """Keep only the arguments this tool declares in :attr:`parameters`.
 
         The argument dict is model-authored, and the handlers are ``functools.partial`` objects
-        carrying pre-bound safety keywords (sandbox ``timeout``, ``allow_imports``) that a call-time
-        keyword of the same name silently overrides — a model could raise its own execution timeout or
-        lift the import guard. Filtering against the declared schema (the same set advertised in
-        :meth:`to_openai_schema`) keeps a hallucinated or adversarial extra out of the handler.
+        carrying pre-bound safety keywords (the sandbox ``timeout``) that a call-time keyword of the
+        same name silently overrides — a model could raise its own execution timeout. Filtering
+        against the declared schema (the same set advertised in :meth:`to_openai_schema`) keeps a
+        hallucinated or adversarial extra out of the handler.
 
         A tool that declares no parameters has no schema to filter against — an MCP server may
         advertise a tool without ``properties`` — so its arguments pass through untouched rather than

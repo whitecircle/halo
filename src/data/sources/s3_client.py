@@ -45,6 +45,7 @@ __all__ = [
     "DEFAULT_BUCKET",
     "S3Client",
     "build_s3_uri",
+    "default_bucket",
     "exists",
     "has_control_json_mirror",
     "load_dataset_from_s3_uri",
@@ -52,7 +53,9 @@ __all__ = [
     "read_control_json_with_cache",
 ]
 
-DEFAULT_BUCKET = env_str("HALO_S3_DEFAULT_BUCKET") or "my-bucket"
+# No fallback name: a placeholder would address a real, globally named bucket someone else owns.
+DEFAULT_BUCKET = env_str("HALO_S3_DEFAULT_BUCKET")
+
 
 # Bounded so concurrency x each file's multipart connections stays within max_pool_connections=50.
 # Clamped rather than ``or``-defaulted: an explicit 0 would become 16 instead of the no-workers it
@@ -75,6 +78,16 @@ _STAGING_ID_RE = re.compile(r"^[0-9a-f]{8}/")
 # ordering gates. dataset_dict.json is the DatasetDict root gate and goes last of all.
 _DATASET_DICT_GATE = "dataset_dict.json"
 _SPLIT_GATE_BASENAME = "state.json"
+
+
+def default_bucket() -> str:
+    """The bucket a key-only S3 path lives in: ``HALO_S3_DEFAULT_BUCKET``, raising when it is unset."""
+    if not DEFAULT_BUCKET:
+        raise ValueError(
+            "No S3 bucket given: use a full s3://<bucket>/... URI (or --bucket), or set "
+            "HALO_S3_DEFAULT_BUCKET to your own bucket."
+        )
+    return DEFAULT_BUCKET
 
 
 def _parallel_s3_transfer(items: list, transfer_one: Callable[[Any], int], *, desc: str, show_progress: bool) -> None:
@@ -182,7 +195,7 @@ class S3Client:
     endpoint_url targets S3-compatible services.
     """
 
-    bucket: str = DEFAULT_BUCKET
+    bucket: str | None = None  # None takes default_bucket()
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     endpoint_url: str | None = None
@@ -192,6 +205,8 @@ class S3Client:
 
     def __post_init__(self):
         """Initialize the boto3 client and its transfer config."""
+        if self.bucket is None:
+            self.bucket = default_bucket()
         session_kwargs = {}
         if self.aws_access_key_id:
             session_kwargs["aws_access_key_id"] = self.aws_access_key_id
@@ -800,10 +815,10 @@ def _get_default_client() -> S3Client:
 
 
 def build_s3_uri(key: str, subfolder: str | None = None) -> str:
-    """Build a full S3 URI from key (+optional subfolder) under DEFAULT_BUCKET, without
+    """Build a full S3 URI from key (+optional subfolder) under :func:`default_bucket`, without
     constructing a client."""
     parts = [p for p in [subfolder, key] if p]
-    return f"s3://{DEFAULT_BUCKET}/{'/'.join(parts)}"
+    return f"s3://{default_bucket()}/{'/'.join(parts)}"
 
 
 def exists(key: str, subfolder: str | None = None) -> bool:

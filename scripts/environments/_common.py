@@ -16,13 +16,13 @@ from typing import Any
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from trl import ModelConfig
 
+from scripts._common import add_openai_endpoint_args
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P, THINKING_SCOPE_EPISODE, RolloutConfig
 from src.environments.base import BaseEnvironment
 from src.environments.episode import resolve_reasoning_end_token_id
 from src.environments.eval_runner import DEFAULT_REQUEST_TIMEOUT_S, trajectory_path, write_trajectories_jsonl
-from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
 from src.training.parser import H4ArgumentParser
 
 logger = logging.getLogger(__name__)
@@ -47,14 +47,7 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dataset", required=True, help="HF Hub id or local save_to_disk dir.")
     parser.add_argument("--config", default=None, help="Dataset config (e.g. 'all', 'verifiable', 'taco').")
     parser.add_argument("--split", default="test", help="Dataset split.")
-    parser.add_argument("--base_url", default=DEFAULT_LOCAL_BASE_URL, help="OpenAI-compatible base URL.")
-    parser.add_argument(
-        "--api_key",
-        default=resolve_local_api_key(),
-        help="API key (default: $VLLM_API_KEY, else $OPENAI_API_KEY, else the placeholder a keyless local "
-        "server accepts; OpenRouter requires a real key).",
-    )
-    parser.add_argument("--model", required=True, help="Served/model name.")
+    add_openai_endpoint_args(parser, model_help="Served/model name.")
     parser.add_argument(
         "--training_config",
         default=None,

@@ -324,15 +324,8 @@ def main():
         description="Merge EP-sharded checkpoint into standard HuggingFace format",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-This script is REQUIRED after saving with save_ep_model(sharded=True).
-Sharded checkpoints cannot be loaded directly - they must be merged first.
-
-Workflow:
-    1. Training: save_ep_model(model, output_dir, sharded=True)  # Fast parallel I/O
-    2. Merge: python scripts/after_training/merge_ep_shards.py --input_dir ... --output_dir ...
-    3. Load: load_ep_model(merged_dir, ep_config)  # Works with any EP size
-
-Alternative: Use save_ep_model(sharded=False) to skip the merge step.
+Required after a run with save_sharded_ep: true, whose per-rank shards load only once merged.
+A run with save_sharded_ep: false writes a gathered checkpoint that needs no merge.
 
 Examples:
     # Merge Qwen3 MoE EP checkpoint
@@ -344,10 +337,6 @@ Examples:
     python scripts/after_training/merge_ep_shards.py \\
         --input_dir checkpoints/gpt-oss-ep \\
         --output_dir checkpoints/gpt-oss-merged
-
-    # Then load the merged checkpoint
-    from src.distributed.expert_parallel.loading import load_ep_model
-    model = load_ep_model('checkpoints/gpt-oss-merged', ep_config)
         """,
     )
     parser.add_argument("--input_dir", required=True, help="Path to the per-rank sharded checkpoint")

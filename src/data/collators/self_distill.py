@@ -166,31 +166,21 @@ class SelfDistillTextCollator:
         NCCL watchdog fires.
         """
         self._tokenize([example[self.conversation_field]], [example], branch="student")
-        self._tokenize(
-            [
-                inject_privileged_hint(
-                    example[self.conversation_field],
-                    self.hint_template,
-                    example.get(self.answer_field),
-                    example.get(self.solution_field) if self.solution_field else None,
-                )
-            ],
-            [example],
-            branch="teacher",
-        )
+        self._tokenize([self._teacher_history(example)], [example], branch="teacher")
         return {}
+
+    def _teacher_history(self, example: dict[str, Any]) -> list[dict[str, Any]]:
+        """The row's conversation with its privileged hint appended to the last user turn."""
+        return inject_privileged_hint(
+            example[self.conversation_field],
+            self.hint_template,
+            example.get(self.answer_field),
+            example.get(self.solution_field) if self.solution_field else None,
+        )
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         student_histories = [ex[self.conversation_field] for ex in examples]
-        teacher_histories = [
-            inject_privileged_hint(
-                ex[self.conversation_field],
-                self.hint_template,
-                ex.get(self.answer_field),
-                ex.get(self.solution_field) if self.solution_field else None,
-            )
-            for ex in examples
-        ]
+        teacher_histories = [self._teacher_history(ex) for ex in examples]
 
         student = self._tokenize(student_histories, examples, branch="student")
         teacher = self._tokenize(teacher_histories, examples, branch="teacher")

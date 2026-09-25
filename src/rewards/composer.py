@@ -7,7 +7,7 @@ from src.rewards.judge import GenerativeJudge
 from src.rewards.reward_model import ServedRewardModel
 from src.rewards.samples import ScoringSample
 from src.rewards.scoring import Scorer, ScoreResult
-from src.rewards.spec import EnvironmentTerm, JudgeTerm, RewardModelTerm, RewardTerm
+from src.rewards.spec import EnvironmentTerm, JudgeTerm, RewardModelTerm, RewardTerm, require_unique_names
 
 # Which scorer stands behind each externally scored term type.
 SCORERS: dict[type[RewardTerm], type[Scorer]] = {JudgeTerm: GenerativeJudge, RewardModelTerm: ServedRewardModel}
@@ -37,9 +37,7 @@ class RewardComposer:
         environment_terms = [term for term in self.terms if isinstance(term, EnvironmentTerm)]
         if len(environment_terms) > 1:
             raise ValueError("a reward carries at most one environment term")
-        names = [term.name for term in self.terms]
-        if len(set(names)) != len(names):
-            raise ValueError(f"reward term names must be unique, got {names}")
+        require_unique_names("reward term", [term.name for term in self.terms])
         self.environment_term: EnvironmentTerm | None = environment_terms[0] if environment_terms else None
         self.external_terms = tuple(term for term in self.terms if not isinstance(term, EnvironmentTerm))
         self._scorers: dict[str, Scorer] | None = None

@@ -355,6 +355,13 @@ def test_kwargs_bool_vs_int_distinction():
     assert fp_true != fp_one, "True and 1 produced same fingerprint"
 
 
+def test_kwargs_list_order_is_part_of_the_key_and_set_order_is_not():
+    """A list's order is content (``label_list`` maps position to class id), so two orders must key
+    two caches; a set's iteration order is hash-seeded, so it must not."""
+    assert _get_kwargs_fingerprint({"label_list": ["a", "b"]}) != _get_kwargs_fingerprint({"label_list": ["b", "a"]})
+    assert _get_kwargs_fingerprint({"ids": {"a", "b"}}) == _get_kwargs_fingerprint({"ids": {"b", "a"}})
+
+
 def test_kwargs_name_or_path_takes_priority():
     """Object with both name_or_path and vocab_size should use name_or_path."""
 

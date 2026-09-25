@@ -131,7 +131,7 @@ def numeric_match(
         if abs(pred_num - exp_num) <= atol:
             return True
         return exp_num != 0 and abs(pred_num - exp_num) / abs(exp_num) <= rtol
-    except (ValueError, TypeError, AttributeError):
+    except ValueError:  # an expected answer that is not a number
         return False
 
 

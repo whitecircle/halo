@@ -97,8 +97,8 @@ def _shim_dispatchless_eager_attention(module) -> None:
 
     ``modeling_bailing_moe_v3`` (Ling 3.0) copies the helper without the ``ALL_ATTENTION_FUNCTIONS``
     lookup, so the requested implementation changes only the mask format while every layer still runs
-    the eager score matmul: an ``[B, H, S, S]`` bf16 plane plus its fp32 softmax copy, around 190 GiB
-    on a packed 80k row. The wrapper reads the attention module's own config per call, so everything
+    the eager score matmul: an ``[B, H, S, S]`` bf16 plane plus its fp32 softmax copy, quadratic in the
+    packed row. The wrapper reads the attention module's own config per call, so everything
     but ``sdpa`` keeps the file's own eager path. Replacing the module global is what makes it stick,
     since the forwards resolve ``eager_attention_forward`` by name at every call.
     """

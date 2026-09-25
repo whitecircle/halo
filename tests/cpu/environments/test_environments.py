@@ -874,7 +874,6 @@ def test_mcp_server_presets():
         assert "command" in config, f"Missing 'command' in {name}"
         assert "args" in config, f"Missing 'args' in {name}"
         assert "env" in config, f"Missing 'env' in {name}"
-        assert "description" in config, f"Missing 'description' in {name}"
 
         assert isinstance(config["args"], list), f"args should be list in {name}"
         assert isinstance(config["env"], list), f"env should be list in {name}"

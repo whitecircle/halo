@@ -167,7 +167,9 @@ language.
 
 `prompt` is the statement; `answer` the grading payload, a JSON string or dict — required
 (`requires_answer`), since the payload IS the test set a submission is graded against. A bare
-`{"test_cases": [...]}` and the full form are both accepted:
+list, `{"test_cases": [...]}` and the full form are accepted; a payload that is neither a list nor a
+dict, unparseable JSON included, fails the episode at reset, so the trainer drops it from the group
+baseline:
 
 ```json
 {"prompt": "<problem statement>",

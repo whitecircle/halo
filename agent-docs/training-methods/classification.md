@@ -14,7 +14,7 @@ The label set comes from the training split: stringified, sorted for determinist
 
 `ds["test"]` is the eval split — a `validation` split contributes labels only.
 
-`-1` is dropped from the label set. A multi-label row treats it as absence, but a single-label row keeps the raw value and reaches the loss as an out-of-range class index — the ignore sentinel is `-100`. Filter those rows out.
+`-1` marks an unlabeled row. A multi-label row treats it as absence and it is dropped from the label set; a single-label dataset carrying it is refused before the model load, since the row has no class and the loss would read `-1` as an out-of-range index. Filter those rows out.
 
 ## Configuration
 
@@ -91,7 +91,6 @@ Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu` and `tests/g
 Failure signatures:
 
 - `metric_for_best_model: auc_roc` raises — either `compute_auc_roc` is off, or an eval slice holds a class with no samples and the metric is undefined there. Rank on `accuracy`, `f1` or `mcc`.
-- `derive_class_weights` raises at construction: a `-1` label reached the count scan. Filter it out.
 - Documents silently shortened: `max_length` truncates rather than drops. Raise it when the label depends on the tail.
 
 ## Related pages

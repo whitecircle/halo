@@ -161,6 +161,34 @@ def test_checkpoint_round_trip_reconstructs_response_format(tmp_path):
     assert result.total_tokens == 5
 
 
+def test_checkpoint_round_trip_restores_the_sampled_token_ids(tmp_path):
+    """A resumed row must carry the ids it was sampled with, as the live response did: a caller that
+    asked for them (``return_token_ids``) reads ``None`` as "the engine returned none"."""
+    checkpoint_file = str(tmp_path / "requests.jsonl")
+    response = OpenAIResponse(answer="a", reasoning=None, finish_reason="stop", tool_calls=None, token_ids=[5, 6, 7])
+    append_openai_checkpoint(checkpoint_file, [(0, response)])
+
+    checkpoint = load_openai_checkpoint(checkpoint_file, result_count=1, response_format=None)
+
+    assert checkpoint.results[0] == response
+
+
+def test_checkpoint_loader_retries_a_record_that_fails_its_response_format(tmp_path):
+    """A structured record that no longer validates is re-requested, as a live response that fails
+    validation is, rather than handed back as a raw dict to a caller that asked for the model."""
+    checkpoint_file = tmp_path / "requests.jsonl"
+    checkpoint_file.write_text(
+        json.dumps({"index": 0, "result": {"answer": {"value": "not-an-int"}, "finish_reason": "stop"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    checkpoint = load_openai_checkpoint(str(checkpoint_file), result_count=1, response_format=StructuredAnswer)
+
+    assert checkpoint.processed_indices == set()
+    assert checkpoint.skipped_records == 1
+    assert checkpoint.results[0] is None
+
+
 def test_checkpoint_loader_skips_bad_records_and_retries_none_results(tmp_path):
     checkpoint_file = tmp_path / "requests.jsonl"
     checkpoint_file.write_text(

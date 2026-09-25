@@ -103,15 +103,20 @@ def resolve_attention_layout(model, pp_size: int = 1) -> tuple[AttentionLayout, 
     return layout, 1.0 if layout.source == "layers" else 1.0 / max(pp_size, 1)
 
 
-def estimate_attention_flops(model, seq_length: int, pp_size: int = 1, tp_size: int = 1) -> float:
-    """Attention-score FLOPS per token for documents of ``seq_length`` tokens, over this rank's
-    layers and its ``1 / tp_size`` share of every layer's heads. 0 without a config.
+def rank_attention_flops(layout: AttentionLayout, share: float, seq_length: int, tp_size: int = 1) -> float:
+    """Attention-score FLOPS per token for documents of ``seq_length`` tokens, over ``share`` of
+    ``layout`` (both from :func:`resolve_attention_layout`) and the rank's ``1 / tp_size`` share of
+    every layer's heads.
 
     The per-layer rule (full, sliding, chunked, sparse, compressed, none) and head width come from
     the layout; CP does not divide the term (already per-token).
     """
+    return layout.flops_per_token(seq_length) * share / max(tp_size, 1)
+
+
+def estimate_attention_flops(model, seq_length: int, pp_size: int = 1, tp_size: int = 1) -> float:
+    """:func:`rank_attention_flops` over this rank's resolved layout; 0 without a config."""
     resolved = resolve_attention_layout(model, pp_size)
     if resolved is None:
         return 0.0
-    layout, share = resolved
-    return layout.flops_per_token(seq_length) * share / max(tp_size, 1)
+    return rank_attention_flops(*resolved, seq_length, tp_size)

@@ -6,15 +6,12 @@ since only it knows the request identity.
 """
 
 import json
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from src.inference.response import OpenAIResponse
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -114,18 +111,17 @@ def _openai_response_from_checkpoint(
 ) -> OpenAIResponse:
     answer = result.get("answer")
     if response_format is not None and isinstance(answer, dict):
-        try:
-            answer = response_format.model_validate(answer)
-        except Exception as e:
-            logger.warning(
-                "Structured response failed %s validation; returning the raw unvalidated dict: %s",
-                response_format.__name__,
-                e,
-            )
+        # A ValidationError is a ValueError: the record is skipped and the request re-issued, as a
+        # live response that fails validation is.
+        answer = response_format.model_validate(answer)
 
     # A null answer is legitimate with tool_calls; only neither-present is genuinely corrupt.
     if answer is None and not result.get("tool_calls"):
         raise ValueError("checkpoint result is missing answer")
+
+    token_ids = result.get("token_ids")
+    if token_ids is not None and not (isinstance(token_ids, list) and all(type(t) is int for t in token_ids)):
+        raise TypeError("checkpoint token_ids must be a list of integers")
 
     finish_reason = result.get("finish_reason")
     reasoning = result.get("reasoning")
@@ -137,6 +133,7 @@ def _openai_response_from_checkpoint(
         prompt_tokens=_optional_int(result.get("prompt_tokens")),
         completion_tokens=_optional_int(result.get("completion_tokens")),
         total_tokens=_optional_int(result.get("total_tokens")),
+        token_ids=token_ids,
     )
 
 

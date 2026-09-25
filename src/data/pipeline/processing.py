@@ -319,14 +319,7 @@ def _get_kwargs_fingerprint(kwargs: dict) -> str:
                 parts.append(f"{key}={tok_sig}")
             elif isinstance(val, (str, int, float, bool)):
                 parts.append(f"{key}={val}")
-            elif isinstance(val, (list, tuple, set, frozenset)) and all(
-                isinstance(item, (str, int, float, bool, type(None))) for item in val
-            ):
-                # Sets are sorted first: their iteration order is hash-seeded, so the raw repr
-                # would key a different cache per process for identical content.
-                ordered = sorted(val, key=lambda item: (item is None, str(type(item)), str(item)))
-                parts.append(f"{key}={ordered!r}")
-            elif (content := _json_content_repr(val)) is not None:
+            elif (content := _scalar_collection_repr(val) or _json_content_repr(val)) is not None:
                 parts.append(f"{key}={content}")
             else:
                 if getattr(val, "tokenizer", None) is not None:

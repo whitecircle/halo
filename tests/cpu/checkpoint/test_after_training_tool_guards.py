@@ -108,9 +108,15 @@ def test_in_place_and_output_dir_together_are_contradictory(tmp_path):
         reset_sinks.reset_sinks(str(checkpoint), output_dir=str(tmp_path / "other"), in_place=True)
 
 
-def test_in_place_cannot_target_a_hub_repo_id(tmp_path):
-    with pytest.raises(ValueError, match="HuggingFace repo ID"):
-        reset_sinks.reset_sinks("org/model", in_place=True)
+@pytest.mark.parametrize("source", ["org/model", "missing-checkpoint"], ids=["hub-repo-id", "missing-path"])
+def test_in_place_needs_a_local_directory(source, tmp_path, monkeypatch):
+    """--in_place rewrites its source, so only a local directory qualifies: a Hub repo id and a
+    mistyped path, slash or not, are refused before anything is loaded."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(reset_sinks, "auto_load_model", lambda *a, **k: pytest.fail(f"--in_place loaded {source}"))
+
+    with pytest.raises(ValueError, match="not a local directory"):
+        reset_sinks.reset_sinks(source, in_place=True)
 
 
 def test_one_spelling_decides_what_a_sink_key_is():

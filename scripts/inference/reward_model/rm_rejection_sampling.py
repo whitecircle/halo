@@ -7,13 +7,13 @@ picks the shape: ``preference`` (default; DPO/SMPO chosen/rejected pairs) or ``o
 Usage:
     # Preference format (DPO/SMPO)
     python scripts/inference/reward_model/rm_rejection_sampling.py \
-        --model_name my-model \
+        --model my-model \
         --prompts_source data/prompts.jsonl \
         --rm_model_path path/to/reward-model
 
     # Offline GRPO format
     python scripts/inference/reward_model/rm_rejection_sampling.py \
-        --model_name my-model \
+        --model my-model \
         --prompts_source data/prompts.jsonl \
         --rm_model_path path/to/reward-model \
         --output_format offline_grpo
@@ -142,7 +142,7 @@ def build_preference_result(
         scores,
         row=row,
         id_field=args.id_field,
-        gen_model=args.model_name,
+        gen_model=args.model,
         correct_answer=correct_answer,
     )
     record["rm_model"] = args.rm_model_path
@@ -273,7 +273,7 @@ async def main():
 
     Path(args.output_folder).mkdir(parents=True, exist_ok=True)
     suffix = "offline_grpo" if args.output_format == "offline_grpo" else "rs"
-    output_path = build_output_path(args.output_folder, args.prompts_source, args.model_name, suffix)
+    output_path = build_output_path(args.output_folder, args.prompts_source, args.model, suffix)
 
     df = load_prompts_dataframe(args)
 
@@ -347,7 +347,7 @@ async def main():
             f" (failed={stats['failed']}, degenerate={stats['skipped_degenerate']}, "
             f"truncated={stats['skipped_truncated']}, overlong={stats['skipped_overlong']})"
         ),
-        check="--rm_model_path, --openai_base_url, --rm_max_seq_len and the input columns",
+        check="--rm_model_path, --base_url, --rm_max_seq_len and the input columns",
     )
     print(
         f"Results saved to {output_path} ({stats['written']} written, {stats['failed']} failed, "

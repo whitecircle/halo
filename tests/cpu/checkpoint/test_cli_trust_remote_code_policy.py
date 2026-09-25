@@ -17,10 +17,11 @@ never exposes the opt-out, or a tool that parses the flag and then hardcodes
 
 The same reasoning converged the source/destination flags on ``--input_dir`` / ``--output_dir``
 (``--model_id`` where the source may be a Hub repo); retired spellings are removed, not aliased. It
-converges the shard cap and the Hub source the same way: each is added by one helper
-(``add_max_shard_size_arg`` / ``add_hub_source_args``), and the assertions below read the sentence
-that helper writes out of ``--help`` — a re-typed flag lands off it, quietly shipping a different
-default or promising a pin the tool never threads. Which tools those two assertions cover is swept
+converges the shard cap, the Hub source, the dtype and the device map the same way: each is added by
+one helper (``add_max_shard_size_arg`` / ``add_hub_source_args`` / ``add_dtype_arg`` /
+``add_device_map_arg``), and the assertions below read what that helper declares off each tool's
+parser — a re-typed flag lands off it, quietly shipping a different spelling or default, or
+promising a pin the tool never threads. Which tools those two assertions cover is swept
 off the tree and read off each parser, so a new tool is covered by existing.
 
 Parser-level for the surface — no model is loaded, so this stays a fast CPU test that reads the exact
@@ -43,9 +44,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from datasets import DatasetDict
 
-from scripts._common import HUB_SOURCE_HELP, add_hub_source_args, add_max_shard_size_arg
+from scripts._common import (
+    HUB_SOURCE_HELP,
+    add_device_map_arg,
+    add_dtype_arg,
+    add_hub_source_args,
+    add_max_shard_size_arg,
+)
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.data.pipeline import preprocessing
 from tests.common.utils import REPO_ROOT, load_script_module
 
 # (tool, the default its input source earns). Every standalone tool that executes a checkpoint's own
@@ -175,6 +184,9 @@ _MAX_SHARD_SIZE_TOOLS = tuple(path for path in _tool_paths() if "--max_shard_siz
 _HUB_SOURCE_TOOLS = tuple(
     (path, path not in _NO_REVISION_TOOLS) for path in _tool_paths() if "--model_id" in _tool_options(path)
 )
+# Every tool with a dtype flag in any spelling, so a re-spelled one (``--torch_dtype``) is swept too.
+_DTYPE_TOOLS = tuple(path for path in _tool_paths() if any("dtype" in option for option in _tool_options(path)))
+_DEVICE_MAP_TOOLS = tuple(path for path in _tool_paths() if "--device_map" in _tool_options(path))
 
 
 def test_the_derived_rosters_cover_the_tool_tree():
@@ -189,6 +201,8 @@ def test_the_derived_rosters_cover_the_tool_tree():
     )
     assert len(_MAX_SHARD_SIZE_TOOLS) >= 8, _MAX_SHARD_SIZE_TOOLS
     assert len(_HUB_SOURCE_TOOLS) >= 4, _HUB_SOURCE_TOOLS
+    assert len(_DTYPE_TOOLS) >= 3, _DTYPE_TOOLS
+    assert len(_DEVICE_MAP_TOOLS) >= 3, _DEVICE_MAP_TOOLS
     assert set(paths) >= _NO_REVISION_TOOLS, sorted(_NO_REVISION_TOOLS - set(paths))
 
 
@@ -292,6 +306,39 @@ def test_the_hub_source_flags_are_the_shared_ones(relative_path: str, threads_re
         )
 
 
+def _declared_action(parser: argparse.ArgumentParser, flag: str) -> argparse.Action:
+    return next(action for action in parser._actions if flag in action.option_strings)
+
+
+def _shared_action(add_arg: Callable[[argparse.ArgumentParser], object], flag: str) -> argparse.Action:
+    """The action ``add_arg`` declares for ``flag`` on an otherwise empty parser."""
+    parser = argparse.ArgumentParser(add_help=False)
+    add_arg(parser)
+    return _declared_action(parser, flag)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "flag", "add_arg"),
+    [(path, "--dtype", add_dtype_arg) for path in _DTYPE_TOOLS]
+    + [(path, "--device_map", add_device_map_arg) for path in _DEVICE_MAP_TOOLS],
+)
+def test_the_load_flags_are_the_shared_ones(relative_path: str, flag: str, add_arg: Callable):
+    """``--dtype`` and ``--device_map`` carry one spelling, default and choice set across the tools,
+    so a command line moves between tools chained over one artifact; a re-typed one drifts on each
+    (``--torch_dtype``, a ``bf16`` default beside a ``bfloat16`` one)."""
+    parser = _tool_parser(relative_path)
+    name = flag.lstrip("-")
+    spellings = sorted(option for action in parser._actions for option in action.option_strings if name in option)
+    assert spellings == [flag], f"{relative_path} spells its {name} flag {spellings}; add it with {add_arg.__name__}"
+
+    declared, shared = _declared_action(parser, flag), _shared_action(add_arg, flag)
+    for field in ("default", "choices", "help"):
+        assert getattr(declared, field) == getattr(shared, field), (
+            f"{relative_path} re-types {flag} ({field}={getattr(declared, field)!r}, shared "
+            f"{getattr(shared, field)!r}); add it with {add_arg.__name__}(parser)"
+        )
+
+
 @pytest.mark.parametrize(("relative_path", "source_flag", "build_source", "load_site"), _LOAD_SITES)
 def test_the_parsed_trust_remote_code_reaches_the_first_load(
     relative_path: str,
@@ -334,6 +381,38 @@ def test_the_parsed_trust_remote_code_reaches_the_first_load(
             f"trust_remote_code={seen.get('trust_remote_code')!r}, expected {expected!r}: the flag is "
             f"parsed but not threaded into the load, so --help promises a policy the tool ignores"
         )
+
+
+def test_prepare_dataset_threads_the_flag_into_the_label_bake_config_read(tmp_path: Path, monkeypatch):
+    """The tokenizer load is not the tool's only remote-code site: the completion-only bake reads the
+    model config for its eos set. Driven from ``main()`` into the real read, with the Hub call and
+    the dataset stubbed, so a flag that stops at the tokenizer fails here."""
+    module = load_script_module("scripts/before_training/prepare_dataset.py", "prepare_dataset_config_read")
+    seen: list[object] = []
+
+    class _ConfigRead(Exception):
+        """Carries control out of the bake at its config read."""
+
+    def _record(*_args, **kwargs):
+        seen.append(kwargs.get("trust_remote_code"))
+        raise _ConfigRead
+
+    def _bake(*, dataset, tokenizer_or_processor, config, output_dir):
+        preprocessing._resolve_config_eos_token_ids(config, tokenizer_or_processor)
+
+    monkeypatch.setattr(preprocessing.AutoConfig, "from_pretrained", _record)
+    monkeypatch.setattr(module, "setup_tokenizer", lambda args: object())
+    monkeypatch.setattr(module, "load_input_dataset", lambda args: DatasetDict())
+    monkeypatch.setattr(module, "preprocess_dataset", _bake)
+    argv = ["--input", "org/raw", "--output", str(tmp_path / "out"), "--model-name", "org/model"]
+    argv += ["--assistant-message-template", "<|im_start|>assistant\n"]
+
+    for extra, expected in (([], True), (["--trust_remote_code"], True), (["--no-trust_remote_code"], False)):
+        seen.clear()
+        monkeypatch.setattr(sys, "argv", ["prepare_dataset.py", *argv, *extra])
+        with pytest.raises(_ConfigRead):
+            module.main()
+        assert seen == [expected], f"{extra or '(default)'}: the config read ran with trust_remote_code={seen}"
 
 
 if __name__ == "__main__":

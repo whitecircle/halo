@@ -146,7 +146,7 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | Step-3.7 Flash | isolated on SDPA and eager, no patch needed — the forward feeds `position_ids` into both mask constructions (full and sliding); bit-exact through dense layers, MoE layers add expert-summation reduction noise (~1e-7 fp32). Training path only: a live cache suppresses the packed mask (`use_cache=False`, as DeepSeek-V4) | — |
 
 The GPT-OSS leak is the one case the toolkit refuses outright: `select_data_collator` raises for
-`DENSE_PACKING_LEAK_MODEL_TYPES` (`src/data/collators/factory.py`) when packing is asked for on a
+`DENSE_PACKING_LEAK_MODEL_TYPES` (`src/models/segment_markers.py`) when packing is asked for on a
 non-varlen backend. Pin `flash_attention_2` or turn packing off. The refusal reads the text
 sub-config too, so a composite (VLM) wrapper around a leaking family is covered.
 

@@ -16,13 +16,13 @@ Run: pytest tests/cpu/inference/test_drop_accounting.py
 import argparse
 import asyncio
 import json
+import logging
 import signal
 import sys
 import types
 
 import pandas as pd
 import pytest
-from loguru import logger as loguru_logger
 
 from scripts.inference import _common
 from scripts.inference.reward_model import _common as rm_common
@@ -60,7 +60,7 @@ def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path)
         "argv",
         [
             "rm_scoring.py",
-            "--model_name",
+            "--model",
             "gen-model",
             "--prompts_source",
             str(prompts),
@@ -91,7 +91,7 @@ class _TruncatingClient:
 
 def _rm_args(**overrides):
     args = types.SimpleNamespace(
-        model_name="gen-model",
+        model="gen-model",
         temperature=0.0,
         max_gen_tokens=8,
         id_field="id",
@@ -134,7 +134,7 @@ def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_pat
         "argv",
         [
             "rm_scoring.py",
-            "--model_name",
+            "--model",
             "gen-model",
             "--prompts_source",
             str(prompts),
@@ -188,21 +188,12 @@ def test_an_interrupt_exits_with_the_shell_convention_for_a_signalled_process(si
     assert excinfo.value.code == 128 + signum
 
 
-def test_the_saved_progress_hint_survives():
-    """The non-zero exit is only actionable with the resume instruction beside it.
+def test_the_saved_progress_hint_survives(caplog):
+    """The non-zero exit is only actionable with the resume instruction beside it."""
+    with caplog.at_level(logging.INFO, logger=_common.__name__), pytest.raises(SystemExit):
+        _common._signal_handler(signal.SIGINT, None)
 
-    Read off a loguru sink rather than ``capsys``: the CLI logs through loguru, whose handler binds
-    to the real stderr at import and never reaches pytest's capture.
-    """
-    lines: list[str] = []
-    sink_id = loguru_logger.add(lines.append, format="{message}")
-    try:
-        with pytest.raises(SystemExit):
-            _common._signal_handler(signal.SIGINT, None)
-    finally:
-        loguru_logger.remove(sink_id)
-
-    assert any("resume by re-running" in line for line in lines), lines
+    assert any("resume by re-running" in message for message in caplog.messages), caplog.messages
 
 
 # --- rm_rejection_sampling: a dying worker is never mistaken for a drained queue ------------------

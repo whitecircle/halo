@@ -3,8 +3,6 @@
 import hashlib
 
 import numpy as np
-import torch
-import torch.distributed as dist
 from accelerate.logging import get_logger
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
@@ -14,9 +12,9 @@ from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.sources.paths import DATA_FILE_BUILDERS, parse_dataset_source, parse_hub_spec
 from src.data.sources.s3_client import load_dataset_from_s3_uri
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
-from src.data.vlm import VLM_IMAGE_COLUMNS, carried_image_columns
+from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_RAW_IMAGE_COLUMNS, carried_image_columns
 from src.distributed.filesystem import fs_aware_main_first, store_join_recorded_failure
-from src.distributed.runtime import current_device, get_global_world_size
+from src.distributed.runtime import get_global_world_size, rank_consensus
 
 # INFO opt-in (the convention vlm_setup and the training scripts use): this module's INFO lines are
 # the run's only record of what data actually loaded (columns kept, split sizes, source dispatch).
@@ -37,11 +35,10 @@ _DEFAULT_DATA_SEED = 42
 _FALLBACK_CONVERSATION_FIELD = "conversation"
 _UNDECLARED = object()
 
-# The image-column spellings a vision route hard-codes: TRL's preference trainers read them off the
-# first sample to pick the vision branch, and list only these two among their signature columns. A
-# run that declares its images elsewhere is aliased onto the first (:func:`alias_images_column`).
-_VISION_ROUTE_COLUMN = "images"
-_VISION_ROUTE_COLUMNS = (_VISION_ROUTE_COLUMN, "image")
+# TRL's preference trainers read the raw image spellings off the first sample to pick the vision
+# branch, and list only these among their signature columns. A run that declares its images
+# elsewhere is aliased onto the first (:func:`alias_images_column`).
+_VISION_ROUTE_COLUMN = VLM_RAW_IMAGE_COLUMNS[0]
 # The tools column TRL's RewardTrainer hands to the chat template (:func:`alias_tools_column`).
 _TOOLS_ROUTE_COLUMN = "tools"
 
@@ -183,12 +180,11 @@ def _reject_divergent_split_presence(dataset: DatasetDict, path: str) -> None:
     """
     if get_global_world_size() <= 1:
         return
-    splits = ("train", "test")
-    present = torch.tensor([1 if name in dataset else 0 for name in splits], device=current_device())
-    anywhere, everywhere = present.clone(), present.clone()
-    dist.all_reduce(anywhere, op=dist.ReduceOp.MAX)
-    dist.all_reduce(everywhere, op=dist.ReduceOp.MIN)
-    diverged = [name for name, hi, lo in zip(splits, anywhere.tolist(), everywhere.tolist(), strict=True) if hi != lo]
+    diverged = []
+    for name in ("train", "test"):
+        everywhere, anywhere = rank_consensus(name in dataset)
+        if anywhere and not everywhere:
+            diverged.append(name)
     if diverged:
         raise ValueError(
             f"Dataset {path} loaded split(s) {diverged} on some ranks but not others — the per-rank "
@@ -383,7 +379,7 @@ def alias_images_column(dataset: DatasetDict, images_field: str | None, path: st
     verdicts identical.
     """
     return _alias_render_column(
-        dataset, "images_field", images_field, _VISION_ROUTE_COLUMN, _VISION_ROUTE_COLUMNS, path
+        dataset, "images_field", images_field, _VISION_ROUTE_COLUMN, VLM_RAW_IMAGE_COLUMNS, path
     )
 
 

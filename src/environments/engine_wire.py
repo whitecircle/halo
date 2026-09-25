@@ -52,9 +52,8 @@ def _extract_token_ids(choice: dict[str, Any]) -> list[int] | None:
 
 
 def _extract_token_logprobs(choice: dict[str, Any]) -> list[float] | None:
-    """Recover the per-token sampling log-probs from a choice's ``logprobs.content``. Returns None if
-    logprobs are absent or any entry lacks a numeric ``logprob``. Diagnostic only (entropy-collapse
-    early warning)."""
+    """Recover the sampled tokens' behavior-policy log-probs (the IS correction's input) from a choice's
+    ``logprobs.content``. Returns None if logprobs are absent or any entry lacks a numeric ``logprob``."""
     content = _logprob_entries(choice)
     if content is None:
         return None

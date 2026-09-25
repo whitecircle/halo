@@ -28,7 +28,7 @@ from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizer
 
 from scripts._common import add_trust_remote_code_arg
 from src.checkpoint.tool_io import DISPLACED_SUFFIX, clear_staging_path
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
+from src.data.pipeline.preprocessed_metadata import PACKING_STRATEGIES, PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset
 from src.data.pipeline.processing import resolve_map_num_proc
 from src.data.pipeline.tokenizer_backend import TOKENIZER_BACKENDS
@@ -72,7 +72,8 @@ def parse_args():
         "--model-name",
         "-m",
         required=True,
-        help="Model name or path for tokenizer",
+        help="Model checkpoint (name or path): its tokenizer, and its config.json for the "
+        "completion-only mask's turn terminators",
     )
     parser.add_argument(
         "--max-length",
@@ -160,7 +161,7 @@ def parse_args():
     parser.add_argument(
         "--packing-strategy",
         default="bfd",
-        choices=["bfd", "bfd_split", "wrapped"],
+        choices=PACKING_STRATEGIES,
         help="TRL packing strategy: 'bfd' (best-fit-decreasing, keeps document boundaries but "
         "DISCARDS the overflow past --max-length), 'bfd_split' (same packing, overflow split into "
         "later examples — the lossless choice for pre-training), or 'wrapped' (concatenate-and-chunk "
@@ -577,6 +578,7 @@ def main():
         num_shards=args.num_shards,
         num_proc=resolve_map_num_proc(args.num_proc),
         tokenizer_backend=args.tokenizer_backend,
+        trust_remote_code=args.trust_remote_code,
         is_vlm=args.vlm,
         min_pixels=args.min_pixels,
         max_pixels=args.max_pixels,

@@ -79,7 +79,7 @@ crashing mid-run. These are the ones that come up:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `HALO_S3_DEFAULT_BUCKET` | `my-bucket` (placeholder) | bucket for the key-only S3 helpers when a path names none — set it before using them |
+| `HALO_S3_DEFAULT_BUCKET` | unset | bucket for the key-only S3 helpers when a path names none — they raise until it is set |
 | `HALO_DATASET_NUM_PROC` | `max(1, min(cpus/4, 4))` | dataset map/filter workers; pin it fleet-wide on heterogeneous nodes |
 | `HALO_FP32_MATMUL_PRECISION` | `highest` | fp32 matmul mode; `high` opts back into TF32, which corrupts long-context RoPE — leave it alone |
 | `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | `100` | device-side spin budget of the dispatch/combine barrier — bounds rank skew |

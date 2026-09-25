@@ -96,6 +96,9 @@ def checkpoint_dir(tmp_path):
     # A Llama/Mistral-style vendor weight dump: the raw format beside the transformers one.
     (src / "original").mkdir()
     save_file({"tok_embeddings.weight": torch.ones(2, 2)}, str(src / "original" / "consolidated.safetensors"))
+    # gpt-oss's Metal-runtime dump of the same weights.
+    (src / "metal").mkdir()
+    (src / "metal" / "model.bin").write_bytes(b"x")
     return src
 
 
@@ -174,8 +177,9 @@ def test_a_vendor_weight_dump_directory_stays_behind(checkpoint_dir, tmp_path):
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
-    assert not (out / "original").exists(), "a vendor weight dump is weights, not aux data"
-    assert "original/*" in WEIGHT_FILE_IGNORE_PATTERNS, "the hub download must drop what the local copy drops"
+    for dump in ("original", "metal"):
+        assert not (out / dump).exists(), f"the {dump}/ vendor weight dump is weights, not aux data"
+        assert f"{dump}/*" in WEIGHT_FILE_IGNORE_PATTERNS, "the hub download must drop what the local copy drops"
     # Not a prefix match: original_adapter_config/ IS aux data (asserted copied above).
     assert (out / "original_adapter_config").exists()
 

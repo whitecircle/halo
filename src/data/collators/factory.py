@@ -11,21 +11,19 @@ from src.data.collators.packing import (
     DataCollatorWithFlatteningAndCompletionMask,
     DataCollatorWithPacking,
 )
-from src.data.spans import resolve_eos_token_ids, verify_marker_renders_in_chat_template
+from src.data.spans import require_response_marker, resolve_eos_token_ids, verify_marker_renders_in_chat_template
 from src.models.patches.attention import (
     VARLEN_ATTN_IMPLEMENTATIONS,
     effective_attn_implementation,
     model_type_matches,
 )
-from src.models.segment_markers import require_segment_aware_kernels, segment_markers_for
+from src.models.segment_markers import (
+    DENSE_PACKING_LEAK_MODEL_TYPES,
+    require_segment_aware_kernels,
+    segment_markers_for,
+)
 
 logger = get_logger(__name__)
-
-# Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend
-# (eager/SDPA/flex) a packed row runs as one causal sequence and documents attend across each other.
-# Packing is refused for them; a varlen kernel is their production path. Isolation matrix:
-# ``agent-docs/data/collators.md``.
-DENSE_PACKING_LEAK_MODEL_TYPES = frozenset({"gpt_oss"})
 
 
 def _validate_collator_options(
@@ -102,12 +100,8 @@ def _validate_collator_options(
                 "per_device_train_batch_size at 1 and scale the batch with "
                 "gradient_accumulation_steps (pipeline parallelism excepted: it keeps the rows and "
                 "splits them into microbatches). Expected on models that cannot run a varlen "
-                "kernel (Gemma 4's head_dim=512, GLM-5 Next/Step-3.7/Inkling, Bailing/Ling's dispatchless "
-                "remote code). "
-                "Isolation is family-dependent — mixers without a reachable boundary parameter "
-                "(Zaya CCA, DeepSeek-V4 compressors, Inkling convs, Bailing and GLM-5 KDA) "
-                "carry state across document boundaries on every backend; see "
-                "agent-docs/data/collators.md.",
+                "kernel. Isolation is family-dependent: the families whose mixers carry state across "
+                "document boundaries on every backend are listed in agent-docs/data/collators.md.",
                 attn_impl,
             )
 
@@ -118,8 +112,7 @@ def _validate_collator_options(
             "Please disable padding_free when using CP."
         )
 
-    if train_on_completions_only and assistant_message_template is None:
-        raise ValueError("train_on_completions_only=True requires assistant_message_template to be set")
+    require_response_marker(assistant_message_template, train_on_completions_only, "select_data_collator")
 
     if train_on_completions_only and getattr(tokenizer, "chat_template", None):
         verify_marker_renders_in_chat_template(tokenizer, assistant_message_template)

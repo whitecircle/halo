@@ -17,6 +17,7 @@ from types import MethodType, ModuleType
 import torch
 import torch.nn as nn
 from accelerate.logging import get_logger
+from fla.modules import FusedRMSNormGated
 from liger_kernel.transformers import LigerRMSNorm
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.monkey_patch import _patch_rms_norm_module
@@ -265,11 +266,8 @@ def _fused_gated_rms_norm_class(original: type) -> type:
 
     Liger has no gated-norm kernel; `flash-linear-attention`, already a dependency for this roster's
     delta-rule kernels, provides one. It keeps the weight multiply in fp32 where the eager modules round
-    first — a deliberate deviation from the bit-for-bit rule, on the more accurate side. Imported inside
-    the factory because ``fla`` is slow to import and probes Triton at import time, while the
-    orchestrator is on the import path of every run and every CPU test.
+    first — a deliberate deviation from the bit-for-bit rule, on the more accurate side.
     """
-    from fla.modules import FusedRMSNormGated  # noqa: PLC0415 — heavy GPU-only kernel dependency
 
     class _FusedGatedRMSNorm(original):
         def __init__(self, *args, **kwargs):
@@ -383,8 +381,7 @@ def _patch_instance(model, spec: LigerFamilySpec, flags: dict) -> None:
                 and getattr(type(module), _PATCHED_MARKER, None) != "gated_rms_norm"
             ):
                 _bridge_gated_norm(module)
-                # Resolved on first need: building it imports `fla`, and every instance is already
-                # fused when the class swap ran at load.
+                # Resolved on first need: every instance is already fused when the class swap ran at load.
                 gated_forward = gated_forward or _fused_gated_rms_norm_class(type(module)).forward
                 module.forward = MethodType(gated_forward, module)
     if _glu_flag_on(flags):

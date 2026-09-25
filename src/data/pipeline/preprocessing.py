@@ -18,7 +18,11 @@ from PIL.Image import DecompressionBombError
 from transformers import AutoConfig, PreTrainedTokenizer
 
 from src.data.pipeline.conversation import maybe_parse_json
-from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, PreprocessingConfig
+from src.data.pipeline.preprocessed_metadata import (
+    PACKING_STRATEGIES,
+    PreprocessedDatasetMetadata,
+    PreprocessingConfig,
+)
 from src.data.pipeline.processing import (
     coordinated_filter,
     coordinated_map,
@@ -41,7 +45,6 @@ from src.data.spans import (
     PACKED_SPAN_POLICY,
     build_completion_only_labels,
     mask_batch_to_completion_spans,
-    require_response_marker,
     resolve_eos_token_ids,
     tokenize_response_template,
 )
@@ -79,8 +82,8 @@ def _completion_only_labels(
     tokenizer: PreTrainedTokenizer,
     assistant_template: str,
     response_token_ids: list[int],
+    eos_token_ids: frozenset[int],
     extra_ignore_token_ids: tuple[int, ...] = (),
-    eos_token_ids: frozenset[int] | None = None,
     span_policy: dict[str, bool] | None = None,
 ) -> list[int]:
     """Completion-only loss labels for one tokenized example, baked with a named span policy.
@@ -97,7 +100,7 @@ def _completion_only_labels(
     batch = mask_batch_to_completion_spans(
         batch,
         response_token_ids,
-        eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(tokenizer),
+        eos_token_ids,
         ignore_index=LABEL_IGNORE_INDEX,
         train_on_last_assistant_only=False,
         response_prompt_template=assistant_template,
@@ -109,15 +112,12 @@ def _completion_only_labels(
 
 
 def _resolve_config_eos_token_ids(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) -> frozenset[int]:
-    """Assistant-turn terminator ids for preprocessing — load the model's HF config (for its
-    ``eos_token_id`` list) and fold in the tokenizer's eos/pad. Falls back to tokenizer-only on a
-    config-load failure so preprocessing never hard-fails on a metadata read.
+    """Assistant-turn terminator ids for the label bake: the model config's ``eos_token_id`` list
+    folded with the tokenizer's eos, the same set the runtime collator masks with. An unreadable
+    config raises: a tokenizer-only set would bake masks that differ from the runtime ones for
+    templates whose turn terminators only the config lists (GLM-4).
     """
-    try:
-        hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=True)
-    except Exception as exc:  # config read is best-effort; tokenizer eos/pad still apply
-        logger.warning(f"Could not load model config for eos_token_id resolution ({exc}); using tokenizer eos/pad.")
-        hf_config = None
+    hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
     return resolve_eos_token_ids(tokenizer, hf_config)
 
 
@@ -310,10 +310,6 @@ def tokenize_vlm_dataset(
 
     processor = resolve_processor_backend(processor, config.tokenizer_backend)
     tokenizer = resolve_tokenizer(processor)
-
-    require_response_marker(
-        config.assistant_message_template, config.train_on_completions_only, "VLM offline preprocessing"
-    )
 
     eos_token_ids = _resolve_config_eos_token_ids(config, tokenizer) if config.train_on_completions_only else None
     response_token_ids = (
@@ -596,10 +592,10 @@ def preprocess_dataset(
         raise ValueError("Packing is not supported for VLM datasets. Set pack_sequences=False when using is_vlm=True.")
 
     # Reject an invalid packing strategy here rather than failing deep inside trl.pack_dataset.
-    if config.pack_sequences and config.packing_strategy not in {"bfd", "bfd_split", "wrapped"}:
+    if config.pack_sequences and config.packing_strategy not in PACKING_STRATEGIES:
         raise ValueError(
             f"Invalid packing_strategy '{config.packing_strategy}'. "
-            "TRL pack_dataset only accepts 'bfd', 'bfd_split' or 'wrapped'."
+            f"TRL pack_dataset only accepts {list(PACKING_STRATEGIES)}."
         )
 
     _reject_unconsumed_image_columns(dataset, config)
