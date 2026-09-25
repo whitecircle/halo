@@ -50,6 +50,9 @@ from src.training.script_runner import (
 
 logger = get_logger(__name__, log_level="INFO")
 
+# A "no label" row, in the stringified form get_label_list gives every label.
+NO_LABEL_SENTINEL = "-1"
+
 
 def tokenize_classification_row(
     example: dict,
@@ -92,14 +95,13 @@ def tokenize_classification_row(
         if is_multi_label:
             ids = [0.0] * len(label_to_id)
             for label in example["label"]:
-                # get_label_list stringifies every key and drops the "-1" sentinel, so the lookup does both.
-                # Skipping the sentinel is the multi-hot analogue of the single-label pass-through: absence = slot 0.
-                if str(label) == "-1":
+                # The label set is stringified and carries no "-1" sentinel: in a multi-hot row it is absence.
+                if str(label) == NO_LABEL_SENTINEL:
                     continue
                 ids[label_to_id[str(label)]] = 1.0
             tokenized["label"] = ids
         else:
-            tokenized["label"] = label_to_id[str(example["label"])] if example["label"] != -1 else -1
+            tokenized["label"] = label_to_id[str(example["label"])]
 
     return tokenized
 
@@ -119,6 +121,27 @@ def require_prompt_or_text_column(train_columns: list[str], text_field: str | No
         f"(columns: {sorted(train_columns)}). Provide a 'prompt' conversation column or set "
         f"text_field to a raw-text column."
     )
+
+
+def drop_no_label_sentinel(label_list: list[str], is_multi_label: bool) -> list[str]:
+    """The stringified label set without the ``-1`` "no label" sentinel, refusing it on single-label data.
+
+    A multi-hot row reads the sentinel as absence. A single-label row has no class to put it in:
+    ``-1`` would reach the cross-entropy as an out-of-range class index. Runs on the world-agreed
+    label set, before the model load, so every rank raises together.
+    """
+    if NO_LABEL_SENTINEL not in label_list:
+        return label_list
+    if not is_multi_label:
+        raise ValueError(
+            f"The single-label dataset carries the {NO_LABEL_SENTINEL!r} 'no label' sentinel (an unlabeled "
+            f"row, as in GLUE-style test splits). A single-label row has no class to put it in, and "
+            f"the loss would read it as an out-of-range class index. Filter those rows out, e.g. "
+            f"dataset.filter(lambda row: str(row['label']) != '-1')."
+        )
+    if is_global_main_process():
+        logger.warning(f"Label {NO_LABEL_SENTINEL} found in label list, removing it.")
+    return [label for label in label_list if label != NO_LABEL_SENTINEL]
 
 
 def get_label_list(raw_dataset, split="train") -> list[str]:
@@ -183,12 +206,7 @@ def main():
             union.update(part or [])
         label_list = list(union)
 
-    # label_list is fully stringified above, so the sentinel is the string "-1".
-    if "-1" in label_list:
-        if is_global_main_process():
-            logger.warning("Label -1 found in label list, removing it.")
-        label_list = [lbl for lbl in label_list if lbl != "-1"]
-
+    label_list = drop_no_label_sentinel(label_list, is_multi_label)
     label_list.sort()
     num_labels = len(label_list)
     if num_labels <= 1:

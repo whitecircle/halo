@@ -14,7 +14,7 @@ The label set comes from the training split: stringified, sorted for determinist
 
 `ds["test"]` is the eval split — a `validation` split contributes labels only.
 
-`-1` is dropped from the label set. A multi-label row treats it as absence, but a single-label row keeps the raw value and reaches the loss as an out-of-range class index — the ignore sentinel is `-100`. Filter those rows out.
+`-1` marks an unlabeled row. A multi-label row treats it as absence and it is dropped from the label set; a single-label dataset carrying it is refused before the model load, since the row has no class and the loss would read `-1` as an out-of-range index. Filter those rows out.
 
 ## Configuration
 
