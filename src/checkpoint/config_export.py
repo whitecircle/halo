@@ -3,7 +3,8 @@
 transformers' serialization is not the artifact contract: a vendor class may drop ``model_type``, a
 pinned rollout server may need flat legacy keys the current schema folds away, and a remote-code
 family may need the source repo's own schema plus the modules its ``auto_map`` names. Each rewrite is
-a no-op for a family that needs none, so writers call the whole set rather than selecting.
+a no-op for a family that needs none, so writers call the whole set rather than selecting. The same
+finalizer tags the directory's Hub model card.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from transformers.dynamic_module_utils import custom_object_save, get_relative_i
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import CONFIG_NAME, cached_file
 
+from src.checkpoint.model_card import tag_exported_model_card
 from src.models.loading.config_levels import config_export_ready
 from src.models.moe_balancing import (
     ep_roster_registered,
@@ -349,6 +351,7 @@ def finalize_exported_config(config, output_dir: str, *, source: str | None) -> 
     ``model_type`` restored for vendor classes declaring none, the flat legacy per-layer keys the
     pinned servers read, and the source repo's own schema where the family declares it. Each is a
     no-op for a family that needs none, so the writers call the whole set rather than selecting.
+    The directory's ``README.md`` card then gets the Halo Hub tag (:func:`tag_exported_model_card`).
 
     One function because the parallel writers and the single-GPU save must produce the same
     directory: a checkpoint missing any of these trains normally and fails only in the merge tools or
@@ -363,6 +366,7 @@ def finalize_exported_config(config, output_dir: str, *, source: str | None) -> 
     restore_model_type(config, output_dir)
     export_legacy_per_layer_config(output_dir)
     export_source_config_schema(config, output_dir, source=source)
+    tag_exported_model_card(output_dir)
 
 
 def save_model_config(model, output_dir: str) -> None:

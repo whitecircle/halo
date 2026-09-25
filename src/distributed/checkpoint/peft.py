@@ -34,6 +34,7 @@ from src.checkpoint.format import (
     PROVENANCE_GPT_OSS_SINKS,
     TRAINING_PROVENANCE_FILE,
 )
+from src.checkpoint.model_card import tag_model_card
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import KEY_PREVIEW_COUNT, consensus_read
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
@@ -105,6 +106,9 @@ class PeftAdapterSaver:
         saved = self._save_adapter_files(ctx, peft_model, output_dir)
         if saved and ctx.is_save_rank:
             self._write_training_provenance(ctx.model, output_dir)
+            # The hand-written branches write no card, and PEFT's own save_pretrained rebuilds the
+            # card's tags from the base model's model_tags, which only a finalize_run_model load carries.
+            tag_model_card(output_dir)
         return saved
 
     def _save_adapter_files(self, ctx: CheckpointContext, peft_model: PeftModel, output_dir: str) -> bool:

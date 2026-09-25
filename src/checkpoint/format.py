@@ -31,6 +31,7 @@ from transformers.core_model_loading import PrefixChange, revert_weight_conversi
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from src.checkpoint.config_export import save_model_config
+from src.checkpoint.model_card import is_staged_card, tag_exported_model_card
 from src.models.moe_balancing import balancing_param_keys
 from src.models.structure import fp32_pinned_param_names, norm_param_keys, strip_peft_adapter_segment
 
@@ -405,7 +406,13 @@ def copy_checkpoint_aux_files(
     input_dir: str, output_dir: str, *, include_resume_sidecars: bool = True, verbose: bool = False
 ) -> None:
     """Copy a checkpoint's non-weight files (config, tokenizer, chat template, remote-code .py, …)
-    from ``input_dir`` to ``output_dir`` verbatim.
+    from ``input_dir`` to ``output_dir`` verbatim, then tag the output's Hub model card.
+
+    Every tool that builds an export out of a source directory runs this copy, including the ones
+    that carry ``config.json`` across as-is and so never reach the config finalizer; the source's
+    card rides along and gets the Halo tag. A source card with malformed metadata stays verbatim and
+    untagged, with a warning (:func:`~src.checkpoint.model_card.tag_exported_model_card`): no loader
+    reads the card, and most callers run this copy after their weight pass.
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
     preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``, ``rng_state_*``)
@@ -414,8 +421,9 @@ def copy_checkpoint_aux_files(
 
     Subdirectories are copied whole, weight files included: a SentenceTransformer module directory
     carries weights no caller rewrites, and filtering them out leaves ``modules.json`` pointing at
-    modules that no longer exist. Three kinds stay behind: a nested ``checkpoint-N`` (resume state
-    rather than the artifact), a vendor weight dump, and anything hidden.
+    modules that no longer exist. Three kinds of directory stay behind: a nested ``checkpoint-N``
+    (resume state rather than the artifact), a vendor weight dump, and a hidden one. So does a card a
+    crashed tagging write left staged.
 
     ``output_dir`` nested inside ``input_dir`` raises: the walk would copy the destination into
     itself until the disk fills.
@@ -444,12 +452,13 @@ def copy_checkpoint_aux_files(
         keep_as_sidecar = include_resume_sidecars and (
             name in _RESUME_SIDECAR_FILES or name.startswith(_RESUME_SIDECAR_PREFIXES)
         )
-        if skip_as_weight and not keep_as_sidecar:
+        if (skip_as_weight and not keep_as_sidecar) or is_staged_card(name):
             continue
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(output_dir, name))
             if verbose:
                 print(f"Copied: {name}")  # noqa: T201 - CLI-facing helper; the merge scripts report via print
+    tag_exported_model_card(output_dir, source_dir=input_dir)
 
 
 def read_checkpoint_index(checkpoint_dir: str, *, missing_ok: bool = False) -> dict:

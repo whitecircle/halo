@@ -23,6 +23,7 @@ from trl import ModelConfig, get_quantization_config
 
 from src.args.distributed_args import DistributedArguments
 from src.args.embedding_args import EmbeddingScriptArguments
+from src.checkpoint.model_card import HUB_TAGS
 from src.configs.embedding_config import EmbeddingConfig
 from src.data.sources.loading import reject_image_columns
 from src.distributed.filesystem import fs_aware_main_first
@@ -102,8 +103,6 @@ def build_sentence_transformer(
         mesh = getattr(backbone, "_device_mesh", None)
         if mesh is not None:
             st_model._device_mesh = mesh
-        return st_model
-
     else:
         model_kwargs: dict = {"dtype": resolve_training_dtype(embedding_config)}
         if model_config.attn_implementation:
@@ -132,7 +131,9 @@ def build_sentence_transformer(
         # builds them from the config; align them or those three knobs are inert on the default path.
         resolve_embedding_max_length(embedding_config, st_model[0])
         align_st_pipeline_to_config(st_model, embedding_config)
-        return st_model
+    # sentence-transformers writes its card from model_card_data, never from the backbone's model_tags.
+    st_model.model_card_data.add_tags(list(HUB_TAGS))
+    return st_model
 
 
 def resolve_embedding_max_length(embedding_config: EmbeddingConfig, transformer_module) -> int:

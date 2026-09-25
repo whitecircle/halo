@@ -101,7 +101,15 @@ Upload the checkpoint directory itself, not the whole `output_dir`. Unless the r
 set `save_only_model: true`, that directory also holds every rank's optimizer
 shards and the training state (`optimizer_*`, `rng_state_*`, `scheduler.pt`,
 `trainer_state.json`) — exclude them, or they go public with the weights. For a
-LoRA run, upload the adapter directory, or merge first for a standalone model.
+LoRA run, upload the adapter directory, or merge it with `merge-peft-adapters`
+for a standalone model. That tool refuses EP expert-LoRA adapters: train those
+with `merge_expert_lora_on_save: true` to save the merged model instead.
+
+Every checkpoint Halo writes — a full model or an adapter (QLoRA and EP expert
+adapters included) from training, or a tool's conversion — holds a `README.md`
+model card tagged `halo`, so the upload lists under that Hub tag; fill in its
+body, and replace a local-path `base_model` with the Hub id, before you publish. A tool whose source card has malformed metadata
+copies that card untagged and warns.
 
 Shard layouts, merge flags, and the full resume mechanics:
 [Checkpoints](../agent-docs/reference/checkpoints.md) ↗ ·

@@ -53,10 +53,10 @@ def test_an_existing_model_type_is_left_alone(tmp_path):
     assert json.loads(path.read_text())["model_type"] == "qwen3"
 
 
-def test_a_family_less_live_config_warns_rather_than_writing_a_wrong_family(caplog):
+def test_a_family_less_live_config_warns_rather_than_writing_a_wrong_family(tmp_path, caplog):
     """Nothing correct to write — but a silent pass would leave a checkpoint no tool can key."""
     with caplog.at_level("WARNING"):
-        finalize_exported_config(types.SimpleNamespace(model_type=""), "/nonexistent", source=None)
+        finalize_exported_config(types.SimpleNamespace(model_type=""), str(tmp_path), source=None)
 
     assert any("model_type" in record.message for record in caplog.records)
 

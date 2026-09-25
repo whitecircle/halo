@@ -20,6 +20,7 @@ from transformers.models.auto.modeling_auto import (
 )
 
 import src.models.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
+from src.checkpoint.model_card import HUB_TAGS
 from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR, trl_reapplication_config
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.patches.attention import (
@@ -184,7 +185,11 @@ def finalize_run_model(
     finalized exactly like the policy whose logprobs it is differenced against.
     ``sinks_pretrained=False`` (a from-scratch build) skips only the neutralized policy: there are
     no pretrained sinks to neutralize, and the live policies still apply.
+
+    The Halo Hub tags go on ``model_tags`` for the card writers that read nothing else: PEFT's own
+    adapter ``save_pretrained`` and a user's ``model.push_to_hub()``. Directory writers tag their cards.
     """
+    model.add_model_tags(list(HUB_TAGS))
     sanitize_generation_config(model)
     if sinks_pretrained or sinks_policy is not SinksPolicy.NEUTRALIZED:
         apply_sinks_policy(model, model_config, policy=sinks_policy, attn_implementation=attn_implementation)

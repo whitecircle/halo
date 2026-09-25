@@ -286,8 +286,8 @@ def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_M
         writer.add(key, tensor)
     writer.close_as_hf_checkpoint()
 
-    # Non-weight files carry over verbatim (config, tokenizer, templates, …); the old safetensors
-    # shards and index are not copied, since the writer rewrites them.
+    # Non-weight files carry over (config, tokenizer, templates, …), the README.md card gaining the
+    # Halo Hub tag; the old safetensors shards and index are not copied, since the writer rewrites them.
     copy_checkpoint_aux_files(in_dir, out_dir)
     logger.info(f"✓ Wrote per-expert checkpoint to {out_dir}")
 

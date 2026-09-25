@@ -31,6 +31,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from src.checkpoint.format import WEIGHT_FILE_IGNORE_PATTERNS, copy_checkpoint_aux_files
+from src.checkpoint.model_card import CARD_STAGING_PREFIX, CARD_STAGING_SUFFIX
 
 SKIPPED = (
     "model.safetensors",
@@ -103,7 +104,8 @@ def test_weight_files_skipped_and_aux_kept(checkpoint_dir, tmp_path):
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
     copied = {p.name for p in out.iterdir()}
-    assert copied == set(KEPT) | set(SIDECARS) | set(MODULE_DIRS) | {"modules.json"}, (
+    # README.md is the export's Hub card, written tagged even though this source ships none.
+    assert copied == set(KEPT) | set(SIDECARS) | set(MODULE_DIRS) | {"modules.json", "README.md"}, (
         f"unexpected copy set: {sorted(copied)}"
     )
 
@@ -176,6 +178,18 @@ def test_a_vendor_weight_dump_directory_stays_behind(checkpoint_dir, tmp_path):
     assert "original/*" in WEIGHT_FILE_IGNORE_PATTERNS, "the hub download must drop what the local copy drops"
     # Not a prefix match: original_adapter_config/ IS aux data (asserted copied above).
     assert (out / "original_adapter_config").exists()
+
+
+def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
+    """A crash between staging a tagged card and swapping it in leaves the staged copy behind; carried
+    over, it would ship in every export built from that directory."""
+    leftover = f"{CARD_STAGING_PREFIX}k3j9x{CARD_STAGING_SUFFIX}"
+    (checkpoint_dir / leftover).write_text("---\ntags:\n- halo\n---\n")
+    out = tmp_path / "merged"
+    out.mkdir()
+    copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
+    assert not (out / leftover).exists(), "a staged card from a crashed write was carried into the export"
+    assert (out / "config.json").exists(), "the skip took the real aux files with it"
 
 
 def test_foreign_framework_exports_are_not_carried(checkpoint_dir, tmp_path):

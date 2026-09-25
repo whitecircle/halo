@@ -206,6 +206,50 @@ config still gets normalized weights in safetensors.
 resume demands of the topology, is the
 [warm vs exact matrix](#warm-restart-vs-exact-resume-torchrun).
 
+## Hub model card
+
+Every checkpoint Halo writes, tool conversions included, carries a `README.md` card tagged `halo`
+(`HUB_TAGS` in `src/checkpoint/model_card.py`), so an upload lists under that Hub tag.
+`tag_model_card` changes only the `tags` value of a card already present — TRL's, PEFT's,
+sentence-transformers', or one an export copies from its source. The other keys keep their values and
+order and the body is kept, but the metadata block is re-dumped: its YAML comments and flow style are
+lost. A fresh card holds the tag alone, except in a directory whose `adapter_config.json` names a
+`peft_type` stock PEFT loads, where it also carries `library_name: peft` and a Hub `base_model`, as
+PEFT's own card does.
+
+Tagging leaves an existing card's `base_model` as it is. The card PEFT's own `save_pretrained` writes
+(the single-GPU / DDP adapter save) sets it to the base model's `_name_or_path`, a local path when the
+run loaded its base from disk; the Hub refuses a local-path `base_model`, so replace it with the Hub id
+before uploading that adapter.
+
+On a card with malformed metadata (not a YAML mapping, or a `tags` entry that is neither a list nor a
+string), `tag_model_card` raises, naming the file to repair, and fails the adapter save or unmerged
+`convert_to_bf16 --peft` that called it. The export finalizers and `reset_sinks` call
+`tag_exported_model_card` instead, which leaves such a card verbatim and untagged with a warning
+naming the card to repair, the source card when the export copied it: no loader reads the card, and
+most exports reach it only after their weights are on disk.
+
+- **Full-model writes** tag in `finalize_exported_config`, which every parallel saver, the
+  single-GPU / DDP fallback and the export tools' `save_full_checkpoint` end with.
+- **Exports built from a source directory** tag in `copy_checkpoint_aux_files`, which also covers the
+  tools that carry `config.json` across as-is.
+- **Adapter saves** tag in `PeftAdapterSaver` and the EP expert-adapter writer, whichever branch
+  wrote the files.
+- **TRL's per-checkpoint card** (`output_dir/README.md`, which TRL builds from its `_tag_names`
+  alone) gets the tag from the checkpointing mixin's `create_model_card`.
+- **Embedding runs** carry the tag on the SentenceTransformer's `model_card_data`, the source of the
+  card sentence-transformers writes.
+
+A new writer ends in `finalize_exported_config` or `copy_checkpoint_aux_files`, or calls the tagger
+itself: `tag_exported_model_card` after copying a source tree, as `reset_sinks` does, and
+`tag_model_card` otherwise, as an unmerged `convert_to_bf16 --peft` does.
+
+Under `push_to_hub: true`, the four trainers that extend `transformers.Trainer` directly (SMPO,
+offline GRPO, classification, teacher distillation) upload no card to the repo root, the one the Hub
+reads tags from: `Trainer._push_from_checkpoint` copies only the model files into `output_dir`, and
+nothing writes `output_dir/README.md` for them. A `hub_strategy` of `checkpoint` or `all_checkpoints`
+also uploads the checkpoint directory, whose tagged card lands under that subfolder only.
+
 ## Serving on vLLM / SGLang
 
 A gathered checkpoint is a standard HF checkpoint — stock `from_pretrained` loads it as-is.

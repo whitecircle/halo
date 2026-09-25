@@ -109,6 +109,7 @@ Per-mode mechanics:
 `tensor_parallel/checkpoint.py`, `src/checkpoint/` (`format.py` layout + dtype, `config_export.py` the
 config contract, `adapters.py` the saved-PEFT shape and the shared `merge_adapter_into_base`,
 `tool_io.py` the tool-side directory I/O, `shard_writer.py` the incremental parts writer,
-`fp8_dequant.py` the streaming fp8 → bf16), and the
+`fp8_dequant.py` the streaming fp8 → bf16, `model_card.py` the `halo` Hub tag on the model card of
+every checkpoint Halo writes, tool conversions included), and the
 `scripts/after_training/` script you are about to run.
 (`CLAUDE.md`: docs-first, but the code wins.)
