@@ -843,6 +843,14 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_fsdp_backward_reshard.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
+    # One row per FSDP2 wrap the knob defers: dense DP / HSDP / TP+DP / CP+DP, and the three MoE
+    # expert-sync regimes (FSDP-sharded ep1 experts, in-backward EP hooks, the deferred EP sweep).
+    "trainers/sft/test_sft_fsdp_defer_grad_sync.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "hsdp", "tp", "cp", "ep", "moe", "qwen3"),
+        args_matrix=("--mode dp", "--mode hsdp", "--mode tp", "--mode cp", "--mode ep1", "--mode ep", "--mode ep2"),
+        timeout=900,
+    ),
     "trainers/other/test_self_distillation_vlm.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "vlm"), timeout=900
     ),
