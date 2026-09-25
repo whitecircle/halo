@@ -91,6 +91,7 @@ def main() -> int:
             "logging_steps": 1,
             "save_strategy": "no",
             "report_to": "none",
+            "logging_nan_inf_filter": False,
             "max_length": args.seq,
             "seed": args.seed,
             "data_seed": args.seed,

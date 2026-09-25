@@ -225,6 +225,7 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
         "eval_steps": mode_config["max_steps"],
         "save_strategy": "no",
         "report_to": [],
+        "logging_nan_inf_filter": False,
         "dataloader_num_workers": 0,
         "dataloader_drop_last": True,
         "remove_unused_columns": False,

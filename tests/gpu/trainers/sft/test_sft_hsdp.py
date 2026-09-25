@@ -143,6 +143,7 @@ def run(ctx) -> dict:
         eval_strategy="steps",
         eval_steps=5,
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,

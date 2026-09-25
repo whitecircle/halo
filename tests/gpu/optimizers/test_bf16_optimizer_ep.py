@@ -101,6 +101,7 @@ def test_full_training(output_dir: str) -> bool:
         logging_steps=1,
         save_strategy="no",
         report_to=[],
+        logging_nan_inf_filter=False,
         dataset_num_proc=1,
         dataloader_num_workers=0,
     )
@@ -245,6 +246,7 @@ def test_lora_training(output_dir: str) -> bool:
         logging_steps=1,
         save_strategy="no",
         report_to=[],
+        logging_nan_inf_filter=False,
         dataset_num_proc=1,
         dataloader_num_workers=0,
     )

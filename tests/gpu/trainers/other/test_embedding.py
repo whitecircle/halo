@@ -91,6 +91,7 @@ def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
         "save_strategy": "no",
         "eval_strategy": "no",
         "report_to": "none",
+        "logging_nan_inf_filter": False,
         "loss_type": "mnrl",
         "max_length": 128,
         "dataloader_drop_last": True,

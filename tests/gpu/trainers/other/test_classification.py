@@ -187,6 +187,7 @@ def make_config(output_dir: str, **overrides) -> ClassificationConfig:
         "save_strategy": "no",
         "eval_strategy": "no",
         "report_to": "none",
+        "logging_nan_inf_filter": False,
         "dataloader_drop_last": True,
         "remove_unused_columns": False,
         "fsdp": "",  # the mixin owns FSDP wrapping

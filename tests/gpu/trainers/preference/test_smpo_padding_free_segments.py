@@ -56,6 +56,7 @@ def run(ctx):
                 lower_clip_percentile=None,
                 min_log_prob=None,
                 report_to="none",
+                logging_nan_inf_filter=False,
                 save_strategy="no",
             ),
             processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),

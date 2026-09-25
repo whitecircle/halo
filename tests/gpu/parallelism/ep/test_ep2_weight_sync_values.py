@@ -194,6 +194,7 @@ def run(ctx):
             logging_steps=1,
             save_strategy="no",
             report_to=[],
+            logging_nan_inf_filter=False,
             seed=42,
             bf16=True,
             gradient_checkpointing=False,

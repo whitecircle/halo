@@ -117,6 +117,7 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=SEQ_LEN,
         dataloader_drop_last=True,
         dataloader_num_workers=0,

@@ -127,6 +127,7 @@ def run_collator_mode(
         gradient_checkpointing=True,
         dataloader_pin_memory=False,
         report_to=[],
+        logging_nan_inf_filter=False,
         # padding_free without packing forbids an enforced max_length in current TRL;
         # the synthetic inputs are already generated <= args.seq, so dropping the cap is safe.
         max_length=None if mode == "padding_free" else args.seq,

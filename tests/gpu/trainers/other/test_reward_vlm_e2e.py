@@ -107,6 +107,7 @@ def run(ctx):
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=1024,
         remove_unused_columns=False,
         dataloader_num_workers=0,

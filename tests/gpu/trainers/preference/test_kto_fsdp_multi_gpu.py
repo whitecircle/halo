@@ -185,6 +185,7 @@ def run(ctx):
         logging_steps=1,
         save_strategy="no",
         report_to=[],
+        logging_nan_inf_filter=False,
         seed=42,
         # fp32: the pinned quantity is the KL gather, and in bf16 the per-sequence log-prob sums
         # (~-1e2) carry ~0.4 of rounding error, which beta scales straight into the sigmoid and

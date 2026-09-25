@@ -165,6 +165,7 @@ def run(ctx):
         eval_strategy="steps",
         eval_steps=EVAL_STEPS,
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_num_workers=0,
         seed=SEED,

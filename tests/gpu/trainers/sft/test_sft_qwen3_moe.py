@@ -136,6 +136,7 @@ def run(ctx):
         eval_steps=NUM_TRAIN_STEPS,
         save_strategy="no",
         report_to=[],
+        logging_nan_inf_filter=False,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,  # Required for EP (inactive experts)
         dataloader_drop_last=True,

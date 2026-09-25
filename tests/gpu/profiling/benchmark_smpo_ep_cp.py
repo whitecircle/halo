@@ -287,6 +287,7 @@ def main() -> int:
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             report_to=[],
+            logging_nan_inf_filter=False,
             include_num_input_tokens_seen=True,
             ddp_find_unused_parameters=True,
             # SMPO specific

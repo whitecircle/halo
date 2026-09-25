@@ -263,6 +263,7 @@ def run_env_grpo_training(
             "logging_first_step": True,
             "save_strategy": "no",
             "report_to": "none",
+            "logging_nan_inf_filter": False,
             "num_generations": num_generations,
             "max_completion_length": max_completion_length,
             "beta": 0.01,

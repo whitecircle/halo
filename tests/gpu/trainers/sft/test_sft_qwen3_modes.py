@@ -278,6 +278,7 @@ def run(ctx) -> dict:
         "logging_steps": 1,
         "save_strategy": "no",  # Manual save after training (avoids FSDP auto-save issues)
         "report_to": "none",
+        "logging_nan_inf_filter": False,
         "max_length": MAX_SEQ_LENGTH,
         "packing": True,
         "dataloader_drop_last": True,

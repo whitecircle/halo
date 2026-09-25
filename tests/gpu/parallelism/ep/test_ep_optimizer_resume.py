@@ -129,6 +129,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
         save_strategy="steps" if save_at else "no",
         save_steps=save_at or 0,
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,

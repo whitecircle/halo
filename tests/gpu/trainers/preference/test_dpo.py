@@ -190,6 +190,7 @@ def run(ctx) -> dict:
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         # TRL 1.6 DPOConfig has no max_prompt_length (prompt is truncated within max_length).
         dataloader_drop_last=True,

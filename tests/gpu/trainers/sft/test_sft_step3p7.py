@@ -144,6 +144,7 @@ def run(ctx):
         eval_strategy="no",
         save_strategy="no",
         report_to=[],
+        logging_nan_inf_filter=False,
         dataloader_num_workers=0,
         dataloader_drop_last=True,
         remove_unused_columns=False,

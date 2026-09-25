@@ -87,6 +87,7 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
         eval_strategy="no",
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=64,
         dataloader_num_workers=0,
         seed=42,

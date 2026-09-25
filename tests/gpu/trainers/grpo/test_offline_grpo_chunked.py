@@ -99,6 +99,7 @@ def run(ctx) -> dict:
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_prompt_length=2048,
         max_completion_length=2048,
         dataloader_drop_last=True,

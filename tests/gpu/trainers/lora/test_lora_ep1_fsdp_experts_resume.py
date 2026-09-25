@@ -116,6 +116,7 @@ def run(ctx) -> dict:
         save_strategy="steps",
         save_steps=SAVE_AT_STEP,
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         remove_unused_columns=False,

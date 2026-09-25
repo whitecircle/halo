@@ -248,6 +248,7 @@ def run_benchmark_mode(
         gradient_checkpointing=True,
         dataloader_pin_memory=False,
         report_to=[],
+        logging_nan_inf_filter=False,
         include_num_input_tokens_seen=True,
         max_length=args.seq,
         dataloader_drop_last=True,

@@ -124,6 +124,7 @@ def _grpo_config(*, output_dir: str, max_steps: int, group_port: int, save: bool
         # the consumed batches would re-run generation for steps already in the checkpoint.
         ignore_data_skip=True,
         report_to="none",
+        logging_nan_inf_filter=False,
         num_generations=2,
         max_completion_length=128,
         beta=0.0,

@@ -145,6 +145,7 @@ def _config(
         save_steps=save_at or 0,
         save_only_model=False,
         report_to="none",
+        logging_nan_inf_filter=False,
         max_prompt_length=MAX_PROMPT_LENGTH,
         max_completion_length=MAX_COMPLETION_LENGTH,
         dataloader_drop_last=True,

@@ -156,6 +156,7 @@ def run_training(
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         dataloader_drop_last=True,
         fsdp="",
     )

@@ -148,6 +148,7 @@ def run(ctx):
         eval_steps=NUM_TRAIN_STEPS,
         save_strategy="no",
         report_to=[],
+        logging_nan_inf_filter=False,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,  # Vision/audio params unused on text-only batches
         dataloader_drop_last=True,

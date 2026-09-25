@@ -191,6 +191,7 @@ def _build_trainer(trainer, model, tokenizer, peft_config, output_dir, paralleli
         "logging_steps": 1,
         "save_strategy": "no",
         "report_to": "none",
+        "logging_nan_inf_filter": False,
         "dataloader_drop_last": True,
         "gradient_checkpointing": False,
         "use_liger_kernel": False,

@@ -224,6 +224,7 @@ def run_mode(ctx, mode: str, tokenizer, train_dataset, eval_dataset) -> dict[str
         "eval_steps": EVAL_STEPS,
         "per_device_eval_batch_size": BATCH_SIZE,
         "report_to": "none",
+        "logging_nan_inf_filter": False,
         "max_length": MAX_SEQ_LENGTH,
         "dataloader_drop_last": True,
         "dataloader_num_workers": 0,

@@ -165,6 +165,7 @@ def main() -> int:
             logging_steps=1,
             save_strategy="no",
             report_to="none",
+            logging_nan_inf_filter=False,
             max_length=args.seq,
             padding_free=args.padding_free,
             packing=args.packing,

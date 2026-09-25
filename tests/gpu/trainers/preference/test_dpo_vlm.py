@@ -57,6 +57,7 @@ def run(ctx) -> dict:
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=1024,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
