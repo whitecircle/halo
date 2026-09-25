@@ -73,7 +73,7 @@ A `prompt` conversation or a raw text column named by `text_field`, plus a `labe
 row for single-label (strings and integers both work; ids come from the string form), a list for
 multi-label. The label set is derived from the **training**
 split, sorted for stable ids, so `num_labels`, `label2id` and `id2label` are never written by hand.
-Labels that appear only in validation are added with a warning.
+Labels that appear only in validation or test are added with a warning.
 
 Rows are truncated to `max_length` rather than dropped here, because a label describes a whole
 document and a shortened document still carries it. A `-1` label marks an unlabeled row: multi-label

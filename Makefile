@@ -105,8 +105,8 @@ seed-hf-cache: ## fetch the Hub configs and tokenizers the CPU tier reads into H
 	@test -n "$(strip $(HF_CACHE))" || { echo "HF_CACHE is empty: there is no cache to seed"; exit 1; }
 	$(DOCKER_RUN_CPU) bash -lc "HF_HUB_DISABLE_PROGRESS_BARS=1 python -m tests.common.hub_seed"
 
-# Both entrypoints are named explicitly: pointing pytest at `tests/gpu/` would collect the manifest
-# scripts as modules (executing their top-level torchrun code), which the launcher design avoids.
+# The two pytest modules under tests/gpu/: the manifest launcher (test_suite.py, one torchrun launch
+# per tests/gpu/manifest.py entry) and its contract tests.
 GPU_ENTRYPOINTS = tests/gpu/test_suite.py tests/gpu/test_launcher_contract.py
 
 test-gpu-core: ## pytest core GPU tier (pre-merge, GPU changes) via the manifest launcher
