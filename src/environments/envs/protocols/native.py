@@ -18,6 +18,7 @@ from src.environments.base import (
     Trajectory,
     require_magnitudes,
 )
+from src.environments.sandbox.base import SANDBOX_FAULTS
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
@@ -158,13 +159,15 @@ class NativeToolUseEnvironment(BaseEnvironment):
         )
 
     def _result_from_call(self, tc: NativeToolCall, outcome: str | Exception) -> NativeToolResult:
-        """Build a NativeToolResult from a success payload or caught exception (observation truncated)."""
+        """Build a NativeToolResult from a success payload or caught exception (observation truncated).
+        A sandbox fault rides on the result, so the accounting books it by type."""
         if isinstance(outcome, Exception):
             return NativeToolResult(
                 tool_call_id=tc.id,
                 name=tc.name,
                 content=self._truncate_observation(f"Error: {outcome}"),
                 success=False,
+                sandbox_fault=outcome if isinstance(outcome, SANDBOX_FAULTS) else None,
             )
         return NativeToolResult(
             tool_call_id=tc.id,
@@ -188,7 +191,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
         """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
-        return self._credit_tool_call(trajectory, result.success)
+        return self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
 
     def _finalize_text_response(
         self, trajectory: Trajectory, action: str
@@ -255,6 +258,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
                         result = self._result_from_call(tc, tool.execute(**bound))
                     except (ToolBudgetExhausted, ToolArgumentError) as e:
                         result = self._refused_call_result(tc, e)
+                    except SANDBOX_FAULTS as e:  # booked (and logged) by type in the accounting, no traceback
+                        result = self._result_from_call(tc, e)
                     except Exception as e:  # a tool fault is an observation, not an episode kill
                         # Logged because the graded tools run here too: a submit handler that dies on a
                         # malformed payload becomes an ordinary tool error, and without this line the
@@ -407,6 +412,8 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
                 return self._result_from_call(tc, await tool.execute_async(**bound))
             except (ToolBudgetExhausted, ToolArgumentError) as e:
                 return self._refused_call_result(tc, e)
+            except SANDBOX_FAULTS as e:
+                return self._result_from_call(tc, e)
             except Exception as e:  # same contract as the sync path above
                 logger.warning("Tool %r raised during async execution", tc.name, exc_info=True)
                 return self._result_from_call(tc, e)

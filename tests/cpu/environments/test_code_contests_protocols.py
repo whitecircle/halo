@@ -32,6 +32,7 @@ from src.environments.envs.tasks.coding.code_contests import (
     CodeContestsEnvironment,
 )
 from src.environments.envs.tasks.coding.datasets import ContestSelection
+from src.environments.envs.tasks.coding.grading import VERDICT_DETAIL_FULL
 from src.environments.registry import resolve_environment
 from tests.common.code_contests import SINGLE_TEST_ANSWER, StubSandbox, call_tool, reset_episode
 
@@ -52,10 +53,12 @@ def _budgets(env) -> tuple[int, int]:
 
 
 def test_leaderboard_pins_one_submission_and_no_scratchpad():
-    env = _env(eval_protocol="leaderboard")
+    env = _env(eval_protocol="leaderboard", verdict_detail=VERDICT_DETAIL_FULL)
     assert env.eval_protocol == "leaderboard"
     assert _budgets(env) == (1, 0)
-    assert env.grading_spec.verdict_detail == "full", "the verdict detail is the config's, not the protocol's"
+    assert env.grading_spec.verdict_detail == VERDICT_DETAIL_FULL, (
+        "the verdict detail is the config's, not the protocol's"
+    )
     schemas = {tool["function"]["name"]: tool["function"]["description"] for tool in env.get_tools_schema()}
     assert "This tool is disabled for this task." in schemas["python_repl"]
     assert "This is your only graded submission" in schemas["submit_solution"]

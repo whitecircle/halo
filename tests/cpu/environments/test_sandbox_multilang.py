@@ -39,6 +39,7 @@ from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSub
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.resolve import resolve_sandbox
 from src.environments.tools.factories import create_session_bash_tools
+from tests.common.code_contests import RecordingSandboxSession
 
 _HAS_GPP = shutil.which("g++") is not None
 _HAS_GCC = shutil.which("gcc") is not None
@@ -347,6 +348,9 @@ def test_staging_never_writes_through_a_link_the_program_planted(tmp_path):
         assert result.error is None, "tampering must not read as an infra fault"
         assert result.returncode == TAMPERED_WORKDIR_RETURNCODE and not result.ok
         assert "main.py" in result.stderr
+        # A verdict the model can recover from (a link at a staged name may be a benign in-workspace
+        # one), not an agent fault that ends the episode.
+        assert result.agent_fault is None
 
 
 def test_reset_to_staged_drops_a_staged_entry_whose_type_changed(tmp_path):
@@ -522,27 +526,8 @@ def test_one_shot_run_builds_every_time():
 # RemoteSession (client-side file accumulation, no network)
 
 
-class _CapturingSession:
-    """Fake requests.Session that records each request's JSON and returns a canned success."""
-
-    def __init__(self):
-        self.payloads = []
-
-    def post(self, url, json=None, timeout=None):
-        self.payloads.append(json)
-
-        class _Resp:
-            def raise_for_status(self_inner):
-                pass
-
-            def json(self_inner):
-                return {"status": "Success", "run_result": {"status": "Finished", "stdout": "ok", "return_code": 0}}
-
-        return _Resp()
-
-
 def test_remote_session_resends_accumulated_files():
-    sess = _CapturingSession()
+    sess = RecordingSandboxSession()
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     rsession = sb.open_session()
     rsession.write_file("util.py", "X = 1")
@@ -550,8 +535,8 @@ def test_remote_session_resends_accumulated_files():
     rsession.write_file("util2.py", "Y = 2")
     rsession.run("print('again')", files={"adhoc.py": "Z=3"})
 
-    assert sess.payloads[0]["files"] == {"util.py": "X = 1"}
-    assert sess.payloads[1]["files"] == {"util.py": "X = 1", "util2.py": "Y = 2", "adhoc.py": "Z=3"}
+    assert sess.posts[0].payload["files"] == {"util.py": "X = 1"}
+    assert sess.posts[1].payload["files"] == {"util.py": "X = 1", "util2.py": "Y = 2", "adhoc.py": "Z=3"}
     assert rsession.list_files() == ["util.py", "util2.py"]
 
 
@@ -559,11 +544,11 @@ def test_remote_shell_tool_sends_the_command_as_a_bash_program():
     """The service, not the registry, runs the program on this backend: the shell tool has to put the
     canonical ``bash`` on the wire, or a SandboxFusion service runs the command through its Python
     runner and every call comes back a syntax error."""
-    sess = _CapturingSession()
+    sess = RecordingSandboxSession()
     remote_session = RemoteSandbox("http://sandbox:8080", session=sess).open_session()
     create_session_bash_tools(lambda: remote_session).get("run_bash_command").execute(command="echo hi")
-    assert sess.payloads[0]["language"] == "bash"
-    assert sess.payloads[0]["code"] == "echo hi"
+    assert sess.posts[0].payload["language"] == "bash"
+    assert sess.posts[0].payload["code"] == "echo hi"
 
 
 # BubblewrapSandbox

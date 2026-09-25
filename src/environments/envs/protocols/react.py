@@ -13,6 +13,7 @@ from typing import Any
 
 from src.environments.base import (
     EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
@@ -22,6 +23,7 @@ from src.environments.base import (
     require_magnitudes,
 )
 from src.environments.envs.protocols.native import validate_tool_budgets
+from src.environments.sandbox.base import SANDBOX_FAULTS
 from src.environments.tools.definitions import NativeToolRegistry, ToolArgumentError, ToolBudgetExhausted
 from src.environments.tools.factories import (
     create_native_math_tools,
@@ -304,6 +306,7 @@ Always think before acting, and provide a Final Answer when you're done."""
         if step.has_action:
             tool = self.registry.get(step.action)
             success = False
+            fault = None
 
             if not tool:
                 observation = self.registry.unknown_tool_message(step.action)
@@ -327,6 +330,11 @@ Always think before acting, and provide a Final Answer when you're done."""
                     logger.debug("Tool %r refused the call: %s", step.action, e)
                     observation = f"Error: {e}"
                     info["tool_error"] = str(e)
+                except SANDBOX_FAULTS as e:
+                    # Booked by type (the native protocol's contract), and it ends the episode.
+                    fault = e
+                    observation = f"Error: {e}"
+                    info["tool_error"] = str(e)
                 except Exception as e:
                     # Without this line the episode just grades 0 with nothing anywhere
                     # saying why: the observation carries the message, but the trajectory is not where
@@ -335,7 +343,7 @@ Always think before acting, and provide a Final Answer when you're done."""
                     observation = f"Error: {str(e)}"
                     info["tool_error"] = str(e)
 
-            reward += self._credit_tool_call(trajectory, success)
+            reward += self._book_tool_call(trajectory, step.action, success, fault)
             observation = self._truncate_observation(observation)
             trajectory.add_message(Message.user(f"Observation: {observation}"))
             return trajectory, reward, False, False, info
@@ -367,11 +375,14 @@ Always think before acting, and provide a Final Answer when you're done."""
         if callable(self.answer_validator):
             try:
                 validated = self.answer_validator(final_answer, expected)
-            except Exception:
-                # Unwarned, an always-raising validator silently re-grades every episode by default.
-                logger.warning("answer_validator raised; falling back to the default check", exc_info=True)
-            else:
-                return EpisodeGrade(1.0 if validated else 0.0)
+            except Exception as exc:
+                # The grader failed, not the policy: no check stands in for it (the default one pays any
+                # Final Answer on a row with no expected answer), so the episode leaves the baseline.
+                logger.warning("answer_validator raised; scoring the episode invalid", exc_info=True)
+                trajectory.info[EPISODE_INVALID_KEY] = True
+                trajectory.info[EPISODE_INVALID_REASON_KEY] = f"answer_validator raised {type(exc).__name__}: {exc}"
+                return EpisodeGrade(0.0)
+            return EpisodeGrade(1.0 if validated else 0.0)
 
         if expected is None:
             if trajectory.info.get("_answer_in_context"):

@@ -7,6 +7,7 @@
 | Large model, want TP beyond what `tp_plan` covers | [Add TP support](#add-tp-support) |
 | Model not in transformers yet | [Vendoring a model](#vendoring-a-model) |
 | Family the auto-detected attention backend cannot run | [Attention backend](#attention-backend) |
+| Forward scales, caps or cuts the logits around `lm_head` | [Declare the head transform](#declare-the-head-transform) |
 
 For plain FSDP, no work is needed — any `AutoModelForCausalLM` works.
 
@@ -19,6 +20,14 @@ Auto-detection covers a family whose attention the installed kernels already run
 Two seams handle those. `resolve_attn_implementation` (`src/models/patches/attention.py`) narrows the backend from the family's own capabilities; `apply_family_attention_patches` (`src/models/loading/model_preparation.py`) applies the family's patches to trainable and frozen loads alike.
 
 Add the family predicate beside the existing ones and wire it into whichever seam applies. The per-family matrix is in [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+
+## Declare the head transform
+
+The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) and the last pipeline stage compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or both paths refuse the family.
+
+Declare it with a `HeadTransformSpec` subclass in `src/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
+
+The declaration is verified, never trusted: `verify_head_transform` runs the family's own forward on a meta-device shell whose backbone emits a fixed hidden state and whose output embedding is a small stand-in, and raises when the declaration does not reproduce the logits. `tests/cpu/models/test_head_transform.py` runs that check over every roster class, the MoE ones derived from the EP layer registry, and compares the chunked sweep's log-probs and gradients with each listed tiny model's forward; add the family's tiny model there, and a dense family to the dense roster.
 
 ## Add EP support
 
@@ -204,7 +213,9 @@ Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported mo
     Leave it off and say why in the spec comment.
 
 3. **Set `flce_default=True`** only when the `[seq, vocab]` logits plane is the family's binding memory limit; the generic default keeps logits for metrics.
-4. **Set `delegates_to_upstream=True`** when upstream already covers the family and the spec only ADDS to it (Qwen3.5/3.6, Qwen3-Next), or takes over a role upstream gets wrong (GptOss's norm casting, Gemma 4's EP-surviving dense MLP — the withheld flag goes in `upstream_off` and the spec must fill that role).
+4. **Set `delegates_to_upstream=True`** when upstream already covers the family and the spec only ADDS to it (dense Qwen3.5/3.6), or takes over a role upstream gets wrong (GptOss's norm casting, Gemma 4's EP-surviving dense MLP, the Qwen MoE `swiglu` that would also swap the routed experts — the withheld flag goes in `upstream_off` and the spec must fill that role).
+
+    A MoE family's routed experts never run Liger's fused MoE kernel (`LigerExperts`): where upstream's `swiglu` could swap them and the spec does not withhold it, the orchestrator forces the flag off whenever Halo does not wrap the experts ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
 
     Upstream's applier runs first with every other flag it declares; the spec names only the roles it leaves eager or takes over.
 

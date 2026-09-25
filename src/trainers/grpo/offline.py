@@ -77,15 +77,13 @@ from src.distributed.pipeline_parallel.losses import (
     token_logprobs,
 )
 from src.distributed.runtime import current_device, get_global_world_size
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.model_preparation import resolve_auto_model_class
 from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.modality import config_declares_multimodality
 from src.models.structure import resolve_tokenizer
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
+from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import MultiGroupSampler
 from src.trainers.grpo.objective.advantages import STD_EPS
-from src.trainers.grpo.objective.offline import offline_token_objective
+from src.trainers.grpo.objective.offline import clamp_negative_advantage_logps, offline_token_objective
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.mixins.pp_gates import reject_pp_compute_metrics, reject_pp_peft
@@ -323,7 +321,11 @@ def live_min_log_prob(model: nn.Module, configured: float | None) -> float | Non
 
 class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
     """Offline GRPO trainer for pre-computed-reward data (``prompt``/``completions``/``rewards``)
-    under EP / TP / PP (see ``_reject_pp_explicit_options`` for the PP-specific rejections)."""
+    under EP / TP / PP (see ``_reject_pp_explicit_options`` for the PP-specific rejections).
+
+    ``ref_model`` is the frozen KL reference for a policy that cannot be deep-copied into one
+    (:meth:`requires_ref_model`); every other run derives its reference, or holds none.
+    """
 
     _tag_names = ["trl", "offline-grpo"]
 
@@ -367,6 +369,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         optimizer_cls_and_kwargs: tuple[type[torch.optim.Optimizer], dict[str, Any]] | None = None,
         preprocess_logits_for_metrics: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         peft_config: PeftConfig | None = None,
+        ref_model: PreTrainedModel | nn.Module | None = None,
         parallelism_config: "ParallelismConfig" = None,
         save_sharded_ep: bool = False,
         **kwargs,
@@ -513,15 +516,9 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             )
             self._check_degenerate_drop(args, eval_dataset, num_eval_groups_in, "evaluation")
 
-        if self.beta == 0.0 or is_peft_model(model) or self.parallelism_config.is_pp_mode:
-            # PEFT: no separate ref — disable_adapter() reverts to base (EP-aware via
-            # _setup_distributed_modes). PP: the reference is scored through the pipeline once the
-            # runtime exists (_pp_precompute_reference_logps), so no full model sits beside a stage.
-            self.ref_model = None
-        else:
-            self.ref_model = self._create_full_ft_reference(model, model_id)
-            if args.disable_dropout:
-                disable_dropout_in_model(self.ref_model)
+        self.ref_model = self._kl_reference(model, ref_model, self.beta, self.parallelism_config, peft_config)
+        if self.ref_model is not None and args.disable_dropout:
+            disable_dropout_in_model(self.ref_model)
 
         if args.initial_min_log_prob is not None and args.min_log_prob is not None:
             model.min_log_prob = args.initial_min_log_prob
@@ -587,11 +584,22 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             self._cached_eval_group_ids = None
 
         self._setup_distributed_modes()
+        self._resolve_chunked_head_transform()
+        self._check_full_logits_fit(self._loss_logits_width())
 
         if self._pp_runtime is not None and self.beta != 0.0:
             self.train_dataset = self._pp_precompute_reference_logps(self.train_dataset, "training")
             if self.eval_dataset is not None:
                 self.eval_dataset = self._pp_precompute_reference_logps(self.eval_dataset, "evaluation")
+
+    def _loss_logits_width(self) -> LogitsWidth | None:
+        """The completion logits row the loss forward carries, one logit past the completion kept for
+        the next-token shift. ``None`` under PP, where the last stage's plane is the pipeline's and
+        use_chunked_grpo_logprobs cannot remove it, and with max_completion_length unset, which leaves
+        the width to the stored completions."""
+        if self._pp_runtime is not None or not is_bounded_length(self.max_completion_length):
+            return None
+        return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
 
     @staticmethod
     def _reject_inert_max_length(args: OfflineGRPOConfig, parallelism_config: "ParallelismConfig | None") -> None:
@@ -683,38 +691,59 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             )
 
     @staticmethod
-    def _create_full_ft_reference(model, model_id: str):
-        """KL reference for full-finetune runs.
+    def _holds_kl_reference(model, kl_beta: float, parallelism_config: "ParallelismConfig", peft_config) -> bool:
+        """Whether the run keeps a KL reference model beside the policy.
 
-        Plain dense models deepcopy the live policy (TRL's ``create_reference_model`` — on resume
-        this re-anchors the KL to the resumed weights, TRL semantics). EP / grouped-GEMM wrapped MoE
-        models hold live NCCL process groups that ``deepcopy`` cannot pickle, so the reference
-        reloads dense from ``model_id`` instead — anchoring to the checkpoint weights (also on
-        resume), with the policy's attention implementation so logprobs share sink/backend semantics.
+        Not at ``kl_beta == 0``; not under PEFT, where ``disable_adapter()`` reverts to the base
+        (EP-aware via ``_setup_distributed_modes``); not under PP, where the reference is scored
+        through the pipeline once the runtime exists (``_pp_precompute_reference_logps``), so no full
+        model sits beside a stage.
         """
-        if not named_ep_layers(model):
-            return create_reference_model(model)
-        if not model_id:
-            raise ValueError(
-                "kl_beta > 0 with a wrapped MoE model needs the checkpoint path to load a dense "
-                "KL reference (deepcopy cannot pickle the EP process groups). Pass the model by "
-                "path, use PEFT, or set kl_beta: 0."
-            )
-        logger.info(f"Loading dense KL reference from {model_id} (wrapped MoE cannot be deep-copied)")
-        # Same Auto class the policy resolved: a multimodal MoE is registered under
-        # AutoModelForImageTextToText, and AutoModelForCausalLM would drop its vision tower, giving a
-        # reference that reads different inputs than the policy. Revision pinned as the policy pins
-        # it (hub main can drift from the trained commit's format). Coverage-gated: a reference
-        # loaded with missing keys is part random weights, and a wrong KL reference biases every step
-        # with no other symptom. Remote code has already run in-process.
-        return from_pretrained_verified(
-            resolve_auto_model_class(model.config),
-            model_id,
-            dtype=model.dtype,
-            attn_implementation=model.config._attn_implementation,
-            revision=getattr(model.config, "_commit_hash", None) or "main",
-            trust_remote_code=True,
+        return (
+            kl_beta != 0.0 and peft_config is None and not is_peft_model(model) and not parallelism_config.is_pp_mode
         )
+
+    @classmethod
+    def requires_ref_model(
+        cls, model, args: OfflineGRPOConfig, parallelism_config: "ParallelismConfig", peft_config
+    ) -> bool:
+        """Whether the caller must load the KL reference and pass it as ``ref_model``.
+
+        A dense policy's reference is a deepcopy of it. An EP / grouped-GEMM wrapped MoE policy, an
+        expert-only LoRA run included (it is not PEFT-wrapped), holds live NCCL process groups
+        ``deepcopy`` cannot pickle, so its reference is a separate frozen load of the policy's weights.
+        """
+        return cls._holds_kl_reference(model, args.kl_beta, parallelism_config, peft_config) and bool(
+            named_ep_layers(model)
+        )
+
+    @classmethod
+    def _kl_reference(cls, model, ref_model, kl_beta: float, parallelism_config: "ParallelismConfig", peft_config):
+        """The KL reference model the run holds, or ``None`` where it holds none.
+
+        The caller's ``ref_model`` when given; otherwise a dense policy's deepcopy (TRL's
+        ``create_reference_model``, which on resume anchors the KL to the resumed weights, as the PP
+        sweep does). A wrapped MoE policy cannot be deep-copied (:meth:`requires_ref_model`), so its
+        reference must arrive loaded.
+        """
+        if not cls._holds_kl_reference(model, kl_beta, parallelism_config, peft_config):
+            if ref_model is not None:
+                raise ValueError(
+                    "ref_model was passed, but this run holds no KL reference model (kl_beta 0, a PEFT policy "
+                    "scored with its adapters disabled, or pipeline parallelism, which scores the reference "
+                    "through the pipeline), so it would never be read. Drop ref_model."
+                )
+            return None
+        if ref_model is not None:
+            return ref_model
+        if named_ep_layers(model):
+            raise ValueError(
+                "kl_beta > 0 with an EP / grouped-GEMM wrapped MoE policy needs ref_model: deepcopy cannot "
+                "pickle the EP process groups, so the KL reference is a dense replica of the policy's weights "
+                "loaded through load_frozen_reference_model with the policy's revision, attention request and "
+                "sinks flags, as scripts/training/offline_grpo.py loads it. Or use PEFT, or set kl_beta: 0."
+            )
+        return create_reference_model(model)
 
     def _build_grouped_dataloader(self, dataset, group_ids, *, batch_size: int, shuffle: bool) -> DataLoader:
         """Build a DataLoader over a ``MultiGroupSampler`` sharded by DP rank/size.
@@ -828,8 +857,9 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         """Per-token completion log-probs; full logits restricted with ``logits_to_keep``, or never
         materialized at all under ``use_chunked_grpo_logprobs``.
 
-        Returns ``(clamped, unclamped)``. ``min_log_prob`` clamping is applied only to examples
-        with negative ``advantages`` (or all examples when ``advantages`` is None).
+        Returns ``(clamped, unclamped)``: ``min_log_prob`` floors the rows with negative
+        ``advantages``, which it requires (:func:`clamp_negative_advantage_logps`); with no floor both
+        are the same tensor.
         """
         if self._use_chunked_grpo_logprobs:
             selected_logps, _ = self._chunked_logps(model, input_ids, attention_mask, logits_to_keep)
@@ -846,18 +876,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
             logits = logits[:, -logits_to_keep:]  # restrict to completion tokens
             selected_logps = selective_log_softmax(logits, input_ids)
 
-        if min_log_prob is not None and advantages is not None:
-            negative_advantage_mask = (advantages < 0).unsqueeze(1)
-            clamped_logps = torch.where(
-                negative_advantage_mask,
-                torch.clamp(selected_logps, min=min_log_prob),
-                selected_logps,
-            )
-            return clamped_logps, selected_logps
-        elif min_log_prob is not None:
-            return torch.clamp(selected_logps, min=min_log_prob), selected_logps
-        else:
-            return selected_logps, selected_logps
+        return clamp_negative_advantage_logps(selected_logps, advantages, min_log_prob), selected_logps
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
@@ -1131,18 +1150,14 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
         advantages = target["advantage"].float()
         group_weights = 1.0 / target["group_size"].float()
-        negative_advantage = (advantages < 0).unsqueeze(1)
 
-        min_log_prob = self._pp_min_log_prob
         token_logps_unclamped = token_logps
-        if min_log_prob is not None:
-            token_logps = torch.where(negative_advantage, token_logps.clamp(min=min_log_prob), token_logps)
+        token_logps = clamp_negative_advantage_logps(token_logps, advantages, self._pp_min_log_prob)
 
         ref_logps = ref_logps_unclamped = None
         if self.beta != 0.0:
-            ref_logps = ref_logps_unclamped = target[REF_PER_TOKEN_LOGPS_COLUMN]
-            if min_log_prob is not None:
-                ref_logps = torch.where(negative_advantage, ref_logps.clamp(min=min_log_prob), ref_logps)
+            ref_logps_unclamped = target[REF_PER_TOKEN_LOGPS_COLUMN]
+            ref_logps = clamp_negative_advantage_logps(ref_logps_unclamped, advantages, self._pp_min_log_prob)
         per_token_loss, sample_values = offline_token_objective(
             token_logps,
             token_logps_unclamped,

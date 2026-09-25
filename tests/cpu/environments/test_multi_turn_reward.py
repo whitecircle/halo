@@ -258,7 +258,13 @@ def _swe_traj(*, tool_calls: int, truncated: bool = False) -> Trajectory:
     traj.add_message(Message.assistant("done"))
     traj.truncated = truncated
     traj.info.update(
-        {"completed": True, "total_tool_calls": tool_calls, "successful_tool_calls": tool_calls, "context": {}}
+        {
+            "completed": True,
+            "final_response": "done",
+            "total_tool_calls": tool_calls,
+            "successful_tool_calls": tool_calls,
+            "context": {"answer": "done"},
+        }
     )
     return traj
 
@@ -268,17 +274,6 @@ def test_swe_applies_tool_use_shaping():
     env = SweEnvironment(turn_overflow_penalty=0.3, sandbox_backend="local")
     assert _reward(env, _swe_traj(tool_calls=1)) == pytest.approx(1.0)
     assert _reward(env, _swe_traj(tool_calls=1, truncated=True)) == pytest.approx(1.0 - 0.3)
-
-
-def test_swe_zero_tool_call_completion_grades_zero():
-    """In the ungraded default path, completing without a single tool call is the worst behavior
-    (a pure no-interaction answer) and must grade the FULL failure, 0 — any partial credit below a
-    genuine attempt's would reward the exploit."""
-    env = SweEnvironment(sandbox_backend="local")
-    assert env._grade_episode(_swe_traj(tool_calls=0)).objective == 0.0
-    traj = _swe_traj(tool_calls=0)
-    assert _reward(env, traj) == pytest.approx(0.0)
-    assert traj.info[REWARD_COMPONENTS_KEY][OBJECTIVE_REWARD_KEY] == 0.0
 
 
 if __name__ == "__main__":

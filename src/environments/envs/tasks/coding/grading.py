@@ -9,6 +9,7 @@ primitives share the ``(test_input, expected, actual) -> bool`` signature.
 
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
@@ -41,11 +42,19 @@ _OUTPUT_EXCERPT_CHARS = 100
 _MAX_FAILURE_DETAILS = 5
 # Tests named on one folded verdict line before the rest are counted.
 _MAX_FOLDED_TESTS_NAMED = 6
-# What a non-passing test's detail line shows the policy. ``full`` adds the expected and produced
-# output to a wrong answer; ``outcome`` states the verdict alone, the Codeforces contract.
+# What a non-passing test's detail line shows the policy. ``outcome``, the default, states each failed
+# test's verdict class and nothing beyond it: stderr, an exit code or an output size can each carry
+# the hidden input the program read. Which tests fail, and how, still reaches the policy;
+# ``stop_on_first_failure`` narrows that to the first failing test, the Codeforces contract. ``full``
+# adds them, and the expected and produced output of a wrong answer, which turns every resubmission
+# into a probe of the hidden tests.
 VERDICT_DETAIL_FULL = "full"
 VERDICT_DETAIL_OUTCOME = "outcome"
 VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
+# What a test lost to infra shows under ``outcome``: its class alone. The error's text (a service's
+# message, a remote compile step's output, an exception quoting a path) can carry what the program
+# wrote, so it goes to the log.
+_INFRA_ERROR_VERDICT = "ERROR -- grading infrastructure failure"
 
 # The checker's argv contract: the test input, the reference output, the candidate output, in this order.
 CHECKER_FILES = ("input.txt", "correct_output.txt", "solution_output.txt")
@@ -57,11 +66,13 @@ _CHECKER_DRIVER = (
 )
 
 
-def _stderr_tail(stderr: str) -> str:
-    """The end of a program's stderr: a traceback names the exception on its last line, so a head
-    excerpt of a long one shows the frames and drops the error."""
+def _stderr_line(stderr: str) -> str:
+    """A detail line quoting the end of a program's stderr, empty for none: a traceback names the
+    exception on its last line, so a head excerpt of a long one shows the frames and drops the error."""
     text = stderr.strip()
-    return text if len(text) <= _STDERR_EXCERPT_CHARS else "…" + text[-_STDERR_EXCERPT_CHARS:]
+    if len(text) > _STDERR_EXCERPT_CHARS:
+        text = "…" + text[-_STDERR_EXCERPT_CHARS:]
+    return f"\n  Stderr: {text}" if text else ""
 
 
 @dataclass
@@ -109,11 +120,18 @@ def compare_tokens(expected: str, actual: str) -> bool:
     return all(_tokens_equal(e, a) for e, a in zip(et, at, strict=False))
 
 
+def _lf_lines(text: str) -> str:
+    """``text`` stripped, with ``\r\n`` and ``\r`` read as ``\n``."""
+    return text.strip().replace("\r\n", "\n").replace("\r", "\n")
+
+
 def exact_output_match(expected: str, actual: str) -> bool:
     """Exact comparison of a program's OUTPUT after stripping leading/trailing whitespace from both
-    sides (legacy CodeContests). Distinct from :func:`src.rewards.matching.exact_match`, which
-    normalizes a free-text answer."""
-    return expected.strip() == actual.strip()
+    sides (legacy CodeContests), reading ``\r\n`` and ``\r`` as ``\n``: a judge compares lines, not
+    line endings, so neither a CRLF test file nor a program ending lines the Windows way flips the
+    verdict, whichever backend captured the output. Distinct from
+    :func:`src.rewards.matching.exact_match`, which normalizes a free-text answer."""
+    return _lf_lines(expected) == _lf_lines(actual)
 
 
 def as_verdict(comparator: Callable[[str, str], bool]) -> VerdictFn:
@@ -262,16 +280,19 @@ def run_solution_against_tests(
     verdict_fn: VerdictFn | None = None,
     stop_on_first_failure: bool = False,
     max_grading_seconds: float | None = None,
-    verdict_detail: str = VERDICT_DETAIL_FULL,
+    verdict_detail: str = VERDICT_DETAIL_OUTCOME,
 ) -> GradeResult:
     """Run a solution against test cases through a :class:`SandboxExecutor` -> :class:`GradeResult`.
 
     Each test feeds ``input`` to stdin and compares stdout to expected ``output`` via ``verdict_fn``
     (default: trimmed exact match) in an independent sandbox run. Details list only non-passing tests,
     one entry per distinct verdict (tests failing the same way are folded into it), capped at
-    ``_MAX_FAILURE_DETAILS`` distinct entries; ``verdict_detail`` decides whether a wrong answer shows
-    the expected and produced output (``full``) or the verdict alone (``outcome``). A runtime error
-    shows the tail of stderr, where a traceback names the exception.
+    ``_MAX_FAILURE_DETAILS`` distinct entries. ``verdict_detail`` decides what an entry shows: the
+    verdict class alone (``outcome``), or also a wrong answer's expected and produced output, a
+    runtime error's exit code, an output-limit overrun's size, the tail of stderr, where a traceback
+    names the exception, and an infra error's text (``full``). A compile error shows the compiler's
+    first error under ``full``, and under ``outcome`` only where the backend builds apart from every
+    test's stdin (``compiles_without_test_input``). An infra error's text always reaches the log.
 
     ``max_grading_seconds`` bounds one grade's total wall clock, since tests run sequentially and a
     several-hundred-test problem would otherwise stall the whole rollout round. It is checked between
@@ -296,6 +317,8 @@ def run_solution_against_tests(
     failures: list[_Failure] = []
     notes: list[str] = []
     suppressed = 0
+    full_detail = verdict_detail == VERDICT_DETAIL_FULL
+    infra_texts: Counter[str] = Counter()
     deadline = None if max_grading_seconds is None else time.monotonic() + max_grading_seconds
     graded = 0
     budget_hit = False
@@ -313,22 +336,30 @@ def run_solution_against_tests(
         else:
             suppressed += 1
 
+    def book_infra(i: int, error: str) -> None:
+        """Book a test lost to infra: no verdict on the program, its text shown under ``full`` only."""
+        nonlocal infra_errors
+        infra_errors += 1
+        infra_texts[error] += 1
+        add_detail(i, f"ERROR -- {error}" if full_detail else _INFRA_ERROR_VERDICT)
+
     with _grading_runner(sandbox, code, language=language, timeout=timeout_per_test) as run_test:
         for i, tc in enumerate(test_cases, 1):
             if deadline is not None and graded and time.monotonic() >= deadline:
                 budget_hit = True
                 break
-            test_input = tc.get("input", "")
+            # A null input is no input: the program reads end-of-file and a checker an empty input.txt.
+            test_input = tc.get("input") or ""
             expected_output = tc.get("output", "")
 
             result = run_test(test_input)
 
             if result.compile_failed:
                 # The source never built, so every test fails the same way: judged once, the whole
-                # pool counted, with the compiler's diagnostics as the verdict.
-                # The compiler names the first error first, so the head of its output is the excerpt.
+                # pool counted, with the compiler's diagnostics as the verdict. The compiler names the
+                # first error first, so the head is the excerpt.
                 line = "COMPILATION ERROR (every test fails)"
-                if result.stderr:
+                if result.stderr and (full_detail or sandbox.compiles_without_test_input):
                     line += f"\n  {result.stderr.strip()[:_STDERR_EXCERPT_CHARS]}"
                 notes.append(line)
                 graded = total
@@ -339,25 +370,24 @@ def run_solution_against_tests(
                 add_detail(i, f"TIME LIMIT EXCEEDED ({timeout_per_test:g}s)")
             elif result.error:
                 # Backend/transport failure (not the program's stderr); bucket as ERROR even with partial stdout.
-                infra_errors += 1
-                add_detail(i, f"ERROR -- {result.error}")
+                book_infra(i, result.error)
             elif result.returncode not in (0, None):
                 # Non-zero exit is a Runtime Error on every judge, never a pass even if stdout matches.
-                body = f"RUNTIME ERROR (exit {result.returncode})"
-                if result.stderr:
-                    body += f"\n  Stderr: {_stderr_tail(result.stderr)}"
+                body = "RUNTIME ERROR"
+                if full_detail:
+                    body += f" (exit {result.returncode}){_stderr_line(result.stderr)}"
                 add_detail(i, body)
             elif len(result.stdout) > max_output_size:
                 # Over-cap output is its own verdict: truncate-and-compare would grade a correct-but-long answer wrong.
-                add_detail(i, f"OUTPUT LIMIT EXCEEDED ({len(result.stdout)} > {max_output_size} bytes)")
+                size = f"{len(result.stdout)} " if full_detail else ""
+                add_detail(i, f"OUTPUT LIMIT EXCEEDED ({size}> {max_output_size} bytes)")
             else:
                 actual_output = result.stdout
                 try:
                     test_passed = verdict_fn(test_input, expected_output, actual_output)
                 except CheckerInfraError as e:
                     # Verdict lost to infra: no ran_ok/pass credit, keeping an all-infra outage visible.
-                    infra_errors += 1
-                    add_detail(i, f"ERROR -- {e}")
+                    book_infra(i, str(e))
                 else:
                     if test_passed or actual_output.strip() or not expected_output.strip():
                         # Requiring output stops a no-output stub tying an honest attempt on this rung.
@@ -366,13 +396,12 @@ def run_solution_against_tests(
                         passed += 1
                     else:
                         body = "FAIL"
-                        if verdict_detail == VERDICT_DETAIL_FULL:
+                        if full_detail:
                             body += (
                                 f"\n  Expected: {expected_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
                                 f"\n  Got:      {actual_output.strip()[:_OUTPUT_EXCERPT_CHARS]}"
+                                f"{_stderr_line(result.stderr)}"
                             )
-                        if result.stderr:
-                            body += f"\n  Stderr: {_stderr_tail(result.stderr)}"
                         add_detail(i, body)
 
             graded = i
@@ -380,6 +409,9 @@ def run_solution_against_tests(
                 notes.append(f"Stopped after first failing test ({total - i} not run).")
                 break
 
+    if infra_texts:
+        lost = "; ".join(f"{text} (x{count})" for text, count in infra_texts.items())
+        logger.warning("Grading lost %d test(s) to infra errors: %s", infra_errors, lost)
     details = [failure.render() for failure in failures] + notes
     if suppressed:
         details.append(f"...and {suppressed} more non-passing tests (details omitted).")
@@ -430,13 +462,19 @@ class GradingSpec:
     # Multiplies a compiled language's per-test limit; the interpreted floor and the clamp stay unscaled.
     compiled_time_limit_scale: float = 1.0
     max_grading_seconds: float | None = None
-    verdict_detail: str = VERDICT_DETAIL_FULL
+    verdict_detail: str = VERDICT_DETAIL_OUTCOME
 
     # The live executor: rebuilt from the run's env kwargs offline, never carried through a JSON dump.
     _META_EXCLUDED = frozenset({"sandbox"})
 
     def __post_init__(self) -> None:
         # ``replace`` re-runs this, so a restored meta block is held to the same contract.
+        for name, seconds in (
+            ("default_timeout (timeout_per_test)", self.default_timeout),
+            ("max_time_limit", self.max_time_limit),
+        ):
+            if not (isfinite(seconds) and seconds > 0):
+                raise ValueError(f"{name} must be a finite number of seconds > 0, got {seconds!r}")
         if not (isfinite(self.compiled_time_limit_scale) and self.compiled_time_limit_scale > 0):
             raise ValueError(
                 f"compiled_time_limit_scale must be a finite number > 0, got {self.compiled_time_limit_scale}"

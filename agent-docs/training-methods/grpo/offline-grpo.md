@@ -93,9 +93,9 @@ The default path materializes `[B, T_completion, vocab]` logits, twice per micro
 
 ### Reference model
 
-A reference exists only at `kl_beta > 0`; a PEFT-wrapped policy builds none, since `disable_adapter()` reverts to the base weights. Dense full fine-tuning deepcopies the live policy, so a resume re-anchors the KL there.
+`kl_beta` is the KL anchor, and a reference exists only at `kl_beta > 0`. A PEFT-wrapped policy builds none, since `disable_adapter()` reverts to the base weights. Dense full fine-tuning deepcopies the live policy, so a resume re-anchors the KL there.
 
-EP and grouped-GEMM wrapped MoE models hold live NCCL groups `deepcopy` cannot pickle, so their reference — and an expert-only LoRA run's, which is not PEFT-wrapped — reloads **dense** from the checkpoint path. Passing such a model as an object without a path raises. The reference log-ratio is capped at 5 nats, bounding the k3 estimator's tail.
+EP and grouped-GEMM wrapped MoE models hold live NCCL groups `deepcopy` cannot pickle, so their reference — and an expert-only LoRA run's, which is not PEFT-wrapped — is a dense per-rank replica the script loads through the DPO/KTO reference path (`load_frozen_reference_model`) and passes as `ref_model`. It carries the policy's weights source (the resumed checkpoint on a resume), revision, `trust_remote_code`, attention request and sinks policy, with the non-persistent buffers repaired. The trainer raises when a wrapped MoE arrives at `kl_beta > 0` without one, and when `ref_model` is passed to a run that holds no reference. The reference log-ratio is capped at 5 nats, bounding the k3 estimator's tail.
 
 ## Launch
 

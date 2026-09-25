@@ -1,9 +1,10 @@
 """The offline-GRPO per-token objective, shared by the non-PP loss and its pipeline counterpart.
 
-Pure tensor math over one batch, or one pipeline microbatch, of completion log-probs: the policy
-term, the capped k3 KL against the reference, and the per-token quantities both paths buffer as
-diagnostics. The ``min_log_prob`` clamp and the reduction stay with the caller, since they differ per
-path (a rank-local quotient off PP, a microbatch sum under it).
+Pure tensor math over one batch, or one pipeline microbatch, of completion log-probs: the
+negative-advantage ``min_log_prob`` floor both paths apply to the policy and the reference, the
+policy term, the capped k3 KL against the reference, and the per-token quantities both paths buffer
+as diagnostics. The reduction stays with the caller, since it differs per path (a rank-local quotient
+off PP, a microbatch sum under it).
 """
 
 from __future__ import annotations
@@ -11,6 +12,20 @@ from __future__ import annotations
 import torch
 
 from src.trainers.grpo.objective.logratio import clamp_ref_logps
+
+
+def clamp_negative_advantage_logps(
+    token_logps: torch.Tensor, advantages: torch.Tensor, min_log_prob: float | None
+) -> torch.Tensor:
+    """``token_logps`` ([B, T]) floored at ``min_log_prob`` on the rows whose advantage ([B]) is negative.
+
+    Below the floor the clamp passes no gradient, so a negative-advantage row stops pushing a token
+    it already rates that unlikely further toward zero probability. Returns ``token_logps`` itself when
+    no floor is configured.
+    """
+    if min_log_prob is None:
+        return token_logps
+    return torch.where((advantages < 0).unsqueeze(1), token_logps.clamp(min=min_log_prob), token_logps)
 
 
 def offline_token_objective(

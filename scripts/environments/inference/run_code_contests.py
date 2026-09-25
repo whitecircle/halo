@@ -14,8 +14,8 @@ graded program, no scratchpad), and on a benchmark that stamps contest dates
 
 The server must serve the model with tool calling enabled (e.g. vLLM
 `--tool-call-parser qwen3_xml --enable-auto-tool-choice`). A solution counts as solved when it passes
-every graded test (`--success_threshold 1.0`). Reasoning models need a large `--max_tokens`: too low
-truncates the chain of thought before any solution and scores 0.
+every test in the pool, the environment's own verdict whatever the shaped reward. Reasoning models
+need a large `--max_tokens`: too low truncates the chain of thought before any solution and scores 0.
 
 Examples:
     # Codeforces verifiable test split, 50 problems, success@1, on a local vLLM server
@@ -252,7 +252,6 @@ def parse_args() -> argparse.Namespace:
         "environment's own). Agentic models iterate test→fix→submit, so a tight cap (e.g. 6) truncates "
         "them mid-loop.",
     )
-    p.add_argument("--success_threshold", type=float, default=1.0, help="Reward at/above which a sample is solved.")
     p.add_argument(
         "--temperature",
         type=float,
@@ -372,7 +371,6 @@ def main() -> None:
             client,
             rollout=rollout,
             num_samples=args.num_samples,
-            success_threshold=args.success_threshold,
             max_workers=args.max_workers,
             collect_trajectories=bool(traj_path),
         )

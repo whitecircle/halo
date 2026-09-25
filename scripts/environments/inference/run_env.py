@@ -59,6 +59,7 @@ from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
     report,
+    require_answers,
 )
 from src.environments.registry import resolve_environment
 from src.inference.openai_client import create_openai_client
@@ -101,7 +102,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num_examples", type=int, default=100, help="Cap on examples (0 = all).")
     p.add_argument("--num_samples", type=int, default=1, help="Episodes per example (success@k).")
-    p.add_argument("--success_threshold", type=float, default=1.0, help="Reward at/above which a sample is a success.")
+    p.add_argument(
+        "--success_threshold",
+        type=float,
+        default=1.0,
+        help="Reward at/above which a sample is a success, for an environment that reports no solve verdict "
+        "of its own (one that does is scored on it).",
+    )
     # No default: each env class carries its own, and passing one unconditionally would cap every env
     # at a number none of them chose.
     p.add_argument("--max_turns", type=int, default=None, help="Max env turns per episode (default: the env's own).")
@@ -183,6 +190,7 @@ def main() -> None:
     # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
     env.verify_backend()
     examples = build_examples(args)
+    require_answers(env, examples, f"the {args.answer_field!r} field of {args.dataset} (--answer_field)")
     client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
     rollout = rollout_config_from_args(
         args, contract, default_temperature=DEFAULT_ROLLOUT_TEMPERATURE, default_max_tokens=DEFAULT_ROLLOUT_MAX_TOKENS

@@ -23,6 +23,7 @@ from src.data.pipeline.preferences import split_rendered_completion
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.row_processors import prepare_generative_row
 from src.data.sources.loading import reject_image_columns
+from src.distributed.loading.frozen_models import load_frozen_reference_model
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.runtime import barrier
 from src.models.loading.model_preparation import log_model_info
@@ -30,6 +31,7 @@ from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser
 from src.training.script_runner import (
+    ScriptRuntime,
     apply_distributed_trainer_config,
     apply_prompt_completion_window,
     build_training_callbacks,
@@ -75,6 +77,40 @@ def build_chat_template_row_fn(tokenizer, tools_field: str | None):
     return apply_chat_templates
 
 
+def _load_kl_reference(
+    args,
+    runtime: ScriptRuntime,
+    offline_grpo_config: OfflineGRPOConfig,
+    model_config: ModelConfig,
+    dist_args: DistributedArguments,
+    *,
+    policy,
+    tokenizer,
+    peft_config,
+    attn_default: str | None,
+):
+    """The frozen KL reference the trainer cannot derive from ``policy``, or ``None`` where it can.
+
+    Only a wrapped-MoE full fine-tune at ``kl_beta != 0`` needs one
+    (:meth:`OfflineGRPOTrainer.requires_ref_model`). It is loaded through the preference trainers'
+    frozen-reference path from the policy's own weights source, so on a resume it anchors to the
+    resumed weights as the dense deepcopy and the pipeline sweep do. ``is_vlm`` is off, as the policy's
+    text-path load also resolves its class from the config.
+    """
+    if not OfflineGRPOTrainer.requires_ref_model(policy, offline_grpo_config, runtime.parallelism_config, peft_config):
+        return None
+    return load_frozen_reference_model(
+        args,
+        model_config,
+        offline_grpo_config,
+        tokenizer,
+        runtime.model_source,
+        is_vlm=False,
+        reset_sinks=dist_args.reset_sinks,
+        attn_default=attn_default,
+    )
+
+
 def main():
     parser = H4ArgumentParser((OfflineGRPOScriptArguments, OfflineGRPOConfig, ModelConfig, DistributedArguments))
     args, offline_grpo_config, model_config, dist_args = parser.parse()
@@ -106,6 +142,18 @@ def main():
     )
 
     peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+
+    ref_model = _load_kl_reference(
+        args,
+        runtime,
+        offline_grpo_config,
+        model_config,
+        dist_args,
+        policy=model,
+        tokenizer=tokenizer,
+        peft_config=peft_config,
+        attn_default=requested_attn,
+    )
 
     log_model_info(model, tokenizer)
 
@@ -177,6 +225,7 @@ def main():
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
+        ref_model=ref_model,
         callbacks=callbacks,
         **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
     )

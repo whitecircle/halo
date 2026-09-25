@@ -34,6 +34,31 @@ INTERPRETER_PLACEHOLDER = "$INTERPRETER"
 REPL_NO_OUTPUT_MESSAGE = "Code executed successfully (no output)"
 
 
+def utf8_encodable(text: str) -> str:
+    """``text`` with what UTF-8 cannot carry (a lone surrogate in model-written code or stdin) replaced
+    by ``?``, as a text-mode pipe writes it: the program sees the replacement, and the host never fails
+    to hand its input over (a failure the grader books as infra, voiding the episode)."""
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def safe_member_name(name: str) -> bool:
+    """Whether ``name`` stays inside a working directory: relative, naming an entry, never ``..``."""
+    return name not in ("", ".", "..") and not name.startswith(("/", "\\")) and ".." not in name.split("/")
+
+
+def require_session_path(path: str) -> None:
+    """Refuse a session file path no backend may take with ``ValueError``, a priced tool error: one
+    UTF-8 cannot encode (a lone surrogate from model-written JSON) or one that leaves the working
+    directory. A backend that failed on it instead would read as the backend's fault. Refused rather
+    than renamed, so the program never finds its file under a name it did not write."""
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"session file path {path!r} is not valid UTF-8") from None
+    if not safe_member_name(path):
+        raise ValueError(f"unsafe session file path: {path!r}")
+
+
 def repl_timeout_message(timeout: float) -> str:
     """The REPL observation for a run killed by its wall-clock ``timeout``."""
     return f"Error: execution exceeded {timeout:g}s timeout"
@@ -75,9 +100,25 @@ class SandboxInfraError(RuntimeError):
 
     Distinct from the program's own non-zero exit, compile error, or timeout; those are verdicts on
     the submitted code and stay ordinary string results. The REPL layer raises this so an
-    infrastructure outage surfaces as a failed tool call rather than a string the protocol would
-    score as successful.
+    infrastructure outage reaches the tool layer by type: the call is booked unpriced, and the episode
+    ends and leaves the GRPO group baseline instead of pricing the fault as the policy's.
     """
+
+
+class SandboxAgentFault(RuntimeError):
+    """The program's own action broke its sandbox beyond what the host can safely repair: it put a link
+    or a file in its working directory's place, which only the ``local`` backend's unconfined program
+    can do.
+
+    The fault is the policy's, not the backend's, so it must never read as :class:`SandboxInfraError`
+    (an episode could otherwise void itself out of the baseline). Grading judges it as the program's
+    runtime error; the REPL layer raises it, the call is booked as a failed one, and the episode ends
+    uncompleted, inside the baseline.
+    """
+
+
+# The typed faults a tool call can end on; the protocols catch them ahead of any other exception.
+SANDBOX_FAULTS = (SandboxInfraError, SandboxAgentFault)
 
 
 @dataclass
@@ -88,16 +129,32 @@ class SandboxResult:
     stderr: str = ""
     returncode: int | None = None
     timed_out: bool = False
-    # The compiler rejected the program's own source (non-zero exit; ``returncode`` is the compiler's).
-    # A missing compiler or a compile timeout is a backend/limit failure and sets ``error`` instead.
+    # The program's source never built: the compiler rejected it (``returncode`` is the compiler's) or
+    # the build ran past the compile limit. A missing compiler is a backend failure and sets ``error``.
     compile_failed: bool = False
     # Backend/transport failure, distinct from the program's own non-zero exit or a compile error.
     error: str | None = None
+    # What the program did to its own sandbox (:class:`SandboxAgentFault`); set with a non-zero
+    # ``returncode`` so grading reads it as a runtime error, never as ``error``.
+    agent_fault: str | None = None
 
     @property
     def ok(self) -> bool:
         """True only when the program built and ran to completion with a zero exit code."""
-        return self.returncode == 0 and not self.timed_out and not self.compile_failed and self.error is None
+        return (
+            self.returncode == 0
+            and not self.timed_out
+            and not self.compile_failed
+            and self.error is None
+            and self.agent_fault is None
+        )
+
+
+def compile_limit_verdict(message: str) -> SandboxResult:
+    """A build killed at its compile limit: the source's verdict (an ``#include`` bomb, a template
+    blow-up), judged like a compiler rejection and never as a backend failure, which would let a
+    program void its own episode."""
+    return SandboxResult(stderr=message, compile_failed=True)
 
 
 @dataclass(frozen=True)
@@ -231,6 +288,16 @@ class SandboxExecutor(ABC):
     Backends differ only in isolation/locality; they share this interface and the
     :class:`LanguageSpec` registry, so multi-language and session semantics are identical.
     """
+
+    # Whether a program is kept from writing the host's filesystem and from its network; it may still
+    # read what the backend exposes (bubblewrap's read-only system paths and ``extra_ro_binds``). Only
+    # a backend that confines it so declares True: a coding environment warns on every other one.
+    isolated: bool = False
+    # Whether a compiled submission is built before, and apart from, every test's stdin, and no program
+    # can make a later build read what an earlier test left behind, so a compiler's message can quote
+    # only the submission. Only a backend that builds so declares True: grading shows that message
+    # under ``verdict_detail: outcome`` there alone.
+    compiles_without_test_input: bool = False
 
     @abstractmethod
     def open_session(self) -> SandboxSession:

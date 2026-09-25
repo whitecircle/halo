@@ -17,6 +17,7 @@ from accelerate.utils import gather_object
 from src.distributed.runtime import (
     current_device,
     fs_aware_save_rank,
+    is_global_main_process,
     is_multi_rank_run,
     is_output_shared_filesystem,
 )
@@ -26,11 +27,26 @@ from src.trainers.grpo.rollout.completions_logging import emit_completion_artifa
 
 logger = logging.getLogger(__name__)
 
-# Wire kinds of a WorldMetrics entry: a (numerator, denominator) pair folded as Σn / Σd, or a maximum.
+Count = torch.Tensor | float | int
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator else 0.0
+
+
+# How a WorldMetrics entry folds, by wire kind: each rank sends its sums, the fold adds them column-wise
+# and derives the metric from the world totals. A maximum is the one kind that is not a sum.
 _FRACTION = "fraction"
 _MAXIMUM = "max"
-
-Count = torch.Tensor | float | int
+_EFFECTIVE_SAMPLE_FRAC = "ess"
+_COVARIANCE = "cov"
+_FOLDS: dict[str, Callable[..., float]] = {
+    _FRACTION: _ratio,
+    # (Σw)² / (n Σw²): 1 for uniform weights, toward 1/n as one weight dominates, 0 when all are zero.
+    _EFFECTIVE_SAMPLE_FRAC: lambda w, w2, n: _ratio(w * w, n * w2),
+    # E[xy] - E[x] E[y] over the pooled samples.
+    _COVARIANCE: lambda xy, x, y, n: _ratio(xy, n) - _ratio(x, n) * _ratio(y, n),
+}
 
 
 def gathered_fractions(
@@ -50,11 +66,12 @@ def gathered_fractions(
 
 
 class WorldMetrics:
-    """Per-step accumulator for batch-level fractions, means and maxima.
+    """Per-step accumulator for batch-level fractions, means, maxima, effective sample sizes and
+    covariances.
 
     TRL's ``GRPOTrainer.log`` averages each process's own ``_metrics`` list and only the main process
     reports, so a value computed over one rank's rows is logged as if it were the batch's. Sites
-    record the local ``(numerator, denominator)`` counts or maximum here instead, and :meth:`flush`
+    record the local sums (or maximum) each metric is derived from here instead, and :meth:`flush`
     folds every rank's entries in ONE collective. Recording issues no collective and no host sync, so
     a site behind a data-dependent gate is safe: a rank that never reaches it contributes nothing to
     that key. A step that raises between a record and its flush ends the run — every such raise in
@@ -62,19 +79,32 @@ class WorldMetrics:
     """
 
     def __init__(self) -> None:
-        self._pending: dict[str, tuple[str, Count, Count]] = {}
+        self._pending: dict[str, tuple[str, tuple[Count, ...]]] = {}
 
     def fraction(self, key: str, numerator: Count, denominator: Count) -> None:
         """World ``numerator / denominator``; a sum over a count is the batch mean."""
         self._record(key, _FRACTION, numerator, denominator)
 
     def maximum(self, key: str, value: Count) -> None:
-        self._record(key, _MAXIMUM, value, 0.0)
+        self._record(key, _MAXIMUM, value)
 
-    def _record(self, key: str, kind: str, first: Count, second: Count) -> None:
+    def effective_sample_frac(self, key: str, weights: torch.Tensor, mask: torch.Tensor) -> None:
+        """World normalized effective sample size ``(Σw)² / (n Σw²)`` of ``weights`` where ``mask`` holds."""
+        mask = mask.bool()
+        w = torch.where(mask, weights.double(), 0.0)
+        self._record(key, _EFFECTIVE_SAMPLE_FRAC, w.sum(), (w * w).sum(), mask.sum())
+
+    def covariance(self, key: str, x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> None:
+        """World covariance of ``x`` and ``y`` over the elements where ``mask`` holds."""
+        # where, not a product: a non-finite value outside the mask would turn the sum into NaN.
+        mask = mask.bool()
+        x, y = torch.where(mask, x.double(), 0.0), torch.where(mask, y.double(), 0.0)
+        self._record(key, _COVARIANCE, (x * y).sum(), x.sum(), y.sum(), mask.sum())
+
+    def _record(self, key: str, kind: str, *values: Count) -> None:
         if key in self._pending:
             raise ValueError(f"{key} was already recorded this step; a key folds one entry per rank")
-        self._pending[key] = (kind, first, second)
+        self._pending[key] = (kind, values)
 
     def flush(
         self, target: MutableMapping[str, list[float]], gather_fn: Callable[[list], list] = gather_object
@@ -82,36 +112,36 @@ class WorldMetrics:
         """Fold the pending entries across ranks into ``target`` (one TRL ``_metrics[mode]`` dict).
 
         COLLECTIVE — every rank calls it once per step at the same point. The key set is the union
-        of what any rank recorded; a fraction whose world denominator is 0 reads 0.
+        of what any rank recorded; a metric whose world count is 0 reads 0.
         """
         pending, self._pending = self._materialized(), {}
-        merged: dict[str, list[tuple[str, float, float]]] = defaultdict(list)
+        merged: dict[str, list[tuple[str, tuple[float, ...]]]] = defaultdict(list)
         for rank_entries in gather_fn([pending]):
             for key, entry in rank_entries.items():
                 merged[key].append(entry)
         for key in sorted(merged):
             entries = merged[key]
-            kinds = {kind for kind, _, _ in entries}
+            kinds = {kind for kind, _ in entries}
             if len(kinds) != 1:
                 raise ValueError(f"{key} was recorded as {sorted(kinds)} on different ranks")
-            if kinds == {_MAXIMUM}:
-                value = max(first for _, first, _ in entries)
+            (kind,) = kinds
+            if kind == _MAXIMUM:
+                value = max(values[0] for _, values in entries)
             else:
-                denominator = sum(second for _, _, second in entries)
-                value = sum(first for _, first, _ in entries) / denominator if denominator else 0.0
+                value = _FOLDS[kind](*(sum(column) for column in zip(*(values for _, values in entries), strict=True)))
             target.setdefault(key, []).append(value)
 
-    def _materialized(self) -> dict[str, tuple[str, float, float]]:
+    def _materialized(self) -> dict[str, tuple[str, tuple[float, ...]]]:
         """The pending entries as floats, every recorded tensor read in one host sync."""
-        tensors = [v for _, a, b in self._pending.values() for v in (a, b) if isinstance(v, torch.Tensor)]
-        values = iter(
+        tensors = [v for _, values in self._pending.values() for v in values if isinstance(v, torch.Tensor)]
+        read = iter(
             torch.stack([t.detach().to(tensors[0].device).double() for t in tensors]).tolist() if tensors else ()
         )
 
         def as_float(value: Count) -> float:
-            return next(values) if isinstance(value, torch.Tensor) else float(value)
+            return next(read) if isinstance(value, torch.Tensor) else float(value)
 
-        return {key: (kind, as_float(a), as_float(b)) for key, (kind, a, b) in self._pending.items()}
+        return {key: (kind, tuple(as_float(v) for v in values)) for key, (kind, values) in self._pending.items()}
 
 
 def _gather_to_completion_writers(values: list) -> list | None:
@@ -164,6 +194,24 @@ def _summarize_episode_generation_tokens(generation_tokens: list[float]) -> dict
     }
 
 
+def group_solve_counts(solved: Sequence[bool | None], group_size: int) -> tuple[int, int, int, int]:
+    """``(groups, all_pass, all_fail, any_pass)`` over consecutive groups of ``group_size`` episodes.
+
+    Each entry is an episode's solve verdict, or ``None`` for one that carries none (the environment
+    reports no verdict, or the episode left the baseline). A group is judged on the episodes that carry
+    a verdict; a group with none is not counted.
+    """
+    groups = all_pass = all_fail = any_pass = 0
+    for start in range(0, len(solved), group_size):
+        verdicts = [v for v in solved[start : start + group_size] if v is not None]
+        if verdicts:
+            groups += 1
+            all_pass += all(verdicts)
+            all_fail += not any(verdicts)
+            any_pass += any(verdicts)
+    return groups, all_pass, all_fail, any_pass
+
+
 class RolloutMetricsMixin:
     """Completion logging and rollout diagnostics for the environmental GRPO trainer.
 
@@ -181,6 +229,10 @@ class RolloutMetricsMixin:
     _total_generation_tokens = 0
     # The mode whose rows ``self._logs`` holds; rebinds per instance like the counters above.
     _completion_logs_mode: str | None = None
+    # ``truncation_alarm_rate``, set by the trainer (``None`` = no alarm), and the modes whose last round
+    # was over it: the warning fires on a crossing, not on every round above the line.
+    _truncation_alarm_rate: float | None = None
+    _truncation_alarmed: frozenset[str] = frozenset()
 
     def cumulative_rollout_metrics(self) -> dict[str, float]:
         """The ``async/*`` totals since train start, as the trainer logs them."""
@@ -281,6 +333,7 @@ class RolloutMetricsMixin:
             {
                 "latency": r.latency,
                 "generation_tokens": r.generation_tokens,
+                "requests_expired_in_sync": r.requests_expired_in_sync,
                 "turns": r.episode_length,
                 "success": bool(r.success),
                 "truncated": bool(r.trajectory and r.trajectory.truncated),
@@ -306,13 +359,17 @@ class RolloutMetricsMixin:
             return sum(vals) / len(vals)
 
         m["async/mean_rollout_latency"].append(_mean([e["latency"] for e in episodes]))
+        # A count, not a mean: each one threw away a turn the engine had already started.
+        m["async/requests_expired_in_sync"].append(float(sum(e["requests_expired_in_sync"] for e in episodes)))
 
         for key, val in _summarize_episode_generation_tokens([e["generation_tokens"] for e in episodes]).items():
             m[key].append(val)
 
         m["episode/turns"].append(_mean([e["turns"] for e in episodes]))
         m["episode/natural_termination_rate"].append(_mean([1.0 if e["success"] else 0.0 for e in episodes]))
-        m["episode/truncation_rate"].append(_mean([1.0 if e["truncated"] else 0.0 for e in episodes]))
+        truncation_rate = _mean([1.0 if e["truncated"] else 0.0 for e in episodes])
+        m["episode/truncation_rate"].append(truncation_rate)
+        self._sound_truncation_alarm(truncation_rate, mode)
         m["episode/error_rate"].append(_mean([1.0 if e["error"] else 0.0 for e in episodes]))
 
         env_keys = {k for e in episodes for k in e["metrics"]}
@@ -353,3 +410,25 @@ class RolloutMetricsMixin:
             for key in {k for e in group for k in e["metrics"] if k.startswith("episode/")}:
                 vals = [e["metrics"][key] for e in group if key in e["metrics"]]
                 m[f"{prefix}/{key.removeprefix('episode/')}"].append(_mean(vals))
+
+    def _sound_truncation_alarm(self, truncation_rate: float, mode: str) -> None:
+        """``episode/truncation_alarm`` for this round, and a warning when the rate crosses over
+        ``truncation_alarm_rate``, naming what the loss does with a truncated episode. The rate is
+        gathered-global, so every rank reaches the same verdict."""
+        if self._truncation_alarm_rate is None:
+            return
+        alarmed = truncation_rate > self._truncation_alarm_rate
+        self._metrics[mode]["episode/truncation_alarm"].append(float(alarmed))
+        if alarmed and mode not in self._truncation_alarmed and is_global_main_process():
+            in_loss = (
+                "mask_truncated_completions drops those episodes from the loss"
+                if self.args.mask_truncated_completions
+                else "a truncated episode is priced like a failure"
+            )
+            logger.warning(
+                f"{truncation_rate:.0%} of this {mode} round's episodes ended truncated, over "
+                f"truncation_alarm_rate={self._truncation_alarm_rate}: the turn cap (max_turns) or a token "
+                f"budget (rollout_max_tokens, the thinking budget) binds, and {in_loss}. Warned again once "
+                f"the rate has dropped back under the threshold."
+            )
+        self._truncation_alarmed = self._truncation_alarmed | {mode} if alarmed else self._truncation_alarmed - {mode}

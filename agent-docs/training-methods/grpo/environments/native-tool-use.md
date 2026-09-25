@@ -35,13 +35,13 @@ The knobs every environment shares — turn cap, per-call tool pay, observation 
 - `web_search` — `query` and optional `max_results` (default 5).
 - `read_file`, `write_file`, `list_files` — a simulated per-episode file store, for tests and closed-world demos.
 
-Registries are built by the factories in `src/environments/tools/factories.py` and composed with `NativeToolRegistry.combine(a, b)`. The `create_native_*` set is stateless; `create_session_*` binds the episode's persistent [sandbox session](sandbox.md) so files survive across turns. Pass `sandbox=` a `SandboxExecutor` to run code in a real isolated interpreter with imports, or `allow_imports=True` to lift the ban inside the in-process REPL — safe only when the whole process is already isolated.
+Registries are built by the factories in `src/environments/tools/factories.py` and composed with `NativeToolRegistry.combine(a, b)`. The `create_native_*` set is stateless; `create_session_*` binds the episode's persistent [sandbox session](sandbox.md) so files survive across turns. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports, in a subprocess ([confined on `remote` and on `bubblewrap` without `allow_network`, rlimits only on `local`](sandbox.md#choosing-a-backend)), or `allow_imports=True` to lift the ban inside the in-process REPL — safe only when the whole process is already isolated.
 
 ## Reward
 
-Per call: `+tool_success_reward` for a successful call, `-tool_error_penalty` for a failed one, paid up to `tool_reward_cap` per episode (default one paid call per turn of the budget, so call spam cannot out-earn the objective). A call refused over its `tool_budgets` cap, or one whose arguments cannot bind to the handler, books as a tool error without spending the budget.
+Per call: `+tool_success_reward` for a successful call, `-tool_error_penalty` for a failed one, paid up to `tool_reward_cap` per episode (default one paid call per turn of the budget, so call spam cannot out-earn the objective). A call refused over its `tool_budgets` cap, or one whose arguments cannot bind to the handler, books as a tool error without spending the budget. A call that ends on a sandbox fault is booked by its class and ends the episode ([Sandbox faults](sandbox.md#sandbox-faults)).
 
-The grade, in order: an episode that never completed grades 0; a `validator` callable in the row's context decides, 1 or 0; else the row's `answer` is graded all-or-nothing (exact match, then numeric); else completing the episode grades 1. The reward's `environment` term prices the grade as `weight × grade ^ exponent`, logged as `reward/objective` ([Reward Terms](../rewards.md#environment-arm)).
+The grade, in order: an episode that never completed grades 0; a `validator` callable in the row's context decides, 1 or 0; else the row's `answer` is graded all-or-nothing (exact match, then numeric); else completing the episode grades 1 (not under [`swe`](swe-environment.md#reward), which has no completion fallback). The reward's `environment` term prices the grade as `weight × grade ^ exponent`, logged as `reward/objective` ([Reward Terms](../rewards.md#environment-arm)).
 
 A row whose `answer` key holds null grades 0 and is marked `episode_invalid`, so the trainer drops it from the group baseline instead of grading every completion 1.
 
@@ -53,7 +53,7 @@ A cut or empty turn is nudged and retried within `max_turns` and `max_length_cut
 
 ## Dataset
 
-`{"prompt": str | list[dict], "answer": Any}`. For the native presets the `answer` column is optional: a row that carries one is graded against it, and without one completing the episode is the objective and every completion grades 1. The subclasses that grade only against it — [code contests](code-contests.md), [`exam_qa` and `qa_search`](benchmarks.md) — require the column (`requires_answer`). Extra columns reach the environment as context only when the training script's `context_fields` names them.
+`{"prompt": str | list[dict], "answer": Any}`. For the native presets the `answer` column is optional: a row that carries one is graded against it, and without one completing the episode is the objective and every completion grades 1. The subclasses that grade only against it — [code contests](code-contests.md), [`exam_qa` and `qa_search`](benchmarks.md) — require the column (`requires_answer`), as does [`swe`](swe-environment.md#reward) unless judge-only or given a `test_function`. Extra columns reach the environment as context only when the training script's `context_fields` names them.
 
 ## Evaluation
 

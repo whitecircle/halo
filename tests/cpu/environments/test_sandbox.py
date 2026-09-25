@@ -20,16 +20,17 @@ import os
 import time
 
 import pytest
+import requests
 
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
 from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.sandbox import local as local_backend
 from src.environments.sandbox.base import LOCAL_NPROC_LIMIT, ExecutionGate, SandboxInfraError, SandboxResult
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
 from src.environments.sandbox.resolve import resolve_sandbox
+from tests.common.code_contests import RecordingSandboxSession
 
 # LocalSubprocessSandbox
 
@@ -114,31 +115,24 @@ def test_local_timeout_kills_forked_grandchildren():
     assert _proc_state(grandchild) in (None, "Z"), f"grandchild {grandchild} survived the group kill"
 
 
-def test_local_timeout_drain_bounded_when_child_escapes_group():
-    """A grandchild that setsid()s OUT of the process group survives the group kill and keeps the
-    stdout pipe's write end open — the post-kill communicate() must be bounded (KILL_DRAIN_TIMEOUT),
-    not hang the grading worker until the escapee exits."""
-    original = local_backend.KILL_DRAIN_TIMEOUT
-    local_backend.KILL_DRAIN_TIMEOUT = 1.0
-    try:
-        sb = LocalSubprocessSandbox()
-        code = (
-            "import os, time\n"
-            "pid = os.fork()\n"
-            "if pid == 0:\n"
-            "    os.setsid()\n"  # escape the process group: the killpg misses this one
-            "    time.sleep(15)\n"
-            "    os._exit(0)\n"
-            "print('parent alive', flush=True)\n"
-            "time.sleep(15)\n"
-        )
-        start = time.monotonic()
-        res = sb.run(code, timeout=1.0)
-        elapsed = time.monotonic() - start
-        assert res.timed_out
-        assert elapsed < 10.0, f"post-kill drain not bounded: took {elapsed:.1f}s (escapee held the pipe)"
-    finally:
-        local_backend.KILL_DRAIN_TIMEOUT = original
+def test_a_child_that_escapes_the_group_does_not_hold_the_run_open():
+    """A grandchild that setsid()s OUT of the process group survives the group kill and keeps its copy
+    of the run's stdin and output files; the timed-out run returns without waiting for it."""
+    code = (
+        "import os, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setsid()\n"  # escape the process group: the killpg misses this one
+        "    time.sleep(15)\n"
+        "    os._exit(0)\n"
+        "print('parent alive', flush=True)\n"
+        "time.sleep(15)\n"
+    )
+    start = time.monotonic()
+    res = LocalSubprocessSandbox().run(code, timeout=1.0)
+    elapsed = time.monotonic() - start
+    assert res.timed_out
+    assert elapsed < 10.0, f"the run waited {elapsed:.1f}s for a child outside its group"
 
 
 def test_limit_wrap_caps_process_count_for_run_step():
@@ -250,43 +244,9 @@ def test_local_isolated_mode_ignores_pythonpath():
 # RemoteSandbox (no network — injected fake session)
 
 
-class _FakeResponse:
-    def __init__(self, payload, status=200):
-        self._payload = payload
-        self._status = status
-
-    def raise_for_status(self):
-        if self._status >= 400:
-            import requests
-
-            raise requests.HTTPError(f"status {self._status}")
-
-    def json(self):
-        return self._payload
-
-
-class _FakeSession:
-    """Captures the last request and returns a canned response (or raises)."""
-
-    def __init__(self, response=None, exc=None):
-        self._response = response
-        self._exc = exc
-        self.last_url = None
-        self.last_json = None
-        self.last_timeout = None
-
-    def post(self, url, json=None, timeout=None):
-        self.last_url = url
-        self.last_json = json
-        self.last_timeout = timeout
-        if self._exc is not None:
-            raise self._exc
-        return self._response
-
-
 def test_remote_endpoint_normalization():
-    sb_base = RemoteSandbox("http://sandbox:8080", session=_FakeSession())
-    sb_full = RemoteSandbox("http://sandbox:8080/run_code/", session=_FakeSession())
+    sb_base = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession())
+    sb_full = RemoteSandbox("http://sandbox:8080/run_code/", session=RecordingSandboxSession())
     assert sb_base.endpoint == "http://sandbox:8080/run_code"
     assert sb_full.endpoint == "http://sandbox:8080/run_code"
 
@@ -296,18 +256,19 @@ def test_remote_parses_success():
         "status": "Success",
         "run_result": {"status": "Finished", "stdout": "42\n", "stderr": "", "return_code": 0},
     }
-    sess = _FakeSession(_FakeResponse(payload))
+    sess = RecordingSandboxSession(payload)
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     res = sb.run("print(42)", stdin="ignored", timeout=7)
     assert res.ok
     assert not res.compile_failed
     assert res.stdout.strip() == "42"
     # Request shape is SandboxFusion-compatible.
-    assert sess.last_json["code"] == "print(42)"
-    assert sess.last_json["language"] == "python"
-    assert sess.last_json["run_timeout"] == 7
-    assert sess.last_json["stdin"] == "ignored"
-    assert sess.last_url.endswith("/run_code")
+    (sent,) = sess.posts
+    assert sent.payload["code"] == "print(42)"
+    assert sent.payload["language"] == "python"
+    assert sent.payload["run_timeout"] == 7
+    assert sent.payload["stdin"] == "ignored"
+    assert sent.url.endswith("/run_code")
 
 
 def test_remote_coerces_string_return_code():
@@ -316,7 +277,7 @@ def test_remote_coerces_string_return_code():
         "status": "Success",
         "run_result": {"status": "Finished", "stdout": "ok\n", "stderr": "", "return_code": "0"},
     }
-    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("print('ok')")
     assert res.returncode == 0
     assert res.ok
@@ -327,7 +288,7 @@ def test_remote_parses_program_error():
         "status": "Success",
         "run_result": {"status": "Finished", "stdout": "", "stderr": "Traceback ...", "return_code": 1},
     }
-    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("raise SystemExit(1)")
     assert not res.ok
     assert res.returncode == 1
@@ -340,7 +301,7 @@ def test_remote_parses_timeout():
         "message": "time limit",
         "run_result": {"status": "TimeLimitExceeded", "stdout": "", "stderr": "", "return_code": None},
     }
-    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("while True: pass")
     assert res.timed_out
     assert not res.ok
@@ -361,7 +322,7 @@ def test_remote_compile_failure_is_program_verdict_not_infra_error():
         },
         "run_result": None,
     }
-    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("int main(){ boom }", language="cpp")
     assert res.compile_failed
     assert res.error is None
@@ -384,7 +345,7 @@ def test_remote_incomplete_compile_step_is_backend_error(compile_result):
     """A compiler step that did not run to completion — or whose compiler is absent (exit 127) — is
     the service's fault, never a verdict on the source: ``error`` set, ``compile_failed`` unset."""
     payload = {"status": "Failed", "compile_result": compile_result}
-    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("int main(){}", language="cpp")
     assert res.error is not None
     assert not res.compile_failed
@@ -399,25 +360,27 @@ def test_remote_success_without_a_run_result_is_a_backend_error():
         {"status": "Success", "run_result": None},
         {"status": "Success", "run_result": "x"},
     ):
-        sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+        sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
         res = sb.run("print(1)")
         assert res.error is not None and not res.ok, payload
 
 
-def test_remote_compile_time_limit_is_backend_error():
-    """A compile that hit the service's compile time limit is a limit failure (``error``), like the
-    local backend's compile timeout — not a verdict on the source and not a run timeout."""
+def test_remote_compile_time_limit_is_a_compile_verdict():
+    """A compile that hit the service's compile time limit is the source's verdict (an ``#include``
+    bomb), like the local backend's compile timeout — never ``error``, which would let a program void
+    its own episode, and not a run timeout."""
     payload = {
         "status": "Failed",
         "message": "",
         "compile_result": {"status": "TimeLimitExceeded", "return_code": None, "stdout": "", "stderr": ""},
         "run_result": None,
     }
-    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("int main(){}", language="cpp")
-    assert res.error is not None
-    assert not res.compile_failed
+    assert res.error is None
+    assert res.compile_failed and not res.timed_out
     assert not res.ok
+    assert format_sandbox_repl_output(res, timeout=5).startswith("Error:"), "the REPL shows it as a failed build"
 
 
 def test_remote_clean_compile_step_reads_run_result():
@@ -428,7 +391,7 @@ def test_remote_clean_compile_step_reads_run_result():
         "compile_result": {"status": "Finished", "return_code": 0, "stdout": "", "stderr": ""},
         "run_result": {"status": "Finished", "stdout": "42\n", "stderr": "", "return_code": 3},
     }
-    sb = RemoteSandbox("http://sandbox:8080", session=_FakeSession(_FakeResponse(payload)))
+    sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("int main(){ return 3; }", language="cpp")
     assert not res.compile_failed
     assert res.error is None
@@ -437,9 +400,7 @@ def test_remote_clean_compile_step_reads_run_result():
 
 
 def test_remote_handles_transport_error():
-    import requests
-
-    sess = _FakeSession(exc=requests.ConnectionError("refused"))
+    sess = RecordingSandboxSession(exc=requests.ConnectionError("refused"))
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     res = sb.run("print(1)")
     assert res.error is not None
@@ -451,9 +412,7 @@ def test_remote_client_timeout_is_an_infra_error_not_the_programs_tle():
     client deadline fires only when the service does not answer. Booked as ``timed_out`` it would
     grade as TIME LIMIT EXCEEDED — a wrong program, outside the infra-outage invalidation — and the
     REPL would render a timeout string instead of raising ``SandboxInfraError``."""
-    import requests
-
-    sess = _FakeSession(exc=requests.Timeout("slow"))
+    sess = RecordingSandboxSession(exc=requests.Timeout("slow"))
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     res = sb.run("print(1)")
     assert res.timed_out is False

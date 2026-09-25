@@ -20,10 +20,9 @@ tied embeddings, and a `logit_scale` multiplier on the lm_head output (the confi
 
 PP is refused loudly: the PP stage loader requires lazy loading, which this family declares off,
 and behind that the generic tie gate refuses too — every shipped checkpoint ties `lm_head` to
-`embed_tokens`. A non-unit `logit_scale` is a third refusal: it would silently vanish in the stage
-head (`_reject_unapplied_logit_scale` in `src/distributed/pipeline_parallel/split.py`). An untied,
-unit-scale variant would additionally have to land its stage boundaries on the period-4
-`layer_types` pattern.
+`embed_tokens`. An untied variant would additionally have to land its stage boundaries on the
+period-4 `layer_types` pattern; its `logit_scale` is the family's declared head transform, which the
+last stage applies (`src/models/head_transform.py`).
 
 ¹ Node-local EP+CP requires `ep_group_size == nvlink_domain_size`; on an 8-GPU node that pins
 `ep_size` to 8, with `cp_size` dividing the domain (EP is orthogonal to DP — ep8+cp2 is a valid

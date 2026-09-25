@@ -24,6 +24,7 @@ from src.trainers.distillation.losses import (
     positive_advantage_gate,
     privileged_teacher_pass,
 )
+from src.trainers.grpo.mixins.on_policy_init import GRPO_CTOR_POSITIONS
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 from src.trainers.mixins.validation import ctor_config, disable_trl_liger
@@ -66,7 +67,7 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
         self._warned_missing_answer: set = set()
 
         disable_trl_liger(
-            ctor_config(args, kwargs),
+            ctor_config(args, kwargs, GRPO_CTOR_POSITIONS),
             "Disabling use_liger_kernel for SDPG: the fused GRPO-Liger loss bypasses the OPD term.",
         )
 
@@ -128,8 +129,15 @@ class DistributedSDPGTrainer(StoredMetricsMixin, DistributedGRPOTrainer):
 
     def _compute_loss(self, model, inputs):
         loss = super()._compute_loss(model, inputs)
-        if self.sdpg_beta_base == 0.0 or "teacher_prompt_ids" not in inputs:
+        if self.sdpg_beta_base == 0.0:
             return loss
+        if "teacher_prompt_ids" not in inputs:
+            raise RuntimeError(
+                f"sdpg_beta_base={self.sdpg_beta_base} but the batch carries no teacher_prompt_ids, so "
+                f"the OPD term would be skipped and the step would train plain GRPO. "
+                f"_generate_and_score_completions builds them; an override of it, or of the batch "
+                f"buffering, must keep the teacher_prompt_* keys, or set sdpg_beta_base: 0 to drop the term."
+            )
 
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
         comp_len = completion_ids.size(1)

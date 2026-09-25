@@ -175,29 +175,6 @@ class EPExpertGatherMixin:
             return self._unfuse_fused_to_per_expert(fused)
         return fused
 
-    def gather_expert_grads(self, device: str = "cpu") -> dict:
-        """Grad-side sibling of :meth:`gather_expert_state_dict`: this layer's expert gradients
-        reassembled over both expert axes into the fused layout, whatever the family stores locally.
-
-        The expert parameter set is layout-dependent (ETP splits the fused ``gate_up_proj``,
-        grouped-GEMM splits it again into ``*_gmm``), so one canonical layout is what makes an
-        equivalence check meaningful. Collective on the expert-TP and dispatch groups.
-        """
-        return self._gather_fused_experts(device, self._expert_grad)
-
-    def _expert_grad(self, attr: str) -> torch.Tensor:
-        """This rank's gradient for expert weight ``attr``.
-
-        Raises when the grad is missing (the backward never reached this expert); gathering zeros
-        instead would turn an equivalence check into a tautology. Full-gathered like the weight side,
-        so an FSDP-sharded ep1 expert yields its whole gradient rather than a shard."""
-        grad = getattr(self, attr).grad
-        if grad is None:
-            raise RuntimeError(
-                f"{type(self).__name__}.{attr} has no gradient: the backward did not reach this expert parameter."
-            )
-        return materialize_dtensor(grad)
-
     def _gather_fused_expert_state_dict(
         self, device: str = "cpu", merge_lora: bool = False, retain: bool = True
     ) -> dict:
@@ -210,11 +187,10 @@ class EPExpertGatherMixin:
     def _gather_fused_experts(self, device: str, take: Callable[[str], torch.Tensor], retain: bool = True) -> dict:
         """Reassemble the fused-GLU experts from whichever per-attribute tensor ``take`` returns.
 
-        ``take`` is the only difference between the weight export and the gradient gather, so both
-        share this one traversal of the expert axes. Tensors are stored in matmul convention (under
-        ETP the gate/up halves live in separate params); reconstruct full tensors and transpose back
-        to ``F.linear`` convention. ``retain=False`` runs every gather and drops the result before the
-        transpose+``contiguous`` (see :meth:`gather_expert_state_dict`).
+        Tensors are stored in matmul convention (under ETP the gate/up halves live in separate
+        params); reconstruct full tensors and transpose back to ``F.linear`` convention.
+        ``retain=False`` runs every gather and drops the result before the transpose+``contiguous``
+        (see :meth:`gather_expert_state_dict`).
         """
         if self.expert_tp_size > 1:
             gate = self._tp_all_gather_cat(take("gate_proj"), dim=2)

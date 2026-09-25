@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.environments.base import Message
+from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError
 
 
 class ToolBudgetExhausted(Exception):
@@ -280,6 +281,9 @@ class NativeToolResult:
     # can reproduce any wording of it (an MCP server answering "Tool not found: x" is a real failure of
     # a real tool), and the protocol drops a turn from training on this flag alone.
     unknown_tool: bool = False
+    # The sandbox fault the call ended on, booked by type (infra or agent-caused) rather than as an
+    # ordinary tool error, and ending the episode.
+    sandbox_fault: SandboxInfraError | SandboxAgentFault | None = None
 
     def to_message(self):
         """Convert to a tool :class:`Message` for the conversation."""

@@ -56,7 +56,7 @@ registry = NativeToolRegistry().register(NativeTool(
 ))
 ```
 
-Arguments are filtered to the declared parameters before the handler runs, so a hallucinated extra never reaches it and a missing required one is refused as a tool error without spending the episode's tool budget. A handler that raises marks the call failed and charges `tool_error_penalty` — raise for an infrastructure fault, return a string for a legitimate negative answer. Pass the registry as `NativeToolUseEnvironment(tool_registry=registry, ...)`.
+Arguments are filtered to the declared parameters before the handler runs, so a hallucinated extra never reaches it and a missing required one is refused as a tool error without spending the episode's tool budget. A handler that raises marks the call failed and charges `tool_error_penalty`; return a string for a legitimate negative answer. A sandbox-backed handler instead raises its sandbox fault, booked by class ([Sandbox faults](sandbox.md#sandbox-faults)). Pass the registry as `NativeToolUseEnvironment(tool_registry=registry, ...)`.
 
 ## Trainable trajectory shape
 

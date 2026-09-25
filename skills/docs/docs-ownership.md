@@ -58,6 +58,7 @@ changes.
 | `src/checkpoint/shard_writer.py` (`StageShardWriter`: incremental safetensors parts + index) | `agent-docs/reference/checkpoints.md` |
 | `src/distributed/checkpoint/write.py` (the collective half of a write: retain-gated DTensor resolve of params and buffers with neutralized sinks, the streamed part writer, the shard-index exchange) | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
 | `src/models/structure.py` (module-tree introspection: unwrap, PEFT names, decoder layers, norms) | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
+| `src/models/head_transform.py` (per-family head transform, verified against the family forward) | `agent-docs/models/adding-a-model.md`, `agent-docs/training-methods/grpo/async-grpo/performance.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `src/distributed/fsdp.py` (FSDP2 wrapping + reshard) | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/distributed/runtime.py` (rank/world state, barriers, cross-rank consensus, group timeouts), `src/distributed/filesystem.py` (c10d-store phases, main-first ordering, output-FS probe, load throttle) | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/nvlink.py` (fabric probes behind `nvlink_domain_size`) | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/deepep.md` |

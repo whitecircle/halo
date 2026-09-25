@@ -2,8 +2,9 @@
 """CPU pin for the ``routing_replay='rollout'`` (R3) batch gate in
 ``DistributedAsyncEnvironmentalGRPOTrainer._assemble_rollout_routing``.
 
-The gate exists because training under R3 without the engine's selection is silently wrong. What it
-must NOT do is fail a step that trains nothing: every assistant turn the engine cut off at its token
+The gate exists because training under R3 without the engine's selection is silently wrong, which
+includes a batch whose every routed row matches no engine coverage convention. What it must NOT do is
+fail a step that trains nothing: every assistant turn the engine cut off at its token
 cap is excluded from the training rows (``_tokenize_trajectory_turns``), so a policy emitting nothing
 but runaway completions produces a batch of fully masked rows carrying no routing — the zero-gradient
 step every other mode takes as a no-op. Both halves are driven end to end here: the real per-turn
@@ -41,8 +42,11 @@ def _routing_payload(tokens: int) -> str:
     return raw_routing_payload(np.zeros((tokens, ENGINE_LAYERS, TOP_K), dtype=np.int32))
 
 
-def _rollout(*, truncated: bool, routing: bool) -> RolloutResult:
-    """One episode with a single assistant turn carrying the engine's ids (and optionally its routing)."""
+def _rollout(
+    *, truncated: bool, routing: bool, routing_tokens: int = len(ENGINE_PROMPT) + len(SAMPLED)
+) -> RolloutResult:
+    """One episode with a single assistant turn carrying the engine's ids (and optionally its routing,
+    ``routing_tokens`` rows long: the default is the full prompt + completion convention)."""
     traj = Trajectory()
     traj.add_message(Message.user("solve it"))
     traj.add_message(
@@ -50,7 +54,7 @@ def _rollout(*, truncated: bool, routing: bool) -> RolloutResult:
             "answer",
             token_ids=list(SAMPLED),
             prompt_token_ids=list(ENGINE_PROMPT),
-            routing_mask=_routing_payload(len(ENGINE_PROMPT) + len(SAMPLED)) if routing else None,
+            routing_mask=_routing_payload(routing_tokens) if routing else None,
             routing_prompt_tokens=len(ENGINE_PROMPT) if routing else None,
             truncated=truncated,
         )
@@ -152,6 +156,28 @@ def test_gate_assembles_the_engine_mask_for_a_trainable_row():
     # Every position of the covered row carries an engine id, not the -1 natural-routing sentinel.
     assert int(masks.min()) == 0
     assert flushed_metrics(host)["routing/rollout_full_frac"] == [1.0]
+
+
+# Matches none of the conventions (prompt + completion, one short of it, completion-only).
+_UNRESOLVED_TOKENS = len(ENGINE_PROMPT) + len(SAMPLED) + 3
+
+
+def test_gate_raises_when_every_routed_row_is_unresolved():
+    """Routing that lines up with no engine convention leaves every position on natural routing, so
+    R3 would train inert with only a coverage metric to show it."""
+    host = _host()
+    rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True, routing_tokens=_UNRESOLVED_TOKENS))
+    with pytest.raises(ValueError, match="no routed row on this rank"):
+        _gate(host, rows)
+
+
+def test_gate_keeps_a_partly_unresolved_batch():
+    """Anti-vacuity: one unresolved row among replayed ones is coverage drift to watch, not a failure."""
+    host = _host()
+    rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True))
+    rows += host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True, routing_tokens=_UNRESOLVED_TOKENS))
+    assert _gate(host, rows) is not None
+    assert flushed_metrics(host)["routing/rollout_unresolved_frac"] == [0.5]
 
 
 if __name__ == "__main__":

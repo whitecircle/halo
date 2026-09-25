@@ -19,7 +19,7 @@ Every knob lives on the RLVR script arguments and is read only with `use_sdpg: t
 | `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n` | Appended to the prompt for the teacher forward only |
 | `opd_positive_advantage_only` | `true` | Restrict OPD to rows with a positive advantage; `false` distills every completion row |
 
-The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero.
+The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero, and a loss batch without the teacher prompts raises rather than training plain GRPO.
 
 ## Launch
 

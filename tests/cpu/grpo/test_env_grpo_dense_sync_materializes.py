@@ -61,6 +61,9 @@ class _RecordingClient:
         self.raw_model_calls += 1
         self.sent.extend((name, param.data) for name, param in model.named_parameters())
 
+    def scope_co_load_groups(self, module_names) -> None:
+        """Nothing in these models is co-loaded; the push scopes every client before it sends."""
+
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         self.sent.append((name, weights))
 

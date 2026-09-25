@@ -6,6 +6,7 @@ Each test pins one run-degrading failure mode:
   they are the lowest-entropy tokens, so an unprotected quantile filter excludes them entirely and
   the chat template rots until every tool call stops parsing;
 * a GRPO group whose completions all score alike carries no signal and must be droppable;
+* a non-finite reward must fail the step on every rank rather than be zeroed into its advantages;
 * identical rewards must never be turned into a full-scale advantage — offline GRPO must not
   fabricate a ±1 ranking out of a zero-variance group.
 
@@ -21,6 +22,7 @@ import torch
 from accelerate import PartialState
 
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
+from src.trainers.grpo.objective import advantages as advantages_module
 from src.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
 from src.trainers.grpo.offline import compute_group_advantages
 
@@ -108,9 +110,16 @@ def test_degenerate_group_mask_flags_only_zero_spread_groups():
     )
 
 
-def test_degenerate_group_mask_noop_without_grouping():
-    rewards = torch.tensor([0.3, 0.3])
-    assert not degenerate_group_mask(rewards, num_generations=1).any(), "num_generations=1 has no group to judge"
+def test_degenerate_group_mask_refuses_a_split_group():
+    """A reward count the group size does not divide means the caller split a group; judging the
+    remainder as its own group would drop or keep completions by accident."""
+    with pytest.raises(ValueError, match="not a multiple of num_generations"):
+        degenerate_group_mask(torch.tensor([0.3, 0.3, 0.1]), num_generations=2)
+
+
+def test_singleton_groups_count_as_degenerate():
+    """One completion has nothing to compare against: the "fewer than two" rule the docstring states."""
+    assert degenerate_group_mask(torch.tensor([0.3, 0.9]), num_generations=1).all()
 
 
 # --- scale_rewards semantics ---
@@ -155,6 +164,24 @@ def test_singleton_groups_do_not_produce_nan():
         got = group_relative_advantages(rewards, num_generations=1, scale_rewards=scale)
         assert not torch.isnan(got).any(), f"NaN advantage with scale_rewards={scale!r}"
         assert torch.allclose(got, torch.zeros(2)), "a singleton group has no baseline → zero advantage"
+
+
+@pytest.mark.parametrize("scale", ["group", "batch", "none"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_non_finite_rewards_raise_instead_of_zeroing(scale, bad):
+    """Zeroing would train on a silently broken reward, and under ``batch`` scaling the one bad value
+    makes the shared std non-finite, so every advantage of the step would be zeroed with it."""
+    rewards = torch.tensor([0.0, 1.0, 0.5, bad])
+    with pytest.raises(ValueError, match="Non-finite GRPO rewards or advantages"):
+        group_relative_advantages(rewards, 2, scale)
+
+
+def test_a_peer_ranks_non_finite_reward_raises_here_too(monkeypatch):
+    """The verdict is agreed across ranks: a rank whose own rewards are finite must raise with the one
+    whose are not, or it heads into the next collective alone."""
+    monkeypatch.setattr(advantages_module, "rank_consensus", lambda ok: (False, True))
+    with pytest.raises(ValueError, match="Non-finite GRPO rewards or advantages"):
+        group_relative_advantages(torch.tensor([0.0, 1.0]), 2, "group")
 
 
 # --- Offline GRPO must not fabricate advantages from a zero-variance group ---

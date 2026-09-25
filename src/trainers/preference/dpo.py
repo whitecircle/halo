@@ -50,8 +50,8 @@ from src.trainers.mixins.pp_gates import (
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 
-# TRL DPOTrainer positional slot for the EP/TP reference gate — derived from the installed signature.
-_CTOR_POSITIONS = ctor_positions(DPOTrainer, "ref_model")
+# TRL DPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
+_CTOR_POSITIONS = ctor_positions(DPOTrainer, "model", "args", "ref_model")
 
 _REF_LOGPS_COLUMNS = ("ref_chosen_logps", "ref_rejected_logps")
 
@@ -120,12 +120,12 @@ class DistributedDPOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsi
         if config is not None and config.is_pp_mode:
             # Must run before _init_distributed_config, which drives the PP gate and the split.
             disable_trl_liger(
-                ctor_config(args, kwargs),
+                ctor_config(args, kwargs, _CTOR_POSITIONS),
                 "DPO under pipeline parallelism: disabling use_liger_kernel — TRL's Liger DPO loss "
                 "has no precompute_ref_log_probs branch, and the PP last-stage loss replaces TRL's "
                 "loss path entirely.",
             )
-        kwargs = self._init_distributed_config(kwargs, ctor_args=args)
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)
         # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not

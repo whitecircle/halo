@@ -16,6 +16,7 @@ from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_SLICES_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
+    SANDBOX_FAULT_KEY,
     SOLVE_RATE_KEY,
     EpisodeGrade,
     Trajectory,
@@ -24,7 +25,7 @@ from src.environments.base import (
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.grading import (
     DEFAULT_MAX_OUTPUT_SIZE,
-    VERDICT_DETAIL_FULL,
+    VERDICT_DETAIL_OUTCOME,
     VERDICT_DETAILS,
     GradeResult,
     GradingSpec,
@@ -38,7 +39,7 @@ from src.environments.sandbox.base import (
     require_language,
 )
 from src.environments.sandbox.repl import run_code_via_sandbox
-from src.environments.sandbox.resolve import resolve_sandbox
+from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolArgumentError, ToolParameter
 from src.rewards.samples import ScoringSample
 
@@ -151,7 +152,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         sandbox_url: str | None = None,
         language: str | Sequence[str] = "python",
         output_comparison: str = "exact",
-        verdict_detail: str = VERDICT_DETAIL_FULL,
+        verdict_detail: str = VERDICT_DETAIL_OUTCOME,
         stop_on_first_failure: bool = False,
         max_time_limit: float = SANDBOX_DEFAULT_TIMEOUT,
         compiled_time_limit_scale: float = 1.0,
@@ -226,6 +227,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             set(p) - {"thinking_tokens"} for p in (reasoning_effort_profiles or {}).values()
         )
         self.sandbox = sandbox or resolve_sandbox(backend=sandbox_backend, url=sandbox_url)
+        warn_if_unisolated(self.sandbox, type(self).__name__)
         # Built once and the single reader of these knobs: every submission of the run is graded under
         # the same contract, and the offline re-grader takes it (via ``to_meta``) to reproduce the
         # verdicts. ``max_time_limit`` caps a per-problem limit so a mis-scaled solution can't pin a
@@ -498,7 +500,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         A submit_solution call is just a tool call, so without this the model keeps going after submitting.
         """
         trajectory, reward, done, truncated, info = super()._step_single(trajectory, action, context)
-        if not done and self._tool_budget_exhausted(trajectory, SUBMIT_TOOL) is not None:
+        # A turn that also booked a sandbox fault ends on it, uncompleted, whatever it submitted.
+        spent = self._tool_budget_exhausted(trajectory, SUBMIT_TOOL) is not None
+        if not done and spent and SANDBOX_FAULT_KEY not in trajectory.info:
             trajectory.info["completed"] = True
             done = True
         return trajectory, reward, done, truncated, info

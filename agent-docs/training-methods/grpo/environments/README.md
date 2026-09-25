@@ -60,13 +60,13 @@ Knobs every environment accepts (the first two are top-level fields):
 |---|---|---|
 | `max_turns` | class default: 10; `exam_qa` 8, code contests 15, `swe` 20 | turns before the episode truncates; ≥ 1 |
 | `rewards` | `[{source: environment}]` | the reward terms: the environment's grade at `weight` / `exponent`, plus external `judge` / `reward_model` terms ([Reward Terms](../rewards.md)) |
-| `tool_success_reward` / `tool_error_penalty` | `0.05` / `0.1` (`mcp` pays `0.1`; code contests `0` / `0`) | paid per successful tool call, charged per failed one |
+| `tool_success_reward` / `tool_error_penalty` | `0.05` / `0.1` (`mcp` pays `0.1`; code contests `0` / `0`) | paid per successful tool call, charged per failed one; a call a sandbox outage ended goes unpriced ([Sandbox faults](sandbox.md#sandbox-faults)) |
 | `tool_reward_cap` | `tool_success_reward × max_turns` | episode total payable for successful calls |
 | `max_observation_chars` | `16384` | longer tool observations are truncated at the source |
 | `reasoning_effort` | `None` (code contests `medium`) | `low` / `medium` / `high` / `random` CoT steer |
 | `carry_reasoning` | `false` | sends the last assistant turn's reasoning back to the engine; vLLM only |
 | `max_length_cutoff_recoveries` | `null` | unproductive turns — engine-cut, or ended with no visible content and no tool call — one episode may retry; `null` = every one within `max_turns` |
-| `requires_answer` | class default: `false`; `true` for code contests, `exam_qa`, `qa_search` and the ReAct presets | the reward grades against the dataset's `answer` column, so a dataset without one is refused at trainer construction |
+| `requires_answer` | class default: `false`; `true` for code contests, `exam_qa`, `qa_search`, the ReAct presets and [`swe`](swe-environment.md#reward) (unless judge-only) | the reward grades against the dataset's `answer` column, so a dataset without one is refused at trainer construction |
 
 ## Pages
 

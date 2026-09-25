@@ -31,6 +31,7 @@ from src.distributed.mesh import MeshDim, mesh_dim_names
 from src.distributed.runtime import current_device, get_global_world_size
 from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
 from src.models.structure import model_has_quantized_params
+from src.trainers.mixins.ep_introspection import require_ep_config
 from src.trainers.mixins.grad_clip import (
     bucketed_grad_norm_sq,
     clipping_enabled,
@@ -297,10 +298,11 @@ class GradientSyncMixin:
           within the EP group — otherwise reduce-scatter already produced the average.
 
         Collectives issue in a fixed ``named_parameters`` order identical on every rank. No-op
-        unless ``defer_grad_sync``.
+        unless ``defer_grad_sync``; both callers run only with EP layers present, so a missing EP
+        config raises.
         """
-        ep_cfg = self._ep_config
-        if ep_cfg is None or not getattr(ep_cfg, "defer_grad_sync", False):
+        ep_cfg = require_ep_config(self._ep_config)
+        if not ep_cfg.defer_grad_sync:
             return
         replica_group = ep_cfg.expert_replica_group  # None ⇔ one EP group per rank block (R==1)
         # The expert leg (SUM/world_size) is not idempotent: a second pass halves every expert grad.
@@ -505,21 +507,20 @@ class GradientSyncMixin:
             dist.all_reduce(norm_sq["fsdp_full"], op=dist.ReduceOp.SUM, group=fsdp_dp_group)
             other_norm_sq = other_norm_sq + norm_sq["fsdp_full"]
 
-        # Expert legs read straight off the EP config, which holds those process groups. A dense or
-        # non-EP run has no ``_ep_config`` and reduces nothing here.
+        # Expert legs read straight off the EP config, which holds those process groups. Only the EP
+        # grad clip calls this, with EP layers present, so a missing config raises.
         global_expert_norm_sq = norm_sq["expert"]
-        ep_cfg = self._ep_config
-        if ep_cfg is not None:
-            if ep_cfg.expert_tp_size > 1 and ep_cfg.expert_tp_group is not None:
-                dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.expert_tp_group)
+        ep_cfg = require_ep_config(self._ep_config)
+        if ep_cfg.expert_tp_size > 1 and ep_cfg.expert_tp_group is not None:
+            dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.expert_tp_group)
 
-            if ep_cfg.dispatch_ep_group is not None:
-                dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.dispatch_ep_group)
+        if ep_cfg.dispatch_ep_group is not None:
+            dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.dispatch_ep_group)
 
-            # Experts replicated across EP groups: avoid counting duplicates.
-            if ep_cfg.num_ep_groups > 1 and ep_cfg.expert_replica_group is not None:
-                dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.expert_replica_group)
-                global_expert_norm_sq.div_(ep_cfg.num_ep_groups)
+        # Experts replicated across EP groups: avoid counting duplicates.
+        if ep_cfg.num_ep_groups > 1 and ep_cfg.expert_replica_group is not None:
+            dist.all_reduce(global_expert_norm_sq, op=dist.ReduceOp.SUM, group=ep_cfg.expert_replica_group)
+            global_expert_norm_sq.div_(ep_cfg.num_ep_groups)
 
         total_norm_sq = global_expert_norm_sq + other_norm_sq
         if self._pp_chain_group is not None:
@@ -756,7 +757,7 @@ class GradientSyncMixin:
         register_grad_sync_step_hook(
             self,
             "_deferred_ep_grad_sync_hook_registered",
-            lambda: getattr(self._ep_config, "defer_grad_sync", False),
+            lambda: self._ep_config is not None and self._ep_config.defer_grad_sync,
             _sweep,
         )
 

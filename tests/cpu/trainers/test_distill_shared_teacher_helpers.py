@@ -5,7 +5,9 @@
    ``reference_model``, but that reference is never parallelized: under EP/TP it stays a dense
    replica running the unpatched MoE path, so every reference log-prob — and the KL built from
    them — is silently biased. It must go through the same ``_validate_reference_model`` gate DPO
-   uses, and it must fail BEFORE the model is moved to the device.
+   uses, and it must fail BEFORE the model is moved to the device. Either term with nothing to
+   compute it from (a weighted anchor without a reference, OPD on without a teacher branch) raises
+   rather than dropping out of the loss.
 2. ``privileged_teacher_pass`` and ``shifted_token_cross_entropy`` each serve two trainers; the
    equivalence checks below pin them to the per-trainer formulas, and the last test states the
    difference the sharing deliberately keeps (per-sample vs global denominator).
@@ -13,6 +15,7 @@
 Run: python tests/cpu/trainers/test_distill_shared_teacher_helpers.py
 """
 
+import types
 from unittest import mock
 
 import pytest
@@ -81,7 +84,47 @@ def test_plain_data_parallel_reference_is_accepted():
 
 
 def test_no_reference_model_is_never_gated():
-    assert _build(ep_size=8, reference_model=None) == []
+    assert _build(ep_size=8, reference_model=None, reference_kl_coef=0.0) == []
+
+
+def test_a_weighted_anchor_without_a_reference_raises():
+    """``reference_kl_coef > 0`` with nothing to anchor to would drop ``L_ref`` from every step."""
+    with pytest.raises(ValueError, match="no reference_model was passed"):
+        _build(reference_model=None, reference_kl_coef=0.5)
+
+
+class _LogitsModel(nn.Module):
+    """Returns zero logits over a small vocab for whatever sequence it is handed."""
+
+    def forward(self, input_ids=None, **_):
+        return types.SimpleNamespace(logits=torch.zeros(*input_ids.shape, 5))
+
+
+def _self_distill_step(inputs, sdpg_beta_base=1.0):
+    """Run the real ``compute_loss`` on a bare trainer; returns the loss."""
+    trainer = object.__new__(DistributedSelfDistillationTrainer)
+    trainer.model = _LogitsModel()
+    trainer.sdpg_beta_base = sdpg_beta_base
+    trainer.reference_kl_coef = 0.0
+    trainer._warned_empty_labels = True
+    trainer._vision_reuse_setup, trainer._vision_reuse_active = True, False
+    trainer.store_metrics = lambda metrics, train_eval: None
+    return trainer.compute_loss(trainer.model, inputs)
+
+
+def _student_batch():
+    return {"input_ids": torch.ones(1, 4, dtype=torch.long), "labels": torch.ones(1, 4, dtype=torch.long)}
+
+
+def test_a_batch_without_the_teacher_branch_raises_while_opd_is_on():
+    """With no rank carrying ``teacher_*`` keys the step would train SFT alone under a self-distillation config."""
+    with pytest.raises(RuntimeError, match="privileged teacher branch"):
+        _self_distill_step(_student_batch())
+
+
+def test_opd_off_needs_no_teacher_branch():
+    """Anti-vacuity: ``sdpg_beta_base: 0`` is the documented SFT-only setting and still trains."""
+    assert torch.isfinite(_self_distill_step(_student_batch(), sdpg_beta_base=0.0))
 
 
 def test_an_unused_reference_is_not_gated():

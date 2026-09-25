@@ -23,6 +23,7 @@ import torch.nn as nn
 from src.distributed.module_registry import build_hf_module_name_map
 from src.distributed.pipeline_parallel.stage_adapters import deepseek_v4_stream_forward, glm5_next_stream_forward
 from src.models.attention_geometry import resolve_head_dim
+from src.models.head_transform import resolve_head_transform
 from src.models.loading.config_levels import get_config_field, text_config
 from src.models.moe_balancing import (
     config_has_experts,
@@ -283,24 +284,6 @@ def _reject_tied_embeddings(model: nn.Module) -> None:
     )
 
 
-def _reject_unapplied_logit_scale(model: nn.Module) -> None:
-    """Raise if the model's forward scales its lm_head output (Cohere ``logit_scale``).
-
-    The stage head path computes ``head(hidden)`` directly, so a scale the ForCausalLM forward
-    applies after the matmul is dropped with no error, leaving every PP logit, loss and gradient off
-    by that factor. Unit scale is a no-op and passes.
-    """
-    text = text_config(getattr(model, "config", None))
-    scale = getattr(text, "logit_scale", None)
-    if scale is None or scale == 1.0:
-        return
-    raise ValueError(
-        f"{type(model).__name__} declares logit_scale={scale}, which its forward applies to the "
-        f"lm_head output after the matmul; the pipeline stage head computes the matmul alone, so "
-        f"every PP logit and loss would silently be off by that factor. Train this model without PP."
-    )
-
-
 def _reject_aux_loss_balancing(model: nn.Module, moe_balancing: str) -> None:
     """Raise if this run's MoE load balancing rides the HF aux-loss path a stage severs.
 
@@ -373,12 +356,15 @@ def validate_model_structure_supports_pp(model: nn.Module) -> None:
 
     Everything here reads classes, config fields and weight identity — never a tensor's values — so
     it holds on a meta-device shell and the stage-aware loader can run it before materializing a
-    weight. The run-knob gate (MoE balancing) lives in :func:`validate_model_supports_pp`, which the
-    trainer calls once the run's setting is resolved.
+    weight; the head-path verdict builds its own shell from the class and config. The run-knob gate
+    (MoE balancing) lives in :func:`validate_model_supports_pp`, which the trainer calls once the
+    run's setting is resolved.
 
     Raises:
         ValueError: the family declares ``SUPPORTS_PP = False``, has no discoverable layer list, ties
-            its embedding to its head, or declares multi-token-prediction tail layers.
+            its embedding to its head, declares multi-token-prediction tail layers, or transforms its
+            head path beyond its declared :class:`~src.models.head_transform.HeadTransform`, which the
+            last stage applies.
     """
     backbone = backbone_with_layers(model)
     if backbone is None:
@@ -391,7 +377,7 @@ def validate_model_structure_supports_pp(model: nn.Module) -> None:
     if not spec.SUPPORTS_PP:
         raise ValueError(f"{type(backbone).__name__} does not support pipeline parallelism. {spec.UNSUPPORTED_REASON}")
     _reject_tied_embeddings(model)
-    _reject_unapplied_logit_scale(model)
+    resolve_head_transform(model)  # raises on a head path the last stage cannot reproduce
     _reject_live_mtp_layers(model)
 
 

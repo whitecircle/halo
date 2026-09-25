@@ -29,6 +29,10 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         Remaining args (memory/compile limits) are inherited from the local backend.
     """
 
+    # A session builds once, on an empty stdin, and the jailed program can neither remove its working
+    # directory (a mount point) to force a rebuild nor write outside it for one to include.
+    compiles_without_test_input = True
+
     def __init__(
         self,
         *args,
@@ -56,6 +60,11 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         self.allow_network = allow_network
         self.extra_ro_binds = tuple(extra_ro_binds or ())
         self._verify_can_sandbox()
+
+    @property
+    def isolated(self) -> bool:
+        """Confined only while the jail keeps its own network namespace (``--share-net`` does not)."""
+        return not self.allow_network
 
     def _verify_can_sandbox(self) -> None:
         """Raise at construction if bwrap cannot create a sandbox in this environment.

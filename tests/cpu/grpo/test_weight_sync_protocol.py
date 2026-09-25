@@ -853,17 +853,18 @@ def test_reconnect_retires_the_old_client_before_probing_the_replacement():
         def buffer_param(self, name, snapshot):
             self._param_buffer.append((name, snapshot))
 
-        def scope_co_load_groups(self, module_names):
-            order.append("scope new client")
-
-    manager = InferenceClientManager(server_configs=[{"url": "http://server0:8000", "group_port": 51216}])
+    manager = InferenceClientManager(
+        server_configs=[{"url": "http://server0:8000", "group_port": 51216}],
+        connection_timeout=0.0,
+        client_cls=RecordingClient,
+        base_group_port=51216,
+    )
     old = RecordingClient(base_url="http://server0:8000")
     old.buffer_param("w", torch.zeros(4))
     order.clear()
     manager._clients = [old]
     manager._initialized = True
     manager._device = torch.device("cpu")
-    manager._client_factory = RecordingClient
 
     new_client = manager.reconnect_client(0)
 
@@ -889,6 +890,8 @@ def test_unconfigured_group_ports_are_seeded_from_the_run_knob():
             {"url": "http://s1:8000"},
             {"url": "http://s2:8000", "group_port": 9000},
         ],
+        connection_timeout=0.0,
+        client_cls=VLLMWeightSyncClient,
         base_group_port=52000,
     )
     assert [manager._group_port(i) for i in range(3)] == [52000, 52001, 9000]

@@ -20,6 +20,7 @@ import shutil
 
 import pytest
 
+from src.environments.base import EPISODE_INVALID_REASON_KEY
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.swe import SweEnvironment
 
@@ -112,12 +113,10 @@ def test_code_env_episodes_are_isolated():
         env.close()
 
 
-def test_sandbox_backend_outage_is_a_failed_tool_call():
-    """A sandbox BACKEND failure must be recorded as a FAILED tool call, not a successful observation.
-
-    Rendering the outage as an ordinary ``"Error: ..."`` string made the native protocol mark
-    ``success=True`` and pay ``tool_success_reward`` for a run that never happened — infrastructure
-    noise entering the reward. A program-level failure (non-zero exit) stays a successful call.
+def test_sandbox_backend_outage_voids_the_episode_unpriced():
+    """A sandbox BACKEND failure is a failed tool call, never a successful observation — and never
+    the policy's fault: it goes unpriced, ends the episode and marks it invalid, so the trainer drops
+    it from the GRPO group baseline. A program-level failure (non-zero exit) stays a successful call.
     """
     from src.environments.sandbox.base import SandboxResult
 
@@ -135,14 +134,17 @@ def test_sandbox_backend_outage_is_a_failed_tool_call():
         result = traj.info["tool_results"][-1]
         assert result["success"] is False, "a backend outage must not score as a successful tool call"
         assert "503" in result["content"]
-        assert traj.total_reward < 0, f"the failed call must be penalized, got {traj.total_reward}"
+        assert traj.done and not traj.info["completed"]
+        assert traj.episode_invalid, "an infra fault must leave the group baseline"
+        assert "503" in traj.info[EPISODE_INVALID_REASON_KEY]
+        assert traj.total_reward == pytest.approx(0.0), "the policy must not pay for the backend's outage"
     finally:
         env.close()
 
 
 def test_code_env_cleanup_closes_sessions():
     env = SweEnvironment(max_turns=5)
-    episode_ids, _ = env.reset(["task"])
+    episode_ids, _ = env.reset(["task"], [{"answer": "done"}])
     env.step(episode_ids, ["w"], [{"tool_calls": [_tool_call("write_file", path="f.txt", content="x")]}])
     eid = episode_ids[0]
     workdir = env._sessions[eid].workdir
