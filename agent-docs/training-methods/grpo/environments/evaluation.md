@@ -26,12 +26,13 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 
 `run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through
 `--context_fields`, buckets by `--group_by` and names each example by `--id_field` (default `id`);
-`run_code_contests.py` instead takes `--adapter` (which fixes the bucket and id fields per benchmark),
-`--language`, `--reasoning_effort` (which also sets the default `--max_tokens`), `--eval_protocol`, and
-`--start_date` / `--end_date` / `--platform` on a benchmark that stamps contest dates
-([Code Contests](code-contests.md#evaluation)). There an option with a flag of its own (`--max_turns`,
-`--language`, `--eval_protocol`, `--reasoning_effort`) is refused in `--env_kwargs`, which would
-otherwise override the flag.
+a field that names no column of the split exits before any row is read, except the default answer
+and id columns, which a dataset may lack. `run_code_contests.py` instead takes `--adapter` (which
+fixes the bucket and id fields per benchmark), `--language`, `--reasoning_effort` (which also sets
+the default `--max_tokens`), `--eval_protocol`, and `--start_date` / `--end_date` / `--platform` on a
+benchmark that stamps contest dates ([Code Contests](code-contests.md#evaluation)). There an option
+with a flag of its own (`--max_turns`, `--language`, `--eval_protocol`, `--reasoning_effort`) is
+refused in `--env_kwargs`, which would otherwise override the flag.
 
 `--training_config <yaml>` parses the YAML with the training script's own config classes: its
 `RolloutConfig` (template variables, stop tokens, thinking budget, sampling) and environment config
