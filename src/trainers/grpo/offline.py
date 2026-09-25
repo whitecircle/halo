@@ -63,8 +63,8 @@ from src.callbacks.variable_scheduler import VariableSchedulerCallback
 from src.configs.offline_grpo_config import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
 from src.data.pipeline.processing import coordinated_map
-from src.data.pipeline.rendered import probe_tokenizer_specials
-from src.data.spans import LABEL_IGNORE_INDEX, ends_with_terminator, resolve_eos_token_ids
+from src.data.pipeline.rendered import lacks_emitted_bos
+from src.data.spans import LABEL_IGNORE_INDEX, lacks_terminator, resolve_eos_token_ids
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -209,30 +209,18 @@ def tokenize_prompt_completion(
         add_special_tokens=False,
     )["input_ids"]
 
-    # BOS only when the tokenizer's own post-processor emits one (gpt-oss/Bailing define one it
-    # never emits), and only within the prompt budget — the caps bound PP's fixed P2P shape.
-    if (
-        bos_token_id is not None
-        and probe_tokenizer_specials(tokenizer).adds_leading_bos
-        and (not prompt_input_ids or prompt_input_ids[0] != bos_token_id)
-        and (not is_bounded_length(max_prompt_length) or len(prompt_input_ids) < max_prompt_length)
+    # Only within the prompt budget: the caps bound PP's fixed P2P shape.
+    if lacks_emitted_bos(prompt_input_ids, tokenizer) and (
+        not is_bounded_length(max_prompt_length) or len(prompt_input_ids) < max_prompt_length
     ):
         prompt_input_ids = [bos_token_id] + prompt_input_ids
 
     if is_encoder_decoder and bos_token_id is not None:
         completion_input_ids = [bos_token_id] + completion_input_ids if completion_input_ids else [bos_token_id]
 
-    # EOS only within the budget: supervising it at a truncation cut teaches premature stopping. Any
-    # declared terminator counts as already-ended, not just tokenizer.eos_token_id — GLM-4 and Gemma
-    # close turns with a role marker the config lists instead, and testing the single id there appends
-    # a second ender the policy never emits.
-    terminators = eos_token_ids or ({eos_token_id} if eos_token_id is not None else set())
-    if eos_token_id is not None and not completion_input_ids:
-        completion_input_ids = [eos_token_id]
-    elif (
-        eos_token_id is not None
-        and not ends_with_terminator(completion_input_ids, tokenizer, terminators)
-        and (not is_bounded_length(max_completion_length) or len(completion_input_ids) < max_completion_length)
+    # EOS only within the budget: supervising it at a truncation cut teaches premature stopping.
+    if lacks_terminator(completion_input_ids, tokenizer, eos_token_ids) and (
+        not is_bounded_length(max_completion_length) or len(completion_input_ids) < max_completion_length
     ):
         completion_input_ids = completion_input_ids + [eos_token_id]
 

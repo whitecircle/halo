@@ -57,8 +57,8 @@ from src.data.collators.smpo import (
 )
 from src.data.pipeline.preferences import split_rendered_completion, split_vlm_preference_row
 from src.data.pipeline.processing import coordinated_map
-from src.data.pipeline.rendered import probe_tokenizer_specials
-from src.data.spans import LABEL_IGNORE_INDEX, ends_with_terminator, resolve_eos_token_ids
+from src.data.pipeline.rendered import lacks_emitted_bos
+from src.data.spans import LABEL_IGNORE_INDEX, lacks_terminator, resolve_eos_token_ids
 from src.data.vlm import render_vlm_text
 from src.distributed.context_parallel.config import cp_shift_against_full_labels
 from src.distributed.loading.model_loading import load_model_from_pretrained
@@ -126,28 +126,15 @@ def tokenize_preference_row(
     chosen_input_ids = full_chosen["input_ids"][split:]
     rejected_input_ids = full_rejected["input_ids"][split:]
 
-    # BOS only when the tokenizer's own post-processor emits one: gpt-oss/Bailing define a
-    # nominal bos_token it never emits, so forcing it trains on a token the policy never sees.
-    bos_id = processing_class.bos_token_id
-    if (
-        bos_id is not None
-        and probe_tokenizer_specials(processing_class).adds_leading_bos
-        and (len(prompt_tokens) == 0 or prompt_tokens[0] != bos_id)
-    ):
-        prompt_tokens = [bos_id] + prompt_tokens
+    if lacks_emitted_bos(prompt_tokens, processing_class):
+        prompt_tokens = [processing_class.bos_token_id] + prompt_tokens
 
-    # Two cases make a naive "already terminated?" check append an ender the policy never emits,
-    # inside the mean log-prob the SMPO margin is computed from: the render closes with
-    # ``<terminator>\n``, so the last token is a newline, and GLM-4/Gemma close turns with a role
-    # marker carried on the config, not on tokenizer.eos_token_id. Hence the whitespace-tolerant
-    # walk over the full terminator set.
+    # A spurious ender would sit inside the mean log-prob the SMPO margin is computed from.
     eos_id = processing_class.eos_token_id
-    terminators = eos_token_ids or ({eos_id} if eos_id is not None else set())
-    if eos_id is not None:
-        if not ends_with_terminator(chosen_input_ids, processing_class, terminators):
-            chosen_input_ids = chosen_input_ids + [eos_id]
-        if not ends_with_terminator(rejected_input_ids, processing_class, terminators):
-            rejected_input_ids = rejected_input_ids + [eos_id]
+    if lacks_terminator(chosen_input_ids, processing_class, eos_token_ids):
+        chosen_input_ids = chosen_input_ids + [eos_id]
+    if lacks_terminator(rejected_input_ids, processing_class, eos_token_ids):
+        rejected_input_ids = rejected_input_ids + [eos_id]
 
     if max_prompt_length and len(prompt_tokens) > max_prompt_length:
         if truncation_mode == "keep_start":

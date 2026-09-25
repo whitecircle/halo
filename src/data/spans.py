@@ -151,6 +151,18 @@ def ends_with_terminator(input_ids, tokenizer, eos_token_ids) -> bool:
     return False
 
 
+def lacks_terminator(input_ids, tokenizer, eos_token_ids) -> bool:
+    """Whether ``input_ids`` need ``tokenizer.eos_token_id`` appended to close the turn.
+
+    False when the tokenizer has no eos to append. Any id in ``eos_token_ids`` (the tokenizer's eos
+    alone when empty) counts as the ender, not just ``tokenizer.eos_token_id``: GLM-4 and Gemma close
+    turns with a role marker the config lists, and testing the single id appends a second ender the
+    policy never emits.
+    """
+    eos_id = tokenizer.eos_token_id
+    return eos_id is not None and not ends_with_terminator(input_ids, tokenizer, eos_token_ids or {eos_id})
+
+
 def resolve_eos_token_ids(
     tokenizer: PreTrainedTokenizerBase,
     model_config: Any = None,

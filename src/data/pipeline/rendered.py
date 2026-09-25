@@ -66,6 +66,18 @@ def probe_tokenizer_specials(tokenizer: PreTrainedTokenizer) -> TokenizerSpecial
     return specials
 
 
+def lacks_emitted_bos(ids: list[int], tokenizer: PreTrainedTokenizer) -> bool:
+    """Whether ``ids`` lack the leading BOS this tokenizer's own post-processor emits.
+
+    Probe-gated (:func:`probe_tokenizer_specials`): gpt-oss/Bailing define a nominal ``bos_token``
+    their post-processor never emits, and prepending it trains on a token the policy never sees.
+    """
+    bos_id = tokenizer.bos_token_id
+    return (
+        bos_id is not None and probe_tokenizer_specials(tokenizer).adds_leading_bos and (not ids or ids[0] != bos_id)
+    )
+
+
 def _render_terminator_survived(encoded: Any, tokenizer: PreTrainedTokenizer, specials: TokenizerSpecials) -> bool:
     """Whether the render's own turn terminator is still present just before the tokenizer-appended
     copy, separated at most by whitespace (templates close the final turn with ``<terminator>\\n``).
