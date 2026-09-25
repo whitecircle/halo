@@ -31,16 +31,23 @@ from src.distributed.runtime import broadcast_from_rank0, is_global_main_process
 logger = logging.getLogger(__name__)
 
 
-def _fetch_served_max_model_len(client_cls: type[BaseWeightSyncClient], url: str) -> int | None:
-    """The served model's context window, or None when it could not be read (server down, or a model
-    card without ``max_model_len``); a preflight probe should not be what fails the run."""
+def _probe_server(
+    client_cls: type[BaseWeightSyncClient],
+    url: str,
+    probe: Callable[[BaseWeightSyncClient], Any],
+    default: Any,
+    failure: str,
+) -> Any:
+    """``probe`` over a fresh client for ``url``, or ``default`` when the server cannot answer it (down,
+    or a model card without the field): a preflight probe never fails the run by itself. ``failure``
+    completes the warning ``Could not <failure> <url>``."""
     client = None
     try:
         client = client_cls(base_url=url)
-        return client.served_max_model_len()
+        return probe(client)
     except Exception as e:
-        logger.warning(f"Could not read max_model_len from {url}: {e}")
-        return None
+        logger.warning(f"Could not {failure} {url}: {e}")
+        return default
     finally:
         if client is not None:
             client.session.close()
@@ -59,7 +66,7 @@ def verify_context_window(
     growing past the context OOMs the trainer's forward before the fail-on-overflow check, so it warns.
     """
     for url in urls:
-        mml = _fetch_served_max_model_len(client_cls, url)
+        mml = _probe_server(client_cls, url, client_cls.served_max_model_len, None, "read max_model_len from")
         if mml is None:
             continue
         logger.info(f"Rollout server {url}: max_model_len={mml}")
@@ -76,20 +83,6 @@ def verify_context_window(
                 f"multi-turn rollout that grows past {mml} tokens can OOM the training forward before the "
                 f"fail-on-overflow check — lower max_turns or rollout_max_tokens so the worst case fits."
             )
-
-
-def _probe_sampler_logprob_semantics(client_cls: type[BaseWeightSyncClient], url: str) -> SamplerLogprobSemantics:
-    """One server's :meth:`BaseWeightSyncClient.probe_sampler_logprob_semantics`; unknown when unreadable."""
-    client = None
-    try:
-        client = client_cls(base_url=url)
-        return client.probe_sampler_logprob_semantics()
-    except Exception as e:
-        logger.warning(f"Could not probe the sampler-logprob semantics of {url}: {e}")
-        return SamplerLogprobSemantics(None, None)
-    finally:
-        if client is not None:
-            client.session.close()
 
 
 def verify_sampler_logprob_reference(
@@ -114,7 +107,13 @@ def verify_sampler_logprob_reference(
     if temperature == 1.0 and not (top_p < 1.0 and sequence_ratio_active):
         return
     for url in urls:
-        semantics = _probe_sampler_logprob_semantics(client_cls, url)
+        semantics = _probe_server(
+            client_cls,
+            url,
+            client_cls.probe_sampler_logprob_semantics,
+            SamplerLogprobSemantics(None, None),
+            "probe the sampler-logprob semantics of",
+        )
         if temperature != 1.0:
             if semantics.temperature_applied is None:
                 logger.warning(

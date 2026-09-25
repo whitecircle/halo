@@ -646,7 +646,7 @@ class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):
             batch_size = (
                 self.args.per_device_train_batch_size if self.model.training else self.args.per_device_eval_batch_size
             )
-        chunked = getattr(self, "_use_chunked_grpo_logprobs", False)
+        chunked = self._use_chunked_grpo_logprobs
         is_multimodal = any(kwargs.get(k) is not None for k in self._multimodal_keys())
         # Mixed full (image) / chunked (text) paths across ranks diverge FSDP2's collectives and deadlock
         # backward, so any multimodal batch routes all ranks to the full forward; text-only models skip this.

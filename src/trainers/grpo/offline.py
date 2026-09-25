@@ -79,7 +79,7 @@ from src.distributed.pipeline_parallel.losses import (
 from src.distributed.runtime import current_device, get_global_world_size
 from src.models.loading.tokenizer_setup import is_bounded_length
 from src.models.modality import config_declares_multimodality
-from src.models.structure import resolve_tokenizer
+from src.models.structure import base_transformers_model, resolve_tokenizer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import MultiGroupSampler
 from src.trainers.grpo.objective.advantages import STD_EPS
@@ -839,9 +839,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         ``ChunkedLogprobsCore``: forward the backbone (no ``lm_head``), drop the final position (the
         causal next-token shift), keep the last ``logits_to_keep``.
         """
-        if is_peft_model(unwrapped_model):
-            unwrapped_model = unwrapped_model.base_model.model
-        backbone = unwrapped_model.base_model
+        backbone = base_transformers_model(unwrapped_model).base_model
         hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
         return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
 
