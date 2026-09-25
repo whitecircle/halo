@@ -317,9 +317,8 @@ its llama-cast norm over GptOss's Gemma-cast one, its GeGLU over Gemma 4's toolk
 `LigerExperts` over the Qwen MoE families' routed experts. A model loaded outside Halo's loaders runs those
 roles eager.
 
-Code loading via `AutoModelForCausalLM.from_pretrained()` instead — the GPU benchmarks — patches through
-`apply_liger_kernel_for_direct_loading()`, which applies the toolkit defaults then sets
-`use_liger_kernel = False`.
+Code loading via `AutoModelForCausalLM.from_pretrained()` instead — the GPU benchmarks — runs
+`apply_liger_kernel` on the config it passes to `from_pretrained`, then `finalize_liger_after_direct_load`.
 
 Under FSDP2, TRL's fused Liger preference/GRPO loss (`liger_loss_fn`, `liger_grpo_loss`, or `liger_loss` in
 later TRL releases) is auto-disabled: it does `input @ weight.t()` against `model.lm_head.weight` outside FSDP2's

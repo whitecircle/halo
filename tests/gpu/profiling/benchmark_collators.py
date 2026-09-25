@@ -33,14 +33,15 @@ import traceback
 import torch
 import torch.distributed as dist
 from accelerate import PartialState
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
-from src.kernels.liger.orchestrator import apply_liger_kernel_for_direct_loading
+from src.kernels.liger.orchestrator import apply_liger_kernel
+from src.models.loading.model_preparation import finalize_liger_after_direct_load
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import create_benchmark_parser, resolve_benchmark_attn
 from tests.common.datasets import create_variable_length_sft_dataset
@@ -97,10 +98,13 @@ def run_collator_mode(
         )
     else:
         parallelism_config = ParallelismConfig()
-        sft_config_tmp = SFTConfig(output_dir=output_dir, use_liger_kernel=use_liger)
-        apply_liger_kernel_for_direct_loading(model_name, sft_config_tmp, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        if use_liger:
+            # Before the build: the class swaps reach only modules constructed afterwards.
+            apply_liger_kernel(model_config)
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
+            config=model_config,
             dtype=torch.bfloat16,
             trust_remote_code=True,
             attn_implementation=resolve_benchmark_attn(model_name, args.attn_implementation),
@@ -140,6 +144,8 @@ def run_collator_mode(
         packing=(mode == "packing"),
         use_liger_kernel=False,
     )
+    # Liger is already applied; TRL's flag follows what was applied (a fused loss returns no logits).
+    finalize_liger_after_direct_load(sft_config, use_liger, model)
 
     # --- Efficiency Callback ---
     efficiency_cb = EfficiencyCallback(

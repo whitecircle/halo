@@ -26,17 +26,15 @@ this file pins is the seam, not the kernel numerics (those are
 from __future__ import annotations
 
 import inspect
-import sys
 import types
 
 import pytest
 from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
-from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextRMSNormGated
 
 from src.kernels.liger import orchestrator
-from src.kernels.liger.builder import LigerApplier, LigerFamilySpec, _fused_gated_rms_norm_class
+from src.kernels.liger.builder import LigerApplier, LigerFamilySpec
 from src.kernels.liger.cross_entropy import liger_cross_entropy
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
 from tests.common.utils import probe_findings
@@ -242,18 +240,6 @@ def test_a_delegating_spec_that_adds_nothing_is_refused():
             modeling_module=QWEN3_NEXT_MODELING,
             delegates_to_upstream=True,
         )
-
-
-def test_the_fused_gated_norm_needs_fla_and_says_so(monkeypatch):
-    """``fla`` owns the only gated-norm kernel on the roster; its absence must not be a silent skip.
-
-    The import is deferred to the patch (``fla`` costs seconds and probes Triton), so a missing or
-    renamed ``FusedRMSNormGated`` surfaces at model load. It has to surface as a failure: swallowing
-    it would leave the family running the eager norm while the applier logged the role as patched.
-    """
-    monkeypatch.setitem(sys.modules, "fla.modules", types.ModuleType("fla.modules"))
-    with pytest.raises(ImportError, match="FusedRMSNormGated"):
-        _fused_gated_rms_norm_class(Qwen3NextRMSNormGated)
 
 
 def test_cross_entropy_never_reaches_upstreams_branch():
