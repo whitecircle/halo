@@ -13,6 +13,7 @@ from typing import Any
 
 from src.environments.base import (
     EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
@@ -374,11 +375,14 @@ Always think before acting, and provide a Final Answer when you're done."""
         if callable(self.answer_validator):
             try:
                 validated = self.answer_validator(final_answer, expected)
-            except Exception:
-                # Unwarned, an always-raising validator silently re-grades every episode by default.
-                logger.warning("answer_validator raised; falling back to the default check", exc_info=True)
-            else:
-                return EpisodeGrade(1.0 if validated else 0.0)
+            except Exception as exc:
+                # The grader failed, not the policy: no check stands in for it (the default one pays any
+                # Final Answer on a row with no expected answer), so the episode leaves the baseline.
+                logger.warning("answer_validator raised; scoring the episode invalid", exc_info=True)
+                trajectory.info[EPISODE_INVALID_KEY] = True
+                trajectory.info[EPISODE_INVALID_REASON_KEY] = f"answer_validator raised {type(exc).__name__}: {exc}"
+                return EpisodeGrade(0.0)
+            return EpisodeGrade(1.0 if validated else 0.0)
 
         if expected is None:
             if trajectory.info.get("_answer_in_context"):

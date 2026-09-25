@@ -21,6 +21,7 @@ import shutil
 import sys
 
 import pytest
+from datasets import Dataset
 
 from scripts.environments.inference import run_env
 from src.environments.base import OBJECTIVE_REWARD_KEY, REWARD_COMPONENTS_KEY
@@ -116,7 +117,7 @@ def test_a_judge_priced_swe_episode_needs_no_answer():
 def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeypatch):
     """The trainer's dataset gate, held by the generic eval driver too: an answer-graded environment
     over a dataset without the column fails before any episode runs, not after each one."""
-    monkeypatch.setattr(run_env, "load_hf_split", lambda *args: [{"prompt": "fix the bug"}])
+    monkeypatch.setattr(run_env, "load_hf_split", lambda *args: Dataset.from_list([{"prompt": "fix the bug"}]))
     monkeypatch.setattr(run_env, "create_openai_client", lambda **kwargs: pytest.fail("generation must not start"))
     argv = [
         "run_env.py",
