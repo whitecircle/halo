@@ -271,8 +271,7 @@ That is also why the twelve `gpt-oss` SFT scripts under `trainers/sft/` (`test_s
 must select their two CP legs and nothing else.
 
 `core` is the pre-merge gate, and small-and-fast is its *intent*: ≤2 GPUs, tiny model. Size the host
-from the manifest, not from that intent. Over half of `tests/gpu/manifest.py` carries `core`
-(121 of 197 entries, 146 pytest nodes once the `args_matrix` rows expand).
+from the manifest, not from that intent. Over half of `tests/gpu/manifest.py` carries `core`.
 
 Within that tier four entries need 4 GPUs, 18 declare a timeout ≥1500 s (three at 2400 s), and a large
 minority load a real multi-billion-parameter checkpoint (gpt-oss-20b, GLM-4.7-Flash, ZAYA1-8B,
