@@ -147,19 +147,5 @@ def test_config_field_defaults_off():
     assert CommonScriptArguments().log_decoded_samples is False
 
 
-ALL_TESTS = [
-    ("disabled_by_default", test_disabled_by_default),
-    ("enabled_writes_file", test_enabled_writes_file),
-    ("test_split_maps_to_eval_filename", test_test_split_maps_to_eval_filename),
-    ("custom_name_filename", test_custom_name_filename),
-    ("skips_dataset_without_input_ids", test_skips_dataset_without_input_ids),
-    ("backcompat_no_tokenizer_no_write", test_backcompat_no_tokenizer_no_write),
-    ("datasetdict_uses_first_split", test_datasetdict_uses_first_split),
-    ("off_the_fs_save_rank_no_write", test_off_the_fs_save_rank_no_write),
-    ("non_main_fs_save_rank_still_writes", test_non_main_fs_save_rank_still_writes),
-    ("config_field_defaults_off", test_config_field_defaults_off),
-]
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
