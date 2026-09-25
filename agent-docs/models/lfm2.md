@@ -28,9 +28,10 @@ LFM-2 uses the [fused contiguous-halves ETP layout](../parallelism/expert-tensor
 ## Packing
 
 Documents stay isolated in both halves of the hybrid stack. The attention layers key on the packed
-`position_ids`; for the `Lfm2MoeShortConv` layers the collators additionally emit `seq_idx` for this
-family (`select_data_collator` turns it on by model type) and both conv paths honor it, which zeroes
-the cross-document term exactly rather than approximately.
+`position_ids`; for the `Lfm2MoeShortConv` layers the collators and SMPO's padding-free forward
+additionally emit `seq_idx` for this family (`segment_markers_for` in `src/models/segment_markers.py`
+turns it on by model type) and both conv paths honor it, which zeroes the cross-document term exactly
+rather than approximately.
 
 ## Why CP isn't supported
 

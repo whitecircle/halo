@@ -41,7 +41,7 @@ The imports reach the layer through transformers' hub-kernel funnel, whose packa
 
 `src/models/patches/kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair.
 
-The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing, and SMPO refuses its own `padding_free` likewise ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
 These layers need no CP for memory: the recurrent state is independent of `S`, per-layer activations are `O(B·S·d)`, and the Conv1d left-context is a 3-token state. The long-context ceiling comes from the 10 full-attention layers — 33K on a single B200/B300 rank at `num_heads=16, head_dim=256, num_kv_heads=2`.
 
@@ -104,7 +104,7 @@ The shipped EP config trains Qwen3.5/3.6 35B-A3B (40 layers = 10 full + 30 linea
 
 Pin `attn_implementation: flash_attention_2` with `packing: true` (fixed-length): the M-RoPE varlen path crashes FA2 with `cudaErrorIllegalAddress`, so do not set `padding_free: true` without revalidating. SDPA reaches parity at `b=1`.
 
-Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeGatedDeltaNet` receives its boundaries from the collators: the packing/padding-free collators emit `seq_idx` (its causal conv) and `cu_seq_lens_q` (its chunked delta rule) for the family, the two kwargs upstream reads and nothing model-side derives ([Document isolation](../data/collators.md#document-isolation-under-packing)). The same holds for Qwen3-Next.
+Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeGatedDeltaNet` receives its boundaries from the collators and SMPO's padding-free forward, which emit `seq_idx` (its causal conv) and `cu_seq_lens_q` (its chunked delta rule) for the family, the two kwargs upstream reads and nothing model-side derives ([Document isolation](../data/collators.md#document-isolation-under-packing)). The same holds for Qwen3-Next.
 
 Examples under `examples/sft/qwen3_5/`:
 
