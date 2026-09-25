@@ -319,7 +319,21 @@ def test_env_reset_reads_a_bare_list_of_tests_from_json():
     assert traj.info["tests_total"] == len(_ADD_TESTS)
 
 
-@pytest.mark.parametrize("answer", ['{"tests": [', None, 42, '"tests"'], ids=["unparseable", "null", "int", "scalar"])
+@pytest.mark.parametrize(
+    "answer",
+    ['{"tests": [', None, 42, '"tests"', [], "[]", {}, {"tests": [], "checker": None}, {"public_tests": _ADD_TESTS}],
+    ids=[
+        "unparseable",
+        "null",
+        "int",
+        "scalar",
+        "empty-list",
+        "empty-json-list",
+        "empty-dict",
+        "empty-tests",
+        "wrong-key",
+    ],
+)
 def test_env_reset_refuses_an_answer_that_holds_no_test_set(answer):
     """Graded against zero tests, such a row would score 0 inside its GRPO group like a wrong solution.
     Refused at reset instead, the episode becomes a rollout error the trainer masks out of the baseline."""

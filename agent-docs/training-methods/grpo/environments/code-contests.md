@@ -119,9 +119,9 @@ each test's request with its stdin.
 
 The grade is the pass fraction `tests_passed / tests_total` of the submitted solution, priced by the
 reward's `environment` term as `weight × fraction ^ exponent` (`rewards:` above). It is credited only
-on `submit_solution`: an unsubmitted solution, a zero-test row and an infra outage all grade 0, and
-the outage also marks the episode invalid. No shaping rung pays out on those either; the
-resubmission penalty and the tool shaping still apply.
+on `submit_solution`: an unsubmitted solution and an infra outage both grade 0, and the outage also
+marks the episode invalid. No shaping rung pays out on those either; the resubmission penalty and
+the tool shaping still apply.
 
 | Component | Knob | Default | Pays |
 |---|---|---|---|
@@ -167,9 +167,9 @@ language.
 
 `prompt` is the statement; `answer` the grading payload, a JSON string or dict — required
 (`requires_answer`), since the payload IS the test set a submission is graded against. A bare
-list, `{"test_cases": [...]}` and the full form are accepted; a payload that is neither a list nor a
-dict, unparseable JSON included, fails the episode at reset, so the trainer drops it from the group
-baseline:
+list, `{"test_cases": [...]}` and the full form are accepted. A payload that holds no tests (an empty
+list, no `tests`/`test_cases` key, unparseable JSON, a scalar) fails the episode at reset, so the
+trainer drops it from the group baseline:
 
 ```json
 {"prompt": "<problem statement>",

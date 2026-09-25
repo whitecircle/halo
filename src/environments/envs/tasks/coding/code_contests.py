@@ -572,8 +572,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         """Store the tests, optional checker, and time limit the submission is graded against.
 
         Accepts a bare list, ``{"test_cases": [...]}``, or the Codeforces
-        ``{"tests": [...], "checker": ..., "time_limit": ...}``. Written to ``traj.info`` so concurrent
-        Ray-rollout episodes don't clobber each other; ``_submit`` reads it via the active-trajectory ContextVar.
+        ``{"tests": [...], "checker": ..., "time_limit": ...}``; a payload holding no tests raises, as
+        in :meth:`_parse_answer`. Written to ``traj.info`` so concurrent Ray-rollout episodes don't
+        clobber each other; ``_submit`` reads it via the active-trajectory ContextVar.
         """
         answer = self._parse_answer(context)
         if isinstance(answer, dict):
@@ -582,6 +583,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             time_limit = answer.get("time_limit")
         else:
             test_cases, checker, time_limit = answer, None, None
+        if not test_cases:
+            raise ValueError("'answer' holds no tests: expected a non-empty list, or a non-empty 'tests'/'test_cases'")
 
         traj.info["_test_cases"] = test_cases
         traj.info["_checker"] = checker
