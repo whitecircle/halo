@@ -20,10 +20,10 @@ truncated**: a row over that window is recorded per rank, then raised on every r
 dropped. `max_completion_length` is no knob here: the script overwrites it with `rollout_max_tokens`,
 and TRL reads it only as the `dr_grpo` normalizer.
 
-`max_train_row_tokens` (default `null` = the model's context window) is a second, tighter bound on a training row, and
-must exceed `rollout_max_tokens` (a row is prompt plus completion). A per-turn row over it leaves
-the batch while the episode's other turns train; a whole-trajectory row trains at zero weight.
-Setting it also turns on `sampling/rows_over_cap_frac`, the share of rows left out.
+`max_train_row_tokens` (default `null`: no cap beyond the context check above) is a memory bound on
+a training row, and must exceed `rollout_max_tokens` (a row is prompt plus completion). A per-turn
+row over it leaves the batch while the episode's other turns train; a whole-trajectory row trains at
+zero weight. Setting it also turns on `sampling/rows_over_cap_frac`, the share of rows left out.
 
 ## Tool calls
 

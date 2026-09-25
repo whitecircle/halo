@@ -33,7 +33,7 @@ Transformers ships `transformers.models.laguna` natively, and the released check
 
     Transformers declares both as `WeightRenaming` entries and applies them only inside `from_pretrained`, so `EPLagunaMoELayer._EXPORT_KEY_RENAMES` mirrors them for the three paths that bypass it: the gather, the RL weight sync, and the lazy loader (which applies the inverse on read). Without them the export writes keys vLLM silently skips and the loader leaves that submodule randomly initialized.
 
-    The pairs fire only when the live name actually differs, so a remote-code revision already spelling `shared_expert` is untouched. See [Checkpoints](../reference/checkpoints.md#expert-parallelism-ep).
+    The pairs fire only when the live name actually differs, so a remote-code revision already spelling `shared_expert` is untouched. See [Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp).
 
 Routing is otherwise unchanged: sigmoid the logits, add the correction bias (and any `moe_balancing: bias_update` bias) for *selection* only, and gate with the unbiased scores. `LagunaTopKRouter.forward` returns `(logits, weights, indices)`; the wrapper keeps only the logits and recomputes weights and indices itself, since the cached pair predates routing replay and balancing.
 

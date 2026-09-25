@@ -83,7 +83,7 @@ Even with the host wall removed, **DeepGEMM is net-slower than bf16 at every tra
 
 Only `fp8` (mxfp8) and `fp4` (nvfp4) have a native path; `mxfp4` is simulated-only, and a shape the kernel rejects falls back to bf16 with a one-time warning. What it gives, opted in:
 
-- **fp8** — DeepGEMM's fp8 grouped kernel, DeepSeek's 1×128 UE8M0 recipe (forward rel ≈ 0.038 vs bf16).
+- **fp8** — DeepGEMM's fp8 grouped kernel, DeepSeek's UE8M0 recipe: 1×128 groups for the activation, 128×128 blocks for the weight (forward rel ≈ 0.038 vs bf16).
 - **fp4** — fp8-activation × fp4-weight kernel on Blackwell fp4 tensor cores (forward rel ≈ 0.12 vs bf16). fp4 packs two e2m1 per byte, so K/2 must be ÷128 → the adapter zero-pads K to ÷256 (gpt-oss K=2880 → 3072; matmul unchanged), letting K-not-÷256 experts run native fp4.
 - **backward is always bf16** (Wgrad-in-HP via `torch._grouped_mm`, measured bf16-exact); the master dtype (bf16 or fp32) is preserved and both fp8 and fp4 converge.
 
@@ -110,12 +110,12 @@ That bit-identity holds for any block whose amax is within `2^-16` of the tensor
 | **mxfp8** (OCP MX) | e4m3 | e8m0 (pow-2) | 1×32 | best (fp8) | compiled |
 | **mxfp4** (OCP MX) | e2m1 | e8m0 (pow-2) | 1×32 | coarsest fp4 | compiled |
 | **nvfp4** (NVIDIA) | e2m1 | e4m3 + per-tensor fp32 | 1×16 | best fp4 | eager |
-| DeepGEMM native fp8 | e4m3 | UE8M0 (pow-2) | 1×128 | — | (native kernel) |
+| DeepGEMM native fp8 | e4m3 | UE8M0 (pow-2) | act 1×128, weight 128×128 | — | (native kernel) |
 | DeepGEMM native fp4 | e2m1 (act fp8) | UE8M0 | weight 1×32 | — | (native kernel) |
 
 `lowp_precision` exposes three formats: **`fp8`** = mxfp8; **`fp4`** = nvfp4 (the accurate fp4; validate an nvfp4 deployment); **`mxfp4`** = OCP fp4, whose power-of-two scale lets its cached weight quant compile bit-identically (~6× cheaper than nvfp4's eager weight quant, helps at low gradient-accumulation). All three converge; pick by deployment target.
 
-In the cache-hit steady state both fp4 formats are bounded by the eager activation quant, so their per-microbatch cost is similar; fp8 is cheaper because its activation quant is lighter. DeepGEMM's native recipes (UE8M0 1×128) are coarser still; use the simulated path when you need exact mx/nv numerics.
+In the cache-hit steady state both fp4 formats are bounded by the eager activation quant, so their per-microbatch cost is similar; fp8 is cheaper because its activation quant is lighter. DeepGEMM's native recipes (UE8M0 scales over 1×128 activation groups, and 128×128 blocks for the fp8 weight) are coarser still; use the simulated path when you need exact mx/nv numerics.
 
 The literature agrees: published fp8 wins on fine-grained MoE are single-digit-% e2e at these widths (N ≤ 4096), the larger ones landing at N ≥ 8192 or folding in precision-orthogonal communication speedups, and NVFP4 pretraining reports no e2e speedup plus a late-training quality gap needing a bf16 tail.
 

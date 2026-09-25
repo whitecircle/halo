@@ -103,8 +103,8 @@ def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
 def lora_model() -> SentenceTransformer:
     """A SentenceTransformer with LoRA injected exactly the way the embedding script does it.
 
-    ``inject_adapter_in_model`` (not ``ST.add_adapter``, which needs peft>=0.18.2) adds the adapters
-    in place without globally freezing, so the freeze-by-name below is part of the wiring under test.
+    ``inject_adapter_in_model`` (not ``ST.add_adapter``, whose transformers adapter API needs
+    peft>=0.19.1) adds the adapters in place; the freeze-by-name below is part of the wiring under test.
     """
     model = SentenceTransformer(MODEL_NAME)
     inject_adapter_in_model(

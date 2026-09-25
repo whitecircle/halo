@@ -24,7 +24,7 @@ Column types and per-script defaults: [Dataset Formats](../data/dataset-formats.
 
 SFT, DPO, KTO, SMPO, both off-policy distillation scripts and reward modeling (on families with a sequence-classification head) take images; classification, embedding and the GRPO family are text-only. One script serves both modalities — the model class follows the checkpoint and the data path follows the run, so a text-only dataset on a multimodal checkpoint trains through the text pipeline.
 
-Per-method rules: [Modality support](../reference/trainer-architecture.md#modality-support). `text_only_model: true` loads a multimodal checkpoint through its text-only sibling ([field reference](../reference/configuration-reference.md#distributedarguments-model-from-scratch)).
+Per-method rules: [Modality support](../reference/trainer-architecture.md#modality-support). `text_only_model: true` loads a multimodal checkpoint through its text-only sibling ([field reference](../reference/configuration-reference.md#distributedarguments-model--from-scratch)).
 
 ## Parallelism support
 

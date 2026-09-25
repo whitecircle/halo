@@ -371,7 +371,9 @@ export NVLINK_DOMAIN_SIZE=64
 
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` composes with the `ElasticBuffer` on single-node
 runs. Set it when variable-shape packing at `per_device_train_batch_size > 1` fragments the
-allocator; no shipped config sets it.
+allocator; no shipped config sets it. Measured on B300 it cuts peak reserved memory by 13–14% at unchanged
+throughput on dense packed SFT (Qwen3-8B, 41.3 → 35.4 GB), DPO (61.6 → 52.7 GB) and SMPO (41.1 →
+35.8 GB); under EP8 it trims 1–6 GB and costs ~1.5% throughput.
 
 ### YAML knobs
 
@@ -393,7 +395,7 @@ Values that differ from it or are load-bearing at 397B:
 | `fp32_grad_reduce` | `true` | bf16 sums lose precision at 16–64 ranks; no storage cost |
 | `use_grouped_gemm` / `use_liger_kernel` / `fp32_output_conversion` | `true` / `true` / `false` (all defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100, and fused linear cross-entropy plus the disabled upcast keep `[b, S, 248320]` — 4 GB per copy at `S=8192` — off the card |
 | `max_concurrent_loading` | leave unset | node-local wave gate; unset adapts to the node (`min(4, max(1, local_world_size // 2))` — 4 on an 8-GPU node, 2 on a 4-GPU tray), and any explicit value is used verbatim. The lazy EP path bypasses it, so this only bounds the fallback |
-| `save_sharded_ep` | `true` on the pure-EP cells (`ep16`/`ep32`/`ep64`) | every rank writes its own shard instead of funneling 794 GB through one. Requires a single EP group spanning all ranks (`ep_group_size == world_size` — exactly these cells) and a shared output filesystem; **rejected under ETP**, so the `ep8+etp8` cell takes the layer-streaming gathered save instead. Merge before serving ([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep)) |
+| `save_sharded_ep` | `true` on the pure-EP cells (`ep16`/`ep32`/`ep64`) | every rank writes its own shard instead of funneling 794 GB through one. Requires a single EP group spanning all ranks (`ep_group_size == world_size` — exactly these cells) and a shared output filesystem; **rejected under ETP**, so the `ep8+etp8` cell takes the layer-streaming gathered save instead. Merge before serving ([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)) |
 | `per_device_train_batch_size` | `1` | the activation column is `b=1`; raise only at 8 nodes and only after step 1's peak is known |
 | `max_length` | `8192` on every `ep_scope=global` cell | doubling it doubles the activation column — but on cross-node EP the hard limit is the 8192 tokens/rank dispatch ceiling above, not memory. Raise the ceiling only after validating a larger dispatch end-to-end on your fabric ([DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) |
 | `unfreeze_layers_patterns` | required at 2 nodes | see [Recommended cell](#recommended-cell) |

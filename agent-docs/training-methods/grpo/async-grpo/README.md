@@ -2,7 +2,7 @@
 
 Multi-turn RL: the model converses with an environment — tools, code, repositories, search — until a final reward, then trains with GRPO. Use it for tool use, agentic training and multi-step reasoning with environment feedback. For pre-collected rewards use [Offline GRPO](../offline-grpo.md); for single-turn verifiable rewards, [Online GRPO](../online-grpo.md); for pairwise preferences, [SMPO](../../preference/smpo.md) or [DPO](../../preference/dpo.md).
 
-The episode reward is the environment's grade priced by the `rewards:` terms, plus the environment's own shaping ([Reward Terms](../rewards.md#environment-arm)). Pick an environment with `environment_type` or register your own ([Environments](../environments/README.md)). Trainer `DistributedAsyncEnvironmentalGRPOTrainer`, script `scripts/training/environmental_grpo.py`. A [rollout server](../../../infrastructure/rollout-servers.md) must be serving before you launch; [Ray](../../../infrastructure/ray.md) configures itself on one node.
+[Reward Terms](../rewards.md#environment-arm) defines how the episode reward is composed. Pick an environment with `environment_type` or register your own ([Environments](../environments/README.md)). Trainer `DistributedAsyncEnvironmentalGRPOTrainer`, script `scripts/training/environmental_grpo.py`. A [rollout server](../../../infrastructure/rollout-servers.md) must be serving before you launch; [Ray](../../../infrastructure/ray.md) configures itself on one node.
 
 ## How a step works
 

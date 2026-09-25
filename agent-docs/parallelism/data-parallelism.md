@@ -97,9 +97,13 @@ SHARD_GRAD_OP, FSDP2 reshards each module after its backward and re-all-gathers 
 microstep's forward: one full param re-gather per grad-accum microstep for weights that did not
 change in between.
 
-Over NVLink that traffic is negligible. With the trainer's NCCL on TCP sockets (the no-fabric compose
-recipe, `NCCL_NET=Socket`) it measures ~15 s per re-gather at gpt-oss-20b scale, ~6 minutes of every
-optimizer step at `gradient_accumulation_steps: 24`.
+Over NVLink, turning the re-gathers off gains about 4–10% throughput: on 8× B300, dense Qwen3-8B SFT
+runs +3.7% (packed `sft.py`, batch 2, `gradient_accumulation_steps: 8`) to +9.7% (4k tokens, batch 1,
+GA 8) faster with `false`, and gpt-oss-20b EP8 +3.6%. Under the default ZeRO-2 wrap
+(`reshard_after_forward=False`) the parameters are already unsharded through each forward and backward,
+so the measured peak is unchanged. With the trainer's NCCL on TCP sockets (the no-fabric compose recipe,
+`NCCL_NET=Socket`) it measures ~15 s per re-gather at gpt-oss-20b scale, ~6 minutes of every optimizer
+step at `gradient_accumulation_steps: 24`.
 
 The window's **last** backward still reshards: the trainer arms the flag per microstep from
 `accelerator.sync_gradients` in `src/trainers/mixins/base.py`. That leaves one re-gather per
@@ -111,7 +115,8 @@ before reduce-scattering onto the sharded DTensors, so a module left unsharded
 hands `model.parameters()` grad-less tensors the optimizer never captured (grad norm 0, nothing
 clipped) while `unshard()` no-ops on it, hiding the optimizer's update from the next forward.
 
-The cost is one unsharded bf16 param copy per GPU held for the whole run. Plain-DP/CP/EP torchrun
+The cost is one unsharded bf16 param copy per GPU held for the whole run, the optimizer step
+included; under ZeRO-2 the forward/backward peak already holds it. Plain-DP/CP/EP torchrun
 path only; rejected with `fsdp_reshard_after_forward: true` (contradicts FULL_SHARD's purpose), TP,
 or PP.
 

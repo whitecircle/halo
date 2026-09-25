@@ -99,7 +99,7 @@ targets that did match. Read the excluded count — it is the tell.
 - **Alpha:** `alpha = rank` (conservative) or `2 * rank` (aggressive). For rank ≥ 64, prefer `use_rslora`.
 - **Target modules:** all-linear for best quality; attention-only when memory-constrained. On MoE models
   `all-linear` does not reach the fused expert tensors — name the expert projections explicitly (see
-  [MoE models](#moe-models-expert-targets-and-full-trained-modules)).
+  [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
 - **Learning rate:** LoRA needs 5–10× the full-FT rate.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
   `disable_dropout_in_model` after the adapter wrap (`disable_dropout` defaults to `True`), zeroing PEFT's
@@ -118,7 +118,7 @@ The effective-batch formula is unchanged by LoRA — see
 Ready configs: `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` (and its `-qlora` counterpart, which adds
 `load_in_4bit: true`, `bnb_4bit_quant_type: nf4`, `use_bnb_nested_quant: true`).
 
-## MoE models — expert targets and full-trained modules {#moe-models-expert-targets-and-full-trained-modules}
+## MoE models — expert targets and full-trained modules
 
 MoE experts are fused `nn.Parameter` tensors (`GptOssExperts.gate_up_proj` / `down_proj`, and the
 equivalents on other families), not `nn.Linear`, so PEFT's `all-linear` cannot reach them; on gpt-oss it
@@ -224,7 +224,7 @@ applies, and downcasting a deliberately-fp32 router or expert would negate `fp32
 | ETP | Yes | No | Attention only | Expert adapters rejected at config time by `ParallelismConfig` (`expert_tp_size > 1` gives the replicated adapter half a partial, never-synced gradient) |
 | PP | **No** | No | — | Attention PEFT rejected at trainer construction (a stage cannot resolve full-tree module names); expert LoRA rejected earlier by `ParallelismConfig` (the adapter save/merge paths would record stage-local layer indices) |
 
-**EP.** The expert names [above](#moe-models-expert-targets-and-full-trained-modules) route to **native grouped
+**EP.** The expert names [above](#moe-models--expert-targets-and-full-trained-modules) route to **native grouped
 LoRA** — grouped `[E_local, K, r]`/`[E_local, r, N]` adapters stored alongside each expert weight, applied in
 the grouped-GEMM compute and gradient-synced across the EP group like the experts themselves. `lora_B` is
 zero-initialized, so the initial delta is zero. The frozen base experts stay bf16.

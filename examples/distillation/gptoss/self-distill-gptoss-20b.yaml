@@ -24,7 +24,7 @@ sdpg_beta_warmup_steps: 50
 sdpg_beta_decay_steps: 100
 opd_exclude_eos: true                   # keeps SFT's hard P(EOS)->1 undiluted by the teacher
 
-# --- Optional reference-policy KL anchor (0 disables; no ref model loaded) ---
+# --- Optional reference-policy KL anchor (0 disables; no ref model loaded; refused at expert_parallel_size > 1) ---
 reference_kl_coef: 0.0
 
 # The multiturn jinja renders EVERY assistant turn with <|channel|>final and ends each with <|return|>,

@@ -62,6 +62,6 @@ The architecture has no bias slot (the gate is a bare weight), so the bias is tr
 
 `Qwen3VLTextAttention` reuses `Qwen3MoeUlyssesAttention` for CP and is in the selective-TP accept-list (`src/distributed/tensor_parallel/module_types.py`). That accept-list governs the attention-only DTensor path, which the loader takes for MoE and EP+TP shapes.
 
-A **dense** Qwen3-VL goes through HF-native `tp_plan="auto"` instead, and the architecture ships no `base_model_tp_plan` — the plan is empty, nothing shards, and the load **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. Use CP or plain FSDP2 for dense VLM runs. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither the CP nor the selective-TP registry.
+A **dense** Qwen3-VL goes through HF-native `tp_plan="auto"` instead, and the architecture ships no `base_model_tp_plan` — the plan is empty, nothing shards, and the load **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. Use plain FSDP2 for dense VLM runs; CP covers only text-only rows, since the CP wrapper refuses `pixel_values`. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither the CP nor the selective-TP registry.
 
 No dedicated SFT configs ship; `tests/gpu/trainers/sft/test_sft_vlm.py` exercises the path on `Qwen/Qwen3-VL-2B-Instruct`. See [Vision-language models](../training-methods/sft.md#vision-language-models).

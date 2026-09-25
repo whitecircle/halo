@@ -110,7 +110,7 @@ processor a multimodal checkpoint resolved to) but routes its data path off the 
 
 | Method | Vision | Notes |
 |---|---|---|
-| SFT | Yes | Conversation-embedded images or an `images_field` column; packing/padding-free rejected on the VLM path; CP patches text attention only. See [SFT — VLMs](../training-methods/sft.md#vision-language-models) |
+| SFT | Yes | Conversation-embedded images or an `images_field` column; packing/padding-free rejected on the VLM path; CP is text-only (the CP wrapper raises on a batch carrying `pixel_values`). See [SFT — VLMs](../training-methods/sft.md#vision-language-models) |
 | DPO / KTO | Yes | `images`/`image` column routes to TRL's vision collators. Vision excludes `precompute_ref_log_probs`, so EP DPO needs standard-PEFT adapters |
 | SMPO | Yes | `DataCollatorForVLMSMPO` processes images at collation; CP, padding-free and PP are text-only. See [SMPO — VLMs](../training-methods/preference/smpo.md) |
 | Teacher distillation | Yes | Student and teacher share the processor's vision geometry; over-length rows pre-filtered |

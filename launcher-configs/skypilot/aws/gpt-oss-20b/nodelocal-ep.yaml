@@ -1,4 +1,4 @@
-# GPT-OSS 20B — node-local EP=8 on AWS (2 x 8 H100 / p5, EFA). Experts stay on NVLink per node;
+# GPT-OSS 20B — node-local EP=8 on AWS (2 x 8 H100, EFA). Experts stay on NVLink per node;
 # EFA carries only the cross-node data-parallel gradient sync (no cross-node all-to-all, so no GIN/gdrdrv).
 # Launch: sky launch -c oss-20b launcher-configs/skypilot/aws/gpt-oss-20b/nodelocal-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
 

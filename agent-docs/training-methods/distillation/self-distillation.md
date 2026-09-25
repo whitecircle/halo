@@ -45,7 +45,7 @@ output_dir: checkpoints/self-distill-qwen3.5-9b
 | `sdpg_beta_base` | `1.0` | Base OPD coefficient; `0` skips the teacher forward entirely |
 | `sdpg_beta_warmup_steps` / `sdpg_beta_decay_steps` | `0` / `0` | `beta(k) = base · min(1, k/T_warm) · min(1, (T−k)/T_decay)` |
 | `opd_exclude_eos` | `True` | Drops EOS/stop tokens from OPD but not from SFT |
-| `reference_kl_coef` | `0.0` | Alpha on a frozen-reference KL anchor; `0` loads no reference |
+| `reference_kl_coef` | `0.0` | Alpha on a frozen-reference KL anchor; `0` loads no reference. Refused under EP, ETP and TP: the dense reference would run the unpatched path, so its log-probs would not match the policy's |
 | `reference_kl_loss` | `unnormalized_kl` | The anchor's divergence; or `reverse_kl`, `forward_kl` |
 | `reference_model_name_or_path` | `None` | The anchor model; defaults to the student's init weights |
 | `confidence_field` / `confidence_power` | `None` / `4.0` | Per-sample weight `conf**p`, mean-normalized across the batch |

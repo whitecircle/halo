@@ -1,4 +1,4 @@
-# GPT-OSS 120B — node-local EP=8 on a single Blackwell node (8 x B200, AWS p6). No cross-node fabric.
+# GPT-OSS 120B — node-local EP=8 on a single Blackwell node (8 x B200, AWS). No cross-node fabric.
 # 120B does not fit node-local on Hopper — needs Blackwell HBM. B200 (180 GB/GPU) is the minimum;
 # B300 has more headroom. Lower max_length if OOM.
 # Launch: sky launch -c oss-120b-nl launcher-configs/skypilot/aws/gpt-oss-120b/nodelocal-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
