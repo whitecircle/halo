@@ -10,7 +10,7 @@ from trl import SFTTrainer
 from trl.trainer.utils import entropy_from_logits
 
 from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.context_parallel.config import cp_shift_against_full_labels
+from src.distributed.context_parallel.config import cp_chunk_bounds, cp_shift_against_full_labels
 from src.models.structure import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ctor_positions, ctor_value
@@ -170,7 +170,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
 
             per_token_entropy = entropy_from_logits(outputs.logits)
             if full_attention_mask is not None:
-                local_attention_mask = full_attention_mask.chunk(self.cp_size, dim=1)[cp_rank]
+                start, end = cp_chunk_bounds(full_attention_mask.size(1), cp_rank, self.cp_size)
+                local_attention_mask = full_attention_mask[:, start:end]
                 entropy_sum = torch.sum(per_token_entropy * local_attention_mask)
                 entropy_tokens = local_attention_mask.sum()
                 attended_tokens = entropy_tokens

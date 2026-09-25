@@ -36,5 +36,12 @@ def test_rank_shifts_tile_the_unsplit_shift(cp_size):
     assert torch.equal(torch.cat([s_labels for _, s_labels in shifted], dim=1), labels[:, 1:])
 
 
+def test_a_sequence_the_ranks_cannot_split_evenly_is_refused():
+    logits = torch.zeros(BATCH, SEQ // 2, VOCAB)
+    labels = torch.zeros(BATCH, SEQ + 1, dtype=torch.long)
+    with pytest.raises(ValueError, match="divisible by cp_size 2"):
+        cp_shift_against_full_labels(logits, labels, 0, 2)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
