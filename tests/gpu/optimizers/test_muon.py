@@ -169,7 +169,7 @@ def check_loss_descends():
 
     losses = run_training(model, optimizer, num_steps=100)
 
-    assert not math.isnan(losses[-1]), "Loss is NaN"
+    assert math.isfinite(losses[-1]), f"Loss is not finite: {losses[-1]}"
     assert losses[-1] < losses[0], f"Loss should decrease: initial={losses[0]:.4f}, final={losses[-1]:.4f}"
     reduction = (losses[0] - losses[-1]) / losses[0]
     log(f"  Loss: {losses[0]:.4f} -> {losses[-1]:.4f} ({reduction * 100:.1f}% reduction)")
@@ -186,7 +186,7 @@ def check_loss_descends_no_bias():
 
     losses = run_training(model, optimizer, num_steps=100)
 
-    assert not math.isnan(losses[-1]), "Loss is NaN"
+    assert math.isfinite(losses[-1]), f"Loss is not finite: {losses[-1]}"
     assert losses[-1] < losses[0], f"Loss should decrease: initial={losses[0]:.4f}, final={losses[-1]:.4f}"
     reduction = (losses[0] - losses[-1]) / losses[0]
     log(f"  Loss: {losses[0]:.4f} -> {losses[-1]:.4f} ({reduction * 100:.1f}% reduction)")

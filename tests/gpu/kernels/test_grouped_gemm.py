@@ -8,15 +8,15 @@ Validates:
   (the native DeepGEMM kernel is opt-in and net-slower than bf16, so never auto-selected), producing
   the expected block-scaled error vs bf16 with finite grads flowing to the bf16 masters.
 
-Run: python tests/gpu/kernels/test_grouped_gemm.py
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_gemm.py
 """
-
-import sys
 
 import torch
 
 from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
 from src.kernels.lowp.deepgemm import deepgemm_available
+from tests.common.harness import gpu_test_main, record_check
+from tests.common.utils import fro_rel_err, log
 
 DEV = "cuda"
 
@@ -76,7 +76,7 @@ def test_simulated_lowprecision_matches_format_error():
         out = grouped_gemm(x, w, offs=offs, precision=prec)  # fine-grained shape -> simulated fake-quant
         (out * torch.randn_like(out)).sum().backward()
         ref = _reference(x.detach(), w.detach(), offs).float()
-        rel = ((out.detach().float() - ref).norm() / ref.norm()).item()
+        rel = fro_rel_err(out.detach(), ref)
         assert lo < rel < hi, (
             f"{prec.value}: rel {rel:.4f} outside band {lo}-{hi} "
             f"(rel≈0 ⇒ silent bf16 fallback; rel>{hi} ⇒ broken quantization)"
@@ -101,29 +101,18 @@ def test_dispatch_contract():
     print(f"  dispatch contract PASS (lowp=simulated at this shape; deepgemm_available={deepgemm_available()})")
 
 
-def main() -> int:
-    if not torch.cuda.is_available():
-        print("SKIP: no CUDA")  # the sentinel the launcher skips on; a bare exit 0 reads as a PASS
-        return 0
-    print(f"Grouped-GEMM tests on {torch.cuda.get_device_name()}")
-    failures = []
-    for test in (
-        test_bf16_grouped_matches_reference,
-        test_bf16_grouped_backward,
-        test_simulated_lowprecision_matches_format_error,
-        test_dispatch_contract,
-    ):
-        try:
-            test()
-        except Exception as exc:
-            failures.append((test.__name__, exc))
-            print(f"  FAIL {test.__name__}: {exc}")
-    if failures:
-        print(f"\n{len(failures)} test(s) FAILED")
-        return 1
-    print("\nAll grouped-GEMM tests PASSED")
-    return 0
+@gpu_test_main(exact_world_size=1, prefix="grouped_gemm", partial_state=False)
+def run(ctx) -> dict:
+    log(f"Grouped-GEMM tests on {torch.cuda.get_device_name()}")
+    checks: dict[str, bool] = {}
+    record_check(checks, "bf16_grouped_matches_reference", test_bf16_grouped_matches_reference)
+    record_check(checks, "bf16_grouped_backward", test_bf16_grouped_backward)
+    record_check(
+        checks, "simulated_lowprecision_matches_format_error", test_simulated_lowprecision_matches_format_error
+    )
+    record_check(checks, "dispatch_contract", test_dispatch_contract)
+    return {"checks": checks}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

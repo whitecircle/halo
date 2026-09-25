@@ -7,12 +7,13 @@ one kernel pair whose bound and ``alpha`` are runtime arguments and whose clamp 
 ``up + 1`` are ``tl.constexpr``. Token counts vary because grouped expert routing produces dynamic
 shapes; the variants are run in one process because that is where a constexpr keyed to the wrong
 wrapper, or a compilation reused across two of them, would show.
+
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fused_glu.py
 """
 
 from collections.abc import Callable
 from typing import NamedTuple
 
-import pytest
 import torch
 
 from src.kernels.fused_glu import (
@@ -27,20 +28,20 @@ from src.kernels.fused_glu import (
     silu_mul_eager,
     silu_then_clamp_mul_eager,
 )
-
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+from tests.common.harness import gpu_test_main, record_check
+from tests.common.utils import log, max_abs_rel_err
 
 DIM, ALPHA, LIMIT = 2880, 1.702, 7.0
+# Device memory the int64-offset case needs to hold its >2**31-element tensors.
+LARGE_NUMEL_MIN_GIB = 110
+STANDARD_PAIRS = ((fused_silu_mul, silu_mul_eager), (fused_gelu_tanh_mul, gelu_tanh_mul_eager))
+STANDARD_DTYPE_TOLS = ((torch.float32, 1e-4), (torch.bfloat16, 5e-2))
 
 
 def _fwd_bwd(fn, gate, up, *args):
     out = fn(gate, up, *args)
     out.float().pow(2).sum().backward()
     return out.detach(), gate.grad, up.grad
-
-
-def _rel(a, b):
-    return ((a.float() - b.float()).abs().max() / b.float().abs().max().clamp(min=1e-9)).item()
 
 
 def _check_standard(fused_fn, eager_fn, n, dtype, tol):
@@ -52,21 +53,13 @@ def _check_standard(fused_fn, eager_fn, n, dtype, tol):
     fused_out, fused_dgate, fused_dup = _fwd_bwd(fused_fn, fused_gate, fused_up)
     eager_out, eager_dgate, eager_dup = _fwd_bwd(eager_fn, eager_gate, eager_up)
     rels = [
-        _rel(fused_out, eager_out),
-        _rel(fused_dgate, eager_dgate),
-        _rel(fused_dup, eager_dup),
+        max_abs_rel_err(fused_out, eager_out),
+        max_abs_rel_err(fused_dgate, eager_dgate),
+        max_abs_rel_err(fused_dup, eager_dup),
     ]
-    assert max(rels) < tol, f"{fused_fn.__name__} n={n} rel fwd/dgate/dup={rels}"
+    assert all(rel < tol for rel in rels), f"{fused_fn.__name__} n={n} rel fwd/dgate/dup={rels}"
 
 
-@pytest.mark.parametrize(
-    ("fused_fn", "eager_fn"),
-    [
-        (fused_silu_mul, silu_mul_eager),
-        (fused_gelu_tanh_mul, gelu_tanh_mul_eager),
-    ],
-)
-@pytest.mark.parametrize(("dtype", "tol"), [(torch.float32, 1e-4), (torch.bfloat16, 5e-2)])
 def test_standard_glu_matches_eager(fused_fn, eager_fn, dtype, tol):
     for n in (1, 333, 4096):
         _check_standard(fused_fn, eager_fn, n, dtype, tol)
@@ -90,8 +83,9 @@ GPTOSS = _Variant("gptoss", fused_gptoss_glu, gptoss_glu_eager, (ALPHA,), 1e-3, 
 CLAMP_THEN_SILU = _Variant("clamp_then_silu", fused_clamped_silu_mul, clamped_silu_mul_eager, (), 1e-5, 1e-5)
 SILU_THEN_CLAMP = _Variant("silu_then_clamp", fused_silu_then_clamp_mul, silu_then_clamp_mul_eager, (), 1e-5, 1e-5)
 
-_EVERY_VARIANT = [pytest.param(v, id=v.name) for v in (GPTOSS, CLAMP_THEN_SILU, SILU_THEN_CLAMP)]
-_SILU_VARIANTS = [pytest.param(v, id=v.name) for v in (CLAMP_THEN_SILU, SILU_THEN_CLAMP)]
+_EVERY_VARIANT = (GPTOSS, CLAMP_THEN_SILU, SILU_THEN_CLAMP)
+_SILU_VARIANTS = (CLAMP_THEN_SILU, SILU_THEN_CLAMP)
+CLAMPED_DTYPE_TOLS = ((torch.float32, 1e-5), (torch.bfloat16, 2e-2))
 
 
 def _check_clamped(variant, n, dtype, limit, tol):
@@ -103,9 +97,13 @@ def _check_clamped(variant, n, dtype, limit, tol):
     eager_gate, eager_up = base_gate.clone().requires_grad_(True), base_up.clone().requires_grad_(True)
     fused_out, fused_dgate, fused_dup = _fwd_bwd(variant.fused, fused_gate, fused_up, *variant.extra, limit)
     eager_out, eager_dgate, eager_dup = _fwd_bwd(variant.eager, eager_gate, eager_up, *variant.extra, limit)
-    rels = [_rel(fused_out, eager_out), _rel(fused_dgate, eager_dgate), _rel(fused_dup, eager_dup)]
+    rels = [
+        max_abs_rel_err(fused_out, eager_out),
+        max_abs_rel_err(fused_dgate, eager_dgate),
+        max_abs_rel_err(fused_dup, eager_dup),
+    ]
     print(f"  {variant.name} n={n:6d} [{dtype}] limit={limit} rel fwd/dgate/dup = {[f'{r:.1e}' for r in rels]}")
-    assert max(rels) < tol
+    assert all(rel < tol for rel in rels), f"{variant.name} n={n} [{dtype}] limit={limit} rel fwd/dgate/dup={rels}"
 
 
 def test_gptoss_fp32_matches_eager():
@@ -118,14 +116,11 @@ def test_gptoss_bf16_matches_eager():
         _check_clamped(GPTOSS, n, torch.bfloat16, LIMIT, 5e-2)
 
 
-@pytest.mark.parametrize("variant", _SILU_VARIANTS)
-@pytest.mark.parametrize(("dtype", "tol"), [(torch.float32, 1e-5), (torch.bfloat16, 2e-2)])
 def test_clamped_glu_matches_eager(variant, dtype, tol):
     for n in (1, 17, 4096):
         _check_clamped(variant, n, dtype, LIMIT, tol)
 
 
-@pytest.mark.parametrize("variant", _EVERY_VARIANT)
 def test_clamped_glu_honours_every_bound_in_one_process(variant):
     """Two families (or Step-3.7's two per-layer limits) share the kernel: after warming at one bound
     over several token counts, a different bound must be computed at that bound, not the first."""
@@ -135,7 +130,6 @@ def test_clamped_glu_honours_every_bound_in_one_process(variant):
     _check_clamped(variant, 6, torch.float32, 7.0, variant.rel_tol)
 
 
-@pytest.mark.parametrize("variant", _EVERY_VARIANT)
 def test_clamped_glu_subgradient_at_the_bound(variant):
     """Inputs sitting exactly on the clamp bound: torch's clamp passes the gradient through at the
     bound itself, so the kernel's pass-through interval must be closed on both ends (a masked-out
@@ -179,15 +173,56 @@ def test_large_numel_int64_offset():
 
     On the grouped expert path at long context / high ep (e.g. ep8 past the DeepEP token ceiling,
     where skewed routing piles >745k tokens onto a rank), ``[N, 2880]`` crosses 2**31 elements. An
-    int32 ``pid * BLOCK`` offset wraps negative there and the kernel illegal-accesses. Skipped on GPUs
+    int32 ``pid * BLOCK`` offset wraps negative there and the kernel illegal-accesses. Not run on GPUs
     too small to hold the >2**31-element tensors (the bug only manifests where the activation fits)."""
-    _, total = torch.cuda.mem_get_info()
-    if total / 2**30 < 110:
-        pytest.skip(f"needs ~110 GiB to hold >2**31-element tensors (have {total / 2**30:.0f} GiB)")
     n = 746_000  # 746000 * 2880 = 2,148,480,000 > 2**31 = 2,147,483,648
     assert n * DIM > 2**31
     _check_clamped(GPTOSS, n, torch.bfloat16, LIMIT, 5e-2)
 
 
+@gpu_test_main(exact_world_size=1, prefix="fused_glu", partial_state=False)
+def run(ctx) -> dict:
+    checks: dict[str, bool] = {}
+    for fused_fn, eager_fn in STANDARD_PAIRS:
+        for dtype, tol in STANDARD_DTYPE_TOLS:
+            record_check(
+                checks,
+                f"standard_glu_matches_eager[{fused_fn.__name__}-{dtype}]",
+                lambda: test_standard_glu_matches_eager(fused_fn, eager_fn, dtype, tol),
+            )
+    record_check(checks, "gptoss_fp32_matches_eager", test_gptoss_fp32_matches_eager)
+    record_check(checks, "gptoss_bf16_matches_eager", test_gptoss_bf16_matches_eager)
+    for variant in _SILU_VARIANTS:
+        for dtype, tol in CLAMPED_DTYPE_TOLS:
+            record_check(
+                checks,
+                f"clamped_glu_matches_eager[{variant.name}-{dtype}]",
+                lambda: test_clamped_glu_matches_eager(variant, dtype, tol),
+            )
+    for variant in _EVERY_VARIANT:
+        record_check(
+            checks,
+            f"clamped_glu_honours_every_bound_in_one_process[{variant.name}]",
+            lambda: test_clamped_glu_honours_every_bound_in_one_process(variant),
+        )
+    for variant in _EVERY_VARIANT:
+        record_check(
+            checks,
+            f"clamped_glu_subgradient_at_the_bound[{variant.name}]",
+            lambda: test_clamped_glu_subgradient_at_the_bound(variant),
+        )
+    record_check(
+        checks,
+        "up_plus_one_is_all_that_separates_the_two_pre_activation_variants",
+        test_up_plus_one_is_all_that_separates_the_two_pre_activation_variants,
+    )
+    total_gib = torch.cuda.mem_get_info()[1] / 2**30
+    if total_gib >= LARGE_NUMEL_MIN_GIB:
+        record_check(checks, "large_numel_int64_offset", test_large_numel_int64_offset)
+    else:
+        log(f"large_numel_int64_offset not run: needs ~{LARGE_NUMEL_MIN_GIB} GiB, have {total_gib:.0f} GiB")
+    return {"checks": checks}
+
+
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
+    run()

@@ -11,8 +11,8 @@ maps its own copy" and every assertion below still passes, testing nothing:
    only; non-shared → each node's local rank 0);
 2. cache reuse — the non-writer ranks get byte-identical results without running the body.
 
-Every check runs to the end of its test and returns a bool that the runner agrees across ranks: an
-early ``return`` past a collective would strand the peers, turning a clean FAIL into a hang.
+Every check runs to the end of its test, which agrees the verdict across ranks before raising: an
+early exit past a collective would strand the peers, turning a clean FAIL into a hang.
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -22,7 +22,6 @@ Usage:
 import os
 import shutil
 import tempfile
-import traceback
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -42,7 +41,7 @@ from src.distributed.runtime import (
     is_global_main_process,
     is_input_shared_filesystem,
 )
-from tests.common.harness import gpu_test_main
+from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log, log_all
 
 # Configuration
@@ -83,11 +82,12 @@ def gather_objects(value):
     return gathered
 
 
-def agree(ok: bool) -> bool:
-    """True only when EVERY rank passed. Collective, so it also keeps the ranks in lockstep."""
+def require_agreement(ok: bool, label: str) -> None:
+    """Raise unless EVERY rank passed. Collective, so it also keeps the ranks in lockstep."""
     flag = torch.tensor([1 if ok else 0], device=f"cuda:{torch.cuda.current_device()}")
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-    return bool(flag.item())
+    if not flag.item():
+        raise AssertionError(f"{label} failed on at least one rank; see the FAIL lines above")
 
 
 def set_hf_datasets_cache(path: str) -> None:
@@ -213,7 +213,7 @@ def check_identical(label: str, value) -> bool:
 # Test Functions
 
 
-def _run_map_and_filter(shared: bool) -> bool:
+def _run_map_and_filter(shared: bool) -> None:
     """coordinated_map + coordinated_filter under one filesystem mode.
 
     Asserts the transform is correct, that exactly the elected writer ranks executed the bodies, and
@@ -254,17 +254,17 @@ def _run_map_and_filter(shared: bool) -> bool:
         ok = check_identical("mapped doubled column", [row["doubled"] for row in mapped]) and ok
         ok = check_identical("filtered ids", [row["id"] for row in filtered]) and ok
 
-    return agree(ok)
+    require_agreement(ok, f"map+filter ({'shared' if shared else 'non-shared'} filesystem)")
 
 
-def test_shared_filesystem_mode() -> bool:
+def test_shared_filesystem_mode() -> None:
     """DIST_SHARED_FILESYSTEM=1: global rank 0 alone maps; every other rank loads its cache."""
-    return _run_map_and_filter(shared=True)
+    _run_map_and_filter(shared=True)
 
 
-def test_non_shared_filesystem_mode() -> bool:
+def test_non_shared_filesystem_mode() -> None:
     """DIST_SHARED_FILESYSTEM=0: each node's local rank 0 maps its own node-local copy."""
-    return _run_map_and_filter(shared=False)
+    _run_map_and_filter(shared=False)
 
 
 def _add_100(example):
@@ -272,7 +272,7 @@ def _add_100(example):
     return {"transformed": example["value"] + 100}
 
 
-def test_cache_file_is_the_shared_artifact() -> bool:
+def test_cache_file_is_the_shared_artifact() -> None:
     """The writer's ``.arrow`` cache file is what every rank's result comes from.
 
     Both halves matter: a cache file appears in the shared dir, AND repeating the identical call
@@ -305,10 +305,10 @@ def test_cache_file_is_the_shared_artifact() -> bool:
             ok = False
         ok = check_identical("cached rerun output", [row["transformed"] for row in repeat]) and ok
 
-    return agree(ok)
+    require_agreement(ok, "cache reuse")
 
 
-def test_map_and_filter_combined() -> bool:
+def test_map_and_filter_combined() -> None:
     """process_dataset_with_map_and_filter end-to-end: rejection sentinels dropped, ranks agree."""
     with filesystem_mode(shared=True), shared_cache_dir("coord_mapfilter_") as cache_dir:
         dataset = on_disk_source(cache_dir, 30)
@@ -337,10 +337,10 @@ def test_map_and_filter_combined() -> bool:
         ok = check_election("mapfilter", 30) and ok
         ok = check_identical("map+filter texts", [row["processed_text"] for row in result]) and ok
 
-    return agree(ok)
+    require_agreement(ok, "map+filter combined")
 
 
-def test_diverging_source_keys_a_distinct_cache() -> bool:
+def test_diverging_source_keys_a_distinct_cache() -> None:
     """Ranks holding DIFFERENT data must not collide on one cache file.
 
     This is the pre-sharded layout (each DP rank owns a disjoint slice): the cache key folds in the
@@ -375,18 +375,7 @@ def test_diverging_source_keys_a_distinct_cache() -> bool:
             log(f"    FAIL: two ranks share output despite disjoint sources — cache collision: {per_rank}")
             ok = False
 
-    return agree(ok)
-
-
-# Test Runner
-
-ALL_TESTS = [
-    ("shared_filesystem_mode", test_shared_filesystem_mode),
-    ("non_shared_filesystem_mode", test_non_shared_filesystem_mode),
-    ("cache_file_is_the_shared_artifact", test_cache_file_is_the_shared_artifact),
-    ("map_and_filter_combined", test_map_and_filter_combined),
-    ("diverging_source_keys_a_distinct_cache", test_diverging_source_keys_a_distinct_cache),
-]
+    require_agreement(ok, "disjoint-source cache keys")
 
 
 def run(ctx) -> dict:
@@ -397,26 +386,13 @@ def run(ctx) -> dict:
     log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"{'=' * 70}\n")
 
-    results: dict[str, bool] = {}
-    for test_name, test_fn in ALL_TESTS:
-        log(f"\n  [{test_name}]")
-        barrier()
-
-        try:
-            result = test_fn()
-        except Exception as e:
-            log_all(f"  [{test_name}] UNHANDLED EXCEPTION: {e}")
-            traceback.print_exc()
-            result = False
-
-        # A rank that threw skipped this test's collectives; re-agree so the verdict (and the
-        # rank alignment) is restored before the next test rather than deadlocking inside it.
-        results[test_name] = agree(result)
-        log(f"  [{test_name}] {'PASS' if results[test_name] else 'FAIL'}")
-
-        barrier()
-
-    return {"checks": results}
+    checks: dict[str, bool] = {}
+    record_check(checks, "shared_filesystem_mode", test_shared_filesystem_mode)
+    record_check(checks, "non_shared_filesystem_mode", test_non_shared_filesystem_mode)
+    record_check(checks, "cache_file_is_the_shared_artifact", test_cache_file_is_the_shared_artifact)
+    record_check(checks, "map_and_filter_combined", test_map_and_filter_combined)
+    record_check(checks, "diverging_source_keys_a_distinct_cache", test_diverging_source_keys_a_distinct_cache)
+    return {"checks": checks}
 
 
 main = gpu_test_main(min_world_size=2, prefix="coordinated_processing", partial_state=False)(run)

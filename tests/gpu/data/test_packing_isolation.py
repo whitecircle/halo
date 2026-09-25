@@ -17,13 +17,15 @@ with a model that ignores its context entirely.
 
 Single GPU::
 
-    CUDA_VISIBLE_DEVICES=0 python tests/gpu/data/test_packing_isolation.py
+    torchrun --nproc_per_node=1 tests/gpu/data/test_packing_isolation.py
 """
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.data.collators.packing import DataCollatorWithPacking
+from tests.common.harness import gpu_test_main
+from tests.common.utils import log
 
 MODEL = "Qwen/Qwen3-0.6B"
 # The isolated path recomputes doc B over exactly the same keys/values, so bf16 accumulation is
@@ -52,8 +54,9 @@ def _doc_b_logits(model, batch, device, la, lb, *, isolated: bool):
         return model(input_ids=input_ids, **kwargs).logits[0, la : la + lb].float()
 
 
-def main() -> None:
-    device = "cuda"
+@gpu_test_main(exact_world_size=1, prefix="packing_isolation", partial_state=False)
+def run(ctx) -> dict:
+    device = ctx.device
     tok = AutoTokenizer.from_pretrained(MODEL)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL, dtype=torch.bfloat16, attn_implementation="flash_attention_2"
@@ -81,22 +84,22 @@ def main() -> None:
     isolated1 = _doc_b_logits(model, batch1, device, la, lb, isolated=True)
     isolated2 = _doc_b_logits(model, batch2, device, la, lb, isolated=True)
     max_diff = (isolated1 - isolated2).abs().max().item()
-    print(f"[isolation] max|Δlogits| on doc B when the PRECEDING doc A changes = {max_diff:.6f}")
-    assert max_diff == 0.0, f"Documents not isolated: doc B logits moved by {max_diff} when doc A changed"
+    log(f"[isolation] max|Δlogits| on doc B when the PRECEDING doc A changes = {max_diff:.6f}")
 
     # Control: same tokens, isolation withheld. Doc B now attends back into doc A, so the drift the
-    # assertion above requires to be zero must here be large — otherwise that zero is vacuous.
+    # isolation check requires to be zero must here be large — otherwise that zero is vacuous.
     leaky1 = _doc_b_logits(model, batch1, device, la, lb, isolated=False)
     leaky2 = _doc_b_logits(model, batch2, device, la, lb, isolated=False)
     ctl_diff = (leaky1 - leaky2).abs().max().item()
-    print(f"[control]   max|Δlogits| on doc B with a dense mask (leak expected) = {ctl_diff:.6f}")
-    assert ctl_diff > LEAK_THRESHOLD, (
-        f"Control failed: doc B's logits moved by only {ctl_diff} when doc A changed under a dense "
-        f"all-ones mask — the perturbation is not measurable, so the isolation assertion proves nothing"
-    )
+    log(f"[control]   max|Δlogits| on doc B with a dense mask (leak expected) = {ctl_diff:.6f}")
 
-    print("PACKING ISOLATION TEST PASSED")
+    return {
+        "checks": {
+            "doc_b_unmoved_by_preceding_doc": max_diff == 0.0,
+            "dense_mask_control_leaks": ctl_diff > LEAK_THRESHOLD,
+        }
+    }
 
 
 if __name__ == "__main__":
-    main()
+    run()

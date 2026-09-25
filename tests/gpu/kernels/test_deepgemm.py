@@ -28,6 +28,8 @@ import torch
 import torch.nn.functional as F
 
 from src.kernels.lowp.deepgemm import deepgemm_available, deepgemm_grouped_gemm, use_deepgemm
+from tests.common.tolerances import TOL
+from tests.common.utils import fro_rel_err
 
 DEV = "cuda"
 
@@ -61,7 +63,7 @@ def test_deepgemm_forward_backward():
             offs = torch.cumsum(torch.tensor(counts, device=DEV, dtype=torch.int32), 0).to(torch.int32)
             out = deepgemm_grouped_gemm(x, w, offs=offs, precision=precision)
             ref = _bf16_ref(x.detach(), w.detach(), offs)
-            rel = ((out.detach().float() - ref.float()).norm() / ref.float().norm()).item()
+            rel = fro_rel_err(out.detach(), ref)
             assert lo < rel < hi, (
                 f"{precision} {name}: fwd rel-vs-bf16 {rel:.4f} outside band {lo}-{hi} "
                 f"(rel≈0 ⇒ silent bf16 fallback; rel>{hi} ⇒ broken)"
@@ -70,8 +72,12 @@ def test_deepgemm_forward_backward():
             out.backward(g)
             gx_ref = F.grouped_mm(g, w.detach().transpose(-2, -1), offs=offs)
             gw_ref = F.grouped_mm(x.detach().transpose(-2, -1), g, offs=offs)
-            assert torch.allclose(x.grad, gx_ref, atol=1e-2, rtol=1e-2), f"{precision} {name}: grad_x not bf16-exact"
-            assert torch.allclose(w.grad, gw_ref, atol=1e-2, rtol=1e-2), f"{precision} {name}: grad_w not bf16-exact"
+            assert torch.allclose(x.grad, gx_ref, atol=TOL.kernel_atol, rtol=TOL.kernel_rtol), (
+                f"{precision} {name}: grad_x not bf16-exact"
+            )
+            assert torch.allclose(w.grad, gw_ref, atol=TOL.kernel_atol, rtol=TOL.kernel_rtol), (
+                f"{precision} {name}: grad_w not bf16-exact"
+            )
             assert x.grad.isfinite().all() and w.grad.isfinite().all()
             print(
                 f"  {precision} {name:14s} T={T:5d} fwd-rel {rel:.4f} (band {lo}-{hi}), "

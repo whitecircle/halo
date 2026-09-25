@@ -7,19 +7,23 @@ Verifies that AdamWBF16:
 2. Achieves loss comparable to fp32 master weights (not stale like pure bf16)
 3. Handles mixed dtype models (bf16 + fp32 params)
 
-Usage (single GPU, no torchrun needed):
-    python tests/gpu/optimizers/test_adamw_bf16.py
+Usage (single GPU):
+    torchrun --nproc_per_node=1 tests/gpu/optimizers/test_adamw_bf16.py
 """
 
+import copy
 import math
 
 import torch
 import torch.nn as nn
 
+import src.optimizers.adamw_bf16 as adamw_mod
 from src.kernels.lowp.quantization import cached_fake_quant
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.optimizers.flash_adamw import create_flash_adamw_optimizer
 from src.optimizers.muon import create_muon_optimizer
+from tests.common.harness import gpu_test_main, record_check
+from tests.common.utils import assert_optimizer_state_bit_exact
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 
@@ -199,7 +203,7 @@ def test_mixed_dtypes():
             assert p.dtype == torch.bfloat16, f"Param {name} should stay bf16"
 
     # Verify training didn't diverge
-    assert not math.isnan(losses[-1]), "Loss is NaN"
+    assert math.isfinite(losses[-1]), f"Loss is not finite: {losses[-1]}"
     assert losses[-1] < losses[0], "Loss should decrease"
 
     print(f"  Final loss: {losses[-1]:.6f} (started at {losses[0]:.6f})")
@@ -207,7 +211,7 @@ def test_mixed_dtypes():
 
 
 def test_weight_decay_groups():
-    """Verify weight decay is applied correctly (decay vs no-decay groups)."""
+    """Decay and no-decay param groups step with a finite loss (the decay itself is not checked)."""
     print("\nTEST 4: Weight decay param groups")
     model = create_model(torch.bfloat16)
 
@@ -236,9 +240,9 @@ def test_weight_decay_groups():
         opt.step()
         opt.zero_grad()
 
-    assert not math.isnan(loss.item()), "Loss is NaN with param groups"
+    assert math.isfinite(loss.item()), f"Loss is not finite with param groups: {loss.item()}"
     print(f"  Final loss: {loss.item():.6f}")
-    print("  PASSED: Param groups with different weight decay work correctly")
+    print("  PASSED: Param groups with different weight decay step with a finite loss")
 
 
 def test_sr_removes_second_moment_bias():
@@ -310,8 +314,6 @@ def test_exp_avg_stays_nearest():
          (torch.equal), i.e. it carries no stochastic component.
     """
     print("\nTEST 7: exp_avg stays nearest-rounded (no SR on the first moment)")
-    import src.optimizers.adamw_bf16 as adamw_mod
-
     beta1, beta2 = 0.9, 0.999
     grad_val = 3.0e-4  # signed, small enough that the bf16 store of the EMA is non-trivial
     n_steps = 16
@@ -488,14 +490,12 @@ def test_every_optimizer_advances_the_version_counter():
         "Muon (fused step)": _named(lambda m: create_muon_optimizer(m, lr=1e-1, weight_decay=0.01)),
         "FlashAdamW": _named(lambda m: create_flash_adamw_optimizer(m, lr=1e-1, weight_decay=0.0)),
     }
-    covered = set()
     for label, build in builders.items():
         param = torch.nn.Parameter(torch.randn(256, 256, device="cuda", dtype=torch.bfloat16))
         # No ImportError swallow: gram-newton-schulz is a core dependency and flashoptim is baked
         # into both images, so a failed build here is a regression, not an absent extra — catching
         # it would silently reduce this sweep to the two AdamWBF16 legs TEST 9 already covers.
         opt = build(param)
-        covered.add(label)
         before_quant = cached_fake_quant(param, "mxfp8", -1).clone()
         before_weight = param.detach().clone()
         before_version = param._version
@@ -512,12 +512,15 @@ def test_every_optimizer_advances_the_version_counter():
         )
         print(f"  {label}: _version {before_version} -> {param._version}, cache tracked the master")
 
-    assert covered == set(builders), f"legs never ran: {sorted(set(builders) - covered)}"
     print("  PASSED: no optimizer leaves the low-precision cache stale")
 
 
 def test_state_dict_roundtrip():
-    """Verify optimizer state can be saved and loaded (checkpoint compatibility)."""
+    """Save -> deepcopy -> load into a fresh optimizer: every state tensor and ``step`` bit-exact.
+
+    The deepcopy matters: ``load_state_dict`` keeps a tensor that already has the param's dtype and
+    device, so loading the live dict would hand the new optimizer the saved tensors themselves.
+    """
     print("\nTEST 5: State dict save/load roundtrip")
     model = create_model(torch.bfloat16)
     opt = AdamWBF16(model.parameters(), lr=1e-4)
@@ -530,47 +533,36 @@ def test_state_dict_roundtrip():
         opt.step()
         opt.zero_grad()
 
-    # Save state
-    state_dict = opt.state_dict()
-
-    # Create fresh optimizer and load state
+    saved = copy.deepcopy(opt.state_dict())
     opt2 = AdamWBF16(model.parameters(), lr=1e-4)
-    opt2.load_state_dict(state_dict)
-
-    # Verify states match
-    for p in model.parameters():
-        s1 = opt.state[p]
-        s2 = opt2.state[p]
-        assert torch.equal(s1["exp_avg"], s2["exp_avg"]), "exp_avg mismatch after load"
-        assert torch.equal(s1["exp_avg_sq"], s2["exp_avg_sq"]), "exp_avg_sq mismatch after load"
-        assert s1["step"] == s2["step"], "step count mismatch after load"
+    opt2.load_state_dict(copy.deepcopy(saved))
+    assert_optimizer_state_bit_exact(saved, opt2.state_dict())
 
     print("  PASSED: State dict roundtrip preserves all optimizer state")
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        print("CUDA not available, cannot run test")
-        exit(1)
 
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"CUDA device:     {torch.cuda.get_device_name(0)}")
+@gpu_test_main(exact_world_size=1, prefix="adamw_bf16", partial_state=False)
+def run(ctx) -> dict:
+    print(f"CUDA device:     {torch.cuda.get_device_name(ctx.device)}")
     print(f"Model size:      {create_model(torch.float32, 'cpu').param_count() / 1e6:.1f}M params")
-    print()
+    checks: dict[str, bool] = {}
+    record_check(checks, "dtypes", test_dtypes)
+    record_check(checks, "vs_baselines", test_vs_baselines)
+    record_check(checks, "mixed_dtypes", test_mixed_dtypes)
+    record_check(checks, "weight_decay_groups", test_weight_decay_groups)
+    record_check(checks, "sr_removes_second_moment_bias", test_sr_removes_second_moment_bias)
+    record_check(checks, "sr_removes_second_moment_bias_eager", test_sr_removes_second_moment_bias_eager)
+    record_check(checks, "exp_avg_stays_nearest", test_exp_avg_stays_nearest)
+    record_check(checks, "step_advances_the_version_counter", test_step_advances_the_version_counter)
+    record_check(
+        checks, "every_optimizer_advances_the_version_counter", test_every_optimizer_advances_the_version_counter
+    )
+    record_check(checks, "state_dict_roundtrip", test_state_dict_roundtrip)
+    return {"checks": checks}
 
-    test_dtypes()
-    test_vs_baselines()
-    test_mixed_dtypes()
-    test_weight_decay_groups()
-    test_sr_removes_second_moment_bias()
-    test_sr_removes_second_moment_bias_eager()
-    test_exp_avg_stays_nearest()
-    test_step_advances_the_version_counter()
-    test_every_optimizer_advances_the_version_counter()
-    test_state_dict_roundtrip()
 
-    print("\n" + "=" * 50)
-    print("ALL TESTS PASSED")
-    print("=" * 50)
+if __name__ == "__main__":
+    run()

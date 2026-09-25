@@ -6,12 +6,15 @@ and reports the final loss. Demonstrates *why* the codebase floors the master at
 far below the fp8 ULP, so RTN drops it entirely and even SR injects ~12% per-step noise (3-bit mantissa)
 vs bf16's ~0.4% — fp8 master stalls or degrades, off the validated bf16-master recipe.
 
-Run: python tests/gpu/optimizers/test_lowp_master_feasibility.py
+Run: torchrun --nproc_per_node=1 tests/gpu/optimizers/test_lowp_master_feasibility.py
 """
 
 import torch
 
-DEV = "cuda" if torch.cuda.is_available() else "cpu"
+from tests.common.harness import gpu_test_main
+from tests.common.utils import log
+
+DEV = "cuda"
 
 
 def quant(w, kind, sr):
@@ -47,28 +50,31 @@ def train(kind, sr, steps=400, lr=1e-3):
     return (X @ W - Y).pow(2).mean().item()
 
 
-if __name__ == "__main__":
-    print(f"device={DEV}  master-weight precision feasibility (final MSE, lower=better):")
+@gpu_test_main(exact_world_size=1, prefix="lowp_master_feasibility", partial_state=False)
+def run(ctx) -> dict:
+    log("master-weight precision feasibility (final MSE, lower=better):")
     ref = train("fp32", False)
-    print(f"  fp32 master           : {ref:.2e}  (reference)")
+    log(f"  fp32 master           : {ref:.2e}  (reference)")
     rows = [("bf16", False), ("bf16", True), ("fp8", False), ("fp8", True)]
     out = {}
     for kind, sr in rows:
         loss = train(kind, sr)
         out[(kind, sr)] = loss
         tag = f"{kind} master{' + SR' if sr else ' (RTN)':8}"
-        print(f"  {tag:22}: {loss:.2e}  ({loss / ref:.1f}x reference)")
-    # Assertions encoding the conclusion: bf16+SR ~ fp32 (shipped AdamWBF16); a low-precision master
+        log(f"  {tag:22}: {loss:.2e}  ({loss / ref:.1f}x reference)")
+    # Checks encoding the conclusion: bf16+SR ~ fp32 (shipped AdamWBF16); a low-precision master
     # without stochastic rounding is catastrophic. (SR rescues even fp8 on this convex toy — fp8+SR is
     # ~1.6x ref — but the 3-bit mantissa is too fragile for real non-convex LLM training, FP8-LM Tab. 6,
     # and buys nothing over bf16+SR, so bf16 is the shipped floor. The toy can't gate that, so don't
     # assert a large fp8+SR gap here — assert the SR-less collapse, which is the real signal.)
-    assert out[("bf16", True)] < 5 * ref, "bf16+SR should track fp32 (this is AdamWBF16)"
-    assert out[("fp8", False)] > 50 * ref, "fp8 master WITHOUT SR must collapse (justifies SR + the bf16 floor)"
-    assert out[("bf16", True)] < out[("bf16", False)], "SR must help (bf16+SR beats bf16 RTN)"
-    print(
-        f"\nConclusion: bf16+SR tracks fp32 (= AdamWBF16, shipped). Raw low-precision master is dead without "
-        f"SR (fp8 RTN ~{out[('fp8', False)] / ref:.0f}x ref). SR rescues fp8 on this convex toy, but the 3-bit "
-        "mantissa is too fragile for real LLM training (FP8-LM) — bf16 / 8-bit (FlashAdamW) is the floor."
-    )
-    print("ALL PASS")
+    return {
+        "checks": {
+            "bf16_sr_master_tracks_fp32": out[("bf16", True)] < 5 * ref,
+            "fp8_master_without_sr_collapses": out[("fp8", False)] > 50 * ref,
+            "sr_beats_rtn_at_bf16": out[("bf16", True)] < out[("bf16", False)],
+        }
+    }
+
+
+if __name__ == "__main__":
+    run()

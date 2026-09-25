@@ -14,15 +14,11 @@ import torch
 
 from src.models.patches.gpt_oss_sinks import install_fa4_trainable_sink_rescale
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.utils import log, max_abs_rel_err
 
 H, HKV, D, S, B = 8, 2, 64, 256, 2
 FWD_REL_TOL = 2e-2  # bf16 output: two roundings (kernel out, gate multiply) vs the fused kernel's one
 GRAD_REL_TOL = 6e-2  # bf16 dq/dk/dv/d_sink vs an fp32 eager reference
-
-
-def _rel(a, b):
-    return ((a.float() - b.float()).abs().max() / b.float().abs().max().clamp(min=1e-9)).item()
 
 
 def _inputs(seed, *, dense: bool):
@@ -79,7 +75,7 @@ def _check_entry_point(cute, *, dense: bool) -> dict:
     with torch.no_grad():
         fused_out, fused_lse = fused(q, k, v, **kwargs, learnable_sink=sink, return_lse=True)
     out, lse = fn(q, k, v, **kwargs, learnable_sink=sink, return_lse=True)
-    fwd_rel, lse_rel = _rel(out, fused_out), _rel(lse, fused_lse)
+    fwd_rel, lse_rel = max_abs_rel_err(out, fused_out), max_abs_rel_err(lse, fused_lse)
     log(f"  [{label}] fwd rescale-vs-fused rel {fwd_rel:.2e}; lse rel {lse_rel:.2e}")
     checks[f"{label}_forward_matches_fused_kernel"] = fwd_rel < FWD_REL_TOL
     checks[f"{label}_returned_lse_is_the_sinked_lse"] = lse_rel < 1e-3
@@ -94,7 +90,7 @@ def _check_entry_point(cute, *, dense: bool) -> dict:
         ("dv", v.grad, ve.grad),
         ("d_sink", sink.grad, se.grad),
     ):
-        rel = _rel(got, ref)
+        rel = max_abs_rel_err(got, ref)
         log(f"  [{label}] {name:6} rel vs eager {rel:.2e}")
         checks[f"{label}_{name}_matches_eager_reference"] = rel < GRAD_REL_TOL
     checks[f"{label}_sink_gradient_is_nonzero"] = bool(sink.grad.abs().sum() > 0)
@@ -103,7 +99,7 @@ def _check_entry_point(cute, *, dense: bool) -> dict:
 
 @gpu_test_main(exact_world_size=1, prefix="fa4_sink_rescale")
 def run(ctx):
-    import flash_attn.cute as cute
+    import flash_attn.cute as cute  # noqa: PLC0415 - optional Blackwell-only dep
 
     checks = {"installs": install_fa4_trainable_sink_rescale()}
     first = (cute.flash_attn_varlen_func, cute.flash_attn_func)
