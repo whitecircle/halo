@@ -27,7 +27,7 @@ from src.data.collators.factory import select_data_collator
 from src.data.collators.vlm import VLMDataCollator
 from src.data.pipeline.processing import coordinated_map, filter_by_length, resolve_map_num_proc
 from src.data.pipeline.rendered import tokenize_rendered
-from src.data.pipeline.row_processors import apply_chat_template_to_conversations
+from src.data.pipeline.row_processors import apply_chat_template_to_conversations, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.data.vlm import is_vlm_run
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
@@ -91,27 +91,12 @@ def _load_distill_teacher(
 def _prepare_text_distill_data(ds, args, training_config, tokenizer, model_config):
     """Chat-template → length-filter → tokenize; the collator derives the labels the losses mask on."""
     num_proc_kwargs = {"num_proc": resolve_map_num_proc(training_config.dataset_num_proc)}
+    render_kwargs = text_render_kwargs(args)
     ds = coordinated_map(
         ds,
-        lambda row: {
-            "text": apply_chat_template_to_conversations(
-                row,
-                tokenizer,
-                conversation_field=args.conversation_field,
-                system_prompt=args.system_prompt,
-                model_supports_system_role=args.model_supports_system_role,
-                tools_field=args.tools_field,
-                interleaved_thinking=args.interleaved_thinking,
-            )
-        },
+        lambda row: {"text": apply_chat_template_to_conversations(row, tokenizer, **render_kwargs)},
         desc="Applying chat template",
-        cache_key_extras={
-            "conversation_field": args.conversation_field,
-            "system_prompt": args.system_prompt,
-            "model_supports_system_role": args.model_supports_system_role,
-            "tools_field": args.tools_field,
-            "interleaved_thinking": args.interleaved_thinking,
-        },
+        cache_key_extras=render_kwargs,
         **num_proc_kwargs,
     )
     train_dataset = filter_by_length(ds["train"], training_config.max_length, tokenizer, **num_proc_kwargs)

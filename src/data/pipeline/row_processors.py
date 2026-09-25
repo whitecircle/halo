@@ -23,6 +23,22 @@ from src.data.pipeline.rendered import render_conversation, tokenize_rendered
 from src.data.vlm import process_vlm_conversation
 from src.models.loading.tokenizer_setup import is_bounded_length
 
+# The chat-render knobs a text run's script args carry (``ConversationRenderArguments`` and its
+# mirrors), named as the text renderers take them.
+TEXT_RENDER_KNOBS = (
+    "conversation_field",
+    "system_prompt",
+    "model_supports_system_role",
+    "interleaved_thinking",
+    "tools_field",
+)
+
+
+def text_render_kwargs(args) -> dict[str, Any]:
+    """The run's :data:`TEXT_RENDER_KNOBS`, passed to a text renderer and to its map-cache key from
+    this one dict, so the key cannot miss a knob the render reads."""
+    return {name: getattr(args, name) for name in TEXT_RENDER_KNOBS}
+
 
 def _rejection_sentinel(sample_output: dict[str, Any] | None = None) -> dict[str, list]:
     """An Arrow-type-stable rejection sentinel row for tokenization maps.

@@ -30,7 +30,7 @@ from src.data.pipeline.processing import (
     process_dataset_with_map_and_filter,
     resolve_map_num_proc,
 )
-from src.data.pipeline.row_processors import create_llm_processor
+from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset, vlm_map_features
 from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.sources.loading import load_datasets_auto
@@ -98,27 +98,13 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
     else:
         collator_packing = sft_config.packing
         use_padding = not sft_config.padding_free
-        common = {
-            "tokenizer": tokenizer,
-            "max_length": sft_config.max_length,
-            "conversation_field": args.conversation_field,
-            "system_prompt": args.system_prompt,
-            "model_supports_system_role": args.model_supports_system_role,
-            "interleaved_thinking": args.interleaved_thinking,
-            "tools_field": args.tools_field,
-        }
+        cache_extras = text_render_kwargs(args)
+        common = {"tokenizer": tokenizer, "max_length": sft_config.max_length, **cache_extras}
         train_processor = create_llm_processor(**common, add_generation_prompt=False, use_padding=use_padding)
         generate_processor = create_llm_processor(**common, add_generation_prompt=True, use_padding=True)
         # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
         extra_columns = sorted(set(ds["train"].column_names))
         map_kwargs = {"num_proc": resolve_map_num_proc(sft_config.dataset_num_proc)}
-        cache_extras = {
-            "conversation_field": args.conversation_field,
-            "system_prompt": args.system_prompt,
-            "model_supports_system_role": args.model_supports_system_role,
-            "interleaved_thinking": args.interleaved_thinking,
-            "tools_field": args.tools_field,
-        }
         # Build the generation set from the raw test split before the train map remaps `ds`.
         generate_dataset = process_dataset_with_map_and_filter(
             ds["test"],
