@@ -135,7 +135,7 @@ GPT-OSS serves from **SGLang** for async GRPO (`rollout_backend: sglang`): SGLan
 
 GPT-OSS defaults to switch-style **aux-loss** balancing: `moe_balancing: auto` resolves to `aux_loss`, and that mode turns `output_router_logits` on itself.
 
-The coefficient a run reads is the checkpoint's, not the class default. `GptOssConfig` declares `router_aux_loss_coef: 0.001`, but every released `config.json` (`openai/gpt-oss-*` and the `unsloth/*-BF16` mirrors) ships **0.9**, large enough to dominate the SFT loss.
+The coefficient a run reads is the checkpoint's, not the class default. `GptOssConfig` declares `router_aux_loss_coef: 0.001`, but every released `config.json` (`openai/gpt-oss-*` and the `unsloth/*-BF16` mirrors) ships **0.9**, large enough to dominate both the SFT loss and the router gradient.
 
 Every shipped example that stays on `aux_loss` overrides it back down to `0.001` in `model_init_kwargs`; do the same on a new aux-loss run rather than inheriting 0.9. A `bias_update` run needs no override — that mode zeroes the coefficient itself (below).
 

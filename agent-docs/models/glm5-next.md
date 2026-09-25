@@ -60,7 +60,7 @@ RL weight sync is off (`_supports_weight_sync`): a sync into a serving engine re
 
 ## Router balancing
 
-The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's exact slot — and the forward honors `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` (the Laguna case). Explicit `bias_update` adopts the native buffer instead: [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) sign-updates it, and the buffer exports with every checkpoint, so a served copy routes as trained.
+The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's exact slot — and the forward honors `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` (the Laguna case), whose switch-style aux loss softmaxes the raw router logits and so balances the unbiased routing, not the selection `e_score_correction_bias` shifts. Explicit `bias_update` adopts the native buffer instead: [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) sign-updates it, and the buffer exports with every checkpoint, so a served copy routes as trained.
 
 ## Attention
 

@@ -39,7 +39,7 @@ Routing is otherwise unchanged: sigmoid the logits, add the correction bias (and
 
 Gathered saves restore the hub layout `experts.{i}.{gate,up,down}_proj.weight` through `_PER_EXPERT_UNFUSED_KEYS`.
 
-Balancing is where the two families diverge. `LagunaConfig` ships `router_aux_loss_coef: 0.001` and `LagunaForCausalLM.forward` declares `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` — GLM-4 MoE Lite, which has neither, lands on `bias_update`.
+Balancing is where the two families diverge. `LagunaConfig` ships `router_aux_loss_coef: 0.001` and `LagunaForCausalLM.forward` declares `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` — GLM-4 MoE Lite, which has neither, lands on `bias_update`. That term is transformers' shared switch-style aux loss: it softmaxes the raw router logits and counts their top-k, so it balances the unbiased routing, not the selection `e_score_correction_bias` shifts.
 
 The inherited `_supports_bias_balancing` still accepts an explicit `bias_update` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)). Under it the sign-updates land in the gate's own `e_score_correction_bias` (the inherited native-slot adoption), so the trained bias is part of the checkpoint and a transformers reload routes exactly as training did.
 

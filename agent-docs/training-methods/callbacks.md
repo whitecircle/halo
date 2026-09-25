@@ -129,9 +129,19 @@ router_balancing_rate: 1.0e-3    # gamma; only used when a bias-update mode is a
 
 Both bias modes force `output_router_logits=False`, overriding `model_init_kwargs`: the EP bias path bypasses the HF router module the recorder hooks, so leaving it on returns an empty `router_logits` tuple and `load_balancing_loss_func` raises `IndexError`. These writes are **run-scoped** — every exported `config.json` carries the hub's coefficient and flag.
 
-`aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP wrappers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, and `Qwen3_5MoeForConditionalGeneration` reads the flag from `kwargs` only.
+`aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP wrappers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, and `Qwen3_5MoeForConditionalGeneration` reads the flag from `kwargs` only. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.
 
 The resolved mode is reconciled world-wide with precedence `bias_update > bias_update_transient > aux_loss > none`: under PP a stage holding no MoE layer resolves `auto` out of ignorance, and a split verdict would send stages into different collectives.
+
+### `aux_loss` under gradient checkpointing
+
+Every MoE run with gradient checkpointing is reentrant outside PP, and a reentrant checkpoint runs a layer's original forward under `no_grad`. transformers collects `router_logits` in that pass, so on its own a checkpointed layer's aux term reaches the loss with no graph and adds no router gradient.
+
+`aux_loss` therefore installs `install_router_aux_gradient` (`src/models/moe_aux_loss.py`) on the module collecting the logits, the innermost one declaring `router_logits` in `_can_record_outputs`. Each tensor collected under a checkpoint's `no_grad` pass becomes a carrier whose backward keeps the gradient the loss hands it. In the layer's recompute, an identity node on the output of the block owning the router passes that gradient to the router's recomputed logits.
+
+The gradient is the family's own `load_balancing_loss_func`, differentiated by autograd: the load pooled over all layers, the attention mask, `router_aux_loss_coef` and the trainer's loss scaling apply exactly as without checkpointing, whichever consumer adds the term (the model forward, a fused-loss forward, the CP wrapper, TRL's KTO). The coefficient stays as configured, so the logged `loss` and `aux_loss` read as they do without checkpointing. Collected logits that carry a graph (no checkpointing, the layers `every_n_layers` leaves unchecked) keep the native path, so no term counts twice. EP needs no collective: each rank computes its aux loss from its own tokens, as HF does.
+
+Two conditions raise instead of dropping the gradient: a kept gradient that no recompute took by the end of the backward, and one backward carrying the aux loss of two checkpointed forwards.
 
 ### `auto` resolution per family
 
@@ -153,7 +163,7 @@ Either way Gemma 4 gets no balancing **and** no `moe/*` metrics, and `output_rou
 
 ### Where `aux_loss` is inert
 
-`*ForCausalLM.forward` adds `router_aux_loss_coef * load_balancing_loss_func(...)` **only when `labels is not None`**, so `aux_loss` balances experts under SFT and pretraining. KTO reaches it another way: TRL's `KTOTrainer` sets the flag and adds the term itself. Everywhere else the term never reaches the loss:
+`*ForCausalLM.forward` adds `router_aux_loss_coef * load_balancing_loss_func(...)` **only when `labels is not None`**, so `aux_loss` balances experts under SFT and pretraining, with or without [gradient checkpointing](#aux_loss-under-gradient-checkpointing). KTO reaches it another way: TRL's `KTOTrainer` sets the flag and adds the term itself. Everywhere else the term never reaches the loss:
 
 - **DPO / SMPO / reward** — the forward runs without `labels`, and none of the three add the term.
 - **Distillation (teacher and self)** — both strip `labels`, for full-vocab logits.

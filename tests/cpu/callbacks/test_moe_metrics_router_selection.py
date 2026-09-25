@@ -32,7 +32,8 @@ from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM, GptO
 from transformers.utils.output_capturing import OutputRecorder
 
 import src.callbacks.moe_metrics as moe_metrics
-from src.callbacks.moe_metrics import MoEMetricsCallback, _hooked_routers
+from src.callbacks.moe_metrics import MoEMetricsCallback
+from src.models.moe_balancing import declared_routers
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GPTOSS_CONFIG
 
 NUM_EXPERTS = TINY_GLM5_CONFIG["n_routed_experts"]
@@ -203,7 +204,7 @@ def test_eval_forwards_are_not_counted():
 def test_routers_are_discovered_from_the_transformers_declaration():
     """Every MoE layer of a real family model contributes exactly one hooked router, in layer order."""
     model = GptOssForCausalLM(GptOssConfig(**TINY_GPTOSS_CONFIG))
-    routers = _hooked_routers(model)
+    routers = declared_routers(model)
 
     assert [r.name for r in routers] == [
         f"model.layers.{i}.mlp.router" for i in range(TINY_GPTOSS_CONFIG["num_hidden_layers"])
@@ -259,7 +260,7 @@ def test_discard_slot_router_is_read_from_its_logits():
     model.train()
     callback = MoEMetricsCallback(topk=1)
     callback.on_train_begin(args=None, state=None, control=None, model=model)
-    assert callback._hook_handles and _hooked_routers(model)[0].folds_discard_slot
+    assert callback._hook_handles and declared_routers(model)[0].folds_discard_slot
 
     hidden = torch.zeros(1, NUM_EXPERTS)
     hidden[0, NUM_EXPERTS - 1] = 1.0  # this token takes the discard slot

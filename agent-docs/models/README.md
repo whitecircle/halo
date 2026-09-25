@@ -85,6 +85,8 @@ Every MoE family shares three settings:
 
 GPT-OSS takes an explicit `bias_update`, adopting its hub `router.bias`, which exports and serves; Qwen3 MoE and text-only Qwen3.5/3.6 take `bias_update_transient`. See [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
 
+`aux_loss` trains the routers only where the trainer's loss adds the term — SFT and KTO — and does so with or without gradient checkpointing ([Callbacks](../training-methods/callbacks.md#aux_loss-under-gradient-checkpointing)).
+
 Every expert / router config field — the expert count, the top-k spelling, `router_aux_loss_coef`, `output_router_logits` — lives on the **text** sub-config for a composite (multimodal) family (Qwen3.5/3.6-MoE, Gemma 4, Mistral-4 under its VLM wrapper). `PreTrainedConfig` does not delegate attribute reads, so the toolkit resolves these through `get_config_field` / `set_config_field` over `config` **and** `config.get_text_config()`. Read one field off the wrapper alone and balancing plus `moe/*` metrics silently disappear.
 
 Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `ROUTER_EXPERT_COUNT_FIELDS` and `ROUTER_TOPK_FIELDS` in `src/models/moe_balancing.py` are the one registry every consumer reads — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP the wrapper's own `_NUM_EXPERTS_ATTR_PATHS` resolves the count off the live module instead.

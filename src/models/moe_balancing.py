@@ -127,6 +127,12 @@ EXPERT_FFN_WIDTH_FIELDS: tuple[str, ...] = (
     "intermediate_size",  # GptOss: the expert FFN is the only FFN, so this is the expert width
 )
 
+# Key under which transformers' per-model-class ``_can_record_outputs`` declares its router, and the
+# tuple position it captures for a bare-class spec that names no index (its installer's own default
+# for every key but ``hidden_states``).
+ROUTER_LOGITS_KEY = "router_logits"
+_BARE_SPEC_LOGITS_INDEX = 1
+
 
 def register_legacy_per_layer_config_keys(model_types: tuple[str, ...], keys: dict[str, tuple[str, str]]) -> None:
     """Claim ``keys`` for every ``model_type`` in ``model_types`` (a family's own spellings).
@@ -497,6 +503,68 @@ def has_discard_expert_slot(model) -> bool:
     return any(getattr(type(module), "_has_discard_expert_slot", False) for module in model.modules())
 
 
+@dataclass(frozen=True)
+class DeclaredRouter:
+    """One router module transformers' ``router_logits`` capture records, and how to read it.
+
+    ``logits_index`` is the tuple position the recorder captures as ``router_logits``.
+    ``folds_discard_slot`` marks a router whose indices map skipped tokens onto a real expert id, so
+    only its logits, which keep the trailing discard column, express the routing.
+    """
+
+    name: str
+    module: torch.nn.Module
+    logits_index: int
+    folds_discard_slot: bool
+
+
+def declares_router_logits(module: torch.nn.Module) -> bool:
+    """Whether ``module``'s class declares a ``router_logits`` capture in ``_can_record_outputs``."""
+    return (getattr(module, "_can_record_outputs", None) or {}).get(ROUTER_LOGITS_KEY) is not None
+
+
+def _router_logits_recorders(model) -> list[tuple]:
+    """Every ``router_logits`` capture spec declared anywhere in the module tree, de-duplicated.
+
+    The walk and de-duplication are for composite models, which declare it on the sub-model owning
+    the routers and repeat it on the causal-LM wrapper.
+    """
+    specs: dict[tuple, None] = {}
+    for module in model.modules():
+        if not declares_router_logits(module):
+            continue
+        entry = module._can_record_outputs[ROUTER_LOGITS_KEY]
+        for spec in entry if isinstance(entry, (list, tuple)) else (entry,):
+            target_class = getattr(spec, "target_class", spec if isinstance(spec, type) else None)
+            class_name = getattr(spec, "class_name", spec if isinstance(spec, str) else None)
+            index = getattr(spec, "index", _BARE_SPEC_LOGITS_INDEX)
+            specs[(target_class, class_name, getattr(spec, "layer_name", None), index)] = None
+    return list(specs)
+
+
+def declared_routers(model) -> list[DeclaredRouter]:
+    """The routers transformers' ``router_logits`` capture records, in module-tree (decoder-layer) order.
+
+    ``_can_record_outputs`` is transformers' own registry of which module produces ``router_logits``.
+    Matching mirrors its installer (target class, else a class-name suffix, refined by
+    ``layer_name``), so the result is exactly the modules an ``output_router_logits`` capture hooks.
+    """
+    specs = _router_logits_recorders(model)
+    routers: list[DeclaredRouter] = []
+    for name, module in model.named_modules():
+        for target_class, class_name, layer_name, index in specs:
+            if target_class is not None:
+                if not isinstance(module, target_class):
+                    continue
+            elif class_name is None or not name.endswith(class_name):
+                continue
+            if layer_name is not None and f".{layer_name.strip('.')}." not in f"{name}.":
+                continue
+            routers.append(DeclaredRouter(name, module, index, has_discard_expert_slot(module)))
+            break
+    return routers
+
+
 def has_balancing_routers(model) -> bool:
     """Whether any router already carries the bias-update state (adopted native slot, side-buffer,
     or a hub-native ``balancing_biases`` the load recording patched in)."""
@@ -561,7 +629,7 @@ def honors_output_router_logits_config(model) -> bool:
     alone when re-applied to a built model, and a verdict read off the class would then enable a
     flag the running forward refuses.
     """
-    forward = getattr(_unwrap_peft(model), "forward", None)
+    forward = getattr(_head_model(model), "forward", None)
     if forward is None:
         return False
     try:
@@ -570,16 +638,20 @@ def honors_output_router_logits_config(model) -> bool:
         return False
 
 
-def _unwrap_peft(model):
-    """The base model under a PEFT wrapper, which forwards **kwargs into it and shares its config;
-    probing the wrapper's own forward would describe the wrapper, not the head that runs."""
+def _head_model(model):
+    """The model under a PEFT wrapper and the toolkit's own (the CP wrapper declares
+    ``_toolkit_inner_model_attr``), each of which forwards **kwargs into it and shares its config;
+    probing a wrapper's own forward would describe the wrapper, not the head that runs."""
     base = getattr(model, "get_base_model", None)
-    return base() if callable(base) else model
+    if callable(base) and (inner := base()) is not model:
+        return _head_model(inner)
+    inner_attr = getattr(type(model), "_toolkit_inner_model_attr", None)
+    return _head_model(getattr(model, inner_attr)) if inner_attr else model
 
 
 def _liger_fused_head_installed(model) -> bool:
     """Whether a Liger fused-loss forward replaced the family's head, on the class or the instance."""
-    forward = getattr(_unwrap_peft(model), "forward", None)
+    forward = getattr(_head_model(model), "forward", None)
     return "liger" in (getattr(forward, "__module__", None) or "")
 
 
