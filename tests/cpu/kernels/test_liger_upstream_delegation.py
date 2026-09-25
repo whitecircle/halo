@@ -14,7 +14,8 @@ this file pins is the seam, not the kernel numerics (those are
 * neither side patches what the other did — not at class level, and not when re-applied on a built
   model — and the roles upstream always swaps are absent from the spec;
 * a role the spec takes over (``upstream_off``) is the toolkit's variant, not upstream's — GptOss's
-  Gemma-cast norm, Gemma 4's always-on dense MLP;
+  Gemma-cast norm, Gemma 4's always-on dense MLP, the Qwen MoE families' shared-expert MLP (whose
+  upstream flag would also swap the routed experts);
 * cross-entropy never reaches upstream's branch (a process-wide ``F.cross_entropy`` rebind, and broken
   outright in liger-kernel 0.8.0's Qwen3.5 applier): the toolkit's scoped patch serves it;
 * the EP fused-GLU decision still fires through the delegation.
@@ -104,12 +105,13 @@ def test_the_delegating_families_resolve_on_the_toolkit_branch():
 
 
 def test_the_taken_over_roles_are_declared_where_upstreams_variant_is_wrong():
-    """GptOss's norm and Gemma 4's dense MLP are the two roles the toolkit takes back from upstream.
+    """GptOss's norm, Gemma 4's dense MLP and the Qwen MoE GLU are the roles taken back from upstream.
 
     Upstream applies the llama-cast ``LigerRMSNorm`` to ``GptOssRMSNorm``, which multiplies its
-    weight in fp32 before the cast back (Gemma's mode); and its ``geglu`` swaps ``Gemma4TextMLP``,
-    the dense MLP every Gemma-4 decoder layer keeps beside its experts, which the EP force-off would
-    otherwise strip on every grouped-GEMM run.
+    weight in fp32 before the cast back (Gemma's mode); its ``geglu`` swaps ``Gemma4TextMLP``, the
+    dense MLP every Gemma-4 decoder layer keeps beside its experts, which the EP force-off would
+    otherwise strip on every grouped-GEMM run; and its Qwen3.5-MoE / Qwen3-Next ``swiglu`` also swaps
+    the routed experts for ``LigerExperts``, a kernel the routed experts never run.
     """
     by_type = {spec.model_types[0]: spec for spec in DELEGATING_SPECS}
     assert by_type["gpt_oss"].upstream_off == ("rms_norm",)
@@ -117,6 +119,8 @@ def test_the_taken_over_roles_are_declared_where_upstreams_variant_is_wrong():
     assert by_type["gemma4_text"].upstream_off == ("geglu",)
     assert by_type["gemma4_text"].glu_mlp == ("Gemma4TextMLP",)
     assert "gemma4_text" in orchestrator._TOOLKIT_GLU_SURVIVES_EP
+    for model_type in ("qwen3_5_moe", "qwen3_next"):
+        assert by_type[model_type].upstream_off == ("swiglu",)
 
 
 def test_a_withheld_flag_needs_the_role_it_stands_for():
@@ -161,8 +165,8 @@ def test_a_delegating_applier_offers_upstreams_knobs_with_the_toolkit_loss_conve
 def test_the_moe_families_add_their_shared_expert_mlp():
     """Dropping the shared-expert role would leave it eager on every layer, under EP included.
 
-    Upstream's ``swiglu`` patch sets ``*Experts``, which the EP wrapper replaces wholesale; the
-    shared expert it adopts unchanged is fused only because the spec names its MLP class.
+    Upstream's ``swiglu`` never runs for these families (it would swap ``*Experts``); the shared
+    expert every EP wrapper adopts unchanged is fused only because the spec names its MLP class.
     """
     shared_expert_mlps = {
         model_type: spec.glu_mlp
@@ -475,11 +479,11 @@ except ValueError as error:
 
 
 def test_ep_keeps_the_shared_expert_glu_a_delegating_spec_names():
-    """The force-off is about WHAT the applier swaps, and a delegating spec now swaps two things.
+    """The force-off is about WHAT the applier swaps, and a delegating spec swaps the shared expert.
 
-    Upstream's ``Qwen3_5MoeExperts = LigerExperts`` is replaced by ``patch_moe_model_for_ep`` and goes
-    inert; the shared-expert MLP the spec names is adopted by that wrapper unchanged and keeps paying
-    on every token. Forcing the flag off would delete the second to save the first.
+    The routed experts are the wrapper's (upstream's ``LigerExperts`` swap is withheld); the
+    shared-expert MLP the spec names is adopted by that wrapper unchanged and keeps paying on every
+    token. Forcing the flag off would delete it for nothing.
     """
     moe = types.SimpleNamespace(model_type="qwen3_5_moe", text_config=None, num_experts=64)
     assert orchestrator.liger_ep_disables_fused_glu(True, moe) is False
