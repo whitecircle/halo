@@ -16,10 +16,10 @@
 ## Type of change
 
 - [ ] Bug fix
-- [ ] New feature / behaviour
+- [ ] New feature / behavior
 - [ ] Performance
 - [ ] Docs
-- [ ] Refactor / no behaviour change
+- [ ] Refactor / no behavior change
 
 ## Proof of Value
 
@@ -27,7 +27,7 @@
 
 - [ ] **No-op / refactor:** loss is bitwise-identical (fixed seed, deterministic) and the
       original checkpoint still loads.
-- [ ] **Behaviour change:** added/updated a test demonstrating the new behaviour.
+- [ ] **Behavior change:** added/updated a test demonstrating the new behavior.
 - [ ] **Performance:** before/after **tokens/s/GPU** and **peak memory** below.
 
 ```
