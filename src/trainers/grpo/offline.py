@@ -588,15 +588,21 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
 
         self._setup_distributed_modes()
         self._resolve_chunked_head_transform()
-        # An unset max_completion_length leaves the width to the stored completions; under PP the last
-        # stage's plane is the pipeline's, which use_chunked_grpo_logprobs cannot remove.
-        if self._pp_runtime is None and args.max_completion_length is not None:
-            self._check_full_logits_fit(LogitsWidth(args.max_completion_length + 1, "max_completion_length"))
+        self._check_full_logits_fit(self._loss_logits_width())
 
         if self._pp_runtime is not None and self.beta != 0.0:
             self.train_dataset = self._pp_precompute_reference_logps(self.train_dataset, "training")
             if self.eval_dataset is not None:
                 self.eval_dataset = self._pp_precompute_reference_logps(self.eval_dataset, "evaluation")
+
+    def _loss_logits_width(self) -> LogitsWidth | None:
+        """The completion logits row the loss forward carries, one logit past the completion kept for
+        the next-token shift. ``None`` under PP, where the last stage's plane is the pipeline's and
+        use_chunked_grpo_logprobs cannot remove it, and with max_completion_length unset, which leaves
+        the width to the stored completions."""
+        if self._pp_runtime is not None or not is_bounded_length(self.max_completion_length):
+            return None
+        return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
 
     @staticmethod
     def _reject_inert_max_length(args: OfflineGRPOConfig, parallelism_config: "ParallelismConfig | None") -> None:

@@ -52,10 +52,13 @@ class LogitsWidth:
     set_by: str
 
 
-def full_logits_verdict(rows: int, width: LogitsWidth, vocab: int, free_bytes: int) -> tuple[bool, str] | None:
+def full_logits_verdict(
+    rows: int, rows_set_by: str, width: LogitsWidth, vocab: int, free_bytes: int
+) -> tuple[bool, str] | None:
     """``(fatal, message)`` for a full-logits plane of ``rows × width × vocab`` against ``free_bytes``:
     fatal when it cannot fit at all, a warning when it takes over :data:`_FULL_LOGITS_WARN_FRACTION` of
-    the free memory, ``None`` when it fits comfortably. Pure, so the thresholds are CPU-testable."""
+    the free memory, ``None`` when it fits comfortably. ``rows_set_by`` names the batch-size setting
+    behind ``rows``. Pure, so the thresholds are CPU-testable."""
     plane = rows * width.tokens * vocab * _FULL_LOGITS_BYTES_PER_LOGIT
     if plane <= _FULL_LOGITS_WARN_FRACTION * free_bytes:
         return None
@@ -70,7 +73,7 @@ def full_logits_verdict(rows: int, width: LogitsWidth, vocab: int, free_bytes: i
     return fatal, (
         f"The GRPO loss forward materializes full logits: {rows} rows × {width.tokens} tokens × {vocab} vocab × "
         f"{_FULL_LOGITS_BYTES_PER_LOGIT} B = {plane / gib:.1f} GiB, {share}. Set use_chunked_grpo_logprobs: true "
-        f"to compute the log-probs in vocab chunks instead, or lower per_device_train_batch_size ({rows}) or "
+        f"to compute the log-probs in vocab chunks instead, or lower {rows_set_by} ({rows}) or "
         f"{width.set_by}, which sets the {width.tokens}-token width."
     )
 
@@ -415,9 +418,10 @@ class ChunkedLogprobsCore:
         share of it. ``width`` is the logits row the loss forward carries (``None``: nothing bounds it,
         so nothing is checked).
 
-        The rows are ``per_device_train_batch_size``, the chunk the loss forward materializes at once,
-        so the estimate is a floor on the step's peak. Collective when it runs: a plane that fits on
-        one rank and not another raises on every rank, never on one alone.
+        The rows are the chunk one loss forward materializes at once: ``per_device_train_batch_size``,
+        or ``per_device_eval_batch_size`` when evaluation runs and it is larger, since the eval loss
+        forward chunks by it. The estimate is a floor on the step's peak. Collective when it runs: a
+        plane that fits on one rank and not another raises on every rank, never on one alone.
         """
         if self._use_chunked_grpo_logprobs or width is None or not torch.cuda.is_available():
             return
@@ -428,8 +432,13 @@ class ChunkedLogprobsCore:
                 "(get_output_embeddings() is None)."
             )
         vocab = head.weight.shape[0]
+        args = self.args
+        rows, rows_set_by = args.per_device_train_batch_size, "per_device_train_batch_size"
+        evaluates = args.eval_strategy not in ("no", None) or args.eval_on_start
+        if evaluates and args.per_device_eval_batch_size > rows:
+            rows, rows_set_by = args.per_device_eval_batch_size, "per_device_eval_batch_size"
         free_bytes, _ = torch.cuda.mem_get_info(self.accelerator.device)
-        verdict = full_logits_verdict(self.args.per_device_train_batch_size, width, vocab, free_bytes)
+        verdict = full_logits_verdict(rows, rows_set_by, width, vocab, free_bytes)
         fatal = verdict is not None and verdict[0]
         if not rank_consensus(not fatal)[0]:
             raise RuntimeError(
