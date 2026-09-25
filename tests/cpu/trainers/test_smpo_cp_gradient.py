@@ -10,8 +10,9 @@ registered" warning — and trains on ``1/cp_size`` of the gradient unless the l
 percentile clip's all-gather must likewise see only detached values.
 
 This drives the real ``get_batch_loss_metrics`` over a 2-rank gloo CP group in float64 and compares
-the per-sequence log-probs, the loss and the FSDP-averaged gradient with a ``cp_size=1`` run of the
-same batch.
+the per-sequence log-probs, the loss, the FSDP-averaged gradient and every logged metric with a
+``cp_size=1`` run of the same batch. The ``logits/*`` means are logging-only reduces: each rank's
+chunk mean would differ from the sequence's.
 
     python tests/cpu/trainers/test_smpo_cp_gradient.py
 """
@@ -95,13 +96,14 @@ def _batch() -> dict[str, torch.Tensor]:
 
 
 def _loss_and_grad(trainer: SmoothMarginPOTrainer, model: _TokenTableLM, batch: dict) -> tuple:
-    """Per-sequence outputs, the loss, the table gradient and the warnings the backward raised."""
+    """Per-sequence outputs, the loss, the table gradient, the logged metrics and the warnings the
+    backward raised."""
     outputs = trainer.concatenated_forward(model, batch)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        loss, _ = trainer.get_batch_loss_metrics(model, batch)
+        loss, metrics = trainer.get_batch_loss_metrics(model, batch)
         loss.backward()
-    return outputs, loss.detach(), model.table.grad.clone(), [str(w.message) for w in caught]
+    return outputs, loss.detach(), model.table.grad.clone(), metrics, [str(w.message) for w in caught]
 
 
 def _worker(rank: int, out_path: str, port: int) -> None:
@@ -113,14 +115,14 @@ def _worker(rank: int, out_path: str, port: int) -> None:
         cp_model = copy.deepcopy(reference_model)
 
         reference = _trainer(ParallelismConfig(world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE), None)
-        ref_outputs, ref_loss, ref_grad, _ = _loss_and_grad(reference, reference_model, batch)
+        ref_outputs, ref_loss, ref_grad, ref_metrics, _ = _loss_and_grad(reference, reference_model, batch)
 
         parallelism_config = ParallelismConfig(
             cp_size=CP_WORLD_SIZE, world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE
         )
         cp_config = parallelism_config.create_cp_config()
         cp_model.cp_config = cp_config
-        cp_outputs, cp_loss, cp_grad, cp_warnings = _loss_and_grad(
+        cp_outputs, cp_loss, cp_grad, cp_metrics, cp_warnings = _loss_and_grad(
             _trainer(parallelism_config, cp_config), cp_model, batch
         )
         # FSDP2 averages every gradient over the whole world, CP ranks included (DP=1 here).
@@ -130,11 +132,15 @@ def _worker(rank: int, out_path: str, port: int) -> None:
         compared = {key: (cp_outputs[key], ref_outputs[key]) for key in PER_SEQUENCE_KEYS}
         compared["loss"] = (cp_loss, ref_loss)
         compared["FSDP-averaged gradient"] = (cp_grad, ref_grad)
+        assert cp_metrics.keys() == ref_metrics.keys()
+        compared.update({f"metric {key}": (cp_metrics[key], ref_metrics[key]) for key in ref_metrics})
         failures = []
         for name, (cp_value, ref_value) in compared.items():
-            rel_err = ((cp_value.double() - ref_value.double()).norm() / ref_value.double().norm()).item()
+            # Absolute where the reference is exactly zero (this batch's reward accuracy).
+            scale = ref_value.double().norm().item() or 1.0
+            rel_err = (cp_value.double() - ref_value.double()).norm().item() / scale
             if not rel_err < REL_TOL:
-                ratio = (cp_value.double().norm() / ref_value.double().norm()).item()
+                ratio = cp_value.double().norm().item() / scale
                 failures.append(f"{name}: rel_err={rel_err:.3e} vs the unsplit sequence (||cp||/||ref||={ratio:.4f})")
         fallback = [message for message in cp_warnings if AUTOGRAD_FALLBACK_WARNING in message]
         if fallback:

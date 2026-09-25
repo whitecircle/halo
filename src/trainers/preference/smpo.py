@@ -780,8 +780,8 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         rejected_loss_mask = loss_mask[num_chosen:]
 
         # Masked fp32 reductions: boolean-indexing [tokens, V] logits copies them, `.any()` syncs.
-        mean_chosen_logits = self._masked_logit_mean(shift_logits[:num_chosen], chosen_loss_mask)
-        mean_rejected_logits = self._masked_logit_mean(shift_logits[num_chosen:], rejected_loss_mask)
+        mean_chosen_logits = self._masked_logit_mean(shift_logits[:num_chosen], chosen_loss_mask, cp_config)
+        mean_rejected_logits = self._masked_logit_mean(shift_logits[num_chosen:], rejected_loss_mask, cp_config)
 
         # Shift here: under CP a deferred shift pairs local-chunk logits with full-length labels.
         chosen_sft_loss = self._compute_cp_aggregated_sft_loss(per_token_nll[:num_chosen], chosen_loss_mask, cp_config)
@@ -799,14 +799,21 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         }
 
     @staticmethod
-    def _masked_logit_mean(logits: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+    def _masked_logit_mean(logits: torch.Tensor, loss_mask: torch.Tensor, cp_config=None) -> torch.Tensor:
         """Mean over the logits of unmasked positions without materializing a masked copy.
 
-        Equals ``logits[loss_mask].mean()`` (fp32-accumulated); an empty mask yields 0.
+        Equals ``logits[loss_mask].mean()`` (fp32-accumulated); an empty mask yields 0. Under CP each
+        rank holds one chunk of every sequence, so the sum and token count are summed over the group
+        first and every rank reports the sequence-global mean. A logged metric, computed without grad.
         """
-        total = (logits.sum(dim=-1, dtype=torch.float32) * loss_mask).sum()
-        count = loss_mask.sum() * logits.size(-1)
-        return total / count.clamp(min=1)
+        with torch.no_grad():
+            stats = torch.stack(
+                [(logits.sum(dim=-1, dtype=torch.float32) * loss_mask).sum(), loss_mask.sum(dtype=torch.float32)]
+            )
+            if cp_config is not None and cp_config.cp_size > 1:
+                dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=cp_config.process_group)
+            total, tokens = stats.unbind()
+            return total / (tokens * logits.size(-1)).clamp(min=1)
 
     def _compute_cp_aggregated_sft_loss(
         self, per_token_nll: torch.Tensor, loss_mask: torch.Tensor, cp_config
