@@ -3,11 +3,12 @@
 
 All doc trees are plain GitHub-rendered markdown, so this is the link gate. A ``#fragment`` into a
 markdown file (or ``#fragment`` alone, into the same file) must name a heading anchor GitHub
-generates for that file or an explicit ``<a id>`` / ``<a name>``. A ``{#id}`` heading attribute is
-refused: GitHub renders the braces as heading text, so the id never exists. Links inside code are
-not links; external URLs are skipped; a fragment into a non-markdown file is checked for its path
-only. Headings are ATX (``#``) or raw ``<h1>``–``<h6>``; an underlined (setext) heading has no anchor
-here, so a link to one fails.
+generates for that file or an explicit ``<a id>`` / ``<a name>``; a fragment on a directory link is
+checked against the directory's ``README.md``, the page GitHub renders there. A ``{#id}`` heading
+attribute is refused: GitHub renders the braces as heading text, so the id never exists. Links inside
+code are not links; external URLs are skipped; a fragment into any other target is checked for its
+path only. Headings are ATX (``#``) or raw ``<h1>``–``<h6>``; an underlined (setext) heading has no
+anchor here, so a link to one fails.
 
 Standard library only (Python 3.9+), so it runs on a hosted runner and on a host without the image.
 
@@ -161,6 +162,16 @@ def load_document(path: Path) -> Document:
     return parse_markdown(path.read_text(encoding="utf-8"))
 
 
+def fragment_page(target: Path) -> Path | None:
+    """The markdown page a ``#fragment`` on ``target`` lands in, or None when GitHub renders none.
+
+    A directory link renders the directory's ``README.md`` below its listing, so its anchors are that
+    page's.
+    """
+    page = target / "README.md" if target.is_dir() else target
+    return page if page.suffix == ".md" and page.is_file() else None
+
+
 def markdown_files(paths: list[str]) -> list[Path]:
     files = []
     for path in paths:
@@ -187,12 +198,9 @@ def check_file(file: Path) -> list[str]:
         resolved = (file.parent / unquote(path)) if path else file
         if not resolved.exists():
             problems.append(f"BROKEN  {file}:{lineno}  ->  {path}")
-        elif (
-            fragment
-            and resolved.suffix == ".md"
-            and resolved.is_file()
-            and unquote(fragment) not in load_document(resolved.resolve()).anchors
-        ):
+            continue
+        page = fragment_page(resolved) if fragment else None
+        if page and unquote(fragment) not in load_document(page.resolve()).anchors:
             problems.append(f"BROKEN ANCHOR  {file}:{lineno}  ->  {target}")
     return problems
 
