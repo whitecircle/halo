@@ -76,7 +76,7 @@ torchrun --nproc_per_node=2 scripts/training/preference/dpo.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_dpo.py` and `test_dpo_vlm.py`.
+Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py` (the adapter-disabled reference of a mixed attention + expert-LoRA run under EP is the frozen base).
 
 ## What to watch
 

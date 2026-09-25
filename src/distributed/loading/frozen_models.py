@@ -13,6 +13,7 @@ from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedMode
 from trl import ModelConfig
 
 from src.distributed.filesystem import fs_aware_main_first
+from src.distributed.loading.peft_setup import has_attention_lora_targets
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
@@ -167,18 +168,25 @@ def load_reference_model_for_preference(
 ):
     """Load the frozen reference model for a preference trainer (DPO/KTO), or ``None`` under PEFT.
 
-    Under PEFT the reference is the adapter-free base → ``None`` (native EP expert-LoRA must set
-    ``precompute_ref_log_probs``, since grouped expert adapters cannot be toggled). Full finetune loads
-    an unparallelized copy. ``reset_sinks`` and ``attn_default`` must mirror the policy load so the
-    reference's logprobs come from the same kernel and the same sink semantics.
+    Under PEFT the reference is the adapter-free base → ``None``: TRL scores it inside the
+    ``PeftModel``'s ``disable_adapter()``, which also drops the native EP expert adapters
+    (``make_disable_adapter_ep_aware``). Expert-only LoRA has no ``PeftModel``, so it must set
+    ``precompute_ref_log_probs``. Full finetune loads an unparallelized copy. ``reset_sinks`` and
+    ``attn_default`` must mirror the policy load so the reference's logprobs come from the same
+    kernel and the same sink semantics.
     """
     if model_config.use_peft:
-        if parallelism_config.expert_lora is not None and not training_config.precompute_ref_log_probs:
+        if (
+            parallelism_config.expert_lora is not None
+            and not has_attention_lora_targets(model_config)
+            and not training_config.precompute_ref_log_probs
+        ):
             raise ValueError(
-                f"{method} with native EP expert-LoRA requires precompute_ref_log_probs=True: TRL "
-                f"builds the reference by disabling adapters, but grouped expert adapters cannot be "
-                f"toggled. Set precompute_ref_log_probs: true, or drop expert targets from "
-                f"lora_target_modules."
+                f"{method} with expert-only native EP LoRA requires precompute_ref_log_probs=True: "
+                f"every lora_target_modules entry names an expert projection, so the model is never "
+                f"PEFT-wrapped and TRL would build its own reference, an unsharded fp32 dense copy of "
+                f"the whole model on every rank. Set precompute_ref_log_probs: true, or add an attention "
+                f"target so the adapter-disabled policy is the reference."
             )
         return None
 

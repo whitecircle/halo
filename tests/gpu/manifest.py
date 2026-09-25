@@ -739,6 +739,9 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/preference/test_kto_fsdp_multi_gpu.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
+    "trainers/preference/test_pref_ep_expert_lora_reference.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1200
+    ),
     "trainers/preference/test_smpo_cp.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
     ),

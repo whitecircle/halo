@@ -145,6 +145,16 @@ def split_expert_lora_targets(model_config: ModelConfig) -> ExpertLoraSpec | Non
     )
 
 
+def has_attention_lora_targets(model_config: ModelConfig) -> bool:
+    """Whether stock PEFT has targets left after the expert peel, i.e. the run gets a ``PeftModel``.
+
+    ``None`` targets mean the architecture defaults; ``[]`` means every target was an expert
+    projection (expert-only LoRA), and conflating the two would full-finetune a ``use_peft`` run.
+    """
+    targets = model_config.lora_target_modules
+    return model_config.use_peft and (targets is None or bool(targets))
+
+
 def _reenable_expert_lora_grads(model: PreTrainedModel) -> None:
     """Re-mark native grouped-LoRA expert adapters trainable after the global PEFT freeze clobbers them.
 
@@ -380,10 +390,7 @@ def setup_peft_model(
     """
     _reject_lora_target_parameters_under_ep(model, model_config)
     expert_lora_active = has_ep_lora(model)
-    # None targets means architecture defaults, [] means expert-only; conflating the two would
-    # full-finetune a `use_peft` run.
-    targets = model_config.lora_target_modules
-    attention_peft = model_config.use_peft and (targets is None or bool(targets))
+    attention_peft = has_attention_lora_targets(model_config)
 
     if not attention_peft and not expert_lora_active:
         if model_config.use_peft:
