@@ -150,7 +150,7 @@ def _validate_gmm_launch_method(pc: ParallelismConfig, model_config) -> None:
         "           scripts/training/sft.py <config>\n"
         "\n"
         "  2. Train this MoE under 'accelerate launch' without grouped GEMM:\n"
-        "       set `use_grouped_gemm: false` in the YAML (or pass --use_grouped_gemm false)\n"
+        "       set `use_grouped_gemm: false` in the YAML (or pass --use_grouped_gemm=false)\n"
         "\n"
         "See agent-docs/optimization/grouped-gemm.md (Standalone grouped GEMM mode)."
     )
@@ -369,8 +369,9 @@ def load_distributed_model(
                 "Quantized loading (QLoRA / bitsandbytes) is not supported with EP / TP / PP "
                 "or grouped-GEMM MoE loaders: they materialize plain de-quantized weights, so "
                 "bitsandbytes Params4bit are lost and PEFT's 4-bit adapter dispatch fails (PP "
-                "rejects PEFT outright). Use QLoRA with standard DDP/FSDP (accelerate launch), "
-                "plain LoRA (no quantization) for EP/TP, or QLoRA + CP (which preserves "
+                "rejects PEFT outright). For QLoRA use plain data parallelism or CP (which "
+                "preserves quantization); on a MoE model also set `use_grouped_gemm: false`, "
+                "under torchrun and accelerate launch alike. Under EP/TP use plain LoRA (no "
                 "quantization)."
             )
         common_kwargs["quantization_config"] = quantization_config

@@ -717,8 +717,7 @@ class ParallelismConfig:
             if self.ep_size > 1 and self.ep_size % self.tp_size != 0:
                 raise ValueError(
                     f"EP+TP requires ep_size ({self.ep_size}) to be a multiple of tp_size "
-                    f"({self.tp_size}) so each EP group spans whole TP groups. Use ep_size==tp_size "
-                    f"(node-local EP+TP) or k*tp_size (cross-node EP)."
+                    f"({self.tp_size}) so each EP group spans whole TP groups."
                 )
             # TP groups are contiguous rank blocks and must stay inside one NVLink domain.
             if self.nvlink_domain_size % self.tp_size != 0:
