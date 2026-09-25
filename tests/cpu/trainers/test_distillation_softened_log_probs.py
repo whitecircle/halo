@@ -9,7 +9,9 @@ applies Hinton's ``T**2``. Pinned against independent spellings of each loss:
 - the teacher arm's ``kl_divergence`` is the OPD forward KL, and it, ``soft_cross_entropy`` and
   ``jensen_shannon`` agree with the ``kl_div`` / ``softmax`` spellings to fp32 rounding;
 - at a temperature bf16 cannot divide exactly, a bf16 input scores exactly like its fp32 copy: the
-  divide runs once, after the upcast, never on the bf16 logits.
+  divide runs once, after the upcast, never on the bf16 logits;
+- a ``-inf`` logit (padded vocabulary, a top-k-truncated teacher) is a zero-probability entry that adds
+  exactly 0, not NaN, to the value and the gradient.
 
     python tests/cpu/trainers/test_distillation_softened_log_probs.py
 """
@@ -30,6 +32,9 @@ INEXACT_TEMPERATURE = 0.7
 FP32_RTOL = 1e-5
 FP32_ATOL = 1e-6
 TEACHER_SOFTENED_LOSSES = ("kl_divergence", "soft_cross_entropy", "jensen_shannon")
+# Trailing vocabulary columns padded with -inf logits, and the teacher support a top-k truncation keeps.
+PADDED_COLUMNS = 7
+TEACHER_TOP_K = 5
 
 
 def _log_probs(logits, temperature):
@@ -150,6 +155,46 @@ def test_teacher_softened_losses_divide_after_the_upcast(name):
     assert not torch.equal(bf16_divide, _log_probs(student, INEXACT_TEMPERATURE)), (
         "fixture does not separate a bf16 divide from an fp32 one"
     )
+
+
+def _padded(logits):
+    return torch.cat([logits, torch.full((*logits.shape[:-1], PADDED_COLUMNS), float("-inf"))], dim=-1)
+
+
+def _top_k_truncated(logits):
+    kept = logits.topk(TEACHER_TOP_K, dim=-1).indices
+    return torch.full_like(logits, float("-inf")).scatter(-1, kept, logits.gather(-1, kept))
+
+
+def _finite_value_and_grad(loss_fn, student, teacher, temperature):
+    value, grad = _value_and_grad(loss_fn, student, teacher, temperature)
+    assert torch.isfinite(value).all(), f"{loss_fn}: non-finite loss"
+    assert torch.isfinite(grad).all(), f"{loss_fn}: non-finite student gradient"
+    return value, grad
+
+
+@pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
+@pytest.mark.parametrize("loss_fn", [reverse_kl_opd_loss, forward_kl_opd_loss, unnormalized_kl_loss])
+def test_opd_losses_ignore_a_vocabulary_padded_on_both_sides(loss_fn, temperature):
+    """Self-distillation scores student and teacher with one model, so both pad the same columns."""
+    student, teacher = _logits(torch.float32, seed=3)
+    padded, padded_grad = _finite_value_and_grad(loss_fn, _padded(student), _padded(teacher), temperature)
+    unpadded, unpadded_grad = _value_and_grad(loss_fn, student, teacher, temperature)
+    torch.testing.assert_close(padded.sum(-1), unpadded.sum(-1), rtol=FP32_RTOL, atol=FP32_ATOL)
+    torch.testing.assert_close(padded_grad[..., :VOCAB], unpadded_grad, rtol=FP32_RTOL, atol=FP32_ATOL)
+    assert padded_grad[..., VOCAB:].eq(0).all()
+
+
+@pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
+@pytest.mark.parametrize("name", TEACHER_SOFTENED_LOSSES)
+def test_teacher_losses_score_a_top_k_truncated_teacher(name, temperature):
+    """The truncated entries add exactly what ``kl_div``/``softmax`` give a zero probability: 0."""
+    student, teacher = _logits(torch.float32, seed=4)
+    teacher = _top_k_truncated(teacher)
+    value, grad = _finite_value_and_grad(_teacher_loss(name), student, teacher, temperature)
+    reference, reference_grad = _value_and_grad(SPELLINGS[name], student, teacher, temperature)
+    torch.testing.assert_close(value.sum(-1), reference.sum(-1), rtol=FP32_RTOL, atol=FP32_ATOL)
+    torch.testing.assert_close(grad, reference_grad, rtol=FP32_RTOL, atol=FP32_ATOL)
 
 
 if __name__ == "__main__":

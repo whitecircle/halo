@@ -16,6 +16,10 @@ from torch.nn.functional import cross_entropy, log_softmax
 
 from src.data.spans import LABEL_IGNORE_INDEX
 
+# Floor for a -inf logit (vocab padding, a top-k-truncated teacher). Its probability stays an exact 0
+# while its log-prob turns finite, so a term that probability weights is 0 instead of 0 * -inf = NaN.
+_MASKED_LOGIT_FLOOR = torch.finfo(torch.float32).min
+
 
 def logits_forward_inputs(inputs: Mapping[str, Any]) -> dict[str, Any]:
     """Model inputs for a forward that must return full-vocab logits.
@@ -74,9 +78,10 @@ def softened_log_probs(logits: torch.Tensor, temperature: float) -> torch.Tensor
 
     fp32 because a bf16 log-sum-exp over a 100k+ vocab plus a bf16 log-prob difference biases the
     distillation gradient. Folding the upcast into ``log_softmax``'s ``dtype`` would not save the fp32
-    copy: torch casts a bf16 input to fp32 first (only fp16 has a fused path).
+    copy: torch casts a bf16 input to fp32 first (only fp16 has a fused path). ``-inf`` logits are
+    floored in place on that copy (:data:`_MASKED_LOGIT_FLOOR`), a no-op on finite ones.
     """
-    return log_softmax(logits.float() / temperature, dim=-1)
+    return log_softmax((logits.float() / temperature).clamp_min_(_MASKED_LOGIT_FLOOR), dim=-1)
 
 
 def reverse_kl_opd_loss(
