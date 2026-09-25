@@ -44,6 +44,7 @@ from src.distributed.parallelism_config import (
     PP_SCHEDULES,
     ParallelismConfig,
 )
+from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.parallelism_args import _LOWP_SHAPE_DEFAULTS, parallelism_config_from_args
 from src.training.parser import _literal_choices
 from tests.common.parallelism import make_parallelism_config
@@ -225,8 +226,7 @@ def test_every_same_name_knob_lands_on_the_built_config(arg_field):
 
     config = parallelism_config_from_args(
         DistributedArguments(**{arg_field: requested}),
-        supports_cp=False,
-        supports_pp=False,
+        trainer_cls=DistributedTrainerMixin,
         allow_low_precision=True,
     )
 
@@ -274,7 +274,7 @@ class _WithFieldRemoved:
 def test_a_missing_declared_field_is_loud(missing):
     dist_args = _WithFieldRemoved(DistributedArguments(), missing)
     with pytest.raises(AttributeError, match=missing):
-        parallelism_config_from_args(dist_args, supports_cp=False, supports_pp=False)
+        parallelism_config_from_args(dist_args, trainer_cls=DistributedTrainerMixin)
 
 
 def test_every_settable_config_field_has_an_argument_surface():

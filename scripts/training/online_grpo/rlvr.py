@@ -69,14 +69,17 @@ def main():
     if not args.use_sdpg:
         reject_non_default_args("RLVR Online GRPO with use_sdpg off", args, *args.SDPG_TUNABLES)
 
+    # --use_sdpg swaps in the SDPG trainer (GRPO loss plus privileged-teacher reverse-KL OPD on
+    # positive-advantage rollouts). It reuses the same rollout and verifier machinery, so only the
+    # class and the OPD kwargs differ.
+    trainer_cls = DistributedSDPGTrainer if args.use_sdpg else DistributedGRPOTrainer
     runtime = init_training_script(
         args,
         grpo_config,
         model_config,
         dist_args,
         script_prefix="rlvr-online-grpo",
-        supports_cp=False,
-        supports_pp=False,
+        trainer_cls=trainer_cls,
     )
     parallelism_config = runtime.parallelism_config
 
@@ -223,10 +226,6 @@ def main():
 
     barrier()
 
-    # --use_sdpg swaps in the SDPG trainer (GRPO loss plus privileged-teacher reverse-KL OPD on
-    # positive-advantage rollouts). It reuses the same rollout and verifier machinery, so only the
-    # class and the OPD kwargs differ.
-    trainer_cls = DistributedSDPGTrainer if args.use_sdpg else DistributedGRPOTrainer
     callbacks = build_training_callbacks(
         args,
         grpo_config,

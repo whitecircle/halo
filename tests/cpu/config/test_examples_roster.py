@@ -40,6 +40,7 @@ from tests.cpu.config.test_examples_parse import (
     PROJECT_ROOT,
     TRAINING_ROOT,
     _bf16_capable,  # noqa: F401 — autouse fixture, imported so both modules validate as a training host does
+    _script_module,
     parsed_field,
     parser_for,
     script_for,
@@ -110,8 +111,8 @@ def declared_nccl_timeout_minutes(config: Path) -> str | None:
 def script_call_kwargs(script: str, func: str, names: tuple[str, ...]) -> dict:
     """Constant keyword arguments the entry script passes to ``func``.
 
-    The capability flags (``supports_cp``, ``supports_pp``, ``syncs_to_external_generator``, ...)
-    live in the script's own call, so reading them there keeps this test honest when a script gains
+    The capability flags (``allow_low_precision``, ``syncs_to_external_generator``, ...) live in the
+    script's own call, so reading them there keeps this test honest when a script gains
     or loses a mode — a hand-kept table here would keep asserting the retired one.
     """
     tree = ast.parse((TRAINING_ROOT / script).read_text(encoding="utf-8"))
@@ -123,6 +124,33 @@ def script_call_kwargs(script: str, func: str, names: tuple[str, ...]) -> dict:
                 if keyword.arg in names and isinstance(keyword.value, ast.Constant)
             }
     return {}
+
+
+def script_trainer_classes(script: str) -> tuple[type, ...]:
+    """Every trainer class the entry script can hand ``init_training_script``: the classes named in
+    its ``trainer_cls=`` argument, or in the assignment that argument reads (``--use_sdpg`` picks one
+    of two). The CP/PP gates are those classes' own ``_supports_cp`` / ``_supports_pp``."""
+    module = _script_module(script)
+    tree = ast.parse((TRAINING_ROOT / script).read_text(encoding="utf-8"))
+    call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "init_training_script"
+    )
+    value = next(keyword.value for keyword in call.keywords if keyword.arg == "trainer_cls")
+    if isinstance(value, ast.Name) and not hasattr(module, value.id):
+        value = next(
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == value.id for target in node.targets)
+        )
+    classes = tuple(
+        getattr(module, node.id)
+        for node in ast.walk(value)
+        if isinstance(node, ast.Name) and isinstance(getattr(module, node.id, None), type)
+    )
+    assert classes, f"{script}: no trainer class resolved from its init_training_script(trainer_cls=...)"
+    return classes
 
 
 def build_parallelism_config(config: Path):
@@ -137,11 +165,7 @@ def build_parallelism_config(config: Path):
     parsed = parser_for(script).parse_yaml_file(str(config))
     dist_args = next(obj for obj in parsed if type(obj).__name__ == "DistributedArguments")
     model_config = next(obj for obj in parsed if type(obj).__name__ == "ModelConfig")
-    flags = script_call_kwargs(
-        script,
-        "init_training_script",
-        ("supports_cp", "supports_pp", "allow_low_precision", "supports_init_from_scratch"),
-    )
+    flags = script_call_kwargs(script, "init_training_script", ("allow_low_precision", "supports_init_from_scratch"))
     # The peel reads the model's own config; where that is unreachable the expert-LoRA rejections
     # (PP and Expert-TP both refuse it) go unchecked, exactly like the model-dependent cases below.
     expert_lora = (
@@ -157,13 +181,11 @@ def build_parallelism_config(config: Path):
             ("get_global_rank", 0),
         ):
             patcher.setattr(f"src.distributed.parallelism_config.{name}", lambda _value=value: _value)
-        return parsed, parallelism_config_from_args(
-            dist_args,
-            expert_lora=expert_lora,
-            supports_cp=flags.get("supports_cp", True),
-            supports_pp=flags.get("supports_pp", True),
-            **{k: v for k, v in flags.items() if k in ("allow_low_precision", "supports_init_from_scratch")},
-        )
+        built = [
+            parallelism_config_from_args(dist_args, trainer_cls=trainer_cls, expert_lora=expert_lora, **flags)
+            for trainer_cls in script_trainer_classes(script)
+        ]
+        return parsed, built[0]
 
 
 def model_config_for(config: Path, parsed: tuple):

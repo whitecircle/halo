@@ -146,7 +146,7 @@ def main():
         model_config,
         dist_args,
         script_prefix="classification",
-        supports_cp=False,
+        trainer_cls=ClassificationTrainer,
     )
     parallelism_config = runtime.parallelism_config
 

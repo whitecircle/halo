@@ -64,7 +64,6 @@ def main():
         dist_args,
         script_prefix="dpo",
         trainer_cls=DistributedDPOTrainer,
-        supports_cp=False,
         sync_tokens=("pad_token",),
     )
     parallelism_config = runtime.parallelism_config

@@ -59,8 +59,7 @@ def init_training_script(
     dist_args,
     *,
     script_prefix: str,
-    supports_cp: bool = True,
-    supports_pp: bool = True,
+    trainer_cls,
     sync_tokens: Sequence[str] = (),
     split_expert_lora: bool = True,
     **parallelism_kwargs,
@@ -78,9 +77,9 @@ def init_training_script(
         model_config: parsed TRL ``ModelConfig``.
         dist_args: parsed ``DistributedArguments``.
         script_prefix: run-name prefix (e.g. ``"sft"``); the parallelism mode suffix is appended.
-        supports_cp: forwarded to :func:`parallelism_config_from_args` (``False`` rejects CP).
-        supports_pp: forwarded to :func:`parallelism_config_from_args` (``False`` rejects PP at
-            config time, before the model — or a teacher/reference/vLLM probe — loads).
+        trainer_cls: the trainer class the script builds, forwarded to
+            :func:`parallelism_config_from_args`, whose CP/PP gates it supplies: a mode the trainer
+            refuses is rejected before the model — or a teacher/reference/vLLM probe — loads.
         sync_tokens: token field names to mirror between ``args`` and ``training_config``
             (configs that re-declare ``eos_token``/``pad_token`` under the resolve-conflict parser).
         split_expert_lora: peel MoE expert targets out of ``model_config.lora_target_modules`` into
@@ -110,8 +109,7 @@ def init_training_script(
     parallelism_config = parallelism_config_from_args(
         dist_args,
         training_config=training_config,
-        supports_cp=supports_cp,
-        supports_pp=supports_pp,
+        trainer_cls=trainer_cls,
         expert_lora=split_expert_lora_targets(model_config) if split_expert_lora else None,
         **parallelism_kwargs,
     )

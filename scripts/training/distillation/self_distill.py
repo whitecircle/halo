@@ -230,16 +230,13 @@ def main():
     # and privileged columns have to survive HF's remove_unused_columns=True, which would strip them.
     sft_config.remove_unused_columns = False
 
-    # supports_cp=False: the privileged-teacher pass uses a separate, longer sequence, so CP must be
-    # rejected at config-build time (mirrors teacher_distill; the trainer also sets _supports_cp=False).
     runtime = init_training_script(
         args,
         sft_config,
         model_config,
         distributed_args,
         script_prefix="self-distill",
-        supports_cp=False,
-        supports_pp=False,
+        trainer_cls=DistributedSelfDistillationTrainer,
         sync_tokens=("eos_token", "pad_token"),
     )
     parallelism_config = runtime.parallelism_config

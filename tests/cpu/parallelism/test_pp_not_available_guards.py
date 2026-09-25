@@ -21,6 +21,7 @@ import pytest
 
 from src.args.distributed_args import DistributedArguments
 from src.distributed.pipeline_parallel.runtime import PipelineRuntime
+from src.trainers.sft import DistributedSFTTrainer
 from src.training.parallelism_args import parallelism_config_from_args
 
 PP_DOC = "agent-docs/parallelism/pipeline-parallelism.md"
@@ -29,7 +30,7 @@ PP_DOC = "agent-docs/parallelism/pipeline-parallelism.md"
 def test_pp_size_one_still_builds():
     """Anti-vacuity for the rejection below: the default path through the same builder is unaffected,
     so the raise is about ``pp_size > 1`` and not about the builder refusing everything."""
-    config = parallelism_config_from_args(DistributedArguments())
+    config = parallelism_config_from_args(DistributedArguments(), trainer_cls=DistributedSFTTrainer)
     assert config.pp_size == 1
     assert not config.is_pp_mode
 
@@ -43,11 +44,11 @@ def test_pp_size_one_still_builds():
     ],
 )
 def test_pipeline_parallel_size_above_one_is_rejected_at_config_time(extra):
-    """``supports_pp=True`` is the SFT spelling — the trainer-support gate is NOT what stops PP here,
-    so the message must be the release one for every axis combination, allowlisted or not."""
+    """SFT declares ``_supports_pp = True``, so the trainer-support gate is NOT what stops PP here:
+    the message must be the release one for every axis combination, allowlisted or not."""
     dist_args = DistributedArguments(pipeline_parallel_size=2, **extra)
     with pytest.raises(ValueError) as excinfo:
-        parallelism_config_from_args(dist_args, supports_pp=True)
+        parallelism_config_from_args(dist_args, trainer_cls=DistributedSFTTrainer)
 
     message = str(excinfo.value)
     assert "not yet available in this release" in message, message

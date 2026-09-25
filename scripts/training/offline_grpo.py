@@ -121,7 +121,7 @@ def main():
         model_config,
         dist_args,
         script_prefix="offline-grpo",
-        supports_cp=False,
+        trainer_cls=OfflineGRPOTrainer,
     )
     parallelism_config = runtime.parallelism_config
 

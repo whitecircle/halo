@@ -188,8 +188,7 @@ def main():
         model_config,
         dist_args,
         script_prefix="distill",
-        supports_cp=False,
-        supports_pp=False,
+        trainer_cls=DistributedDistillationTrainer,
     )
     parallelism_config = runtime.parallelism_config
     local_rank = runtime.local_rank
