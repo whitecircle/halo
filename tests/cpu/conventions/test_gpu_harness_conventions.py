@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 """Conventions a GPU test script must honour, pinned so a new script cannot quietly break them.
 
-Both are about scratch: a GPU test allocates its dirs through the launcher and hands them back.
+Every manifest script runs under ``gpu_test_main`` unless its lifecycle is one the harness cannot
+express, named in ``_OWN_LIFECYCLE`` with the reason.
+
+The rest are about scratch: a GPU test allocates its dirs through the launcher and hands them back.
 
 ``tests.common.distributed.setup_cache_dirs`` hands back two ``tempfile.mkdtemp`` dirs — an
 output dir and an HF datasets cache. Nothing reclaims them on its own, so a test that allocates
@@ -31,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from tests.common.utils import REPO_ROOT, imports_name
+from tests.gpu.manifest import MANIFEST, script_path
 
 _GPU_ROOT = Path(REPO_ROOT) / "tests" / "gpu"
 
@@ -39,6 +43,13 @@ _RECLAIMERS = ("cleanup_dirs", "on_teardown")
 _HARNESS = "gpu_test_main"
 _RMTREE = "rmtree"
 _FORBIDDEN_PATH_PREFIX = "/mnt/"
+# Manifest scripts that keep their own lifecycle, each for a reason the harness cannot express.
+_OWN_LIFECYCLE = {
+    "kernels/test_deepgemm.py": "prints SKIP: when deep_gemm is absent; the harness has no skip channel",
+    "trainers/other/test_checkpoint_roundtrip_gptoss_20b.py": "tears the group down before a rank-0 verify",
+    "trainers/other/test_checkpoint_roundtrip_qwen3_8b.py": "its rank-0-only reload skips the closing barrier",
+    "trainers/sft/test_zaya_load_forward_backward.py": "a single-process plain-python script",
+}
 
 
 def _called_names(tree: ast.AST) -> set[str]:
@@ -134,6 +145,38 @@ def test_the_scan_is_not_vacuous(tmp_path):
     )
     reclaimer_tree = ast.parse(reclaimer.read_text(encoding="utf-8"))
     assert _reclaims_its_dirs(reclaimer, reclaimer_tree), "a cleanup_dirs call must discharge the obligation"
+
+
+def _runs_under_the_harness(path: Path) -> bool:
+    """Whether the script imports ``gpu_test_main``, or re-launches another suite's entry that does."""
+    if imports_name(path, _HARNESS):
+        return True
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith("tests.gpu.")
+        and imports_name(REPO_ROOT / (node.module.replace(".", "/") + ".py"), _HARNESS)
+        for node in ast.walk(tree)
+    )
+
+
+def test_every_manifest_script_runs_under_the_harness():
+    """A hand-rolled lifecycle hides a non-zero rank's error, blocks teardown until the NCCL watchdog
+    on a single-rank failure, and emits no result line, so the launcher cannot tell FAIL from ERROR."""
+    offenders = sorted(
+        rel for rel in MANIFEST if rel not in _OWN_LIFECYCLE and not _runs_under_the_harness(script_path(rel))
+    )
+    assert not offenders, (
+        "move these onto tests.common.harness.gpu_test_main (or, for a lifecycle the harness cannot "
+        "express, add an _OWN_LIFECYCLE entry naming why):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_own_lifecycle_exemptions_are_live():
+    """An exemption that outlives its reason blesses a script nothing checks."""
+    for rel in _OWN_LIFECYCLE:
+        assert rel in MANIFEST, f"stale exemption: {rel} is not a manifest script"
+        assert not _runs_under_the_harness(script_path(rel)), f"{rel} now runs under the harness — drop its exemption"
 
 
 def test_no_gpu_test_names_a_host_scratch_path():

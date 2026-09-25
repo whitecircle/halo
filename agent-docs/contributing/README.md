@@ -141,8 +141,8 @@ manifest.
   and rejection of unsupported configs — never on private internals.
 - **A CPU test file is a plain pytest module.** It ends in
   `if __name__ == "__main__": raise SystemExit(pytest.main([__file__, "-v"]))`, so a standalone
-  `python tests/cpu/<file>.py` runs exactly what `pytest` collects. The conventions test requires a
-  `pytest.main([__file__, …])` entry in every CPU test file.
+  `python tests/cpu/<file>.py` runs exactly what `pytest` collects. The conventions test requires
+  every CPU test file to end in exactly that block.
 
     A hand-listed runner silently drops any test missing from its list, and a printed pass/fail summary
     hides a FAIL from pytest; both are rejected by `tests/cpu/conventions/test_test_conventions.py`.
