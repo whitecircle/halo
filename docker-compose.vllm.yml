@@ -51,6 +51,7 @@ services:
     # --return-tokens-as-token-ids (train_on_sampled_tokens recovers the sampled ids) and
     # --logprobs-mode processed_logprobs (the IS ratio divides by them; raw_logprobs are
     # pre-temperature). Parsers, prefix caching, chat template: agent-docs/infrastructure/rollout-servers.md
+    # VLLM_TOOL_CALLING_FLAGS set to empty drops tool calling (the ReAct recipes); unset keeps it on.
     command: >
       ${VLLM_MODEL:-Qwen/Qwen3-0.6B}
       --port ${VLLM_PORT:-8000}
@@ -65,9 +66,8 @@ services:
       --logprobs-mode processed_logprobs
       ${VLLM_PREFIX_CACHING_FLAG:---enable-prefix-caching}
       ${VLLM_SPECULATIVE_CONFIG:+--speculative-config '${VLLM_SPECULATIVE_CONFIG}'}
-      --enable-auto-tool-choice
       ${VLLM_TOOL_PARSER_PLUGIN:+--tool-parser-plugin ${VLLM_TOOL_PARSER_PLUGIN}}
-      --tool-call-parser ${VLLM_TOOL_PARSER:-hermes}
+      ${VLLM_TOOL_CALLING_FLAGS---enable-auto-tool-choice --tool-call-parser ${VLLM_TOOL_PARSER:-hermes}}
       ${VLLM_CHAT_TEMPLATE:+--chat-template ${VLLM_CHAT_TEMPLATE}}
       ${VLLM_REASONING_PARSER_PLUGIN:+--reasoning-parser-plugin ${VLLM_REASONING_PARSER_PLUGIN}}
       ${VLLM_REASONING_PARSER:+--reasoning-parser ${VLLM_REASONING_PARSER}}

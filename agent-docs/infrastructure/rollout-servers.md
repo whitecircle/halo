@@ -396,6 +396,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` | `0` | vLLM's grammar-constrained tool calling; off so the served distribution is the policy's and the engine core skips per-step grammar work ([Throughput](#throughput)) |
 | `VLLM_TUNED_CONFIG_FOLDER` | *(unset)* | Directory of tuned Triton MoE tile configs, visible inside the container ([Throughput](#throughput)) |
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
+| `VLLM_TOOL_CALLING_FLAGS` | `--enable-auto-tool-choice --tool-call-parser $VLLM_TOOL_PARSER` | Set to empty (`VLLM_TOOL_CALLING_FLAGS=`) to serve with no tool parser, as the ReAct recipes do; unset keeps the default |
 | `VLLM_TOOL_PARSER_PLUGIN` | *(unset)* | `--tool-parser-plugin` path (gpt-oss uses the baked `/opt/gpt_oss_text_tool_parser.py`) |
 | `VLLM_CHAT_TEMPLATE` | *(unset)* | Set to the SAME `.jinja` the trainer's `chat_template:` uses; the file must be visible inside the server container |
 | `VLLM_REASONING_PARSER` | *(unset)* | Required when training sets `rollout_max_thinking_tokens` |
@@ -455,7 +456,8 @@ open-book `exam_qa`) the absence of the right one is silent and fatal to RL: cal
 `tool_calls`, every episode reward 0, flat zero gradient.
 
 ReAct envs send no `tools` schema (their tools are named in the system prompt) and parse actions
-from the response text, so the parser plays no part there; the ReAct recipes serve without one.
+from the response text, so the parser plays no part there; the ReAct recipes serve without one
+(`VLLM_TOOL_CALLING_FLAGS=` under compose).
 Native-tool parsers per family:
 
 | Family | `--tool-call-parser` |

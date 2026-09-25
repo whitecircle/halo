@@ -68,9 +68,13 @@ def test_both_composes_configure_a_tool_call_parser():
 
     The environment then sees no ``tool_calls``, every episode ends unsolved at reward 0, and every
     GRPO group is degenerate — the run trains to completion with a flat zero gradient and no error.
+    vLLM's pair is a default that only an explicitly empty ``VLLM_TOOL_CALLING_FLAGS`` drops (the
+    ReAct recipes): the unset-only ``-`` operator, where ``:+`` would leave it off by default.
     """
     vllm = _server_command(VLLM_COMPOSE, "vllm-server")
-    assert "--tool-call-parser" in vllm and "--enable-auto-tool-choice" in vllm
+    assert (
+        "${VLLM_TOOL_CALLING_FLAGS---enable-auto-tool-choice --tool-call-parser ${VLLM_TOOL_PARSER:-hermes}}" in vllm
+    ), vllm
     sglang = _server_command(SGLANG_COMPOSE, "sglang-server")
     assert "--tool-call-parser" in sglang, (
         "docker-compose.sglang.yml must pass --tool-call-parser: without it tool-using environments "
