@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.logging import get_logger
@@ -689,16 +690,16 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
     ) -> torch.Tensor:
         """Average per-sequence log probs, all-reducing partial sums/counts across the CP group.
 
-        Each CP rank holds only its chunk's partial sums and counts.
+        Each CP rank holds only its chunk's partial sums and counts. The logp-sum reduce must be
+        autograd-aware (its backward sums the gradient over the group): an in-place
+        ``dist.all_reduce`` reaches autograd only through the deprecated c10d fallback, as the identity.
         """
         if cp_config is None or cp_config.cp_size <= 1:
             return logp_sums / token_counts.clamp(min=1)
 
         # fp32 collectives: a bf16 all-reduce(SUM) of per-sequence logp sums is lossy.
-        global_logp_sums = logp_sums.clone().float()
+        global_logp_sums = dist_nn.all_reduce(logp_sums.float(), group=cp_config.process_group)
         global_token_counts = token_counts.clone().float()
-
-        dist.all_reduce(global_logp_sums, op=dist.ReduceOp.SUM, group=cp_config.process_group)
         dist.all_reduce(global_token_counts, op=dist.ReduceOp.SUM, group=cp_config.process_group)
 
         return global_logp_sums / global_token_counts.clamp(min=1)
@@ -864,7 +865,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         total_loss = per_token_nll.sum(dtype=torch.float32)
         total_count = loss_mask.sum().float()
         if cp_config is not None and cp_config.cp_size > 1:
-            dist.all_reduce(total_loss, op=dist.ReduceOp.SUM, group=cp_config.process_group)
+            total_loss = dist_nn.all_reduce(total_loss, group=cp_config.process_group)
             dist.all_reduce(total_count, op=dist.ReduceOp.SUM, group=cp_config.process_group)
         return total_loss / total_count.clamp(min=1)
 
@@ -1347,12 +1348,9 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         combined_sft_loss = self.chosen_sft_ratio * chosen_sft_loss + (1 - self.chosen_sft_ratio) * rejected_sft_loss
 
+        # No cp_size factor under CP: both terms reach the loss through autograd all-reduces, whose
+        # backward sums the cp_size rank-identical copies and so cancels FSDP2's 1/cp_size average.
         total_loss = margin_losses.mean() + combined_sft_loss
-
-        # Both terms are already a CP-global mean, but FSDP2 averages grads over cp_size * dp_size —
-        # cancel the 1/cp_size. Any future aux term must be added after this scaling.
-        if self.cp_size > 1:
-            total_loss = total_loss * self.cp_size
 
         # Every pair is valid off PP, and the logit means / SFT losses already arrive as means (under
         # CP, CP-global ones) — unit divisors report them as they are instead of re-reducing them.
