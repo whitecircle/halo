@@ -3,7 +3,8 @@
 The store is unauthenticated, and the engine reads the NCCL bootstrap from it while the group forms
 (vLLM unpickles it). Bound on every interface, any host that reaches the group port in that window
 can plant a bootstrap of its own. The listener therefore binds the advertised address on both
-engines; a wide bind is the explicit ``HALO_WEIGHT_SYNC_BIND_ALL`` opt-in, and an advertised
+engines, and the engine is sent that resolved address rather than a name it might resolve
+differently; a wide bind is the explicit ``HALO_WEIGHT_SYNC_BIND_ALL`` opt-in, and an advertised
 address this host cannot bind alone is refused before the engine is asked to join, never silently
 widened.
 
@@ -155,6 +156,18 @@ def test_the_listener_binds_the_advertised_address(client, engine_requests, adve
     )
 
 
+def test_a_name_is_advertised_as_the_address_the_listener_binds(client, engine_requests):
+    """The engine resolves a name on its own host, where it can map elsewhere; it is sent the address
+    the listener took, so it dials the listener rather than wherever the name points there."""
+    client.group_host = "localhost"
+
+    client.init_communicator(device="cpu")
+
+    [(advertised, port)] = engine_requests
+    assert advertised == "127.0.0.1", f"the engine was sent {advertised!r}, not the address the listener binds"
+    assert _listening_addresses(port) == ["127.0.0.1"]
+
+
 def test_the_opt_in_binds_every_interface(client, engine_requests, monkeypatch, caplog):
     """``HALO_WEIGHT_SYNC_BIND_ALL`` is the one way to a wide bind, for a NAT or port-mapped trainer, and
     it is announced at WARNING: an operator must see that the unauthenticated store is on the network."""
@@ -201,6 +214,24 @@ def test_a_name_resolving_to_loopback_is_refused_for_a_remote_server(
 
     assert not opened_listeners, f"a listener was opened on loopback for a remote server: {opened_listeners}"
     assert not engine_requests, "the engine was asked to dial a listener it cannot reach"
+
+
+@pytest.mark.parametrize("bind_all", [False, True], ids=["narrow", "bind_all"])
+def test_an_ipv6_group_address_is_refused_as_unsupported(
+    client, engine_requests, opened_listeners, monkeypatch, bind_all
+):
+    """The listener is IPv4-only, the wide one included, so an IPv6 group address is refused as
+    unsupported in either mode, without pointing at an opt-in that could not serve it."""
+    if bind_all:
+        monkeypatch.setenv(BIND_ALL_ENV, "1")
+    client.group_host = "::1"
+
+    with pytest.raises(RuntimeError, match="IPv6 is unsupported") as refused:
+        client.init_communicator(device="cpu")
+
+    assert BIND_ALL_ENV not in str(refused.value), f"the refusal suggests the IPv4-only opt-in: {refused.value}"
+    assert not opened_listeners, f"a rendezvous listener was opened for an IPv6 address: {opened_listeners}"
+    assert not engine_requests, "the engine was asked to dial an IPv6 address no listener takes"
 
 
 def test_an_auto_picked_port_is_probed_on_the_bind_address(client, monkeypatch):
