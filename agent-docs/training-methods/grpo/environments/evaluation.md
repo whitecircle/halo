@@ -43,7 +43,7 @@ wins over the YAML, the YAML over the default.
 
 The training run's check of `episode_timeout` against the NCCL watchdog stays with training: the
 eval joins no process group, so a recipe whose budget needs a raised `DIST_NCCL_TIMEOUT_MINUTES`
-(the code-contests recipes' `2700`) evaluates without it.
+(the code-contests recipes' `episode_timeout: 2700`) evaluates without it.
 
 To compare a checkpoint with its base, serve each in turn under the same `--served-model-name` and
 run one command with `--training_config`, dataset, split and `--num_samples` fixed, so only the

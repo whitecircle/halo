@@ -25,8 +25,9 @@ Authoritative: `agent-docs/data/dataset-formats.md`. Messages are OpenAI ChatML
   ([rule](../../agent-docs/training-methods/grpo/environments/swe-environment.md#reward)); `native_*`
   and `mcp` need none. A ReAct preset given an `answer_validator` clears the requirement, and an
   explicit `environment_kwargs.requires_answer` overrides it, except that `swe` refuses `false`
-  without a `test_function` while the reward has an `environment` term. Rename the columns with `prompt_field` / `answer_field` (a renamed answer still
-  lands in the row as `answer`); an unknown name raises at startup.
+  without a `test_function` while the reward has an `environment` term. Rename the columns with
+  `prompt_field` / `answer_field` (a renamed answer still lands in the row as `answer`); an unknown
+  name raises at startup.
 - **Reward** — `chosen`, `rejected` (`List[Dict]`), optional `prompt` (implicit-prompt sets like
   Skywork-Reward keep the shared turns inside chosen/rejected) and `images`. There is **no
   pre-tokenization pass**: TRL's `RewardTrainer` chat-templates and tokenizes the raw columns.

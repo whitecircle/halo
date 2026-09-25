@@ -40,7 +40,7 @@ from src.environments.sandbox.base import SandboxExecutor, SandboxResult
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
-from tests.common.code_contests import StubSandbox
+from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 
 _JUDGE = {"source": "judge", "name": "quality", "requirements": [{"name": "done", "description": "Done."}]}
 
@@ -257,22 +257,6 @@ def test_a_graded_program_cannot_read_a_hidden_input_back_by_default(program, hi
     assert outcome.details.splitlines()[1:] == [verdict], outcome.details
 
 
-class _Answering:
-    """A requests session that answers every ``/run_code`` POST with one SandboxFusion body."""
-
-    def __init__(self, body: dict):
-        self._body = body
-
-    def post(self, url, json=None, timeout=None):
-        return self
-
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self._body
-
-
 @pytest.mark.parametrize(
     "body",
     [
@@ -284,7 +268,7 @@ class _Answering:
 def test_a_remote_error_shows_its_class_alone_by_default(body, caplog):
     """A service's error text can quote what the program wrote: the verdict shows the class, the log
     the text."""
-    remote = RemoteSandbox("http://sandbox:8080", session=_Answering(body))
+    remote = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(body))
     tests = [{"input": "", "output": "right"}]
     outcome = run_solution_against_tests("code", tests, sandbox=remote, language="cpp")
     assert outcome.details.splitlines()[1:] == ["Test 1: ERROR -- grading infrastructure failure"], outcome.details
@@ -328,7 +312,7 @@ _REMOTE_COMPILE_ERROR = {
 
 def test_a_remote_compile_message_shows_under_full_only():
     """A remote build shares each test's request with its stdin, so its message may quote it."""
-    remote = RemoteSandbox("http://sandbox:8080", session=_Answering(_REMOTE_COMPILE_ERROR))
+    remote = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(_REMOTE_COMPILE_ERROR))
     tests = [{"input": "HIDDEN-4217", "output": "right"}]
     outcome = run_solution_against_tests("code", tests, sandbox=remote, language="cpp")
     assert outcome.details.splitlines()[1:] == ["COMPILATION ERROR (every test fails)"], outcome.details
