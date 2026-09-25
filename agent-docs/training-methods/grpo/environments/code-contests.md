@@ -235,9 +235,11 @@ must exceed. Every episode sends its level's thinking budget, so the vLLM server
 [reasoning budget](../async-grpo/rollouts.md#reasoning-budget) needs, a reasoning parser among it;
 without one vLLM rejects the request. A non-thinking model served with a think-tag parser gets its
 whole answer back as reasoning (no end marker reads as all reasoning), so evaluate one with
-`--env_kwargs '{"reasoning_effort": null}'`: no level, no budget, no parser needed. The eval knows
-the server is SGLang only from a `--training_config` naming `rollout_backend: sglang`, which drops
-the budget as [training does](../async-grpo/rollouts.md#reasoning-budget).
+`--reasoning_effort none`: no level, no budget, no parser needed, and a default `--max_tokens` of
+32768, the training rollout's. Under `--training_config` the level defaults to the YAML's, where a
+`reasoning_effort: null` is `none`; only a YAML without the key takes `medium`, as training does.
+The eval knows the server is SGLang only from a `--training_config` naming `rollout_backend: sglang`,
+which drops the budget as [training does](../async-grpo/rollouts.md#reasoning-budget).
 
 `--eval_protocol` picks the [evaluation protocol](#evaluation-protocols), else the training
 config's, else `harness`; the report title and the trajectory meta name it. A training config

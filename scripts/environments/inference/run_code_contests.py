@@ -51,6 +51,7 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
+from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
@@ -85,6 +86,9 @@ DEFAULT_ENV_TYPE = "codeforces"
 DEFAULT_TEMPERATURE = 0.2
 # Env options with a flag of their own, the flag being their one spelling on this command line.
 FLAG_OWNED_ENV_KWARGS = ("max_turns", "language", "eval_protocol", "reasoning_effort")
+# ``--reasoning_effort``'s spelling of no level (``reasoning_effort=None``): no episode sends a level
+# or a level's thinking budget, the setting a non-thinking model is evaluated under.
+NO_REASONING_EFFORT = "none"
 
 
 def parse_list_flag(flag: str, value: str) -> list[str]:
@@ -133,6 +137,26 @@ def resolve_eval_protocol(flag: str | None, trained_env: dict[str, Any]) -> tupl
     return eval_protocol, without_eval_protocol_pins(trained_env, eval_protocol, "the training config")
 
 
+def resolve_effort_setting(flag: str | None, trained_env: dict[str, Any]) -> str | None:
+    """The run's effort level: the flag (:data:`NO_REASONING_EFFORT` = no level), else the training
+    config's, else :data:`DEFAULT_REASONING_EFFORT`. As in training, the default fills only a key the
+    config omits: a config setting ``reasoning_effort: null`` trained at no level and is evaluated at none."""
+    if flag is not None:
+        return None if flag == NO_REASONING_EFFORT else flag
+    return trained_env.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
+
+
+def default_max_tokens(flag: str | None) -> int:
+    """``--max_tokens``' default without ``--training_config``: the flag's level's thinking budget plus
+    :data:`SOLUTION_HEADROOM_TOKENS`. Without a level there is no thinking budget to size it from, so it
+    takes the training rollout's own default. Read off the flag alone: under a training config the YAML's
+    ``rollout_max_tokens`` is the default, and its level may be ``random``, which has no budget."""
+    level = resolve_effort_setting(flag, {})
+    if level is None:
+        return DEFAULT_ROLLOUT_MAX_TOKENS
+    return REASONING_EFFORT_PROFILES[level]["thinking_tokens"] + SOLUTION_HEADROOM_TOKENS
+
+
 def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], env_kwargs: dict) -> dict[str, Any]:
     """The run's environment config, built once: the environment is made from it and the meta line
     records it, so the two cannot disagree. The training config's options come first (under the
@@ -144,9 +168,7 @@ def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], en
         "max_turns": resolve_setting(args.max_turns, trained_env.get("max_turns"), None),
         **({"language": parse_language_flag(args.language)} if args.language else {}),
         "eval_protocol": eval_protocol,
-        "reasoning_effort": resolve_setting(
-            args.reasoning_effort, trained_env.get("reasoning_effort"), DEFAULT_REASONING_EFFORT
-        ),
+        "reasoning_effort": resolve_effort_setting(args.reasoning_effort, trained_env),
         **env_kwargs,
     }
 
@@ -165,7 +187,7 @@ def contest_meta(
     adapter_name: str,
     selection: ContestSelection,
     env: CodeContestsEnvironment,
-    reasoning_effort: str,
+    reasoning_effort: str | None,
     env_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """The code-contest keys of the trajectory meta line: what the offline re-grader rebuilds the run's
@@ -262,10 +284,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--reasoning_effort",
         default=None,
-        choices=sorted(REASONING_EFFORT_PROFILES),
-        help=f"Solver reasoning effort, passed to the model's chat template (low/medium/high). Default: the "
-        f"training config's under --training_config, else {DEFAULT_REASONING_EFFORT}. Sets the default "
-        f"--max_tokens unless --max_tokens or --training_config is given.",
+        choices=[*sorted(REASONING_EFFORT_PROFILES), NO_REASONING_EFFORT],
+        help=f"Solver reasoning effort, passed to the model's chat template (low/medium/high), or "
+        f"{NO_REASONING_EFFORT}: no level and no thinking budget, for a non-thinking model. Default: the "
+        f"training config's under --training_config (a null there is {NO_REASONING_EFFORT}), else "
+        f"{DEFAULT_REASONING_EFFORT}. Sets the default --max_tokens unless --max_tokens or "
+        f"--training_config is given.",
     )
     p.add_argument(
         "--max_tokens",
@@ -274,7 +298,8 @@ def parse_args() -> argparse.Namespace:
         help="Max tokens per generation. Default: the training config's rollout_max_tokens under "
         "--training_config, else the effort profile's thinking budget "
         + ", ".join(f"{level}={p['thinking_tokens']}" for level, p in REASONING_EFFORT_PROFILES.items())
-        + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom.",
+        + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom; under --reasoning_effort {NO_REASONING_EFFORT}, "
+        f"the training rollout's default {DEFAULT_ROLLOUT_MAX_TOKENS}.",
     )
     p.add_argument("--max_workers", type=int, default=16, help="Concurrent episodes.")
     p.add_argument(
@@ -352,13 +377,12 @@ def main() -> None:
 
     # Without a training config the flag's effort level sets the generation budget unless --max_tokens
     # overrides it: too small a budget truncates the chain of thought before any solution and scores
-    # the problem 0. Under one the YAML's rollout_max_tokens is the default.
-    flag_effort = args.reasoning_effort or DEFAULT_REASONING_EFFORT
+    # the problem 0.
     rollout = rollout_config_from_args(
         args,
         contract,
         default_temperature=DEFAULT_TEMPERATURE,
-        default_max_tokens=REASONING_EFFORT_PROFILES[flag_effort]["thinking_tokens"] + SOLUTION_HEADROOM_TOKENS,
+        default_max_tokens=default_max_tokens(args.reasoning_effort),
     )
     logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
 

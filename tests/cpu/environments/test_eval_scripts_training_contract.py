@@ -22,9 +22,13 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
+from scripts.environments.inference.run_code_contests import resolve_env_config
 from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P
 from src.env import resolve_nccl_timeout_minutes
+from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from src.environments.eval_runner import DEFAULT_REQUEST_TIMEOUT_S
+from src.environments.registry import resolve_environment
+from tests.common.code_contests import StubSandbox
 from tests.common.utils import REPO_ROOT
 
 _CALL_TOKEN_ID = 200012
@@ -143,6 +147,25 @@ def test_an_unresolvable_stop_token_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(common.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     with pytest.raises(ValueError, match="<\\|nope\\|>"):
         TrainingContract.load(str(path))
+
+
+@pytest.mark.parametrize(
+    ("effort_line", "level"),
+    [("  reasoning_effort: null\n", None), ("", DEFAULT_REASONING_EFFORT)],
+    ids=["null", "absent"],
+)
+def test_the_coding_eval_takes_the_level_the_training_env_was_built_with(tmp_path, monkeypatch, effort_line, level):
+    """A YAML's ``reasoning_effort: null`` trains at no level and one without the key at the env
+    class's default: the eval resolves each to the level training built its env with, instead of
+    reading the null as unset and grading a no-level policy at the default."""
+    path = tmp_path / "train.yaml"
+    path.write_text(_TRAINING_YAML.replace("  timeout_per_test: 3\n", f"  timeout_per_test: 3\n{effort_line}"))
+    monkeypatch.setattr(common.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    contract = TrainingContract.load(str(path))
+    trained_env = contract.env_config_dict()
+    training = resolve_environment(contract.env_config.environment_type, {**trained_env, "sandbox": StubSandbox()})
+    flags = SimpleNamespace(eval_protocol=None, language=None, reasoning_effort=None, max_turns=None)
+    assert resolve_env_config(flags, trained_env, {})["reasoning_effort"] == training.reasoning_effort == level
 
 
 def test_the_meta_line_records_the_whole_generation_contract(contract, tmp_path):

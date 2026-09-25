@@ -5,20 +5,25 @@
 kept a second submission or a scratchpad would report attempts-until-accept as pass@k, so the protocol
 pins those budgets at every effort level: a config written for this run that contradicts it is
 refused, while a training config's budgets, written under another protocol, give way. ``harness``
-pins nothing.
+pins nothing. The eval script's ``--reasoning_effort none`` evaluates a non-thinking model at no level.
 
 The environments run against a stub sandbox that echoes a canned result (no subprocesses, no network).
 
 Run: python tests/cpu/environments/test_code_contests_protocols.py  (or pytest)
 """
 
+import sys
 from types import SimpleNamespace
 
 import pytest
 
+import src.environments.eval_runner as eval_runner
+from scripts.environments._common import rollout_config_from_args
 from scripts.environments.inference.run_code_contests import (
     FLAG_OWNED_ENV_KWARGS,
     contest_meta,
+    default_max_tokens,
+    parse_args,
     refuse_flag_owned_env_kwargs,
     resolve_env_config,
     resolve_eval_protocol,
@@ -212,6 +217,59 @@ def test_a_default_run_keeps_its_trajectory_file_name():
     assert run_trajectory_path(args, _env(), window) == (
         "/runs/org-m__livecodebench__test__python__2025-01-04..2025-04-06_atcoder.jsonl"
     )
+
+
+# --- No effort level: a non-thinking model ---
+
+
+def _parse_flags(monkeypatch, *flags: str):
+    """The eval script's own parser over ``flags`` plus the two it requires."""
+    monkeypatch.setattr(sys, "argv", ["run_code_contests.py", "--dataset", "d", "--model", "m", *flags])
+    return parse_args()
+
+
+def test_the_effort_flag_spells_no_level_as_none(monkeypatch):
+    """``--env_kwargs`` may not set an option its flag owns, so the flag itself must reach no level:
+    ``none`` is ``reasoning_effort=None``, over a training config's level too."""
+    args = _parse_flags(monkeypatch, "--reasoning_effort", "none")
+    assert resolve_env_config(args, {}, {})["reasoning_effort"] is None
+    assert resolve_env_config(args, {"reasoning_effort": "high"}, {})["reasoning_effort"] is None
+
+
+@pytest.mark.parametrize(("flag", "max_tokens"), [(None, 12288), ("low", 8192), ("high", 20480), ("none", 32768)])
+def test_the_default_generation_budget_follows_the_flag_s_level(flag, max_tokens):
+    """A level's thinking budget plus the solution headroom; no level has no budget to size it from and
+    takes the training rollout's default instead of looking a profile up."""
+    assert default_max_tokens(flag) == max_tokens
+
+
+async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):
+    """``--reasoning_effort none`` end to end: the episode's requests carry no level, no thinking budget
+    and no template variable, so a server without a reasoning parser serves them, and the trajectory and
+    the meta line record no level."""
+    args = _parse_flags(monkeypatch, "--reasoning_effort", "none")
+    env_config = resolve_env_config(args, {}, {})
+    env = CodeContestsEnvironment(sandbox=StubSandbox(), **env_config)
+    rollout = rollout_config_from_args(
+        args, None, default_temperature=0.2, default_max_tokens=default_max_tokens(args.reasoning_effort)
+    )
+    calls = []
+
+    async def fake_generate(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            answer="done", finish_reason="stop", completion_tokens=3, tool_calls=None, reasoning=None, token_ids=None
+        )
+
+    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    traj = await eval_runner.run_episode(env, "solve it", dict(SINGLE_TEST_ANSWER), None, rollout=rollout)
+
+    assert env.reasoning_effort is None
+    assert calls and all(call["extra_body"] == {} for call in calls)
+    assert calls[0]["max_tokens"] == 32768
+    assert eval_runner.serialize_trajectory(traj)["reasoning_effort"] is None
+    meta = contest_meta(args.adapter, ContestSelection(), env, env_config["reasoning_effort"], env_config)
+    assert meta["reasoning_effort"] is None and meta["env_kwargs"]["reasoning_effort"] is None
 
 
 if __name__ == "__main__":

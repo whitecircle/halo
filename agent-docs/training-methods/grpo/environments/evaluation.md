@@ -22,7 +22,7 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 | `--success_threshold` | `1.0` | `run_env.py` only: reward counting a sample as solved, for an environment that reports no solve verdict |
 | `--max_workers` | 32 (16 coding) | Concurrent episodes |
 | `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config |
-| `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding: the effort budget) / 180 s | Sampling, HTTP timeout |
+| `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding at a level: its effort budget) / 180 s | Sampling, HTTP timeout |
 
 `run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through
 `--context_fields`, buckets by `--group_by` and names each example by `--id_field` (default `id`);
@@ -30,11 +30,11 @@ a field that names no column of the split exits before any row is read, except t
 and id columns, which a dataset may lack; like the trainer, it refuses a dataset without the answer
 field before generating when the environment declares `requires_answer`. `run_code_contests.py`
 instead takes `--adapter` (which fixes the bucket and id fields per benchmark), `--language`,
-`--reasoning_effort` (which also sets the default `--max_tokens`), `--eval_protocol`, and
-`--start_date` / `--end_date` / `--platform` on a benchmark that stamps contest dates
-([Code Contests](code-contests.md#evaluation)). There an option with a flag of its own (`--max_turns`,
-`--language`, `--eval_protocol`, `--reasoning_effort`) is refused in `--env_kwargs`, which would
-otherwise override the flag.
+`--reasoning_effort` (`low` / `medium` / `high`, or `none` for no level; it also sets the default
+`--max_tokens`), `--eval_protocol`, and `--start_date` / `--end_date` / `--platform` on a benchmark
+that stamps contest dates ([Code Contests](code-contests.md#evaluation)). There an option with a
+flag of its own (`--max_turns`, `--language`, `--eval_protocol`, `--reasoning_effort`) is refused in
+`--env_kwargs`, which would otherwise override the flag.
 
 `--training_config <yaml>` parses the YAML with the training script's own config classes: its
 `RolloutConfig` (template variables, stop tokens, thinking budget, sampling) and environment config

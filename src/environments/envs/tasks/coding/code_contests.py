@@ -163,7 +163,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         execution_progress_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
         improved_resubmission_refund: float = 0.0,
-        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
         **kwargs,
