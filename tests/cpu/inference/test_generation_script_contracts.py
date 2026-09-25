@@ -27,7 +27,7 @@ from scripts.inference.generation import openai_batched_generation as batched
 
 _ROWS = [{"id": i, "prompt": [{"role": "user", "content": f"q{i}"}]} for i in range(2)]
 
-_BATCHED_ARGV = ["prog", "--model_name", "gen-model", "--input_path", "in", "--output_path", "out"]
+_BATCHED_ARGV = ["prog", "--model", "gen-model", "--input_path", "in", "--output_path", "out"]
 
 
 def _response(answer: str):

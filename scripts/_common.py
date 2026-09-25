@@ -1,14 +1,18 @@
-"""Argparse flags shared by the checkpoint-handling entry scripts.
+"""Argparse flags shared across the ``scripts/`` subtrees.
 
-The shard cap, the Hub-capable source block and the remote-code switch are defined once so the
-tools chained over a single artifact (``after_training/``, ``before_training/``,
-``inference/reward_model/``) accept the same spelling and defaults. Flags only; the drivers they
-feed live in ``src/``.
+The shard cap, the Hub-capable source block, the dtype and device-map pair and the remote-code
+switch are defined once so the tools chained over a single artifact (``after_training/``,
+``before_training/``, ``inference/reward_model/``) accept the same spelling and defaults. The
+OpenAI-compatible endpoint block is defined once for the same reason across the generation, eval
+and playground CLIs (``inference/``, ``environments/``), which all drive one served model. Flags
+only; the drivers they feed live in ``src/``.
 """
 
 import argparse
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
+from src.models.loading.dtype import DTYPE_BY_NAME
 
 # What ``--model_id`` accepts; kept in step with ``resolve_checkpoint_source``.
 HUB_SOURCE_HELP = "Hub repo id or a local checkpoint directory"
@@ -77,4 +81,55 @@ def add_trust_remote_code_arg(parser: argparse.ArgumentParser, *, default: bool 
         f"— {'the remote-code families, e.g. Bailing/Ling, do not load without it' if default else 'this source may be a Hub repo'}). "
         f"Pass {'--no-trust_remote_code for a source you do not trust' if default else '--trust_remote_code for a remote-code family (Bailing/Ling, Laguna) you trust'}.",
     )
+    return parser
+
+
+def add_dtype_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Add the ``--dtype`` flag for a tool that writes a checkpoint, as :data:`DTYPE_BY_NAME` names it."""
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=list(DTYPE_BY_NAME),
+        help="Dtype of the output checkpoint (default: %(default)s).",
+    )
+    return parser
+
+
+def add_device_map_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Add the ``--device_map`` flag for a tool that loads a whole model through ``from_pretrained``."""
+    parser.add_argument(
+        "--device_map",
+        type=str,
+        default=None,
+        help="Device map for the model load, e.g. 'auto' or 'cpu' (default: none, the model loads on the CPU).",
+    )
+    return parser
+
+
+def add_openai_endpoint_args(
+    parser: argparse.ArgumentParser, *, model_help: str | None = None
+) -> argparse.ArgumentParser:
+    """Add the OpenAI-compatible endpoint a generation, eval or playground CLI drives: ``--base_url``,
+    ``--api_key`` and, given ``model_help``, a required ``--model``.
+
+    One spelling and one key-resolution policy, since these CLIs point at the same served model and a
+    command line has to carry from one to the next. Without ``model_help`` no model flag is added,
+    for a CLI where the name is optional (its own flag) or typed into its UI.
+    """
+    parser.add_argument(
+        "--base_url",
+        type=str,
+        default=DEFAULT_LOCAL_BASE_URL,
+        help="OpenAI-compatible base URL (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--api_key",
+        type=str,
+        default=resolve_local_api_key(),
+        help="API key for the endpoint (default: $VLLM_API_KEY, else $OPENAI_API_KEY, else the placeholder a "
+        "keyless local server accepts; a hosted endpoint such as OpenRouter needs a real key).",
+    )
+    if model_help is not None:
+        parser.add_argument("--model", type=str, required=True, help=model_help)
     return parser

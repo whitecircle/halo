@@ -26,7 +26,7 @@ from scripts.inference.reward_model import rm_scoring
 
 
 class _DeadClient:
-    """API client whose every generation call fails, as a wrong --model_name or dead endpoint does."""
+    """API client whose every generation call fails, as a wrong --model or dead endpoint does."""
 
     def __init__(self):
         async def _create(**_kwargs):
@@ -58,7 +58,7 @@ def _prepare_rm_scoring(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, clie
 
     argv = [
         "rm_scoring.py",
-        "--model_name",
+        "--model",
         "gen-model",
         "--prompts_source",
         str(prompts),

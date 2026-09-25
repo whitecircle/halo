@@ -26,7 +26,7 @@ from accelerate import PartialState
 from transformers import AutoModelForSequenceClassification
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
-from scripts._common import add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts._common import add_device_map_arg, add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.adapters import merge_adapter_into_base
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.log import configure_cli_logging
@@ -188,18 +188,8 @@ Examples:
         default="causal_lm",
         help="Model task type (default: causal_lm)",
     )
-    parser.add_argument(
-        "--dtype",
-        choices=list(DTYPE_BY_NAME),
-        default="bf16",
-        help="Model dtype (default: bf16)",
-    )
-    parser.add_argument(
-        "--device_map",
-        type=str,
-        default=None,
-        help="Device map for loading large models (e.g., 'auto', 'cpu')",
-    )
+    add_dtype_arg(parser)
+    add_device_map_arg(parser)
     parser.add_argument(
         "--num_labels",
         type=int,

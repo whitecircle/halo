@@ -4,7 +4,7 @@ Async streaming, configurable generation parameters, and system prompts.
 
 Usage:
     python scripts/inference/playground/gradio_openai_chatbot.py \
-        --model my-model --model-url http://localhost:8000/v1
+        --model my-model --base_url http://localhost:8000/v1
 
     # Serving the model:
     VLLM_MODEL=Qwen/Qwen3-8B docker compose -f docker-compose.vllm.yml up vllm-server
@@ -16,26 +16,15 @@ from collections.abc import AsyncGenerator
 import gradio as gr
 from openai import NOT_GIVEN, AsyncOpenAI
 
+from scripts._common import add_openai_endpoint_args
 from scripts.inference._common import add_gradio_server_args, launch_gradio
-from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, create_openai_client, resolve_local_api_key
+from src.inference.openai_client import create_openai_client
 
 
 def build_parser() -> argparse.ArgumentParser:
     """The chat UI's CLI: the served model it talks to, plus the shared server block."""
     parser = argparse.ArgumentParser(description="OpenAI-compatible chat interface")
-    parser.add_argument(
-        "--model-url",
-        type=str,
-        default=DEFAULT_LOCAL_BASE_URL,
-        help=f"API base URL (default: {DEFAULT_LOCAL_BASE_URL})",
-    )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=resolve_local_api_key(),
-        help="API key for the served model (default: $VLLM_API_KEY, else $OPENAI_API_KEY, else the placeholder "
-        "a keyless local server accepts). A real key belongs in the environment.",
-    )
+    add_openai_endpoint_args(parser)
     # No stand-in default: a made-up name 404s on every request, while omitting the field lets a
     # single-model server answer with whatever it serves.
     parser.add_argument(
@@ -46,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Served model name (default: none — the server's only model answers; a multi-model server needs it)",
     )
     parser.add_argument(
-        "--stop-token-ids", type=str, default="", help="Comma-separated stop token IDs (vLLM-specific)"
+        "--stop_token_ids", type=str, default="", help="Comma-separated stop token IDs (vLLM-specific)"
     )
     add_gradio_server_args(parser, port_default=8730)
     return parser
@@ -132,7 +121,7 @@ def create_demo(client: AsyncOpenAI, model: str | None, stop_token_ids: list[int
 def main():
     args = build_parser().parse_args()
 
-    client = create_openai_client(base_url=args.model_url, api_key_override=args.api_key)
+    client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
     stop_ids = []
     if args.stop_token_ids:

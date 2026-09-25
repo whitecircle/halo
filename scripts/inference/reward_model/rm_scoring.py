@@ -4,7 +4,7 @@ Generates against an OpenAI-compatible API, scores with the reward model, prints
 
 Usage:
     python scripts/inference/reward_model/rm_scoring.py \
-        --model_name my-model \
+        --model my-model \
         --prompts_source data/prompts.jsonl \
         --rm_model_path path/to/reward-model
 
@@ -159,7 +159,7 @@ async def main():
     client, rm_tokenizer, rm_model, rm_device = boot_scoring_run(args)
 
     Path(args.output_folder).mkdir(parents=True, exist_ok=True)
-    output_path = build_output_path(args.output_folder, args.prompts_source, args.model_name, "rm_scoring")
+    output_path = build_output_path(args.output_folder, args.prompts_source, args.model, "rm_scoring")
 
     df = load_prompts_dataframe(args)
 
@@ -218,10 +218,10 @@ async def main():
             len(pending),
             output_path,
             drops=f" (failed={stats['failed']}, truncated={stats['truncated']}, overlong={stats['overlong']})",
-            check="--model_name, the endpoint, and that the RM has a chat template",
+            check="--model, the endpoint, and that the RM has a chat template",
         )
 
-    print_statistics(responses, rewards, args.model_name)
+    print_statistics(responses, rewards, args.model)
     print(
         f"Results saved to {output_path} ({len(rewards) - resumed_count} scored / {stats['failed']} failed / "
         f"{stats['truncated']} truncated / {stats['overlong']} over --rm_max_seq_len / "

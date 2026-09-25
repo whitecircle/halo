@@ -31,7 +31,13 @@ from accelerate import PartialState
 from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
-from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts._common import (
+    add_device_map_arg,
+    add_dtype_arg,
+    add_hub_source_args,
+    add_max_shard_size_arg,
+    add_trust_remote_code_arg,
+)
 from src.checkpoint.tool_io import (
     preflight_model_load_resources,
     reject_in_place_conversion,
@@ -82,19 +88,8 @@ def parse_args():
         action="store_true",
         help="Reset all attention sinks to minimum value before saving",
     )
-    parser.add_argument(
-        "--torch_dtype",
-        type=str,
-        default="bfloat16",
-        choices=list(DTYPE_BY_NAME),
-        help="Torch dtype to load the model with (default: bfloat16)",
-    )
-    parser.add_argument(
-        "--device_map",
-        type=str,
-        default=None,
-        help="Device map for model loading (e.g., 'auto', 'cpu'). If not set, loads on CPU.",
-    )
+    add_dtype_arg(parser)
+    add_device_map_arg(parser)
     add_max_shard_size_arg(parser)
     # --model_id is usually a Hub repo here (this is the tool that patches a freshly downloaded
     # third-party checkpoint), so remote code stays opt-in.
@@ -216,12 +211,10 @@ def main():
     # The shared model_preparation utilities use accelerate's rank-aware logger.
     PartialState()
 
-    torch_dtype = DTYPE_BY_NAME[args.torch_dtype]
-
     logger.info("PATCH VOCABULARY SCRIPT")
     logger.info(f"Model: {args.model_id}")
     logger.info(f"Output: {args.output_dir}")
-    logger.info(f"Dtype: {args.torch_dtype}")
+    logger.info(f"Dtype: {args.dtype}")
     logger.info(f"Reset sinks: {args.reset_sinks}")
 
     patterns = load_patterns(args.patterns)
@@ -248,7 +241,7 @@ def main():
     # would otherwise load with randomly initialized tensors and be saved as a complete-looking
     # patch.
     logger.info("Loading model...")
-    model_kwargs = {"dtype": torch_dtype}
+    model_kwargs = {"dtype": DTYPE_BY_NAME[args.dtype]}
     if args.device_map:
         model_kwargs["device_map"] = args.device_map
 
@@ -283,11 +276,6 @@ def main():
     logger.info("SAVING MODEL AND TOKENIZER")
     logger.info(f"Saving to: {args.output_dir}")
 
-    # _tied_weights_keys belongs to remote_code_compat (apply_remote_code_compat_shims, run by the
-    # auto_load_model above): a per-instance {k: k} here would declare a self-tie on these untied
-    # checkpoints, and save_pretrained would drop the head.
-
-    # Save, restore model_type, then sweep; the processing class carries the patched tokenizer.
     save_full_checkpoint(
         model,
         args.output_dir,

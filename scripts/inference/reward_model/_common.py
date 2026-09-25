@@ -18,8 +18,8 @@ import pandas as pd
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from scripts._common import add_trust_remote_code_arg
-from scripts.inference._common import add_generation_args, add_openai_endpoint_args
+from scripts._common import add_openai_endpoint_args, add_trust_remote_code_arg
+from scripts.inference._common import add_generation_args
 from src.checkpoint.tool_io import reject_sharded_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
@@ -35,7 +35,7 @@ _MESSAGE_DUMP_EXCLUDE = {"function_call", "tool_calls", "refusal", "audio"}
 # Longest basename these scripts will build, in bytes. Common filesystems cap a single name at 255
 # bytes, and the failure surfaces as an uncaught OSError(ENAMETOOLONG) from the first
 # `output_path.exists()`, after the reward model is already resident on the GPU. Reachable in
-# practice: vLLM's --served-model-name defaults to the served model's path, which --model_name then
+# practice: vLLM's --served-model-name defaults to the served model's path, which --model then
 # carries.
 _MAX_OUTPUT_BASENAME = 255
 
@@ -118,7 +118,7 @@ def boot_scoring_run(args) -> tuple[Any, Any, Any, torch.device]:
     One call for both scripts, so neither drifts onto a different set of ``--rm_*`` knobs; every flag
     the reward model is loaded under is threaded here.
     """
-    client = create_openai_client(base_url=args.openai_base_url, api_key_override=args.openai_api_key)
+    client = create_openai_client(base_url=args.base_url, api_key_override=args.api_key)
     rm_tokenizer, rm_model, rm_device = load_reward_model(
         args.rm_model_path,
         args.rm_model_atten_impl,
@@ -206,7 +206,7 @@ async def generate_chat_message(client, messages: list[dict], args, response_for
     """
     completion = await client.chat.completions.create(
         messages=messages,
-        model=args.model_name,
+        model=args.model,
         temperature=args.temperature,
         response_format=response_format,
         max_tokens=args.max_gen_tokens,

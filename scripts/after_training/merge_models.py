@@ -49,7 +49,7 @@ from safetensors import safe_open
 from transformers import AutoConfig
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
-from scripts._common import add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts._common import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
@@ -516,7 +516,7 @@ def main() -> int:
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--method", default="linear", choices=list(_METHODS))
     parser.add_argument("--base_model", default=None, help="Base for task_arithmetic / ties.")
-    parser.add_argument("--dtype", default="bfloat16", choices=list(DTYPE_BY_NAME))
+    add_dtype_arg(parser)
     # Knob defaults stay None here and resolve in merge_models(), so a knob a method ignores raises;
     # the help text renders each op signature's own default rather than a copy of it.
     parser.add_argument(

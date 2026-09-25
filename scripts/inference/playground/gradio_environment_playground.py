@@ -22,12 +22,13 @@ from typing import Any
 
 import gradio as gr
 
+from scripts._common import add_openai_endpoint_args
 from scripts.inference._common import add_gradio_server_args, launch_gradio
 from src.configs.rollout_config import RolloutConfig
 from src.environments.base import Trajectory
 from src.environments.eval_runner import require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
-from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, create_openai_client, resolve_local_api_key
+from src.inference.openai_client import DEFAULT_LOCAL_BASE_URL, create_openai_client
 
 # Per non-assistant message, in the transcript panel: a full tool observation (a failing test log, a
 # search dump) is capped at 16k chars by the env itself and would dominate the turn it belongs to.
@@ -239,20 +240,7 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
 def build_parser() -> argparse.ArgumentParser:
     """The playground's CLI: the rollout endpoint it prefills, plus the shared server block."""
     parser = argparse.ArgumentParser(description="Gradio Environment Playground")
-    parser.add_argument(
-        "--vllm-url",
-        type=str,
-        default=DEFAULT_LOCAL_BASE_URL,
-        help=f"Rollout server base URL, prefilled into the UI (default: {DEFAULT_LOCAL_BASE_URL}).",
-    )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=resolve_local_api_key(),
-        help="API key for the rollout server (default: $VLLM_API_KEY, else $OPENAI_API_KEY, else the "
-        "placeholder a keyless local server accepts). A real key belongs in the environment. Kept "
-        "server-side.",
-    )
+    add_openai_endpoint_args(parser)
     add_gradio_server_args(parser, port_default=7860)
     return parser
 
@@ -260,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     args = build_parser().parse_args()
 
-    demo = create_demo(default_base_url=args.vllm_url, api_key=args.api_key)
+    demo = create_demo(default_base_url=args.base_url, api_key=args.api_key)
     launch_gradio(demo, args, theme=gr.themes.Soft())
 
 

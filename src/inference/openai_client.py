@@ -64,7 +64,7 @@ class RequestTools:
 def resolve_local_api_key() -> str:
     """Key for the local rollout server: ``VLLM_API_KEY`` → ``OPENAI_API_KEY`` → placeholder.
 
-    The CLI default for every ``--openai_api_key`` flag; an explicit key arrives as the flag's value
+    The CLI default for the shared ``--api_key`` flag; an explicit key arrives as the flag's value
     instead. ``VLLM_API_KEY`` is checked first because it is the server-side ``--api-key``
     convention.
     """

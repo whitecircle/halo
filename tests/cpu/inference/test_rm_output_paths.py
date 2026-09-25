@@ -6,7 +6,7 @@ prompt source therefore makes a second model's run read the first model's rows a
 generate nothing — while appending its results to a file that claims a different ``gen_model``.
 
 The name is also the first thing touched after the reward model is resident on the GPU
-(``output_path.exists()``), so an over-long ``--model_name`` — vLLM's ``--served-model-name`` defaults
+(``output_path.exists()``), so an over-long ``--model`` — vLLM's ``--served-model-name`` defaults
 to the served model's PATH — must not surface as an uncaught ``OSError(ENAMETOOLONG)`` there.
 
 Run: ``python tests/cpu/inference/test_rm_output_paths.py`` (or ``pytest -m cpu``).

@@ -82,7 +82,7 @@ export dtype. The index metadata is HF's own — there is no `merged_from_*` mar
 ### `merge_peft_adapters.py`
 Load base + adapter, `merge_and_unload()`, save standalone HF checkpoint (base path read from
 `adapter_config.json`). Flags: `--adapter_dir`, `--output_dir`,
-`--task {causal_lm,classification}`, `--dtype {bf16,fp16,fp32}`, `--device_map` (`auto`/`cpu` for big
+`--task {causal_lm,classification}`, `--dtype` (`bfloat16`), `--device_map` (`auto`/`cpu` for big
 models), `--num_labels`, `--max_shard_size` (`5GB`), `--attn_implementation`, plus the shared
 `--trust_remote_code` / `--quiet`. Uses
 `resolve_auto_model_class`, so **VLM bases load as the full `*ForImageTextToText` wrapper** (avoids
