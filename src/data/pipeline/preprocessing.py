@@ -18,7 +18,11 @@ from PIL.Image import DecompressionBombError
 from transformers import AutoConfig, PreTrainedTokenizer
 
 from src.data.pipeline.conversation import maybe_parse_json
-from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, PreprocessingConfig
+from src.data.pipeline.preprocessed_metadata import (
+    PACKING_STRATEGIES,
+    PreprocessedDatasetMetadata,
+    PreprocessingConfig,
+)
 from src.data.pipeline.processing import (
     coordinated_filter,
     coordinated_map,
@@ -593,10 +597,10 @@ def preprocess_dataset(
         raise ValueError("Packing is not supported for VLM datasets. Set pack_sequences=False when using is_vlm=True.")
 
     # Reject an invalid packing strategy here rather than failing deep inside trl.pack_dataset.
-    if config.pack_sequences and config.packing_strategy not in {"bfd", "bfd_split", "wrapped"}:
+    if config.pack_sequences and config.packing_strategy not in PACKING_STRATEGIES:
         raise ValueError(
             f"Invalid packing_strategy '{config.packing_strategy}'. "
-            "TRL pack_dataset only accepts 'bfd', 'bfd_split' or 'wrapped'."
+            f"TRL pack_dataset only accepts {list(PACKING_STRATEGIES)}."
         )
 
     _reject_unconsumed_image_columns(dataset, config)
