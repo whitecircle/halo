@@ -170,22 +170,9 @@ def test_is_vlm_model_probe_is_revision_pinned(path: Path):
         )
 
 
-_VLM_SETUP = _REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py"
-
-
 @pytest.mark.parametrize(
     "path",
-    [
-        pytest.param(
-            p,
-            marks=pytest.mark.xfail(
-                strict=True, reason="load_model_for_training probes without model_config.trust_remote_code"
-            ),
-        )
-        if p == _VLM_SETUP
-        else p
-        for p in _VLM_PROBE_CALL_SITES
-    ],
+    _VLM_PROBE_CALL_SITES,
     ids=[str(p.relative_to(_REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
 )
 def test_is_vlm_model_probe_threads_trust_remote_code(path: Path):
@@ -200,6 +187,31 @@ def test_is_vlm_model_probe_threads_trust_remote_code(path: Path):
         assert "config" in kwargs or "trust_remote_code" in kwargs, (
             f"{path}: modality probe fetches a config without the run's trust_remote_code="
         )
+
+
+def _forced_remote_code_lines(path: Path) -> list[int]:
+    """Lines where ``path`` passes a literal ``trust_remote_code=True``."""
+    return [
+        node.lineno
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and any(
+            kw.arg == "trust_remote_code" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+            for kw in node.keywords
+        )
+    ]
+
+
+def test_no_src_load_forces_trust_remote_code():
+    """Every load in ``src/`` takes the run's ``trust_remote_code``. Forced on, it runs a
+    checkpoint's remote modules the run never trusted, and on a repo that ships a native class
+    beside an ``auto_map`` it swaps the native config or processor for the remote one."""
+    src_files = sorted((_REPO_ROOT / "src").rglob("*.py"))
+    assert len(src_files) > 100, f"the src/ sweep collapsed to {len(src_files)} files"
+    forced = [
+        f"{path.relative_to(_REPO_ROOT)}:{line}" for path in src_files for line in _forced_remote_code_lines(path)
+    ]
+    assert not forced, f"trust_remote_code=True hardcoded at {forced}; pass the run's model_config.trust_remote_code"
 
 
 # sft.py: preprocessed completion-masking mismatch

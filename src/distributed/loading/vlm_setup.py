@@ -87,7 +87,7 @@ def load_vlm_processor(model_config: ModelConfig):
         "vlm_processor",
         lambda: AutoProcessor.from_pretrained(
             model_config.model_name_or_path,
-            trust_remote_code=True,
+            trust_remote_code=model_config.trust_remote_code,
             revision=getattr(model_config, "model_revision", None),
         ),
     )
@@ -171,7 +171,7 @@ def load_vlm_model_and_processor(
         else hub_metadata_main_first(
             "vlm_tokenizer",
             lambda: AutoTokenizer.from_pretrained(
-                model_config.model_name_or_path, trust_remote_code=True, revision=revision
+                model_config.model_name_or_path, trust_remote_code=model_config.trust_remote_code, revision=revision
             ),
         )
     )
@@ -182,7 +182,7 @@ def load_vlm_model_and_processor(
         parallelism_config,
         weights_source=weights_source,
         attn_default=attn_default,
-        trust_remote_code=True,
+        trust_remote_code=model_config.trust_remote_code,
         revision=revision,
         reset_sinks=reset_sinks,
         train_sinks=train_sinks,
@@ -217,7 +217,9 @@ def load_model_for_training(
     takes the same branch and any ``vlm_probe`` store phase a caller enters stays uniform too.
     """
     revision = getattr(model_config, "model_revision", None)
-    if not text_only_model and is_vlm_model(model_config.model_name_or_path, revision=revision):
+    if not text_only_model and is_vlm_model(
+        model_config.model_name_or_path, revision=revision, trust_remote_code=model_config.trust_remote_code
+    ):
         if init_from_scratch:
             raise ValueError("init_from_scratch is not supported for VLM models.")
         model, processor, tokenizer = load_vlm_model_and_processor(
