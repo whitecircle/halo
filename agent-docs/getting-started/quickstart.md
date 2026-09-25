@@ -148,7 +148,8 @@ That config declares `expert_parallel_size: 8`, so no CLI flag is needed. `HALO_
 
 The log-writing rank tees stdout and stderr to `<output_dir>/log/run.log` with no shell redirection —
 global rank 0 on a shared filesystem, each node's local rank 0 otherwise. `tail -f` it to monitor;
-append `> $D/job.log 2>&1` to also capture the other ranks (e.g. a crash off rank 0).
+append `> $D/job.log 2>&1` to also capture the other ranks (e.g. a crash off rank 0). A log directory
+or `tee` that cannot be set up is warned on that rank, and the run continues without the file.
 
 ## 6. CLI overrides
 

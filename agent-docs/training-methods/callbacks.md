@@ -37,7 +37,7 @@ Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline.
 | `tokens_per_second` | This GPU's tokens over step compute time — the headline |
 | `cluster_tokens_per_second` | Unique cluster tokens: per-GPU × `data_parallel_size` × `cp_size` |
 | `step_time_seconds` | Optimizer-step wall clock |
-| `mfu_percent`, `tflops_per_sec` | Against the device peak in `src/hardware.py`; `0.0` for a pair it lacks |
+| `mfu_percent`, `tflops_per_sec` | Against the device peak in `src/hardware.py`; `0.0`, with a startup warning, for an undetected GPU or a GPU/precision pair it lacks |
 | `smfu_percent`, `smfu_tflops_per_sec` | MoE-aware twin, crediting only the experts that fire; sparse models only |
 
 Memory keys take no prefix: `allocated_gb`, `reserved_gb`, `peak_allocated_gb`, `training_peak_allocated_gb`; `num_full_model_params` adds `distributed_efficiency`.

@@ -154,7 +154,8 @@ backend's serialized state (vocab, merges, normalizer), else the sorted vocab ta
 chat-template hash and the special-token ids; `name_or_path` is the fallback only where no
 content is readable. A resume that repoints the load at the run's own checkpoint therefore
 reuses the map cache instead of re-tokenizing the corpus, and an edited vocab, template or
-special-token id invalidates it.
+special-token id invalidates it. A content read that raises falls back to the path with a one-time
+warning per tokenizer class: that key misses on every resume leg and survives an in-place edit.
 
 For pre-sharded loads the key also carries the DP rank/size: each rank holds a disjoint slice, and
 without the DP identity equal-length shards would

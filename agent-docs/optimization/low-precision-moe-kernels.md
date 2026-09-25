@@ -158,7 +158,7 @@ A VLM's **vision tower and projector are excluded** on top of that: the dense co
 
 Fused 3-D expert banks take their contraction axis from the resolved layer class, so a multimodal wrapper or remote-code checkpoint quantizes on the correct axis; 2-D `*.weight` matrices take `--contraction_axis` (default `-1`, the `in_features` of an `[out, in]` Linear).
 
-A weight whose contraction axis is not block-divisible is copied through in high precision rather than silently mis-blocked. `--verify` reports the max round-trip dequant relerr, which is how a wrong axis shows up.
+A weight whose contraction axis is not block-divisible is copied through in high precision rather than silently mis-blocked. `--verify` reports the max round-trip dequant relerr, which is how a wrong axis shows up: past the format's own error (mxfp8 0.08, nvfp4 0.25, mxfp4 0.35) it raises naming the worst tensor, before the index and `config.json` are written, so the rejected export does not load.
 
 `--include`/`--exclude` override both fences. `--output_dir` must differ from `--input_dir`.
 
