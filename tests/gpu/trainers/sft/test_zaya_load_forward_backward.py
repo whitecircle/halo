@@ -19,11 +19,11 @@ What this validates:
 Single-GPU, no torchrun. Plain DDP / FSDP / EP / TP / CP wrappers are
 exercised by separate tests; this one isolates the modeling + patch path.
 
-Memory budget (B300, 275 GB HBM):
+Memory budget (B300, 288 GB HBM):
   weights bf16: ~17 GB
   AdamW master + state (fp32): ~70 GB (Param + m + v at fp32, then bf16 copy)
   fwd activations (8-token batch): a few hundred MB
-  Total: ~90 GB, comfortably below the 275 GB ceiling.
+  Total: ~90 GB, comfortably below the 288 GB ceiling.
 
 Run:
     docker run --rm --gpus '"device=0"' \\

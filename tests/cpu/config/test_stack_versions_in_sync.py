@@ -135,7 +135,6 @@ HISTORICAL_FORMS: dict[str, str] = {
 # Numbers that are deliberately not the pin and have no such shape. Each entry must still match
 # something, so a statement that is deleted or corrected takes its exemption with it.
 ALLOWED_EXCEPTIONS: dict[tuple[str, str], str] = {
-    ("torch", "2.13"): "the torch generation vLLM 0.27+ / SGLang 0.5.18 move to — why the engines are capped",
     ("nccl", "2.28.9"): "torch's own wheel-metadata pin — the value the uv override exists to replace",
     ("cutlass_dsl", "4.4.2"): "gram-newton-schulz's own hard pin — the value the force-reinstall exists to replace",
 }

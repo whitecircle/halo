@@ -228,8 +228,8 @@ class AsyncTrainingConfig(AdvantageShapingArguments, ChunkedLogprobsArguments):
     max_train_row_tokens: int | None = field(
         default=None,
         metadata={
-            "help": "Longest training row (prompt + completion tokens) a training rank takes; None = the model's "
-            "context window. A per-turn row over it is left out of the batch (the episode's other turns still "
+            "help": "Longest training row (prompt + completion tokens) a training rank takes; None = no cap beyond "
+            "the context check. A per-turn row over it is left out of the batch (the episode's other turns still "
             "train); a whole-trajectory row over it trains as a zero-weight row. Logged as "
             "sampling/rows_over_cap_frac: rows left out over rows left out plus rows that train. A memory bound "
             "for the training ranks — must be above rollout_max_tokens — below the context check, which rejects "

@@ -75,7 +75,8 @@ learning_rate: 1.0e-5
 The hint is filled from the column named by `sdpg_answer_field` (default `answer`). The warmup and
 decay steps ramp the distillation coefficient in after the SFT term has settled and phase it back
 out near the end. `reference_kl_coef: 0` means no reference model is loaded at all; raise it only if
-you want an anchor against the starting weights, which costs a second resident model.
+you want an anchor against the starting weights, which costs a second resident model. It is refused
+under expert, expert-tensor and tensor parallelism.
 
 Two things bite here. `max_length` must have headroom for the hint, because neither branch is ever
 truncated — the teacher branch is systematically longer and an over-length row raises. And

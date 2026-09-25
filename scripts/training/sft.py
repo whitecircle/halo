@@ -9,7 +9,7 @@ pre-processed datasets, QLoRA and ``init_from_scratch``; the VLM path loads an
 not apply to images).
 
 Supported Parallelism Modes: EP, CP, TP, EP+CP, EP+TP (TP+CP unsupported; CP incompatible with
-padding-free, and CP patches only the text-decoder attention on VLMs).
+padding-free, and CP is text-only: the CP wrapper raises on a batch carrying ``pixel_values``).
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/sft.py \\

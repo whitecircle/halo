@@ -303,22 +303,29 @@ never win the soname race.
 A skew fails `ncclCommInitRank` at `/init_weight_transfer_engine` or hangs it with no error;
 rebuild the image after any lock bump of the pin.
 
-0.26.0 is the last vLLM release on torch 2.11, the training image's torch and NCCL generation; 0.27
-moves to torch 2.13, whose NCCL does not match that pin. The image also installs the EFA userspace
-the training image runs (`docker/efa/install_efa_userspace.sh`), so the group can ride EFA from a
-trainer on another node ([Servers on other nodes](#servers-on-other-nodes-efa)).
+The image also installs the EFA userspace the training image runs
+(`docker/efa/install_efa_userspace.sh`), so the group can ride EFA from a trainer on another node
+([Servers on other nodes](#servers-on-other-nodes-efa)).
 
-### Config-schema parity {#config-schema-parity}
+The pinned NCCL wheel installs over newer vLLM bases as well; the engine pin is held by the
+weight-sync contract and what the image patches and asserts at build, and no newer release is
+validated end to end. Two breaks are known. From 0.28 the engine reads the packed-transfer fields
+(`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) off the init request, while this client
+sends them with each update, so its first sync fails. From 0.29 the module the gpt-oss plugins
+import their protocol types from (`vllm.entrypoints.openai.engine.protocol`) is gone, so the image
+build fails.
+
+### Config-schema parity
 
 The server parses every checkpoint with **its** transformers, pinned to the 5.14 line, one line below
 the training image's 5.16 (`Dockerfile.vllm` asserts the pin at build). **Gemma 4 is what pins that
 line.**
 
-vLLM's Gemma 4 model code (0.25.1 through 0.28.0) reads the 5.14 config schema (flat
-`global_head_dim` / `num_global_key_value_heads`, a global `num_attention_heads`). 5.16 folds those
-into `per_layer_config` and raises `AmbiguousGlobalPerLayerAttributeError` on vLLM's
-`get_head_size`, so a 5.16 server makes Gemma 4 unservable on every one of those vLLM versions.
-Toolkit exports are therefore written in the flat form.
+vLLM's Gemma 4 model code before 0.28.0 (the pinned 0.26.0 included) reads the 5.14 config schema
+(flat `global_head_dim` / `num_global_key_value_heads`, a global `num_attention_heads`). 5.16 folds
+those into `per_layer_config` and raises `AmbiguousGlobalPerLayerAttributeError` on vLLM's
+`get_head_size`, so a 5.16 server makes Gemma 4 unservable on those versions. Toolkit exports are
+therefore written in the flat form. 0.28.0 reads both forms.
 
 **Step-3.7 is a different constraint**, not a dialect: this transformers has no `step3p7` class at
 all and reads the family only through the release's `auto_map` modules, which its release config
@@ -464,11 +471,12 @@ upstream refactor fails the build instead of a training run.
 
 The server's transformers stays at SGLang's own exact pin (5.12.1 for 0.5.17); only NCCL and the EFA
 userspace are rebuilt. Serving-only use can run upstream directly
-(`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`); weight sync needs this image. 0.5.17 is the last SGLang
-release on torch 2.11, the training image's torch and NCCL generation; 0.5.18 moves to torch 2.13,
-whose NCCL does not match the pin weight sync needs on both ends. A later release changes nothing
-here: 0.5.19's `--moe-a2a-backend deepep_v2` forces `--moe-runner-backend deep_gemm`, which an online
-update does not reach.
+(`SGLANG_IMAGE=lmsysorg/sglang:v0.5.17`); weight sync needs this image. The pinned NCCL wheel
+installs over newer SGLang bases as well, and no newer release is validated end to end. One break is
+known: from 0.5.19 upstream ships the GLM-4 gate fix this image patches in, so the patch's
+pre-image assert fails the build. A later release adds no expert path: 0.5.19's
+`--moe-a2a-backend deepep_v2` forces `--moe-runner-backend deep_gemm`, which an online update does
+not reach.
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.17`, then set
 `SGLANG_IMAGE` to that tag (it defaults to the locally built `sglang-server:0.5.17`).

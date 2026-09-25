@@ -47,10 +47,10 @@ Source of truth: `MOE_LAYER_MAP` in `src/distributed/expert_parallel/patching.py
 
     Expert LoRA is rejected with `expert_tp_size > 1`. The grouped adapters honor `r` / `alpha` /
     `dropout` / `use_rslora`, with `r` a multiple of 8 — the grouped GEMM's stride contract
-    ([PEFT](../optimization/peft.md#moe-models-expert-targets-and-full-trained-modules)); knobs with
+    ([PEFT](../optimization/peft.md#moe-models--expert-targets-and-full-trained-modules)); knobs with
     no grouped implementation (`use_dora`,
     `lora_target_parameters`) are rejected rather than applied to the attention half alone. See
-    [PEFT](../optimization/peft.md#moe-models-expert-targets-and-full-trained-modules).
+    [PEFT](../optimization/peft.md#moe-models--expert-targets-and-full-trained-modules).
 
 ### Per-family EP restrictions
 

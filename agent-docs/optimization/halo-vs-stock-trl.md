@@ -155,7 +155,7 @@ ZeRO-2 (64k: 100 vs 138 GB) — the better dense choice when memory is tight.
   (256k z3: CP4 2,257·98 vs CP8 1,836·56).
 - `EP1 z2` OOMs (ZeRO-2 keeps ~40 GB of params resident); `EP8`, `EP8+CP2`, `EP8+TP8` hit the ceiling below.
 
-### The EP8 dispatch ceiling: ~64k tokens/rank {#the-ep8-dispatch-ceiling-64k-tokensrank}
+### The EP8 dispatch ceiling: ~64k tokens/rank
 
 Multi-step EP8 *training* has a practical ceiling around **64k tokens/rank**:
 
@@ -170,7 +170,7 @@ Multi-step EP8 *training* has a practical ceiling around **64k tokens/rank**:
 
 For ≥128k sequences, keep per-rank tokens ≤64k by **splitting further with CP** (EP8+CP8 = 16k/rank at
 128k), or **go dense** (EP1 / dense CP-only — neither uses DeepEP). Related kernel-side detail:
-[DeepEP → dispatch wire-index limit](../infrastructure/deepep.md#token-count-ceiling).
+[DeepEP → dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
 
 ## Why Halo's EP wins: all-to-all vs masked all-reduce
 

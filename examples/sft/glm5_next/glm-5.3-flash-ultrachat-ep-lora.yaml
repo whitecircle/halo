@@ -1,6 +1,6 @@
 # GLM-5.3-Flash (glm5_next, 321B total / 18B active) — EP=8 LoRA (attention PEFT + native grouped expert-LoRA)
 # SFT pilot on UltraChat 200K, single 8x Blackwell node. ~304B of the 321B is routed expert weight: ep8 holds
-# ~110 GB static (nvidia-smi before launching) of a 275 GB card because LoRA keeps optimizer state adapter-only.
+# ~110 GB static (nvidia-smi before launching) of a 288 GB card because LoRA keeps optimizer state adapter-only.
 # Convert first (the hub release is fp8): python scripts/before_training/convert_glm5_bf16.py --model_id zai-org/GLM-5.3-Flash --output_dir /mnt/models/GLM-5.3-Flash-BF16
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>   (see agent-docs/models/glm5-next.md)
 

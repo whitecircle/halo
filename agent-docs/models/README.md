@@ -20,7 +20,7 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 | [Inkling-Small](inkling.md) | Yes | **No** | **No** | Yes | **No** | **No** | untested | `examples/sft/inkling/*` |
 | [Gemma 4 MoE](gemma4.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes | `examples/sft/gemma4/*` |
 | [Bailing MoE / Ling](bailing.md) | Yes | Yes ³ | **No** ³ | Yes | untested ⁶ | **No** | Yes | `examples/sft/ling_mini_2/*` |
-| [LFM-2 MoE](lfm2.md) | Yes | **No** | Yes | Yes | **No** | Yes | Yes | — |
+| [LFM-2 MoE](lfm2.md) | Yes | **No** | Yes | Yes | **No** | Yes | Yes | `examples/sft/lfm2/*` |
 | [Mistral4 MoE](mistral4.md) | Yes | Yes | Yes | Yes | Yes ⁶ | Yes | Yes | `examples/sft/mistral4/*` |
 | [DeepSeek-V4](deepseek-v4.md) | Yes | **No** ⁸ | **No** ⁸ | untested | **No** | **No** | Yes | `examples/sft/deepseek_v4/*` |
 | [Zaya (Zyphra/ZAYA1)](zaya.md) | Yes ⁴ | **No** ⁴ | **No** ⁴ | Yes | **No** | **No** | Yes | `examples/sft/zaya/*` |

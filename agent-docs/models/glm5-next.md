@@ -80,6 +80,6 @@ Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend 
 
 | Config | Topology | Notes |
 |---|---|---|
-| `examples/sft/glm5_next/glm-5.3-flash-ultrachat-ep-lora.yaml` | EP=8, 1×8 | LoRA + expert-LoRA — the only shape expected to fit one 8×Blackwell node (~110 GB static of a 275 GB card, unmeasured; full FT puts ~38B of experts on each rank, ~304 GB at 8 B/param) |
+| `examples/sft/glm5_next/glm-5.3-flash-ultrachat-ep-lora.yaml` | EP=8, 1×8 | LoRA + expert-LoRA — the only shape expected to fit one 8×Blackwell node (~110 GB static of a 288 GB card, unmeasured; full FT puts ~38B of experts on each rank, ~304 GB at 8 B/param) |
 
 The config points `model_name_or_path` at the BF16 conversion output above. Full fine-tuning takes cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).
