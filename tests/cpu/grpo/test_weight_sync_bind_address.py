@@ -1,32 +1,53 @@
-"""The vLLM weight-sync rendezvous store must listen only on the address the engine is told to dial.
+"""The weight-sync rendezvous store must listen only on the address the engine is told to dial.
 
-The store is unauthenticated, and the engine unpickles the NCCL bootstrap it reads from it while the
-group forms. Bound on every interface, any host that reaches the group port in that window can plant
-a pickle and run code in the rollout server. The listener therefore binds the advertised address; a
-wide bind is the explicit ``HALO_WEIGHT_SYNC_BIND_ALL`` opt-in, and an advertised address this host
-cannot bind alone is refused before the engine is asked to join, never silently widened.
+The store is unauthenticated, and the engine reads the NCCL bootstrap from it while the group forms
+(vLLM unpickles it). Bound on every interface, any host that reaches the group port in that window
+can plant a bootstrap of its own. The listener therefore binds the advertised address on both
+engines; a wide bind is the explicit ``HALO_WEIGHT_SYNC_BIND_ALL`` opt-in, and an advertised
+address this host cannot bind alone is refused before the engine is asked to join, never silently
+widened.
 
-The tests drive the real client and the real ``StatelessProcessGroup`` listener (a group of one, so
-no engine peer is needed) and read the bound address off the listening socket.
+The tests drive the real clients and their real rendezvous stores (a group of one, so no engine
+peer is needed) and read the bound address off the kernel's listener table, as ``ss -ltn`` does.
 
     python tests/cpu/grpo/test_weight_sync_bind_address.py
 """
 
 import logging
 import socket
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from torch.distributed import distributed_c10d as c10d
 
 import src.distributed.nccl.clients.vllm as vllm_module
+import src.distributed.nccl.transport.stateless_group as stateless_group_module
+import src.distributed.nccl.transport.torch_group as torch_group_module
 from src.distributed.nccl.clients.base import _get_ip, _is_loopback
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from tests.common.ports import free_port
 
 BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
 # RFC 5737 documentation range: never an address of the test host.
 NON_LOCAL_ADDRESS = "203.0.113.7"
+_TCP_LISTEN = "0A"
+
+
+def _listening_addresses(port: int) -> list[str]:
+    """Every address the kernel holds a TCP listener on at ``port``, IPv4 and IPv6 alike."""
+    addresses = []
+    for table, family in (("/proc/net/tcp", socket.AF_INET), ("/proc/net/tcp6", socket.AF_INET6)):
+        for row in Path(table).read_text().splitlines()[1:]:
+            fields = row.split()
+            address_hex, port_hex = fields[1].split(":")
+            if int(port_hex, 16) != port or fields[3] != _TCP_LISTEN:
+                continue
+            raw = bytes.fromhex(address_hex)
+            # The kernel prints the address as 32-bit words in host (little-endian) byte order.
+            packed = b"".join(raw[i : i + 4][::-1] for i in range(0, len(raw), 4))
+            addresses.append(socket.inet_ntop(family, packed))
+    return addresses
 
 
 class _Response:
@@ -50,35 +71,71 @@ class _GroupHoldingCommunicator:
         pass
 
 
+def _group_without_nccl(*args, **kwargs):
+    """Stand-in for the c10d NCCL group, which needs a GPU; the rendezvous store is built before it."""
+    return object(), None
+
+
+def _recording_join(engine_requests: list[tuple[str, int]]):
+    def post_once(path, **kwargs):
+        body = kwargs["json"]
+        group = body.get("init_info", body)  # vLLM nests the group fields, SGLang does not
+        engine_requests.append((group["master_address"], group["master_port"]))
+        return _Response({})
+
+    return post_once
+
+
 @pytest.fixture
-def engine_requests() -> list[dict]:
-    """Bodies of the group-join requests the client sent the engine, in order."""
+def engine_requests() -> list[tuple[str, int]]:
+    """``(master address, port)`` of each group-join request the client sent the engine, in order."""
     return []
 
 
 @pytest.fixture
-def vllm_client(monkeypatch, engine_requests):
-    """A real client against a local server address, its HTTP half stubbed.
+def opened_listeners(monkeypatch) -> list[str]:
+    """Bind address of every rendezvous listener either transport opened, in order."""
+    opened: list[str] = []
+    real = stateless_group_module.rendezvous_listener
 
-    ``/get_world_size`` answers 0, so the group is the trainer alone: ``create()`` binds the listener
-    and returns without waiting for an engine peer.
+    def recording(bind_address, port):
+        opened.append(bind_address)
+        return real(bind_address, port)
+
+    monkeypatch.setattr(stateless_group_module, "rendezvous_listener", recording)
+    monkeypatch.setattr(torch_group_module, "rendezvous_listener", recording)
+    return opened
+
+
+@pytest.fixture(params=["vllm", "sglang"])
+def client(request, monkeypatch, engine_requests, opened_listeners):
+    """A real client of each engine against a local server address, its HTTP half stubbed.
+
+    The engine reports no ranks, so the group is the trainer alone: the rendezvous store binds its
+    listener and returns without waiting for an engine peer.
     """
     monkeypatch.delenv(BIND_ALL_ENV, raising=False)
-    monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
-    with patch.object(VLLMWeightSyncClient, "check_server"):
-        client = VLLMWeightSyncClient(base_url="http://127.0.0.1:8000")
-    monkeypatch.setattr(client, "probe_generation", lambda: None)
-    monkeypatch.setattr(
-        client, "_post_once", lambda path, **kwargs: engine_requests.append(kwargs["json"]) or _Response({})
-    )
-    monkeypatch.setattr(vllm_module.requests, "get", lambda url, timeout=None: _Response({"world_size": 0}))
-    monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _GroupHoldingCommunicator)
+    if request.param == "vllm":
+        monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
+        with patch.object(VLLMWeightSyncClient, "check_server"):
+            client = VLLMWeightSyncClient(base_url="http://127.0.0.1:8000")
+        monkeypatch.setattr(client, "probe_generation", lambda: None)
+        monkeypatch.setattr(vllm_module.requests, "get", lambda url, timeout=None: _Response({"world_size": 0}))
+        monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _GroupHoldingCommunicator)
+    else:
+        monkeypatch.delenv("SGLANG_GROUP_HOST", raising=False)
+        with patch.object(SGLangWeightSyncClient, "check_server"):
+            client = SGLangWeightSyncClient(base_url="http://127.0.0.1:30000")
+        monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 0)
+        monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+        monkeypatch.setattr(c10d, "_new_process_group_helper", _group_without_nccl)
+    monkeypatch.setattr(client, "_post_once", _recording_join(engine_requests))
     yield client
     client.close_communicator()
 
 
 @pytest.mark.parametrize("advertise_nic", [False, True], ids=["loopback", "nic"])
-def test_the_listener_binds_the_advertised_address(vllm_client, engine_requests, advertise_nic):
+def test_the_listener_binds_the_advertised_address(client, engine_requests, advertise_nic):
     """A same-host group advertises loopback and takes no connection from the network; a group
     advertising the trainer's NIC (a server on another node) listens on that NIC alone."""
     expected = "127.0.0.1"
@@ -86,29 +143,28 @@ def test_the_listener_binds_the_advertised_address(vllm_client, engine_requests,
         expected = _get_ip()
         if _is_loopback(expected):
             pytest.skip("no default route: this host has no NIC address to advertise")
-        vllm_client.group_host = expected
+        client.group_host = expected
 
-    vllm_client.init_communicator(device="cpu")
+    client.init_communicator(device="cpu")
 
-    advertised = engine_requests[0]["init_info"]
-    bound = vllm_client._process_group.socket.getsockname()
-    assert advertised["master_address"] == expected
-    assert bound == (expected, advertised["master_port"]), (
-        f"the rendezvous listener bound {bound} while the engine was told to dial "
-        f"{advertised['master_address']}:{advertised['master_port']}"
+    [(advertised, port)] = engine_requests
+    assert advertised == expected
+    assert _listening_addresses(port) == [expected], (
+        f"the rendezvous store listens on {_listening_addresses(port)} while the engine was told to "
+        f"dial {advertised}:{port}"
     )
 
 
-def test_the_opt_in_binds_every_interface(vllm_client, engine_requests, monkeypatch, caplog):
+def test_the_opt_in_binds_every_interface(client, engine_requests, monkeypatch, caplog):
     """``HALO_WEIGHT_SYNC_BIND_ALL`` is the one way to a wide bind, for a NAT or port-mapped trainer, and
     it is announced at WARNING: an operator must see that the unauthenticated store is on the network."""
     monkeypatch.setenv(BIND_ALL_ENV, "1")
 
     with caplog.at_level(logging.WARNING):
-        vllm_client.init_communicator(device="cpu")
+        client.init_communicator(device="cpu")
 
-    port = engine_requests[0]["init_info"]["master_port"]
-    assert vllm_client._process_group.socket.getsockname() == ("0.0.0.0", port)
+    [(_, port)] = engine_requests
+    assert _listening_addresses(port) == ["0.0.0.0"]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(BIND_ALL_ENV in m and "every interface" in m for m in warnings), (
         f"the wide bind was not announced at WARNING: {warnings}"
@@ -117,53 +173,49 @@ def test_the_opt_in_binds_every_interface(vllm_client, engine_requests, monkeypa
 
 @pytest.mark.parametrize("advertised", [NON_LOCAL_ADDRESS, "0.0.0.0"])
 def test_an_unbindable_advertised_address_is_refused_before_the_engine_joins(
-    vllm_client, engine_requests, monkeypatch, advertised
+    client, engine_requests, opened_listeners, advertised
 ):
     """A NAT address (not local) or the wildcard (every interface) would need the wide bind, so
     without the opt-in it raises naming the knob, before any listener or engine request exists."""
-    formed: list[dict] = []
-    monkeypatch.setattr(
-        vllm_module.StatelessProcessGroup, "create", staticmethod(lambda **kwargs: formed.append(kwargs))
-    )
-    vllm_client.group_host = advertised
+    client.group_host = advertised
 
     with pytest.raises(RuntimeError, match=BIND_ALL_ENV):
-        vllm_client.init_communicator(device="cpu")
+        client.init_communicator(device="cpu")
 
-    assert not formed, f"a rendezvous listener was created for {advertised}: {formed}"
+    assert not opened_listeners, f"a rendezvous listener was opened for {advertised}: {opened_listeners}"
     assert not engine_requests, "the engine was asked to join a group whose listener was refused"
 
 
-def test_a_name_resolving_to_loopback_is_refused_for_a_remote_server(vllm_client, engine_requests, monkeypatch):
+def test_a_name_resolving_to_loopback_is_refused_for_a_remote_server(
+    client, engine_requests, opened_listeners, monkeypatch
+):
     """A trainer hostname that ``/etc/hosts`` maps to ``127.0.1.1`` would put the listener on loopback,
     where an engine on another host can never connect; it raises instead of timing out the group."""
-    formed: list[dict] = []
-    monkeypatch.setattr(
-        vllm_module.StatelessProcessGroup, "create", staticmethod(lambda **kwargs: formed.append(kwargs))
-    )
     resolve = socket.gethostbyname
     monkeypatch.setattr(socket, "gethostbyname", lambda name: "127.0.1.1" if name == "trainer" else resolve(name))
-    vllm_client.host = NON_LOCAL_ADDRESS  # the server sits on another host
-    vllm_client.group_host = "trainer"
+    client.host = NON_LOCAL_ADDRESS  # the server sits on another host
+    client.group_host = "trainer"
 
     with pytest.raises(RuntimeError, match=BIND_ALL_ENV):
-        vllm_client.init_communicator(device="cpu")
+        client.init_communicator(device="cpu")
 
-    assert not formed, f"a rendezvous listener was created on loopback for a remote server: {formed}"
+    assert not opened_listeners, f"a listener was opened on loopback for a remote server: {opened_listeners}"
     assert not engine_requests, "the engine was asked to dial a listener it cannot reach"
 
 
-def test_sglang_resolves_a_non_local_address_to_its_every_interface_listener(monkeypatch):
-    """SGLang's store is torch's ``TCPStore``, whose master listens on every interface whatever address
-    it is given, so a NAT-advertised address stays accepted there without the opt-in."""
-    monkeypatch.delenv(BIND_ALL_ENV, raising=False)
-    port = free_port()
-    with patch.object(SGLangWeightSyncClient, "check_server"):
-        client = SGLangWeightSyncClient(
-            base_url="http://127.0.0.1:30000", group_port=port, group_host=NON_LOCAL_ADDRESS
-        )
+def test_an_auto_picked_port_is_probed_on_the_bind_address(client, monkeypatch):
+    """The free-port probe binds where the listener will, so the port it picks is free there."""
+    bound: list[tuple[str, int]] = []
+    real_bind = socket.socket.bind
+    monkeypatch.setattr(socket.socket, "bind", lambda sock, address: bound.append(address) or real_bind(sock, address))
 
-    assert client._resolve_group_address() == (NON_LOCAL_ADDRESS, port, "0.0.0.0")
+    _, port, bind_address = client._resolve_group_address()
+
+    assert bound, "no port was probed"
+    assert all(host == bind_address for host, _ in bound), (
+        f"the port was probed on {bound}, not on the bind address {bind_address}"
+    )
+    assert port > 0
 
 
 if __name__ == "__main__":

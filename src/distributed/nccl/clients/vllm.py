@@ -223,7 +223,7 @@ class VLLMWeightSyncClient(BaseWeightSyncClient):
                 port=master_port,
                 rank=0,
                 world_size=world_size,
-                bind_host=bind_address,
+                bind_address=bind_address,
             )
             # ncclCommInitRank is unconditionally blocking (the wrapper binds no non-blocking init and
             # NCCL has no comm-init deadline), so a server that never joins would park the trainer with

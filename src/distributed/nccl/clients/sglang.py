@@ -33,7 +33,6 @@ from torch.distributed import distributed_c10d as c10d
 
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from src.distributed.nccl.clients.base import (
-    _ALL_INTERFACES,
     _CLEANUP_TIMEOUT_S,
     _GROUP_FORMATION_TIMEOUT_S,
     _HTTP_PROBE_TIMEOUT_S,
@@ -217,11 +216,6 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             )
         return tp_size
 
-    def _rendezvous_bind_address(self, master_address: str) -> str:
-        """Every interface: the group's store is torch's ``TCPStore``, whose master listens there
-        whatever address it is given, so the port is probed where that listener takes it."""
-        return _ALL_INTERFACES
-
     def init_communicator(self, device: torch.device | str | int = 0):
         """Form the weight-update group: trainer rank 0, engine ranks 1..N."""
         engine_ws = self.fetch_engine_world_size()
@@ -268,6 +262,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                     world_size=world_size,
                     device=self.sync_device,
                     group_name=self.group_name,
+                    bind_address=bind_address,
                     timeout_s=_GROUP_FORMATION_TIMEOUT_S,
                 ),
             )

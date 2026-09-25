@@ -19,6 +19,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import distributed_c10d as c10d
 
+from src.distributed.nccl.transport.stateless_group import rendezvous_listener
+
 logger = logging.getLogger(__name__)
 
 # SGLang's own default; it is the PrefixStore prefix, so both sides must agree on it.
@@ -55,6 +57,7 @@ def create_weight_update_group(
     device: torch.device,
     group_name: str = DEFAULT_WEIGHT_UPDATE_GROUP_NAME,
     *,
+    bind_address: str,
     timeout_s: float,
 ) -> tuple[dist.ProcessGroup, dist.TCPStore]:
     """Host the rendezvous store and join the weight-update group as rank 0.
@@ -62,6 +65,9 @@ def create_weight_update_group(
     ``world_size`` counts the trainer: ``1 + tp_size * dp_size``. Returns the group and the store,
     which the caller must keep alive: dropping the store closes the listener and the engine can no
     longer re-join. Pair with :func:`destroy_weight_update_group`.
+
+    The store listens on ``bind_address`` alone (:func:`rendezvous_listener`): ``master_address``
+    itself, or every interface under the client's explicit opt-in.
 
     ``timeout_s`` has no default because this half of the handshake blocks against a concurrent HTTP
     request to the engine, and the client sets that deadline (``_GROUP_FORMATION_TIMEOUT_S``); a
@@ -79,14 +85,16 @@ def create_weight_update_group(
     """
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    store = dist.TCPStore(
-        host_name=master_address,
-        port=master_port,
-        world_size=world_size,
-        is_master=True,
-        timeout=timedelta(seconds=timeout_s),
-        wait_for_workers=False,
-    )
+    with rendezvous_listener(bind_address, master_port) as listen_fd:
+        store = dist.TCPStore(
+            host_name=master_address,
+            port=master_port,
+            world_size=world_size,
+            is_master=True,
+            timeout=timedelta(seconds=timeout_s),
+            wait_for_workers=False,
+            master_listen_fd=listen_fd,
+        )
     # SGLang wraps the rendezvous store in PrefixStore(group_name) before handing it to c10d, so an
     # unprefixed store here would leave the two sides reading different keys and hanging.
     prefixed = dist.PrefixStore(group_name, store)
