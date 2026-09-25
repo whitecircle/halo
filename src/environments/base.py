@@ -927,6 +927,18 @@ class BaseEnvironment(ABC):
         """Grade a finished episode: the objective in ``[0, 1]`` and the environment's own shaping terms."""
 
     @staticmethod
+    def _null_answer_grade(trajectory: Trajectory) -> EpisodeGrade:
+        """The grade of an episode whose row is answer-graded but whose ``answer`` cell is null.
+
+        Nothing was verified, so the completion payout would hand the full objective to any episode
+        that finished, and to its whole GRPO group, since every sibling finishes just as easily. The
+        episode leaves the baseline instead, the contract of a grading-infra outage.
+        """
+        logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
+        trajectory.info[EPISODE_INVALID_KEY] = True
+        return EpisodeGrade(0.0)
+
+    @staticmethod
     def _cut_short(trajectory: Trajectory) -> bool:
         """An episode its driver lost, or one a sandbox fault ended: graded on what it earned and never
         sent to an external scorer, since a verdict on the fragment would be paid for and taught."""

@@ -22,7 +22,7 @@ from src.environments.base import (
     Trajectory,
     require_magnitudes,
 )
-from src.environments.envs.protocols.native import validate_tool_budgets
+from src.environments.envs.protocols.native import admit_tool_call, validate_tool_budgets
 from src.environments.sandbox.base import SANDBOX_FAULTS
 from src.environments.tools.definitions import NativeToolRegistry, ToolArgumentError, ToolBudgetExhausted
 from src.environments.tools.factories import (
@@ -315,13 +315,7 @@ Always think before acting, and provide a Final Answer when you're done."""
                 self._flag_calls_rejected(trajectory)
             else:
                 try:
-                    # Bind before spending the episode's budget: a call the handler cannot run is
-                    # refused without being counted, as under the native protocol.
-                    args = tool.bind(step.action_args or {})
-                    cap = self._tool_budget_exhausted(trajectory, step.action)
-                    if cap is not None:
-                        raise ToolBudgetExhausted(tool.budget_exhausted_message(cap))
-                    self._count_tool_call(trajectory, step.action)
+                    args = admit_tool_call(self, tool, step.action_args or {}, trajectory)
                     observation = tool.execute(**args)
                     success = True
                 except (ToolBudgetExhausted, ToolArgumentError) as e:
@@ -386,13 +380,7 @@ Always think before acting, and provide a Final Answer when you're done."""
 
         if expected is None:
             if trajectory.info.get("_answer_in_context"):
-                # The row IS answer-graded and its cell is null: nothing was verified, so the
-                # completion payout below would hand the full objective to any episode that answered
-                # — and to its whole group, since every sibling answers just as easily. Drop it from
-                # the baseline instead, the same contract the native protocol holds.
-                logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
-                trajectory.info[EPISODE_INVALID_KEY] = True
-                return EpisodeGrade(0.0)
+                return self._null_answer_grade(trajectory)
             # Nothing to grade against: reaching a Final Answer is the objective. ``requires_answer``
             # keeps an answer-graded run off this path rather than paying it the full objective.
             return EpisodeGrade(1.0)

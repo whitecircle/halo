@@ -9,7 +9,6 @@ from typing import Any
 
 from src.environments.base import (
     EPISODE_ERROR_KEY,
-    EPISODE_INVALID_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     TOOL_CALL_COUNTS_KEY,
     AsyncBaseEnvironment,
@@ -53,11 +52,29 @@ def validate_tool_budgets(budgets: dict[str, int] | None, registry: NativeToolRe
     return validated
 
 
-class NativeToolUseEnvironment(BaseEnvironment):
-    """Environment using native vLLM/OpenAI tool calling.
+def admit_tool_call(
+    env: BaseEnvironment,
+    tool: NativeTool,
+    arguments: dict[str, Any],
+    trajectory: Trajectory,
+    *,
+    for_async: bool = False,
+) -> dict[str, Any]:
+    """Admit one call before it runs, under either protocol: bind its arguments (against the handler
+    that will run), then spend one of the episode's calls on the tool. Refuses
+    (:class:`ToolArgumentError`, :class:`ToolBudgetExhausted`) without counting, so a call the handler
+    could never run does not consume the budget; runs synchronously before any await so concurrent
+    calls in one turn cannot both pass a one-call cap."""
+    bound = tool.bind(arguments, for_async=for_async)
+    cap = env._tool_budget_exhausted(trajectory, tool.name)
+    if cap is not None:
+        raise ToolBudgetExhausted(tool.budget_exhausted_message(cap))
+    env._count_tool_call(trajectory, tool.name)
+    return bound
 
-    With DistributedAsyncEnvironmentalGRPOTrainer, pass ``tools=env.get_tools_schema()`` to the generation config.
-    """
+
+class NativeToolUseEnvironment(BaseEnvironment):
+    """Environment using native vLLM/OpenAI tool calling."""
 
     SHAPING_COMPONENTS = ("tool_shaping",)
 
@@ -223,21 +240,6 @@ class NativeToolUseEnvironment(BaseEnvironment):
         finally:
             _ACTIVE_TRAJECTORY.reset(token)
 
-    def _admit_call(
-        self, tool: NativeTool, tc: NativeToolCall, trajectory: Trajectory, *, for_async: bool = False
-    ) -> dict[str, Any]:
-        """Admit one call before it runs: bind its arguments (against the handler that will run), then
-        spend one of the episode's calls on the tool. Refuses (:class:`ToolArgumentError`,
-        :class:`ToolBudgetExhausted`) without counting, so a call the handler could never run does not
-        consume the budget; runs synchronously before any await so concurrent calls in one turn cannot
-        both pass a one-call cap."""
-        bound = tool.bind(tc.arguments, for_async=for_async)
-        cap = self._tool_budget_exhausted(trajectory, tc.name)
-        if cap is not None:
-            raise ToolBudgetExhausted(tool.budget_exhausted_message(cap))
-        self._count_tool_call(trajectory, tc.name)
-        return bound
-
     def _execute_tool_calls(
         self,
         tool_calls: list[NativeToolCall],
@@ -254,7 +256,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
                     result = self._unknown_tool_result(tc)
                 else:
                     try:
-                        bound = self._admit_call(tool, tc, trajectory)
+                        bound = admit_tool_call(self, tool, tc.arguments, trajectory)
                         result = self._result_from_call(tc, tool.execute(**bound))
                     except (ToolBudgetExhausted, ToolArgumentError) as e:
                         result = self._refused_call_result(tc, e)
@@ -382,13 +384,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
             return EpisodeGrade(1.0 if validate_answer(trajectory.info.get("final_response", ""), expected) else 0.0)
 
         if "answer" in ctx:
-            # The dataset row is answer-graded and its cell is null: nothing was verified, so paying
-            # the completion fallback would hand the full objective to ANY episode that finished —
-            # and to its whole GRPO group, since every sibling row completes just as easily. Drop it
-            # from the baseline instead (same contract as a grading-infra outage).
-            logger.warning("Episode context carries a null 'answer'; scoring it invalid, not a success")
-            trajectory.info[EPISODE_INVALID_KEY] = True
-            return EpisodeGrade(0.0)
+            return self._null_answer_grade(trajectory)
 
         return EpisodeGrade(1.0)
 
@@ -408,7 +404,7 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
             if not tool:
                 return self._unknown_tool_result(tc)
             try:
-                bound = self._admit_call(tool, tc, trajectory, for_async=True)
+                bound = admit_tool_call(self, tool, tc.arguments, trajectory, for_async=True)
                 return self._result_from_call(tc, await tool.execute_async(**bound))
             except (ToolBudgetExhausted, ToolArgumentError) as e:
                 return self._refused_call_result(tc, e)
