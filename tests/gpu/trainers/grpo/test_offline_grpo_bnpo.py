@@ -210,6 +210,7 @@ def run_training(
     checks = {}
     checks["loss_finite"] = math.isfinite(training_loss)
     checks["all_steps_finite"] = all(math.isfinite(l) for l in step_losses)
+    checks["steps_completed"] = trainer.state.global_step == MAX_STEPS
     if not is_tp:
         checks["has_eval"] = len(eval_losses) > 0
         checks["eval_finite"] = all(math.isfinite(l) for l in eval_losses) if eval_losses else False

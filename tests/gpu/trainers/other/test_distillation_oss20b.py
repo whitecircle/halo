@@ -118,6 +118,7 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
 
     output_dir = os.path.join(base_output_dir, mode)
 
+    trainer = None
     try:
         log("\nEnsuring model is downloaded...")
         ensure_model_downloaded(MODEL_NAME, rank)
@@ -262,20 +263,19 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
         if not all_passed:
             log(f"  Failed: {[k for k, v in checks.items() if not v]}")
         log(f"{'#' * 70}\n")
-
-        if hasattr(trainer, "cleanup_ep"):
-            trainer.cleanup_ep()
-        del trainer, student_model, teacher_model
-        cleanup_memory()
-        barrier()
         return all_passed
 
     except Exception as e:
         log(f"\nFATAL ERROR: {e}")
         if rank == 0:
             traceback.print_exc()
-        cleanup_memory()
         return False
+
+    finally:
+        # DeepEP buffers outlive the trainer object: a mode that raised mid-run still releases them
+        # before the next mode builds its own.
+        if trainer is not None:
+            trainer.cleanup_ep()
 
 
 @gpu_test_main(min_world_size=2, prefix="distill_oss20b")

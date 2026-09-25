@@ -3,10 +3,11 @@
 SMPO with Context Parallelism (CP=2): smoke test.
 
 Runs SmoothMarginPOTrainer for 10 steps with cp_size=2 (Ulysses attention splits each sequence
-across GPUs). It checks only that training runs without raising, that ``trainer.is_cp_mode`` is
-set, and that the final training loss is finite; it does not compare the loss against a reference.
-tests/gpu/parallelism/cp/test_cp_smpo_logprobs.py pins the Ulysses logits only, so the trainer's
-cross-rank log-prob aggregation under CP has no reference check.
+across GPUs). It checks only that ``trainer.is_cp_mode`` is set, that every configured step ran and
+that the final training loss is finite; it does not compare the loss against a reference.
+tests/gpu/parallelism/cp/test_cp_smpo_logprobs.py pins per-token log-probs computed from the
+gathered Ulysses logits against a non-CP forward, outside the trainer; the trainer's own CP
+log-prob path is not compared here.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
@@ -145,6 +146,7 @@ def run(ctx) -> dict:
     final_loss = train_result.metrics["train_loss"]
     log(f"Final training loss: {final_loss}")
     checks["train_loss_finite"] = math.isfinite(final_loss)
+    checks["steps_completed"] = trainer.state.global_step == NUM_TRAIN_STEPS
     log(f"Steps completed: {trainer.state.global_step}")
 
     return {"checks": checks}

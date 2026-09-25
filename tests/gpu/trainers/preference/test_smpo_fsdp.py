@@ -12,7 +12,7 @@ Runs SmoothMarginPOTrainer in standard FSDP mode on Qwen3-0.6B with:
 Test Phases:
 1. Synthetic preference dataset creation (prompt/chosen/rejected)
 2. SMPO training for 10 steps
-3. Validation: the final and every per-step loss is finite
+3. Validation: every configured step ran, and the final and every per-step loss is finite
 
 It does not compare the SMPO objective against a reference, so a wrong-but-finite loss passes.
 
@@ -161,6 +161,9 @@ def run(ctx):
     all_finite = all(math.isfinite(l) for l in step_losses)
     checks["all_steps_finite"] = all_finite
     log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
+
+    checks["steps_completed"] = trainer.state.global_step == MAX_STEPS
+    log(f"  Steps completed: {trainer.state.global_step}/{MAX_STEPS}")
 
     return {"checks": checks}
 

@@ -4,8 +4,9 @@ Offline GRPO Trainer smoke test with batch_size=4 and mixed group sizes.
 
 Runs OfflineGRPOTrainer with per_device_train_batch_size > 1, where a single batch contains
 examples from multiple different prompt groups with different group sizes (4 and 8 completions
-per prompt), once per loss type (grpo, bnpo, dr_grpo). For each it checks only that the final and
-every per-step loss is finite; no loss is compared against a reference or across loss types.
+per prompt), once per loss type (grpo, bnpo, dr_grpo). For each it checks only that every configured
+step ran and that the final and every per-step loss is finite; no loss is compared against a
+reference or across loss types.
 
 Key differences from test_offline_grpo.py:
 - batch_size=4 (vs 1) to stress multi-example batching
@@ -200,6 +201,7 @@ def run_single_loss_type(
 
     result = {
         "loss": training_loss,
+        "global_step": trainer.state.global_step,
         "step_losses": step_losses,
         "pos_logps": pos_logps,
         "neg_logps": neg_logps,
@@ -271,6 +273,9 @@ def run(ctx):
         all_finite = all(math.isfinite(l) for l in step_losses)
         checks[f"{loss_type}_all_steps_finite"] = all_finite
         log(f"    All steps finite: {'PASS' if all_finite else 'FAIL'}")
+
+        checks[f"{loss_type}_steps_completed"] = result["global_step"] == MAX_STEPS
+        log(f"    Steps completed: {result['global_step']}/{MAX_STEPS}")
 
         metrics[f"{loss_type}_final_loss"] = loss
 

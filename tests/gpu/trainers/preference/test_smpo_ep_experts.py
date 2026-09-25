@@ -24,7 +24,6 @@ from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
@@ -105,7 +104,7 @@ def run(ctx) -> dict:
         parallelism_config=parallelism_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
-    barrier()
+    ctx.barrier()
     train_result = trainer.train()
     log(f"  Training loss: {train_result.training_loss:.6f}, steps: {train_result.global_step}")
     checks["loss_finite"] = math.isfinite(train_result.training_loss)
@@ -125,7 +124,7 @@ def run(ctx) -> dict:
     # trainer.save_model adapter-only write (save_ep_checkpoint Case B)
     save_dir = os.path.join(ctx.output_dir, "adapter")
     trainer.save_model(save_dir)
-    barrier()
+    ctx.barrier()
     if ctx.rank == 0:
         f = os.path.join(save_dir, "adapter_model.safetensors")
         ek = [k for k in load_file(f) if "experts." in k and ".lora_" in k] if os.path.exists(f) else []

@@ -35,7 +35,6 @@ from transformers import AutoTokenizer
 from src.configs.smpo_config import SmoothMarginPOConfig
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
@@ -159,7 +158,7 @@ def run(ctx) -> dict:
 
     log("\n--- Starting training ---")
     log(f"GPU memory before training: {gpu_mem_gb():.1f}GB")
-    barrier()
+    ctx.barrier()
 
     train_result = trainer.train()
 

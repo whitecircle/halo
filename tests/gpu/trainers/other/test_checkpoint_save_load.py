@@ -2,10 +2,10 @@
 """
 Checkpoint Save Test across Parallelism Modes.
 
-Validates that DistributedSFTTrainer can train and save model checkpoints
-correctly under different parallelism configurations. For each mode, the
-test trains for 3 steps, saves the model via trainer.save_model(), and
-verifies that the expected checkpoint files exist on disk.
+For each parallelism mode, trains DistributedSFTTrainer for 3 steps, saves via
+trainer.save_model(), and checks that the final training loss is finite and that
+config.json plus a weights file exist on disk. It does not reload the checkpoint
+or compare its tensors, so a saved-but-wrong checkpoint passes.
 
 Modes tested (sequentially):
 1. FSDP mode: ParallelismConfig() -- standard data parallelism
