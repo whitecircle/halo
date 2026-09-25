@@ -45,7 +45,6 @@ from src.data.spans import (
     PACKED_SPAN_POLICY,
     build_completion_only_labels,
     mask_batch_to_completion_spans,
-    require_response_marker,
     resolve_eos_token_ids,
     tokenize_response_template,
 )
@@ -311,10 +310,6 @@ def tokenize_vlm_dataset(
 
     processor = resolve_processor_backend(processor, config.tokenizer_backend)
     tokenizer = resolve_tokenizer(processor)
-
-    require_response_marker(
-        config.assistant_message_template, config.train_on_completions_only, "VLM offline preprocessing"
-    )
 
     eos_token_ids = _resolve_config_eos_token_ids(config, tokenizer) if config.train_on_completions_only else None
     response_token_ids = (

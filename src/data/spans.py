@@ -518,7 +518,8 @@ def build_completion_only_labels(
     fallback masks by ``== pad_token_id``, which erases real eos tokens wherever ``pad_token_id ==
     eos_token_id`` (the Qwen default), and only fits an unpadded single example. ``span_policy``
     defaults to :data:`SELF_DISTILL_SPAN_POLICY` (start after the marker, end at the first terminator
-    after it, unbounded by the next marker start).
+    after it, unbounded by the next marker start). ``eos_token_ids`` defaults to the tokenizer's eos
+    alone; a caller holding the model config passes :func:`resolve_eos_token_ids` over it.
     """
     require_response_marker(response_prompt_template, train_on_completions_only, "completion-only labels")
     labels = input_ids.clone()
@@ -532,8 +533,6 @@ def build_completion_only_labels(
     if not train_on_completions_only:
         return labels
 
-    # tokenizer.eos_token_id alone is unreliable: some templates (GLM-4) delimit turns with role
-    # markers listed in config.eos_token_id instead of a per-turn <|endoftext|>.
     if eos_token_ids is None:
         eos_token_ids = resolve_eos_token_ids(tokenizer)
     batch = mask_batch_to_completion_spans(
