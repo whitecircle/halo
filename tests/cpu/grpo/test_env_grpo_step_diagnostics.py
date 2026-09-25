@@ -91,19 +91,19 @@ def _groups_of_two():
     ]
 
 
-def test_an_eval_round_logs_the_group_split_and_pass_at_k():
+def test_an_eval_round_logs_the_group_split_and_success_at_k():
     host = _diagnostics_host()
     _Trainer._record_step_diagnostics(host, _groups_of_two(), 2, "eval", None, torch.zeros(6), torch.ones(6, 1))
     logged = flushed_metrics(host, "eval")
     assert logged["outcome/all_pass_group_frac"] == [pytest.approx(1 / 3)]
     assert logged["outcome/all_fail_group_frac"] == [pytest.approx(1 / 3)]
-    assert logged["outcome/pass@2"] == [pytest.approx(2 / 3)]
+    assert logged["outcome/success@2"] == [pytest.approx(2 / 3)]
 
 
-def test_a_training_round_logs_no_pass_at_k_and_an_env_without_a_verdict_logs_no_split():
+def test_a_training_round_logs_no_success_at_k_and_an_env_without_a_verdict_logs_no_split():
     host = _diagnostics_host()
     _Trainer._record_step_diagnostics(host, _groups_of_two(), 2, "train", None, torch.zeros(6), torch.ones(6, 1))
-    assert not any(key.startswith("outcome/pass@") for key in flushed_metrics(host))
+    assert not any(key.startswith("outcome/success@") for key in flushed_metrics(host))
 
     silent = _diagnostics_host()
     episodes = [_episode(None) for _ in range(4)]
@@ -166,9 +166,10 @@ def test_a_truncation_point_at_one_leaves_no_band_and_logs_no_extreme_fraction()
 
 
 class _RoundHost(rm.RolloutMetricsMixin):
-    def __init__(self, alarm_rate):
+    def __init__(self, alarm_rate, *, mask_truncated: bool = False):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
         self._truncation_alarm_rate = alarm_rate
+        self.args = types.SimpleNamespace(mask_truncated_completions=mask_truncated)
 
 
 def _round(truncated: int, total: int = 4):
@@ -199,6 +200,25 @@ def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(monkeypat
     warnings = [r for r in caplog.records if "truncation_alarm_rate" in r.getMessage()]
     assert len(warnings) == 2, "warned on each crossing, not on every round over the line"
     assert "50%" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("mask_truncated", "said", "unsaid"),
+    [
+        (False, "priced like a failure", "drops those episodes from the loss"),
+        (True, "mask_truncated_completions drops those episodes from the loss", "priced like a failure"),
+    ],
+    ids=["kept", "masked"],
+)
+def test_the_truncation_warning_states_what_the_loss_does_with_a_truncated_episode(
+    monkeypatch, caplog, mask_truncated, said, unsaid
+):
+    monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
+    host = _RoundHost(alarm_rate=0.25, mask_truncated=mask_truncated)
+    with caplog.at_level(logging.WARNING, logger=rm.__name__):
+        host._log_rollout_metrics(_round(2), "train")
+    (warning,) = [r.getMessage() for r in caplog.records if "truncation_alarm_rate" in r.getMessage()]
+    assert said in warning and unsaid not in warning
 
 
 @pytest.mark.parametrize("rate", [1.0, -0.1])

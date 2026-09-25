@@ -1353,11 +1353,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
     ) -> None:
-        """Record the step's solve-group split, eval pass@k and log-prob/advantage covariance.
+        """Record the step's solve-group split, eval success@k and log-prob/advantage covariance.
 
         The groups are this rank's consecutive ``num_generations`` blocks, judged on the environment's
         solve verdict: an episode outside the baseline or without a verdict does not vote, and no group
-        metric is recorded where no episode carries one. pass@k is an eval round's share of groups any
+        metric is recorded where no episode carries one. success@k is an eval round's share of groups any
         member solved. The covariance pairs each loss token's pre-update log-prob with its row's
         advantage; it needs the recompute forward, a config-derived gate.
         """
@@ -1371,7 +1371,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             world.fraction("outcome/all_pass_group_frac", all_pass, groups)
             world.fraction("outcome/all_fail_group_frac", all_fail, groups)
             if mode == "eval" and num_generations > 1:
-                world.fraction(f"outcome/pass@{num_generations}", any_pass, groups)
+                world.fraction(f"outcome/success@{num_generations}", any_pass, groups)
         if recompute_logps is not None:
             world.covariance(
                 "logps/advantage_cov", recompute_logps, advantages.unsqueeze(1).expand_as(recompute_logps), loss_mask

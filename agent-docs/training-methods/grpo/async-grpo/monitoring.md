@@ -8,7 +8,7 @@ Async GRPO metrics are namespaced by the question they answer. Rollout means are
 |---|---|---|
 | `async/*` | rollout throughput | `mean_rollout_latency`; job totals `total_rollouts`, `cumulative_mean_rollout_latency`, `total_generation_tokens`; `prefetch_hit_rate`, `prefetch_hits` / `prefetch_misses`; `requests_expired_in_sync` |
 | `episode/*` | agent behavior | `turns`, `generation_tokens` (+`_max`, `_p90`), `natural_termination_rate`, `truncation_rate`, `truncation_alarm`, `error_rate`, `length_cutoff_turns`, `empty_turns`, `thinking_budget_exhausted`, `reasoning_cjk_rate`, `tool_calls`, `sandbox_infra_fault`, `sandbox_agent_fault`, `reward_scored` |
-| `outcome/*` | task success | `solve_rate`, `all_pass_group_frac` / `all_fail_group_frac`, eval `pass@k`, plus per-env keys such as `test_pass_frac` |
+| `outcome/*` | task success | `solve_rate`, `all_pass_group_frac` / `all_fail_group_frac`, eval `success@k`, plus per-env keys such as `test_pass_frac` |
 | `reward/*` | reward and decomposition | bare `reward` / `reward_std`; `within_group_std`; the components `turn_shaping`, `tool_shaping`, `objective`, the environment's own terms (`submission`, …) and each external term's `<name>`; `composition_residue`; the trainer's `effort_length_penalty`, `effort_length_floor` |
 | `judge/*`, `reward_model/*` | external reward terms | `judge/<name>/<requirement>`, `judge/<name>/completion_tokens`, `judge/<name>/cost_usd`; `reward_model/<name>/logit` |
 | `logps/*` | policy confidence | `sampling_mean`, `advantage_cov`; the related `kl`, `entropy`, `kl_clamp_frac` are unnamespaced |
@@ -41,7 +41,7 @@ Four common misreadings:
 
 ## Evaluation
 
-Eval metrics carry the `eval_` prefix. The eval group size is `num_generations_eval` (TRL's `GRPOConfig`, `None` → `num_generations`); set it to `1` for a fast pass@1 monitoring eval. Above 1, and where the environment reports a solve verdict, `eval_outcome/pass@<k>` is the share of prompts any of their `k` valid samples solved; `eval_outcome/solve_rate` stays the per-sample mean.
+Eval metrics carry the `eval_` prefix. The eval group size is `num_generations_eval` (TRL's `GRPOConfig`, `None` → `num_generations`); set it to `1` for a fast pass@1 monitoring eval. Above 1, and where the environment reports a solve verdict, `eval_outcome/success@<k>` is the share of prompts any of their `k` valid samples solved; `eval_outcome/solve_rate` stays the per-sample mean.
 
 Eval rounds run without prefetch and a round waits for its slowest episode, so `eval_rollout_batch_size` widens the round — rows per rank, not prompts. It must be a multiple of `num_generations_eval`, at most `max_concurrent_rollouts`, and needs `dataloader_drop_last: false` — all three raise at startup. Make it a divisor of the per-rank share too, or the round pads duplicate rows ([`eval_rollout_batch_size`](../../../reference/configuration-reference.md#asynctrainingconfig)).
 

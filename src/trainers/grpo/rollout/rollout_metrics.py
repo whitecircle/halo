@@ -413,16 +413,22 @@ class RolloutMetricsMixin:
 
     def _sound_truncation_alarm(self, truncation_rate: float, mode: str) -> None:
         """``episode/truncation_alarm`` for this round, and a warning when the rate crosses over
-        ``truncation_alarm_rate``. The rate is gathered-global, so every rank reaches the same verdict."""
+        ``truncation_alarm_rate``, naming what the loss does with a truncated episode. The rate is
+        gathered-global, so every rank reaches the same verdict."""
         if self._truncation_alarm_rate is None:
             return
         alarmed = truncation_rate > self._truncation_alarm_rate
         self._metrics[mode]["episode/truncation_alarm"].append(float(alarmed))
         if alarmed and mode not in self._truncation_alarmed and is_global_main_process():
+            in_loss = (
+                "mask_truncated_completions drops those episodes from the loss"
+                if self.args.mask_truncated_completions
+                else "a truncated episode is priced like a failure"
+            )
             logger.warning(
                 f"{truncation_rate:.0%} of this {mode} round's episodes ended truncated, over "
                 f"truncation_alarm_rate={self._truncation_alarm_rate}: the turn cap (max_turns) or a token "
-                f"budget (rollout_max_tokens, the thinking budget) binds, and a truncated episode is priced "
-                f"like a failure. Warned again once the rate has dropped back under the threshold."
+                f"budget (rollout_max_tokens, the thinking budget) binds, and {in_loss}. Warned again once "
+                f"the rate has dropped back under the threshold."
             )
         self._truncation_alarmed = self._truncation_alarmed | {mode} if alarmed else self._truncation_alarmed - {mode}
