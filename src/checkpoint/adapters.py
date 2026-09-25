@@ -240,6 +240,30 @@ def assert_no_expert_lora_adapter(adapter_dir: str) -> None:
         raise ValueError(_expert_lora_merge_remedy(adapter_dir, mixed=len(expert_keys) != len(keys)))
 
 
+def adapter_input_gates(adapter_dir: str, output_dir: str) -> PeftConfig:
+    """Refuse a saved adapter a tool cannot convert into ``output_dir``, then return its config.
+
+    The gate order every tool writing from a saved adapter shares; each gate covers a failure that
+    raises nothing:
+
+    * a per-rank EP/TP directory reads as whole while every expert tensor is one rank's slice.
+      Checked on the adapter and again on the base, from which a merge takes its weights;
+    * an ``--output_dir`` pointing at the adapter or the base destroys that input, since the save
+      deletes the weight files it does not overwrite;
+    * ``merge_and_unload`` cannot fold a native EP expert-LoRA adapter, and drops every expert delta.
+    """
+    reject_sharded_checkpoint(adapter_dir)
+    reject_in_place_conversion(adapter_dir, output_dir)
+    assert_no_expert_lora_adapter(adapter_dir)
+
+    peft_config = PeftConfig.from_pretrained(adapter_dir)
+    base_model_path = peft_config.base_model_name_or_path
+    if base_model_path and os.path.isdir(base_model_path):
+        reject_in_place_conversion(base_model_path, output_dir)
+        reject_sharded_checkpoint(base_model_path)
+    return peft_config
+
+
 def merge_adapter_into_base(
     adapter_dir: str,
     output_dir: str,
@@ -254,14 +278,7 @@ def merge_adapter_into_base(
 ) -> PreTrainedModel:
     """Fold a saved PEFT adapter into its base model and write the merged checkpoint.
 
-    The gate order every merge tool shares; each gate covers a failure that raises nothing:
-
-    * a per-rank EP/TP directory reads as whole while every expert tensor is one rank's slice.
-      Checked on the adapter and again on the base, from which a merge takes its weights;
-    * an ``--output_dir`` pointing at the adapter or the base destroys that input, since the save
-      deletes the weight files it does not overwrite;
-    * ``merge_and_unload`` cannot fold a native EP expert-LoRA adapter, and drops every expert delta.
-
+    :func:`adapter_input_gates` runs first, so nothing is loaded or written for a refused input.
     ``excuse_task_head`` is read off the adapter's ``modules_to_save``: a classification head on a
     plain causal-LM base is the only absence the tool's own ``load_base_model`` may excuse.
     ``prepare_for_save`` mutates the merged model before the save, which carries the base's aux files
@@ -269,15 +286,8 @@ def merge_adapter_into_base(
     """
     log = logger.info if verbose else lambda message: None
 
-    reject_sharded_checkpoint(adapter_dir)
-    reject_in_place_conversion(adapter_dir, output_dir)
-    assert_no_expert_lora_adapter(adapter_dir)
-
-    peft_config = PeftConfig.from_pretrained(adapter_dir)
+    peft_config = adapter_input_gates(adapter_dir, output_dir)
     base_model_path = peft_config.base_model_name_or_path
-    if base_model_path and os.path.isdir(base_model_path):
-        reject_in_place_conversion(base_model_path, output_dir)
-        reject_sharded_checkpoint(base_model_path)
 
     # Size preflight before the heavy load: without a device map the whole base lands in host RAM,
     # and the merged output is about the base checkpoint's size on disk.

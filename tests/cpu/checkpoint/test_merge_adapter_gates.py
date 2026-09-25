@@ -10,8 +10,9 @@ if it runs BEFORE the base model is loaded and the output directory created. The
 re-checked separately because under a merge the WEIGHTS come from the base, so the adapter-side gates
 covered the wrong directory.
 
-One sequence serves both tools. These assertions pin that single copy — its gates, their order, and
-the point they run at — and fail if a tool grows its own.
+One sequence serves both tools, and its gates (``adapter_input_gates``) also front the unmerged
+``convert_to_bf16 --peft`` re-save, whose adapter a later merge reads. These assertions pin that
+single copy — its gates, their order, and the point they run at — and fail if a tool grows its own.
 
 Run: ``python tests/cpu/checkpoint/test_merge_adapter_gates.py`` (or ``pytest -m cpu``).
 """
@@ -277,6 +278,23 @@ def test_both_merge_tools_fold_through_the_shared_sequence(tmp_path, monkeypatch
     assert tools == [script.__name__.rsplit(".", 1)[-1]], (
         f"{script.__name__} did not reach the shared merge (reached: {tools})"
     )
+
+
+@pytest.mark.parametrize("side", ["adapter", "base"])
+def test_an_unmerged_adapter_conversion_runs_the_shared_gates(tmp_path, monkeypatch, side):
+    """``convert_to_bf16 --peft`` without ``--merge_adapter`` re-saves an adapter a later merge reads,
+    so it owes the merge's gates, taken from the one sequence rather than a copy of it."""
+    assert convert_to_bf16.adapter_input_gates is adapters.adapter_input_gates
+
+    base = tmp_path / "base"
+    base.mkdir()
+    adapter = _adapter_dir(tmp_path, base)
+    monkeypatch.setattr(convert_to_bf16, "load_model", lambda *a, **k: pytest.fail("loaded past a refused gate"))
+
+    with pytest.raises(ValueError, match="not in-place"):
+        convert_to_bf16.convert_to_bf16(
+            adapter, adapter if side == "adapter" else str(base), "causal_lm", is_peft=True
+        )
 
 
 if __name__ == "__main__":

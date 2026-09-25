@@ -12,7 +12,8 @@ load-bearing and easy to lose in a per-tool re-derivation:
   pull expert banks into host RAM, which only holds while the walk stays lazy.
 
 ``detect_model_type``'s ``text_config`` fallback is here too: it is what lets the expert-layout gates
-resolve a composite VLM checkpoint whose family lives one level down.
+resolve a composite VLM checkpoint whose family lives one level down. ``detect_model_types`` reads
+both spellings from the same file, the nested language family first.
 
 Run: pytest tests/cpu/checkpoint/test_checkpoint_io_iteration.py
 """
@@ -30,6 +31,7 @@ from safetensors.torch import save_file
 from src.checkpoint import tool_io
 from src.checkpoint.tool_io import (
     detect_model_type,
+    detect_model_types,
     iter_checkpoint_shard_entries,
     iter_checkpoint_tensors,
 )
@@ -197,6 +199,19 @@ def test_a_declared_top_level_model_type_still_wins(tmp_path):
     )
 
     assert detect_model_type(str(tmp_path)) == "gemma4"
+
+
+def test_detect_model_types_leads_with_the_language_family(tmp_path):
+    """The fused-expert layout is the language family's, so a quantizer resolving its contraction axis
+    tries the nested spelling first and the wrapper's second; a ``null`` sub-config has none."""
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}})
+    )
+    assert detect_model_types(str(tmp_path)) == ["gemma4_text", "gemma4"]
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3", "text_config": None}))
+    assert detect_model_types(str(tmp_path)) == ["qwen3"]
+    assert detect_model_types(str(tmp_path / "absent")) == []
 
 
 if __name__ == "__main__":
