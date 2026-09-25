@@ -20,7 +20,7 @@ from typing import Any
 import torch
 from accelerate.utils import is_peft_model
 from huggingface_hub import snapshot_download
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 from transformers.core_model_loading import PrefixChange
 from transformers.integrations.finegrained_fp8 import Fp8Dequantize
 from transformers.utils import CONFIG_NAME, GENERATION_CONFIG_NAME
@@ -332,7 +332,7 @@ def _reject_indexless_ep_shards(checkpoint_dir: str) -> None:
     try:
         with safe_open(shards[0], framework="pt") as reader:
             partial = next((key for key in reader.keys() if EP_SHARD_KEY_RE.match(key)), None)  # noqa: SIM118
-    except Exception:
+    except (SafetensorError, OSError):
         return
     if partial is not None:
         raise ValueError(

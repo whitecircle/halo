@@ -28,6 +28,7 @@ from accelerate import PartialState
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from src.checkpoint import tool_io
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
 from src.checkpoint.tool_io import checkpoint_shard_files, reject_sharded_checkpoint, stored_tensor_nbytes
 from src.distributed.expert_parallel.saving import _save_ep_sharded
@@ -139,6 +140,22 @@ def test_indexless_per_rank_shards_are_refused(tmp_path):
         reject_sharded_checkpoint(checkpoint)
     with pytest.raises(ValueError, match="no model.safetensors.index.json"):
         checkpoint_shard_files(checkpoint)
+
+
+def test_an_unreadable_indexless_shard_is_left_to_the_callers_read(tmp_path):
+    """A truncated first shard is not refused here: the caller's own read reports it with its cause."""
+    (tmp_path / "model-00000-of-00002.safetensors").write_bytes(b"x" * 64)
+    reject_sharded_checkpoint(str(tmp_path))
+
+
+def test_a_fault_in_the_indexless_peek_raises_instead_of_waving_shards_through(tmp_path, monkeypatch):
+    """Only an unreadable shard skips the peek. Any other error there is a bug in the guard, and
+    swallowing it would pass partial ``.shard_N`` tensors to the tool as whole weights."""
+    checkpoint = _indexless_shard_dir(tmp_path)
+    monkeypatch.setattr(tool_io, "EP_SHARD_KEY_RE", None)
+
+    with pytest.raises(AttributeError):
+        reject_sharded_checkpoint(checkpoint)
 
 
 def test_an_indexless_gathered_checkpoint_still_resolves(tmp_path):
