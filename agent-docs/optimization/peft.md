@@ -286,16 +286,15 @@ from the frozen base instead of a second model copy. Under EP the mixin patches 
 (`make_disable_adapter_ep_aware`) so it reverts the native EP expert adapters too, giving a true frozen-base
 reference for both adapter halves; the patch also covers TRL's `use_adapter(None)` for online GRPO / DPO / KTO.
 
-A reference pass must open that context **after** some other forward has unsharded the FSDP2 parameters;
-both trainers do, behind the policy forward and behind the no-grad log-prob recompute respectively.
-
 peft clears `requires_grad` on the adapter tensors a module holds at entry and restores it on the ones it
-holds at exit. The forward in between swaps them, and this toolkit's `reshard_after_forward=False` keeps the
-transient unsharded copies registered afterwards.
-
-Open the context first and the restore lands on those copies, leaving every sharded adapter frozen; the next
-training step then raises, with no `grad_fn` on the loss or, under gradient checkpointing, a
-recompute-metadata mismatch.
+holds at exit, while FSDP2 copies each sharded param's flag onto its unsharded copy at every unshard. A
+reference pass that is the first forward after a reshard — online GRPO at `beta > 0` with no old-logps
+recompute (`vllm_importance_sampling_correction: false`, aligned accumulation) — enters on the sharded params
+and exits on the unsharded copies the forward leaves registered, which would freeze every sharded adapter:
+each later micro-step that unshards afresh trains without it, silently under gradient checkpointing. The
+mixin therefore also wraps the context for every PEFT model (`make_disable_adapter_fsdp2_safe`): it reshards
+the FSDP2 modules before peft's exit, so the restore lands on the sharded params. The forward or backward
+after the pass re-gathers the parameters once.
 
 An **explicit** `ref_model` is rejected under EP and TP (it is never parallelized, so its log-probs would not
 match the policy's): use LoRA with `ref_model=None`, or `precompute_ref_log_probs=True`. Under TP, LoRA is

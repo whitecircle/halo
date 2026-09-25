@@ -682,6 +682,9 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--mode lora", "--mode qlora", "--mode lora_ep", "--mode expert_lora"),
         timeout=1500,
     ),
+    "trainers/lora/test_lora_reference_pass_fsdp2.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "lora", "qwen3"), timeout=600
+    ),
     "trainers/lora/test_lora_self_distill.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss", "qwen3"),

@@ -37,6 +37,7 @@ from src.distributed.expert_parallel.dispatcher import (
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.expert_parallel.saving import validate_ep_sharded_save
 from src.distributed.fsdp import (
+    make_disable_adapter_fsdp2_safe,
     reshard_fsdp2_modules,
     reshard_label,
     setup_fsdp2_for_dp,
@@ -554,11 +555,13 @@ class DistributedTrainerMixin(
 
         self._setup_ep_gradient_checkpointing()
 
-        # Make peft's disable_adapter() drop native expert adapters too, so KL references see a frozen base.
-        if has_ep_lora(self.model):
-            peft_model = find_peft_model(self.model)
-            if peft_model is not None:
+        # The reference passes run under peft's disable_adapter(): it must drop the native expert
+        # adapters too, so they see a frozen base, and restore trainability on the sharded params.
+        peft_model = find_peft_model(self.model)
+        if peft_model is not None:
+            if has_ep_lora(self.model):
                 make_disable_adapter_ep_aware(peft_model)
+            make_disable_adapter_fsdp2_safe(peft_model, self.model)
 
         self._validate_merge_expert_lora_save()
 

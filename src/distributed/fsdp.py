@@ -1,5 +1,6 @@
 """FSDP v2 (fully_shard) data-parallel gradient sync for all torchrun modes, plus the sharding-state
-helpers its consumers need afterwards (:func:`fsdp2_modules`, :func:`reshard_fsdp2_modules`).
+helpers its consumers need afterwards (:func:`fsdp2_modules`, :func:`reshard_fsdp2_modules`,
+:func:`make_disable_adapter_fsdp2_safe`).
 
 :func:`setup_fsdp2_for_dp` / :func:`setup_fsdp2_for_tp` build the mesh themselves; a caller that
 already holds one (the trainer's EP+TP wrap reuses the loader's 2D mesh) composes
@@ -9,6 +10,7 @@ already holds one (the trainer's EP+TP wrap reuses the loader's 2D mesh) compose
 True = FULL_SHARD (lower peak memory, slightly slower).
 """
 
+import contextlib
 import logging
 
 import torch
@@ -411,3 +413,30 @@ def reshard_fsdp2_modules(model: nn.Module) -> None:
     """
     for module in fsdp2_modules(model):
         module.reshard()
+
+
+def make_disable_adapter_fsdp2_safe(peft_model: nn.Module, fsdp_root: nn.Module) -> None:
+    """Make ``peft_model.disable_adapter()`` restore ``requires_grad`` on the FSDP2 sharded params.
+
+    peft clears ``requires_grad`` on the adapter params registered at entry and restores it on those
+    registered at exit, while FSDP2 copies each sharded param's flag onto its unsharded twin at every
+    unshard. A reference pass that is the first forward after a reshard enters on the sharded params
+    and, with the forward's unsharded params left registered, exits on those: the sharded adapters stay
+    frozen for the rest of the run. Resharding every FSDP2 module under ``fsdp_root`` (the module the
+    wrap was applied to, so its root group is included) before peft's exit lands the restore on the
+    sharded params, whichever set entry saw. Per-rank, and a no-op without FSDP2. Idempotent.
+    """
+    if getattr(peft_model, "_fsdp2_safe_disable_adapter", False):
+        return
+    disable_adapter = peft_model.disable_adapter
+
+    @contextlib.contextmanager
+    def _fsdp2_safe_disable_adapter():
+        with disable_adapter():
+            try:
+                yield
+            finally:
+                reshard_fsdp2_modules(fsdp_root)
+
+    peft_model.disable_adapter = _fsdp2_safe_disable_adapter
+    peft_model._fsdp2_safe_disable_adapter = True
