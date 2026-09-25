@@ -216,7 +216,7 @@ Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
 **Trainers.** CP is declare-to-enable (`_supports_cp`, default `False`): only
 `DistributedSFTTrainer` and `SmoothMarginPOTrainer` declare it. Every other trainer raises at
 construction, and its entry script rejects `--context_parallel_size > 1` earlier through
-`parallelism_config_from_args(..., supports_cp=False)`. Full matrix:
+`parallelism_config_from_args(..., trainer_cls=...)`, which reads the same flag. Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). Nothing
 inspects a trainer's loss for CP-safety, so a new trainer must verify its own objective before
 declaring the flag.

@@ -106,9 +106,9 @@ From `CLAUDE.md` "Distributed Trainers" table. All extend `DistributedTrainerMix
 The PP column is each trainer's declared `_supports_pp`, inert while the release gate rejects
 `pp_size > 1` first. Only **SFT and SMPO support CP**. The authoritative gate is the per-class `_supports_cp` /
 `_supports_pp` attribute (`src/trainers/mixins/base.py`, checked in
-`src/trainers/mixins/validation.py`), so a hand-built config is rejected too. Each non-CP training
-script additionally calls `parallelism_config_from_args(..., supports_cp=False)`
-(`src/training/parallelism_args.py`), which rejects a CLI-requested `context_parallel_size > 1` with a clear
+`src/trainers/mixins/validation.py`), so a hand-built config is rejected too. Each training
+script additionally passes its trainer class to `parallelism_config_from_args(..., trainer_cls=...)`
+(`src/training/parallelism_args.py`), which reads the same flags and rejects a CLI-requested `context_parallel_size > 1` with a clear
 error — passing CP there is a config error, not a silent no-op. There is no `_supports_etp`: ETP
 folds into `ep_group_size` and is gated by `_supports_ep`.
 
