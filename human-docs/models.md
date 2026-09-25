@@ -54,7 +54,6 @@ packed, so the VLM path uses standard padding.
 ## Adding one
 
 A family that trains under plain FSDP2 needs no code. Giving it expert or context
-parallelism means one wrapper file that registers itself — usually 40 to 140
-lines, and under 40 when an existing family's expert layout matches.
+parallelism means one wrapper file that registers itself.
 [Model Integration Cost](model-integration-cost.md) is the honest accounting;
 [Adding a Model](../agent-docs/models/adding-a-model.md) ↗ is the procedure.

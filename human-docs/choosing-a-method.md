@@ -1,6 +1,6 @@
 # Choosing a Method
 
-Pick by the data you have and the goal. Every method shares one config, collator factory, and parallelism stack, so
+Pick by the data you have and the goal. Every method uses the same YAML format and parallelism stack, so
 switching is a config change, not a rewrite. The last column is the `halo launch` name; see
 [Quickstart](quickstart.md) to run one.
 
@@ -10,8 +10,8 @@ switching is a config change, not a rewrite. The last column is the `halo launch
 | SFT (VLM) | Same, with images — `sft` auto-detects a multimodal model | image conversations | `sft` |
 | Classification | Produce a sequence-level label (safety, topic, toxicity) | text + `label` | `classification` |
 | Reward modeling | Train a Bradley-Terry scorer to consume later | `chosen` / `rejected` pairs | `rewards` |
-| DPO | Align on preference pairs with a KL leash to a reference model | `prompt`, `chosen`, `rejected` | `dpo` |
-| SMPO | Reference-free preference alignment, one model, dynamic margin | `prompt`, `chosen`, `rejected` | `smpo` |
+| DPO | Align on preference pairs with a KL leash to a reference model | `chosen`, `rejected` (+ optional `prompt`) | `dpo` |
+| SMPO | Reference-free preference alignment, one model, dynamic margin | `chosen`, `rejected` (+ optional `prompt`) | `smpo` |
 | KTO | Feedback is unpaired thumbs-up / thumbs-down, not pairs | `prompt`, `completion`, `label` | `kto` |
 | [Offline GRPO](training-methods/offline-grpo.md) | You already have completions with reward scores; no live generation | `prompt`, `completions`, `rewards` | `offline-grpo` |
 | [Online GRPO (RLVR)](training-methods/online-grpo.md) | Model generates and earns rule-based verifiable rewards (math, format) | `prompt`, `answer` | `rlvr` |
@@ -48,4 +48,4 @@ overlaps rollouts with training through a prefetch queue; it can serve from SGLa
 [Supported Matrix](supported-matrix.md#rollout-engines)). Every other method trains without vLLM or Ray.
 
 The full per-method reference, with every hyperparameter, is in the `agent-docs`
-[training-methods reference](../agent-docs/training-methods/sft.md) ↗.
+[training-methods reference](../agent-docs/training-methods/README.md) ↗.

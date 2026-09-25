@@ -37,7 +37,7 @@ reference.
 | Nodes never join, or the rendezvous times out | The torchrun arguments differ across nodes, a node started late, the master address isn't fabric-routable (the error names `MASTER_ADDR` / `MASTER_PORT`), or a stale process holds the port (`pkill -f torchrun`). |
 | Hang at step 0, watchdog timeout minutes later | A rank never reached a collective. Grab all-rank stacks (below); the rank *not* in a collective is the culprit. |
 | Every GPU at 100% util but idle power draw, no error | A data-dependent backward graph: a row disconnected from the loss on one rank prunes its gradient collective. Keep every row connected to the loss — [Debugging](../agent-docs/reference/debugging.md) ↗. |
-| Timeout during dataset prep or a huge checkpoint save | Legitimate slow work outlasting the watchdog. Raise `DIST_NCCL_TIMEOUT_MINUTES` (default 30). |
+| Watchdog timeout during a huge gathered checkpoint save | Legitimate slow work outlasting the watchdog. Raise `DIST_NCCL_TIMEOUT_MINUTES` (default 30). Dataset prep waits on `DIST_STORE_TIMEOUT_HOURS` instead (below). |
 | "Checkpoint not found" on resume, or duplicate per-node saves | The filesystem flag doesn't match reality: `DIST_SHARED_FILESYSTEM` is `1` for a shared FS, `0` for per-node disks. |
 | `OSError: [Errno 116] Stale file handle` while loading a model or dataset cache | A cross-node read-after-write on NFS/EFS. Set `DIST_INPUT_SHARED_FILESYSTEM=0` and leave the output side shared — see [Clusters](clusters.md). |
 | A rank waits hours then aborts during a download or corpus pack | The rank going first outlasted `DIST_STORE_TIMEOUT_HOURS` (default 4). Raise it. |

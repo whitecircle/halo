@@ -19,7 +19,7 @@ truth; this is the summary, and it wins over any recipe that disagrees with it.
 | Hardware | Image | Status |
 | --- | --- | --- |
 | NVIDIA B200 / B300 | `halo:blackwell` | supported, primary Blackwell target |
-| NVIDIA GB200 / GB300 NVL72 | `halo:blackwell` | supported; set `NVLINK_DOMAIN_SIZE=72` |
+| NVIDIA GB200 / GB300 NVL72 | — | no image: Grace hosts are aarch64 and both images are x86_64-only |
 | NVIDIA H100 / H200 | `halo:hopper` | supported |
 | NVIDIA A100 / Ampere, RTX 3090 / 4090 (Ada) | `halo:blackwell` | single-GPU LoRA/QLoRA: the image's torch, FA2 and bitsandbytes carry sm_80–sm_89 kernels; DeepEP, FA3 and FA4 do not run there; not a validated release target (the Hopper image builds FA2 for sm_90 only) |
 | RTX 50-series (SM 12.x) | `halo:blackwell` | kernels present (torch, FA2 and bitsandbytes carry sm_120), but the attention auto-select picks FA4, whose kernels do not run on SM 12.x: set `attn_implementation: flash_attention_2` or `sdpa`; not validated |
@@ -29,11 +29,13 @@ Pull the prebuilt images or build them from source: [Installation](installation.
 ## Attention backends
 
 Halo picks the backend: FA4 on Blackwell, FA3 on Hopper, FA2 as the fallback,
-SDPA or eager where no Flash kernel serves the family. Gemma 4 gets no flash path
-at all (FA2 caps head_dim at 256 and FA4 overflows tensor memory at its 512-wide
-global layers); Qwen3.5/3.6 and GLM-4 MoE Lite are demoted off FA4 alone (its
-backward NaNs at their shapes) and keep FA3 on Hopper; GLM-5 Next, Step-3.7
-Flash, Inkling and Bailing/Ling run without one; DeepSeek-V4 needs eager.
+SDPA or eager where no Flash kernel serves the family; the padded-batch scripts
+(preference, reward, classification, teacher distillation, GRPO) default to SDPA
+when the YAML sets none. Gemma 4 gets no flash path at all (FA2 caps head_dim at
+256 and FA4 overflows tensor memory at its 512-wide global layers); Qwen3.5/3.6
+and GLM-4 MoE Lite are demoted off FA4 alone (its backward NaNs at their shapes)
+and keep FA3 on Hopper; GLM-5 Next, Step-3.7 Flash, Inkling, Laguna and
+Bailing/Ling run without one; DeepSeek-V4 needs eager.
 
 Context parallelism picks its own kernel and ignores the configured label — FA3
 on Hopper, FA4 on Blackwell, FA2 otherwise — and rejects SDPA except where a
@@ -44,8 +46,7 @@ family's wrapper waives the check (Bailing/Ling). Per-family resolution:
 
 Every trainer supports EP, TP, ETP and EP+TP. CP is declare-to-enable and only
 SFT and SMPO set it: nothing inspects a trainer's loss, so CP would silently
-mis-pool across sequence shards. The Notes column says what keeps each of the
-others off.
+mis-pool across sequence shards.
 
 | Method | Script | CP | Notes |
 | --- | --- | :---: | --- |
@@ -94,7 +95,7 @@ from this repo's image, not upstream. Engine setup, ports, weight sync and
 | ETP | experimental | expert FFN memory, experts replicated |
 | EP+CP · EP+TP | supported for selected families | MoE plus long context / attention sharding |
 | EP+ETP | experimental | MoE expert memory pressure, node-local |
-| TP+CP · TP+ETP · ETP+CP · EP+TP+ETP | unsupported | rejected at config validation |
+| TP+CP · TP+ETP · ETP+CP · any three axes | unsupported | rejected at config validation |
 | Pipeline parallelism | not yet available | `pipeline_parallel_size > 1` is rejected at config time |
 
 The layout rules behind these — and the shapes rejected before a run starts —
@@ -126,7 +127,7 @@ CP wrapper drop CP. What each family is for: [Supported Models](models.md).
 | Inkling | Yes | Yes | No | No | Yes | No | No | untested | multimodal MoE; short-conv layers and a relative-logits bias block CP, and its attention class is not TP-shardable. No online RL |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM; KDA linear attention blocks CP and is not TP-shardable, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first. No online RL |
 | Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM; per-layer head counts block TP, no CP wrapper, SDPA only; sharded EP saves refused — use the gathered save; online RL on vLLM only |
-| Any other HF causal LM | Yes | — | family-specific | native if `tp_plan` exists | — | — | — | Yes | a dense model without a TP plan raises at load instead of sharding |
+| Any other HF causal LM | Yes | — | No | native if `tp_plan` exists | — | — | — | Yes | a dense model without a TP plan raises at load instead of sharding |
 
 Three rules cut across the table. Every `Yes` in EP+CP carries the same topology
 rule — EP stays node-local and `ep_size × expert_tp_size` equals the NVLink

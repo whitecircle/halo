@@ -25,8 +25,8 @@ long sequence, not a way to go faster: it holds memory nearly flat from 16k to
 64k tokens and buys no speed. Sharding buys capacity — a 119B MoE trains on four
 GPUs at `ep2 + etp2` — and you pay for it in tokens per second.
 
-One rule of thumb before you judge any number: `M = per_device_batch_size ×
-sequence_length` should be at least ~8k on a B300 MoE run. Below that the step is
+One rule of thumb before you judge any number: `M = per_device_train_batch_size ×
+max_length` should be at least ~8k on a B300 MoE run. Below that the step is
 latency-bound and the GPUs are waiting, not computing. Turn on
 `enable_efficiency_metrics: true` to get tokens/s/GPU in your own logs.
 
@@ -34,13 +34,13 @@ latency-bound and the GPUs are waiting, not computing. Turn on
 
 | Lever | What it buys |
 | --- | --- |
-| Bigger `M` — raise `per_device_train_batch_size` or `max_length` | the single largest effect; batch 1 → 4 is 1.5–2.1× on MoE. Fill the global batch with `gradient_accumulation_steps`, not more parallelism |
-| `gradient_checkpointing: false` when activations fit | +29% on GPT-OSS `ep8` at 4k, at roughly double the activation memory |
-| `packing: true` (or `padding_free: true`) | 9.2× on a corpus averaging a quarter of `max_length`; nothing when rows already fill it |
+| Bigger `M` — raise `per_device_train_batch_size` or `max_length` | the single largest effect; batch 1 → 4 is 1.2–2.1× on MoE, least at high EP. Fill the global batch with `gradient_accumulation_steps`, not more parallelism |
+| `gradient_checkpointing: false` when activations fit | +29% on GPT-OSS `ep8` at 4k, at roughly double the peak memory |
+| `packing: true` | 9.2× on a corpus averaging a quarter of `max_length` (`padding_free: true`: 2.3×); nothing when rows already fill it |
 | `use_grouped_gemm: true` (default on SM90+) | 2.1–3.4× end-to-end at `ep2` — one batched expert matmul instead of a loop |
 | Flash Attention 4 (auto on Blackwell) | 1.1× at 4k rising to 2.3× at 32k on dense; ~+13% on MoE, where all-to-all dominates |
 | `use_liger_kernel: true` (default) | +40% and 19 GB at MoE `ep2`; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades a few percent of speed for tens of GB |
-| `AdamWBF16` (automatic with `bf16: true`) | weights and optimizer state in 6 bytes/param where fp32-state AdamW needs 12, and a 17% shorter step |
+| `AdamWBF16` (automatic with `bf16: true`) | weights and optimizer state in 6 bytes/param where fp32-state AdamW needs 12, and a 17% shorter step than `adamw_torch_fused` |
 
 The defaults already have most of this on. The levers you actually set per run
 are the first three.
