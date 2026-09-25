@@ -63,12 +63,15 @@ Once your PR path is approved, the normal bar applies (full detail in
 - **Keep it focused.** A diff over **~2,000 lines** is hard to review and will be deferred — split it.
 - **Work from a fork.** Outside contributors have no push access here: fork the repo, clone your
   fork, branch off `main`, push to your fork, and open the PR against `whitecircle/halo`'s `main`.
-- **Every PR is squash-merged.** Merge commits and rebase merges are disabled, so a PR's commit
-  structure is never preserved, and GitHub signs the squash commit it creates. Signed commits
-  (SSH or GPG — the *Verified* badge) are required only on branches pushed to this repository, an
-  organization rule; a fork needs no signing setup. Maintainers' one-time setup:
-  `git config --global gpg.format ssh`, `git config --global user.signingkey ~/.ssh/id_ed25519.pub`,
-  `git config --global commit.gpgsign true`.
+- **Every PR is squash-merged, and every commit in it must carry a verified signature** (SSH or
+  GPG — the *Verified* badge), forks included: GitHub does not merge a PR while any of its commits
+  lacks one. Merge commits and rebase merges are disabled, so a PR's commit structure is never
+  preserved. One-time setup: add your SSH or GPG key to your GitHub account as a **signing key**,
+  then `git config --global gpg.format ssh` (SSH keys only),
+  `git config --global user.signingkey ~/.ssh/id_ed25519.pub` and
+  `git config --global commit.gpgsign true`. Re-sign earlier commits with
+  `git rebase --exec 'git commit --amend --no-edit -S' <base>` (the `main` commit the branch starts
+  from) and force-push.
 
 ## Markdown locations
 

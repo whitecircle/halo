@@ -57,5 +57,5 @@
 - [ ] Tests added/updated; `make test-cpu` (and `make test-gpu-core` if GPU-affecting) pass
 - [ ] Docs updated for any user-facing change (`make docs` is green)
 - [ ] No internal infra / secrets / credentials added
-- [ ] Commits on a `whitecircle/halo` branch are signed (*Verified* badge); every PR is squash-merged, a fork needs no signing
+- [ ] Every commit carries a verified signature (*Verified* badge), forks included — a PR with an unsigned commit cannot merge; re-sign with `git rebase --exec 'git commit --amend --no-edit -S' <base>` and force-push
 - [ ] Focused diff (large PRs ~2,000+ lines are reviewed later — consider splitting)

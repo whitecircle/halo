@@ -47,8 +47,10 @@ models you used.
 3. Ship tests that **fail when the behavior breaks** — no smoke-only or
    `assert x is not None` tests. The anti-slop test guide is in
    [`agent-docs/contributing/`](../agent-docs/contributing/README.md) ↗.
-4. Every PR is squash-merged. Signed commits (SSH or GPG) are required only on
-   branches of this repository, not in a fork. Never commit secrets, `.env`, or
+4. Every PR is squash-merged, and every commit in it must carry a verified
+   signature (SSH or GPG), forks included: GitHub does not merge a PR while any
+   of its commits lacks one. Signing setup and re-signing earlier commits:
+   [`CONTRIBUTING.md`](../CONTRIBUTING.md). Never commit secrets, `.env`, or
    keys.
 
 The dev-environment guide (building images, running tests, docs tooling) is

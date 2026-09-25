@@ -378,8 +378,11 @@ first-class content — report it with the reason.
    reopen. Merging a PR adds you to the allowlist, so the gate applies once. `/approve` assigns you to the
    issue, which keeps it open while you work; an unassigned idle issue goes stale after 30 days and closes
    7 days later.
-2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged;
-   signed commits (SSH or GPG) are required only on branches of this repository, not in a fork.
+2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged, and
+   every commit in it must carry a verified signature (SSH or GPG), forks included: GitHub does not
+   merge a PR while any of its commits lacks one. Re-sign earlier commits with
+   `git rebase --exec 'git commit --amend --no-edit -S' <base>` (the `main` commit the branch starts
+   from) and force-push; the one-time signing setup is in `CONTRIBUTING.md`.
 3. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
    `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (plus
    `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs `ruff`,
