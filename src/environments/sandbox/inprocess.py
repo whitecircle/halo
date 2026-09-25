@@ -248,7 +248,7 @@ def safe_calculate(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) ->
     """
     try:
         expr = expression.strip().replace("^", "**").replace("\u00d7", "*").replace("\u00f7", "/")
-        _validate_sandbox_ast(expr, allow_imports=False)
+        _validate_sandbox_ast(expr)
     except ValueError as e:
         return f"Error: {str(e)}"
 
@@ -265,22 +265,21 @@ def safe_calculate(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) ->
     return _run_with_timeout(_evaluate, timeout)
 
 
-def _validate_sandbox_ast(code: str, allow_imports: bool = False) -> None:
+def _validate_sandbox_ast(code: str) -> None:
     """Reject sandbox-escape constructs before execution. Raises ValueError on a violation.
 
     Overriding ``__builtins__`` does not contain ``eval``/``exec``: ``().__class__.__bases__[0].
     __subclasses__()`` walks the dunder graph to arbitrary classes (file IO, subprocess). Dunder
-    attribute/name access, frame/generator introspection attrs, dunder subscripts, and introspection/IO
-    builtins are therefore all forbidden. ``import`` is blocked unless ``allow_imports``, which is safe
-    only under external isolation. This is defense in depth, not a hard boundary (see the module
-    docstring).
+    attribute/name access, frame/generator introspection attrs, dunder subscripts, ``import``, and
+    introspection/IO builtins are therefore all forbidden. This is defense in depth, not a hard
+    boundary (see the module docstring).
     """
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return
     for node in ast.walk(tree):
-        if not allow_imports and isinstance(node, (ast.Import, ast.ImportFrom)):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
             raise ValueError("imports are not allowed in the sandbox")
         if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
             raise ValueError(f"access to dunder attribute '{node.attr}' is not allowed in the sandbox")
@@ -347,17 +346,13 @@ def _run_python_sandboxed_inner(code: str) -> str:
         return f"Error: {str(e) or type(e).__name__}"
 
 
-def run_python_sandboxed(
-    code: str,
-    timeout: float = SANDBOX_DEFAULT_TIMEOUT,
-    allow_imports: bool = False,
-) -> str:
+def run_python_sandboxed(code: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
     """Execute Python in a restricted-builtins sandbox with an escape guard + wall-clock timeout.
 
     Returns an ``Error: ...`` string on violation, exception, or timeout.
     """
     try:
-        _validate_sandbox_ast(code, allow_imports=allow_imports)
+        _validate_sandbox_ast(code)
     except ValueError as e:
         return f"Error: {str(e)}"
 

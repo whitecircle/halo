@@ -27,18 +27,13 @@ from src.environments.tools.definitions import (
 from src.environments.tools.web_search import async_web_search, validate_search_backend, web_search
 
 
-def _code_repl_handler(
-    language: str,
-    timeout: float,
-    allow_imports: bool,
-    sandbox: SandboxExecutor | None,
-) -> Callable[..., str]:
+def _code_repl_handler(language: str, timeout: float, sandbox: SandboxExecutor | None) -> Callable[..., str]:
     """Pick the code-execution handler. Python with no ``sandbox`` uses the in-process REPL; otherwise
     (or any non-Python language) runs via a :class:`SandboxExecutor`, resolving a default when none given."""
     spec = require_language(language)
 
     if spec.name == "python" and sandbox is None:
-        return functools.partial(run_python_sandboxed, timeout=timeout, allow_imports=allow_imports)
+        return functools.partial(run_python_sandboxed, timeout=timeout)
 
     executor = sandbox or resolve_sandbox()
     return functools.partial(run_code_via_sandbox, sandbox=executor, timeout=timeout, language=spec.name)
@@ -49,7 +44,6 @@ def _code_tool(
     description: str,
     language: str,
     timeout: float,
-    allow_imports: bool,
     sandbox: SandboxExecutor | None,
 ) -> NativeTool:
     """Build a code-execution :class:`NativeTool`."""
@@ -63,7 +57,7 @@ def _code_tool(
                 description="Source code to execute. Writes results to stdout/print; it is given no stdin.",
             ),
         ],
-        handler=_code_repl_handler(language, timeout, allow_imports, sandbox),
+        handler=_code_repl_handler(language, timeout, sandbox),
     )
 
 
@@ -94,7 +88,6 @@ def create_native_math_tools(timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> Native
 def create_native_code_tools(
     language: str = "python",
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
-    allow_imports: bool = False,
     sandbox: SandboxExecutor | None = None,
     tool_name: str | None = None,
 ) -> NativeToolRegistry:
@@ -103,8 +96,6 @@ def create_native_code_tools(
     Args:
         language: any name or alias in the sandbox language registry (``LANGUAGES``).
         timeout: wall-clock cap (seconds) per execution.
-        allow_imports: permit ``import`` in the in-process Python sandbox only (no effect with a real
-            ``sandbox`` or compiled language). Only safe in an externally isolated context.
         sandbox: run on this :class:`SandboxExecutor`, a subprocess with imports and the stdlib (confined
             on ``bubblewrap`` / ``remote``, rlimits only on ``local``). ``None`` keeps the in-process
             Python REPL; a non-Python language resolves a default backend.
@@ -135,7 +126,6 @@ def create_native_code_tools(
             description=description,
             language=spec.name,
             timeout=timeout,
-            allow_imports=allow_imports,
             sandbox=sandbox,
         )
     )
@@ -143,14 +133,10 @@ def create_native_code_tools(
 
 
 def create_native_python_tools(
-    timeout: float = SANDBOX_DEFAULT_TIMEOUT,
-    allow_imports: bool = False,
-    sandbox: SandboxExecutor | None = None,
+    timeout: float = SANDBOX_DEFAULT_TIMEOUT, sandbox: SandboxExecutor | None = None
 ) -> NativeToolRegistry:
     """Create a sandboxed Python REPL tool (named ``python``). See :func:`create_native_code_tools`."""
-    return create_native_code_tools(
-        language="python", timeout=timeout, allow_imports=allow_imports, sandbox=sandbox, tool_name="python"
-    )
+    return create_native_code_tools(language="python", timeout=timeout, sandbox=sandbox, tool_name="python")
 
 
 def create_native_search_tools(backend: str | None = None) -> NativeToolRegistry:
@@ -287,14 +273,12 @@ def create_native_file_tools() -> NativeToolRegistry:
 
 
 def create_all_native_tools(
-    timeout: float = SANDBOX_DEFAULT_TIMEOUT,
-    allow_imports: bool = False,
-    sandbox: SandboxExecutor | None = None,
+    timeout: float = SANDBOX_DEFAULT_TIMEOUT, sandbox: SandboxExecutor | None = None
 ) -> NativeToolRegistry:
     """Registry with all native tools: math, python, search, and (simulated) file."""
     return NativeToolRegistry.combine(
         create_native_math_tools(timeout=timeout),
-        create_native_python_tools(timeout=timeout, allow_imports=allow_imports, sandbox=sandbox),
+        create_native_python_tools(timeout=timeout, sandbox=sandbox),
         create_native_search_tools(),
         create_native_file_tools(),
     )
