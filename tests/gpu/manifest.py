@@ -400,6 +400,9 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/tp/test_tp_gathered_save_sinks.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "gptoss"), timeout=600
     ),
+    "parallelism/tp/test_tp_lora_bridge.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "tp", "lora"), timeout=600
+    ),
     "parallelism/tp/test_vlm_parallelism.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "vlm", "tp", "cp", "qwen3"), timeout=1000
     ),
