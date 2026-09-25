@@ -960,13 +960,13 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         Detached: the bound is a clamp limit, not a term of the objective. Left differentiable,
         every clamped token would route its gradient back into the single element that is the
-        quantile, handing that token ``clamped_count`` times the gradient. The multi-rank branch is
-        detached anyway (the all-gather is not autograd-aware), so detaching here also keeps the
-        objective independent of ``cp_size``.
+        quantile, handing that token ``clamped_count`` times the gradient. Detaching up front also
+        keeps the all-gather, which has no autograd kernel, off the graph.
         """
+        values = values.detach().float()
         group = cp_config.process_group if cp_config else None
         if group is None or dist.get_world_size(group) == 1:
-            return torch.quantile(values.float(), q).detach() if values.numel() > 0 else None
+            return torch.quantile(values, q) if values.numel() > 0 else None
 
         world = dist.get_world_size(group)
         counts = torch.zeros(world, dtype=torch.long, device=values.device)
@@ -977,8 +977,8 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             return None
 
         width = int(counts.max())
-        padded = values.float().new_zeros(width)
-        padded[: values.numel()] = values.float()
+        padded = values.new_zeros(width)
+        padded[: values.numel()] = values
         gathered = padded.new_zeros(world * width)
         dist.all_gather_into_tensor(gathered, padded, group=group)
         gathered = gathered.view(world, width)

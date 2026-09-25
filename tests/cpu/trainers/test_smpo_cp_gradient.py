@@ -6,7 +6,8 @@ so every rank computes the same loss. Those sum reduces must be autograd-aware: 
 the gradient over the CP group, which FSDP2's world-wide gradient average then divides back by
 ``cp_size``. An in-place ``dist.all_reduce`` on a grad-carrying tensor instead reaches autograd
 through PyTorch's deprecated c10d fallback — identity backward plus an "autograd kernel was not
-registered" warning — and trains on ``1/cp_size`` of the gradient unless the loss is rescaled.
+registered" warning — and trains on ``1/cp_size`` of the gradient unless the loss is rescaled. The
+percentile clip's all-gather must likewise see only detached values.
 
 This drives the real ``get_batch_loss_metrics`` over a 2-rank gloo CP group in float64 and compares
 the per-sequence log-probs, the loss and the FSDP-averaged gradient with a ``cp_size=1`` run of the
@@ -64,7 +65,10 @@ def _trainer(parallelism_config: ParallelismConfig, cp_config) -> SmoothMarginPO
     trainer.pad_token_id = PAD_TOKEN_ID
     trainer.label_pad_token_id = -100
     trainer.padding_free = False
-    trainer.lower_clip_percentile = trainer.upper_clip_percentile = trainer.min_log_prob = None
+    # Clipping on, so the CP quantile's all-gather runs inside the backward-carrying forward.
+    trainer.lower_clip_percentile = 0.25
+    trainer.upper_clip_percentile = 0.9
+    trainer.min_log_prob = -3.0
     trainer.beta = 2.0
     trainer.loss_type = "sigmoid"
     trainer.target_margin = 0.3
