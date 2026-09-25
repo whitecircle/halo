@@ -293,7 +293,7 @@ def score_router_grads(baseline_router_grads, ep_router_grads, results) -> bool:
 
         grad_cos = cos_sim(all_baseline_grads, all_ep_grads, label="router grads, all layers")
         results["router_grad_cosine"] = grad_cos
-        # DIRECTION gate: bf16 reassociation alone leaves this at 0.978 over pretrained sinks.
+        # DIRECTION gate: bf16 reassociation alone leaves this at 0.968 against the HF baseline.
         grad_cos_ok = grad_cos > ROUTER_GRAD_COSINE_MIN
         results["router_grad_cosine_ok"] = grad_cos_ok
         log(
@@ -303,7 +303,7 @@ def score_router_grads(baseline_router_grads, ep_router_grads, results) -> bool:
         if not grad_cos_ok:
             ok = False
 
-        # SCALE gate: the band admits 1.25x, so a 2x reduction error cannot hide (measures 0.9965).
+        # SCALE gate: the band admits 1.25x, so a 2x reduction error cannot hide (measures 1.028).
         baseline_norm = all_baseline_grads.norm().item()
         ep_norm = all_ep_grads.norm().item()
         norm_ratio = ep_norm / baseline_norm if baseline_norm > 0 else float("inf")
