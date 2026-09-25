@@ -408,6 +408,8 @@ def merge_models(
                     f"no meaningful average. Merge models that share it."
                 )
             writer.add(key, tensors[0])
+            # Left bound, the other models' copies would sit beside the next key's reads.
+            del tensors
             continue
 
         per_key = {"tensors": tensors, "t0": tensors[0], "t1": tensors[-1], "weights": weights}

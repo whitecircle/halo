@@ -501,23 +501,38 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
 
 def test_the_merge_loop_releases_each_keys_inputs_before_reading_the_next(tmp_path, monkeypatch):
     """The RAM preflight counts one key's inputs: a binding that outlives its iteration (``per_key``
-    holds every input) keeps the previous key's tensors alive beside the next key's reads."""
-    keys = [f"w{i}" for i in range(3)]
+    holds every input, and an integer key is passed through on its own branch) keeps the previous
+    key's tensors alive beside the next key's reads. The one copy the writer stages is its output."""
+    keys = ["i0", *(f"w{i}" for i in range(3))]
     models = [
-        _write_tiny_checkpoint(tmp_path / name, {key: torch.full((4,), value) for key in keys})
+        _write_tiny_checkpoint(
+            tmp_path / name,
+            {"i0": torch.arange(4), **{key: torch.full((4,), value) for key in keys[1:]}},
+        )
         for name, value in (("a", 0.0), ("b", 2.0))
     ]
     reads: list[tuple[str, weakref.ref]] = []
+    staged: list[weakref.ref] = []
     held_over: list[tuple[str, str]] = []
     read_tensor = mm._TensorReader.get
+    stage_tensor = mm.StageShardWriter.add
 
     def tracked_get(self, key):
-        held_over.extend((key, prior) for prior, ref in reads if prior != key and ref() is not None)
+        held_over.extend(
+            (key, prior)
+            for prior, ref in reads
+            if prior != key and ref() is not None and not any(ref() is out() for out in staged)
+        )
         tensor = read_tensor(self, key)
         reads.append((key, weakref.ref(tensor)))
         return tensor
 
+    def tracked_add(self, key, tensor):
+        staged.append(weakref.ref(tensor))
+        return stage_tensor(self, key, tensor)
+
     monkeypatch.setattr(mm._TensorReader, "get", tracked_get)
+    monkeypatch.setattr(mm.StageShardWriter, "add", tracked_add)
     mm.merge_models(
         [str(model) for model in models],
         str(tmp_path / "out"),
