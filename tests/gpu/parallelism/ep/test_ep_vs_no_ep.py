@@ -53,7 +53,7 @@ from tests.common.distributed import ensure_model_downloaded, init_distributed, 
 from tests.common.ep_reference import broadcast_reference, dense_reference, fixed_chat_batch
 from tests.common.models import GPT_OSS_20B
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
+from tests.common.utils import cleanup_memory, cos_sim, gpu_mem_gb, log, log_all
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -76,13 +76,6 @@ ATTN_IMPLEMENTATION = "eager"
 LOSS_ABS_TOL = TOL.router_pick_flip_loss_abs
 LOGIT_COSINE_MIN = 0.95
 ROUTER_GRAD_COSINE_MIN = TOL.grad_direction_cosine_min
-
-
-def cosine_sim(a, b):
-    """Compute cosine similarity between two flat tensors."""
-    a_flat = a.float().flatten()
-    b_flat = b.float().flatten()
-    return torch.nn.functional.cosine_similarity(a_flat.unsqueeze(0), b_flat.unsqueeze(0)).item()
 
 
 def extract_router_grads(model):
@@ -226,6 +219,130 @@ def run_ep_forward(batch):
     return loss_val, logits, router_grads
 
 
+def score_logits(baseline_logits, ep_logits, results) -> bool:
+    """Gate the EP logits' direction against the baseline's; per-position and top-1 figures are reported."""
+    log("\n  --- Logit Comparison ---")
+    log(f"  Baseline logits shape: {baseline_logits.shape}")
+    log(f"  EP logits shape: {ep_logits.shape}")
+
+    logit_cos = cos_sim(baseline_logits, ep_logits, label="logits")
+    results["logit_cosine"] = logit_cos
+    logit_ok = logit_cos >= LOGIT_COSINE_MIN
+    log(f"  Logit cosine similarity: {logit_cos:.6f} (min={LOGIT_COSINE_MIN}): {'PASS' if logit_ok else 'FAIL'}")
+
+    B, S, V = baseline_logits.shape
+    position_cosines = []
+    for s in range(S):
+        pos_cos = cos_sim(baseline_logits[0, s], ep_logits[0, s], label=f"logits at position {s}")
+        position_cosines.append(pos_cos)
+
+    avg_pos_cos = sum(position_cosines) / len(position_cosines)
+    min_pos_cos = min(position_cosines)
+    worst_pos = position_cosines.index(min_pos_cos)
+    results["avg_position_cosine"] = avg_pos_cos
+    results["min_position_cosine"] = min_pos_cos
+    log(f"  Avg per-position cosine: {avg_pos_cos:.6f}")
+    log(f"  Min per-position cosine: {min_pos_cos:.6f} (position {worst_pos})")
+
+    abs_diff = (baseline_logits.float() - ep_logits.float()).abs()
+    log(f"  Logit abs diff — mean: {abs_diff.mean():.6f}, max: {abs_diff.max():.6f}, std: {abs_diff.std():.6f}")
+
+    baseline_top1 = baseline_logits.argmax(dim=-1)
+    ep_top1 = ep_logits.argmax(dim=-1)
+    agreement = (baseline_top1 == ep_top1).float().mean().item()
+    results["top1_agreement"] = agreement
+    log(f"  Top-1 token agreement: {agreement:.4f} ({agreement * 100:.1f}%)")
+    return logit_ok
+
+
+def score_router_grads(baseline_router_grads, ep_router_grads, results) -> bool:
+    """Gate the EP router gradients against the baseline's on scale and direction.
+
+    The router weight is REPLICATED and world-synced (EP distributes only experts), so its grad is
+    reduced exactly once. Two gates: SCALE (a dropped/doubled reduction scales the norm ratio by the
+    axis size) and DIRECTION (a routing/permutation corruption reorients it without moving the norm).
+    """
+    log("\n  --- Router Gradient Comparison (pass/fail: norm ratio + cosine) ---")
+
+    # A severed router is the regression this exists to catch, so a missing gradient or a
+    # router present on one side only fails rather than dropping out of the comparison. Rank 0
+    # alone reaches this, so it records the verdict instead of raising before the broadcast.
+    ok = True
+    severed = sorted(
+        f"{side}:{name}"
+        for side, grads in (("baseline", baseline_router_grads), ("ep", ep_router_grads))
+        for name, grad in grads.items()
+        if grad is None
+    )
+    keys_differ = baseline_router_grads.keys() != ep_router_grads.keys()
+    if not baseline_router_grads or keys_differ or severed:
+        log(f"  FAIL: router grads missing {severed}")
+        log(f"  FAIL: only in baseline {sorted(baseline_router_grads.keys() - ep_router_grads.keys())}")
+        log(f"  FAIL: only in EP {sorted(ep_router_grads.keys() - baseline_router_grads.keys())}")
+        results["router_grad_cosine"] = None
+        ok = False
+    else:
+        baseline_keys = sorted(baseline_router_grads.keys())
+        log(f"  Router grad keys ({len(baseline_keys)} layers): {baseline_keys[:3]}...")
+
+        all_baseline_grads = torch.cat([baseline_router_grads[k].flatten() for k in baseline_keys])
+        all_ep_grads = torch.cat([ep_router_grads[k].flatten() for k in baseline_keys])
+
+        grad_cos = cos_sim(all_baseline_grads, all_ep_grads, label="router grads, all layers")
+        results["router_grad_cosine"] = grad_cos
+        # DIRECTION gate: bf16 reassociation alone leaves this at 0.978 over pretrained sinks.
+        grad_cos_ok = grad_cos > ROUTER_GRAD_COSINE_MIN
+        results["router_grad_cosine_ok"] = grad_cos_ok
+        log(
+            f"  Router grad cosine similarity: {grad_cos:.6f} "
+            f"(min={ROUTER_GRAD_COSINE_MIN}): {'PASS' if grad_cos_ok else 'FAIL'}"
+        )
+        if not grad_cos_ok:
+            ok = False
+
+        # SCALE gate: the band admits 1.25x, so a 2x reduction error cannot hide (measures 0.9965).
+        baseline_norm = all_baseline_grads.norm().item()
+        ep_norm = all_ep_grads.norm().item()
+        norm_ratio = ep_norm / baseline_norm if baseline_norm > 0 else float("inf")
+        results["router_grad_norm_ratio"] = norm_ratio
+        norm_ratio_ok = 1 / TOL.grad_norm_ratio_max < norm_ratio < TOL.grad_norm_ratio_max
+        results["router_grad_norm_ratio_ok"] = norm_ratio_ok
+        log(f"  Baseline grad norm: {baseline_norm:.6f}")
+        log(f"  EP grad norm: {ep_norm:.6f}")
+        log(
+            f"  Norm ratio (EP/baseline): {norm_ratio:.4f} "
+            f"(band {1 / TOL.grad_norm_ratio_max:.2f}–{TOL.grad_norm_ratio_max}): "
+            f"{'PASS' if norm_ratio_ok else 'FAIL'}"
+        )
+        if not norm_ratio_ok:
+            ok = False
+
+        layer_cosines = []
+        for key in baseline_keys:
+            lcos = cos_sim(baseline_router_grads[key], ep_router_grads[key], label=key)
+            layer_cosines.append(lcos)
+        log(
+            f"  Per-layer grad cosine: min={min(layer_cosines):.4f}, "
+            f"max={max(layer_cosines):.4f}, avg={sum(layer_cosines) / len(layer_cosines):.4f}"
+        )
+
+        worst_layer = layer_cosines.index(min(layer_cosines))
+        best_layer = layer_cosines.index(max(layer_cosines))
+        log(f"  Best layer: {baseline_keys[best_layer]} (cos={layer_cosines[best_layer]:.4f})")
+        log(f"  Worst layer: {baseline_keys[worst_layer]} (cos={layer_cosines[worst_layer]:.4f})")
+
+        baseline_nonzero = (all_baseline_grads.abs() > 1e-8).float().mean().item()
+        ep_nonzero = (all_ep_grads.abs() > 1e-8).float().mean().item()
+        grads_alive = baseline_nonzero > 0.5 and ep_nonzero > 0.5
+        results["grads_alive"] = grads_alive
+        log(f"  Baseline grad non-zero fraction: {baseline_nonzero:.4f}")
+        log(f"  EP grad non-zero fraction: {ep_nonzero:.4f}")
+        log(f"  Gradients alive (both >50% non-zero): {'PASS' if grads_alive else 'FAIL'}")
+        if not grads_alive:
+            ok = False
+    return ok
+
+
 def compare_results(
     reference_loss,
     baseline_loss,
@@ -302,121 +419,15 @@ def compare_results(
         log(f"  EP cross-rank spread: {ep_spread:.8f} (tol={TOL.ep_identical_batch_rank_spread_abs})")
 
     if rank == 0:
-        log("\n  --- Logit Comparison ---")
-        log(f"  Baseline logits shape: {baseline_logits.shape}")
-        log(f"  EP logits shape: {ep_logits.shape}")
-
-        logit_cos = cosine_sim(baseline_logits, ep_logits)
-        results["logit_cosine"] = logit_cos
-        logit_ok = logit_cos >= LOGIT_COSINE_MIN
-        log(f"  Logit cosine similarity: {logit_cos:.6f} (min={LOGIT_COSINE_MIN}): {'PASS' if logit_ok else 'FAIL'}")
-        if not logit_ok:
+        # Rank 0 alone scores, so a cosine ``cos_sim`` refuses (a zero-norm or non-finite operand)
+        # is recorded as a failure rather than raised past the broadcast the other ranks wait in.
+        try:
+            passed = score_logits(baseline_logits, ep_logits, results) and passed
+            passed = score_router_grads(baseline_router_grads, ep_router_grads, results) and passed
+        except ValueError as error:
+            log(f"  FAIL: {error}")
+            results["cosine_refused"] = str(error)
             passed = False
-
-        B, S, V = baseline_logits.shape
-        position_cosines = []
-        for s in range(S):
-            pos_cos = cosine_sim(baseline_logits[0, s], ep_logits[0, s])
-            position_cosines.append(pos_cos)
-
-        avg_pos_cos = sum(position_cosines) / len(position_cosines)
-        min_pos_cos = min(position_cosines)
-        worst_pos = position_cosines.index(min_pos_cos)
-        results["avg_position_cosine"] = avg_pos_cos
-        results["min_position_cosine"] = min_pos_cos
-        log(f"  Avg per-position cosine: {avg_pos_cos:.6f}")
-        log(f"  Min per-position cosine: {min_pos_cos:.6f} (position {worst_pos})")
-
-        abs_diff = (baseline_logits.float() - ep_logits.float()).abs()
-        log(f"  Logit abs diff — mean: {abs_diff.mean():.6f}, max: {abs_diff.max():.6f}, std: {abs_diff.std():.6f}")
-
-        baseline_top1 = baseline_logits.argmax(dim=-1)
-        ep_top1 = ep_logits.argmax(dim=-1)
-        agreement = (baseline_top1 == ep_top1).float().mean().item()
-        results["top1_agreement"] = agreement
-        log(f"  Top-1 token agreement: {agreement:.4f} ({agreement * 100:.1f}%)")
-
-    # The router weight is REPLICATED and world-synced (EP distributes only experts), so its grad is
-    # reduced exactly once. Two gates: SCALE (a dropped/doubled reduction scales the norm ratio by the
-    # axis size) and DIRECTION (a routing/permutation corruption reorients it without moving the norm).
-    if rank == 0:
-        log("\n  --- Router Gradient Comparison (pass/fail: norm ratio + cosine) ---")
-
-        # A severed router is the regression this exists to catch, so a missing gradient or a
-        # router present on one side only fails rather than dropping out of the comparison. Rank 0
-        # alone reaches this, so it records the verdict instead of raising before the broadcast.
-        severed = sorted(
-            f"{side}:{name}"
-            for side, grads in (("baseline", baseline_router_grads), ("ep", ep_router_grads))
-            for name, grad in grads.items()
-            if grad is None
-        )
-        keys_differ = baseline_router_grads.keys() != ep_router_grads.keys()
-        if not baseline_router_grads or keys_differ or severed:
-            log(f"  FAIL: router grads missing {severed}")
-            log(f"  FAIL: only in baseline {sorted(baseline_router_grads.keys() - ep_router_grads.keys())}")
-            log(f"  FAIL: only in EP {sorted(ep_router_grads.keys() - baseline_router_grads.keys())}")
-            results["router_grad_cosine"] = None
-            passed = False
-        else:
-            baseline_keys = sorted(baseline_router_grads.keys())
-            log(f"  Router grad keys ({len(baseline_keys)} layers): {baseline_keys[:3]}...")
-
-            all_baseline_grads = torch.cat([baseline_router_grads[k].flatten() for k in baseline_keys])
-            all_ep_grads = torch.cat([ep_router_grads[k].flatten() for k in baseline_keys])
-
-            grad_cos = cosine_sim(all_baseline_grads, all_ep_grads)
-            results["router_grad_cosine"] = grad_cos
-            # DIRECTION gate: bf16 reassociation alone leaves this at 0.978 over pretrained sinks.
-            grad_cos_ok = grad_cos > ROUTER_GRAD_COSINE_MIN
-            results["router_grad_cosine_ok"] = grad_cos_ok
-            log(
-                f"  Router grad cosine similarity: {grad_cos:.6f} "
-                f"(min={ROUTER_GRAD_COSINE_MIN}): {'PASS' if grad_cos_ok else 'FAIL'}"
-            )
-            if not grad_cos_ok:
-                passed = False
-
-            # SCALE gate: the band admits 1.25x, so a 2x reduction error cannot hide (measures 0.9965).
-            baseline_norm = all_baseline_grads.norm().item()
-            ep_norm = all_ep_grads.norm().item()
-            norm_ratio = ep_norm / baseline_norm if baseline_norm > 0 else float("inf")
-            results["router_grad_norm_ratio"] = norm_ratio
-            norm_ratio_ok = 1 / TOL.grad_norm_ratio_max < norm_ratio < TOL.grad_norm_ratio_max
-            results["router_grad_norm_ratio_ok"] = norm_ratio_ok
-            log(f"  Baseline grad norm: {baseline_norm:.6f}")
-            log(f"  EP grad norm: {ep_norm:.6f}")
-            log(
-                f"  Norm ratio (EP/baseline): {norm_ratio:.4f} "
-                f"(band {1 / TOL.grad_norm_ratio_max:.2f}–{TOL.grad_norm_ratio_max}): "
-                f"{'PASS' if norm_ratio_ok else 'FAIL'}"
-            )
-            if not norm_ratio_ok:
-                passed = False
-
-            layer_cosines = []
-            for key in baseline_keys:
-                lcos = cosine_sim(baseline_router_grads[key], ep_router_grads[key])
-                layer_cosines.append(lcos)
-            log(
-                f"  Per-layer grad cosine: min={min(layer_cosines):.4f}, "
-                f"max={max(layer_cosines):.4f}, avg={sum(layer_cosines) / len(layer_cosines):.4f}"
-            )
-
-            worst_layer = layer_cosines.index(min(layer_cosines))
-            best_layer = layer_cosines.index(max(layer_cosines))
-            log(f"  Best layer: {baseline_keys[best_layer]} (cos={layer_cosines[best_layer]:.4f})")
-            log(f"  Worst layer: {baseline_keys[worst_layer]} (cos={layer_cosines[worst_layer]:.4f})")
-
-            baseline_nonzero = (all_baseline_grads.abs() > 1e-8).float().mean().item()
-            ep_nonzero = (all_ep_grads.abs() > 1e-8).float().mean().item()
-            grads_alive = baseline_nonzero > 0.5 and ep_nonzero > 0.5
-            results["grads_alive"] = grads_alive
-            log(f"  Baseline grad non-zero fraction: {baseline_nonzero:.4f}")
-            log(f"  EP grad non-zero fraction: {ep_nonzero:.4f}")
-            log(f"  Gradients alive (both >50% non-zero): {'PASS' if grads_alive else 'FAIL'}")
-            if not grads_alive:
-                passed = False
 
     pass_tensor = torch.tensor([1 if passed else 0], device=device, dtype=torch.int32)
     dist.broadcast(pass_tensor, src=0)
