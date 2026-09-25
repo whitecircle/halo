@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Consolidation contract for the frozen auxiliary models: one loader, one sinks policy.
 
-The DPO/KTO reference, the SDPG KL anchor and the distillation teacher all load an unparallelized
-frozen model whose logprobs are the other half of the objective. A per-site copy of
-that load buys a silent numerical bug the moment it drifts — a pin read off an object that cannot
+The DPO/KTO reference, the SDPG KL anchor, the offline-GRPO KL reference of a wrapped-MoE policy and
+the distillation teacher all load an unparallelized frozen model whose logprobs are the other half of
+the objective. A per-site copy of that load buys a silent numerical bug the moment it drifts — a pin read off an object that cannot
 carry it (a "pinned" teacher on hub ``main``), or a backend resolved under ``sinks_reset=True``
 whose sink reset is then never applied (a GptOss teacher running sdpa over live sinks, every
 logprob shifted by nats). Both are "this copy is missing a step the others have".
@@ -26,14 +26,17 @@ from unittest.mock import patch
 import pytest
 import torch
 from accelerate import PartialState
+from torch import nn
 from transformers import AutoModelForImageTextToText, GenerationConfig
 from trl import ModelConfig
 
 import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
+import scripts.training.offline_grpo as offline_grpo_script
 import src.distributed.loading.frozen_models as frozen_models
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model, load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
 
 # The SDPG reference load logs through accelerate's logger, which requires an initialized state.
@@ -70,9 +73,9 @@ FROZEN_LOAD_STEP_OWNERS = frozenset(
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
-def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation=None):
-    """The DPO/KTO full-finetune reference load, driven through its real call site."""
-    args = types.SimpleNamespace(
+def _token_setup_args():
+    """The script arguments the tokenizer setup seam reads, all at their defaults."""
+    return types.SimpleNamespace(
         eos_token=None,
         bos_token=None,
         pad_token=None,
@@ -81,10 +84,13 @@ def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation
         added_special_tokens=None,
         tokenizer_backend="hf",
     )
+
+
+def _tokenizer():
     # Every ``<special>_token_id`` accompanies its token: ``PreTrainedTokenizerBase.__getattr__``
     # resolves them, so no real tokenizer can carry one without the other, and the setup seam the
     # loader runs records the pad id on the model.
-    tokenizer = types.SimpleNamespace(
+    return types.SimpleNamespace(
         eos_token="<e>",
         eos_token_id=1,
         bos_token="<b>",
@@ -93,12 +99,16 @@ def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation
         pad_token_id=3,
         chat_template="{{ messages }}",
     )
+
+
+def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation=None):
+    """The DPO/KTO full-finetune reference load, driven through its real call site."""
     return load_reference_model_for_preference(
-        args,
+        _token_setup_args(),
         ModelConfig(model_name_or_path=AUX_MODEL, attn_implementation=attn_implementation),
         types.SimpleNamespace(bf16=True, fp16=False, precompute_ref_log_probs=False),
         ParallelismConfig(),
-        tokenizer,
+        _tokenizer(),
         is_vlm=False,
         method="DPO",
         reset_sinks=reset_sinks,
@@ -129,10 +139,26 @@ def _sdpg_reference(*, reset_sinks):
     )
 
 
+def _offline_grpo_reference(*, reset_sinks):
+    """The offline-GRPO KL reference of a wrapped-MoE full fine-tune, whose policy cannot be deep-copied."""
+    return offline_grpo_script._load_kl_reference(
+        _token_setup_args(),
+        types.SimpleNamespace(parallelism_config=ParallelismConfig(), model_source=AUX_MODEL),
+        types.SimpleNamespace(kl_beta=0.1, bf16=True, fp16=False),
+        ModelConfig(model_name_or_path=AUX_MODEL),
+        types.SimpleNamespace(reset_sinks=reset_sinks),
+        policy=nn.Sequential(StubEPLayerBase()),
+        tokenizer=_tokenizer(),
+        peft_config=None,
+        attn_default=None,
+    )
+
+
 FROZEN_LOAD_SITES = {
     "preference-reference": _preference_reference,
     "distillation-script": _script_teacher,
     "sdpg-reference": _sdpg_reference,
+    "offline-grpo-reference": _offline_grpo_reference,
 }
 
 # The scripts that load a policy AND a live reference, i.e. the ones whose two loads must agree.

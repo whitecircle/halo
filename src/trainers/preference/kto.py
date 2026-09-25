@@ -51,9 +51,9 @@ from src.trainers.mixins.pp_gates import (
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 
-# TRL KTOTrainer positional slot for the EP/TP reference gate — derived from the installed signature
+# TRL KTOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature
 # (its public class is a ``(*args, **kwargs)`` shim, so the derivation reads the class it forwards to).
-_CTOR_POSITIONS = ctor_positions(KTOTrainer, "ref_model")
+_CTOR_POSITIONS = ctor_positions(KTOTrainer, "model", "args", "ref_model")
 
 _REF_LOGPS_COLUMN = "ref_logps"
 
@@ -77,13 +77,13 @@ class DistributedKTOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsi
     def __init__(self, *args, **kwargs):
         # TRL's fused KTO Liger path NPEs when ref_model is None; must precede _init_distributed_config.
         disable_trl_liger(
-            ctor_config(args, kwargs),
+            ctor_config(args, kwargs, _CTOR_POSITIONS),
             "Disabling TRL's use_liger_kernel for KTO: the experimental KTO Liger loss path is "
             "broken in TRL 1.6. Liger kernels are still applied at the model level by "
             "load_distributed_model.",
         )
 
-        kwargs = self._init_distributed_config(kwargs, ctor_args=args)
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)
         # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not

@@ -52,7 +52,7 @@ from src.distributed.pipeline_parallel.losses import (
 )
 from src.models.structure import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.validation import ctor_config
+from src.trainers.mixins.validation import ctor_config, ctor_positions
 from src.trainers.reward.pooling import (
     decode_pooling_plane,
     encode_pooling_plane,
@@ -61,6 +61,9 @@ from src.trainers.reward.pooling import (
 )
 
 logger = get_logger(__name__, log_level="info")
+
+# TRL RewardTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
+_CTOR_POSITIONS = ctor_positions(RewardTrainer, "model", "args")
 
 # The two rendered sides; their presence marks a dataset the VLM map has already prepared.
 _RENDERED_SIDE_COLUMNS = frozenset(VLM_PREFERENCE_COLUMNS[:2])
@@ -111,7 +114,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, RewardTrainer):
                 # paired by hand.
                 kwargs["data_collator"] = DataCollatorForVLMPreference(
                     processor=processing_class,
-                    max_length=getattr(ctor_config(args, kwargs, position=1), "max_length", None),
+                    max_length=getattr(ctor_config(args, kwargs, _CTOR_POSITIONS), "max_length", None),
                 )
             # TRL's reward ctor settles the pad token through the tokenizer api (``pad_token``,
             # ``get_vocab``), none of which a ProcessorMixin carries — handed a processor it raises
@@ -119,7 +122,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, RewardTrainer):
             # and the processor is reinstated below because ``save_pretrained`` writes
             # ``processing_class``: without it the export carries no processor_config.json.
             kwargs["processing_class"] = resolve_tokenizer(processing_class)
-        kwargs = self._init_distributed_config(kwargs)
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         super().__init__(*args, **kwargs)
         if self._is_vlm:
             self.processing_class = self._processor

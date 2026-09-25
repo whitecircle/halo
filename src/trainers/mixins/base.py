@@ -9,7 +9,6 @@ class below.
 import logging
 import os
 import time
-from abc import ABC
 from collections.abc import Iterable
 from dataclasses import fields
 from typing import Any
@@ -57,13 +56,12 @@ from src.distributed.runtime import (
 )
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from src.kernels.liger.orchestrator import (
-    apply_liger_parallelism_overrides,
-    liger_ep_disables_fused_glu,
-    liger_parallelism_overrides,
+    sanitize_liger_config,
+    trl_reapplication_config,
     warn_if_flce_unreachable,
 )
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
-from src.models.moe_balancing import config_has_experts, ep_wraps_experts
+from src.models.moe_balancing import ep_wraps_experts
 from src.models.structure import model_has_quantized_params, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
@@ -75,11 +73,15 @@ from src.optimizers.registry import (
 )
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
-from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from src.trainers.mixins.ep_introspection import (
+    EpIntrospectionMixin,
+    forces_reentrant_checkpointing,
+    require_ep_config,
+)
 from src.trainers.mixins.grad_sync import GradientSyncMixin
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
-from src.trainers.mixins.validation import ParallelismValidationMixin, disable_trl_liger
+from src.trainers.mixins.validation import ParallelismValidationMixin, ctor_model_and_config, disable_trl_liger
 
 register_custom_optimizers()
 
@@ -92,6 +94,9 @@ _FSDP_SHAPING_KNOBS = ("use_hsdp", "fsdp_reshard_after_forward", "fsdp_reshard_a
 
 # ParallelismConfig knobs only the mixin-managed (torchrun) FSDP2 wrap implements.
 _ACCELERATE_UNSUPPORTED_KNOBS = (*_FSDP_SHAPING_KNOBS, "fp32_grad_reduce")
+
+# Where TRL keeps its fused Liger loss: preference trainers (DPO/KTO), GRPO, and the name later TRL uses.
+_TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss", "liger_loss")
 
 # Peak-allocated fraction of device memory above which the post-first-step margin warning fires.
 # A rank this close to full after the first optimizer step OOMs on a later backward.
@@ -150,21 +155,6 @@ def _knobs_set_by_user(config, names: Iterable[str]) -> list[str]:
     return [name for name in names if getattr(config, name) != defaults[name]]
 
 
-def forces_reentrant_checkpointing(parallelism_config, model_config) -> bool:
-    """Whether gradient checkpointing has to run reentrant for this run.
-
-    CP's sequence all-to-alls do not survive non-reentrant recompute, and EP's DeepEP barriers desync
-    ranks under its lazy recompute. A MoE routes in its recompute too: the router re-runs on a
-    recomputed (nondeterministically, on most attention kernels) hidden state and a near-tie pick can
-    flip, so the routing tensors change shape, which non-reentrant checkpointing rejects as a metadata
-    mismatch — with or without EP wrappers. Pipeline parallelism is the exception: reentrant runs the
-    original forward in no_grad, so FSDP2 registers no pre-backward hooks there.
-    """
-    if parallelism_config.is_pp_mode:
-        return False
-    return parallelism_config.is_ep_mode or parallelism_config.is_cp_mode or config_has_experts(model_config)
-
-
 class DistributedTrainerMixin(
     CheckpointingMixin,
     DataParallelDataLoaderMixin,
@@ -173,16 +163,15 @@ class DistributedTrainerMixin(
     ParallelismValidationMixin,
     PipelineTrainerMixin,
     TokenMetricsMixin,
-    ABC,
-):  # base mixin: not directly instantiable, but has no abstract methods
+):
     """Distributed training infrastructure (EP/CP/TP) for a Trainer subclass.
 
     Lifecycle: subclasses call ``_init_distributed_config()`` to extract parallelism
     kwargs before ``super().__init__()``, then ``_setup_distributed_modes()`` after it,
     and override the ``_supports_*`` flags to declare supported modes.
 
-    ``parallelism_config`` holds the resolved configuration; ``cp_config`` / ``_ep_config``
-    are set only when CP / EP are enabled.
+    ``parallelism_config`` holds the resolved configuration; ``cp_config`` is set only when CP is
+    enabled, ``_ep_config`` whenever the model carries EP layers.
     """
 
     _supports_ep: bool = True
@@ -214,15 +203,23 @@ class DistributedTrainerMixin(
         """
         return PPLossAdapter(token_loss_fn=causal_lm_token_loss)
 
-    def _init_distributed_config(self, kwargs: dict, training_args=None, ctor_args: tuple = (), **explicit) -> dict:
+    def _init_distributed_config(
+        self,
+        kwargs: dict,
+        training_args=None,
+        ctor_args: tuple = (),
+        ctor_positions: dict[str, int] | None = None,
+        **explicit,
+    ) -> dict:
         """Extract ParallelismConfig from kwargs and set up distributed state.
 
         Call before super().__init__() to extract/validate parallelism args (modifies kwargs
-        in-place, removing them). training_args defaults to kwargs["args"]; trainers with an
+        in-place, removing them). training_args defaults to the ctor's ``args``; trainers with an
         explicit `args` param (Classification, SMPO) should pass it. Trainers whose signatures name
         the distributed params explicitly pass them via ``**explicit``; kwargs-style values win over
-        explicit ones. ``ctor_args`` are the trainer's own ctor positionals, forwarded to the
-        ``_validate_pp_mode`` hook.
+        explicit ones. A ``(*args, **kwargs)`` trainer passes its positionals as ``ctor_args`` with
+        ``ctor_positions``, the slot table of the base it forwards them to: every setup step below
+        reads the ``model`` or the ``args`` in them, and they reach the ``_validate_pp_mode`` hook.
         """
         if explicit:
             kwargs = {**explicit, **kwargs}
@@ -248,8 +245,10 @@ class DistributedTrainerMixin(
         # Declared here so every trainer's eval path caches the same object under the same key.
         self._eval_dataloaders: dict[str, Any] = {}
 
+        model, ctor_training_args = ctor_model_and_config(ctor_args, kwargs, ctor_positions)
         if training_args is None:
-            training_args = kwargs.get("args")
+            training_args = ctor_training_args
+        model_config = getattr(model, "config", None)
         self._configure_mixed_precision(kwargs, training_args)
 
         # Non-shared FS: without a per-node write, nodes 1..N resume at global_step=0 and desync the step.
@@ -266,20 +265,23 @@ class DistributedTrainerMixin(
                     "node (otherwise non-zero nodes resume at global_step=0 → step desync)."
                 )
 
-        # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering.
+        # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering and
+        # running upstream's applier alone.
         if training_args is not None and getattr(training_args, "use_liger_kernel", False):
             safe_config = dict(getattr(training_args, "liger_kernel_config", None) or {})
             if "fused_linear_cross_entropy" not in safe_config:
                 safe_config["fused_linear_cross_entropy"] = False
-            forced_off = liger_parallelism_overrides(
-                has_ep_wrapped_experts=liger_ep_disables_fused_glu(
-                    parallelism_config.needs_ep_wrappers, getattr(kwargs.get("model"), "config", None)
+            training_args.liger_kernel_config = trl_reapplication_config(
+                model_config,
+                sanitize_liger_config(
+                    safe_config,
+                    needs_ep_wrappers=parallelism_config.needs_ep_wrappers,
+                    model_config=model_config,
+                    tp_size=parallelism_config.tp_size,
+                    cp_size=parallelism_config.cp_size,
+                    pp_size=parallelism_config.pp_size,
                 ),
-                tp_size=parallelism_config.tp_size,
-                cp_size=parallelism_config.cp_size,
-                pp_size=parallelism_config.pp_size,
             )
-            training_args.liger_kernel_config = apply_liger_parallelism_overrides(safe_config, forced_off)
 
         # Deferred past TRL.__init__ (which would re-apply Liger on EP-wrapped experts); restored before train().
         self._deferred_liger_kernel = parallelism_config.needs_ep_wrappers and disable_trl_liger(training_args)
@@ -303,7 +305,7 @@ class DistributedTrainerMixin(
         if (
             training_args is not None
             and getattr(training_args, "gradient_checkpointing", False)
-            and forces_reentrant_checkpointing(parallelism_config, getattr(kwargs.get("model"), "config", None))
+            and forces_reentrant_checkpointing(parallelism_config, model_config)
         ):
             gc_kwargs = dict(getattr(training_args, "gradient_checkpointing_kwargs", None) or {})
             if gc_kwargs.get("use_reentrant") is False:
@@ -466,6 +468,8 @@ class DistributedTrainerMixin(
         if config.fp32_non_ep_params:
             self._upcast_non_ep_params_to_fp32()
 
+        self._capture_ep_config()
+
         # TP/CP before needs_ep_wrappers (defaults True), else a TP-only dense model shards FSDP2 over world.
         if config.is_pp_mode:
             self._setup_pipeline_parallel()
@@ -565,13 +569,7 @@ class DistributedTrainerMixin(
                 self.model, merge_expert_lora_on_save=self.parallelism_config.merge_expert_lora_on_save
             )
 
-        # Liger's fused loss matmuls the FSDP2-sharded lm_head.weight; the instance flag TRL caches must go too.
-        has_liger_loss = hasattr(self, "liger_loss_fn") or getattr(self, "liger_grpo_loss", None) is not None
-        if self._fsdp_wrapped and getattr(self, "use_liger_kernel", False) and has_liger_loss:
-            self.use_liger_kernel = False
-            self.args.use_liger_kernel = False
-            if is_global_main_process():
-                logger.info("  Disabled Liger fused loss (incompatible with FSDP2 DTensors)")
+        self._disable_trl_liger_loss_under_fsdp2()
 
         # TRL's SyncRefModelCallback zips policy/ref params with plain .data ops — crashes on a DTensor/EP policy.
         wrapped = self._fsdp_wrapped or self.parallelism_config.is_ep_mode or self.parallelism_config.is_tp_mode
@@ -590,6 +588,29 @@ class DistributedTrainerMixin(
 
         # Setup varies per rank (TP materialization, EP patching), so ranks re-align before the first step.
         barrier()
+
+    def _disable_trl_liger_loss_under_fsdp2(self) -> None:
+        """Turn off TRL's fused Liger loss once FSDP2 has sharded the model.
+
+        The loss matmuls ``lm_head.weight`` outside FSDP2's forward hooks, where it is a sharded
+        DTensor. TRL caches the flag on the trainer and builds the loss under a per-trainer name, so
+        the flag must go too, and a name this guard does not know (a TRL release that renamed it)
+        must fail rather than leave the loss running on a shard.
+        """
+        if not (self._fsdp_wrapped and getattr(self, "use_liger_kernel", False)):
+            return
+        if not any(getattr(self, attr, None) is not None for attr in _TRL_LIGER_LOSS_ATTRS):
+            raise RuntimeError(
+                f"use_liger_kernel is on under FSDP2 but none of TRL's known fused Liger loss "
+                f"attributes {_TRL_LIGER_LOSS_ATTRS} is set on {type(self).__name__}: the installed TRL "
+                f"builds that loss under another name, which this guard cannot disable, and it would "
+                f"matmul the FSDP2-sharded lm_head.weight. Set use_liger_kernel: false, or add the new "
+                f"attribute name to _TRL_LIGER_LOSS_ATTRS."
+            )
+        self.use_liger_kernel = False
+        self.args.use_liger_kernel = False
+        if is_global_main_process():
+            logger.info("  Disabled Liger fused loss (incompatible with FSDP2 DTensors)")
 
     def _cast_peft_params_to_compute_dtype(self):
         """Align trainable PEFT params (LoRA adapters + ``modules_to_save`` copies) to the surrounding
@@ -610,7 +631,7 @@ class DistributedTrainerMixin(
         if peft_model is None:
             return
         # EP params: FSDP-ignored and deliberately fp32; downcasting breaks the router forward.
-        ep_param_ids = {id(p) for module in self._find_ep_modules() for p in module.parameters()}
+        ep_param_ids = self._get_ep_param_ids()
         cast = 0
         for param in peft_model.parameters():
             if id(param) in ep_param_ids:
@@ -907,11 +928,12 @@ class DistributedTrainerMixin(
         logger.info("✓ CP configured (NVLink-domain-local)")
 
     def _find_cp_wrapper(self) -> UlyssesCPModelWrapper | None:
-        """Find the CP wrapper in the model hierarchy."""
-        if isinstance(self.model, UlyssesCPModelWrapper):
-            return self.model
+        """Find the CP wrapper in the model hierarchy, beneath any ``torch.compile`` wrapper."""
+        model = self._top_level_model()
+        if isinstance(model, UlyssesCPModelWrapper):
+            return model
 
-        inner = getattr(self.model, "base_model", None)
+        inner = getattr(model, "base_model", None)
         if inner is not None:
             inner_model = getattr(inner, "model", inner)
             if isinstance(inner_model, UlyssesCPModelWrapper):
@@ -957,8 +979,8 @@ class DistributedTrainerMixin(
         caller's DP scope (the world without PP, the stage group under PP).
         """
         ep_modules, dtype_incompatible, all_ignored_modules = ignored
-        ep_cfg = self._ep_config
-        if ep_cfg is not None and ep_cfg.is_deferred_dp:
+        ep_cfg = require_ep_config(self._ep_config)
+        if ep_cfg.is_deferred_dp:
             # Sharded over the EP group, not the stage: non-expert memory per rank is `replicas`x
             # the stage-FSDP figure.
             replicas = max(1, ep_cfg.world_size // ep_cfg.ep_group_size)
@@ -1017,8 +1039,8 @@ class DistributedTrainerMixin(
         expert-TP group (ETP mode), or None."""
         if self.parallelism_config.is_tp_mode:
             return self._get_tp_process_group()
-        if self.parallelism_config.is_expert_tp_mode and self._ep_config is not None:
-            return self._ep_config.expert_tp_group
+        if self.parallelism_config.is_expert_tp_mode:
+            return require_ep_config(self._ep_config).expert_tp_group
         return None
 
     def _get_tp_group_src_rank(self) -> int:
@@ -1026,8 +1048,8 @@ class DistributedTrainerMixin(
         results so all group ranks process identical inputs."""
         if self.parallelism_config.is_tp_mode:
             return get_global_rank() - self._get_tp_rank()
-        if self.parallelism_config.is_expert_tp_mode and self._ep_config is not None:
-            group = self._ep_config.expert_tp_group
+        if self.parallelism_config.is_expert_tp_mode:
+            group = require_ep_config(self._ep_config).expert_tp_group
             if group is not None:
                 return dist.get_process_group_ranks(group)[0]
         return get_global_rank()
@@ -1291,7 +1313,7 @@ class DistributedTrainerMixin(
         self._accumulate_attention_flops(inputs)
         if self._pp_runtime is not None:
             # The schedule drives forward and backward, so the inherited step must not also run them.
-            return self._pp_training_step(inputs, num_items_in_batch)
+            return self._pp_training_step(inputs)
         self._warn_once_on_thin_memory_margin()
         # HF sets sync_gradients before every training_step, so this is the window's last microbatch.
         self._set_backward_reshard(self.accelerator.sync_gradients)
@@ -1432,7 +1454,7 @@ class DistributedTrainerMixin(
 
         self.is_deepspeed_enabled = False
         # Runs before any FSDP2 wrapping, so _fsdp_wrapped is False — the checkpoint path relies on it.
-        self.is_fsdp_enabled = getattr(self, "is_fsdp_enabled", False)
+        self.is_fsdp_enabled = False
 
         logger.info(f"Created Accelerator with distributed_type: {self.accelerator.state.distributed_type}")
 
@@ -1518,9 +1540,8 @@ class DistributedTrainerMixin(
 
         When custom data distribution gives ranks unequal eval batch counts, the default eval loop's
         per-step gather_for_metrics deadlocks, so gather_function is swapped for the identity (each
-        rank scores its own shard). Gated on actually-unequal counts: for equal-batch DP the
-        identity swap would report rank-0's shard as the global metric, so the cross-rank gather
-        stays.
+        rank scores its own shard, and the logged metrics are rank 0's, which the swap warns about).
+        Gated on actually-unequal counts: for equal-batch DP the cross-rank gather stays.
         """
         if (
             self._needs_custom_accelerator()
@@ -1535,6 +1556,14 @@ class DistributedTrainerMixin(
                     "disables cross-rank padding, which that gather needs. Provide a sized, evenly "
                     "divisible eval dataset or set top_entropy_quantile: 1.0."
                 )
+            metric_key_prefix = kwargs.get("metric_key_prefix", args[2] if len(args) > 2 else "eval")
+            logger.warning(
+                f"Evaluation batch counts differ across ranks (or cannot be measured), so the "
+                f"evaluation loop's cross-rank gather is replaced by the identity to avoid a deadlock: "
+                f"'{metric_key_prefix}_loss' and any compute_metrics output this evaluation logs are "
+                f"rank 0's own shard, not the global value. An eval dataset that splits evenly across "
+                f"the data-parallel ranks restores global metrics."
+            )
             original_gather = self.gather_function
             self.gather_function = lambda x: x
             # evaluation_loop also pads logits/labels outside gather_function; identity is safe (own shard only).
@@ -1561,7 +1590,7 @@ class DistributedTrainerMixin(
         try:
             local_batches = len(self.get_eval_dataloader(eval_dataset))
             measurable = True
-        except (TypeError, AttributeError):
+        except TypeError:
             local_batches, measurable = 0, False
 
         # Agree measurability first: a rank that early-returns leaves peers at the reduces below.

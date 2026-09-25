@@ -17,7 +17,7 @@ from trl import GRPOTrainer
 
 from src.args.mixins import AdvantageShaping, RLRRConfig
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin
+from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.mixins.generation_buffer import GRPOGenerationBufferMixin
@@ -86,7 +86,7 @@ class DistributedGRPOTrainer(
 
         self._save_completions = kwargs.pop("save_completions", True)
 
-        with self._patch_trl_for_vendored_vllm_client(training_args):
+        with self._patch_trl_for_vendored_vllm_client():
             super().__init__(*args, **kwargs)
 
         if self._rlrr_config is not None:
@@ -163,16 +163,6 @@ class DistributedGRPOTrainer(
         log_with_decoupled_completions(self, logs, start_time, super().log, save_completions=self._save_completions)
 
     @staticmethod
-    def _is_vllm_server_mode(grpo_args) -> bool:
-        """Detect whether this trainer was constructed for server-mode vLLM.
-
-        Reads the declared ``GRPOConfig`` fields directly — a getattr default here and in
-        :meth:`_require_vllm_server_mode` could disagree and leave TRL unpatched in a shape the
-        requirement gate had already accepted.
-        """
-        return grpo_args.use_vllm and grpo_args.vllm_mode == "server"
-
-    @staticmethod
     def _require_vllm_server_mode(grpo_args) -> None:
         """Require vLLM server-mode; reject in-process HF generation (``use_vllm=False``, slow +
         rank-divergent under FSDP2/EP) and colocate (no vLLM in the training image). The raised
@@ -201,17 +191,15 @@ class DistributedGRPOTrainer(
                 f"with vllm_server_host/vllm_server_port (weights sync over NCCL)."
             )
 
+    @staticmethod
     @contextlib.contextmanager
-    def _patch_trl_for_vendored_vllm_client(self, grpo_args) -> Iterator[None]:
+    def _patch_trl_for_vendored_vllm_client() -> Iterator[None]:
         """Swap TRL's vLLM client + availability checks for the duration of init.
 
         vLLM isn't installed, so force ``is_vllm_available`` True and substitute the vendored
-        NCCL-only ``VLLMWeightSyncClient``. Reverted after ``super().__init__``.
+        NCCL-only ``VLLMWeightSyncClient``. Reverted after ``super().__init__``; the ctor has already
+        required server mode, the only shape TRL builds that client for.
         """
-        if not self._is_vllm_server_mode(grpo_args):
-            yield
-            return
-
         originals = (
             _trl_vllm_generation.is_vllm_available,
             _trl_vllm_client.is_vllm_available,
@@ -252,6 +240,8 @@ class DistributedGRPOTrainer(
         self._apply_rlrr_advantages(result)
         self._apply_advantage_shaping(result)
         self._apply_degenerate_group_drop(result)
+        # Consumed: the next generation batch must stash its own rewards, never reuse these.
+        self._last_rewards_per_func = None
 
         # k3 tail clamp; both tensors exist only when beta != 0 AND TRL's recompute gate fired.
         old_logps = result.get("old_per_token_logps")
@@ -281,8 +271,8 @@ class DistributedGRPOTrainer(
         """Whether any hook re-derives advantages/masks from the stashed full reward set.
 
         The stash in :meth:`_calculate_rewards` and every consumer below read this same gate. A knob
-        covered by one but not the other leaves the stash ``None``, so the consumer early-returns and
-        the setting never reaches the math.
+        covered by one but not the other leaves the stash ``None``, which the consumer's first train
+        batch refuses.
         """
         return (
             self._rlrr_config is not None
@@ -297,9 +287,20 @@ class DistributedGRPOTrainer(
         ``rewards`` aggregates the reward functions as TRL's ``sum_then_normalize`` branch does
         (weighted nansum), in the gathered process order; ``unscorable`` marks rows where every
         reward fn returned NaN (TRL forces their advantage to 0).
+
+        Called only by a hook that is armed, so a missing stash in train mode means TRL scored this
+        batch without passing through :meth:`_calculate_rewards`; returning ``None`` would leave the
+        hook's setting silently unapplied, so it raises.
         """
-        if not self.model.training or self._last_rewards_per_func is None:
+        if not self.model.training:
             return None
+        if self._last_rewards_per_func is None:
+            raise RuntimeError(
+                "An advantage hook (RLRR / advantage_shaping / drop_degenerate_groups / "
+                "scale_rewards_std_floor) is armed but no gathered rewards were stashed for this "
+                "generation batch: TRL's scoring no longer goes through _calculate_rewards, so the "
+                "hook would silently leave TRL's advantages in place."
+            )
         rewards_per_func = self._last_rewards_per_func
         weights = self.reward_weights.to(rewards_per_func.device).unsqueeze(0)
         rewards = (rewards_per_func * weights).nansum(dim=1)  # [total], gathered order
@@ -428,6 +429,12 @@ class DistributedGRPOTrainer(
         )
 
         self._install_advantages(result, advantages_full, "RLRR")
+
+    def _loss_logits_width(self) -> LogitsWidth | None:
+        """TRL keeps one logit past the completion for the next-token shift."""
+        if self.max_completion_length is None:
+            return None
+        return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
 
     def _setup_weight_sync(self) -> None:
         """Replace ``VLLMGeneration.sync_weights`` with the distributed-aware version.

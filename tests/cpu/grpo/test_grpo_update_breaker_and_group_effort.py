@@ -267,6 +267,18 @@ def test_the_completions_record_is_written_after_the_breaker():
     )
 
 
+def test_the_step_diagnostics_read_the_advantages_after_the_breaker():
+    """``logps/advantage_cov`` describes the update the step takes; read before the breaker it reports
+    the advantages of a step the breaker then zeroed."""
+    fn = _build_training_tensors_ast()
+    branch = _breaker_branch(fn)
+    breaker_at = next(i for i, stmt in enumerate(fn.body) if branch in ast.walk(stmt))
+    recorded_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_record_step_diagnostics")]
+
+    assert recorded_at, "_build_training_tensors no longer records the step diagnostics"
+    assert min(recorded_at) > breaker_at, "the step diagnostics read the advantages before the breaker"
+
+
 # The phase helpers ``_build_training_tensors`` is partitioned into, in call order.
 _PHASE_HELPERS = (
     "_build_rollout_rewards",
@@ -292,7 +304,8 @@ def test_world_metrics_flush_once_after_every_recording_site_with_no_return_betw
     fn = _build_training_tensors_ast()
     flush_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "flush")]
     assert len(flush_at) == 1, f"_build_training_tensors flushes the world metrics {len(flush_at)} times"
-    recorded_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "fraction") or _calls(stmt, "maximum")]
+    recording = ("fraction", "maximum", "effective_sample_frac", "covariance", "_record_step_diagnostics")
+    recorded_at = [i for i, stmt in enumerate(fn.body) if any(_calls(stmt, name) for name in recording)]
     logged_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_populate_completion_logs")]
     assert recorded_at and max(recorded_at) < flush_at[0], "a count recorded after the flush logs a step late"
     assert max(logged_at) < flush_at[0], "the flush follows the completions record, the last phase every rank runs"

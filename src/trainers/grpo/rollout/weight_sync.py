@@ -403,6 +403,10 @@ def sync_weights_to_client(model: torch.nn.Module, client: Any | None, is_main: 
     # One forwarding-rank predicate for the push and the flush: two spellings that disagree would
     # leave the buffering rank never closing the update it opened.
     sender = client if (is_main and is_tp_main) else None
+    # The engine fuses a co-load group only where the pushed model declares every member, so the
+    # client's groups are scoped to this module tree before the first chunk.
+    if sender is not None:
+        sender.scope_co_load_groups(name for name, _ in model.named_modules())
     try:
         peft = gather_and_send_weights(model, sender)
     except BaseException:
@@ -473,10 +477,6 @@ def sync_trainer_weights(trainer, client: Any | None) -> bool:
     if log_memory:
         log_cuda_memory("weight-sync pre")
 
-    # The engine fuses a co-load group only where this model declares every member, so the client's
-    # groups are scoped to its module tree before the first chunk; only the forwarding rank holds one.
-    if client is not None:
-        client.scope_co_load_groups(name for name, _ in model.named_modules())
     # Hold every rank until the forwarding rank's push lands: peers would otherwise drive rollouts
     # against a mid-update engine. Fenced because the push is main-rank-only, so a raise must not skip
     # the barrier its peers block in.

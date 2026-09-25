@@ -13,7 +13,6 @@ config — deciding from the raw user dict either flips the flag off while the m
 import logging
 import sys
 import types
-from pathlib import Path
 
 import pytest
 import torch.nn.functional as F
@@ -29,8 +28,6 @@ from src.models.loading.model_preparation import finalize_liger_after_direct_loa
 from src.models.moe_balancing import has_ep_wrapper_class
 
 PartialState()  # the orchestrator's logger needs accelerate state initialized
-
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class _RecordingApplier:
@@ -73,7 +70,8 @@ def _zaya_like_config():
 
 
 def _wrapper_config(wrapper: str, text: str):
-    return types.SimpleNamespace(model_type=wrapper, text_config=types.SimpleNamespace(model_type=text))
+    text_config = types.SimpleNamespace(model_type=text)
+    return types.SimpleNamespace(model_type=wrapper, text_config=text_config, get_text_config=lambda: text_config)
 
 
 def test_an_appliers_own_swiglu_default_off_is_honored(monkeypatch):
@@ -223,7 +221,8 @@ def test_pp_off_leaves_the_family_default_alone(monkeypatch):
     ],
 )
 def test_parallelism_overrides_are_the_one_home_for_the_decision(axis, expected):
-    """Both Liger application sites read this function, so it is where the rules must be right.
+    """Both Liger application sites read this function through ``sanitize_liger_config``, so it is
+    where the rules must be right.
 
     Liger is applied at model load AND re-sanitized by the trainer mixin before TRL can re-apply it
     on the wrapped model. If each site restated the rules, an axis handled at one and not the other
@@ -234,39 +233,24 @@ def test_parallelism_overrides_are_the_one_home_for_the_decision(axis, expected)
 
 
 def test_both_sites_fold_the_overrides_with_the_same_semantics():
-    """Sharing the rule TABLE is not enough — both sites must APPLY it the same way.
+    """Sharing the rule TABLE is not enough — both sites must APPLY it the same way, so both call
+    ``sanitize_liger_config``.
 
     The fold exempts an explicitly requested ``swiglu``/``geglu`` (inert under EP, not wrong) and
     forces a wrong-loss kernel off regardless. A blanket ``dict.fromkeys(forced_off, False)`` at
     either site stamps that exemption away with no warning, so an explicit ``swiglu: true`` would
     survive model load and be silently reverted before TRL re-applies Liger.
     """
-    forced_off = orchestrator.liger_parallelism_overrides(has_ep_wrapped_experts=True, tp_size=2)
+    qwen3_moe = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
+    axes = {"needs_ep_wrappers": True, "model_config": qwen3_moe, "tp_size": 2}
 
-    explicit = orchestrator.apply_liger_parallelism_overrides({"swiglu": True, "cross_entropy": True}, forced_off)
+    explicit = orchestrator.sanitize_liger_config({"swiglu": True, "cross_entropy": True}, **axes)
     assert explicit["swiglu"] is True, "an explicitly requested swiglu must survive the EP override"
     assert explicit["cross_entropy"] is False, "TP makes the fused softmax a partial-vocab slice — not negotiable"
 
     # Anti-vacuity: without the explicit request the same override DOES turn swiglu off.
-    implicit = orchestrator.apply_liger_parallelism_overrides({}, forced_off)
+    implicit = orchestrator.sanitize_liger_config({}, **axes)
     assert implicit["swiglu"] is False, "unrequested swiglu must still be disabled under EP"
-
-
-def test_trainer_mixin_folds_through_the_shared_applier():
-    """The mixin must fold via ``apply_liger_parallelism_overrides``, not restate the fold itself.
-
-    Source-level because the fold sits mid-``_init_distributed_config``, behind mixed-precision and
-    filesystem setup that a unit call would have to fake. The failure it guards is structural, not
-    numeric: ``dict.fromkeys(forced_off, False)`` is a *correct-looking* fold that drops the
-    explicit-request exemption the load-time site honors.
-    """
-    mixin_src = (_REPO_ROOT / "src" / "trainers" / "mixins" / "base.py").read_text()
-    assert "apply_liger_parallelism_overrides(" in mixin_src, (
-        "the trainer mixin must fold the parallelism overrides through the shared applier"
-    )
-    assert "dict.fromkeys(forced_off" not in mixin_src, (
-        "re-stating the fold drops the swiglu/geglu explicit-request exemption applied at model load"
-    )
 
 
 def test_ep_swiglu_force_off_only_applies_to_moe_models(monkeypatch):
@@ -290,19 +274,23 @@ def test_ep_swiglu_force_off_only_applies_to_moe_models(monkeypatch):
 def test_ep_swiglu_force_off_requires_an_ep_wrapper_class_for_the_family(monkeypatch):
     """``needs_ep_wrappers`` is the run's INTENT; only the registry says a wrapper exists for the family.
 
-    Mixtral declares no EP MoE layer, so patching wraps nothing and the stock expert loop runs —
-    forcing Liger's swiglu off there removes the only fused expert path the run has, on the intent
-    alone. A family that DOES have a wrapper must still lose it.
+    Mixtral declares no EP MoE layer, so patching wraps nothing and the soft EP gate must not fire on
+    the intent alone. Its swiglu still goes off, but through the routed-experts rule, which an explicit
+    request cannot override — where the wrapped family's inert swap yields to one.
     """
+    mixtral = types.SimpleNamespace(model_type="mixtral", text_config=None, num_experts=64)
+    assert orchestrator.liger_ep_disables_fused_glu(True, mixtral) is False, "no EP wrapper class exists for mixtral"
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "mixtral", _RecordingApplier())
-    config = types.SimpleNamespace(model_type="mixtral", text_config=None, num_experts=64)
-    applied = orchestrator.apply_liger_kernel(config, None, needs_ep_wrappers=True)
-    assert applied["swiglu"] is True, "no EP wrapper class exists for mixtral — nothing replaces the FFN"
+    applied = orchestrator.apply_liger_kernel(mixtral, {"swiglu": True}, needs_ep_wrappers=True)
+    assert applied["swiglu"] is False, "unwrapped routed experts must never reach upstream's LigerExperts swap"
 
+    qwen3_moe = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
+    assert orchestrator.liger_ep_disables_fused_glu(True, qwen3_moe) is True
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "qwen3_moe", _RecordingApplier())
-    config = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
-    applied = orchestrator.apply_liger_kernel(config, None, needs_ep_wrappers=True)
+    applied = orchestrator.apply_liger_kernel(qwen3_moe, None, needs_ep_wrappers=True)
     assert applied["swiglu"] is False, "EPQwen3MoELayer wraps this family — Liger's fused MLP is inert"
+    explicit = orchestrator.apply_liger_kernel(qwen3_moe, {"swiglu": True}, needs_ep_wrappers=True)
+    assert explicit["swiglu"] is True, "an explicit request for the inert swap under the wrapper is honored"
 
 
 def test_ep_does_not_strip_a_toolkit_appliers_dense_and_shared_expert_glu(monkeypatch):
@@ -494,9 +482,10 @@ def test_the_ep_swiglu_force_off_is_not_read_as_a_user_request(monkeypatch):
     config = types.SimpleNamespace(model_type="model_type_without_any_applier", text_config=None, num_experts=8)
 
     # Premise: the fold really does write swiglu/geglu False for this call.
-    assert orchestrator.apply_liger_parallelism_overrides(
-        {}, orchestrator.liger_parallelism_overrides(has_ep_wrapped_experts=True)
-    ) == {"swiglu": False, "geglu": False}
+    assert orchestrator.sanitize_liger_config({}, needs_ep_wrappers=True, model_config=config) == {
+        "swiglu": False,
+        "geglu": False,
+    }
 
     assert orchestrator.apply_liger_kernel(config, None, needs_ep_wrappers=True) is None
 
@@ -547,8 +536,7 @@ def test_finalize_turns_the_withheld_roles_off_for_trls_reapplication():
     assert model.config._halo_liger_applied_config == applied, "the effective record must not change"
 
     # Through a wrapper's text config too: Gemma 4's dense GeGLU is the toolkit's.
-    text = types.SimpleNamespace(model_type="gemma4_text")
-    wrapper = types.SimpleNamespace(model_type="gemma4", text_config=text)
+    wrapper = _wrapper_config("gemma4", "gemma4_text")
     geglu_applied = {"rope": False, "cross_entropy": False, "fused_linear_cross_entropy": True, "geglu": True}
     assert orchestrator.trl_reapplication_config(wrapper, geglu_applied) == {**geglu_applied, "geglu": False}
     # A family that withholds nothing re-applies exactly what was applied.

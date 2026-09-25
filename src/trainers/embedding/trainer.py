@@ -222,7 +222,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         mixin's LoRA gate. Runs after wrapping, on the live model.
         """
         config = self.parallelism_config
-        if not (config.is_ep_mode or config.is_ep_tp_mode) or not self._has_injected_lora():
+        if not config.is_ep_mode or not self._has_injected_lora():
             return
         raise ValueError(
             "LoRA for embedding training is not supported with Expert Parallelism: the EP save path "
@@ -253,13 +253,21 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         return any((".lora_A." in n) or (".lora_B." in n) for n, _ in backbone.named_parameters())
 
     def _lora_scaling(self, backbone: nn.Module) -> float:
-        """Active-adapter LoRA scaling read from a live LoraLayer (same factor the forward used)."""
+        """Active-adapter LoRA scaling read from a live LoraLayer (same factor the forward used).
+
+        Raises when no LoraLayer carries one: folding at a guessed 1.0 would export wrong merged
+        weights whenever ``lora_alpha != r``.
+        """
         for module in backbone.modules():
             if isinstance(module, LoraLayer) and getattr(module, "scaling", None):
                 adapters = list(module.active_adapters) or list(module.scaling.keys())
                 if adapters:
                     return float(module.scaling[adapters[0]])
-        return 1.0
+        raise RuntimeError(
+            "The backbone carries injected LoRA weights but no LoraLayer with an adapter scaling, so "
+            "the factor to fold them into the base weights is unknown; folding at 1.0 would export "
+            "wrong weights whenever lora_alpha != r."
+        )
 
     def compute_loss(
         self,
@@ -297,7 +305,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         # state.logging_steps, not args: HF resolves a ratio (0 < logging_steps < 1) against
         # max_steps there, and max(0.1, 1) would capture on every step, which is a no-grad encode
         # and a collective under EP/TP.
-        return next_step > 0 and next_step % max(int(self.state.logging_steps), 1) == 0
+        return next_step % max(int(self.state.logging_steps), 1) == 0
 
     def _encode_and_compute_metrics(
         self,

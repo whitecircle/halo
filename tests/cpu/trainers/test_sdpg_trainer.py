@@ -16,6 +16,7 @@ import torch
 from accelerate import PartialState
 
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
+from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -100,6 +101,20 @@ def test_positive_advantage_gate_zeroes_nonpositive_rows():
     # Disabled, the gate is the completion mask alone — every row contributes.
     ungated = positive_advantage_gate(completion_mask, advantages, enabled=False)
     assert ungated.sum().item() == 6.0
+
+
+@pytest.mark.parametrize(("beta", "raises"), [(0.5, True), (0.0, False)])
+def test_a_batch_without_teacher_prompts_raises_while_opd_is_on(monkeypatch, beta, raises):
+    """With the OPD term on, a batch missing its privileged teacher prompts would skip the term and
+    train plain GRPO; with it off (``sdpg_beta_base: 0``) no teacher prompt is built or needed."""
+    monkeypatch.setattr(DistributedGRPOTrainer, "_compute_loss", lambda self, model, inputs: torch.tensor(1.0))
+    t = object.__new__(DistributedSDPGTrainer)
+    t.sdpg_beta_base = beta
+    if raises:
+        with pytest.raises(RuntimeError, match="teacher_prompt_ids"):
+            t._compute_loss(None, {})
+    else:
+        assert t._compute_loss(None, {}).item() == 1.0
 
 
 if __name__ == "__main__":

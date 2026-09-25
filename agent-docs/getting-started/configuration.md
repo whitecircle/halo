@@ -49,13 +49,15 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 
 ## Liger kernels
 
-`use_liger_kernel: true` (default) enables fused Triton kernels (cross-entropy, RMSNorm, SwiGLU, RoPE). Three safety filters (`liger_parallelism_overrides`, `src/kernels/liger/orchestrator.py`) override the defaults:
+`use_liger_kernel: true` (default) enables fused Triton kernels (cross-entropy, RMSNorm, SwiGLU, RoPE). Four safety filters (`liger_parallelism_overrides` and `liger_routed_expert_overrides`, `src/kernels/liger/orchestrator.py`) override the defaults, applied by one sanitizer (`sanitize_liger_config`) at model load and again when the trainer re-sanitizes the config HF Trainer re-applies:
 
 - **Wrapped MoE experts** — `swiglu`/`geglu` fusion off, because the EP or grouped-GEMM wrapper replaces the expert FFN Liger would swap.
 
     The trigger is `liger_ep_disables_fused_glu` (`src/kernels/liger/orchestrator.py`): the run needs EP wrappers (`ep_size > 1`, `expert_tensor_parallel_size > 1` including pure ETP, or `use_grouped_gemm`), the model has experts, the family has a registered EP layer class, **and** the applier that owns the GLU swap is the one the wrapper replaces.
 
-    Four cases keep fused SwiGLU: dense runs, MoE at `ep_size: 1` with `use_grouped_gemm: false`, a MoE family with no EP layer class, and a family whose toolkit Liger spec patches the dense and shared-expert MLPs the wrappers adopt unchanged.
+    Dense runs keep fused SwiGLU, as does a family whose toolkit Liger spec patches the dense and shared-expert MLPs the wrappers adopt unchanged.
+
+- **Unwrapped MoE experts** — `swiglu` off, even when requested, where Halo does not wrap the routed experts (`ep_size: 1` with `use_grouped_gemm: false`, or a family with no EP layer class) and upstream liger-kernel holds the flag, which its MoE appliers use to install `LigerExperts` (input gradient wrong on Blackwell in the pinned release). The flag goes whole, so upstream's dense, shared-expert and vision SwiGLU on such a model run eager too ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
 
 - **TP** (`tp_size > 1`) — `cross_entropy` and `fused_linear_cross_entropy` off; the `lm_head` logits are DTensor-sharded across the vocab dim, so a fused softmax would see a partial vocab.
 - **CP or PP** (`cp_size > 1` or `pp_size > 1`) — same two off: the CP wrapper (and, when PP lands, the last pipeline stage) computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.

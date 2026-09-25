@@ -13,8 +13,6 @@ Two invariants the split into ``src/trainers/mixins/`` depends on, both silent w
 Run: python tests/cpu/trainers/test_mixin_composition.py
 """
 
-from abc import ABC
-
 import pytest
 
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -117,7 +115,7 @@ def test_sibling_mixins_declare_no_overlapping_methods():
     Read off the composed class rather than listed here, so a sub-mixin added to the bases tuple is
     covered on arrival — a hand-maintained list silently stops checking the one it omits.
     """
-    bases = tuple(base for base in DistributedTrainerMixin.__bases__ if base is not ABC)
+    bases = DistributedTrainerMixin.__bases__
     assert len(bases) >= 6, f"only {len(bases)} sub-mixins discovered — the derivation lost the bases tuple"
     seen: dict[str, str] = {}
     for base in bases:

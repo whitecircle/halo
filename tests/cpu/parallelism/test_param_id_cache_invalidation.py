@@ -8,8 +8,9 @@ rather than swapping ``.data``, so any id cached before wrapping names an object
 ever see again — every EP param then reads as non-EP, its grad lands in the wrong bucket, and
 nothing raises.
 
-The memos are documented as lazily populated by step-time consumers only, but the fp32 upcast
-(``_upcast_non_ep_params_to_fp32``) calls ``_get_ep_param_ids`` during setup, BEFORE wrapping. So
+The memos are documented as lazily populated by step-time consumers only, but the PEFT dtype
+alignment and the fp32 upcast (``_upcast_non_ep_params_to_fp32``) call ``_get_ep_param_ids`` during
+setup, BEFORE wrapping. So
 the invariant cannot be left to convention — ``_invalidate_param_id_caches`` has to enforce it.
 
 Usage:
@@ -71,6 +72,17 @@ def _rewrap_parameters(model: nn.Module) -> list[nn.Parameter]:
 
 def _live_ep_ids(model: nn.Module) -> set:
     return {id(p) for m in model.modules() if isinstance(m, EPMoELayerBase) for p in m.parameters()}
+
+
+def test_the_ep_config_is_captured_explicitly_and_only_there():
+    """Discovery has no side effect; the capture reads the first EP layer's config, or ``None``."""
+    trainer = _StubTrainer()
+    assert trainer._find_ep_modules() and trainer._ep_config is None
+    trainer._capture_ep_config()
+    assert trainer._ep_config is trainer.model[1].ep_config
+    trainer.model = nn.Sequential(nn.Linear(H, H))
+    trainer._capture_ep_config()
+    assert trainer._ep_config is None
 
 
 def test_stale_ids_would_misclassify_every_ep_param():
