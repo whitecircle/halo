@@ -43,9 +43,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from datasets import DatasetDict
 
 from scripts._common import HUB_SOURCE_HELP, add_hub_source_args, add_max_shard_size_arg
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.data.pipeline import preprocessing
 from tests.common.utils import REPO_ROOT, load_script_module
 
 # (tool, the default its input source earns). Every standalone tool that executes a checkpoint's own
@@ -334,6 +336,38 @@ def test_the_parsed_trust_remote_code_reaches_the_first_load(
             f"trust_remote_code={seen.get('trust_remote_code')!r}, expected {expected!r}: the flag is "
             f"parsed but not threaded into the load, so --help promises a policy the tool ignores"
         )
+
+
+def test_prepare_dataset_threads_the_flag_into_the_label_bake_config_read(tmp_path: Path, monkeypatch):
+    """The tokenizer load is not the tool's only remote-code site: the completion-only bake reads the
+    model config for its eos set. Driven from ``main()`` into the real read, with the Hub call and
+    the dataset stubbed, so a flag that stops at the tokenizer fails here."""
+    module = load_script_module("scripts/before_training/prepare_dataset.py", "prepare_dataset_config_read")
+    seen: list[object] = []
+
+    class _ConfigRead(Exception):
+        """Carries control out of the bake at its config read."""
+
+    def _record(*_args, **kwargs):
+        seen.append(kwargs.get("trust_remote_code"))
+        raise _ConfigRead
+
+    def _bake(*, dataset, tokenizer_or_processor, config, output_dir):
+        preprocessing._resolve_config_eos_token_ids(config, tokenizer_or_processor)
+
+    monkeypatch.setattr(preprocessing.AutoConfig, "from_pretrained", _record)
+    monkeypatch.setattr(module, "setup_tokenizer", lambda args: object())
+    monkeypatch.setattr(module, "load_input_dataset", lambda args: DatasetDict())
+    monkeypatch.setattr(module, "preprocess_dataset", _bake)
+    argv = ["--input", "org/raw", "--output", str(tmp_path / "out"), "--model-name", "org/model"]
+    argv += ["--assistant-message-template", "<|im_start|>assistant\n"]
+
+    for extra, expected in (([], True), (["--trust_remote_code"], True), (["--no-trust_remote_code"], False)):
+        seen.clear()
+        monkeypatch.setattr(sys, "argv", ["prepare_dataset.py", *argv, *extra])
+        with pytest.raises(_ConfigRead):
+            module.main()
+        assert seen == [expected], f"{extra or '(default)'}: the config read ran with trust_remote_code={seen}"
 
 
 if __name__ == "__main__":

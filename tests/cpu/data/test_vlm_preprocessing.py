@@ -16,17 +16,19 @@ import io
 import logging
 import sys
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from datasets import Dataset, DatasetDict
 from PIL import Image
+from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dataset
-from src.data.vlm import VLM_IMAGE_COLUMNS
+from src.data.vlm import VLM_IMAGE_COLUMNS, is_vlm_run
 from src.models import modality
 from src.models.modality import is_vlm_model
 from tests.common.models import QWEN2_5_VL_3B
@@ -525,34 +527,24 @@ def test_images_field_without_vlm_mode_is_refused():
 
 def test_is_vlm_model_detects_via_config_mapping():
     """A model_type registered under AutoModelForImageTextToText is a VLM regardless of its name."""
-    from types import SimpleNamespace
-
-    from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
-
     mt = next(iter(MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES))
     assert is_vlm_model("org/some-text-named-checkpoint", config=SimpleNamespace(model_type=mt))
 
 
 def test_is_vlm_model_detects_via_vision_config():
     """A config carrying a vision_config is a VLM even if its model_type isn't in the mapping."""
-    from types import SimpleNamespace
-
     cfg = SimpleNamespace(model_type="custom_thing", vision_config=SimpleNamespace(hidden_size=8))
     assert is_vlm_model("org/whatever", config=cfg)
 
 
 def test_is_vlm_model_text_config_is_not_vlm():
     """A plainly text-only config with no VLM name hint is not a VLM."""
-    from types import SimpleNamespace
-
     assert not is_vlm_model("Qwen/Qwen3-4B", config=SimpleNamespace(model_type="qwen3"))
 
 
 def test_is_vlm_model_name_fallback_for_unmapped_vlm():
     """Name heuristic still catches a VLM whose (text-looking) config isn't in the mapping — e.g. a
     remote-code VLM — so config-miss does not force a false negative."""
-    from types import SimpleNamespace
-
     assert is_vlm_model("org/My-Custom-VL-7B", config=SimpleNamespace(model_type="custom"))
     assert is_vlm_model("llava-hf/llava-1.5-7b-hf", config=SimpleNamespace(model_type="custom"))
 
@@ -566,8 +558,6 @@ def test_a_registered_text_only_config_beats_a_name_hint_matching_mid_word():
     padding-free rejection make it fail — and forced text-only re-publishes of natively-multimodal
     MoEs into directories named to dodge the list.
     """
-    from types import SimpleNamespace
-
     text_only = SimpleNamespace(model_type="qwen3_5_moe_text", vision_config=None)
     for path in (
         "/ckpt/revision-8472618112abcbd45acbcdc58436aff4233c23f7",
@@ -584,8 +574,6 @@ def test_an_unregistered_model_type_still_defers_to_the_name_hint():
     silence there must not be read as text-only — that would drop a VLM's images silently, where a
     false positive from the name heuristic fails loud.
     """
-    from types import SimpleNamespace
-
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
     assert "custom_remote_vlm" not in CONFIG_MAPPING_NAMES
@@ -620,6 +608,24 @@ def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch
     monkeypatch.setattr(modality.AutoConfig, "from_pretrained", _unreachable)
     assert is_vlm_model("org/My-Custom-VL-7B")
     assert not is_vlm_model("Qwen/Qwen3-4B")
+
+
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch, trust_remote_code):
+    """The probe is a run's first hub contact, so it must not execute a checkpoint's own config code
+    under ``trust_remote_code: false``, nor refuse a config the run trusted. Unset means off, the
+    training default."""
+    seen = []
+
+    def _record(*_args, **kwargs):
+        seen.append(kwargs["trust_remote_code"])
+        return SimpleNamespace(model_type="qwen3")
+
+    monkeypatch.setattr(modality.AutoConfig, "from_pretrained", _record)
+    is_vlm_model("org/checkpoint", trust_remote_code=trust_remote_code)
+    is_vlm_run(SimpleNamespace(images_field="images"), "org/checkpoint", trust_remote_code=trust_remote_code)
+    is_vlm_model("org/checkpoint")
+    assert seen == [trust_remote_code, trust_remote_code, False]
 
 
 if __name__ == "__main__":

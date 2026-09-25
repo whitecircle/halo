@@ -120,9 +120,9 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 |-----------|---------|-------------|
 | `--input`, `-i` | *required* | Input: S3 URI, Hub ID, or local path |
 | `--output`, `-o` | *required* | Output: S3 URI, `hf://org/name`, or local path |
-| `--model-name`, `-m` | *required* | Model name/path for the tokenizer |
+| `--model-name`, `-m` | *required* | Model name/path for the tokenizer; completion-only masking also reads its `config.json` for the turn-terminator ids, so it must be the model checkpoint, not a bare tokenizer |
 | `--max-length` | `8192` | Maximum sequence length |
-| `--trust_remote_code` / `--no-trust_remote_code` | `True` | Execute the tokenizer/processor's own code when loading it — on, the default every tool reading a local artifact shares ([Scripts](../reference/scripts-reference.md#input-guards)) |
+| `--trust_remote_code` / `--no-trust_remote_code` | `True` | Execute the checkpoint's own tokenizer/processor and config code when loading them — on, the default every tool reading a local artifact shares ([Scripts](../reference/scripts-reference.md#input-guards)) |
 | `--mode` | `chat` | `chat` = apply chat template to `--conversation-field` (SFT); `text` = raw-text causal-LM for (continued) pre-training (tokenize `--text-field`, append EOS per document). See [Pre-training](../training-methods/pretraining.md). |
 | `--text-field` | `text` | (mode=text) column holding raw text |
 | `--no-append-eos` | `False` | (mode=text) skip the per-document EOS appended to preserve document boundaries |

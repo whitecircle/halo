@@ -72,7 +72,8 @@ def parse_args():
         "--model-name",
         "-m",
         required=True,
-        help="Model name or path for tokenizer",
+        help="Model checkpoint (name or path): its tokenizer, and its config.json for the "
+        "completion-only mask's turn terminators",
     )
     parser.add_argument(
         "--max-length",
@@ -577,6 +578,7 @@ def main():
         num_shards=args.num_shards,
         num_proc=resolve_map_num_proc(args.num_proc),
         tokenizer_backend=args.tokenizer_backend,
+        trust_remote_code=args.trust_remote_code,
         is_vlm=args.vlm,
         min_pixels=args.min_pixels,
         max_pixels=args.max_pixels,

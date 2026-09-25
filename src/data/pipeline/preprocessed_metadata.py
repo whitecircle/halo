@@ -95,6 +95,8 @@ class PreprocessingConfig:
     num_shards: int = field(default=1, metadata=_NO_RENDER_CHECK)  # 1 = no sharding
     num_proc: int | None = field(default=None, metadata=_NO_RENDER_CHECK)  # None = the toolkit default
     tokenizer_backend: str = field(default="hf", metadata=_NO_RENDER_CHECK)  # "hf" or "gigatoken"
+    # Governs the model-config read for the label bake's eos set; the caller loads the tokenizer.
+    trust_remote_code: bool = field(default=False, metadata=_NO_RENDER_CHECK)
 
     # No render check: the consuming VLM branch already raises on a non-VLM artifact, and the pixel
     # budget is baked into the stored pixel_values.

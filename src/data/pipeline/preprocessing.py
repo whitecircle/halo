@@ -79,8 +79,8 @@ def _completion_only_labels(
     tokenizer: PreTrainedTokenizer,
     assistant_template: str,
     response_token_ids: list[int],
+    eos_token_ids: frozenset[int],
     extra_ignore_token_ids: tuple[int, ...] = (),
-    eos_token_ids: frozenset[int] | None = None,
     span_policy: dict[str, bool] | None = None,
 ) -> list[int]:
     """Completion-only loss labels for one tokenized example, baked with a named span policy.
@@ -97,7 +97,7 @@ def _completion_only_labels(
     batch = mask_batch_to_completion_spans(
         batch,
         response_token_ids,
-        eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(tokenizer),
+        eos_token_ids,
         ignore_index=LABEL_IGNORE_INDEX,
         train_on_last_assistant_only=False,
         response_prompt_template=assistant_template,
@@ -109,15 +109,12 @@ def _completion_only_labels(
 
 
 def _resolve_config_eos_token_ids(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) -> frozenset[int]:
-    """Assistant-turn terminator ids for preprocessing — load the model's HF config (for its
-    ``eos_token_id`` list) and fold in the tokenizer's eos/pad. Falls back to tokenizer-only on a
-    config-load failure so preprocessing never hard-fails on a metadata read.
+    """Assistant-turn terminator ids for the label bake: the model config's ``eos_token_id`` list
+    folded with the tokenizer's eos, the same set the runtime collator masks with. An unreadable
+    config raises: a tokenizer-only set would bake masks that differ from the runtime ones for
+    templates whose turn terminators only the config lists (GLM-4).
     """
-    try:
-        hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=True)
-    except Exception as exc:  # config read is best-effort; tokenizer eos/pad still apply
-        logger.warning(f"Could not load model config for eos_token_id resolution ({exc}); using tokenizer eos/pad.")
-        hf_config = None
+    hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
     return resolve_eos_token_ids(tokenizer, hf_config)
 
 

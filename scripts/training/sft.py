@@ -251,7 +251,11 @@ def main():
     # that guards transformers' unlocked remote-code module cache needs a live group; without it
     # every rank of every node fetches at once.
     init_distributed()
-    is_vlm_checkpoint = is_vlm_model(model_config.model_name_or_path, revision=model_config.model_revision)
+    is_vlm_checkpoint = is_vlm_model(
+        model_config.model_name_or_path,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
     runtime = init_training_script(
         args,
         sft_config,

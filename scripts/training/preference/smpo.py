@@ -71,7 +71,13 @@ def main():
     # guards (the trainer enforces the same ones) raise before the model load, and pinned to the same
     # revision as that load, since hub `main` can name a different modality than the commit this run
     # trains.
-    is_vlm = is_vlm_run(args, model_config.model_name_or_path, ds, revision=model_config.model_revision)
+    is_vlm = is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        ds,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
     if dist_args.context_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Context Parallelism — drop --context_parallel_size.")
     if is_vlm:
