@@ -23,7 +23,7 @@ from trl import ModelConfig, get_quantization_config
 
 from src.args.distributed_args import DistributedArguments
 from src.args.embedding_args import EmbeddingScriptArguments
-from src.checkpoint.model_card import HALO_HUB_TAGS
+from src.checkpoint.model_card import HUB_TAGS
 from src.configs.embedding_config import EmbeddingConfig
 from src.data.sources.loading import reject_image_columns
 from src.distributed.filesystem import fs_aware_main_first
@@ -132,7 +132,7 @@ def build_sentence_transformer(
         resolve_embedding_max_length(embedding_config, st_model[0])
         align_st_pipeline_to_config(st_model, embedding_config)
     # sentence-transformers writes its card from model_card_data, never from the backbone's model_tags.
-    st_model.model_card_data.add_tags(list(HALO_HUB_TAGS))
+    st_model.model_card_data.add_tags(list(HUB_TAGS))
     return st_model
 
 

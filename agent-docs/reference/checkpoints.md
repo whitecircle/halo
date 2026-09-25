@@ -209,7 +209,7 @@ resume demands of the topology, is the
 ## Hub model card
 
 Every checkpoint Halo writes, tool conversions included, carries a `README.md` card tagged `halo`
-(`HALO_HUB_TAGS` in `src/checkpoint/model_card.py`), so an upload lists under that Hub tag.
+(`HUB_TAGS` in `src/checkpoint/model_card.py`), so an upload lists under that Hub tag.
 `tag_model_card` changes only the `tags` value of a card already present — TRL's, PEFT's,
 sentence-transformers', or one an export copies from its source. The other keys keep their values and
 order and the body is kept, but the metadata block is re-dumped: its YAML comments and flow style are

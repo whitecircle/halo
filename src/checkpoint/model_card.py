@@ -27,7 +27,7 @@ from src.log import warn_once
 
 logger = logging.getLogger(__name__)
 
-HALO_HUB_TAGS = ("halo",)
+HUB_TAGS = ("halo",)
 
 # The staged card's name pattern: unique per write, and skipped by the non-weight copy should a
 # crash leave one behind.
@@ -55,13 +55,13 @@ def is_staged_card(name: str) -> bool:
 
 
 def with_halo_tags(tags: str | list[str] | None) -> list[str]:
-    """``tags`` as a list, a bare string or ``None`` included, with :data:`HALO_HUB_TAGS` appended where absent."""
+    """``tags`` as a list, a bare string or ``None`` included, with :data:`HUB_TAGS` appended where absent."""
     tags = [tags] if isinstance(tags, str) else list(tags or [])
-    return tags + [tag for tag in HALO_HUB_TAGS if tag not in tags]
+    return tags + [tag for tag in HUB_TAGS if tag not in tags]
 
 
 def tag_model_card(output_dir: str) -> None:
-    """Add :data:`HALO_HUB_TAGS` to the ``README.md`` card in ``output_dir``, creating it if absent.
+    """Add :data:`HUB_TAGS` to the ``README.md`` card in ``output_dir``, creating it if absent.
 
     Only the ``tags`` entry of an existing card changes value: its other metadata round-trips as the
     raw mapping (``model-index`` included), keys and order kept, and its body, line endings and mode
