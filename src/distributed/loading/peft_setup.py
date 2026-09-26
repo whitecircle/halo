@@ -382,8 +382,8 @@ def setup_peft_model(
     """Set up adapter training (attention PEFT and/or native EP expert LoRA).
 
     Three cases: (1) no adapters → unfreeze/freeze patterns + full/partial finetune; (2) any adapter run →
-    freeze base then re-enable native EP expert adapters (PEFT re-enables attention after); (3) expert-LoRA
-    only → frozen base + trainable expert adapters, no PEFT config.
+    refuse those patterns, freeze base, then re-enable native EP expert adapters (PEFT re-enables attention
+    after); (3) expert-LoRA only → frozen base + trainable expert adapters, no PEFT config.
     """
     _reject_lora_target_parameters_under_ep(model, model_config)
     expert_lora_active = has_ep_lora(model)
@@ -407,6 +407,16 @@ def setup_peft_model(
             freeze_modules_by_patterns(model, args.freeze_layers_patterns)
         return None
 
+    set_patterns = [
+        name for name in ("unfreeze_layers_patterns", "freeze_layers_patterns") if getattr(args, name, None)
+    ]
+    if set_patterns:
+        raise ValueError(
+            f"{' and '.join(set_patterns)} cannot combine with adapters: an adapter run freezes every base "
+            "parameter and trains only the adapters, so the patterns would select nothing. Drop the "
+            "patterns, or drop the adapters (use_peft: false, no expert LoRA targets) for a partial "
+            "fine-tune."
+        )
     if stamped_sinks_policy(model) is SinksPolicy.TRAINABLE:
         raise ValueError(
             "train_sinks: true needs full fine-tuning: an adapter run freezes every base parameter, and "
@@ -439,13 +449,6 @@ def setup_peft_model(
             f"This will lead to silent bugs. Make sure to pass --lora_task_type {expected_task_type}.",
             stacklevel=2,
         )
-
-    for patterns_arg in ("unfreeze_layers_patterns", "freeze_layers_patterns"):
-        if getattr(args, patterns_arg, None):
-            warnings.warn(
-                f"You can't use non-empty {patterns_arg} and peft together, only peft config will be used",
-                stacklevel=2,
-            )
 
     return build_peft_config(model, model_config)
 
