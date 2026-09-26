@@ -134,17 +134,22 @@ Examples:
         "--bucket", "-b", default=DEFAULT_BUCKET, help="S3 bucket name (default: $HALO_S3_DEFAULT_BUCKET)"
     )
     common_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
-    common_parser.add_argument("--quiet", "-q", action="store_true", help="Disable progress bar")
+    transfer_parser = argparse.ArgumentParser(add_help=False)
+    transfer_parser.add_argument("--quiet", "-q", action="store_true", help="Disable progress bar")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    push_parser = subparsers.add_parser("push", parents=[common_parser], help="Upload a local folder to S3")
+    push_parser = subparsers.add_parser(
+        "push", parents=[common_parser, transfer_parser], help="Upload a local folder to S3"
+    )
     push_parser.add_argument("local_path", help="Local folder path to upload")
     push_parser.add_argument("s3_key", help="S3 key/path for the folder")
     push_parser.add_argument("--no-overwrite", action="store_true", help="Don't overwrite if exists")
     push_parser.set_defaults(func=_cli_push)
 
-    download_parser = subparsers.add_parser("download", parents=[common_parser], help="Download a folder from S3")
+    download_parser = subparsers.add_parser(
+        "download", parents=[common_parser, transfer_parser], help="Download a folder from S3"
+    )
     download_parser.add_argument("s3_key", help="S3 key/path of the folder")
     download_parser.add_argument("local_path", help="Local path to download to")
     download_parser.add_argument("--no-overwrite", action="store_true", help="Don't overwrite if local exists")

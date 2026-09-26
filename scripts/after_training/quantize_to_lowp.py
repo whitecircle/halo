@@ -208,7 +208,7 @@ def _reject_unexportable_experts(
             f"weight is in the low-precision scope: its expert spelling is none the EP layer roster "
             f"declares, so every expert would be copied through in bf16 under a quantization_config "
             f"that claims QAT parity. Declare the family's hub expert keys on its EP layer class, or "
-            f"export with --lowp_apply_moe_experts=false if training left the experts in bf16."
+            f"export with --no-lowp_apply_moe_experts if training left the experts in bf16."
         )
 
 
@@ -468,7 +468,11 @@ def parse_args():
         "for [out,in] Linear weights). Fused 3-D expert tensors use the axis their EP layer class "
         "declares and ignore this flag.",
     )
-    p.add_argument("--include", default=_DEFAULT_INCLUDE, help="Regex of weight names to quantize.")
+    p.add_argument(
+        "--include",
+        default=_DEFAULT_INCLUDE,
+        help="Regex narrowing the quantized set (dense MLP projections and declared expert weights).",
+    )
     p.add_argument("--exclude", default=_DEFAULT_EXCLUDE, help="Regex of weight names to keep high precision.")
     # The training run's lowp scope, which the checkpoint does not carry. Same names and defaults as
     # the ParallelismConfig knobs, so a config's values transfer verbatim.

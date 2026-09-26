@@ -470,7 +470,8 @@ def parse_args():
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="Assert the saved checkpoint is stored in BF16 (reads the safetensors headers; raises on failure)",
+        help="Assert the saved checkpoint is stored in BF16 (reads the safetensors headers; raises on failure). "
+        "An unmerged --peft save is only checked to be non-empty.",
     )
     parser.add_argument(
         "--check_inference",

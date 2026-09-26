@@ -74,7 +74,8 @@ Shard size defaults to 5 GB (`save_max_shard_size` overrides it). It bounds the 
 there — the save logs that rather than appearing to honor it.
 
 It does not reach the merge either: the after-training tools size their own output from their
-`--max_shard_size` flag, so pass it there to match a run's setting.
+`--max_shard_size` flag, so pass it there to match a run's setting (`quantize_to_lowp.py` has none; it
+mirrors its input's shards).
 
 A directory of per-rank shards whose index never landed (a run killed between the shard writes and
 the index write) is refused by every after-training tool. The shards carry `.shard_N` keys, which a

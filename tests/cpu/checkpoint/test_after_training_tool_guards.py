@@ -91,7 +91,7 @@ def test_reset_sinks_refuses_to_pick_an_output_directory_for_you(tmp_path):
 
 
 def test_reset_sinks_refuses_an_output_dir_aimed_at_its_own_input(tmp_path):
-    """The same mistake through the other flag: --output_dir == --checkpoint_dir IS the in-place run
+    """The same mistake through the other flag: --output_dir == --model_id IS the in-place run
     the explicit flag exists to make deliberate."""
     checkpoint = tmp_path / "ckpt"
     checkpoint.mkdir()

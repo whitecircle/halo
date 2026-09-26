@@ -135,12 +135,12 @@ python scripts/before_training/s3_datasets.py delete my_folder --recursive --yes
 ```
 
 Commands: `push`, `download`, `list`, `exists`, `delete`. Every command takes `--subfolder/-s`,
-`--bucket/-b`, `--verbose/-v` and `--quiet/-q` (suppresses the transfer progress bar, so it acts on
-push/download only). The other flags are per command:
+`--bucket/-b` and `--verbose/-v`. The other flags are per command:
 
 | Flag | Commands | Notes |
 |---|---|---|
 | `--no-overwrite` | push, download | |
+| `--quiet/-q` | push, download | Suppresses the transfer progress bar |
 | `--recursive/-r` | list, delete | Opt-in on `delete`: removes every object under the prefix. The Python `delete()` above defaults the other way (`recursive=True`) |
 | `--yes/-y` | delete | Skips the confirmation |
 | `--max-keys/-n` | list | Default 100 here, unlike `list_objects`'s 1000 |

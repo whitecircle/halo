@@ -81,7 +81,7 @@ def parse_args():
         "--output_dir",
         type=str,
         default=None,
-        help="Directory to save the modified checkpoint. Required unless --in_place is given.",
+        help="Directory to save the modified checkpoint. Required unless --in_place or --dry_run is given.",
     )
     parser.add_argument(
         "--in_place",
@@ -314,7 +314,7 @@ def reset_sinks(
 
     Args:
         checkpoint_dir: Path to checkpoint directory or HuggingFace repo ID.
-        output_dir: Directory to save the modified checkpoint. Required unless ``in_place``.
+        output_dir: Directory to save the modified checkpoint. Required unless ``in_place`` or ``dry_run``.
         dry_run: If True, only inspect sink values without modifying.
         in_place: Rewrite ``checkpoint_dir`` itself. Explicit because it has no undo; the sibling
             conversion tools refuse an in-place run outright.

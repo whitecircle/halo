@@ -427,7 +427,7 @@ and the merge carries no optimizer state, so a resume from the merged directory 
 it with `save_only_model: true`, as every shipped sharded config does.
 
 `save_max_shard_size` does not apply to these files; a per-rank shard is one file by design. The cap
-bounds the gathered save and the merged artifact.
+bounds the gathered save; the merged artifact takes `merge_ep_shards.py --max_shard_size`.
 
 **Sharded** writes `model-{rank:05d}-of-{world_size:05d}.safetensors` plus an index carrying
 `ep_size`. `validate_ep_sharded_save()` rejects it **at trainer construction** whenever any of these

@@ -119,8 +119,8 @@ ignores the flag, and an unresolvable family raises rather than guessing), `--in
 (regex), `--verify`, and the four training-scope flags the checkpoint does not carry:
 `--lowp_apply_dense_mlp` / `--lowp_apply_moe_experts` (both default on) and
 `--lowp_keep_first_blocks` / `--lowp_keep_last_blocks` (both `0`) — same names and defaults as the
-`ParallelismConfig` knobs, so a training config transfers verbatim. Quantizes any `*.weight` matrix
-**and** the fused 3-D MoE expert tensors (`...experts.gate_up_proj` / `down_proj`, no `.weight`
+`ParallelismConfig` knobs, so a training config transfers verbatim. Quantizes the dense MLP projections
+**and** the declared expert weights, fused 3-D banks included (`...experts.gate_up_proj` / `down_proj`, no `.weight`
 suffix — the largest tensors in gpt-oss/Qwen3.5/GLM4/LFM2) that match include∧¬exclude. For a sharded input it rebuilds `model.safetensors.index.json` and copies every
 non-weight file (config, tokenizer, `chat_template.jinja`, remote-code `.py`). An **export tool, not a
 speedup** — bf16 stays optimal at these shapes.
@@ -128,7 +128,7 @@ speedup** — bf16 stays optimal at these shapes.
 ### `reset_sinks.py`
 Set every `*.sinks` param to dtype-min (neutralize the attention sink), matching the GptOss FA2-finetune
 behavior. Flags: `--model_id` (required; local dir or HF repo id, no `--revision`), `--output_dir`
-(required unless `--in_place`), `--in_place` (rewrites the `--model_id` directory, no undo — never
+(required unless `--in_place` or `--dry_run`), `--in_place` (rewrites the `--model_id` directory, no undo — never
 valid for a repo id), `--dry_run`, plus the shared `--max_shard_size` / `--trust_remote_code`
 (default **off** — a Hub-capable source). Direct safetensors edit when `model.safetensors`
 exists, else `from_pretrained` + `save_pretrained` for sharded checkpoints.

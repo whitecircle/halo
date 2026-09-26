@@ -3,8 +3,8 @@
 
 A LoRA run's output directory carries only ``adapter_model.safetensors`` + ``adapter_config.json``;
 this loads the base model, applies the adapter and saves a standard HuggingFace checkpoint. Covers
-causal-LM and sequence-classification (``--task classification``) adapters; VLM bases and
-``trust_remote_code`` families are auto-detected from the base model path. ``--output_dir`` is
+causal-LM and sequence-classification (``--task classification``) adapters; a VLM base is detected
+from its config, and remote-code families load under ``--trust_remote_code`` (default on). ``--output_dir`` is
 written fresh: every ``model*.safetensors`` or index the completed save did not produce is removed
 afterwards.
 

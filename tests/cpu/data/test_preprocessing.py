@@ -114,12 +114,8 @@ def test_tokenize_dataset():
 
 
 def test_tokenize_dataset_completion_only():
-    """train_on_completions_only must mask prompt tokens to -100 and keep assistant completions.
-
-    Regression: the flag (exposed by PreprocessingConfig + prepare_dataset.py --train-only-on-
-    completions) was a silent no-op — tokenize_dataset always wrote labels = input_ids.copy(), so a
-    preprocessed dataset trained on the full prompt regardless.
-    """
+    """train_on_completions_only (PreprocessingConfig, prepare_dataset.py --train-on-completions-only)
+    must mask prompt tokens to -100 and keep assistant completions, not copy labels from input_ids."""
     print("Testing tokenize_dataset completion-only...")
 
     dataset = Dataset.from_dict(
