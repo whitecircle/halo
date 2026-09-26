@@ -82,15 +82,26 @@ def _native_env(tool_registry, env_config: dict):
     return NativeToolUseEnvironment(tool_registry=tool_registry, **env_config)
 
 
+def _react_env(name: str, create: Callable[..., Any], env_config: dict):
+    """Create a ReAct preset, refusing a configured ``system_prompt``: the preset hardcodes the prompt
+    that states the Thought/Action/Final Answer format its parser reads, so the value would be dropped."""
+    if env_config.get("system_prompt") is not None:
+        raise ValueError(
+            f"environment_type {name!r} hardcodes its ReAct system prompt, so environment_kwargs.system_prompt "
+            f"would be ignored. Remove it, or pick an environment_type whose class takes a system_prompt "
+            f"(e.g. native_math)."
+        )
+    return create(**_without(env_config, "system_prompt"))
+
+
 def _register_builtins():
     """Register all built-in environment types.
 
     Every factory forwards the full env_config, so YAML ``environment_kwargs`` reach the environment;
     :func:`_without` covers the few that bind a key themselves.
     """
-    # ReAct: system_prompt is hardcoded per template, so exclude it from the forward.
-    register_environment("react_math", lambda c: create_react_math_environment(**_without(c, "system_prompt")))
-    register_environment("react_search", lambda c: create_react_search_environment(**_without(c, "system_prompt")))
+    register_environment("react_math", lambda c: _react_env("react_math", create_react_math_environment, c))
+    register_environment("react_search", lambda c: _react_env("react_search", create_react_search_environment, c))
 
     register_environment(
         "native_math",

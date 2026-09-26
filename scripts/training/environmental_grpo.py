@@ -242,6 +242,18 @@ def main():
     reject_unsupported_args(
         "Environmental GRPO", tools_field=args.tools_field, text_only_model=dist_args.text_only_model
     )
+    # The script pins max_completion_length to rollout_max_tokens below, so any other value is discarded.
+    if grpo_config.max_completion_length not in (GRPOConfig.max_completion_length, async_config.rollout_max_tokens):
+        raise ValueError(
+            f"max_completion_length={grpo_config.max_completion_length} is not a knob under Environmental "
+            f"GRPO: each turn generates up to rollout_max_tokens ({async_config.rollout_max_tokens}), which "
+            f"the script also writes into max_completion_length. Set rollout_max_tokens instead and remove "
+            f"max_completion_length."
+        )
+
+    # A throwaway env for the startup checks below (max_turns=None takes the class default), built
+    # before any load so an environment_kwargs the environment refuses fails here.
+    probe_env = create_environment(env_config.environment_type, env_config.to_env_config())
 
     runtime = init_training_script(
         args,
@@ -299,9 +311,7 @@ def main():
 
     # All ranks raise together. A single turn (prompt budget plus per-turn generation) has to fit the
     # context; the multi-turn worst case is advisory. The prompt budget includes the environment's own
-    # preamble (system prompt + tool schema), measured off a throwaway env whose max_turns=None takes
-    # the env class default.
-    probe_env = create_environment(env_config.environment_type, env_config.to_env_config())
+    # preamble (system prompt + tool schema), measured off the probe env.
     max_turns = probe_env.max_turns
     template_kwargs = probe_template_kwargs(async_config, probe_env)
     prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)

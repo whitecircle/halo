@@ -225,6 +225,9 @@ def main():
         completion_only_loss=sft_config.completion_only_loss is not None,
         assistant_only_loss=sft_config.assistant_only_loss,
     )
+    # Read by that same prep alone (disable_trl_dataset_prep overwrites dataset_kwargs); eval_packing has
+    # nothing to narrow with packing refused above.
+    reject_non_default_args("Self-distillation", sft_config, "dataset_text_field", "dataset_kwargs", "eval_packing")
 
     # The SelfDistill collator tokenizes the raw branches at collation time, so the raw conversation
     # and privileged columns have to survive HF's remove_unused_columns=True, which would strip them.

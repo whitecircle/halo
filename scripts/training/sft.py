@@ -55,6 +55,7 @@ from src.training.script_runner import (
     load_script_datasets,
     log_script_dataset_examples,
     reject_images_under_text_only_model,
+    reject_non_default_args,
     reject_unsupported_args,
     run_trainer,
 )
@@ -221,6 +222,11 @@ def main():
         )
     if sft_config.packing and sft_config.padding_free:
         raise ValueError("Cannot use both 'packing' and 'padding_free' simultaneously.")
+    if sft_config.eval_packing and not sft_config.packing:
+        raise ValueError(
+            "eval_packing=True packs nothing without packing=True: it can only turn packing off for the "
+            "eval split. Set packing: true to pack both splits, or remove eval_packing."
+        )
     # TRL applies these inside its own dataset prep + default collator, both replaced here, so they would
     # parse and mask nothing. Completion masking is train_on_completions_only + assistant_message_template.
     reject_unsupported_args(
@@ -228,6 +234,14 @@ def main():
         # Tri-state: an explicit False ("train on the full sequence") is ignored the same as True.
         completion_only_loss=sft_config.completion_only_loss is not None,
         assistant_only_loss=sft_config.assistant_only_loss,
+    )
+    # Read by that same prep alone, and disable_trl_dataset_prep overwrites dataset_kwargs.
+    reject_non_default_args(
+        "Halo SFT (it renders conversation_field itself; tokenize a raw-text column offline with "
+        "scripts/before_training/prepare_dataset.py --mode text)",
+        sft_config,
+        "dataset_text_field",
+        "dataset_kwargs",
     )
 
     # The checkpoint's modality names the run, which init_training_script needs before the dataset
@@ -261,6 +275,9 @@ def main():
         loader=load_datasets_auto,
         conversation_field=args.conversation_field,
     )
+    if is_preprocessed:
+        # Both splits are used as baked, so eval_packing has nothing to decide.
+        reject_non_default_args("Halo SFT on a pre-processed dataset", sft_config, "eval_packing")
 
     # The run's data path, decided before the model load because it also decides whether the
     # checkpoint's processor is required: a multimodal checkpoint carrying text-only rows is a text
