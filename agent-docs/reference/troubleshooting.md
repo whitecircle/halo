@@ -219,3 +219,11 @@ guides: [Expert](../parallelism/expert-parallelism.md) ·
 [Tensor](../parallelism/tensor-parallelism.md) · [Context](../parallelism/context-parallelism.md) ·
 [Expert-Tensor](../parallelism/expert-tensor-parallelism.md) ·
 [Pipeline](../parallelism/pipeline-parallelism.md).
+
+## Turning off a fused kernel
+
+The MoE fused kernels have no runtime fallback: one that fails to compile or launch raises at the first forward. They are validated on B300; on other GPUs, turn off the one that fails.
+
+The fused GLU kernels (`src/kernels/fused_glu.py`) fall back to the eager combine on their own for CPU tensors and for any activation they do not compute exactly. They have no switch on CUDA.
+
+The native RMSNorm is a Liger role: `liger_kernel_config: {rms_norm: false}` keeps the family's own norm, and `use_liger_kernel: false` turns off every Liger role. The fused weighted un-permute has no switch of its own; `use_grouped_gemm: false` avoids it by running the per-expert loop instead of the grouped path, at a large throughput cost.

@@ -65,6 +65,19 @@ class _SwigluOffApplier(_RecordingApplier):
         super().__call__(rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu)
 
 
+def _stub_qwen3_moe_applier(monkeypatch):
+    """Record instead of patching for Qwen3 MoE, the one upstream-GLU family with an EP wrapper.
+
+    Its norms are the toolkit's (a delegating spec), so both registries resolve it; stubbing only
+    upstream's entry would still run the real delegating applier and rebind the HF module classes for
+    the rest of the session.
+    """
+    applier = _RecordingApplier()
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "qwen3_moe", applier)
+    monkeypatch.setitem(orchestrator._TOOLKIT_LIGER_APPLIERS, "qwen3_moe", applier)
+    return applier
+
+
 def _zaya_like_config():
     return types.SimpleNamespace(model_type="zaya", text_config=None)
 
@@ -261,7 +274,7 @@ def test_ep_swiglu_force_off_only_applies_to_moe_models(monkeypatch):
     wrappers only for MoE models, so gating Liger on the flag alone silently strips fused SwiGLU from
     every dense model in the repo while logging that EP wrappers were the reason.
     """
-    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "qwen3_moe", _RecordingApplier())
+    _stub_qwen3_moe_applier(monkeypatch)
     moe_config = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
     moe_applied = orchestrator.apply_liger_kernel(moe_config, None, needs_ep_wrappers=True)
     assert moe_applied["swiglu"] is False, "MoE + EP wrappers must still disable Liger's fused MLP"
@@ -286,7 +299,7 @@ def test_ep_swiglu_force_off_requires_an_ep_wrapper_class_for_the_family(monkeyp
 
     qwen3_moe = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
     assert orchestrator.liger_ep_disables_fused_glu(True, qwen3_moe) is True
-    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "qwen3_moe", _RecordingApplier())
+    _stub_qwen3_moe_applier(monkeypatch)
     applied = orchestrator.apply_liger_kernel(qwen3_moe, None, needs_ep_wrappers=True)
     assert applied["swiglu"] is False, "EPQwen3MoELayer wraps this family — Liger's fused MLP is inert"
     explicit = orchestrator.apply_liger_kernel(qwen3_moe, {"swiglu": True}, needs_ep_wrappers=True)
@@ -310,7 +323,7 @@ def test_ep_does_not_strip_a_toolkit_appliers_dense_and_shared_expert_glu(monkey
 
     # Anti-vacuity: the exemption belongs to the spec that names the surviving MLPs, not to a blanket
     # EP no-op — an applier whose only GLU patch is the routed-expert swap still loses it.
-    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "qwen3_moe", _RecordingApplier())
+    _stub_qwen3_moe_applier(monkeypatch)
     upstream = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
     assert orchestrator.apply_liger_kernel(upstream, None, needs_ep_wrappers=True)["swiglu"] is False
 
@@ -535,10 +548,14 @@ def test_finalize_turns_the_withheld_roles_off_for_trls_reapplication():
     assert training_config.liger_kernel_config == {**applied, "rms_norm": False}
     assert model.config._halo_liger_applied_config == applied, "the effective record must not change"
 
-    # Through a wrapper's text config too: Gemma 4's dense GeGLU is the toolkit's.
+    # Through a wrapper's text config too: Gemma 4's dense GeGLU and its norms are the toolkit's.
     wrapper = _wrapper_config("gemma4", "gemma4_text")
     geglu_applied = {"rope": False, "cross_entropy": False, "fused_linear_cross_entropy": True, "geglu": True}
-    assert orchestrator.trl_reapplication_config(wrapper, geglu_applied) == {**geglu_applied, "geglu": False}
+    assert orchestrator.trl_reapplication_config(wrapper, geglu_applied) == {
+        **geglu_applied,
+        "geglu": False,
+        "rms_norm": False,
+    }
     # A family that withholds nothing re-applies exactly what was applied.
     assert orchestrator.trl_reapplication_config(_zaya_like_config(), applied) == applied
 

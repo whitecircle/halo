@@ -67,6 +67,15 @@ def bucketed_grad_norm_sq(shards: dict[str, list[torch.Tensor]], *, device) -> d
     return {name: local_grad_norm_sq(bucket, device=device) for name, bucket in shards.items()}
 
 
+def clip_coefficient(max_norm: float | torch.Tensor, total_norm: torch.Tensor) -> torch.Tensor:
+    """The clamped clip coefficient ``min(1, max_norm / total_norm)``, device-resident.
+
+    ``nan_to_num`` runs before the clamp, since a NaN total norm would otherwise multiply into every
+    gradient where 1.0 leaves them untouched.
+    """
+    return torch.nan_to_num(max_norm / (total_norm + _CLIP_NORM_EPS), nan=1.0).clamp(max=1.0)
+
+
 def scale_shards_to_max_norm_(
     shards: list[torch.Tensor], max_norm: float | torch.Tensor, total_norm: torch.Tensor
 ) -> None:
@@ -74,9 +83,7 @@ def scale_shards_to_max_norm_(
 
     Device-resident and applied unconditionally so no path pays a host sync to decide whether to
     clip; ``max_norm`` is therefore taken as given rather than coerced with ``float()``, which would
-    sync on a tensor threshold. ``nan_to_num`` runs before the clamp, since a NaN total norm would
-    otherwise multiply into every gradient where 1.0 leaves them untouched. Callers pass local shards
+    sync on a tensor threshold. Callers pass local shards
     (``to_local()`` on DTensors) because ``_foreach_mul_`` refuses a mixed DTensor/plain list.
     """
-    clip_coef = torch.nan_to_num(max_norm / (total_norm + _CLIP_NORM_EPS), nan=1.0).clamp(max=1.0)
-    torch._foreach_mul_(shards, clip_coef)
+    torch._foreach_mul_(shards, clip_coefficient(max_norm, total_norm))

@@ -34,6 +34,7 @@ from src.models.structure import model_has_quantized_params
 from src.trainers.mixins.ep_introspection import require_ep_config
 from src.trainers.mixins.grad_clip import (
     bucketed_grad_norm_sq,
+    clip_coefficient,
     clipping_enabled,
     scale_shards_to_max_norm_,
     trainable_clip_params,
@@ -266,6 +267,10 @@ class GradientSyncMixin:
                 # Device-resident: reading the norm back stalls the launch queue; max_norm <= 0 disables clipping (HF).
                 # Scale local shards: _foreach_mul_ refuses DTensor + plain EP tensors together.
                 if clipping_enabled(max_norm):
+                    deferred = trainer._grad_scale_deferring_optimizer(all_params)
+                    if deferred is not None:
+                        deferred.defer_grad_scale(clip_coefficient(float(max_norm), global_norm))
+                        return global_norm
                     shards = [
                         g.to_local() if isinstance(g, DTensor) else g
                         for g in (p.grad for p in all_params)
@@ -283,6 +288,28 @@ class GradientSyncMixin:
                 return torch.nn.utils.clip_grad_norm_(params, max_norm, norm_type=norm_type, foreach=False)
 
         self.accelerator.clip_grad_norm_ = ep_clip_grad_norm_
+
+    def _grad_scale_deferring_optimizer(self, params: list):
+        """The optimizer that will apply the clip coefficient inside its own step, or ``None``.
+
+        Only an optimizer exposing ``defer_grad_scale`` (AdamWBF16) whose parameters with gradients are
+        exactly the clipped parameters with gradients qualifies: a clipped parameter it does not step
+        would go unclipped, and a stepped parameter the clip did not select would be scaled. Its
+        parameter list is cached per optimizer instance, since the set is fixed once training starts.
+        """
+        optimizer = getattr(self, "optimizer", None)
+        optimizer = getattr(optimizer, "optimizer", optimizer)  # accelerate's AcceleratedOptimizer wrapper
+        if optimizer is None or not hasattr(optimizer, "defer_grad_scale"):
+            return None
+        cached = getattr(self, "_grad_scale_params", None)
+        if cached is None or cached[0] is not optimizer:
+            cached = self._grad_scale_params = (
+                optimizer,
+                [p for group in optimizer.param_groups for p in group["params"]],
+            )
+        clipped = {id(p) for p in params if p.grad is not None}
+        stepped = {id(p) for p in cached[1] if p.grad is not None}
+        return optimizer if clipped == stepped else None
 
     def _sync_deferred_expert_grads(self) -> None:
         """Post-backward EP grad sync for every deferred topology (``EPConfig.defer_grad_sync``).

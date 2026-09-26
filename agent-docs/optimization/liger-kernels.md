@@ -124,7 +124,7 @@ over (`upstream_off`) a role upstream gets wrong for the family.
 | Qwen3.5 / 3.6 MoE | `qwen3_5_moe`, `qwen3_5_moe_text` | RMSNorm, FLCE | GDN gated norm → `fla`; **takes over `swiglu`**: shared-expert `Qwen3_5MoeMLP`, withholding upstream's [routed-expert swap](#routed-experts) |
 | Qwen3-Next | `qwen3_next` | RMSNorm, FLCE | GDN gated norm → `fla`; **takes over `swiglu`**: dense + shared-expert `Qwen3NextMLP`, withholding upstream's [routed-expert swap](#routed-experts) |
 | GptOss | `gpt_oss` | RoPE, FLCE | **takes over RMSNorm**: `GptOssRMSNorm` multiplies its weight in fp32 before the cast back (Gemma's casting mode); upstream applies the llama-cast `LigerRMSNorm`, a bf16-ULP deviation on every norm |
-| Gemma 4 | `gemma4_text` (the `gemma4` wrapper resolves here) | RMSNorm, FLCE | **takes over GeGLU**: `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its experts, so the EP wrapper never replaces it; the toolkit's fused GLU probes its activation and survives EP, where upstream's swap was force-off |
+| Gemma 4 | `gemma4_text` (the `gemma4` wrapper resolves here) | FLCE | **takes over RMSNorm** with torch's fused `F.rms_norm` (`rms_norm_kernel="native"`: fp32 normalize and weight multiply, one cast; covers the weightless `with_scale=False` norms too). At [2048, 2816] bf16 on B300 it runs fwd+bwd in 51 µs against LigerRMSNorm's gemma mode at 203 µs, and launches in 75 µs against 218 µs, with the same error against fp64. **Takes over GeGLU**: `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its experts, so the EP wrapper never replaces it; the toolkit's fused GLU probes its activation and survives EP, where upstream's swap was force-off |
 
 `delegates_to_upstream` makes that a build-time contract: the upstream applier is looked up in liger-kernel's
 own registry (a family it stops covering fails at import), the delegating applier re-exports upstream's exact
@@ -190,6 +190,13 @@ Where an EP wrapper owns the routed experts, their activation is the toolkit's o
 Liger's: SwiGLU (`fused_silu_mul`) or tanh-GeGLU (`fused_gelu_tanh_mul`), chosen by probing the layer's
 `act_fn` and falling back to the family's eager combine when neither kernel computes it. It runs on the
 grouped-GEMM, per-expert-loop and ETP paths alike.
+
+One row-strided kernel pair (`src/kernels/fused_glu.py`) serves every combine, the clamped family's
+(GptOss, DeepSeek-V4, GLM-5 Next, Step-3.7) included: the activation, the clamp placement and GptOss's
+`up + 1` are `tl.constexpr`, `alpha` and the bound runtime arguments. On a layer storing one fused
+`[gate | up]` projection, `packed_glu_mul` resolves the latched combine (including a clamp-binding
+`functools.partial`) to its packed form, which reads both halves in place and writes one `[..., 2M]`
+gradient.
 
 Each wrapped layer logs the executed path at construction (`grouped_mm=True, glu_combine=fused_silu_mul`, or
 `glu_combine=eager`); `tests/gpu/kernels/test_fused_glu.py` checks BF16 and FP32 forward/backward numerics.

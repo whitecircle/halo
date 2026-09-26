@@ -25,13 +25,15 @@ The two moments round differently:
 
 The kernel computes both EMAs and the weight update in fp32, truncating only on store-back, so the update always sees the exact fp32 second moment.
 
+**Gradient clipping inside the step.** `defer_grad_scale(coef)` hands the step a device scalar that the kernel multiplies into each gradient as it reads it. The EP clip (`ep_clip_grad_norm_`) uses it whenever the optimizer exposes the hook and owns every clipped parameter, instead of rescaling every gradient with `_foreach_mul_` (whose fp32-scalar-on-bf16 form runs one unvectorized kernel per parameter). The gradients stay unscaled until the step; `zero_grad` drops a scale no step consumed. So anything reading `.grad` between the clip and the step (a `TrainerCallback.on_pre_optimizer_step`, which Hugging Face documents as running after clipping) sees the unclipped gradients; the reported `grad_norm` is the pre-clip norm either way.
+
 SR seeds come from a dedicated, rank-synchronized RNG (`_SR_RNG`, one per optimizer module) kept separate from the global `random` module, so nothing in the data path can desync the noise across ranks. Replicas that hold the same parameter and receive the same averaged gradient — HSDP `dp_replicate` groups, DDP — round it identically and stay bit-for-bit in sync.
 
 ## Benchmarks
 
 **GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (Blackwell, SM100):** AdamWBF16 (Triton) steps in 51.6 ms vs 62.1 ms for `adamw_torch_fused` (**−17%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
 
-The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element) and draws both SR noise streams from one `tl.randint4x` Philox call. This row compares two bf16-state optimizers; the 6-vs-12 B/param memory win is against fp32-state AdamW and is not visible here.
+The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element). Each lane owns four consecutive elements and one `tl.randint4x` Philox call, whose 4 × 32 bits give every element its two independent 16-bit SR draws (6.5 TB/s effective on a 254M-element expert tensor, B300). This row compares two bf16-state optimizers; the 6-vs-12 B/param memory win is against fp32-state AdamW and is not visible here.
 
 **Loss quality (4-layer FFN, 50M params, 200 steps):** AdamWBF16 (SR on weight + `exp_avg_sq`) reaches a gap to fp32-master of ~0.00008 — about 5× tighter than weight-only SR (~0.0004), because the unbiased second moment keeps the effective LR at nominal `lr`. Pure bf16 (fused) lags by 0.27.
 

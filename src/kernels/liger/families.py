@@ -50,6 +50,7 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         model_types=("glm4_moe_lite",),
         modeling_module="transformers.models.glm4_moe_lite.modeling_glm4_moe_lite",
         rms_norm=("Glm4MoeLiteRMSNorm",),
+        rms_norm_kernel="native",
         glu_mlp=("Glm4MoeLiteMLP",),
         causal_lm=("Glm4MoeLiteForCausalLM",),
         flce_default=True,
@@ -111,19 +112,33 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         delegates_to_upstream=True,
         upstream_off=("swiglu",),
     ),
+    # Qwen3 MoE: upstream owns every role but the norms, which take torch's fused kernel in the llama mode
+    # (a launch-bound kernel at these shapes, about twice as cheap per call as LigerRMSNorm).
+    LigerFamilySpec(
+        model_types=("qwen3_moe",),
+        modeling_module="transformers.models.qwen3_moe.modeling_qwen3_moe",
+        rms_norm=("Qwen3MoeRMSNorm",),
+        rms_norm_kernel="native",
+        delegates_to_upstream=True,
+        upstream_off=("rms_norm",),
+    ),
     # GptOss: upstream owns the rotary (half-width cos/sin, algebraically `rotate_half`) and the head,
     # but applies the llama-cast `LigerRMSNorm` to a norm that multiplies its weight in fp32 before
-    # the cast back — Gemma's casting mode — so the norm role is taken over. Its `swiglu` is a no-op
-    # upstream (no patch block) and the EP layer runs the clamped GLU through its own fused kernel.
+    # the cast back — Gemma's casting mode — so the norm role is taken over, on torch's fused kernel in
+    # that mode. Its `swiglu` is a no-op upstream (no patch block) and the EP layer runs the clamped GLU
+    # through its own fused kernel.
     LigerFamilySpec(
         model_types=("gpt_oss",),
         modeling_module="transformers.models.gpt_oss.modeling_gpt_oss",
         rms_norm=("GptOssRMSNorm",),
         rms_norm_casting_mode="gemma",
+        rms_norm_kernel="native",
         delegates_to_upstream=True,
         upstream_off=("rms_norm",),
     ),
-    # Gemma 4: upstream owns the `(1 + w)`-free Gemma-cast norms, the rotary (off, single-tensor
+    # Gemma 4: the norms (fp32 normalize and weight multiply, some built without a weight) take torch's
+    # fused kernel, which launches and runs several times cheaper than LigerRMSNorm's gemma mode at these
+    # shapes and also covers the weightless ones. Upstream owns the rotary (off, single-tensor
     # signature) and the head; `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its
     # experts, so the EP wrapper never replaces it. Upstream's `geglu` swaps that class for a
     # tanh-GeGLU that never checks the activation; the toolkit's probes it and survives the wrap.
@@ -131,9 +146,11 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
     LigerFamilySpec(
         model_types=("gemma4_text",),
         modeling_module="transformers.models.gemma4.modeling_gemma4",
+        rms_norm=("Gemma4RMSNorm",),
+        rms_norm_kernel="native",
         glu_mlp=("Gemma4TextMLP",),
         delegates_to_upstream=True,
-        upstream_off=("geglu",),
+        upstream_off=("geglu", "rms_norm"),
     ),
     # Inkling. `InklingMLP` scales its output by a trained `global_scale`, so the fused GLU would
     # drop a parameter; positions enter as a learned relative-logit bias, so there is no rotary.

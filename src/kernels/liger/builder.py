@@ -51,6 +51,9 @@ _WITHHOLDABLE_UPSTREAM_ROLES = {"rms_norm": "rms_norm", "swiglu": "glu_mlp", "ge
 _FLA_GATE_ACTIVATIONS = frozenset({"swish", "silu", "sigmoid"})
 
 
+_RMS_NORM_CASTING_MODES = ("llama", "gemma")
+
+
 @dataclass(frozen=True)
 class LigerFamilySpec:
     """The Liger-patchable surface of one model family, by role.
@@ -76,6 +79,10 @@ class LigerFamilySpec:
     # multiply in fp32. `offset` is the constant added to the weight (Gemma-style `(1 + w)`).
     rms_norm_casting_mode: str = "llama"
     rms_norm_offset: float = 0.0
+    # "liger" swaps in LigerRMSNorm; "native" swaps in torch's fused `F.rms_norm` under the same casting
+    # mode (offset 0 only), which also serves weightless norms and is several times cheaper to launch and
+    # to run.
+    rms_norm_kernel: str = "liger"
     # Gated norm classes: `norm(x) * weight * act(gate)` over the last dim, as the linear-attention
     # (GDN) blocks apply to their attention output. Served by `fla`'s fused kernel, not Liger's, and
     # patched under the same `rms_norm` flag. A grouped gated norm (Bailing's, which reduces over
@@ -120,6 +127,21 @@ class LigerFamilySpec:
             raise ValueError(
                 f"LigerFamilySpec for {self.model_types} declares a logit scale or an in-head aux loss "
                 f"but no causal_lm"
+            )
+        if self.rms_norm_casting_mode not in _RMS_NORM_CASTING_MODES:
+            raise ValueError(
+                f"LigerFamilySpec for {self.model_types} sets rms_norm_casting_mode="
+                f"{self.rms_norm_casting_mode!r}; expected one of {_RMS_NORM_CASTING_MODES}"
+            )
+        if self.rms_norm_kernel not in ("liger", "native"):
+            raise ValueError(
+                f"LigerFamilySpec for {self.model_types} sets rms_norm_kernel={self.rms_norm_kernel!r}; "
+                f"expected 'liger' or 'native'"
+            )
+        if self.rms_norm_kernel == "native" and self.rms_norm_offset:
+            raise ValueError(
+                f"LigerFamilySpec for {self.model_types} pairs the native RMSNorm with offset "
+                f"{self.rms_norm_offset}; the native kernel implements offset 0 only"
             )
         if self.upstream_off and not self.delegates_to_upstream:
             raise ValueError(f"LigerFamilySpec for {self.model_types} withholds upstream flags but does not delegate")
@@ -197,6 +219,49 @@ def _rebrand(patched: type, original: type, role: str) -> type:
     return patched
 
 
+def _norm_epsilon(module: nn.Module) -> float:
+    """The epsilon of an RMSNorm module, whichever spelling its family uses."""
+    eps = getattr(module, "variance_epsilon", None)
+    if eps is None:
+        eps = getattr(module, "eps", None)
+    if eps is None:
+        raise AttributeError(
+            f"{type(module).__name__} exposes neither `variance_epsilon` nor `eps`; a fused RMSNorm "
+            f"cannot be given an epsilon. Drop it from the family's rms_norm spec."
+        )
+    return eps
+
+
+def native_rms_norm_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    """``x * rsqrt(mean(x²) + eps) * w`` through torch's fused kernel, under the module's casting mode.
+
+    The kernel normalizes in fp32 and casts once. In the gemma mode the weight multiply is inside it, in
+    fp32; in the llama mode the normalized activations are cast back first and the weight multiplies
+    them in the activation dtype, as the llama-family norms write ``weight * x.to(input_dtype)``. A norm
+    built without a scale (``with_scale=False``) passes no weight. In the gemma mode the fused kernel takes
+    the activations and the weight in one dtype, so a weight in another dtype (an fp32 norm under bf16
+    compute) runs the same function on fp32 copies and casts back.
+    """
+    weight = self.weight if getattr(self, "with_scale", True) else None
+    shape, eps = (hidden_states.shape[-1],), _norm_epsilon(self)
+    if getattr(self, "native_rms_casting_mode", "gemma") == "llama":
+        normed = torch.nn.functional.rms_norm(hidden_states, shape, None, eps)
+        return normed if weight is None else weight * normed
+    if weight is not None and weight.dtype != hidden_states.dtype:
+        return torch.nn.functional.rms_norm(hidden_states.float(), shape, weight.float(), eps).type_as(hidden_states)
+    return torch.nn.functional.rms_norm(hidden_states, shape, weight, eps)
+
+
+def _native_rms_norm_class(original: type, *, casting_mode: str) -> type:
+    """``original`` with :func:`native_rms_norm_forward` under ``casting_mode``."""
+
+    class _NativeRMSNorm(original):
+        native_rms_casting_mode = casting_mode
+        forward = native_rms_norm_forward
+
+    return _rebrand(_NativeRMSNorm, original, "rms_norm")
+
+
 def _liger_rms_norm_class(original: type, *, offset: float, casting_mode: str) -> type:
     """``original`` with Liger's fused RMSNorm forward and the parameters that select its variant.
 
@@ -214,15 +279,7 @@ def _liger_rms_norm_class(original: type, *, offset: float, casting_mode: str) -
             # Families spell eps either way; Liger's forward reads `variance_epsilon`. A third
             # spelling would hand `None` to the Triton kernel, which fails inside the launcher
             # without naming the family.
-            eps = getattr(self, "variance_epsilon", None)
-            if eps is None:
-                eps = getattr(self, "eps", None)
-            if eps is None:
-                raise AttributeError(
-                    f"{type(self).__name__} exposes neither `variance_epsilon` nor `eps`; Liger's "
-                    f"fused RMSNorm cannot be given an epsilon. Drop it from the family's rms_norm spec."
-                )
-            self.variance_epsilon = eps
+            self.variance_epsilon = _norm_epsilon(self)
             self.offset = offset
             self.casting_mode = casting_mode
             self.in_place = in_place
@@ -328,13 +385,14 @@ def _patch_module(module: ModuleType, spec: LigerFamilySpec, flags: dict) -> lis
         for name in spec.rms_norm:
             original = _named_class(module, name, spec)
             if getattr(original, _PATCHED_MARKER, None) != "rms_norm":
-                setattr(
-                    module,
-                    name,
-                    _liger_rms_norm_class(
+                fused = (
+                    _native_rms_norm_class(original, casting_mode=spec.rms_norm_casting_mode)
+                    if spec.rms_norm_kernel == "native"
+                    else _liger_rms_norm_class(
                         original, offset=spec.rms_norm_offset, casting_mode=spec.rms_norm_casting_mode
-                    ),
+                    )
                 )
+                setattr(module, name, fused)
         for name in spec.gated_rms_norm:
             original = _named_class(module, name, spec)
             if getattr(original, _PATCHED_MARKER, None) != "gated_rms_norm":
@@ -371,7 +429,10 @@ def _patch_instance(model, spec: LigerFamilySpec, flags: dict) -> None:
     if flags.get("rms_norm"):
         gated_forward = None
         for module in model.modules():
-            if type(module).__name__ in spec.rms_norm:
+            if type(module).__name__ in spec.rms_norm and spec.rms_norm_kernel == "native":
+                module.native_rms_casting_mode = spec.rms_norm_casting_mode
+                module.forward = MethodType(native_rms_norm_forward, module)
+            elif type(module).__name__ in spec.rms_norm:
                 _patch_rms_norm_module(
                     module,
                     offset=spec.rms_norm_offset,
