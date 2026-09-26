@@ -325,7 +325,9 @@ python scripts/before_training/patch_vocab.py \
 | `scripts/profiling/nvlink_health.py` | Torch-free NVLink preflight from `nvidia-smi`: per-link hard errors, FEC correction depth, active bandwidth. Exits non-zero only when a link is unhealthy, separating real faults from benign `Xid 145` churn (see [Debugging](debugging.md)) |
 | `scripts/profiling/weight_sync_transport.py` | Weight-sync transport preflight against a live rollout server (driver `src/diagnostics/weight_sync_transport.py`): forms the group with the toolkit's own client, pushes one parameter of the served checkpoint unchanged and names the transport NCCL formed on. `--server-url` (required), `--backend vllm\|sglang`, `--group-port` (`0` = ephemeral), `--group-host` (auto), `--device` (`cuda:0`), `--param` (the input embedding), `--model-id` / `--revision` (the checkpoint the server loaded; default the id it advertises), `--rounds` (3), `--connection-timeout` (120 s), `--expect efa\|ib\|socket\|p2p\|shm` (exit 1 on a mismatch or an altered served model), `--json`. Procedure and transport legend: [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
 
-Throughput benchmarks live under `tests/gpu/profiling/`, grouped by what they measure:
+Cross-framework comparisons live under `scripts/benchmarks/` (`gemma4_sft/`: the Gemma 4 SFT comparison against Axolotl, AutoModel, Megatron Bridge, MS-SWIFT and Unsloth). Every script sources `scripts/benchmarks/paths.env`, where only `BENCH_ROOT` is required, and runs in Docker with GPUs attached through CDI. `gemma4_sft/reproduce.sh [framework...]` runs the comparison end to end: data, every framework (its 2,048-token configuration first, its own activation checkpointing when that runs out of memory, two runs of the first that fits) and `summary.tsv`; `BENCH_SEQ` sets tokens per row (16,384 packs 8 protocol rows) and `BENCH_STEPS` the steps per run. `RUNNER=direct` runs inside an already-started framework image instead of `docker run`.
+
+Throughput benchmarks of Halo itself live under `tests/gpu/profiling/`, grouped by what they measure:
 
 | Group | Scripts |
 |---|---|

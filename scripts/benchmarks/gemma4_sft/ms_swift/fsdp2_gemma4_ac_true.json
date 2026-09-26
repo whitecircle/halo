@@ -1,0 +1,16 @@
+{
+    "_note": "ms-swift fsdp2.json preset with an explicit wrap class: the preset's TRANSFORMER_BASED_WRAP uses model._no_split_modules, which lists Gemma4AudioLayer (absent in 26B-A4B, audio_config=null) and crashes. cpu_ram_efficient_loading=false: with true, accelerate fsdp2_load_full_state_dict fails (AttributeError: Tensor has no attribute device_mesh). activation_checkpointing=true: the fallback when the configuration without it runs out of memory (long rows).",
+    "fsdp": "full_shard auto_wrap",
+    "fsdp_config": {
+        "fsdp_version": 2,
+        "reshard_after_forward": true,
+        "auto_wrap_policy": "TRANSFORMER_BASED_WRAP",
+        "transformer_layer_cls_to_wrap": [
+            "Gemma4TextDecoderLayer",
+            "Gemma4VisionEncoderLayer"
+        ],
+        "cpu_ram_efficient_loading": false,
+        "state_dict_type": "SHARDED_STATE_DICT",
+        "activation_checkpointing": true
+    }
+}

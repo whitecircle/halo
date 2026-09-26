@@ -1,0 +1,95 @@
+# the protocol: canonical pre-tokenized rows (bench_data), sequential order, token-weighted loss.
+# optimizer (PROTOCOL.txt): AdamW betas (0.9, 0.999), eps 1e-8, wd 0.0, lr 1e-5 constant (no lr_scheduler), clip 1.0.
+# Gemma 4 26B-A4B full-parameter text SFT throughput benchmark (2x B300).
+# Derived from AutoModel v0.6.0 examples/vlm_finetune/gemma4/gemma4_26b_a4b_moe.yaml
+# (FSDP2 + EP, DeepEP dispatcher) and examples/convergence/tulu3/models/gemma4-31b (text-only SFT path).
+# Changes: ep_size 8 -> 2, local dataset, seq 2048 (max_length 2049 -> 2048 input tokens after shift),
+# embeddings trainable, no val / no ckpt, 25 steps, lr 1e-5 constant, clip 1.0.
+
+recipe: FinetuneRecipeForVLM
+
+step_scheduler:
+  global_batch_size: 2
+  local_batch_size: 1
+  ckpt_every_steps: 100000
+  val_every_steps: 100000
+  max_steps: ${BENCH_STEPS}
+  num_epochs: 1
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 42
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained
+  pretrained_model_name_or_path: google/gemma-4-26B-A4B-it
+  torch_dtype: torch.bfloat16
+  trust_remote_code: true
+  attn_implementation: eager
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: te
+    linear: te
+    rms_norm: te
+    rope_fusion: true
+    experts: torch_mm
+    dispatcher: deepep
+    fake_balanced_gate: false
+    enable_hf_state_dict_adapter: true
+    enable_fsdp_optimizations: true
+  text_config:
+    use_cache: false
+
+processor:
+  padding_side: right
+
+checkpoint:
+  enabled: false
+  checkpoint_dir: ${BENCH_ROOT}/automodel/runs/ckpt_unused/
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  ep_size: 2
+  sequence_parallel: false
+  activation_checkpointing: false
+
+clip_grad_norm:
+  max_norm: 1.0
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+dataset:
+  _target_: bench_data.make_canonical_dataset
+  path_or_dataset: ${BENCH_CANON}
+  split: train
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  num_workers: 0
+  pin_memory: true
+  shuffle: false
+  collate_fn:
+    _target_: bench_data.canonical_collate_fn
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-5
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  fused: true
+
+freeze_config:
+  freeze_embeddings: false
+  freeze_vision_tower: true
+  freeze_audio_tower: true
+  freeze_language_model: false

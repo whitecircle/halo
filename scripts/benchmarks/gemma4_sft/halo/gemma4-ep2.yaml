@@ -1,0 +1,49 @@
+# Halo protocol config: Gemma-4 26B-A4B full SFT, 2x B300, EP=2 (published EP recipe layout), GC off, bf16 expert master weights (fp32_experts false; AdamWBF16 SR on all params).
+model_name_or_path: google/gemma-4-26B-A4B-it
+moe_balancing: none
+
+# Dataset: the canonical tokens and labels (data/canonical_tokens.jsonl, PROTOCOL.txt) pre-sharded by
+# halo/build_canonical.py so that rank r trains canonical row 2*(k-1)+r at step k; BENCH_SEQ tokens per row.
+dataset: ${BENCH_ROOT}/halo/data/canonical${BENCH_SEQ_SUFFIX}
+train_on_completions_only: true
+pad_token: <pad>
+
+expert_parallel_size: 2
+save_sharded_ep: false
+use_grouped_gemm: true
+fp32_experts: false
+fp32_output_conversion: false
+
+attn_implementation: sdpa
+use_liger_kernel: true
+max_length: ${BENCH_SEQ}
+bf16: true
+
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 1
+max_steps: ${BENCH_STEPS}
+gradient_checkpointing: false
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+optim: adamw_torch_fused
+learning_rate: 1.0e-05
+lr_scheduler_type: constant
+warmup_steps: 0
+max_grad_norm: 1.0
+
+save_strategy: "no"
+eval_strategy: "no"
+output_dir: ${BENCH_ROOT}/halo/out/gemma4-ep2
+
+logging_steps: 1
+logging_first_step: true
+report_to: none
+remove_unused_columns: false
+dataloader_num_workers: 2
+seed: 42
+
+use_peft: false
+train_sampling_strategy: sequential
+average_tokens_across_devices: true
