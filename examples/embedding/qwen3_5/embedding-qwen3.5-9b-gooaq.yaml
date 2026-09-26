@@ -1,12 +1,13 @@
 # Embedding fine-tune — Qwen3.5-9B chat model turned into an embedder on GooAQ (MNRL, in-batch negatives).
 # The two dataset columns (question, answer) map positionally to anchor/positive in the ST collator.
 # Launch: python scripts/training/embedding.py <this config>
-#   or: torchrun --nproc_per_node=2 scripts/training/embedding.py <this config> --tensor_parallel_size=2
+#   or: torchrun --nproc_per_node=2 scripts/training/embedding.py <this config> --tensor_parallel_size=2 --batch_sampler=batch_sampler
+#       (TP batches through the toolkit loader, which applies no no_duplicates sampler)
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B
 attn_implementation: sdpa   # embedding batches are right-padded, and FA2 unpads them into the
-                            #   M-RoPE varlen path that crashes this family (FA2 needs packing: true)
+                            #   M-RoPE varlen path that crashes this family
 
 # --- Dataset ---
 dataset: sentence-transformers/gooaq:pair

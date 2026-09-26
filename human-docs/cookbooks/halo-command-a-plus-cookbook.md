@@ -211,7 +211,7 @@ LoRA is untested on this family; validate before a long run.
 
 ## Continue with GRPO
 
-Offline GRPO works from the SFT checkpoint today: it trains on pre-generated
+Offline GRPO works from the SFT checkpoint: it trains on pre-generated
 completions and needs no rollout server, so the standard offline configuration applies
 unchanged. `packing` is an SFT-only field; the GRPO configs declare none, so a
 `packing:` key there fails to parse.

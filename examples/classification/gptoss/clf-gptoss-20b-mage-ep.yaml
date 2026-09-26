@@ -12,7 +12,7 @@ moe_balancing: none
 # MAGE has native `text` + int `label` columns (the pipeline reads the label column by the hardcoded name `label`).
 dataset: yaful/MAGE
 text_field: text
-test_size: 0.1   # the loader folds all provided splits together and re-splits by this ratio
+test_size: 0.1   # the loader pools the train and test splits and re-splits them by this ratio; other splits are dropped
 
 # --- Parallelism ---
 expert_parallel_size: 8
@@ -56,4 +56,4 @@ remove_unused_columns: true
 
 # --- PEFT (optional) ---
 use_peft: false
-lora_task_type: SEQ_CLS
+lora_task_type: SEQ_CLS   # read once use_peft is on: PEFT then trains and saves the score head

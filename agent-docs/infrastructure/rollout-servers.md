@@ -377,7 +377,6 @@ Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:vllm-0.26.0` (anonymous, 
 ```bash
 make build-vllm                        # or the pull + tag above
 VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
-  TRAINER_CUDA_DEVICES=0,1,2,3,4,5 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 

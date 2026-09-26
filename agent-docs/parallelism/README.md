@@ -173,7 +173,7 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 
 ⁴ Zaya — CCA rules out CP/TP, GC unsupported; see [Zaya — Limitations](../models/zaya.md#limitations).
 
-⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). EP+CP is a valid shape not yet run on this model. See [mistral4.md](../models/mistral4.md).
+⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). EP+CP is a valid shape, unvalidated on this model. See [mistral4.md](../models/mistral4.md).
 
 ⁶ LFM-2 — CP blocked by the sequence-axis short-conv layers in the hybrid stack (no Ulysses wrapper); see [lfm2.md](../models/lfm2.md).
 

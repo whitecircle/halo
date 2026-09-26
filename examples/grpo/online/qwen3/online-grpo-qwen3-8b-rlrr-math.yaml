@@ -1,6 +1,7 @@
 # Online GRPO (RLVR) with RLRR relative-reward shaping — Qwen3-8B (dense FSDP DP=2) on DAPO-Math-17k.
-# RLRR replaces the group mean/std advantage with intra-group rankings, so an all-correct or all-wrong
-# group still carries signal. See agent-docs/training-methods/grpo/online-grpo.md.
+# RLRR replaces the group mean/std advantage with intra-group rankings. With this 0/1 accuracy reward an
+# all-correct group still ranks by length bin (rlrr_lambda); an all-wrong group ties at zero advantage.
+# See agent-docs/training-methods/grpo/online-grpo.md.
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' (GPU 0), then
 #   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
 

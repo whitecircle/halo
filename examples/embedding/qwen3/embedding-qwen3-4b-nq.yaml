@@ -1,6 +1,7 @@
 # Embedding fine-tune — Qwen3-Embedding-4B on Natural Questions (MNRL, in-batch negatives).
 # Launch: python scripts/training/embedding.py <this config>
-#   or: torchrun --nproc_per_node=2 scripts/training/embedding.py <this config> --tensor_parallel_size=2
+#   or: torchrun --nproc_per_node=2 scripts/training/embedding.py <this config> --tensor_parallel_size=2 --batch_sampler=batch_sampler
+#       (TP batches through the toolkit loader, which applies no no_duplicates sampler)
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-Embedding-4B

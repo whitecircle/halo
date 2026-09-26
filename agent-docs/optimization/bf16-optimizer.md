@@ -55,7 +55,9 @@ optim: adamw_torch  # adamw_torch / adamw_torch_fused both auto-enable AdamWBF16
 
 `bf16_optimizer` (a `DistributedArguments` field, so every training script parses it) overrides that
 resolution: `true` forces AdamWBF16 on where the auto path would decline (a non-AdamW `optim`, replicated
-DDP), `false` forces full fp32 master weights.
+DDP), `false` forces the stock AdamW over the parameters as loaded. Under `bf16: true` those are bf16, so
+`false` keeps bf16 master weights and moments with round-to-nearest updates (the stall above), not fp32
+ones; fp32 masters come from `fp32_non_ep_params` (dense params) or `bf16: false`.
 
 `false` is rejected only where the run mixes plain-tensor experts with FSDP2 DTensors: `ep_group_size` (`ep_size × expert_tp_size`) above 1, or `ep_group_size == 1` with `fsdp_shard_ep1_experts: false`. The raise lands when the optimizer is built, not at config time. Dense runs and MoE at `ep_size == expert_tp_size == 1` with the default `fsdp_shard_ep1_experts: true` are allowed.
 
@@ -76,9 +78,9 @@ AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR pat
 | **full bf16** (AdamWBF16, default) | 17,875 | 91.4 GB | 6 B/param; production path |
 | `fp32_non_ep_params` | 17,409 | 92.7 GB | non-EP params fp32, experts bf16; +1 GB only (experts dominate, stay bf16) |
 | `+ fp32_grad_reduce` | 16,117 | 92.7 GB | bf16 master, fp32 grad reduction (~−9%: 2× bandwidth on the grad all-reduce) |
-| **full fp32** (`bf16_optimizer=False`) | — | — | **rejected at `ep_group_size > 1`, and at `ep_group_size == 1` with `fsdp_shard_ep1_experts: false`** — fused AdamW cannot mix the plain-tensor expert FFN (EP rank-local experts, or the grouped-GEMM `gate_proj_gmm`/`up_proj_gmm` split at ep1) with FSDP2 DTensors (`aten._fused_adamw_ got mixed torch.Tensor and DTensor`); raised when the optimizer is built (still before the first step) |
+| **stock AdamW** (`bf16_optimizer=False`) | — | — | **rejected at `ep_group_size > 1`, and at `ep_group_size == 1` with `fsdp_shard_ep1_experts: false`** — fused AdamW cannot mix the plain-tensor expert FFN (EP rank-local experts, or the grouped-GEMM `gate_proj_gmm`/`up_proj_gmm` split at ep1) with FSDP2 DTensors (`aten._fused_adamw_ got mixed torch.Tensor and DTensor`); raised when the optimizer is built (still before the first step) |
 
-Full fp32 master (`bf16_optimizer=False`) is supported on dense models and on `ep_group_size == 1` MoE with the default FSDP-sharded experts. The fp32 deltas are small for gpt-oss because its non-expert params are a minor fraction; high-vocab or attention-heavy models cost more.
+`bf16_optimizer=False` builds on dense models and on `ep_group_size == 1` MoE with the default FSDP-sharded experts. The `fp32_non_ep_params` delta is small for gpt-oss because its non-expert params are a minor fraction; high-vocab or attention-heavy models cost more.
 
 `fp32_grad_reduce: true` upcasts gradients to fp32 for every cross-rank reduction the mixin owns (FSDP2 `reduce_dtype=fp32` for dense params, the EP router/expert grad-sync hooks, the TP replicated-grad sync, the QLoRA adapter AllReduce), then stores the averaged result bf16. It keeps bf16 master weights (6 B/param) — unlike `fp32_non_ep_params` it changes only the reduction, not storage.
 

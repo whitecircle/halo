@@ -9,8 +9,8 @@ model_name_or_path: Qwen/Qwen3.6-35B-A3B
 chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
 force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
-# No output_router_logits: the aux loss is inert under the policy-gradient objective, and the
-# load-balancing loss transformers then runs expands to tens of GB on a 100k-token trajectory.
+# No output_router_logits: the aux loss is inert under the policy-gradient objective, and the flag
+# would still record a [tokens, num_experts] router-logit plane per MoE layer on every forward.
 
 # --- Parallelism (4 train GPUs: pure data-parallel, DP=4, ZeRO-2) ---
 expert_parallel_size: 1            # pure DP; attention-only LoRA fits per-rank
@@ -21,7 +21,6 @@ fsdp_reshard_after_forward: false  # ZeRO-2
 use_peft: true
 lora_r: 64
 lora_alpha: 128
-lora_dropout: 0.05
 lora_task_type: CAUSAL_LM
 lora_target_modules:
 - q_proj
@@ -122,8 +121,9 @@ num_generations_eval: 1
 scale_rewards: batch
 drop_degenerate_groups: true
 top_entropy_quantile: 1.0
-mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow — a real failure worth its
-                                   # negative advantage; a length-cut TURN is priced and retried in-episode
+mask_truncated_completions: false  # `truncated` = the max_turns overflow, or a cut/empty turn past the recovery
+                                   # cap or on the last turn: a real failure worth its negative advantage; a
+                                   # cut turn within the cap is priced and retried in-episode
 
 # --- Training ---
 per_device_train_batch_size: 1
@@ -162,7 +162,6 @@ logging_first_step: true
 report_to: ["wandb"]
 log_completions: false
 save_completions: true       # trajectories → <output_dir>/completions/*.parquet
-num_completions_to_print: 2
 
 # --- Data ---
 dataloader_num_workers: 0

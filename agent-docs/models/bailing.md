@@ -19,7 +19,7 @@ The MoE block is unchanged from V2 (same per-expert `gate_proj`/`up_proj`/`down_
 
 Attention is what differs: layers alternate in groups of `layer_group_size`, with most layers `BailingMoeV3KimiDeltaAttention` (KDA linear attention through `fla`) and the rest `BailingMoeV3MultiLatentAttention` (MLA).
 
-The KDA kernels accept a `cu_seqlens` kwarg (fla convention) that the toolkit collators do not yet emit, so under packing the recurrence scans the whole row and mixes across document boundaries — an emission gap, not an architectural limit. KDA is the majority of the stack, so that term dominates whatever the MLA layers do ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+The KDA kernels accept a `cu_seqlens` kwarg (fla convention) that the toolkit collators do not emit, so under packing the recurrence scans the whole row and mixes across document boundaries — an emission gap, not an architectural limit. KDA is the majority of the stack, so that term dominates whatever the MLA layers do ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
 Three consequences for a training config:
 

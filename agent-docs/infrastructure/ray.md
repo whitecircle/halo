@@ -131,7 +131,7 @@ Not Ray; what binds depends on the environment class:
 
 - **Sandbox-backed** (`code_contests`, `codeforces`, `swe`, any env with a `python`/code tool): a
   process-global gate of `HALO_SANDBOX_MAX_CONCURRENCY` slots (default: host core count), **per
-  process**.
+  process** (`local`/`bubblewrap` only; no effect under `remote`).
 
     Each actor is its own process, so N actors on a node can run `N × cpu_count` concurrent sandbox
     subprocesses unless the var is set so the slots **sum** to the core budget. Per-run rlimits and

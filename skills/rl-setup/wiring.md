@@ -31,7 +31,6 @@ docker build -f Dockerfile.vllm -t vllm-server:0.26.0 .
 # on both for NCCL P2P. The server advertises native weight-transfer endpoints.
 VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
 VLLM_CUDA_DEVICES=0 VLLM_TP=1 VLLM_PORT=8000 \
-TRAINER_CUDA_DEVICES=1,2,3,4,5,6,7 \
 HF_HOME=$HALO_SCRATCH/hf HF_TOKEN=$HF_TOKEN \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
@@ -62,8 +61,10 @@ The server command always includes `--weight-transfer-config '{"backend": "nccl"
 `--return-tokens-as-token-ids` (load-bearing: `train_on_sampled_tokens` defaults
 on, so without it the trainer re-tokenizes a re-render), `--logprobs-mode
 processed_logprobs` (also load-bearing: a rank-0 startup probe refuses a server returning raw
-pre-temperature logprobs at any `rollout_temperature != 1.0`) and
-`--enable-auto-tool-choice`, plus `--moe-backend ${VLLM_MOE_BACKEND:-triton}`. Both services run
+pre-temperature logprobs at any `rollout_temperature != 1.0`), plus
+`--moe-backend ${VLLM_MOE_BACKEND:-triton}`. `--enable-auto-tool-choice --tool-call-parser` come
+from `VLLM_TOOL_CALLING_FLAGS`: on by default, dropped by an empty value
+(`VLLM_TOOL_CALLING_FLAGS=`). Both services run
 `network_mode: host`; healthcheck polls `/health`; the `training` service
 `depends_on` it being healthy and gets `VLLM_SERVER_URL=http://localhost:8000`.
 
@@ -263,13 +264,11 @@ reads `EnvironmentConfig` + `AsyncTrainingConfig` from YAML.
 
 Each recipe's header carries its server flags and GPU split. React-math (EP=4) serves on GPUs 4-7
 with `--reasoning-parser qwen3` and no tool-call parser — react_math reads its Action from the
-text, and compose always passes `--tool-call-parser` — so it runs standalone:
+text — so compose runs it with the tool-calling flags emptied:
 
 ```bash
-docker run -d --gpus all --network=host --ipc=host -e CUDA_VISIBLE_DEVICES=4,5,6,7 \
-  vllm-server:0.26.0 Qwen/Qwen3.6-35B-A3B --port 8000 \
-  --weight-transfer-config '{"backend": "nccl"}' --moe-backend triton \
-  --return-tokens-as-token-ids --logprobs-mode processed_logprobs --reasoning-parser qwen3
+VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_REASONING_PARSER=qwen3 \
+VLLM_TOOL_CALLING_FLAGS= docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 # Trainer — single entry point; resolves the env from environment_type in the YAML
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \

@@ -2,7 +2,8 @@
 
 Halo against upstream `trl.SFTTrainer` on transformers v5 with native FSDP — same model, data, attention, and
 kernels, only the framework changes. Measured with the same `EfficiencyCallback` and synthetic dataset as
-[Throughput Benchmarks](throughput-benchmarks.md), so tokens/s/GPU and peak memory are directly comparable.
+[Throughput Benchmarks](throughput-benchmarks.md), in a run set of its own: a config both pages list agrees
+within ~10% (batch-1 EP steps are communication-bound and vary run to run), so compare within one page.
 
 Unless a header says otherwise, every number is **gpt-oss-20b** (`unsloth/gpt-oss-20b-BF16`, 20.7B, 32
 experts, top_k=4) on **8× B300**, bf16, FA4 + Liger, `grouped_mm` experts, gradient checkpointing on, DeepEP

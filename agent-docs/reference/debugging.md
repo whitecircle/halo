@@ -137,10 +137,11 @@ per rank without a code change.
 wall clock, and accumulates it into the monitor's `.stats` map: one `TimingStats` (`count`,
 `total_time`, `.avg_time`) per operation name.
 
-The EP layers wrap their dispatch/expert-compute/combine phases with it when
-`HALO_EP_PERF_PROFILE=1`; the per-phase syncs serialize the timing, so use it on a diagnostic run only.
-`tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` reads those stats and prints the
-dispatch / expert-compute / combine split.
+`HALO_EP_PERF_PROFILE=1` is a benchmark switch: the EP layers then wrap their
+dispatch/expert-compute/combine phases with it, and only `tests/gpu/profiling/benchmark_sft_ep.py
+--comm_profile` (which sets the variable itself) reads those stats, printing the split. A training run
+with it set pays two syncs per phase and reports nothing; `enable_torch_profiler` shows the same `ep.*`
+spans at no cost.
 
 ## 3. GPU memory profiling
 

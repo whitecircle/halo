@@ -13,8 +13,8 @@ dataset:
 - HuggingFaceH4/ultrachat_200k@train_sft
 conversation_field: messages
 test_size: 0.01
-# The tiny checkpoint ships the Qwen3 tokenizer — without the matching marker the default (Llama-3
-# header) never matches and completion-only masking zeroes every label (loss 0).
+# The tiny checkpoint ships the Qwen3 tokenizer, hence the Qwen3 marker. Required: completion-only
+# masking raises at startup without it.
 assistant_message_template: "<|im_start|>assistant\n"
 
 # --- Parallelism ---

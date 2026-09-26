@@ -87,6 +87,6 @@ trainer uses. vLLM answers a request naming any model but the one it serves with
 
 The compose files already pass the MoE backend weight sync needs
 (`--moe-backend triton`, `--moe-runner-backend triton`); leave it. A run with
-`routing_replay: rollout` also needs `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` on
-the server. Plain serving works on any SGLang 0.5.17 image; weight sync needs this
+`routing_replay: rollout` also needs `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1`
+exported where you run compose (it adds `--enable-return-routed-experts`). Plain serving works on any SGLang 0.5.17 image; weight sync needs this
 repo's server images. Parsers, ports and the other variables: [Rollout Servers](../rollout-servers.md).

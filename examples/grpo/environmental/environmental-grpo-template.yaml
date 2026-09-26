@@ -26,7 +26,7 @@ rewards:
 # environment_kwargs:
 #   timeout_per_test: 5          # code_contests / codeforces, seconds per test case
 #   search_backend: duckduckgo   # qa_search, open-book exam_qa
-#   reasoning_effort: null       # every environment: low / medium / high, or random (drawn per episode)
+#   reasoning_effort: null       # every environment: low / medium / high, or random (drawn once per generation group)
 # Shared kwargs: agent-docs/training-methods/grpo/environments/README.md; native-tool shaping: .../environments/native-tool-use.md
 
 # --- Ray Workers (AsyncTrainingConfig fields) ---
@@ -74,7 +74,6 @@ rollout_max_tokens: 8192
 # --- Prefetch (AsyncTrainingConfig fields) ---
 enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the
                           # trainer auto-disables it (that server stops serving during weight sync)
-num_prefetch_batches: 1
 
 # --- Dataset (EnvironmentalGRPOScriptArguments fields) ---
 dataset:
@@ -152,6 +151,5 @@ seed: 42
 use_peft: false
 # lora_r: 64
 # lora_alpha: 128
-# lora_dropout: 0.05
 # lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
 # lora_task_type: CAUSAL_LM

@@ -10,8 +10,8 @@ model_name: Qwen/Qwen3.6-35B-A3B   # the id the rollout servers serve; unset, th
 chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
 force_chat_template: true      # the stage-2 weights ship this same template (a save keeps the forced one); serve with it
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
-# No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag still runs
-# transformers' load-balancing loss — a layers x tokens x top_k x experts int64 one-hot, tens of GB here.
+# No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag would still
+# record a [tokens, num_experts] router-logit plane per MoE layer on every forward.
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
 
 # --- Parallelism (6 train GPUs: pure data-parallel, DP=6, ZeRO-3) ---
@@ -50,7 +50,7 @@ environment_kwargs:
   no_tool_use_penalty: 0.1   # ending with 0 tool calls
   multi_turn_reward: 0       # off: a bounty for a second call pays a judge probe like a scratchpad run
   tool_success_reward: 0     # any per-call pay is farmable by duplicate re-runs
-  turn_overflow_penalty: 0.15 # magnitude, >= 0 — charged when the episode burns max_turns
+  turn_overflow_penalty: 0.15 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns spent, or a cut/empty turn it could not retry)
   length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut, or ended without a call or an answer
   tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
@@ -126,8 +126,9 @@ num_generations_eval: 1
 scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
 drop_degenerate_groups: true  # all-alike groups would still inflate the DAPO normalizer
 top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
-mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow — a real failure worth its
-                                   # negative advantage; a length-cut TURN is priced and retried in-episode
+mask_truncated_completions: false  # `truncated` = the max_turns overflow, or a cut/empty turn past the recovery
+                                   # cap or on the last turn: a real failure worth its negative advantage; a
+                                   # cut turn within the cap is priced and retried in-episode
 
 # --- Training ---
 per_device_train_batch_size: 1
@@ -167,7 +168,6 @@ logging_first_step: true
 report_to: ["wandb"]
 log_completions: false
 save_completions: true       # trajectories → <output_dir>/completions/*.parquet
-num_completions_to_print: 2
 
 # --- Data ---
 dataloader_num_workers: 0

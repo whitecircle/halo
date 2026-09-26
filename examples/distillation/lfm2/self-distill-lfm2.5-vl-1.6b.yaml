@@ -36,7 +36,7 @@ lr_scheduler_type: cosine
 warmup_steps: 20
 gradient_checkpointing: true
 max_length: 8192
-assistant_message_template: "<|im_start|>assistant\n"   # LFM2.5-VL template; unset would default to the llama3 header and mask every row
+assistant_message_template: "<|im_start|>assistant\n"   # LFM2.5-VL template; required: completion-only masking raises at startup without it
 seed: 42
 
 output_dir: checkpoints/lfm25vl-self-distill

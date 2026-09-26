@@ -29,7 +29,7 @@ Two capabilities scale independently, and almost every performance question is w
 
 1. **Arithmetic throughput** (tensor cores): **~1818 TFLOP/s** bf16 measured on a large square GEMM (B300).
 
-    The die's architectural ceiling is 148 SMs x 2.032 GHz x 8192 FLOP/SM/clk = **2464 TFLOP/s**, so that measurement is 74% of what the silicon can physically issue — a normal large-GEMM cuBLAS efficiency. Any quoted bf16 figure above 2464 is impossible, whatever the benchmark claims.
+    The die's architectural ceiling is 148 SMs x 2.032 GHz x 8192 FLOP/SM/clk = **2464 TFLOP/s**, so that measurement is 74% of what the silicon can physically issue — a normal large-GEMM cuBLAS efficiency. No step executes more than 2464 bf16 TFLOP/s; a higher quoted figure counts FLOPs that never ran, like the nominal `6·N` achieved TFLOPS of a sparse MoE, which credits every local expert ([Throughput Benchmarks](../optimization/throughput-benchmarks.md#maximizing-achieved-tflops)).
 
 2. **Memory bandwidth** (HBM ↔ chip): ~6.6 TB/s (B300, large device-to-device copy).
 

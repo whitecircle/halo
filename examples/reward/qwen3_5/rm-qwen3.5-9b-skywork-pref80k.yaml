@@ -4,7 +4,7 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B
 attn_implementation: sdpa   # reward batches are right-padded, and FA2 unpads them into the M-RoPE
-                            #   varlen path that crashes this family (FA2 needs packing: true)
+                            #   varlen path that crashes this family
 
 # --- Dataset ---
 dataset: Skywork/Skywork-Reward-Preference-80K-v0.2
@@ -48,7 +48,7 @@ remove_unused_columns: true
 
 # --- PEFT (optional) ---
 use_peft: false
-lora_task_type: SEQ_CLS
+lora_task_type: SEQ_CLS   # read once use_peft is on: PEFT then trains and saves the score head
 # lora_r: 64
 # lora_alpha: 128
 # lora_target_modules: [q_proj, k_proj, v_proj, o_proj]

@@ -5,14 +5,14 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B
 attn_implementation: sdpa   # classification batches are right-padded, and FA2 unpads them into the
-                            #   M-RoPE varlen path that crashes this family (FA2 needs packing: true)
+                            #   M-RoPE varlen path that crashes this family
 
 # --- Dataset ---
 # The pipeline reads the label column by the hardcoded name `label`, so the dataset must carry
 # `text` + int `label` columns.
 dataset: yaful/MAGE
 text_field: text
-test_size: 0.1   # the loader folds all provided splits together and re-splits by this ratio
+test_size: 0.1   # the loader pools the train and test splits and re-splits them by this ratio; other splits are dropped
 
 # --- Training ---
 per_device_train_batch_size: 4
@@ -53,4 +53,4 @@ remove_unused_columns: true
 
 # --- PEFT (optional) ---
 use_peft: false
-lora_task_type: SEQ_CLS
+lora_task_type: SEQ_CLS   # read once use_peft is on: PEFT then trains and saves the score head

@@ -265,19 +265,19 @@ QLoRA saves ~10 GB more than bf16 all-linear LoRA and is ~33% faster, because th
 bandwidth on the bandwidth-bound MLP matmuls. It is the path onto consumer GPUs, since plain LoRA needs
 ~34 GB even at the minimum rank.
 
-MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at EP=2, seq 4096, r=64:
+MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at EP=2, seq 4096, r=64 (full
+fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchmarks.md#ep-only-batch-scaling)):
 
 | Config | Trainable | tokens/s/GPU | Peak memory |
 |---|---|---|---|
-| Full fine-tuning | 11,388M (100%) | 7,896 | 77.3 GB |
 | LoRA r=64, attn only (PEFT) | 32M (0.28%) | 9,632 | 28.4 GB |
 | LoRA r=64, experts only (grouped) | 425M (3.60%) | 9,919 | 32.0 GB |
 | LoRA r=64, attn + experts | 457M (3.86%) | 7,586 | 32.0 GB |
 
-**LoRA under EP is faster *and* leaner than full fine-tuning.** The frozen base experts carry no optimizer
-state and skip the EP gradient all-to-all, so attention-only and experts-only both run ~1.25× full-FT
-throughput at ~⅓ the memory. Experts-only ties attention-only because the grouped expert adapters fold into
-the grouped-GEMM compute. Attn + experts is slower than either alone, on par with full FT.
+**LoRA under EP is far leaner than full fine-tuning at slightly lower throughput.** The frozen base carries
+no gradients or optimizer state, so attention-only and experts-only run at ~0.9× full-FT throughput (10,551
+tok/s/GPU) in ~40% of its 77.3 GB. Experts-only ties attention-only because the grouped expert adapters fold
+into the grouped-GEMM compute. Attn + experts is slower than either alone, ~0.7× full FT.
 
 On `qwen3-30b-a3b` (128 experts) experts-only r=64 is 9.39% trainable at 5,034 tok/s/GPU and 46.8 GB. At
 batch 1 the step is communication-bound, so tok/s/GPU varies ±10% run-to-run.
@@ -315,6 +315,10 @@ whenever none is passed and none of its no-reference cases apply (a PEFT-wrapped
 and **raises** whenever the policy carries live attention sinks (`reset_sinks: false`), where the two
 models would compute different log-probs for identical tokens. Set `use_peft: true`,
 `precompute_ref_log_probs: true` (DPO/KTO), or `beta: 0` (GRPO).
+
+The DPO/KTO scripts never leave the reference to TRL: a full fine-tune gets a frozen copy on plain data
+parallelism and needs `precompute_ref_log_probs: true` under EP, TP or PP; an expert-only LoRA run needs it
+in every mode ([DPO → Reference model](../training-methods/preference/dpo.md#reference-model)).
 
 ## Online RL — rollout-server weight sync
 

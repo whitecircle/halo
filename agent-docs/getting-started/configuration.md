@@ -75,7 +75,7 @@ liger_kernel_config:
 ## Launcher selection
 
 `halo launch <method> <config>` (`src/cli.py`) resolves the method to a script under
-`scripts/training/` and picks the launcher: `accelerate launch` whenever `-a accelerate/<config>.yaml`
+`scripts/training/` and picks the launcher: `accelerate launch` whenever `-a launcher-configs/accelerate/<config>.yaml`
 is given (there `-n N` becomes `--num_processes`), else `torchrun` when `-n N` sets more than one
 process (required for EP/CP/TP/ETP), else plain Python. A plain-Python run trains on the one GPU it binds however many are visible: `init_training_script` pins `n_gpu` to 1, so HF never wraps the model in `nn.DataParallel` (whose loss and gradients scale with the GPU count). Every flag the launcher does not own reaches the trainer, so overrides follow the config directly (`halo launch sft cfg.yaml -n 8 --learning_rate=1e-5`); a standalone `--` is needed only before a flag that collides with the launcher's own (`--help`, `--port`, `--dry-run`, ...).
 `--list` prints the method names, `--dry-run` prints the command, `-p <port>` sets the rendezvous port
@@ -176,7 +176,7 @@ Configs live under `examples/<method>/<model-family>/`: `sft/`, `preference/`, `
 
 Async GRPO with Environments adds a rollout-backend level below the family — `environmental/<family>/{vllm,sglang}/`, with `sglang` files for gpt-oss, Qwen3.5/3.6 and Gemma 4. The GRPO templates (`examples/grpo/online/rlvr-online-grpo-template.yaml`, `examples/grpo/environmental/environmental-grpo-template.yaml`) sit at the top of their method folder.
 
-A family directory is the snake_case hub family (`qwen3_5`, `deepseek_v4`, `ling_mini_2`), and file names lead with the same family token (`gptoss-20b-…`, `gemma4-26b-a4b-…`). One deviation: `qwen3_5/` also holds the `qwen3.6-*` configs, since Qwen3.6 ships under the Qwen3.5 model types.
+A family directory is a snake_case family token (`qwen3_5`, `deepseek_v4`, `ling_mini_2`). File names start with the model's name (`gptoss-20b-…`, `glm-4.7-flash-…`), behind a method prefix outside `sft/` and the Async GRPO recipes (`dpo-gemma4-26b-a4b-…`, `offline-grpo-qwen3.6-…`). `qwen3_5/` also holds the `qwen3.6-*` configs, since Qwen3.6 ships under the Qwen3.5 model types.
 
 ## Accelerate configs
 
@@ -197,7 +197,7 @@ Start with the gradop config; if OOM, try the full one. A hand-written accelerat
 | `muon` | Muon (Newton-Schulz) | ~4 B on 2D params | Faster convergence on matrix params |
 | `flash_adamw` | FlashAdamW (quantized states) | ~5 B | Maximum memory savings, drop-in AdamW |
 
-AdamWBF16 replaces `adamw_torch_fused`/`adamw_torch` automatically when `bf16: true`, except under accelerate-managed DDP. `bf16_optimizer` (default `null` = that auto rule) overrides it either way: `true` is the opt-in under DDP, `false` forces full fp32 masters. `true` alongside `optim: muon` or `flash_adamw` raises — both name an optimizer, and one would silently win. FlashAdamW needs `uv pip install "halo[flash-optimizers]"`. See [BF16 Optimizer](../optimization/bf16-optimizer.md#compatibility), [Muon](../optimization/muon-optimizer.md), [FlashAdamW](../optimization/flash-adamw.md).
+AdamWBF16 replaces `adamw_torch_fused`/`adamw_torch` automatically when `bf16: true`, except under accelerate-managed DDP. `bf16_optimizer` (default `null` = that auto rule) overrides it either way: `true` is the opt-in under DDP, `false` runs the stock AdamW over the params as loaded (bf16 masters with round-to-nearest under `bf16: true`, not fp32 — fp32 masters come from `fp32_non_ep_params` or `bf16: false`). `true` alongside `optim: muon` or `flash_adamw` raises — both name an optimizer, and one would silently win. FlashAdamW needs `uv pip install "halo[flash-optimizers]"`. See [BF16 Optimizer](../optimization/bf16-optimizer.md#compatibility), [Muon](../optimization/muon-optimizer.md), [FlashAdamW](../optimization/flash-adamw.md).
 
 ## Low-precision compute
 

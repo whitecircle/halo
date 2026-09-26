@@ -132,7 +132,7 @@ CP wrapper drop CP. What each family is for: [Supported Models](models.md).
 Three rules cut across the table. Every `Yes` in EP+CP carries the same topology
 rule — EP stays node-local and `ep_size × expert_tp_size` equals the NVLink
 domain size. ETP has no per-family opt-in (every EP-capable family shards expert
-FFNs through the same helper, so `untested` means not yet GPU-validated), with
+FFNs through the same helper, so `untested` means not GPU-validated), with
 GPT-OSS the one behavioral exception: its interleaved expert weights cannot be
 de-interleaved once TP-sharded, so grouped GEMM turns off under ETP. And LoRA
 `Yes` covers FSDP/DP, EP, CP and pure ETP — TP and EP+TP reject adapters

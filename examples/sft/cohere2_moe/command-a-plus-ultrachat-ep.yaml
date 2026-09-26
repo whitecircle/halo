@@ -19,8 +19,8 @@ dataset:
 - HuggingFaceH4/ultrachat_200k@train_sft
 conversation_field: messages
 test_size: 0.01
-# Assistant turns open with <|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>. Without this the Llama-3
-# default marker is used, matches nothing, and every label is masked — loss is exactly 0.
+# Assistant turns open with <|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>. Required: completion-only masking
+# raises at startup without it.
 assistant_message_template: "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
 
 # --- Parallelism & MoE precision ---

@@ -73,8 +73,8 @@ These fire automatically; mention them only to confirm, not as new advice. Figur
   sub-keys of that dict, not top-level fields): never materializes the `batch×seq×vocab` logits, for
   tens of GB at 32k at near-CE throughput; SFT-only, disables entropy logging, not CP-compatible.
 - **MoE activation OOM →** keep **GC on** (roughly half the GC-off activation footprint, and what makes
-  32k fit at all — pure ep8 GC-off OOMs there) and/or **raise EP degree** (more ranks = less expert
-  memory/GPU).
+  32k fit on the default elastic transport — pure ep8 GC-off OOMs there, and fits only on
+  `ep_buffer_backend: legacy`) and/or **raise EP degree** (more ranks = less expert memory/GPU).
 - **Optimizer-state OOM →** AdamWBF16 (auto) is already half of fp32 AdamW's state. For more,
   `optim: flash_adamw` (quantized moments, convergence matches AdamW; needs `flashoptim`) — tens of GB
   at 70B+.

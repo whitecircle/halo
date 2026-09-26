@@ -8,7 +8,6 @@ model_name_or_path: Qwen/Qwen3.6-35B-A3B
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
 model_init_kwargs:
   output_router_logits: true
-  router_aux_loss_coef: 0.001
 moe_balancing: none  # explicit aux_loss is REJECTED on a GRPO trainer (it never enters the loss); router logits stay on for MoE metrics
 
 # --- Parallelism (EP=2: one dispatch group on 2 GPUs, DP=2) ---

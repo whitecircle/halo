@@ -184,8 +184,9 @@ Keep more params local (low EP), then drop GC if activations fit, then add batch
 | qwen3.5-35b-a3b | ep8 | b8, s4096 | 10,012 | 396 | 132.9 GB |
 
 - **Local params decide the ceiling.** ep1 keeps all 20.7B local and tops the table; ep2 ~11.4B; ep8 ~4.2B;
-  qwen3.5-35b ep2 ~17.5B. Choose the lowest EP that fits. (The ep1 row counts every local expert as active,
-  so it over-reads as a utilization fraction for sparse MoE.)
+  qwen3.5-35b ep2 ~17.5B. Choose the lowest EP that fits. (The ep1 rows count every local expert as active,
+  so their TFLOPS are nominal — above what the silicon can issue — and over-read as a utilization fraction
+  for sparse MoE.)
 - **Sequence length raises ep8's floor** but does not close the gap to ep1/ep2 — ep8 is the memory topology.
 - **Drop GC where activations fit** — the largest single throughput lever. Past the GC-off memory wall, the
   largest batch that fits under GC-on is the recipe.
@@ -262,7 +263,9 @@ bandwidth-bound regime where fp8/fp4 quant overhead only loses.
 
 † s65536 GC-on uses `ep_buffer_backend=legacy` (DeepEP CUDA-IPC). The default elastic transport completes the forward but its ep8 backward combine all-gather races the DeepEP NVLink barrier at 65,536 tokens/rank and faults (`symmetric.hpp` Cuda 719); legacy's token-count-independent intranode buffer trains it clean. s49152 trains on either transport.
 
-GC-off is +27–28% but ~2× memory; it fits to 16k (117 GB) and **does not fit 32k**. Use GC-off for max
+GC-off is +27–28% but ~2× memory; on the default elastic transport it fits to 16k (117 GB) and **does not
+fit 32k**, which `ep_buffer_backend: legacy` trains at 9,694 tok/s/GPU
+([Halo vs stock TRL](halo-vs-stock-trl.md#gradient-checkpointing-on-vs-off)). Use GC-off for max
 throughput at ≤16k; GC-on for long context — pure ep8 GC-on streams to 64k (135 GB) without Context
 Parallelism, tapering past 32k as the per-rank sequence grows.
 

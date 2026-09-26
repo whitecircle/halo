@@ -9,8 +9,8 @@ model_name_or_path: Qwen/Qwen3.6-35B-A3B
 chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
 force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
 attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
-# No output_router_logits: the aux loss is inert under the policy-gradient objective, and the
-# load-balancing loss transformers then runs expands to tens of GB on a 100k-token trajectory.
+# No output_router_logits: the aux loss is inert under the policy-gradient objective, and the flag
+# would still record a [tokens, num_experts] router-logit plane per MoE layer on every forward.
 
 # --- Parallelism (6 train GPUs: pure data-parallel, DP=6, ZeRO-3) ---
 expert_parallel_size: 1            # pure DP; the servers hold the other 2 GPUs
@@ -112,8 +112,9 @@ num_generations_eval: 1
 scale_rewards: batch
 drop_degenerate_groups: true
 top_entropy_quantile: 1.0
-mask_truncated_completions: false  # `truncated` means ONLY the max_turns overflow — a real failure worth its
-                                   # negative advantage; a length-cut TURN is priced and retried in-episode
+mask_truncated_completions: false  # `truncated` = the max_turns overflow, or a cut/empty turn past the recovery
+                                   # cap or on the last turn: a real failure worth its negative advantage; a
+                                   # cut turn within the cap is priced and retried in-episode
 
 # --- Training ---
 per_device_train_batch_size: 1
@@ -152,7 +153,6 @@ logging_first_step: true
 report_to: ["wandb"]
 log_completions: false
 save_completions: true       # trajectories → <output_dir>/completions/*.parquet
-num_completions_to_print: 2
 
 # --- Data ---
 dataloader_num_workers: 0

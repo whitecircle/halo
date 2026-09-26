@@ -27,7 +27,7 @@ rejected at config time, before any rank math.
 | Gradient clipping across DP/EP/TP shards | Global grad-norm reduced over all shard groups (correct, rank-consistent) |
 | Profiling / flame graphs / memory snapshots | See [Debugging & Profiling](debugging.md) |
 
-## Known limitations & roadmap
+## Known limitations
 
 **RL weight sync stages one chunk on the forwarding rank's GPU.** For Online GRPO and Async GRPO with Environments the vendored
 NCCL client stages each un-sharded policy weight on the sync GPU and streams it to the engine in
@@ -61,14 +61,13 @@ accordingly.
 
 Where `save_sharded_ep` does not qualify, tune `save_steps` — at 400B a gathered save is one rank
 writing ~800 GB per checkpoint, so budget it against your write bandwidth. `save_only_model: true`
-drops the optimizer shards but not the funnel. Parallel model writes for a replicated layout are a
-roadmap item.
+drops the optimizer shards but not the funnel.
 
 | Limitation | Impact | Workaround / status |
 |------------|--------|--------------------|
 | **Pipeline parallelism is not yet available** | The config surface, stage-scoped rank math, trainer gates (`src/trainers/mixins/pp_gates.py`) and stage/loss/split seams (`src/distributed/pipeline_parallel/`) ship; the schedule engine (`PipelineRuntime`) does not. `pipeline_parallel_size > 1` is rejected at config time. | Shard with EP/TP/CP and their supported combinations; the engine lands in a future release. See [Pipeline Parallelism](../parallelism/pipeline-parallelism.md). |
-| **From-scratch with EP/TP/CP/ETP/PP** | Random-init pre-training is dense-only; `init_from_scratch` raises `NotImplementedError` under EP, TP, CP, ETP or PP (no distributed random-init of sharded experts; PP has nothing to be stage-aware about without a checkpoint). Only `scripts/training/sft.py` threads the flag through. | Pre-train dense from scratch; or **continued** pre-training (load a small/seed checkpoint) works in every mode. MoE-from-scratch is a roadmap item. |
-| **Streaming (on-the-fly) datasets** | The data pipeline materializes datasets (full or per-rank shards) rather than streaming an infinite corpus; exact data-position resume across a multi-week run is not yet supported. | Use **pre-tokenized sharded datasets** (`scripts/before_training/prepare_dataset.py` + `--num-shards`) — each rank loads only its shards, which scales to very large corpora. Set `--num-shards` to a multiple of the data-parallel degree (`>= data_parallel_size`; `k×world_size` is safe); fewer shards than DP ranks hard-errors for the train split. Checkpoint model frequently (`save_steps`) for restart. |
+| **From-scratch with EP/TP/CP/ETP/PP** | Random-init pre-training is dense-only; `init_from_scratch` raises `NotImplementedError` under EP, TP, CP, ETP or PP (no distributed random-init of sharded experts; PP has nothing to be stage-aware about without a checkpoint). Only `scripts/training/sft.py` threads the flag through. | Pre-train dense from scratch; or **continued** pre-training (load a small/seed checkpoint) works in every mode. |
+| **Streaming (on-the-fly) datasets** | The data pipeline materializes datasets (full or per-rank shards) rather than streaming an infinite corpus; exact data-position resume across a multi-week run is not supported. | Use **pre-tokenized sharded datasets** (`scripts/before_training/prepare_dataset.py` + `--num-shards`) — each rank loads only its shards, which scales to very large corpora. Set `--num-shards` to a multiple of the data-parallel degree (`>= data_parallel_size`; `k×world_size` is safe); fewer shards than DP ranks hard-errors for the train split. Checkpoint model frequently (`save_steps`) for restart. |
 | **Exact resume requires same world size + layout** | All sharded modes (FSDP2 DP, EP, EP+CP, EP+TP, EP+ETP, CP, pure TP) save per-rank optimizer shards; a topology fingerprint gates the restore, so a different GPU count or parallelism shape cannot remap them (no resharding / elastic). | Resume on the same world size and layout for exact optimizer state. A fingerprint mismatch (or `save_only_model: true`) warm-restarts instead — weights, LR schedule, and trainer step still resume, only the Adam moments reinit. Weights themselves are topology-free — every checkpoint is a standard HF model directory, so export-and-reload across topologies works. Elastic/DCP-resharding resume is a roadmap item. |
 | **Non-shared-FS checkpoints duplicate per node** | On `DIST_SHARED_FILESYSTEM=0`, each node's local rank 0 writes a full checkpoint (the price of per-node local disk). | Use a shared FS (NFS/Lustre) to write once; otherwise this is expected. |
 | **Weight sync fans out from one producer** | Online and async GRPO broadcast updated weights from the trainer's forwarding rank to every rollout server, and the push time grows with the server count (the fan-out costs the sum of the pushes, not the slowest) — fine for a handful of servers, not a large inference fleet. | Keep the inference fleet modest. |

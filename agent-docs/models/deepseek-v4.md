@@ -10,7 +10,7 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 
 - **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `src/distributed/context_parallel/validation.py`.
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.
-- **ETP** — the experts use the shared fused-GLU storage, so `expert_tp_size > 1` mechanically works through `_init_fused_glu_params`; not yet validated on V4.
+- **ETP** — the experts use the shared fused-GLU storage, so `expert_tp_size > 1` mechanically works through `_init_fused_glu_params`; unvalidated on V4.
 - **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
 - **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds trainer parameter names straight into the engine's `model.load_weights`, and neither pinned engine has a loader they land in ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 

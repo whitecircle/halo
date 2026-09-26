@@ -89,10 +89,13 @@ crashing mid-run. These are the ones that come up:
 | `HALO_ALLOW_MISSING_CHECKPOINT_KEYS` | `0` | demote the missing-checkpoint-key error to a warning; only for deliberately partial checkpoints |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1`, baked into both images | driver-owned, latched at `deep_ep`'s `cuInit` — a Python write is too late; `1` is worth +9.7% on ep8 |
 
-The rollout servers have a set of their own (`VLLM_*` / `SGLANG_*`: R3 capture,
-speculative decoding, attention backend), set on the server container — except
-`VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, the weight-sync dial-back address, which
-the trainer reads. See [Rollout Servers](rollout-servers.md).
+The rollout-server switches (`VLLM_*` / `SGLANG_*`: R3 capture, speculative
+decoding, attention backend) are `docker compose` interpolation variables: export
+them or put them in `.env` where you run compose. Neither engine reads them, so a
+hand-run server takes `--enable-return-routed-experts` / `--speculative-config` /
+`--attention-backend` directly. `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, the
+weight-sync dial-back address, are read by the trainer. See
+[Rollout Servers](rollout-servers.md).
 
 The rest — DeepEP buffer sizing, gradient-bucket geometry, low-precision cache
 switches, weight-sync timeouts, the EP profiling switches — are catalogued with

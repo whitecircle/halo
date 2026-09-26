@@ -5,9 +5,6 @@
 model_name_or_path: unsloth/gpt-oss-20b-BF16
 attn_implementation: flash_attention_2   # FA2 carries no sink argument; live sinks are rejected
                                          #   under it, so reset_sinks must stay on (its default)
-model_init_kwargs:
-  output_router_logits: true
-  router_aux_loss_coef: 0.001
 dataset: open-r1/OpenR1-Math-220k:default
 conversation_field: messages
 test_size: 0.02
