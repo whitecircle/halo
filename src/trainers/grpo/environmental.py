@@ -87,6 +87,7 @@ from src.trainers.grpo.rollout.weight_sync import (
 )
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.loss_masks import effective_loss_mask
+from src.trainers.mixins.validation import evaluation_runs
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -628,7 +629,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         """The eval round's geometry, checked at construction like the train round's. TRL validates
         only the GLOBAL eval batch against ``num_generations_eval``; groups are per rank here, so the
         per-rank round — ``eval_rollout_batch_size``, else ``per_device_eval_batch_size`` — must hold
-        whole groups."""
+        whole groups. A run that never evaluates has no eval round to check."""
+        if not evaluation_runs(self.args):
+            return
         rows = self.async_config.eval_rollout_batch_size
         if rows is None:
             per_rank = self.args.per_device_eval_batch_size

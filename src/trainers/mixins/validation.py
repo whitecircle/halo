@@ -3,8 +3,8 @@
 Read-only checks run once during setup: inspect ``self.parallelism_config`` / ``self.model`` and
 raise with an actionable message, or return. :func:`ctor_positions` / :func:`ctor_value` /
 :func:`ctor_config` / :func:`ctor_model_and_config` read the argument a gate validates out of a
-trainer ``__init__``'s ``*args``, before the checks below run, and :func:`disable_trl_liger` clears
-the TRL flag a gate rejects.
+trainer ``__init__``'s ``*args``, before the checks below run, :func:`disable_trl_liger` clears
+the TRL flag a gate rejects, and :func:`evaluation_runs` says whether an eval-side gate applies.
 """
 
 from __future__ import annotations
@@ -122,6 +122,11 @@ def disable_trl_liger(training_args, reason: str | None = None) -> bool:
         logger.warning(reason)
     training_args.use_liger_kernel = False
     return True
+
+
+def evaluation_runs(training_args) -> bool:
+    """Whether the HF loop evaluates at all: an eval strategy, or ``eval_on_start`` under ``"no"``."""
+    return training_args.eval_strategy not in ("no", None) or bool(training_args.eval_on_start)
 
 
 def has_non_expert_lora(model) -> bool:

@@ -23,9 +23,12 @@ SENTINEL = object()
 
 
 class _Args:
-    """The two eval-batch readings a real ``TrainingArguments`` exposes."""
+    """The eval readings a real ``TrainingArguments`` exposes: an evaluating run's strategy and its two
+    eval-batch sizes."""
 
     def __init__(self, per_device: int = 4, drop_last: bool = False):
+        self.eval_strategy = "steps"
+        self.eval_on_start = False
         self.per_device_eval_batch_size = per_device
         self.dataloader_drop_last = drop_last
 
