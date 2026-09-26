@@ -15,7 +15,7 @@ It speaks native tool calls, so the server needs a tool-call parser for the mode
 
 ```yaml
 environment_type: codeforces
-max_turns: 14                # 14 in most recipes, 16 in the curriculum's stage-2 and stage-3 recipes; the class default is 15
+max_turns: 16                # 16 in most recipes, 18 in the curriculum's stage-2 and stage-3 recipes; the class default is 15
 rewards:
   - source: environment      # the pass fraction of the submitted solution
     exponent: 2.0            # convex partial credit: half-right earns a quarter

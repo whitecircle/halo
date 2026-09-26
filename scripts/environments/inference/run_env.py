@@ -27,16 +27,14 @@ Examples:
 
     # Multiple-choice exam, bucketed by category, via OpenRouter
     python scripts/environments/inference/run_env.py \
-        --env_type exam_qa --dataset <letter-answer-mc-dataset> --split test \
+        --env_type exam_qa --dataset <multiple-choice-dataset> --split test \
         --prompt_field question --answer_field answer --context_fields choices --group_by subject \
         --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" --model qwen/qwen3-235b-a22b
 
 `exam_qa` grades multiple choice by letter: the row needs a `choices` column (the option strings,
-passed through with `--context_fields choices`) and an `answer` that is already a letter A-J. Pointed
-at a raw `cais/mmlu`, whose `answer` is an integer index, every episode scores zero without an error.
-Convert the index to a letter during dataset preparation; nothing on the eval path can, since the
-grader compares two strings and never sees the choice ordering. Schema and dataset notes:
-`agent-docs/training-methods/grpo/environments/custom-environments.md`.
+passed through with `--context_fields choices`) and an `answer` that is a letter A-J or a 0-based
+index into `choices` (a raw `cais/mmlu` ships the index); any other answer raises at episode start.
+Grading notes: `agent-docs/training-methods/grpo/environments/benchmarks.md`.
 """
 
 import argparse
