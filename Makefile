@@ -46,11 +46,15 @@ DOCKER_RUN = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_
   $(if $(strip $(ENV_FILE)),--env-file $(ENV_FILE),) \
   -e HF_HOME=$(HALO_SCRATCH)/hf -e HF_DATASETS_CACHE=$(HALO_SCRATCH)/hf/datasets \
   -e TMPDIR=$(HALO_SCRATCH)/tmp -e HALO_DATA_ROOT=$(HALO_SCRATCH) \
-  -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(NCCL_PROTO_ENV) $(EXTRA_DOCKER_ENV) \
+  -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(NCCL_PROTO_ENV) \
+  $(SERVER_TIER_DOCKER_ENV) $(EXTRA_DOCKER_ENV) \
   -v $(CURDIR):/workspace $(MNT_MOUNT) $(if $(strip $(AWS_DIR)),-v $(AWS_DIR):/root/.aws,) -w /workspace \
   $(IMAGE)
-# Extra docker flags for this run and the CPU one below: per target (see test-gpu-vllm) or from the
-# caller, e.g. EXTRA_DOCKER_ENV="-e HF_HUB_OFFLINE=1" for an offline CPU tier.
+# The server tiers' own flags, set per target (see test-gpu-vllm); kept apart from the caller's
+# EXTRA_DOCKER_ENV so a caller's flags add to them instead of replacing them.
+SERVER_TIER_DOCKER_ENV =
+# Extra docker flags from the caller for this run and the CPU one below, e.g.
+# EXTRA_DOCKER_ENV="-e HF_HUB_OFFLINE=1" for an offline CPU tier.
 EXTRA_DOCKER_ENV ?=
 # Fabric for NCCL in the container — the weight-sync group to a rollout server and every other
 # trainer collective. EFA=1 passes the EFA devices and names the aws-ofi-nccl net, so a missing
@@ -125,7 +129,7 @@ SERVER_TIER ?= not moe
 # recipe the compose bases default to (InfiniBand off, socket net; NCCL_SOCKET_IFNAME keeps it off
 # Docker's bridge and the per-container veth pairs, which NCCL otherwise enumerates and cannot carry
 # host-to-host traffic on). The SGLang server needs only cuMem parity on top (docker-compose.sglang.yml).
-test-gpu-vllm: EXTRA_DOCKER_ENV = $(NO_FABRIC_ENV) \
+test-gpu-vllm: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e VLLM_SERVER_URL=$(VLLM_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=vllm
 test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half; EFA=1 on an EFA host)
@@ -136,7 +140,7 @@ test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAIN
 	  CoT budget draws a 400 without a reasoning parser, and another under Model Runner V2)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_ENTRYPOINTS) $(PYTEST_ARGS)"
 
-test-gpu-sglang: EXTRA_DOCKER_ENV = $(NO_FABRIC_ENV) \
+test-gpu-sglang: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e SGLANG_SERVER_URL=$(SGLANG_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=sglang
 test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER=moe for the MoE half; EFA=1 on an EFA host)
