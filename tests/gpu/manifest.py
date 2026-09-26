@@ -189,6 +189,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fa4_trainable_sink_rescale.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
+    "kernels/test_flex_sliding_attention.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_family_kernel_stack_numerics.py": TestSpec(
         nproc=1,
         markers=("gpu", "full", "1gpu", "moe", *_family_markers(_TINY_MOE_FAMILIES)),
@@ -1376,6 +1377,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_attention_implementations.py",
     "profiling/benchmark_collators.py",
     "profiling/benchmark_convergence.py",
+    "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
     "profiling/benchmark_moe_block.py",
     "profiling/benchmark_offline_grpo_ep.py",

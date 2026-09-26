@@ -109,7 +109,7 @@ The `reset_sinks` decision is recorded on the config instance, so the nested EP/
 
 **Gemma4** (5 full-attention layers at `global_head_dim=512`): FA2/FA3/FA4/cuDNN-SDPA all reject head_dim>256 (FA2 cap 256, cuDNN cap 128 on cu13, FA4's SM100 kernel overflows tensor memory and asserts in `flash_fwd_sm100`); math SDPA materializes `[B, heads, S, S]` (64 GB/layer at 32k → OOM).
 
-The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`head_dim_exceeds_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. Gemma4 32k EP=8 then runs at peak ~155 GB/rank.
+The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`head_dim_exceeds_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. Gemma4 32k EP=8 then runs at peak ~155 GB/rank. The model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
 
 **Qwen3.5 / Qwen3.6 / Qwen3-Next and GLM-4 MoE Lite (GLM-4.7-Flash)**: auto-fall back from FA4 to **SDPA** (`model_fa4_backward_nan_prone`). The FA4 beta backward emits **NaN gradients** on these models — forward is finite, the first backward goes non-finite and collapses loss to 0 (NaN `grad_norm`).
 
@@ -209,7 +209,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | No flash-attn | FA2 is still requested and the model build raises — set `attn_implementation: sdpa` yourself (CP then unavailable) |
 | GptOss | FA4 on Blackwell, FA3 on Hopper |
 | Qwen3.5 / Qwen3.6 / GLM-4.7-Flash | → SDPA (FA4 backward NaN) |
-| Gemma4 | → SDPA, mem-efficient kernel (head_dim 512) |
+| Gemma4 | → `sdpa_flex_sliding`: FlexAttention on the sliding layers, matmul attention (mem-efficient SDPA past a score-memory budget) on the head_dim-512 global layers ([Gemma 4](../models/gemma4.md)) |
 | Bailing / Ling | no fallback: the flash label fails the model build — set `attn_implementation: sdpa` |
 | DeepSeek-V4 | → eager |
 | GLM-5 Next · Step-3.7 Flash · Inkling | → SDPA (upstream declares no flash support) |
@@ -225,7 +225,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 
 **FA4 first-use compile under multi-rank parallelism.** FA4 JIT-compiles each kernel on first use (~10 s) mid-forward. A cache-miss compile on one rank stalls it while peers race ahead to the next collective (a TP `o_proj` all-reduce, an EP DeepEP dispatch), desyncing the group into a deadlock.
 
-`warm_attention_kernels` (`src/distributed/loading/warmup.py`, called at the end of `load_distributed_model`) runs the rank-local `warmup_fa4_kernels` (`src/models/patches/attention.py`) on every rank behind one barrier, so the training loop only hits warm kernels. It is a no-op unless FA4 is active and `world_size > 1`.
+`warm_attention_kernels` (`src/distributed/loading/warmup.py`, called at the end of `load_distributed_model` and of the frozen reference/teacher loader) runs the rank-local compiles on every rank behind one barrier, so the training loop only hits warm kernels: `warmup_fa4_kernels` (`src/models/patches/attention.py`) when FA4 is active, and `warmup_flex_sliding_kernels` when the model runs `sdpa_flex_sliding` ([below](#sliding-window-and-wide-head-layers-on-sdpa)). It is a no-op at `world_size == 1`, where no peer waits on a compiling rank and each kernel compiles at its first call.
 
 It covers both entry points — dense `flash_attn_func` and varlen `flash_attn_varlen_func` over a two-document `cu_seqlens` — each in the variants the model can reach: sliding-window when the config declares one, and a learnable sink when the model carries sinks.
 
@@ -240,3 +240,15 @@ The backward then recompiles every step: ~190 s/step vs ~10 s on gpt-oss-20b ep4
 ## Blackwell notes
 
 vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails on SM 10.0. See [Online GRPO](../training-methods/grpo/online-grpo.md#vllm-on-blackwell-b200).
+
+## Sliding-window and wide-head layers on SDPA
+
+A model whose run resolves to `sdpa` and whose widest head exceeds 256 (`head_dim_exceeds_flash`; Gemma 4) is built with `sdpa_flex_sliding` (`src/models/patches/flex_sliding_attention.py`). Sinks models keep `sdpa`. `HALO_FLEX_SLIDING=0` opts out.
+
+- **Sliding layers** run compiled FlexAttention under a `BlockMask` derived from the dense mask transformers built, so causality, the window, packed-document isolation and padding carry over and the tiles outside the window are skipped. Under SDPA the same layers compute every tile of the dense mask. Each query's allowed keys in such a mask are one contiguous run, so the mask reduces to the first and last key per query (`key_intervals`, read 256 query rows at a time), and the kernel's mask function compares against those two `[Q]` tensors: no index over the `[Q, K]` grid (whose flattened offset outgrows int32 past about 46k tokens) and no copy of the dense mask is kept. A mask that allows some query a non-contiguous set of keys goes to SDPA. The block masks are built once per mask tensor (every sliding layer of a forward, and its gradient-checkpoint recompute, gets the same one) and are freed with it.
+- **One compiled shape family.** Each batch row runs alone, padded to a multiple of 128, always under a mask and outside autocast. A call either records a graph with every input requiring grad (an input left frozen, as by a LoRA that adapts `q_proj` alone, joins as a detached leaf) or runs under `no_grad`. The kernel therefore compiles twice, a training graph and a forward-only one, for any mix of lengths, batch sizes, grad modes and trained projections. `warmup_flex_sliding_kernels` compiles both for each call the model's sliding attention modules make (head count, head width, window and `scaling`, which Dynamo guards on), so no rank compiles mid-run. Deterministic-algorithms mode is a guard the warm-up does not cover: a run with `full_determinism` compiles each graph again at its first sliding call. The tuned tiles (head_dim 256, 16-bit inputs, SM100+) do not depend on the length; other shapes use FlexAttention's defaults.
+- **Short sliding calls** (a query no longer than the window, or than one 128-token tile) go to SDPA: the window never binds there, so no tile would be skipped.
+- **Causal global layers** run matmul attention (fp32 softmax) where SDPA has only its mem-efficient kernel (head_dim above 256, or the flash backend disabled process-wide, as the Gemma 4 loader does) and the scores saved for backward fit `EAGER_GLOBAL_BUDGET_BYTES` (2 GiB). The budget is per layer: without gradient checkpointing every global layer holds its share. At 4,096 tokens a Gemma 4 26B-A4B global layer saves 1.5 GiB against 0.13 GiB on mem-efficient SDPA, about 7 GiB more across its 5 global layers.
+- **Everything else** goes to the implementation registered as `sdpa`: bidirectional modules, dropout, float masks, `output_attentions`, and calls carrying sinks (`s_aux`), a softcap or a position bias.
+
+`tests/gpu/kernels/test_flex_sliding_attention.py` checks Gemma 4 and Mistral (a window on every layer) against the SDPA model, loss and every gradient, on packed rows longer than the window; rows of ~47.5k tokens against SDPA; that one warm-up leaves no compile for later lengths, batch sizes, masks, grad modes, trained projections and autocast, and none for a Gemma 4 forward and backward; and that the block masks are freed with their mask.
