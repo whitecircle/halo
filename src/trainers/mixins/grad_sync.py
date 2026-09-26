@@ -292,19 +292,24 @@ class GradientSyncMixin:
     def _grad_scale_deferring_optimizer(self, params: list):
         """The optimizer that will apply the clip coefficient inside its own step, or ``None``.
 
-        Only an optimizer exposing ``defer_grad_scale`` (AdamWBF16) and owning every clipped parameter
-        qualifies: a parameter it does not step would otherwise go unclipped. Its parameter ids are
-        cached per optimizer instance, since the set is fixed once training starts.
+        Only an optimizer exposing ``defer_grad_scale`` (AdamWBF16) whose parameters with gradients are
+        exactly the clipped parameters with gradients qualifies: a clipped parameter it does not step
+        would go unclipped, and a stepped parameter the clip did not select would be scaled. Its
+        parameter list is cached per optimizer instance, since the set is fixed once training starts.
         """
         optimizer = getattr(self, "optimizer", None)
         optimizer = getattr(optimizer, "optimizer", optimizer)  # accelerate's AcceleratedOptimizer wrapper
         if optimizer is None or not hasattr(optimizer, "defer_grad_scale"):
             return None
-        cached = getattr(self, "_grad_scale_param_ids", None)
+        cached = getattr(self, "_grad_scale_params", None)
         if cached is None or cached[0] is not optimizer:
-            ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
-            cached = self._grad_scale_param_ids = (optimizer, ids)
-        return optimizer if all(id(p) in cached[1] for p in params if p.grad is not None) else None
+            cached = self._grad_scale_params = (
+                optimizer,
+                [p for group in optimizer.param_groups for p in group["params"]],
+            )
+        clipped = {id(p) for p in params if p.grad is not None}
+        stepped = {id(p) for p in cached[1] if p.grad is not None}
+        return optimizer if clipped == stepped else None
 
     def _sync_deferred_expert_grads(self) -> None:
         """Post-backward EP grad sync for every deferred topology (``EPConfig.defer_grad_sync``).

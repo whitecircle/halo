@@ -72,7 +72,7 @@ def main():
 
         block_mask = create_block_mask(mask_mod, None, None, seq, seq, device="cuda")
 
-        from src.models.patches.gemma4_attention import _sliding_kernel_options
+        from src.models.patches.flex_sliding_attention import _sliding_kernel_options
 
         options = _sliding_kernel_options(q) if window else None
 

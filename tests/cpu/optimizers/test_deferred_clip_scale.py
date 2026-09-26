@@ -1,5 +1,5 @@
-"""The EP clip hands its coefficient to the optimizer only when that optimizer applies it to every
-clipped parameter; anything else keeps the in-place gradient scaling."""
+"""The EP clip hands its coefficient to the optimizer only when the optimizer steps exactly the clipped
+parameters that hold gradients; anything else keeps the in-place gradient scaling."""
 
 from types import SimpleNamespace
 
@@ -33,6 +33,19 @@ def test_adamw_bf16_owning_every_param_takes_the_scale():
 def test_a_clipped_param_outside_the_optimizer_keeps_in_place_scaling():
     params = _params(3)
     assert _target(SimpleNamespace(optimizer=AdamWBF16(params[:2])), params) is None
+
+
+def test_an_optimizer_stepping_unclipped_grads_keeps_in_place_scaling():
+    # The step would scale params[2] although the clip did not select it.
+    params = _params(3)
+    assert _target(SimpleNamespace(optimizer=AdamWBF16(params)), params[:2]) is None
+
+
+def test_unclipped_optimizer_params_without_grads_do_not_block_deferral():
+    params = _params(3)
+    params[2].grad = None
+    optimizer = AdamWBF16(params)
+    assert _target(SimpleNamespace(optimizer=optimizer), params[:2]) is optimizer
 
 
 def test_an_optimizer_without_deferral_keeps_in_place_scaling():
