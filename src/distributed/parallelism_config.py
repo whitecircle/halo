@@ -762,7 +762,8 @@ class ParallelismConfig:
                     f"supported (ep_group_size={self.ep_group_size}, world={self.stage_world_size}): "
                     f"expert-TP keeps the deferred cross-replica DP path off, so FSDP2's DP-wide "
                     f"reduce-scatter would race the narrower DeepEP combine across domains. Use a "
-                    f"single EP group (ep_size*expert_tp_size == world_size) or drop expert_tp_size to 1."
+                    f"single EP group (expert_parallel_size * expert_tensor_parallel_size == world size) or set "
+                    f"expert_tensor_parallel_size to 1."
                 )
             # Global-scope EP+ETP must form one ETP group per NVLink domain, keeping the ETP
             # all-reduce on NVLink. Not gated on multi-domain: on one domain the rule degenerates to
