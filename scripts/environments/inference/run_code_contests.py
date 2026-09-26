@@ -44,6 +44,7 @@ import logging
 from typing import Any
 
 from scripts.environments._common import (
+    DEFAULT_SPLIT,
     add_endpoint_args,
     load_training_contract,
     resolve_setting,
@@ -355,6 +356,10 @@ def build_examples(
 def main() -> None:
     args = parse_args()
     adapter = CODE_DATASET_ADAPTERS[args.adapter]
+    try:
+        args.split = adapter.resolve_split(args.split, DEFAULT_SPLIT)
+    except ValueError as exc:
+        raise SystemExit(f"--adapter {args.adapter}: {exc}") from exc
     selection = resolve_selection(args, adapter)
     env_kwargs = json.loads(args.env_kwargs)
     refuse_flag_owned_env_kwargs(env_kwargs)

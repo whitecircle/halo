@@ -34,6 +34,8 @@ TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncTrainingConfig, ModelConfig
 
 # The sampling flags an explicit CLI value lays over the training config, by ``RolloutConfig`` field.
 _SAMPLING_FLAGS = ("temperature", "top_p", "max_tokens", "request_timeout")
+# The split an eval reads when --split is omitted, unless its dataset ships a single split of its own.
+DEFAULT_SPLIT = "test"
 
 
 def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
@@ -42,11 +44,13 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
     Task-specific flags (env type, adapter, language, sampling budgets, concurrency) stay on the
     script's own parser; only flags whose meaning and defaults are identical across the eval scripts
     live here. The sampling flags default to ``None`` so :func:`rollout_config_from_args` can tell an
-    explicit value from an omitted one: explicit CLI > ``--training_config`` > default.
+    explicit value from an omitted one: explicit CLI > ``--training_config`` > default. ``--split``
+    does too, so a runner can refuse an explicit split its dataset does not ship; each runner resolves
+    it before the split is read or recorded.
     """
     parser.add_argument("--dataset", required=True, help="HF Hub id or local save_to_disk dir.")
     parser.add_argument("--config", default=None, help="Dataset config (e.g. 'all', 'verifiable', 'taco').")
-    parser.add_argument("--split", default="test", help="Dataset split.")
+    parser.add_argument("--split", default=None, help=f"Dataset split (default: {DEFAULT_SPLIT}).")
     add_openai_endpoint_args(parser, model_help="Served/model name.")
     parser.add_argument(
         "--training_config",

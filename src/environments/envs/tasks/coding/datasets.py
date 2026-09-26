@@ -28,6 +28,9 @@ _LCB_RELEASE_FILES: dict[str, list[str]] = {
 # The LiveCodeBench platforms whose rows carry stdin tests, as the rows spell them. Its ``leetcode``
 # rows are functional, which ``keep_livecodebench`` drops, so a selection naming it would score nothing.
 _LCB_GRADABLE_PLATFORMS = ("atcoder", "codeforces")
+# The one split each single-split benchmark ships; its loader reads it whatever split it is passed.
+_LCB_SPLIT = "test"
+_HLCE_SPLIT = "train"
 
 # HardTests difficulty on the Codeforces rating scale. A Codeforces rating is used as is; Luogu's
 # seven levels and the coarse AtCoder/TACO labels map to a representative rating, so one rating
@@ -273,9 +276,10 @@ def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator
     file in its stored row order, which is not newest-first (``test6.jsonl`` opens on its 2025-01-04
     contests). The eval's example indices, and the re-grader's, are this order.
 
-    ``config`` is the release tag (default ``release_v6``); ``split`` ignored. Bypasses ``load_dataset``,
-    whose loading script datasets 4.x does not execute. A release is cumulative, so a contamination-clean
-    subset is a :class:`ContestSelection` window over it, not a release tag.
+    ``config`` is the release tag (default ``release_v6``); ``split`` is ignored, a release's files being
+    its one ``test`` split. Bypasses ``load_dataset``, whose loading script datasets 4.x does not execute.
+    A release is cumulative, so a contamination-clean subset is a :class:`ContestSelection` window over
+    it, not a release tag.
     """
     files = _LCB_RELEASE_FILES.get(config or "release_v6")
     if files is None:
@@ -453,7 +457,7 @@ def keep_hlce(row: dict[str, Any]) -> bool:
 def load_hlce(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
     """Stream HLCE ICPC World Finals rows. ``split`` is ignored — the dataset is a single ``train`` set.
     Only the icpc-world-finals subset is gradable; the sibling ioi set has no hidden tests."""
-    yield from load_dataset(dataset, config, split="train", streaming=True)
+    yield from load_dataset(dataset, config, split=_HLCE_SPLIT, streaming=True)
 
 
 def _parse_day(name: str, value: str | None) -> date | None:
@@ -535,6 +539,9 @@ class CodeDatasetAdapter:
     group_label: str = "rating"
     id_field: str = "id"
     load: Callable[[str, str | None, str], Iterable[dict[str, Any]]] | None = None
+    # The one split a benchmark ships, which its ``load`` reads whatever it is passed; ``None`` => the
+    # split the run names.
+    split: str | None = None
     # Prepared-row fields a source spells differently (``id``/``rating``/``tags``), added by the
     # preparation script before its filters run; ``None`` => the raw row already carries them.
     normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None
@@ -554,6 +561,16 @@ class CodeDatasetAdapter:
         """Whether the eval scripts can score the source's raw rows. A source whose prepared fields need
         ``normalize`` (and a joined tests table) is scored from its prepared pool instead."""
         return self.normalize is None
+
+    def resolve_split(self, requested: str | None, default: str) -> str:
+        """The split a run loads and records: the source's own where it ships one, else ``requested``,
+        else ``default``. A requested split the source does not ship raises, rather than being recorded
+        while its own is scored."""
+        if self.split is None:
+            return default if requested is None else requested
+        if requested not in (None, self.split):
+            raise ValueError(f"this dataset ships only the {self.split!r} split, not {requested!r}")
+        return self.split
 
     def require_selectable(self, selection: ContestSelection) -> None:
         """Raise unless this source can apply ``selection``: a date window needs a stamped contest date,
@@ -603,6 +620,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         group_label="difficulty",
         id_field="question_id",
         load=load_livecodebench,
+        split=_LCB_SPLIT,
         contest_date=livecodebench_contest_date,
         platform_field="platform",
         platforms=_LCB_GRADABLE_PLATFORMS,
@@ -623,5 +641,6 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         group_label="contest",
         id_field="question_id",
         load=load_hlce,
+        split=_HLCE_SPLIT,
     ),
 }

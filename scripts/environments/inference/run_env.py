@@ -46,6 +46,7 @@ import logging
 from typing import Any
 
 from scripts.environments._common import (
+    DEFAULT_SPLIT,
     add_endpoint_args,
     load_training_contract,
     resolve_setting,
@@ -83,6 +84,8 @@ def parse_args() -> argparse.Namespace:
         "--training_config names one (environment_type).",
     )
     add_endpoint_args(p)
+    # A generic dataset ships no split of its own to refuse a different one against.
+    p.set_defaults(split=DEFAULT_SPLIT)
     p.add_argument("--prompt_field", default="prompt", help="Row field holding the prompt.")
     p.add_argument(
         "--answer_field",
