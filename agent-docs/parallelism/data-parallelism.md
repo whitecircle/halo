@@ -172,9 +172,10 @@ accelerate's `no_sync` already skips the reduce on non-final microsteps.
 
 At `ep_group_size==1` (`ep_size==1` AND `expert_tp_size==1`) the MoE experts are replicated and the
 DeepEP dispatch is a no-op. By default (`fsdp_shard_ep1_experts: true`) FSDP shards them, with its
-reduce-scatter as their sole gradient sync: throughput-neutral (the expert all-gather overlaps),
-grad-equivalent, and freeing memory that scales with DP (gpt-oss-20b −19% peak at 2 GPU, −37% at
-8 GPU).
+reduce-scatter as their sole gradient sync: grad-equivalent, and freeing memory that scales with DP.
+gpt-oss-20b on 8 GPUs at batch 1 drops from 148.3 to 60.3 GB peak (−59%) for −10.6% throughput, and
+−3.5% at batch 4, where the expert all-gather overlaps better
+([Throughput Benchmarks](../optimization/throughput-benchmarks.md#ep-only-batch-scaling)).
 
 Set it `false` to keep a full replicated copy on every DP rank (EP modules become FSDP
 `ignored_params`), the max-throughput choice when memory is not the bottleneck. No effect when

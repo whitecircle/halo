@@ -56,7 +56,7 @@ gap, not the gap.
 - **gpt-oss-20b, seq 4096, bf16.** Halo: 24,456 tok/s/GPU at EP1 (8× B300, batch 4, GC off; 20,174
   GC on) and 10,051 at EP8 (batch 4, GC on, 57 GB). NeMo AutoModel reports 13,058 on 8× H100 (FSDP
   without EP, mock data, forced-balanced routing). Megatron-LM on the same 8× B300 (batch 2, GC off): OOM at EP1 where
-  Halo runs 27,707; 13,932 vs Halo 21,642 at EP2; 15,876 vs 17,519 at EP4; 14,734 vs 11,856 at EP8
+  Halo runs 27,707; 13,932 vs Halo 21,642 at EP2; 14,734 vs 11,856 at EP8
   (Megatron ahead there), at 246 vs 158 GB peak at EP1 and 104 vs 58 GB at EP8.
 - **Qwen3-30B-A3B, bf16.** transformers' own expert-parallel path: 3,485 tok/s/GPU at 38.6 GB
   (8× H100, seq 2048, `tp_size=8`). Halo EP2 on 8× B300 at seq 4096: 6,898 / 11,343 / 14,536 at

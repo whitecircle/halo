@@ -511,8 +511,8 @@ topology rejections sit on top: single-domain multi-group EP with `ep_size > 2`
 | `DeepEP NVLink barrier timeout` then `cudaErrorLaunchFailure` abort, under GC | `use_reentrant=False` reached the EP path. The trainer forces `True` — this only appears if `enable_ep_gradient_checkpointing` was called directly. Do not pin `false` |
 | OOM | Enable GC; raise EP size (each doubling roughly halves per-GPU expert memory) |
 
-gpt-oss-20b peak per GPU on 8×B300 (grows with sequence length): `ep8` ~48 GB, `ep2` >139 GB —
-roughly halving per doubling of `ep_size`. `ep4` is not a legal shape on 8 GPUs
+gpt-oss-20b peak per GPU on 8×B300 at seq 4096, batch 1: `ep8` 25.3 GB, `ep2` 77.3 GB (it grows with
+sequence length and batch). `ep4` is not a legal shape on 8 GPUs
 ([above](#single-domain-multi-group-ep-races-and-hangs)).
 
 ## Adding a new model

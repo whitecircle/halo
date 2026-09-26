@@ -261,7 +261,7 @@ adapter matmuls run on every MLP layer. Throughput is **rank-invariant** within 
 ~16.8k, all-linear ~11.9k across r=16/64/128): the frozen base forward/backward dominates the step, and
 only memory grows with rank.
 
-QLoRA saves ~10 GB more than bf16 all-linear LoRA and is ~33% faster, because the 4-bit base cuts weight
+QLoRA saves ~10 GB more than bf16 all-linear LoRA and is ~35% faster, because the 4-bit base cuts weight
 bandwidth on the bandwidth-bound MLP matmuls. It is the path onto consumer GPUs, since plain LoRA needs
 ~34 GB even at the minimum rank.
 
@@ -308,13 +308,12 @@ must precompute. SMPO is reference-free. Offline GRPO is the exception: a wrappe
 requires a dense `ref_model`, which the script loads
 ([Offline GRPO → Reference model](../training-methods/grpo/offline-grpo.md#reference-model)).
 
-On the TRL-derived trainers (online / async GRPO, DPO, KTO), where no adapter wraps the model — a full
-fine-tune, or an expert-only LoRA run, which builds no `PeftModel` — TRL builds its own reference model
-whenever none is passed and none of its no-reference cases apply (a PEFT-wrapped policy;
-`precompute_ref_log_probs` on DPO/KTO; `beta == 0` on GRPO): an unparallelized fp32 replica per rank. `_validate_implicit_reference_model` warns about that under EP,
+On online / async GRPO, where no adapter wraps the model — a full fine-tune, or an expert-only LoRA
+run, which builds no `PeftModel` — TRL builds its own reference model at `beta != 0`: an
+unparallelized fp32 replica per rank. `_validate_implicit_reference_model` warns about that under EP,
 and **raises** whenever the policy carries live attention sinks (`reset_sinks: false`), where the two
-models would compute different log-probs for identical tokens. Set `use_peft: true`,
-`precompute_ref_log_probs: true` (DPO/KTO), or `beta: 0` (GRPO).
+models would compute different log-probs for identical tokens. Add an attention LoRA target (it wraps the
+model, and the disabled adapter is the reference) or set `beta: 0`.
 
 The DPO/KTO scripts never leave the reference to TRL: a full fine-tune gets a frozen copy on plain data
 parallelism and needs `precompute_ref_log_probs: true` under EP, TP or PP; an expert-only LoRA run needs it

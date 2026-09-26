@@ -60,7 +60,7 @@ FA2 + FA3.
 
 FA2 is an SM80-style kernel, untuned for Blackwell. FA4 is the Blackwell-native CuTe DSL kernel: **2.1–3.7× faster than FA2 on the isolated attention kernel** (microbench B2×S8192×H32×D128: fwd 2.71→0.70 ms, fwd+bwd 10.9→3.0 ms). Both match an fp32 SDPA reference to ~2e-3 (bf16 floor) across MHA/GQA and head_dim 64/128.
 
-The end-to-end step win is a function of attention's share of the step, which grows with sequence length (attention is O(seq²), the rest ~O(seq)). Measured on Qwen3-4B, batch 1, GC on, single B300 (tok/s/GPU):
+The end-to-end step win is a function of attention's share of the step, which grows with sequence length (attention is O(seq²), the rest ~O(seq)). Measured on Qwen3-4B, batch 1, GC on, single B300 (tok/s/GPU), each row one same-session A/B; compare within this table (the separate [Throughput Benchmarks](throughput-benchmarks.md) run reads 25,459 for the FA4 4k cell, where the step is overhead-bound):
 
 | SeqLen | FA4 | FA2 | SDPA | FA4/FA2 |
 |--------|-----|-----|------|---------|
