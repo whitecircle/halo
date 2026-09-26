@@ -737,7 +737,7 @@ class ParallelismConfig:
                     f"{self.stage_world_size // self.ep_group_size} EP groups across "
                     f"{self.num_nvlink_domains} NVLink domains, and the cross-replica gradient "
                     "average is incompatible with the EP+TP (dp, tp) FSDP mesh. Use a SINGLE EP "
-                    f"group (ep_size={self.stage_world_size} with ep_scope='global'), drop TP (node-local "
+                    f"group (expert_parallel_size={self.stage_world_size} with ep_scope='global'), drop TP (node-local "
                     "EP uses the deferred cross-replica sync), or use EP+ETP."
                 )
 
@@ -830,9 +830,10 @@ class ParallelismConfig:
             f"groups (ep_group_size={self.ep_group_size}), whose combine barriers race FSDP2's "
             f"DP-wide collectives. Measured on an 8-GPU node: the legacy buffer deadlocks, the elastic "
             f"default faults with 'Invalid access of peer GPU memory over nvlink' — both with and "
-            f"without gradient checkpointing. Use a SINGLE dispatch group per domain: ep_size=2, or "
-            f"raise ep_size*expert_tp_size to the domain ({self.nvlink_domain_size}) with ETP, or "
-            f"shrink the job to {self.ep_group_size} GPUs. Sizing ep_size itself to the domain works "
+            f"without gradient checkpointing. Use a SINGLE dispatch group per domain: expert_parallel_size=2, "
+            f"or raise expert_parallel_size * expert_tensor_parallel_size to the domain "
+            f"({self.nvlink_domain_size}), or shrink the job to {self.ep_group_size} GPUs. Sizing "
+            f"expert_parallel_size itself to the domain works "
             f"only where the model has that many experts per rank to give (rarely on a "
             f"{self.nvlink_domain_size}-wide rack); attention TP leaves ep_group_size unchanged, so "
             f"EP+TP lands back on this same rejection."
