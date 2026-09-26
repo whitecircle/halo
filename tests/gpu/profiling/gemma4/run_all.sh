@@ -17,3 +17,10 @@ run() {
 docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" > "$OUT/image.txt" 2>/dev/null || echo "$IMAGE" > "$OUT/image.txt"
 git rev-parse HEAD > "$OUT/commit.txt"
 run python tests/gpu/profiling/gemma4/bench_moe_block.py --out /out/moe_block.json
+for seq in 2048 8192 32768; do
+  for layer in sliding global; do
+    for backend in sdpa eager flex fa2 fa4; do
+      run python tests/gpu/profiling/gemma4/bench_attention.py --backend $backend --layer $layer --seq $seq --out /out/attention.jsonl || true
+    done
+  done
+done

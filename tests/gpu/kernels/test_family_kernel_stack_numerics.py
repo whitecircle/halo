@@ -4,11 +4,12 @@ gradients.
 
 The per-kernel suites pin each kernel against its own reference: ``test_fused_glu.py`` (the GLU
 combines), ``test_moe_permute.py`` (the fused un-permute), ``test_liger_family_kernels.py`` (each Liger
-role). This file checks that nothing breaks
+role), ``test_flex_sliding_attention.py`` (the attention variant). This file checks that nothing breaks
 where they meet, per family: the family's Liger applier as the loader calls it, the EP wrapper with
 grouped GEMM (ep_size 1, so every expert is local and the fused weighted un-permute runs), and the
 attention implementation an SDPA run resolves to. A family whose wrapper latched the wrong combine, whose
-norm took the wrong casting mode, or whose packed GLU read the wrong half moves the loss or a gradient by far more than the tolerances below.
+norm took the wrong casting mode, whose packed GLU read the wrong half, or whose sliding layers lost the
+window moves the loss or a gradient by far more than the tolerances below.
 
 Two comparisons per family, both against the stock Hugging Face model built from the same weights:
 
@@ -206,10 +207,12 @@ def _stack_model(model_type: str, reference_state: dict, dtype: torch.dtype, att
     from src.distributed.expert_parallel.config import EPConfig
     from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
     from src.kernels.liger.orchestrator import apply_liger_kernel
+    from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
 
     config = _build_config(model_type, attn)
     applied = apply_liger_kernel(config, None, needs_ep_wrappers=True)
-    stack_attn = attn
+    stack_attn = resolve_flex_sliding_attn_implementation(config, attn)
+    config._attn_implementation = stack_attn
     torch.manual_seed(SEED)
     model = _auto(model_type).from_config(config).cuda()
     model.load_state_dict(reference_state)
@@ -237,11 +240,16 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     from src.distributed.expert_parallel.base_layer import find_ep_layers
     from src.distributed.expert_parallel.layers import roster  # noqa: F401  (registers the EP families)
     from src.models.loading.config_levels import text_config
+    from src.models.patches import flex_sliding_attention
+    from src.models.patches.flex_sliding_attention import flex_attention
 
     PartialState()
     _init_single_process_group()
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+    # The fp32 comparison runs the exact (uncompiled) FlexAttention; the compiled kernel's own accuracy is
+    # test_flex_sliding_attention.py's.
+    flex_sliding_attention._compiled_flex = flex_attention
 
     family = FAMILIES[model_type]
     probe = _build_config(model_type, "eager")
