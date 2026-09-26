@@ -275,8 +275,9 @@ def test_a_merged_checkpoint_gets_its_resume_adapter_before_rotation(tmp_path, m
 
     new_ckpt = os.path.join(str(tmp_path), "checkpoint-2")
     resume_adapter = ("resume_adapter", "checkpoint context", new_ckpt, True)
+    trainer_sidecars = ("trainer_sidecars", "checkpoint-2", True)
     shards = [] if save_only_model else [("shards_written", True, True)]
-    assert trainer.events == [("base_save", None), resume_adapter, *shards, ("rotate", 1)]
+    assert trainer.events == [("base_save", None), resume_adapter, trainer_sidecars, *shards, ("rotate", 1)]
 
 
 def test_an_unmerged_run_writes_no_resume_adapter(tmp_path, monkeypatch):
