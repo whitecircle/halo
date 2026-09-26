@@ -89,8 +89,9 @@ ADAPTER_WEIGHT_NAMES = (ADAPTER_SAFETENSORS_FILE, ADAPTER_BIN_FILE)
 # sink policy). A sidecar rather than adapter_config.json, so stock PEFT loads the adapter unchanged.
 TRAINING_PROVENANCE_FILE = "training_provenance.json"
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
-# A ``merge_expert_lora_on_save`` checkpoint's resume state: the unmerged adapter, written as the
-# non-merged save writes it, beside the merged weights that serve. A subdirectory, because an
+# A merged checkpoint's resume state, beside the merged weights that serve: a
+# ``merge_expert_lora_on_save`` run's unmerged adapter, written as the non-merged save writes it, or
+# an embedding run's unfolded injected-LoRA tensors. A subdirectory, because an
 # ``adapter_config.json`` at the root makes ``from_pretrained`` load that adapter on top of the
 # merged weights, which already hold its delta. The root marker follows once the adapter is complete
 # and classifies the checkpoint as resume-from-base-plus-adapter: its presence is the verdict; the

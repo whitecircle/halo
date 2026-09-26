@@ -343,7 +343,8 @@ non-adapter param. Plain LoRA only: 4-bit QLoRA is rejected on the ST loader. In
 
 Runs under standard / FSDP2 data parallelism only; EP and TP are rejected at trainer construction (the EP
 save path has no adapter-merge step, so the checkpoint would carry adapter keys that reload as random base
-weights).
+weights). Saves fold the adapters into the weights; training checkpoints also keep them unfolded, which a
+resume restores onto the base ([Embedding — Saving](../training-methods/embedding.md#saving)).
 
 ## Quantized training (QLoRA)
 

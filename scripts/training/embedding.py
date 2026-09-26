@@ -201,6 +201,41 @@ def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config:
         )
 
 
+def inject_lora(model: SentenceTransformer, model_config: ModelConfig, dist_args: DistributedArguments) -> None:
+    """Inject the run's LoRA into ``model`` in place and train the adapters alone; no-op without PEFT.
+
+    ``inject_adapter_in_model``, not ``SentenceTransformer.add_adapter``: that goes through
+    transformers' adapter API, which requires peft >= 0.19.1 while the image pins 0.18.1. EP/TP are
+    rejected by the trainer's own gates, which see the injected adapters structurally.
+    """
+    peft_config = build_peft_config(model, model_config)
+    if peft_config is None:
+        return
+    # modules_to_save is unsupported here: the trainable copies are created, the freeze below
+    # re-freezes them, and the wrapper renames the base tensor, so the saved ST module lacks the
+    # plain <mod>.weight.
+    if model_config.lora_modules_to_save:
+        raise ValueError(
+            f"lora_modules_to_save={list(model_config.lora_modules_to_save)} is not supported for "
+            "embedding training: the SentenceTransformer path injects adapters in place, which "
+            "leaves the modules_to_save copies frozen and rewrites the base module's keys so the "
+            "saved model no longer reloads. Train those modules with a full fine-tune instead."
+        )
+    # The freeze below re-freezes everything that is not an adapter — trainable sinks included.
+    if dist_args.train_sinks:
+        raise ValueError(
+            "train_sinks: true needs full fine-tuning: embedding LoRA freezes every non-adapter "
+            "parameter after injection, so the sinks would train nowhere. Keep the sinks live and "
+            "frozen instead (reset_sinks: false without train_sinks), or drop the adapters."
+        )
+    inject_adapter_in_model(peft_config, model)
+    for name, param in model.named_parameters():
+        param.requires_grad = "lora_" in name
+    if is_global_main_process():
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"Applied LoRA adapters (r={model_config.lora_r}); trainable params: {trainable / 1e6:.2f}M")
+
+
 def main():
     parser = H4ArgumentParser((EmbeddingScriptArguments, EmbeddingConfig, ModelConfig, DistributedArguments))
     args, embedding_config, model_config, dist_args = parser.parse()
@@ -257,35 +292,7 @@ def main():
         logger.info(f"Model: {model}")
         logger.info(f"Embedding dimension: {model.get_sentence_embedding_dimension()}")
 
-    # Inject LoRA with peft's inject_adapter_in_model, not SentenceTransformer.add_adapter: that goes
-    # through transformers' adapter API, which requires peft >= 0.19.1 while the image pins 0.18.1.
-    # The loop below pins the trainable set to the adapter params alone.
-    peft_config = build_peft_config(model, model_config)
-    if peft_config is not None:
-        # modules_to_save is unsupported here: the trainable copies are created, the freeze below
-        # re-freezes them, and the wrapper renames the base tensor, so the saved ST module lacks the
-        # plain <mod>.weight.
-        if model_config.lora_modules_to_save:
-            raise ValueError(
-                f"lora_modules_to_save={list(model_config.lora_modules_to_save)} is not supported for "
-                "embedding training: the SentenceTransformer path injects adapters in place, which "
-                "leaves the modules_to_save copies frozen and rewrites the base module's keys so the "
-                "saved model no longer reloads. Train those modules with a full fine-tune instead."
-            )
-        # The freeze below re-freezes everything that is not an adapter — trainable sinks included.
-        if dist_args.train_sinks:
-            raise ValueError(
-                "train_sinks: true needs full fine-tuning: embedding LoRA freezes every non-adapter "
-                "parameter after injection, so the sinks would train nowhere. Keep the sinks live and "
-                "frozen instead (reset_sinks: false without train_sinks), or drop the adapters."
-            )
-        # EP/TP are rejected by the trainer's own gates, which see the injected adapters structurally.
-        inject_adapter_in_model(peft_config, model)
-        for name, param in model.named_parameters():
-            param.requires_grad = "lora_" in name
-        if is_global_main_process():
-            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            logger.info(f"Applied LoRA adapters (r={model_config.lora_r}); trainable params: {trainable / 1e6:.2f}M")
+    inject_lora(model, model_config, dist_args)
 
     apply_distributed_trainer_config(embedding_config, parallelism_config)
 

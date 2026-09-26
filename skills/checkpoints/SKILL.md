@@ -36,8 +36,8 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
   command; leave `model_name_or_path` at the base.** The scripts repoint the policy's weights at the
   checkpoint themselves (`resolve_resume_weights_source`, `src/training/environment.py`) under
   EP/ETP/EP+TP/EP+CP/CP/TP and, at the default `use_grouped_gemm: true`, every run, dense included
-  (an adapter-only checkpoint, and a `merge_expert_lora_on_save` one through its
-  `resume_adapter.json` marker, keeps the base and restores the adapter). The base keeps feeding the
+  (an adapter-only checkpoint, and a merged one — `merge_expert_lora_on_save` or embedding LoRA —
+  through its `resume_adapter.json` marker, keeps the base and restores the adapter). The base keeps feeding the
   DPO/KTO/SDPG reference and the dataset-compat check, so repointing `model_name_or_path` yourself
   moves the reference onto trained weights. The model loads the
   trained weights at construction and the loader skips the re-read; it restores `trainer_state.json`,
@@ -62,6 +62,7 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 |---|---|---|---|
 | Dense FSDP2 / DDP | loadable | — | use directly |
 | LoRA / QLoRA (any mode) | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
+| Embedding LoRA (in-place injected) | loadable, adapters folded in | — | use directly (`SentenceTransformer(path)`) |
 | TP-only | loadable | — (no per-rank TP save) | use directly |
 | EP — every family (each layer class in `src/distributed/expert_parallel/layers/` declares its own `HF_MODEL_TYPES`; read them there, and `supported_ep_merge_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
 | CP / EP+CP | loadable | **rejected** — `save_sharded_ep` raises under Ulysses attention | use gathered directly |

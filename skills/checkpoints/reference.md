@@ -32,8 +32,8 @@ additionally needs `ep_size` in the index metadata, not just the marker.
 - **Path B — load at construction** (EP, ETP, EP+TP, EP+CP, CP, TP, and at the default
   `use_grouped_gemm: true` every other run, dense included): `resolve_resume_weights_source`
   (`src/training/environment.py`) repoints the policy's weights source at the checkpoint dir (an
-  adapter-only one keeps the base, and so does a `merge_expert_lora_on_save` one, whose
-  `resume_adapter.json` marker sends the resume to its `resume_adapter/`), so
+  adapter-only one keeps the base, and so does a merged one — `merge_expert_lora_on_save` or
+  embedding LoRA — whose `resume_adapter.json` marker sends the resume to its `resume_adapter/`), so
   `load_distributed_model()` builds the model from the trained
   weights. `model_config` is not mutated — the DPO/KTO/SDPG reference and the dataset-compat check
   keep the base, so **leave `model_name_or_path` at the base**. An unmerged per-rank save raises

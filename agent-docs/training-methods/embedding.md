@@ -81,6 +81,8 @@ Under EP or TP the backbone loads through `PreloadedTransformer` (`src/trainers/
 
 Saves route through the shared `save_checkpoint` ladder ([Checkpoints](../reference/checkpoints.md)); all ranks run the gather collective and only the writer retains the state dict, with in-place LoRA folded in (`<m>.weight = base + scaling · B @ A`) first. The ST pipeline config (`modules.json`, `sentence_bert_config.json`, the per-module directories) is written alongside, so the output loads with `SentenceTransformer(path)`.
 
+The fold serves but cannot resume, so every LoRA training checkpoint also carries the unfolded trainable tensors in `resume_adapter/` (live dtype, top-level parameter names) and the root marker `resume_adapter.json`; on a non-shared filesystem each node's save rank writes its own copy. Resume builds from `model_name_or_path` (the base), the script re-injects the adapters, and `EmbeddingTrainer._load_from_checkpoint` restores them bit-exact before the optimizer state; the folded weights are never read. It refuses a model loaded from the checkpoint itself, a marked checkpoint missing its adapter file, an adapter file for other target modules or rank, a LoRA run resuming an unmarked checkpoint, and a full fine-tune resuming a marked one. The final `save_model()` export carries no resume state ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
+
 ## What to watch
 
 Metrics come from a separate `torch.no_grad()` encoding pass on logging steps, capped at 256 samples per padded text group; evaluation runs it every batch under an `eval_` prefix (`eval_embed/norm`, …).
@@ -100,7 +102,7 @@ pytest tests/cpu/trainers tests/cpu/config/test_embedding_pipeline_alignment.py 
 torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_embedding.py
 ```
 
-The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save and the LoRA merge on `sentence-transformers/paraphrase-MiniLM-L3-v2`.
+The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save and the LoRA merge on `sentence-transformers/paraphrase-MiniLM-L3-v2`. `tests/gpu/trainers/lora/test_embedding_lora_resume*.py` resume a LoRA run from its mid checkpoint against the uninterrupted one per backbone family (BERT, Qwen3, Qwen3.5, Gemma 4, GPT-OSS) and run shape (one GPU, FSDP2, accelerate DDP, pre-sharded data), and check that TP and EP refuse the adapters.
 
 ## Related pages
 

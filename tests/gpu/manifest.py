@@ -672,6 +672,53 @@ MANIFEST: dict[str, TestSpec] = {
         # 600s covers the cycles and the policy load, with room for a cold cache.
         timeout=600,
     ),
+    # Injected-LoRA embedding resume, family x run shape. Core: every data-parallel shape on the ST
+    # encoder, FSDP2 and the TP refusal on a decoder; the roster scripts carry the other families and
+    # the EP refusals.
+    "trainers/lora/test_embedding_lora_resume.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "lora", "tp", "qwen3"),
+        args_matrix=(
+            "--family bert --mode fsdp",
+            "--family bert --mode ddp",
+            "--family bert --mode presharded",
+            "--family qwen3 --mode fsdp",
+            "--family qwen3 --mode tp",
+        ),
+        timeout=900,
+    ),
+    "trainers/lora/test_embedding_lora_resume_1gpu.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu", "lora", "qwen3"),
+        args_matrix=("--family bert", "--family qwen3"),
+        timeout=600,
+    ),
+    "trainers/lora/test_embedding_lora_resume_roster.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "qwen3", "gemma4", "gptoss"),
+        args_matrix=(
+            "--family qwen3 --mode ddp",
+            "--family qwen3 --mode presharded",
+            "--family qwen3_5 --mode fsdp",
+            "--family qwen3_5 --mode ddp",
+            "--family qwen3_5 --mode presharded",
+            "--family gemma4 --mode fsdp",
+            "--family gemma4 --mode ddp",
+            "--family gemma4 --mode presharded",
+            "--family gemma4 --mode ep",
+            "--family gpt_oss --mode fsdp",
+            "--family gpt_oss --mode ddp",
+            "--family gpt_oss --mode presharded",
+            "--family gpt_oss --mode ep",
+        ),
+        timeout=1200,
+    ),
+    "trainers/lora/test_embedding_lora_resume_roster_1gpu.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "full", "1gpu", "lora", "moe", "qwen3", "gemma4", "gptoss"),
+        args_matrix=("--family qwen3_5", "--family gemma4", "--family gpt_oss"),
+        timeout=900,
+    ),
     "trainers/lora/test_lora_bailing_moe.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "moe", "etp", "bailing"), timeout=1500
     ),

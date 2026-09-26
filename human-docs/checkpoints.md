@@ -43,8 +43,8 @@ loading weights back into a running model, which the fused-expert and CP-wrapped
 layouts cannot accept. One consequence: the training scripts must launch the
 resume, since they repoint the model source. LoRA checkpoints are the exception:
 the model is rebuilt from the base and the adapters are restored onto it, including
-for `merge_expert_lora_on_save`, whose checkpoints keep the unmerged adapters for
-exactly this.
+for `merge_expert_lora_on_save` and embedding LoRA, whose checkpoints keep the
+unmerged adapters for exactly this.
 
 `load_best_model_at_end` is refused at startup for a full fine-tune under CP, on
 a MoE model wrapped for expert compute (plain FSDP2 at the default
@@ -106,7 +106,7 @@ Upload the checkpoint directory itself, not the whole `output_dir`, and exclude
 its training state, or it goes public with the weights: `scheduler.pt`,
 `trainer_state.json`, (under bias balancing) `router_balancing_biases.pt` and
 (when `precompute_ref_log_probs` swept the reference) `reference_logps.pt` in every
-checkpoint, `resume_adapter/` and `resume_adapter.json` under `merge_expert_lora_on_save`,
+checkpoint, `resume_adapter/` and `resume_adapter.json` under `merge_expert_lora_on_save` or embedding LoRA,
 plus `optimizer*` and `rng_state*` unless the run set `save_only_model: true`. For a LoRA run, upload the adapter directory, or merge
 it with `merge-peft-adapters` for a standalone model. That tool refuses EP expert-LoRA adapters: train those
 with `merge_expert_lora_on_save: true` to save the merged model instead.

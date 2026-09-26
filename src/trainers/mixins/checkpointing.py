@@ -230,7 +230,9 @@ class CheckpointingMixin:
 
     def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
         """Write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters, which it resumes from
-        (:func:`~src.distributed.checkpoint.save.save_resume_adapter`); no-op for any other run.
+        (:func:`~src.distributed.checkpoint.save.save_resume_adapter`); no-op for any other run. A
+        trainer whose own ``save_model`` folds adapters overrides it (the embedding trainer's
+        injected LoRA).
 
         A checkpoint sidecar rather than part of ``save_model``: the final export is a serving
         artifact with no training state to resume, so it carries none. Written under

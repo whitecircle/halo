@@ -6,6 +6,7 @@ CP is not supported: embedding models require full-sequence pooling.
 import dataclasses
 import inspect
 import json
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
@@ -17,6 +18,7 @@ import torch.nn.functional as F
 import transformers
 from datasets import Dataset, DatasetDict, IterableDataset
 from peft.tuners.lora import LoraLayer
+from safetensors.torch import save_file
 from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
 from sentence_transformers.base.sampler import BatchSamplers
 from sentence_transformers.evaluation import SentenceEvaluator
@@ -33,6 +35,7 @@ from sentence_transformers.losses import (
     OnlineContrastiveLoss,
     TripletLoss,
 )
+from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 from transformers.data.data_collator import DataCollator
@@ -40,20 +43,37 @@ from transformers.trainer_callback import TrainerCallback
 from trl.trainer.utils import disable_dropout_in_model
 
 import src.trainers.embedding.sentence_transformers_compat  # noqa: F401  installs ST's gradient-checkpointing signatures
-from src.checkpoint.format import write_gathered_checkpoint
+from src.checkpoint.adapters import adapter_weight_paths, read_adapter_file
+from src.checkpoint.config_export import checkpoint_source_ref
+from src.checkpoint.format import (
+    ADAPTER_SAFETENSORS_FILE,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
+    resume_adapter_dir,
+    write_gathered_checkpoint,
+    write_resume_adapter_marker,
+)
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
+from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.save import save_checkpoint
-from src.distributed.checkpoint.write import gather_saveable_tensors
+from src.distributed.checkpoint.write import gather_saveable_tensors, resolve_retained
+from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import (
     barrier_on_exit,
+    broadcast_from_rank0,
     fs_aware_makedirs,
     fs_aware_save_rank,
+    is_global_main_process,
+    reject_across_ranks,
 )
+from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import restore_special_token_ids
 from src.models.loading.tokenizer_setup import pristine_model_max_length
 from src.trainers.mixins.base import DistributedTrainerMixin
+
+logger = logging.getLogger(__name__)
 
 # Metric encoding is a diagnostic re-forward under no_grad; a full batch would double peak activations.
 _METRIC_MAX_SAMPLES = 256
@@ -132,6 +152,34 @@ def _merge_injected_lora_state_dict(state_dict: dict, scaling: float) -> dict:
         else:
             merged[k] = v
     return merged
+
+
+def _trainable_tensors(model: nn.Module) -> dict[str, torch.Tensor]:
+    """The tensors an injected-LoRA run trains, which its fold cannot give back: every parameter with
+    ``requires_grad``, the same set the optimizer steps. Structural, so rank-uniform in name and order."""
+    return {name: param.data for name, param in model.named_parameters() if param.requires_grad}
+
+
+def _resume_adapter_mismatch(saved: dict[str, torch.Tensor], live: dict[str, torch.Tensor], path: str) -> str | None:
+    """Why the resume adapter at ``path`` cannot restore ``live`` exactly, or None.
+
+    Names and full shapes must match one for one: a tensor left out would resume from
+    initialization, and ``copy_`` would broadcast a saved rank-1 adapter into a wider one.
+    """
+    missing = sorted(live.keys() - saved.keys())
+    unexpected = sorted(saved.keys() - live.keys())
+    reshaped = [
+        f"{name}: saved {tuple(saved[name].shape)}, live {tuple(live[name].shape)}"
+        for name in sorted(live.keys() & saved.keys())
+        if saved[name].shape != live[name].shape
+    ]
+    if not (missing or unexpected or reshaped):
+        return None
+    return (
+        f"the resume adapter at {path} does not match this run's trainable tensors (was the run "
+        f"relaunched with other lora_target_modules or lora_r?): missing {missing[:KEY_PREVIEW_COUNT]}, "
+        f"unexpected {unexpected[:KEY_PREVIEW_COUNT]}, reshaped {reshaped[:KEY_PREVIEW_COUNT]}"
+    )
 
 
 class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
@@ -477,6 +525,9 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         Single-GPU, DDP, accelerate-managed FSDP keep plain params → delegate to ST.
         """
         output_dir = output_dir or self.args.output_dir
+        # A forward's transient unsharded params predate the last optimizer step; the resume adapter
+        # written after this save reads the resharded ones, and the fold must read the same tensors.
+        reshard_fsdp2_modules(self._top_level_model())
         fs_aware_makedirs(output_dir)
 
         # align_special_tokens collapsed the backbone eos list at train start; the mixin restore covers one branch.
@@ -493,6 +544,119 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         # This override bypasses the mixin's sidecar; without it a resumed MoE run re-inits balancing.
         self._persist_router_balancing_biases(output_dir)
         self._mark_model_save_collectives_done()
+
+    def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
+        """Write what an injected-LoRA checkpoint resumes from; the mixin's hook for any other run.
+
+        Every injected-LoRA save folds the adapters into the weights it writes, and a fold cannot
+        resume: it rounds the delta to the save dtype and leaves no adapter tensors for the restored
+        optimizer moments to belong to. Each training checkpoint therefore also carries the run's
+        trainable tensors unfolded, at their live dtype and under the top-level model's parameter
+        names, in :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR`; each save rank writes the marker
+        the resume classifies on once its own copy is complete, so a failed write leaves the
+        checkpoint unmarked. The final ``save_model`` export carries neither. Collective.
+        """
+        if not self._has_injected_lora():
+            super()._save_merged_checkpoint_resume_adapter(checkpoint_dir)
+            return
+        model = self._top_level_model()
+        reshard_fsdp2_modules(model)
+        is_save_rank = fs_aware_save_rank()
+        state = resolve_retained(_trainable_tensors(model).items(), retain=is_save_rank)
+        adapter_dir = os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
+        fs_aware_makedirs(adapter_dir)
+        with barrier_on_exit():
+            if is_save_rank:
+                save_file(state, os.path.join(adapter_dir, ADAPTER_SAFETENSORS_FILE))
+                write_resume_adapter_marker(checkpoint_dir)
+                logger.info(f"Saved the resume adapter of folded checkpoint {checkpoint_dir} ({len(state)} tensors)")
+        del state
+
+    def _load_from_checkpoint(
+        self, resume_from_checkpoint: str, model: nn.Module = None, *, for_best_model: bool = False
+    ) -> None:
+        """Resume an injected-LoRA run from its checkpoint's resume adapter; the mixin's loader otherwise.
+
+        The checkpoint's weights are the fold and already hold the delta, so they are never read:
+        the run was rebuilt from the base with fresh adapters, and its trainable tensors are
+        restored exactly from :data:`RESUME_ADAPTER_DIR` before the optimizer state resumes onto
+        them. The marker is the verdict, decided on rank 0: a run without injected LoRA refuses a
+        marked checkpoint, and an injected-LoRA run refuses an unmarked one.
+        """
+        marked = broadcast_from_rank0(
+            is_global_main_process() and resume_adapter_dir(resume_from_checkpoint) is not None
+        )
+        if not self._has_injected_lora():
+            if marked:
+                raise ValueError(
+                    f"{resume_from_checkpoint} is an injected-LoRA checkpoint ({RESUME_ADAPTER_MARKER_FILE}): "
+                    f"it resumes by restoring {RESUME_ADAPTER_DIR}/ onto the base model, but this run trains "
+                    f"no injected adapters. Resume with the same use_peft / lora_* settings, or start a new "
+                    f"run from its folded weights (model_name_or_path: {resume_from_checkpoint}, without "
+                    f"resume_from_checkpoint)."
+                )
+            super()._load_from_checkpoint(resume_from_checkpoint, model, for_best_model=for_best_model)
+            return
+        if not marked:
+            raise ValueError(
+                f"{resume_from_checkpoint} holds folded weights without a resume adapter (no "
+                f"{RESUME_ADAPTER_MARKER_FILE}: a torn save, or one written without it), and this run "
+                f"trains injected LoRA. Resuming would restart the adapters from initialization while "
+                f"restoring their optimizer state. Resume from a checkpoint that carries its resume "
+                f"adapter, or start a new run from the folded weights (model_name_or_path: "
+                f"{resume_from_checkpoint}, without resume_from_checkpoint)."
+            )
+        self._restore_injected_lora(resume_from_checkpoint)
+        self._restore_router_balancing_biases(resume_from_checkpoint)
+
+    def _restore_injected_lora(self, checkpoint: str) -> None:
+        """Copy the resume adapter into the live trainable tensors, bit-exact at an unchanged dtype.
+
+        Refuses a model built from the checkpoint itself (its fold already holds the delta, so the
+        restored adapters would apply it twice), a marked checkpoint whose adapter file is absent,
+        and a file whose tensors differ from the live trainable set in name or shape (another
+        ``lora_target_modules`` / ``lora_r``). Every verdict is rank-uniform. Each rank reads its own
+        node's copy; plain tensors restore from it, and FSDP2 DTensors take mesh rank 0's through
+        ``distribute_tensor``, a mesh collective issued in sorted key order on every rank.
+        """
+        adapter_dir = os.path.join(checkpoint, RESUME_ADAPTER_DIR)
+        source = checkpoint_source_ref(self._get_unwrapped_model())
+        built_from_checkpoint = broadcast_from_rank0(
+            is_global_main_process()
+            and source is not None
+            and os.path.realpath(source) == os.path.realpath(checkpoint)
+        )
+        if built_from_checkpoint:
+            raise ValueError(
+                f"{checkpoint} holds folded weights, which already carry the adapter delta, and resume "
+                f"restores the unfolded adapters from {adapter_dir} onto the BASE model. This model was "
+                f"loaded from the checkpoint itself, so the delta would apply twice. Point "
+                f"model_name_or_path at the base model the run started from."
+            )
+        saved, path = consensus_read(
+            adapter_weight_paths(adapter_dir), read_adapter_file, what="Resume adapter", checkpoint=checkpoint
+        )
+        if path is None:
+            raise RuntimeError(
+                f"{checkpoint} is marked to resume from its adapter ({RESUME_ADAPTER_MARKER_FILE}), but "
+                f"{adapter_dir} holds no adapter file on any rank, so the adapters would resume from "
+                f"initialization. Resume from a complete checkpoint."
+            )
+        model = self._top_level_model()
+        # Best-model loads follow an eval forward that left the FSDP2 tree unsharded.
+        reshard_fsdp2_modules(model)
+        live = _trainable_tensors(model)
+        reject_across_ranks(_resume_adapter_mismatch(saved, live, path), "Injected-LoRA resume", ValueError)
+        with torch.no_grad():
+            for name in sorted(live):
+                target = live[name]
+                value = saved[name].to(target.dtype)
+                if isinstance(target, DTensor):
+                    value = distribute_tensor(value, target.device_mesh, target.placements)
+                target.copy_(value)
+        del saved
+        if is_global_main_process():
+            logger.info(f"Restored {len(live)} injected-LoRA tensors from {path}")
 
     def _checkpoint_context(self) -> CheckpointContext:
         """The mixin's context, re-pointed at the backbone.

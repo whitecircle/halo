@@ -29,7 +29,8 @@ every trainer.
 `SentenceTransformer` `nn.Sequential` at the `auto_model` backbone, then writes the ST pipeline
 config beside it. Its in-place-injected LoRA is not a `PeftModel`, so `PeftAdapterSaver` never sees
 it: that branch skips the ladder, folds the adapter into the gathered state dict and writes it
-through `write_gathered_checkpoint`.
+through `write_gathered_checkpoint`. Its training checkpoints resume from a `resume_adapter/`
+([Merge-on-save checkpoints](#merge-on-save-checkpoints)).
 
 **Gathered saves** (the default everywhere) produce HuggingFace-compatible checkpoints loadable with
 `from_pretrained()`. The optional **per-rank sharded EP save** (`save_sharded_ep`) is a
@@ -119,7 +120,7 @@ depends on whether the mode transforms the model at construction — see
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
 | `reference_logps.pt` | Yes | Yes | DPO/KTO `precompute_ref_log_probs` columns per split, attached on resume in place of the sweep ([DPO — Resuming a precompute run](../training-methods/preference/dpo.md#resuming-a-precompute-run)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
-| `resume_adapter/`, `resume_adapter.json` | Yes | Yes | `merge_expert_lora_on_save` only: the unmerged adapter the merged checkpoint resumes from, and the marker that says so ([Merge-on-save checkpoints](#merge-on-save-checkpoints)) |
+| `resume_adapter/`, `resume_adapter.json` | Yes | Yes | `merge_expert_lora_on_save` and embedding LoRA only: the unmerged adapter the merged checkpoint resumes from, and the marker that says so ([Merge-on-save checkpoints](#merge-on-save-checkpoints)) |
 
 `optimizer.pt` is dropped under every
 [torchrun sharded mode](#warm-restart-vs-exact-resume-torchrun), which hold per-rank
@@ -511,6 +512,15 @@ new base drops them with every other resume sidecar (`merge_models`, `patch_voca
 --merge_adapter`).
 
 Covering test: `tests/common/merged_resume_e2e.py` (exact resume against an uninterrupted run).
+
+An embedding LoRA checkpoint takes the same marker and directory. Its in-place-injected adapters are
+not a `PeftModel`, so `EmbeddingTrainer` writes them itself (it overrides
+`_save_merged_checkpoint_resume_adapter`): every trainable tensor, at its live dtype, under the
+top-level `SentenceTransformer`'s parameter names, with no `adapter_config.json` — nothing but the
+resume reads it, and the restore is bit-exact. The restore is its own `_load_from_checkpoint`, which
+copies the tensors into the base-built model (FSDP2 DTensors through `distribute_tensor`) and never
+reads the folded weights; the refusals above apply, plus an adapter file whose names or shapes differ
+from the live trainable set ([Embedding](../training-methods/embedding.md#saving)).
 
 ## Accelerate / FSDP checkpoints
 

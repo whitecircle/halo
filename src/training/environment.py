@@ -262,11 +262,11 @@ def _checkpoint_has_full_model_weights(checkpoint: str) -> bool:
 
 
 def _classify_resume_checkpoint(checkpoint: str) -> str:
-    """Classify a resume checkpoint as ``"merged_adapter"`` (a ``merge_expert_lora_on_save``
-    checkpoint, resumed from its resume adapter), ``"merged_adapter_missing"`` (marked, but that
-    adapter directory holds no adapter file), ``"full"`` (loadable weights), ``"adapter"``
-    (adapter-only), or ``"invalid"`` (none of these, e.g. an unmerged sharded save). Pure function of
-    the on-disk layout.
+    """Classify a resume checkpoint as ``"merged_adapter"`` (a ``merge_expert_lora_on_save`` or
+    injected-LoRA embedding checkpoint, resumed from its resume adapter), ``"merged_adapter_missing"``
+    (marked, but that adapter directory holds no adapter file), ``"full"`` (loadable weights),
+    ``"adapter"`` (adapter-only), or ``"invalid"`` (none of these, e.g. an unmerged sharded save). Pure
+    function of the on-disk layout.
 
     The merged class is read off the marker its save writes last, never inferred from the files
     beside it: its weights are as loadable as a full fine-tune's. Both adapter spellings count
@@ -292,7 +292,7 @@ def resolve_resume_weights_source(checkpoint: str | None, model_config, parallel
 
     ``model_config`` is left unchanged so reference/teacher models and the dataset-compat check still
     resolve the base path. No-resume, adapter-only and merged-with-resume-adapter cases return the
-    base, onto which the loader restores the adapter; a merged checkpoint's own weights already hold
+    base, onto which the resume restores the adapter; a merged checkpoint's own weights already hold
     that delta, so building from them would apply it twice. A checkpoint that is neither loadable nor
     an adapter raises, since training would otherwise continue from the base weights. Decided on
     rank 0 and broadcast for FS-agnostic consistency.
@@ -335,9 +335,9 @@ def resolve_resume_weights_source(checkpoint: str | None, model_config, parallel
     if decision == "merged_adapter" and is_global_main_process():
         logger.info(
             f"Resume: '{checkpoint}' holds merged weights for serving; the policy loads the base "
-            f"'{base}' and the loader restores the checkpoint's resume adapter onto it."
+            f"'{base}' and the resume restores the checkpoint's resume adapter onto it."
         )
-    # "adapter" / "merged_adapter": frozen base stays at model_name_or_path; the loader restores the adapter.
+    # "adapter" / "merged_adapter": frozen base stays at model_name_or_path; the resume restores the adapter.
     return base
 
 
