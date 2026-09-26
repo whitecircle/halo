@@ -78,6 +78,7 @@ from src.models.patches.attention import (
     validate_attn_implementation,
 )
 from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 
@@ -325,6 +326,13 @@ def load_distributed_model(
                 f"Context Parallelism."
             )
 
+    # The model is built with the sparse-window variant of a resolved `sdpa`, decided before the compile
+    # guards below so they see the final backend. The family patches still key on `sdpa` (it is what
+    # every call outside the sliding and global layers runs). `sdpa_flex_sliding` needs no guard: its
+    # FlexAttention is compiled shape-dynamic once per process, so EP ranks never recompile mid-run.
+    family_attn_implementation = attn_implementation
+    attn_implementation = resolve_flex_sliding_attn_implementation(model_config, attn_implementation)
+
     # EP recompiles deadlock with NCCL all-to-all; FSDP2 + trainable sinks NaN in the compiled backward.
     if attn_implementation == "flex_attention":
         if parallelism_config.is_ep_mode:
@@ -332,7 +340,7 @@ def load_distributed_model(
         elif model_has_sinks(model_config) and reset_sinks:
             patch_flex_attention_compile("FSDP2 + trainable attention sinks NaN gradient fix")
 
-    apply_family_attention_patches(model_config, attn_implementation)
+    apply_family_attention_patches(model_config, family_attn_implementation)
 
     if use_liger_kernel:
         apply_liger_kernel(
