@@ -1,0 +1,65 @@
+base_model: google/gemma-4-26B-A4B-it
+
+plugins:
+  - benchplugin.bench_plugin.BenchPlugin
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin
+  - axolotl.integrations.kernels.KernelsPlugin
+  - axolotl.integrations.liger.LigerPlugin
+  - benchplugin.ep_dist_init.EPDistInitPlugin
+  - axolotl.integrations.expert_parallel.ExpertParallelPlugin
+use_kernels: true
+use_scattermoe: false
+experts_implementation: grouped_mm
+liger_rms_norm: true
+liger_glu_activation: true
+liger_layer_norm: true
+liger_rope: false
+strict: false
+
+# the protocol: canonical pre-tokenized rows (input_ids/labels exactly = canonical_tokens.jsonl,
+# attention_mask all ones); no `type:` -> axolotl treats the dataset as already tokenized.
+datasets:
+  - path: ${BENCH_ROOT}/axolotl/data_axolotl${BENCH_SEQ_SUFFIX}.jsonl
+    ds_type: json
+dataset_prepared_path: ${BENCH_ROOT}/axolotl/prepared${BENCH_SEQ_SUFFIX}
+# the protocol order: no shuffling; SequentialSampler (curriculum_sampling), accelerate shards batches round-robin
+shuffle_merged_datasets: false
+shuffle_before_merging_datasets: false
+curriculum_sampling: true
+val_set_size: 0
+output_dir: ${BENCH_ROOT}/axolotl/outputs/run
+save_strategy: "no"
+eval_strategy: "no"
+
+sequence_len: ${BENCH_SEQ}
+excess_length_strategy: truncate
+sample_packing: false
+pad_to_sequence_len: true
+
+micro_batch_size: 1
+gradient_accumulation_steps: 1
+max_steps: ${BENCH_STEPS}
+num_epochs: 1
+optimizer: adamw_torch_fused
+lr_scheduler: constant
+learning_rate: 0.00001
+warmup_steps: 0
+max_grad_norm: 1.0
+weight_decay: 0.0
+# optimizer hyperparameters: PROTOCOL.txt
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 1.0e-8
+
+bf16: true
+tf32: true
+
+gradient_checkpointing: false
+logging_steps: 1
+attn_implementation: flash_attention_2
+gemma4_hybrid_attn_impl: true
+seed: 42
+
+dataset_processes: 16
+expert_parallel_size: 2
+expert_parallel_fallback_on_unsupported: false

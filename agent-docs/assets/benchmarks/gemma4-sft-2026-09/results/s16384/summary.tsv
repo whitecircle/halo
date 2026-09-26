@@ -1,0 +1,13 @@
+framework	run	config	tokens_per_second	peak_alloc_gib	loss_step1	loss_last	load_before	load_after	valid
+automodel	automodel_ac_r1	automodel_ac	5680	183.6	6.3511	1.0562	10.12	11.29	yes
+automodel	automodel_ac_r2	automodel_ac	5684	183.6	6.3511	1.0562	11.29	7.50	yes
+axolotl	axolotl_nogc_r1	axolotl_nogc	12258	249.1	6.3594	1.0625	6.47	6.51	yes
+axolotl	axolotl_nogc_r2	axolotl_nogc	12289	249.1	6.3594	1.0547	6.51	10.12	yes
+halo	halo_gc_r1	halo_gc	13756	121.2	6.3556	0.9795	8.00	6.79	yes
+halo	halo_gc_r2	halo_gc	13752	121.2	6.3556	0.9809	6.79	7.42	yes
+megatron_bridge	megatron_fullrecompute_bf16moments_r1	megatron_fullrecompute_bf16moments	4518	245.8	6.3345	0.9901	13.31	12.90	yes
+megatron_bridge	megatron_fullrecompute_bf16moments_r2	megatron_fullrecompute_bf16moments	4509	245.8	6.3345	0.9901	12.90	9.64	yes
+ms_swift	ms_swift_ac_r1	ms_swift_ac	2821	204.9	6.3535	0.9884	7.67	31.45	yes
+ms_swift	ms_swift_ac_r2	ms_swift_ac	2824	204.9	6.3535	0.9864	31.45	9.48	yes
+unsloth	unsloth_gc_r1	unsloth_gc	6352	240.9	6.3537	1.0462	29.00	6.64	yes
+unsloth	unsloth_gc_r2	unsloth_gc	6261	240.9	6.9243	1.3441	6.64	17.72	no: step-1 loss

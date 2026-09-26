@@ -1,0 +1,14 @@
+# Official Axolotl 0.19.0 image + DeepEP (needed by axolotl.integrations.expert_parallel; not shipped in the image).
+FROM axolotlai/axolotl:0.19.0-py3.12-cu130-2.13.0@sha256:b38049f2454ceafc58c7a8269c7b400a75416e15b0f308a33850d48ae11e384d
+ARG DEEPEP_COMMIT=42144303752422ade37f24bca9e2dde12df70e09
+COPY deepep_build.patch /tmp/deepep_build.patch
+ENV CUDA_HOME=/usr/local/cuda-13.0 TORCH_CUDA_ARCH_LIST="10.0;10.3" MAX_JOBS=64
+RUN set -eux; SP=/workspace/axolotl-venv/lib/python3.12/site-packages; \
+    cd $SP/nvidia/cu13/lib && for l in nvtx3interop; do f=$(ls lib$l.so.* | head -1); ln -sf $f lib$l.so; done; \
+    ln -sf $SP/nvidia/nvshmem/lib/libnvshmem_host.so.3 $SP/nvidia/nvshmem/lib/libnvshmem_host.so; \
+    git clone https://github.com/deepseek-ai/DeepEP.git /opt/DeepEP && cd /opt/DeepEP && git checkout $DEEPEP_COMMIT && \
+    git apply /tmp/deepep_build.patch && \
+    PATH=$CUDA_HOME/bin:$PATH CPATH=$SP/nvidia/nccl/include:$CUDA_HOME/include:$CUDA_HOME/include/cccl \
+    LIBRARY_PATH=$CUDA_HOME/lib64/stubs:$CUDA_HOME/lib64:$SP/nvidia/cu13/lib:/usr/lib/x86_64-linux-gnu \
+    uv pip install --python /workspace/axolotl-venv/bin/python --no-build-isolation --no-deps . && \
+    ls /workspace/axolotl-venv/lib/python3.12/site-packages | grep -i deep_ep  # import needs libcuda (runtime only)

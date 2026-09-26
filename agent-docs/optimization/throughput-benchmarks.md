@@ -17,31 +17,51 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **8× NVIDIA B300** 
 
 ## Full-parameter SFT framework comparison
 
-Recipe-level runs on 2× B300 (Gemma 4) and 4× B300 (Mistral Small 4): BF16, sequence length 2,048,
-batch size 1 per GPU, 25 total steps, mean of all 20 post-warmup steps. They compare complete
-training stacks, so optimizer, data pipeline, attention, expert implementation, and parallel layout
-are part of each result.
+**Gemma 4 26B-A4B**, 2× B300, BF16, 2,048 tokens per row, micro-batch 1 per GPU, 25 steps, tokens/s over
+steps 6–25, peak `max_memory_allocated` max over ranks. Every framework trains the same tokens, labels and row
+order with the same optimizer hyperparameters, each at its newest release and its fastest configuration of
+several tried. Protocol and result JSONs: `agent-docs/assets/benchmarks/gemma4-sft-2026-09/` (`PROTOCOL.txt`, `results/`);
+launch scripts and configs: `scripts/benchmarks/gemma4_sft/`.
+
+| framework | version | layout | cluster tok/s | peak GiB/GPU |
+|---|---|---|---:|---:|
+| Halo | public image | EP2 + FSDP2, bf16 experts | **14,964** | **101.9** |
+| Axolotl | 0.19.0 | FSDP2 no-reshard, FA2 sliding | 8,783 | 137.6 |
+| NeMo AutoModel | container 26.08.00 | EP2 + FSDP2, eager attention | 7,406 | 119.1 |
+| Unsloth | 2026.9.11 | DDP, bf16 AdamW | 6,360 | 238.6 |
+| MS-SWIFT | 4.5.3 | FSDP2, fp32 master | 5,393 | 195.1 |
+| Megatron Bridge | 0.6.2 + MCore 0.19.2 | EP2, distributed optimizer, fp32 master | 5,243 | 255.6 |
+
+At **16,384 tokens per row** (8 protocol rows packed into one causal sequence, 50 steps, tokens/s over steps 6–50;
+`PROTOCOL.txt` "Long rows", records in `results/s16384/`), each framework starts from its 2,048-token configuration and
+turns on its own activation checkpointing when that runs out of memory:
+
+| framework | what it needs at 16k | cluster tok/s | peak GiB/GPU | at 2,048 tokens |
+|---|---|---:|---:|---:|
+| Halo | gradient checkpointing | **13,754** | **121.2** | 14,964 |
+| Axolotl | nothing (no checkpointing) | 12,274 | 249.1 | 8,783 |
+| Unsloth | Unsloth gradient checkpointing | 6,352 | 240.9 | 6,360 |
+| NeMo AutoModel | activation checkpointing | 5,682 | 183.6 | 7,406 |
+| Megatron Bridge (0.6.1, official image) | full recompute + bf16 Adam moments | 4,514 | 245.8 | 5,243 |
+| MS-SWIFT | FSDP activation checkpointing | 2,822 | 204.9 | 5,393 |
+
+Halo needs the least memory, half of Axolotl's, which is the only framework that fits without checkpointing. Megatron
+Bridge fits only with bf16 moments on top of full recompute. Unsloth's value is a single run: its second run in the
+same environment starts from a different step-1 loss on identical rows and is excluded (`PROTOCOL.txt` "Validity").
+Every other rate is the mean of two runs that agree within 0.3%. Run it with
+`BENCH_ROOT=<dir> BENCH_SEQ=16384 BENCH_STEPS=50 bash scripts/benchmarks/gemma4_sft/reproduce.sh`.
+
+The kernels Halo runs for Gemma 4: [Gemma 4](../models/gemma4.md).
+
+![Gemma 4 SFT throughput against memory](../assets/benchmarks/gemma4_sft_pareto.png)
+
+**Mistral Small 4 119B**, 4× B300, BF16, sequence length 2,048, batch size 1 per GPU, 25 total steps, mean
+of all 20 post-warmup steps:
 
 | model | framework | topology | cluster tok/s | peak GiB/GPU |
 |---|---|---|---:|---:|
-| Gemma 4 26B-A4B | Halo | EP2 | **7,245** | 103.4 |
-| Gemma 4 26B-A4B | NeMo AutoModel | EP2 | 5,040 | **101.7** |
-| Gemma 4 26B-A4B | Axolotl 0.18.0 | FSDP2, ScatterMoE | 4,485 | 102.6 |
-| Gemma 4 26B-A4B | Megatron Bridge | EP2 | 3,690 | 249.7 |
-| Gemma 4 26B-A4B | MS-SWIFT 4.4.1 | ZeRO-3 | 3,367 | 198.7 |
-| Gemma 4 26B-A4B | Unsloth 2026.7.5 | DDP, 8-bit AdamW | 3,187 | 196.4 |
 | Mistral Small 4 119B | Halo | DP2, EP2, ETP2 | **7,587** | **207.1** |
 | Mistral Small 4 119B | Axolotl 0.18.0 | FSDP2, eager experts | 380 | 251.0 |
-
-The external-backend curves use one deterministic high-entropy JSONL; Halo's profiling harness uses
-synthetic tokens, so its dashed loss and gradient-norm traces are numerical-health evidence, not a
-convergence comparison. Raw 20-point traces and protocol metadata (Halo, Axolotl, MS-SWIFT, Unsloth)
-are in `agent-docs/assets/benchmarks/runs/`; the NeMo AutoModel and Megatron Bridge rows are
-throughput/memory only.
-
-![Gemma 4 SFT throughput comparison](../assets/benchmarks/sft_throughput_comparison_gemma4.png)
-
-![Gemma 4 measured SFT curves](../assets/benchmarks/sft_training_curves_gemma4.png)
 
 ![Mistral Small 4 SFT throughput comparison](../assets/benchmarks/sft_throughput_comparison_mistral4.png)
 
