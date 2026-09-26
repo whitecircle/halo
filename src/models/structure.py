@@ -178,15 +178,23 @@ def strip_peft_adapter_segment(name: str) -> str:
 
 
 @contextmanager
-def merged_adapters(model: torch.nn.Module | None) -> Iterator[bool]:
+def merged_adapters(model: torch.nn.Module | None, *, restore_base: bool = False) -> Iterator[bool]:
     """Fold LoRA into the base weights for the body, then unfold. Yields whether ``model`` is PEFT.
 
     ``merge_adapter`` is an in-place DTensor collective under FSDP2, so every rank must enter. The
     unmerge in the ``finally`` is what makes this usable mid-training: an intermediate merged save
     must leave the adapters trainable, unlike ``merge_and_unload``, which dissolves the PeftModel.
     ``None`` (no PEFT model in the tree) is a no-op, so callers can pass a lookup result directly.
+
+    ``restore_base`` makes the unfold exact. In bf16, ``(w + d) - d`` misses ``w`` by a rounding step
+    wherever the fold changed the exponent, so the unmerge alone moves the frozen base a little on
+    every call. With it, the weights the merge rewrites (PEFT's ``.base_layer.`` params) are copied
+    first and written back after the unmerge: one extra copy of their local shards, no collective.
     """
     peft = model is not None and is_peft_model(model)
+    originals = []
+    if peft and restore_base:
+        originals = [(param, param.data.clone()) for name, param in model.named_parameters() if ".base_layer." in name]
     if peft:
         model.merge_adapter()
     try:
@@ -194,6 +202,9 @@ def merged_adapters(model: torch.nn.Module | None) -> Iterator[bool]:
     finally:
         if peft:
             model.unmerge_adapter()
+            with torch.no_grad():
+                for param, original in originals:
+                    param.data.copy_(original)
 
 
 def decoder_layers(module: torch.nn.Module) -> torch.nn.ModuleList | None:

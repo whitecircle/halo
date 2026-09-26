@@ -119,6 +119,7 @@ depends on whether the mode transforms the model at construction — see
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
 | `reference_logps.pt` | Yes | Yes | DPO/KTO `precompute_ref_log_probs` columns per split, attached on resume in place of the sweep ([DPO — Resuming a precompute run](../training-methods/preference/dpo.md#resuming-a-precompute-run)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
+| `resume_adapter/`, `resume_adapter.json` | Yes | Yes | `merge_expert_lora_on_save` only: the unmerged adapter the merged checkpoint resumes from, and the marker that says so ([Merge-on-save checkpoints](#merge-on-save-checkpoints)) |
 
 `optimizer.pt` is dropped under every
 [torchrun sharded mode](#warm-restart-vs-exact-resume-torchrun), which hold per-rank
@@ -450,7 +451,8 @@ the collective-free CP branch.
 Under EP the native grouped expert adapters are gathered across the EP group into the same
 `adapter_model.safetensors`. `merge_expert_lora_on_save` routes the save away from this path
 entirely, to `save_ep_checkpoint`'s merged gathered checkpoint (see
-[PEFT](../optimization/peft.md#checkpoint-saving)).
+[PEFT](../optimization/peft.md#checkpoint-saving)), whose training checkpoints still resume from their
+adapters ([Merge-on-save checkpoints](#merge-on-save-checkpoints)).
 
 Output: `adapter_config.json`, `adapter_model.safetensors`, `tokenizer.*`. On a safetensors write
 failure the saver falls back to `torch.save` (`adapter_model.bin`). Resume accepts either — the
@@ -467,6 +469,34 @@ re-apply it, because a merge rebuilds the base from the hub, whose sinks are alw
 A directory holding native grouped expert adapters carries a `peft_type` stock PEFT does not know, so
 an external load raises instead of loading the attention half alone
 ([PEFT](../optimization/peft.md#checkpoint-saving)).
+
+### Merge-on-save checkpoints
+
+A `merge_expert_lora_on_save` checkpoint serves from its merged weights (stock `from_pretrained`)
+but cannot resume from them: the bf16 fold loses part of the delta, and the optimizer moments belong
+to the adapters. So `_save_checkpoint` adds the unmerged adapter to every training checkpoint, in
+`resume_adapter/`, through the writer the non-merged save uses (`PeftAdapterSaver` for a mixed run,
+`save_ep_lora_adapters` for expert-only). The root marker `resume_adapter.json` follows once every
+save rank's copy is complete. A subdirectory, because an `adapter_config.json` at the root makes
+`from_pretrained` load the base it names instead of the merged weights. The final `save_model()`
+export carries neither: nothing resumes from it.
+
+The save leaves the run bit-identical. A bf16 `(w + d) - d` is not always `w`, so the attention merge
+is undone by writing back the base weights it rewrote (`merged_adapters(restore_base=True)`) rather
+than by the unmerge alone.
+
+On resume the marker is the verdict, never the files beside it. `resolve_resume_weights_source` keeps
+`model_name_or_path`, and the loader restores `resume_adapter/` onto the base-built model. It refuses
+a model built from the merged weights (the delta would apply twice) and a marked checkpoint missing
+its adapter. A merged checkpoint without the marker, resumed by a run that trains adapters (a torn
+save, or one written without it), raises rather than restart the adapters from init under their
+restored optimizer moments; a new run from those weights (`model_name_or_path` pointed at the
+checkpoint) is the way to continue.
+
+`copy_checkpoint_aux_files` treats the adapter and its marker as resume sidecars: a tool output
+keeps them, an N-way merge drops them. `tests/gpu/trainers/lora/test_lora_merged_save_resume.py`
+pins the resume against an uninterrupted run: adapters bit-equal after the restore, first resumed
+loss identical.
 
 ## Accelerate / FSDP checkpoints
 
@@ -530,7 +560,9 @@ whether to repoint the weights source.
 It repoints when `needs_ep_wrappers`, `is_cp_mode` or `is_tp_mode` holds — with the default
 `use_grouped_gemm: true` that is **every stock torchrun run**, dense included. The return is the
 **checkpoint directory**, so the trained weights load at model construction (Path B). Only a
-`use_grouped_gemm: false` run with no EP, CP or TP keeps `model_name_or_path` (Path A).
+`use_grouped_gemm: false` run with no EP, CP or TP keeps `model_name_or_path` (Path A). An adapter
+checkpoint keeps it too — adapter-only, or merge-on-save through its marker — and the loader restores
+the adapter onto the base ([Merge-on-save checkpoints](#merge-on-save-checkpoints)).
 
 The FSDP2 loader detects a model constructed from the checkpoint and skips the redundant
 full-state-dict re-read.
@@ -580,7 +612,8 @@ Because the Path-B base is rebuilt fresh, two classes of trained state are resto
 
 - **Adapters** (`restore_adapters`, `src/distributed/checkpoint/peft.py`) — native EP expert adapters
   (keyed `<layer>.experts.<attr>.lora_*`) sliced per rank, PEFT attention adapters via
-  `set_peft_model_state_dict`.
+  `set_peft_model_state_dict`, read from the checkpoint root or a merged checkpoint's
+  `resume_adapter/`.
 
     That call warns on partial matches and raises if *every* saved key is unmatched, so a silent
     zero-init resume cannot pass quietly. Expert adapters that **no** EP layer can receive raise

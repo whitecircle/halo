@@ -367,12 +367,13 @@ class PeftAdapterSaver:
         return config or peft_config
 
 
-def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> None:
+def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
     """Restore LoRA adapters when base-weight reload is skipped (EP/CP).
 
     EP/CP rebuild the model with zero-init adapters, so trained weights must reload here or resume
     continues from the untrained adapter. Handles native EP expert adapters (sliced per rank by
-    :func:`apply_ep_lora_adapters`) and PEFT attention adapters. No-op when no adapter file.
+    :func:`apply_ep_lora_adapters`) and PEFT attention adapters. Returns the adapter file restored
+    from, or ``None`` when ``checkpoint`` holds none on any rank (a no-op); rank-uniform either way.
     """
     state, loaded_path = consensus_read(
         adapter_weight_paths(checkpoint),
@@ -381,7 +382,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> None:
         checkpoint=checkpoint,
     )
     if loaded_path is None:
-        return  # no adapters anywhere: full fine-tuning
+        return None  # no adapters anywhere: full fine-tuning
     unwrapped = unwrap_framework_wrappers(model)
 
     expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
@@ -421,6 +422,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> None:
         logger.info(
             f"Restored adapters from {loaded_path} ({len(expert_state)} expert + {len(attn_state)} attention tensors)"
         )
+    return loaded_path
 
 
 def _load_peft_adapter_state(peft_model, attn_state: dict) -> list[str]:

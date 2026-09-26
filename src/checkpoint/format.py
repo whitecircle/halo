@@ -89,6 +89,16 @@ ADAPTER_WEIGHT_NAMES = (ADAPTER_SAFETENSORS_FILE, ADAPTER_BIN_FILE)
 # sink policy). A sidecar rather than adapter_config.json, so stock PEFT loads the adapter unchanged.
 TRAINING_PROVENANCE_FILE = "training_provenance.json"
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
+# A ``merge_expert_lora_on_save`` checkpoint's resume state: the unmerged adapter, written as the
+# non-merged save writes it, beside the merged weights that serve. A subdirectory, because an
+# ``adapter_config.json`` at the root makes ``from_pretrained`` load its base model instead of the
+# merged weights. The root marker is written last and is what classifies the checkpoint as
+# resume-from-base-plus-adapter: its presence is the verdict, its body names the directory.
+RESUME_ADAPTER_DIR = "resume_adapter"
+RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
+# Resume state like the sidecars below, but not weight-suffixed: the aux copy carries them by
+# default and drops them by name where ``include_resume_sidecars`` is off.
+_RESUME_ADAPTER_ENTRIES = (RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
 
 # Never carried over: a stray pytorch_model.bin or optimizer*.pt would shadow the fresh safetensors.
 _WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")
@@ -433,6 +443,9 @@ def copy_checkpoint_aux_files(
 
     ``output_dir`` nested inside ``input_dir`` raises: the walk would copy the destination into
     itself until the disk fills.
+
+    A merged checkpoint's resume adapter and its marker are resume state too: carried by default,
+    dropped with the sidecars.
     """
     input_root = os.path.realpath(input_dir)
     if os.path.commonpath([input_root, os.path.realpath(output_dir)]) == input_root:
@@ -442,6 +455,8 @@ def copy_checkpoint_aux_files(
             f"artifact to a directory outside the source checkpoint."
         )
     for name in os.listdir(input_dir):
+        if name in _RESUME_ADAPTER_ENTRIES and not include_resume_sidecars:
+            continue
         src = os.path.join(input_dir, name)
         if os.path.isdir(src):
             if name.startswith((".", f"{PREFIX_CHECKPOINT_DIR}-")) or name in _WEIGHT_DUMP_DIRS:
@@ -572,6 +587,26 @@ def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool =
     """
     names = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE) if safetensors_only else WHOLE_MODEL_WEIGHT_FILES
     return any(os.path.isfile(os.path.join(checkpoint_dir, name)) for name in names)
+
+
+def write_resume_adapter_marker(checkpoint_dir: str) -> None:
+    """Mark ``checkpoint_dir`` as resuming from its :data:`RESUME_ADAPTER_DIR`, not its weights.
+
+    The caller writes it only once that directory is complete, so a marked checkpoint carries its
+    adapter.
+    """
+    with open(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE), "w") as fh:
+        json.dump({"adapter_dir": RESUME_ADAPTER_DIR}, fh, indent=2)
+
+
+def resume_adapter_dir(checkpoint_dir: str) -> str | None:
+    """The adapter directory a marked checkpoint resumes from, or ``None`` for any other checkpoint.
+
+    Stat-only, like :func:`has_whole_model_weight_file`, for the same rank-0-then-broadcast callers.
+    """
+    if not os.path.isfile(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE)):
+        return None
+    return os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
 
 
 def load_full_state_dict(checkpoint_dir: str, device: str = "cpu") -> dict[str, torch.Tensor] | None:

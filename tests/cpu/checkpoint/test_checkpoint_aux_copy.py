@@ -29,7 +29,13 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from src.checkpoint.format import WEIGHT_FILE_IGNORE_PATTERNS, copy_checkpoint_aux_files
+from src.checkpoint.format import (
+    ADAPTER_SAFETENSORS_FILE,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
+    WEIGHT_FILE_IGNORE_PATTERNS,
+    copy_checkpoint_aux_files,
+)
 from src.checkpoint.model_card import CARD_STAGING_PREFIX, CARD_STAGING_SUFFIX
 
 SKIPPED = (
@@ -137,6 +143,29 @@ def test_resume_sidecars_can_be_excluded(checkpoint_dir, tmp_path):
         assert not (out / name).exists(), f"{name} describes one run's state and must not ship in a merge"
     for name in KEPT:
         assert (out / name).exists(), f"{name} must still be carried"
+
+
+@pytest.mark.parametrize("include_resume_sidecars", [True, False], ids=["resume-source", "n-way-merge"])
+def test_a_merged_checkpoint_resume_adapter_travels_with_the_sidecars(tmp_path, include_resume_sidecars):
+    """A merge-on-save checkpoint resumes from ``resume_adapter/``, which its marker names. Both are
+    resume state like ``scheduler.pt``: a tool writing a resume source keeps them, and an N-way merge
+    drops them — carried into a merge of several runs, the marker would resume one run's adapters
+    over the base and ignore the merged weights."""
+    src = tmp_path / "checkpoint"
+    (src / RESUME_ADAPTER_DIR).mkdir(parents=True)
+    save_file(
+        {"a.experts.down_proj.lora_A": torch.ones(2, 2)}, str(src / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE)
+    )
+    (src / RESUME_ADAPTER_MARKER_FILE).write_text("{}")
+    (src / "config.json").write_text("{}")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    copy_checkpoint_aux_files(str(src), str(out), include_resume_sidecars=include_resume_sidecars)
+
+    assert (out / "config.json").exists()
+    assert (out / RESUME_ADAPTER_MARKER_FILE).exists() is include_resume_sidecars
+    assert (out / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE).exists() is include_resume_sidecars
 
 
 def test_module_directories_copy_whole_with_their_weights(checkpoint_dir, tmp_path):

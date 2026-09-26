@@ -15,7 +15,9 @@ artifacts: a family-specific expert gather, and one shard per stage under global
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from functools import partial
 
 import torch
@@ -23,10 +25,15 @@ import torch.nn as nn
 
 from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE
 from src.checkpoint.config_export import save_model_config
-from src.checkpoint.format import save_dtype_caster, write_merged_index
+from src.checkpoint.format import (
+    RESUME_ADAPTER_DIR,
+    save_dtype_caster,
+    write_merged_index,
+    write_resume_adapter_marker,
+)
 from src.checkpoint.shard_writer import StageShardWriter
 from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.peft import expert_lora_config_fields, find_peft_model
+from src.distributed.checkpoint.peft import PeftAdapterSaver, expert_lora_config_fields, find_peft_model
 from src.distributed.checkpoint.write import (
     chunked_saveable_tensors,
     exchange_shard_index,
@@ -148,7 +155,8 @@ def save_ep_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     With native grouped-LoRA on experts, writes a standalone adapter unless
     ``merge_expert_lora_on_save`` requests a merged checkpoint. That merge covers both halves of a
     mixed run: the expert deltas fold inside each family's gather, and any attention adapters fold
-    into their base weights for the duration of the write.
+    into their base weights for the duration of the write. A training checkpoint also carries the
+    unmerged adapters it resumes from (:func:`save_resume_adapter`).
     """
     if ctx.has_expert_lora and not ctx.merge_expert_lora_on_save:
         save_ep_lora_adapters(
@@ -156,8 +164,9 @@ def save_ep_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
         )
         return
     # Collective and rank-uniform: merge_adapter is an in-place DTensor op under FSDP2, and the
-    # unmerge on exit leaves the adapters trainable after an intermediate merged save.
-    with merged_adapters(find_peft_model(ctx.model)) as adapters_merged:
+    # unmerge on exit leaves the adapters trainable after an intermediate merged save. restore_base
+    # keeps that save from moving the frozen base, which a resume of this checkpoint would not see.
+    with merged_adapters(find_peft_model(ctx.model), restore_base=True) as adapters_merged:
         save_ep_model(
             ctx.model,
             output_dir,
@@ -168,6 +177,30 @@ def save_ep_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
             merge_lora=ctx.has_expert_lora and ctx.merge_expert_lora_on_save,
             adapters_merged=adapters_merged,
         )
+
+
+def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
+    """Write a ``merge_expert_lora_on_save`` checkpoint's resume state beside its merged weights.
+
+    The merged weights serve but cannot resume: the bf16 fold loses part of the delta, and the
+    optimizer state belongs to the adapters, not to the fold. The unmerged adapters go to
+    :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR` through the writer the non-merged save uses
+    (:class:`PeftAdapterSaver` when a PeftModel carries an attention half,
+    :func:`save_ep_lora_adapters` for expert-only), so the adapter restore reads them unchanged. Each
+    save rank then writes the marker the resume classifies on, after its own copy is complete.
+    Collective: every rank enters the adapter gathers.
+    """
+    adapter_dir = os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
+    peft_model = find_peft_model(ctx.model)
+    if peft_model is not None:
+        # No tokenizer: the checkpoint root carries it, and nothing loads this directory standalone.
+        PeftAdapterSaver().save(replace(ctx, tokenizer=None), peft_model, adapter_dir)
+    else:
+        save_ep_lora_adapters(ctx.model, adapter_dir, adapter_config=_expert_lora_adapter_config(ctx))
+    with barrier_on_exit():
+        if ctx.is_save_rank:
+            write_resume_adapter_marker(checkpoint_dir)
+            logger.info(f"Saved the resume adapter of merged checkpoint {checkpoint_dir}")
 
 
 def reject_unhandled_pp_axes(config, phase: str) -> None:

@@ -88,11 +88,6 @@ _PEFT_KEY_ARTIFACTS = ("base_model.", ".base_layer", "lora_A", "lora_B", "origin
 
 # Below this the adapters did not move enough in MAX_STEPS for anything downstream to be meaningful.
 _MIN_ADAPTER_EFFECT = 1e-2
-# One in-place bf16 merge -> unmerge on a merged base weight leaves (w+d)-d != w — the same rounding
-# step every on-policy weight sync pays. Measured on this run's shapes: drift 0.0 (the round-trip
-# reversed exactly), one rounding step ~2.4e-4, sampled LoRA delta 9.8e-4 — so the budget sits one
-# step up while merge_drift_budget_below_lora_delta keeps the delta 3x above it, tolerance-proof.
-_MERGE_ROUNDTRIP_TOL = 2.5e-4
 # How much closer a written tensor must sit to the merged weight than to the frozen base. bf16 merge
 # is not exactly reversible, so the checkpoint lands a rounding step from `expected` rather than on
 # it; measured separation is 4x, and an UNMERGED save sits exactly on base (ratio 0), so anything
@@ -304,29 +299,14 @@ def run(ctx) -> dict:
     # forward: it is the direct statement of the invariant, and a post-save EP forward would add
     # a DeepEP dispatch minutes after the previous one, which the NVLink barrier can time out on.
     after = _weight_snapshot(unwrapped)
-    # Adapters and biases must come back bit-identical; each merged base WEIGHT carries the
-    # save's own in-place merge -> unmerge rounding step, bounded by _MERGE_ROUNDTRIP_TOL.
-    adapters_changed = sorted(k for k, v in after.items() if "lora_" in k and not torch.equal(v, before[k]))
-    bias_changed = sorted(
-        k for k, v in after.items() if "lora_" not in k and k.endswith(".bias") and not torch.equal(v, before[k])
-    )
-    weight_drift = {
-        k: (v.float() - before[k].float()).abs().max().item()
-        for k, v in after.items()
-        if "lora_" not in k and not k.endswith(".bias")
-    }
-    drifted = sorted(k for k, d in weight_drift.items() if d > _MERGE_ROUNDTRIP_TOL)
-    changed = adapters_changed + bias_changed + drifted
+    # Bit-identical, base weights included: the save writes back what its merge rewrote rather than
+    # trusting a bf16 unmerge, whose (w+d)-d misses w by a rounding step.
+    changed = sorted(k for k, v in after.items() if not torch.equal(v, before[k]))
     checks["save_left_weights_unchanged"] = not changed
-    # An unmerge that never ran leaves the whole LoRA delta on the base, which must sit clearly
-    # above the drift budget — else the tolerance could mask exactly the failure this pins.
-    sampled_delta = max((expected[k].float() - unmerged[k].float()).abs().max().item() for k in expected)
-    checks["merge_drift_budget_below_lora_delta"] = sampled_delta > 3 * _MERGE_ROUNDTRIP_TOL
     checks["adapters_still_trainable"] = any(p.requires_grad for n, p in unwrapped.named_parameters() if "lora_" in n)
     log(
         f"  {len(before)} weights compared; changed: {changed[:3] or 'none'}; "
-        f"max base-weight drift {max(weight_drift.values()):.2e} (tol {_MERGE_ROUNDTRIP_TOL}), "
-        f"sampled LoRA delta {sampled_delta:.2e}; adapters trainable={checks['adapters_still_trainable']}"
+        f"adapters trainable={checks['adapters_still_trainable']}"
     )
 
     # Both ranks run the remaining checks, on the same shared-FS directory and on their own

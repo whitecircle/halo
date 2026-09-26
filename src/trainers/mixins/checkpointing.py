@@ -34,7 +34,7 @@ from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.peft import PeftAdapterSaver, find_peft_model
-from src.distributed.checkpoint.save import save_checkpoint
+from src.distributed.checkpoint.save import save_checkpoint, save_resume_adapter
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.runtime import (
@@ -182,6 +182,7 @@ class CheckpointingMixin:
         guard.reject()
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
+        self._save_merged_checkpoint_resume_adapter(output_dir)
         # save_only_model drops scheduler.pt on every mode, re-warming the LR from step 0 on resume.
         self._persist_lr_scheduler_for_resume(trial)
         self._persist_trainer_sidecars(output_dir)
@@ -224,6 +225,19 @@ class CheckpointingMixin:
                 best_model_checkpoint=self.state.best_model_checkpoint,
                 use_mtime=True,
             )
+
+    def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
+        """Write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters, which it resumes from
+        (:func:`~src.distributed.checkpoint.save.save_resume_adapter`); no-op for any other run.
+
+        A checkpoint sidecar rather than part of ``save_model``: the final export is a serving
+        artifact with no training state to resume, so it carries none. Written under
+        ``save_only_model`` too, where the adapters are still the only exact trained weights.
+        Collective, on every rank.
+        """
+        if not self.parallelism_config.merge_expert_lora_on_save:
+            return
+        save_resume_adapter(self._checkpoint_context(), checkpoint_dir)
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
         """Write a trainer's own resume state into ``checkpoint_dir``; none by default.

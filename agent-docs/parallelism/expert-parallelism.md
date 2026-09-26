@@ -452,7 +452,10 @@ the checkpoint, and the checkpoint loader raises when the live model was constru
 else, rather than silently continuing on stale weights.
 
 The loader then restores adapters and extra trained params; optimizer, scheduler and balancing
-biases resume from trainer state. An unmerged sharded save is refused at resume resolution, and
+biases resume from trainer state. A `merge_expert_lora_on_save` checkpoint is the exception to the
+repoint: it resumes from the base plus its `resume_adapter/`
+([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)). An unmerged
+sharded save is refused at resume resolution, and
 `load_best_model_at_end` is refused under EP full fine-tune (export the best checkpoint instead). See
 [Checkpoints & Resume](../reference/checkpoints.md).
 

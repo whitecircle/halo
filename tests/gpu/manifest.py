@@ -636,6 +636,18 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/lora/test_lora_mixed_merged_save.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=2400
     ),
+    # Tiny random-init MoE, hence `core`: one row per expert layout x adapter shape.
+    "trainers/lora/test_lora_merged_save_resume.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "qwen3", "gptoss"),
+        args_matrix=(
+            "--family qwen3_moe --adapters expert",
+            "--family qwen3_moe --adapters mixed",
+            "--family gpt_oss --adapters expert",
+            "--family gpt_oss --adapters mixed",
+        ),
+        timeout=1200,
+    ),
     "trainers/lora/test_lora_ep_convergence.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1000
     ),

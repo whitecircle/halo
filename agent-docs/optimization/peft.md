@@ -233,7 +233,8 @@ the grouped-GEMM compute and gradient-synced across the EP group like the expert
 zero-initialized, so the initial delta is zero. The frozen base experts stay bf16.
 
 The default save writes a standalone adapter; `merge_expert_lora_on_save: true` folds the delta into the
-base for a servable HF checkpoint instead ([Merging adapters](#merging-adapters)).
+base for a servable HF checkpoint instead, keeping the unmerged adapter beside it for resume
+([Merging adapters](#merging-adapters)).
 
 **TP / EP+TP.** For a colwise-sharded base, `lora_B` becomes a per-rank output shard while `lora_A` stays
 replicated. Nothing broadcasts the replicated matrix (it diverges from init) and nothing distinguishes the
@@ -425,7 +426,7 @@ to a tensor-key scan when the config is absent or carries a stock `peft_type`, s
 holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 
 **Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
-from the checkpoint's `adapter_model.safetensors` (not from the base reload) by
+from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
 `restore_adapters` (`src/distributed/checkpoint/peft.py`), which `CheckpointLoader` calls. Resuming expert adapters into a run that does not build them (EP off,
 `use_grouped_gemm: false`, or the expert projections dropped from `lora_target_modules`) raises rather than
 discarding them.
@@ -467,13 +468,17 @@ namespace is refused.
 
 `merge_expert_lora_on_save: true` produces the merged servable checkpoint at training time instead, for
 expert-only **and** mixed runs alike. Without it a mixed adapter is resumable by this toolkit but foldable by
-no tool, since saving the adapters and merging afterwards hits exactly the refusal above.
+no tool, since saving the adapters and merging afterwards hits exactly the refusal above. Each merged
+training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
+base, so the run continues exactly ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 
 It needs native grouped expert adapters to exist: `lora_target_modules` must name at least one expert
 projection, or `_validate_merge_expert_lora_save` raises.
 
 Both halves are folded: expert deltas inside each family's `gather_expert_state_dict`, attention deltas via a
-`merge_adapter` held across the write and unmerged after, so training continues unchanged. The fold happens
+`merge_adapter` held across the write. Afterwards the adapters are unmerged and the base weights the merge
+rewrote are written back bit for bit (a bf16 unmerge alone misses by a rounding step), so training
+continues unchanged. The fold happens
 in the gathered EP save under mixin-managed FSDP2 (torchrun); it is rejected under accelerate-managed FSDP
 and with `save_sharded_ep: true`.
 
@@ -484,6 +489,9 @@ and with `save_sharded_ep: true`.
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_cp_tp.py
 # LoRA + EP with MoE
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_ep.py
+# merge_expert_lora_on_save checkpoint: servable, and resumed exactly against an uninterrupted run
+torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_merged_save_resume.py \
+    --family gpt_oss --adapters mixed
 
 # Adapters on an on-policy run, asserted on the SERVED policy (needs a live vLLM server):
 # attention LoRA under EP and pure ETP, native grouped expert LoRA under EP

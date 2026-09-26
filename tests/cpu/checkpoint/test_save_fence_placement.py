@@ -57,7 +57,7 @@ class _Trainer(DistributedTrainerMixin, _BaseWithTailWrites):
         self.tail_write_fails = tail_write_fails
         self.args = SimpleNamespace(save_total_limit=1, save_only_model=False, should_save=True)
         self.state = SimpleNamespace(global_step=2, best_model_checkpoint=None)
-        self.parallelism_config = SimpleNamespace(is_tp_mode=False)
+        self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)
         self._fsdp_wrapped = True
         self.lr_scheduler = None
 
