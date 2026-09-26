@@ -231,9 +231,9 @@ runtime**: a custom data path that bypasses those would sum unrelated tokens wit
 
 - **"Node-local EP group size (N) cannot exceed the NVLink domain (M)"** — `ep_size * expert_tp_size`
   must fit one domain under `ep_scope=node`. Reduce either, or use `ep_scope=global`.
-- **"Cross-node EP+ETP supports one ETP group per NVLink domain only"** — set `expert_tp_size` to the
-  EP members per domain and `ep_size` to the domain count (both quoted in the message), or use
-  `ep_scope=node`.
+- **"Cross-node EP+ETP supports one ETP group per NVLink domain only"** — set `expert_tensor_parallel_size`
+  to the EP members per domain and `expert_parallel_size` to the domain count (both quoted in the
+  message), or use `ep_scope=node`.
 - **"Sharded EP save (save_sharded_ep=True) is not supported with expert_tp_size=N"** — use the
   default gathered save.
 - **OOM** — raise `expert_tp_size`, or switch to EP+TP if attention is also a bottleneck (the two

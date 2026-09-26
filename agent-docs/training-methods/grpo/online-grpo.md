@@ -123,7 +123,7 @@ Weights are pushed before the **next** generation, not at the optimizer step: TR
 - QLoRA (`load_in_4bit` / `load_in_8bit`): bnb-packed storage corrupts the served policy.
 - GptOss sinks removed by the `flash_attention_2` `reset_sinks` reset, and `train_sinks: true`.
 - Model types in the client's `UNSERVABLE_MODEL_TYPES`, and EP families setting `_supports_weight_sync = False` ([per-family restrictions](../../parallelism/expert-parallelism.md#per-family-ep-restrictions)).
-- An EP family with no live EP wrapper: `ep_size: 1` with `use_grouped_gemm: false`.
+- An EP family with no live EP wrapper: `expert_parallel_size: 1` with `use_grouped_gemm: false`.
 - Live `bias_update` balancing state: the payload is parameters only.
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)
@@ -152,7 +152,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
 
 `halo launch rlvr <config> --nproc 7` builds the same `torchrun` line — the device split stays yours — landing on FSDP2 data parallelism. Add `--tensor_parallel_size` for dense TP or `--expert_parallel_size` for MoE.
 
-Set `ep_size` to the training-GPU count so the trainer ranks form **one** DeepEP group. Above `ep_size: 2` a group narrower than the NVLink domain is rejected ([DeepEP](../../infrastructure/deepep.md#ep-grouping-what-is-reliable)), and `num_experts` must divide by `ep_size` — so most rosters want a power-of-two split: trainer on `CUDA_VISIBLE_DEVICES=0,1,2,3` with `--expert_parallel_size=4`, server on `VLLM_CUDA_DEVICES=4,5,6,7`. Under EP+TP, `tp_size` must divide the NVLink domain and `ep_size` must be a multiple of it.
+Set `expert_parallel_size` to the training-GPU count so the trainer ranks form **one** DeepEP group. Above `expert_parallel_size: 2` a group narrower than the NVLink domain is rejected ([DeepEP](../../infrastructure/deepep.md#ep-grouping-what-is-reliable)), and `num_experts` must divide by `ep_size` — so most rosters want a power-of-two split: trainer on `CUDA_VISIBLE_DEVICES=0,1,2,3` with `--expert_parallel_size=4`, server on `VLLM_CUDA_DEVICES=4,5,6,7`. Under EP+TP, `tp_size` must divide the NVLink domain and `ep_size` must be a multiple of it.
 
 ### LoRA
 

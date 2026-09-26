@@ -36,9 +36,11 @@ constraints, not decoration.
 
 A few notes on the ones that bite:
 
-- `attn_implementation` — leave it unset and Halo picks the backend for your GPU
-  and model (FA4 on Blackwell, FA3 on Hopper, per-family fallbacks where a kernel
-  is known-broken). Most examples pin one anyway; copy the pin with the config.
+- `attn_implementation` — leave it unset and SFT, self-distillation and embedding
+  pick the backend for your GPU and model (FA4 on Blackwell, FA3 on Hopper, per-family
+  fallbacks where a kernel is known-broken). The padded-batch methods (preference,
+  reward, classification, teacher distillation, every GRPO) default to SDPA
+  instead. Most examples pin one anyway; copy the pin with the config.
 - `model_revision` pins a Hub commit, and `max_concurrent_loading` caps how many
   ranks per node load weights at once — unset it resolves to half the node's GPUs
   capped at 4, and `1` rescues a CPU-RAM-tight host.
@@ -95,7 +97,8 @@ things per trainer:
 | SFT, DPO, KTO, distillation | `max_length` only; DPO's `generation_max_prompt_length` (default 512) bounds eval-time samples, not training |
 | SMPO | shares carved out of `max_length` — an unset prompt takes half, the completion the rest |
 | Offline GRPO | independent truncation caps; set both and their sum becomes the tokenizer's `model_max_length` |
-| Online GRPO, async GRPO with environments | `max_prompt_length` is a dataset *filter* (over-long rows are dropped, not truncated); `max_completion_length` is the generation budget |
+| Online GRPO | `max_prompt_length` is a dataset *filter* (over-long rows are dropped, not truncated); `max_completion_length` is the generation budget |
+| Async GRPO with environments | `max_prompt_length` is the same filter; the per-turn generation budget is `rollout_max_tokens`, and a `max_completion_length` you set must equal it |
 
 The two online trainers declare no `max_length` at all, so the key fails to parse
 there; offline GRPO's parses and is then refused at trainer construction.
