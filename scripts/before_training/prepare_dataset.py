@@ -9,7 +9,9 @@ data formats and are not handled here.
 Usage:
     python scripts/before_training/prepare_dataset.py \\
         --input "s3://bucket/raw/my_dataset" --output "s3://bucket/preprocessed/my_dataset" \\
-        --model-name "Qwen/Qwen3-8B" --max-length 8192 [--pack-sequences] [--num-shards 64] [--vlm]
+        --model-name "Qwen/Qwen3-8B" --max-length 8192 \\
+        --assistant-message-template $'<|im_start|>assistant\\n' \\
+        [--pack-sequences | --vlm] [--test-size 0.01] [--num-shards 64]
 """
 
 import argparse
@@ -199,7 +201,9 @@ def parse_args():
         "--num-shards",
         type=int,
         default=1,
-        help="Number of shards to create (default: 1 = no sharding)",
+        help="Number of shards to create (default: 1 = unsharded: every rank loads the dataset whole and "
+        "the DataLoader splits it, at any data-parallel size). Above 1 each rank loads only its own shards, "
+        "which needs >= data_parallel_size shards and a test split",
     )
 
     parser.add_argument(
@@ -255,7 +259,8 @@ def parse_args():
     parser.add_argument(
         "--hf-token",
         default=None,
-        help="HuggingFace token for private repos",
+        help="HuggingFace token for the hf:// upload (default: the ambient login). The input and "
+        "tokenizer loads always use the ambient credentials (HF_TOKEN / huggingface-cli login)",
     )
 
     parser.add_argument(
@@ -316,7 +321,7 @@ def apply_tokenizer_overrides(tokenizer, args) -> None:
 
     Shared by the plain-tokenizer and VLM-processor paths so a tokenized dataset carries the same
     special tokens either way; a pad/eos mismatch changes what the collator masks. The same overrides
-    are recorded in the config (:func:`build_preprocessing_config`), which lets training verify the
+    are recorded in the ``PreprocessingConfig`` that ``main`` builds, which lets training verify the
     run's tokenizer matches the one that baked the rows.
     """
     if args.pad_token:
@@ -386,6 +391,13 @@ def load_input_dataset(args) -> DatasetDict:
         else:
             logger.info("No test split, using entire dataset as train")
             dataset = DatasetDict({"train": dataset})
+    elif "train" not in dataset:
+        # Only the train and test splits are baked, so a split set without train would publish an
+        # artifact holding no rows.
+        raise ValueError(
+            f"{args.input} has no 'train' split ({sorted(dataset)}). Point --input at the split to "
+            "prepare: an '@<split>' suffix on a Hub ID, or the split's own directory of a saved DatasetDict."
+        )
     elif args.test_size:
         # A local file, a save_to_disk dir or a split-less Hub id loads as a DatasetDict, the most
         # common input form. Splitting only the bare-Dataset case would drop --test-size.
@@ -395,8 +407,6 @@ def load_input_dataset(args) -> DatasetDict:
                 f"({sorted(set(dataset) & {'test', 'validation'})}). Drop the flag, or point --input "
                 "at the train split alone."
             )
-        if "train" not in dataset:
-            raise ValueError(f"--test-size needs a 'train' split to cut; {args.input} has {sorted(dataset)}.")
         logger.info(f"Creating train/test split with test_size={args.test_size}")
         dataset = DatasetDict({**dataset, **dataset["train"].train_test_split(args.test_size, seed=_SPLIT_SEED)})
 

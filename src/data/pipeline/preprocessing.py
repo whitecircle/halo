@@ -584,7 +584,8 @@ def preprocess_dataset(
     """Preprocess a dataset: tokenize, optionally pack, and optionally shard/save.
 
     For VLM, pass the processor instead of a tokenizer and set config.is_vlm=True. Returns a dict with
-    "train"/"test" datasets, "metadata", and (if output_dir given) "shard_indices".
+    "train"/"test" datasets, "metadata", and (if output_dir is given and num_shards > 1)
+    "shard_indices". At num_shards <= 1 the splits are saved unsharded (``save_to_disk``).
     """
     result = {}
 
@@ -606,6 +607,15 @@ def preprocess_dataset(
     else:
         train_data = dataset
         test_data = None
+
+    # Refused before the tokenization pass: training rejects a sharded dataset without a test split,
+    # while an unsharded one is handed a placeholder test split at load.
+    if output_dir is not None and config.num_shards > 1 and test_data is None:
+        raise ValueError(
+            f"num_shards={config.num_shards} writes a sharded dataset, which training refuses without a "
+            f"'test' split, and this input has none. Cut one with --test-size, or keep --num-shards at 1 "
+            f"for an unsharded dataset, which trains with a placeholder test split taken from train."
+        )
 
     if config.is_vlm:
         tokenize_fn = tokenize_vlm_dataset
@@ -666,26 +676,23 @@ def preprocess_dataset(
 
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
+        splits = {split: result[split] for split in ("train", "test") if split in result}
 
-        shard_indices = {}
-
-        # Test is sharded the same way as train: a split whose shards do not reach every DP rank
-        # leaves those ranks with an empty eval set, mismatching gather_for_metrics counts and
-        # hanging the eval.
-        for split in ("train", "test"):
-            if split not in result:
-                continue
-            index = shard_dataset(
-                result[split],
-                config.num_shards,
-                output_dir,
-                split,
-            )
-            shard_indices[split] = index
-            index.save(os.path.join(output_dir, split, SHARD_INDEX_FILE))
-
-        result["shard_indices"] = shard_indices
-        _warn_on_shard_count_ceiling(shard_indices, config.num_shards)
+        if config.num_shards > 1:
+            shard_indices = {}
+            # Test is sharded the same way as train: a split whose shards do not reach every DP rank
+            # leaves those ranks with an empty eval set, mismatching gather_for_metrics counts and
+            # hanging the eval.
+            for split, split_data in splits.items():
+                index = shard_dataset(split_data, config.num_shards, output_dir, split)
+                shard_indices[split] = index
+                index.save(os.path.join(output_dir, split, SHARD_INDEX_FILE))
+            result["shard_indices"] = shard_indices
+            _warn_on_shard_count_ceiling(shard_indices, config.num_shards)
+        else:
+            # No shard index: training then loads the whole dataset on every rank and its DataLoader
+            # splits the rows by data-parallel rank, so the artifact trains at any DP size.
+            DatasetDict(splits).save_to_disk(output_dir)
 
         metadata.save(os.path.join(output_dir, METADATA_FILE))
         logger.info(f"Saved metadata to {os.path.join(output_dir, METADATA_FILE)}")

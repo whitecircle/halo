@@ -9,7 +9,7 @@ from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, l
 from src.data.pipeline.preprocessed_metadata import is_preprocessed_dataset
 from src.data.pipeline.processing import coordinated_filter, missing_render_column_splits, require_render_column
 from src.data.probe_consensus import agree_probe_across_ranks
-from src.data.sources.paths import DATA_FILE_BUILDERS, parse_dataset_source, parse_hub_spec
+from src.data.sources.paths import DATA_FILE_BUILDERS, hub_repo_id, parse_dataset_source, parse_hub_spec
 from src.data.sources.s3_client import load_dataset_from_s3_uri
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_RAW_IMAGE_COLUMNS, carried_image_columns
@@ -708,6 +708,15 @@ def load_preprocessed_dataset(
     Pass the data-parallel rank/size, not global rank/world_size: CP/TP-group siblings must share
     data, while EP ranks (orthogonal to DP) get disjoint shards.
     """
+    if parse_dataset_source(path)[0] == "hf_hub":
+        # Refused on every rank alike, off the path string. ``load_dataset`` infers the Json builder
+        # from the saved tree's ``state.json`` sidecars and would hand back those as rows.
+        raise ValueError(
+            f"Pre-processed dataset {path} is on the Hub, which training does not read in place. "
+            f"Download it (hf download {hub_repo_id(path)} --repo-type dataset --local-dir <dir>) "
+            f"and point dataset at <dir>."
+        )
+
     if is_sharded_dataset_coordinated(path):
         logger.info(f"Loading sharded pre-processed dataset from {path}")
         logger.info(f"  Data parallel rank: {data_parallel_rank}/{data_parallel_size}")

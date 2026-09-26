@@ -70,7 +70,7 @@ overrides recorded in `metadata.json` and re-checked at training time — `--bos
   (`src/data/pipeline/preprocessed_metadata.py`) and **skips tokenization**. No config flag needed — point `dataset:` at the output.
 - **presharded** — sharded output has `shard_index.json`; the trainer computes
   `dataset_presharded = is_presharded_dataset_load(...)` and passes it so the DataLoader does **not**
-  re-shard already-split data. `--num-shards` **must be ≥ data_parallel_size**: a short train split
+  re-shard already-split data. `--num-shards` above 1 **must be ≥ data_parallel_size**: a short train split
   raises at load (`src/data/sources/sharded_dataset.py`), any other split warns — without the check
   a rank past the last shard would train on zero examples.
 

@@ -60,8 +60,9 @@ to the Hub or S3. Five flags decide whether the output is usable:
 
 - `--mode chat` (the default) reads the conversation field through the chat
   template; `--mode text` tokenizes `--text-field` raw for (continued)
-  pre-training. Either way the shard count must be at least your data-parallel
-  size.
+  pre-training. The default `--num-shards 1` writes one unsharded dataset that
+  trains at any data-parallel size; above 1 the shard count must be at least
+  your data-parallel size.
 - `--pack-sequences` turns packing on; without it the rows are tokenized and
   sharded one document each.
 - `--packing-strategy` then decides what happens to a document longer than
@@ -73,10 +74,10 @@ to the Hub or S3. Five flags decide whether the output is usable:
 - `--max-length` is stamped into the dataset metadata and must **equal** the
   training config's `max_length`. A mismatch either way raises at load, since
   rows are baked at prep time and never re-truncated.
-- `--test-size`. Without it a single-split input is written train-only: a
-  sharded output is then rejected at startup naming the missing split, and an
-  unsharded one trains with a placeholder test split warned in from the first
-  100 train rows.
+- `--test-size`. Without it a single-split input is written train-only: it then
+  trains with a placeholder test split warned in from the first 100 train rows,
+  and `--num-shards` above 1 is refused, since a sharded dataset needs a real
+  test split.
 
 `--tokenizer-backend gigatoken` swaps the HF tokenizer for a Rust bulk encoder,
 roughly 6× faster on UltraChat 200K with the Qwen3-0.6B tokenizer. It verifies
