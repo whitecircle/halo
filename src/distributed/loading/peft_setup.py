@@ -10,7 +10,6 @@ import fnmatch
 import warnings
 
 import torch
-from accelerate.logging import get_logger
 from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
 from peft.tuners.tuners_utils import BaseTunerLayer, _maybe_include_all_linear_layers, check_target_module_exists
 from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
@@ -32,8 +31,6 @@ from src.models.structure import (
     is_kbit_quantized,
     is_normalization_module,
 )
-
-logger = get_logger(__name__)
 
 _TORCH_LAYER_PACKAGE = "torch.nn.modules."
 # The forward-probe verdict cache key: a class can be grouped at one width and plain at another.

@@ -183,13 +183,9 @@ def cp_shift_against_full_labels(
     return cp_boundary_shift(logits, labels[:, start:end], boundary_labels, is_last_rank)
 
 
-def split_sequence_for_cp(
-    tensor: torch.Tensor,
-    cp_config: CPConfig,
-    seq_dim: int = 1,
-) -> torch.Tensor:
-    """Split a tensor's sequence dimension for context parallelism."""
+def split_sequence_for_cp(tensor: torch.Tensor, cp_config: CPConfig) -> torch.Tensor:
+    """Split a ``[batch, seq, ...]`` tensor's sequence dimension for context parallelism."""
     if cp_config.cp_size == 1:
         return tensor
-    start, end = cp_chunk_bounds(tensor.shape[seq_dim], cp_config.cp_rank, cp_config.cp_size)
-    return tensor.narrow(seq_dim, start, end - start).contiguous()
+    start, end = cp_chunk_bounds(tensor.shape[1], cp_config.cp_rank, cp_config.cp_size)
+    return tensor.narrow(1, start, end - start).contiguous()

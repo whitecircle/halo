@@ -1186,8 +1186,8 @@ class DistributedTrainerMixin(
                 f"meta device, so they hold no values at all: {meta_buffer_names[:20]}. Allocating "
                 f"them would run on uninitialized memory that also differs across ranks. The load "
                 f"path skipped finalize_loaded_model, or this buffer belongs to a family its fixes "
-                f"do not recompute — extend fix_rotary_inv_freq / fix_non_persistent_buffers "
-                f"(src/models/patches/buffer_fixes.py)."
+                f"do not recompute — extend the _ROTARY_FIXERS / _NON_PERSISTENT_FIXERS chains that "
+                f"finalize_loaded_model runs (src/models/patches/buffer_fixes.py)."
             )
 
         model.to(device)

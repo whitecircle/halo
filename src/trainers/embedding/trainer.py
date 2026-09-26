@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
-from accelerate.logging import get_logger
 from datasets import Dataset, DatasetDict, IterableDataset
 from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
@@ -54,8 +53,6 @@ from src.distributed.runtime import (
 from src.models.loading.config_levels import restore_special_token_ids
 from src.models.loading.tokenizer_setup import pristine_model_max_length
 from src.trainers.mixins.base import DistributedTrainerMixin
-
-logger = get_logger(__name__, log_level="INFO")
 
 # Metric encoding is a diagnostic re-forward under no_grad; a full batch would double peak activations.
 _METRIC_MAX_SAMPLES = 256

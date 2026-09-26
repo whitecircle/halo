@@ -4,7 +4,6 @@ import inspect
 from functools import cached_property
 
 import torch
-from accelerate.logging import get_logger
 from transformers import Trainer
 from trl import SFTTrainer
 from trl.trainer.utils import entropy_from_logits
@@ -14,8 +13,6 @@ from src.distributed.context_parallel.config import cp_chunk_bounds, cp_shift_ag
 from src.models.structure import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ctor_positions, ctor_value
-
-logger = get_logger(__name__, log_level="info")
 
 # TRL SFTTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
 _CTOR_POSITIONS = ctor_positions(SFTTrainer, "model", "args", "data_collator")

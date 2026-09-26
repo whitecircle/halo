@@ -8,7 +8,6 @@ separate dense reference are here too.
 import contextlib
 
 import torch
-from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedModel
 from trl import ModelConfig
 
@@ -29,8 +28,6 @@ from src.models.patches.attention import resolve_attn_implementation
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-
-logger = get_logger(__name__)
 
 
 def load_frozen_auxiliary_model(
