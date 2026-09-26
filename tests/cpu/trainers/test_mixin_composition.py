@@ -32,6 +32,7 @@ _OWNERSHIP = {
         "_optimizer_store",
         "_persist_lr_scheduler_for_resume",
         "_persist_router_balancing_biases",
+        "_persist_trainer_sidecars",
         "_restore_router_balancing_biases",
         "_rotate_checkpoints_after_sidecars",
         "_save_checkpoint",

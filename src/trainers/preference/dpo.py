@@ -100,11 +100,12 @@ _PP_PAIR_LOSSES: dict[str, Callable[[float, torch.Tensor, torch.Tensor, torch.Te
 }
 
 
-class DistributedDPOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsistentMixin, DPOTrainer):
+class DistributedDPOTrainer(PrecomputeRefLogpsRankConsistentMixin, DistributedTrainerMixin, DPOTrainer):
     """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
 
     ``PrecomputeRefLogpsRankConsistentMixin`` keeps ``precompute_ref_log_probs`` (the EP/TP
-    full-finetune reference path) from deadlocking on its rank-divergent disk cache. PP is
+    full-finetune reference path) from deadlocking on its rank-divergent disk cache and carries its
+    columns across a resume; it precedes ``DistributedTrainerMixin`` so its checkpoint hook wins. PP is
     precompute-only with the reference log-probs shipped as dataset columns; the PP contract is in
     ``_pp_loss_adapter``.
     """
@@ -125,6 +126,7 @@ class DistributedDPOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsi
                 "has no precompute_ref_log_probs branch, and the PP last-stage loss replaces TRL's "
                 "loss path entirely.",
             )
+        self._init_reference_resume(kwargs)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)

@@ -191,7 +191,7 @@ def load_reference_model_for_preference(
     # (``reject_pp_ref_model``), and without this branch a pure-PP run (pp>1, ep_group_size==1,
     # tp_size==1) loads a full dense reference on every rank before reaching that refusal.
     if parallelism_config.is_ep_mode or parallelism_config.is_tp_mode or parallelism_config.is_pp_mode:
-        # Precomputed log-probs come from the untrained policy; a resume re-derives them trained.
+        # Precomputed log-probs come from the untrained policy; a resume restores them from the checkpoint.
         if training_config.precompute_ref_log_probs:
             return None
         raise ValueError(

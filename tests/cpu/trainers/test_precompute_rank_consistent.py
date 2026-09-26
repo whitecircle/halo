@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 from accelerate import PartialState
+from datasets import Dataset, concatenate_datasets
 
 import src.trainers.preference.precompute as precompute_mod
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
@@ -40,10 +41,17 @@ def hash_module(model):
 
 
 class _FakeBase:
-    """Stands in for TRL's ``DPOTrainer``/``KTOTrainer``: records the cache key it would build."""
+    """Stands in for TRL's ``DPOTrainer``/``KTOTrainer``: records the cache key it would build and
+    appends the swept column, as TRL's concat does."""
+
+    _signature_columns = ["prompt_ids", "ref_logps"]
+
+    def _set_signature_columns_if_needed(self):
+        pass
 
     def _precompute_ref_logps(self, dataset, name, batch_size):
-        return (dataset._fingerprint, hash_module(self.model))
+        self.cache_key = (dataset._fingerprint, hash_module(self.model))
+        return concatenate_datasets([dataset, Dataset.from_dict({"ref_logps": [-1.0] * len(dataset)})], axis=1)
 
 
 class _FakeTrainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixin, _FakeBase):
@@ -52,6 +60,7 @@ class _FakeTrainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoader
     def __init__(self):
         self.model = object()
         self._dataset_presharded = False
+        self._init_reference_resume({})
         self.accelerator = SimpleNamespace(prepare_data_loader=lambda loader: loader, gather=lambda tensor: tensor)
 
     def _required_ref_logps_columns(self) -> tuple[str, ...]:
@@ -61,11 +70,11 @@ class _FakeTrainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoader
         return 0
 
 
-class _FakeDataset:
-    column_names = ["prompt"]  # no reference columns, so the sweep is not short-circuited
-
-    def __init__(self, fingerprint):
-        self._fingerprint = fingerprint
+def _fake_dataset(fingerprint: str) -> Dataset:
+    """Token rows with no reference columns, so the sweep is not short-circuited."""
+    dataset = Dataset.from_dict({"prompt_ids": [[1, 2], [3]]})
+    dataset._fingerprint = fingerprint
+    return dataset
 
 
 def _install_rank0_broadcast(monkeypatch):
@@ -75,23 +84,25 @@ def _install_rank0_broadcast(monkeypatch):
 
 def test_control_base_observes_divergent_key():
     """Without the mixin, the base sees this rank's own (divergent) fingerprint + hash."""
-    key = _FakeBase._precompute_ref_logps(_FakeTrainer(), _FakeDataset("FP1"), "train", 2)
-    assert key == ("FP1", "H1")
+    trainer = _FakeTrainer()
+    _FakeBase._precompute_ref_logps(trainer, _fake_dataset("FP1"), "train", 2)
+    assert trainer.cache_key == ("FP1", "H1")
 
 
 def test_mixin_collapses_both_key_inputs_to_rank0(monkeypatch):
     """The mixin must broadcast BOTH the dataset fingerprint AND the model hash to rank 0's value,
     so the cache path is identical on every rank."""
     _install_rank0_broadcast(monkeypatch)
-    key = _FakeTrainer()._precompute_ref_logps(_FakeDataset("FP1"), "train", 2)
+    trainer = _FakeTrainer()
+    trainer._precompute_ref_logps(_fake_dataset("FP1"), "train", 2)
     # Dropping either broadcast leaves this rank's "FP1"/"H1" — the regression that deadlocks EP/TP.
-    assert key == ("R0", "R0")
+    assert trainer.cache_key == ("R0", "R0")
 
 
 def test_mixin_pins_dataset_fingerprint_in_place(monkeypatch):
     """The dataset object's fingerprint is rewritten to rank 0's (TRL reads it again downstream)."""
     _install_rank0_broadcast(monkeypatch)
-    ds = _FakeDataset("FP1")
+    ds = _fake_dataset("FP1")
     _FakeTrainer()._precompute_ref_logps(ds, "train", 2)
     assert ds._fingerprint == "R0"
 
@@ -100,7 +111,7 @@ def test_hash_module_restored_after_precompute(monkeypatch):
     """The temporary ``hash_module`` patch must be reverted, even across repeated calls."""
     _install_rank0_broadcast(monkeypatch)
     original = hash_module
-    _FakeTrainer()._precompute_ref_logps(_FakeDataset("FP1"), "train", 2)
+    _FakeTrainer()._precompute_ref_logps(_fake_dataset("FP1"), "train", 2)
     assert sys.modules[__name__].hash_module is original
 
 
@@ -164,6 +175,7 @@ def test_dpo_skips_sweep_when_ref_columns_present(monkeypatch):
     monkeypatch.setattr(precompute_mod, "broadcast_from_rank0", _record_and_stop)
     trainer = DistributedDPOTrainer.__new__(DistributedDPOTrainer)
     trainer._dataset_presharded = False  # set by _init_distributed_config before TRL runs the sweep
+    trainer._init_reference_resume({})  # likewise, by the trainer's __init__
 
     class _ColumnsDataset:
         column_names = ["prompt_ids", "chosen_ids", "rejected_ids", "ref_chosen_logps", "ref_rejected_logps"]

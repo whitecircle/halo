@@ -52,6 +52,11 @@ class ScriptRuntime(NamedTuple):
     resume_checkpoint: str | None
     model_source: str
 
+    @property
+    def policy_from_checkpoint(self) -> bool:
+        """Whether the policy loads its weights from the resume checkpoint (a Path-B resume)."""
+        return self.resume_checkpoint is not None and self.model_source == self.resume_checkpoint
+
 
 def init_training_script(
     args,

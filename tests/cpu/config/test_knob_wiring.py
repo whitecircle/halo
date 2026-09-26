@@ -10,6 +10,7 @@ Run: pytest tests/cpu/config/test_knob_wiring.py
 
 import ast
 import dataclasses
+import importlib
 import inspect
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ from src.trainers.distillation.self_distillation import DistributedSelfDistillat
 from src.trainers.grpo.objective.logratio import ISMaskConfig
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.parallelism_args import parallelism_config_from_args
 from src.training.script_runner import (
@@ -464,6 +466,42 @@ def test_every_training_script_forwards_moe_balancing_to_its_trainer():
         str(script.relative_to(PROJECT_ROOT)) for script in _TRAINER_SCRIPTS if not _forwards_moe_balancing(script)
     ]
     assert not missing, f"these scripts do not forward the parsed moe_balancing to their trainer: {missing}"
+
+
+def _constructed_trainer_class(script: Path, call: ast.Call) -> type | None:
+    """The class ``call`` constructs, resolved through the script's own ``from ... import`` of it."""
+    name = getattr(call.func, "id", None)
+    for node in ast.walk(ast.parse(script.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.module and any(alias.name == name for alias in node.names):
+            return getattr(importlib.import_module(node.module), name)
+    return None
+
+
+def test_precompute_trainers_receive_the_resume_context():
+    """TRL runs the reference precompute inside the trainer's ``__init__``, before ``train()`` ever
+    sees the resume checkpoint. A script that does not hand the trainer ``resume_checkpoint`` and
+    ``policy_from_checkpoint`` leaves a Path-B resume sweeping the trained policy as its own
+    reference — the checkpoint's saved columns never read. The scripts are found through the class
+    hierarchy, so a new trainer on the precompute mixin is held to it too.
+    """
+    wired: dict[str, bool] = {}
+    for script in _TRAINER_SCRIPTS:
+        call = _trainer_call(script)
+        trainer_cls = _constructed_trainer_class(script, call)
+        if trainer_cls is None or not issubclass(trainer_cls, PrecomputeRefLogpsRankConsistentMixin):
+            continue
+        passed = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        wired[str(script.relative_to(PROJECT_ROOT))] = all(
+            isinstance(passed.get(field), ast.Attribute)
+            and passed[field].attr == field
+            and getattr(passed[field].value, "id", None) == "runtime"
+            for field in ("resume_checkpoint", "policy_from_checkpoint")
+        )
+    assert len(wired) >= 2, f"the scan found {sorted(wired)}, not the DPO and KTO scripts"
+    unwired = sorted(script for script, ok in wired.items() if not ok)
+    assert not unwired, (
+        f"these scripts do not hand their trainer runtime.resume_checkpoint/policy_from_checkpoint: {unwired}"
+    )
 
 
 def test_the_shared_bundle_carries_every_distributed_knob():

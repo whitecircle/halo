@@ -2,7 +2,8 @@
 
 Routes every write and every restore through :mod:`src.distributed.checkpoint` (the saver ladder,
 the loader, the per-rank optimizer shard store) and adds the LR-scheduler and
-router-balancing-bias sidecars, rotation deferred until they are on disk, and a parallelism-aware
+router-balancing-bias sidecars, a hook for a trainer's own, rotation deferred until they are on
+disk, and a parallelism-aware
 best-model load. Its zero-arg ``super()`` calls must resolve past every sibling mixin to the base
 Trainer, which ``tests/cpu/trainers/test_mixin_composition.py`` checks.
 """
@@ -180,17 +181,17 @@ class CheckpointingMixin:
                 f"save's collectives completed: {guard.reason}"
             )
         guard.reject()
+        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+        output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
         # save_only_model drops scheduler.pt on every mode, re-warming the LR from step 0 on resume.
         self._persist_lr_scheduler_for_resume(trial)
+        self._persist_trainer_sidecars(output_dir)
 
         # Pure TP skips FSDP2 but keeps per-rank TP optimizer shards; one optimizer.pt clobbers them.
         pure_tp = self.parallelism_config.is_tp_mode and not self._fsdp_wrapped
         if (not self._fsdp_wrapped and not pure_tp) or self.args.save_only_model:
             self._rotate_checkpoints_after_sidecars(trial)
             return
-
-        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-        output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
 
         # Sync before modifying checkpoint files (base Trainer's post-save I/O is async across ranks).
         barrier()
@@ -224,6 +225,15 @@ class CheckpointingMixin:
                 best_model_checkpoint=self.state.best_model_checkpoint,
                 use_mtime=True,
             )
+
+    def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
+        """Write a trainer's own resume state into ``checkpoint_dir``; none by default.
+
+        Called on every rank of every checkpoint save, after the base save's collectives and before
+        rotation, so a checkpoint is never rotated in ahead of its sidecars. An override fences its
+        save-rank write with :func:`barrier_on_exit`, and its trainer lists it ahead of
+        :class:`DistributedTrainerMixin` in its bases so this default does not shadow it.
+        """
 
     def _persist_lr_scheduler_for_resume(self, trial) -> None:
         """Write ``scheduler.pt`` even under ``save_only_model`` (which makes the base Trainer drop it).

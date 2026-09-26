@@ -250,6 +250,14 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--trainer dpo", "--trainer kto"),
         timeout=420,
     ),
+    # Four tiny-MoE builds and one checkpoint round-trip per row; the refusal phase raises on every
+    # rank together, so a rank-local raise would surface as a hang against the timeout.
+    "parallelism/ep/test_ep_preference_precompute_resume.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=("--trainer dpo", "--trainer kto"),
+        timeout=900,
+    ),
     "parallelism/ep/test_ep_pooled_head_trainers.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),

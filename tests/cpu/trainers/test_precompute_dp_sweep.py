@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from accelerate import PartialState
+from datasets import Dataset, concatenate_datasets
 from torch.utils.data import DataLoader, SequentialSampler
 
 PartialState()
@@ -41,20 +42,28 @@ def _dataloader() -> DataLoader:
     return DataLoader(dataset, batch_size=BATCH_SIZE, sampler=SequentialSampler(dataset), collate_fn=torch.tensor)
 
 
-def _fake_dataset() -> SimpleNamespace:
-    """The two attributes the mixin reads: the cache key it pins, and the columns it checks for
-    already-supplied reference log-probs (absent here, so the sweep runs)."""
-    return SimpleNamespace(_fingerprint="deadbeef", column_names=["prompt"])
+def _fake_dataset() -> Dataset:
+    """Token rows without reference log-probs, so the sweep runs."""
+    dataset = Dataset.from_dict({"prompt_ids": [[row] for row in range(DATASET_SIZE)]})
+    dataset._fingerprint = "deadbeef"
+    return dataset
 
 
 class _TrlLikeBase:
-    """Stands in for TRL's ``_precompute_ref_logps``: prepare a loader, gather every batch."""
+    """Stands in for TRL's ``_precompute_ref_logps``: prepare a loader, gather every batch, append
+    the gathered values as the reference column."""
+
+    _signature_columns = ["prompt_ids", "ref_logps"]
+
+    def _set_signature_columns_if_needed(self):
+        pass
 
     def _precompute_ref_logps(self, dataset, name, batch_size):
         loader = self.accelerator.prepare(_dataloader())
         self.observed_rows = [int(row) for batch in loader for row in batch]
         self.observed_gathers = [[int(row) for row in self.accelerator.gather(batch)] for batch in loader]
-        return dataset
+        gathered = [float(row) for step in self.observed_gathers for row in step]
+        return concatenate_datasets([dataset, Dataset.from_dict({"ref_logps": gathered})], axis=1)
 
 
 class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixin, _TrlLikeBase):
@@ -63,6 +72,7 @@ class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixi
     def __init__(self, rank: int, *, presharded: bool = False, world_chunks=None):
         self.parallelism_config = _parallelism_config(rank)
         self._dataset_presharded = presharded
+        self._init_reference_resume({})
         self._world_chunks = world_chunks or []
         self._gather_step = 0
         self.accelerator = SimpleNamespace(

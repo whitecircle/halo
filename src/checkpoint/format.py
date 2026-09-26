@@ -75,6 +75,9 @@ SCHEDULER_STATE_FILE = "scheduler.pt"
 # HF Trainer's replicated optimizer state, which the sharded modes deliberately replace.
 OPTIMIZER_STATE_FILES = ("optimizer.pt", "optimizer.bin")
 ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
+# The DPO/KTO ``precompute_ref_log_probs`` columns, per dataset split, with the row count and token
+# digest a resume verifies them against.
+REFERENCE_LOGPS_FILE = "reference_logps.pt"
 
 # PEFT adapter artifact filenames. ADAPTER_WEIGHT_NAMES is in load-preference order; PeftAdapterSaver
 # falls back to .bin, so detection must accept both.
@@ -92,8 +95,9 @@ _WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")
 # Foreign-framework exports, never weights this toolkit reads. The aux copy and the hub-download
 # ignore list share this tuple so they cannot disagree.
 _FOREIGN_EXPORT_SUFFIXES = (".pth", ".gguf", ".h5", ".msgpack", ".onnx", ".onnx_data", ".tflite", ".ot", ".mlmodel")
-# Exempt from that skip: dropping these restarts the LR schedule or zeroes the router biases.
-_RESUME_SIDECAR_FILES = (SCHEDULER_STATE_FILE, ROUTER_BALANCING_BIASES_FILE)
+# Exempt from that skip: dropping these restarts the LR schedule, zeroes the router biases, or leaves
+# a precompute resume with no untrained reference to restore.
+_RESUME_SIDECAR_FILES = (SCHEDULER_STATE_FILE, ROUTER_BALANCING_BIASES_FILE, REFERENCE_LOGPS_FILE)
 # Same exemption by prefix: losing ``rng_state_<rank>.pth`` re-draws every shuffle and dropout mask.
 _RESUME_SIDECAR_PREFIXES = ("rng_state",)
 # Vendor dumps of the same weights in a raw format (gpt-oss ships ``original/`` and ``metal/``):
@@ -416,8 +420,8 @@ def copy_checkpoint_aux_files(
     reads the card, and most callers run this copy after their weight pass.
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
-    preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``, ``rng_state_*``)
-    a resume-from-merged run restores; ``include_resume_sidecars=False`` drops them, for an artifact
+    preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``,
+    ``reference_logps.pt``, ``rng_state_*``) a resume-from-merged run restores; ``include_resume_sidecars=False`` drops them, for an artifact
     that describes no single run (an N-way merge).
 
     Subdirectories are copied whole, weight files included: a SentenceTransformer module directory

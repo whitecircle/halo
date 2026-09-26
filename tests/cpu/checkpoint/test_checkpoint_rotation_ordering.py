@@ -3,7 +3,8 @@
 
 HF Trainer's ``_save_checkpoint`` ends by rotating old checkpoints (an rmtree, honoring
 ``save_total_limit``); the mixin then writes its own sidecars — scheduler.pt under
-``save_only_model``, and the per-rank optimizer shards that REPLACE the base's rank-0-only
+``save_only_model``, the trainer's own (``_persist_trainer_sidecars``: the precomputed DPO/KTO
+reference log-probs), and the per-rank optimizer shards that REPLACE the base's rank-0-only
 optimizer.pt. With ``save_total_limit: 1`` that ordering opens a window where the previous
 checkpoint is already deleted and the new one has no optimizer state yet — a preemption there
 leaves exactly one checkpoint that warm-restarts the optimizer of a multi-day run. The mixin
@@ -99,6 +100,17 @@ class _Trainer(DistributedTrainerMixin, _RecordingBase):
     def _get_output_dir(self, trial=None):
         return self.run_dir
 
+    def _persist_trainer_sidecars(self, checkpoint_dir):
+        """Where the trainer-sidecar hook lands in the window: which directory it was handed, and
+        whether the previous checkpoint was still on disk when it wrote."""
+        self.events.append(
+            (
+                "trainer_sidecars",
+                os.path.relpath(checkpoint_dir, self.run_dir),
+                os.path.isdir(os.path.join(self.run_dir, "checkpoint-1")),
+            )
+        )
+
     def _optimizer_store(self):
         return self._shard_writer
 
@@ -138,7 +150,12 @@ def test_rotation_runs_after_the_optimizer_shards_are_on_disk(tmp_path, monkeypa
     # The whole window, in order: the base saved with rotation NEUTRALIZED; the shards were written
     # while optimizer.pt was still in place AND the previous checkpoint still existed (nothing to
     # lose at any preemption point); only then did rotation run, at the caller's real limit.
-    assert trainer.events == [("base_save", None), ("shards_written", True, True), ("rotate", 1)]
+    assert trainer.events == [
+        ("base_save", None),
+        ("trainer_sidecars", "checkpoint-2", True),
+        ("shards_written", True, True),
+        ("rotate", 1),
+    ]
     assert trainer.args.save_total_limit == 1, "the caller's limit must be restored"
 
     new_ckpt = os.path.join(str(tmp_path), "checkpoint-2")
@@ -177,7 +194,7 @@ def test_non_sharded_modes_still_rotate_after_the_super_call(tmp_path, monkeypat
 
     trainer._save_checkpoint(model=None, trial=None)
 
-    assert trainer.events == [("base_save", None), ("rotate", 1)]
+    assert trainer.events == [("base_save", None), ("trainer_sidecars", "checkpoint-2", True), ("rotate", 1)]
     assert not os.path.isdir(previous)
     assert os.path.isfile(os.path.join(str(tmp_path), "checkpoint-2", "optimizer.pt"))
 

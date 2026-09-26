@@ -58,11 +58,12 @@ _CTOR_POSITIONS = ctor_positions(KTOTrainer, "model", "args", "ref_model")
 _REF_LOGPS_COLUMN = "ref_logps"
 
 
-class DistributedKTOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsistentMixin, KTOTrainer):
+class DistributedKTOTrainer(PrecomputeRefLogpsRankConsistentMixin, DistributedTrainerMixin, KTOTrainer):
     """TRL's KTOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
 
     ``PrecomputeRefLogpsRankConsistentMixin`` keeps ``precompute_ref_log_probs`` (the EP/TP
-    full-finetune reference path) from deadlocking on its rank-divergent disk cache. PP is
+    full-finetune reference path) from deadlocking on its rank-divergent disk cache and carries its
+    columns across a resume; it precedes ``DistributedTrainerMixin`` so its checkpoint hook wins. PP is
     ``apo_zero_unpaired``-only and precompute-only with the reference log-probs shipped as a
     dataset column; the PP contract is in ``_pp_loss_adapter``.
     """
@@ -83,6 +84,7 @@ class DistributedKTOTrainer(DistributedTrainerMixin, PrecomputeRefLogpsRankConsi
             "load_distributed_model.",
         )
 
+        self._init_reference_resume(kwargs)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
         super().__init__(*args, **kwargs)

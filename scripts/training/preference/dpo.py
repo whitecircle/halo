@@ -153,6 +153,8 @@ def main():
         processing_class=processing_class,
         peft_config=peft_config,
         callbacks=callbacks,
+        resume_checkpoint=runtime.resume_checkpoint,
+        policy_from_checkpoint=runtime.policy_from_checkpoint,
         **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(

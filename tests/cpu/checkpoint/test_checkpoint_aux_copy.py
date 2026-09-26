@@ -3,13 +3,14 @@ directories ride whole.
 
 A merged directory is the mandated resume source for sharded EP/TP checkpoints
 (resolve_resume_weights_source), so the copy must keep ``scheduler.pt``,
-``router_balancing_biases.pt`` and every ``rng_state_<rank>.pth`` — dropping them silently
-re-warms the LR schedule from step 0, zeroes the router balancing biases, and re-draws every
-shuffle and dropout mask on resume — while still refusing to carry weight files that would
-shadow the freshly written safetensors. The refusal covers foreign-framework exports
-(``consolidated.*.pth``, ``.gguf``, ``.h5``, ``rust_model.ot``, ``*.tflite``) a hub source ships
-beside them: those are weights too, and copying them bloats every converted checkpoint. That
-``.pth`` sits on both sides is exactly why the sidecar exemption is by name, not by suffix.
+``router_balancing_biases.pt``, ``reference_logps.pt`` and every ``rng_state_<rank>.pth`` —
+dropping them re-warms the LR schedule from step 0, zeroes the router balancing biases, leaves a
+precompute run no untrained reference to restore, and re-draws every shuffle and dropout mask —
+while still refusing to carry weight files that would shadow the freshly written safetensors. The
+refusal covers foreign-framework exports (``consolidated.*.pth``, ``.gguf``, ``.h5``,
+``rust_model.ot``, ``*.tflite``) a hub source ships beside them: those are weights too, and
+copying them bloats every converted checkpoint. That ``.pth`` sits on both sides is exactly why the
+sidecar exemption is by name, not by suffix.
 
 Subdirectories are part of the artifact and copy whole, their own weights included: a
 SentenceTransformer module directory (``1_Pooling/``, ``2_Dense/``) or
@@ -62,6 +63,7 @@ SIDECARS = (
     "rng_state_0.pth",
     "scheduler.pt",
     "router_balancing_biases.pt",
+    "reference_logps.pt",
 )
 # The SentenceTransformer module layout an embedding EP save produces: modules.json names these
 # directories, and 2_Dense carries its OWN weights that no merge rewrites.
@@ -117,6 +119,7 @@ def test_resume_sidecars_survive_merge_copy(checkpoint_dir, tmp_path):
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
     assert (out / "scheduler.pt").exists(), "LR schedule must survive into the merged resume source"
     assert (out / "router_balancing_biases.pt").exists(), "router biases must survive into the merged resume source"
+    assert (out / "reference_logps.pt").exists(), "a precompute run's reference log-probs must survive the merge"
     # Same suffix as the foreign exports below, opposite verdict: a per-rank RNG state is what a
     # bit-reproducible resume replays from.
     assert (out / "rng_state_0.pth").exists(), "per-rank RNG state must survive into the resume source"
