@@ -85,7 +85,7 @@ switched off (expert-only EP LoRA has no adapter wrapper to switch off, so it ne
 `precompute_ref_log_probs: true`). Otherwise a second full model is loaded and stays resident for
 the whole run — except under expert or tensor parallelism, where that copy is refused outright and
 `precompute_ref_log_probs: true`, which takes the log-probs once from the untrained policy before
-step 1, is the way through. SMPO and KTO differ here: SMPO never loads one, KTO follows DPO's rules.
+step 1 and keeps them in the checkpoints for a resume, is the way through. SMPO and KTO differ here: SMPO never loads one, KTO follows DPO's rules.
 
 ## KTO
 

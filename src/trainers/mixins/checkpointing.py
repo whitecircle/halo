@@ -1,11 +1,10 @@
 """Checkpoint save/resume plus the sidecars the base Trainer does not handle.
 
 Routes every write and every restore through :mod:`src.distributed.checkpoint` (the saver ladder,
-the loader, the per-rank optimizer shard store) and adds the LR-scheduler and
-router-balancing-bias sidecars, a hook for a trainer's own, rotation deferred until they are on
-disk, and a parallelism-aware
-best-model load. Its zero-arg ``super()`` calls must resolve past every sibling mixin to the base
-Trainer, which ``tests/cpu/trainers/test_mixin_composition.py`` checks.
+the loader, the per-rank optimizer shard store) and adds the LR-scheduler and router-balancing-bias
+sidecars, a hook for a trainer's own, rotation deferred until they are on disk, and a
+parallelism-aware best-model load. Its zero-arg ``super()`` calls must resolve past every sibling
+mixin to the base Trainer, which ``tests/cpu/trainers/test_mixin_composition.py`` checks.
 """
 
 import inspect

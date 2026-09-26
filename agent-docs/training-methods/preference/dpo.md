@@ -36,12 +36,21 @@ No training-side prompt cap exists, so an over-long prompt eats its own completi
 Three shapes, decided by `load_reference_model_for_preference` (`src/distributed/loading/frozen_models.py`):
 
 - **PEFT** (`use_peft: true`) — no second model: the script passes a LoRA config, so the reference is the base with the adapter disabled. A trainer built by hand around an already-wrapped `PeftModel` gets a frozen `ref` adapter copy instead.
-- **EP / TP / PP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1; a resume re-derives them from the trained one.
+- **EP / TP / PP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1, and a resume restores them from the checkpoint ([below](#resuming-a-precompute-run)).
 - **A frozen copy** — every other shape, precompute on plain data parallelism included. It mirrors the policy load (same revision, attention validator, sink policy) and stays resident for the run.
 
 Under EP, TP or PP a frozen copy is rejected outright — the reference is never parallelized — so full fine-tuning there needs precompute. TP rejects PEFT too, leaving precompute as its only shape. Expert-only native EP LoRA needs it as well: with no `PeftModel` nothing switches the adapters off. A mixed attention + expert adapter keeps the implicit reference, since `disable_adapter()` drops the expert adapters too.
 
 A policy carrying live attention sinks (`reset_sinks: false`) is refused whenever a reference model reaches the trainer, single GPU included. Only PEFT, or EP/TP/PP with precompute, leaves none.
+
+### Resuming a precompute run
+
+The sweep runs inside the trainer's `__init__`, over the policy when no separate reference exists, and every rank attaches the gathered columns in memory, so per-node storage needs no shared cache file. A [Path-B resume](../../reference/checkpoints.md#resuming-training) builds the policy from the checkpoint before that, so a sweep there would score the trained weights and zero every log-ratio. Every checkpoint of a sweeping run therefore carries the columns in `reference_logps.pt`: one entry per split (`train`, then each eval dataset by name) with its row count, a digest of each token-id column the reference read, and the settings that shape the values (`max_length`, plus `truncation_mode` and `ld_alpha` for DPO). The script hands the trainer the resume checkpoint, and the precompute attaches the saved columns instead of sweeping (`src/trainers/preference/precompute.py`).
+
+- A saved split whose row count, token ids, settings or columns (a KL column a KTO loss now needs) differ from the run's raises.
+- A checkpoint with no entry for a split raises when the policy was built from the checkpoint's weights and no separate reference exists. A resume that builds the policy from the base (an adapter checkpoint), or that has a frozen reference copy, sweeps untrained weights and proceeds.
+- To give a checkpoint without the file one, run the same config for one step from the base into a scratch `output_dir` (`--max_steps=1 --save_strategy=steps --save_steps=1 --save_only_model=true --resume_from_checkpoint=false`) and copy its `checkpoint-1/reference_logps.pt` into the checkpoint; the resume validates it like its own.
+- Columns the dataset already carries are read from it and not persisted.
 
 Pipeline parallelism is [not yet available in this release](../../parallelism/pipeline-parallelism.md); the shipped PP gates (`src/trainers/mixins/pp_gates.py`) already pin its contract for this trainer — `precompute_ref_log_probs: true` with the `ref_chosen_logps` / `ref_rejected_logps` columns already in the train dataset, and in the eval dataset whenever one is passed (`test_size` alone creates one, whatever `eval_strategy` says); `loss_type` ∈ {`sigmoid`, `hinge`, `ipo`} with `f_divergence_type: reverse_kl`; and no `use_weighting`, `ld_alpha` or `compute_metrics`.
 
@@ -76,7 +85,7 @@ torchrun --nproc_per_node=2 scripts/training/preference/dpo.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py` (the adapter-disabled reference of a mixed attention + expert-LoRA run under EP is the frozen base).
+Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py` (the adapter-disabled reference of a mixed attention + expert-LoRA run under EP is the frozen base), and `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (an EP precompute resume keeps the untrained reference; DPO and KTO).
 
 ## What to watch
 
@@ -90,3 +99,5 @@ Failure signatures:
 
 - A reference-model raise on a live-sinks policy — `use_peft: true`, or precompute under EP/TP/PP. `beta: 0` does not help: it changes the loss, not whether a reference loads.
 - "Cannot hold a separate dense reference" under EP/TP/PP — set `precompute_ref_log_probs: true` or `--use_peft`.
+- "Cannot resume precompute_ref_log_probs" — the checkpoint's `reference_logps.pt` is missing or lacks that split. Recover it with the one-step run [above](#resuming-a-precompute-run), or put the reference columns (computed on the base model) in the dataset.
+- "does not belong to this dataset" on resume — the resumed data or reference settings differ from the saving run's (dataset, split, chat template, tokenizer, `max_length`, `truncation_mode`, `ld_alpha`).

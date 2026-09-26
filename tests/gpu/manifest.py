@@ -242,8 +242,8 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_etp_weight_sync.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "etp", "moe", "gptoss"), timeout=600
     ),
-    # The failure mode is a hang (a rank-divergent cache path leaves non-main ranks short of the
-    # sweep's collectives), so the timeout is the assertion: 420s covers the sweep and fails fast.
+    # The failure mode is a hang (a rank that cannot read the main process's cache file fails while
+    # its peer waits in the next collective), so the timeout is the assertion: 420s covers the sweep.
     "parallelism/ep/test_ep_preference_precompute.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),

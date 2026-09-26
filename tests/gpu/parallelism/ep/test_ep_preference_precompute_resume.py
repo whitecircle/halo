@@ -60,9 +60,11 @@ MAX_LENGTH = 96
 # re-derived the reference from the trained weights lands visibly elsewhere.
 LEARNING_RATE = 5e-4
 # The resumed first step sees the continuous run's weights (bf16, saved and reloaded exactly), batch
-# and reference columns, so only kernel nondeterminism separates the two losses.
+# and reference columns in the same process: measured |delta| 0.0 for DPO and KTO on B300.
 LOSS_ATOL = 1e-3
-# The control must miss by at least this much, or the comparisons above prove nothing.
+# The control must miss by at least this much, or the comparisons above prove nothing. Measured on
+# B300: first-step loss off by 0.30 (DPO, at ln 2) and 0.021 (KTO, at 0.5); reference columns off
+# by 16 (DPO) and 13 (KTO) nats.
 CONTROL_MIN_LOSS_DELTA = 10 * LOSS_ATOL
 CONTROL_MIN_LOGP_DELTA = 1.0
 # The real Qwen tokenizer tokenizes the text rows, so the tiny model must span its full id range.
@@ -166,8 +168,11 @@ def run(ctx):
     ckpt_dir = os.path.join(train_out, f"checkpoint-{SAVE_AT_STEP}")
     bare_ckpt_dir = os.path.join(shared, "checkpoint_without_sidecar")
     if ctx.rank == 0:
+        # A standalone rerun gets the same MASTER_PORT-keyed dir; phase 4 copies into a fixed path.
+        shutil.rmtree(shared, ignore_errors=True)
+        ctx.on_teardown(lambda: shutil.rmtree(shared, ignore_errors=True))
         _build_tiny_checkpoint(tiny_dir)
-        # One arrow directory every rank loads: TRL's sweep cache lives beside it.
+        # Built once for every rank and phase, so each phase tokenizes the same rows.
         Dataset.from_dict(_build_rows(kind)).save_to_disk(dataset_dir)
     ctx.barrier()
     pc = ParallelismConfig(ep_size=EP_SIZE)

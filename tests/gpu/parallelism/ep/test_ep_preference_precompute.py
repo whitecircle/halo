@@ -2,30 +2,28 @@
 """DPO / KTO reference-log-prob PRECOMPUTE under Expert Parallelism (ep2, tiny Qwen3-MoE).
 
 ``precompute_ref_log_probs`` is the only way to run a *full-finetune* DPO/KTO under EP: the
-reference model cannot be parallelized, so TRL sweeps the EP-patched policy once inside
-``__init__`` and caches the log-probs as dataset columns. TRL keys that disk cache on
-``Hasher.hash((dataset._fingerprint, hash_module(model)))`` — and under EP ``hash_module`` hashes a
-RANK-SHARDED expert state dict, so every rank derives a DIFFERENT cache path. TRL writes the file on
-the main process only and has every rank read it back, so a divergent key means the non-main ranks
-block on a path nobody wrote and the next EP collective deadlocks with no exception anywhere.
-``PrecomputeRefLogpsRankConsistentMixin`` collapses both key inputs to rank 0's value.
+reference model cannot be parallelized, so the EP-patched policy is swept once inside ``__init__``
+and the log-probs become dataset columns. TRL hands them to the ranks through an Arrow cache file
+the main process writes beside the dataset and every rank reads back, which fails wherever the
+ranks do not share that directory. ``PrecomputeRefLogpsRankConsistentMixin`` runs the sweep itself
+and attaches the gathered columns in memory on every rank.
 
 This test pins that seam three ways, and fails when any of them breaks:
 
-  * **the mechanism** — the cache path every rank derives inside the sweep must be identical, and
-    the file must exist on every rank afterwards. Its anti-vacuity control is the raw
-    ``hash_module`` of the EP-patched model, which must DIVERGE across ranks: that proves the guard
-    is load-bearing here rather than trivially satisfied by a rank-identical model.
+  * **the mechanism** — each rank loads the dataset from its OWN directory, the shape of per-node
+    storage, so no rank can read a file another rank wrote beside its copy. Every rank must end
+    with the same columns.
   * **the values** — the cached columns must equal per-sequence reference log-probs recomputed on a
     DENSE, un-EP-patched copy of the same seeded weights, row by row, under TRL's exact shifted
     completion-mask convention. This catches a sweep that silently ran on the wrong rows (a
     mis-ordered ``gather_for_metrics``), on a stale cache from another model, or that copied rank
     0's log-probs onto rank r's rows. Anti-vacuity: the same comparison with chosen/rejected swapped
     (DPO) or against the mismatched KL completions (KTO) must MISS by orders of magnitude.
-  * **no deadlock** — construction and a short ``train()`` complete. A re-deadlock does not raise,
-    it wedges, so the manifest timeout is the assertion; keep it tight.
+  * **no deadlock** — construction and a short ``train()`` complete. A rank failing on a missing
+    file leaves its peers in the next collective, so the manifest timeout is the assertion; keep it
+    tight.
 
-Also pins the pre-sharded rejection (per-rank shards + one rank-0-authoritative cache = every
+Also pins the pre-sharded rejection (per-rank shards + one gathered set of log-probs = every
 non-zero rank training on rank 0's log-probs).
 
 Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_preference_precompute.py \
@@ -38,8 +36,6 @@ import sys
 
 import torch
 import torch.distributed as dist
-import trl.experimental.kto.kto_trainer as trl_kto_module
-import trl.trainer.dpo_trainer as trl_dpo_module
 from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForCausalLM
 from trl import DPOConfig, KTOConfig
@@ -50,9 +46,6 @@ from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
-
-# The module whose ``hash_module`` symbol keys the cache — the one the guard patches per trainer.
-TRL_MODULES = {"dpo": trl_dpo_module, "kto": trl_kto_module}
 
 EP_SIZE = 2
 N_ROWS = 16
@@ -108,21 +101,14 @@ def build_rows(kind: str) -> dict:
     return rows
 
 
-def shared_dataset(kind: str, ctx) -> Dataset:
-    """A dataset backed by ONE arrow directory every rank loads from.
+def rank_private_dataset(kind: str, ctx, subdir: str) -> Dataset:
+    """The dataset loaded from this rank's OWN arrow directory, as per-node storage leaves it.
 
-    Required, not incidental: TRL's cache lives beside the dataset's own arrow files, and the whole
-    contract under test is that rank 0 writes a file the other ranks then read. An in-memory dataset
-    gets a random cache path per call and a per-rank directory gets a private one, so either would
-    make the sweep unreachable rather than exercising it — the production shape is a shared
-    ``HF_DATASETS_CACHE``.
+    TRL's cache lives beside the dataset's arrow files, so here the main process's cache file is
+    invisible to every other rank: a sweep that hands the columns over through it fails on them.
     """
-    directories: list = [None] * ctx.world_size
-    dist.all_gather_object(directories, ctx.output_dir)
-    path = os.path.join(directories[0], f"{kind}_dataset")
-    if ctx.rank == 0:
-        Dataset.from_dict(build_rows(kind)).save_to_disk(path)
-    dist.barrier()
+    path = os.path.join(ctx.output_dir, subdir, f"{kind}_dataset")
+    Dataset.from_dict(build_rows(kind)).save_to_disk(path)
     return load_from_disk(path)
 
 
@@ -171,44 +157,13 @@ def build_args(kind: str, output_dir: str):
     return (DPOConfig if kind == "dpo" else KTOConfig)(max_length=MAX_LENGTH, **common)
 
 
-def spying_trainer_class(kind: str, recorded: list[str]):
-    """The real trainer with the cache path it derives inside the sweep recorded.
-
-    ``Dataset._get_cache_file_path`` is spied only for the duration of the sweep so the surrounding
-    ``map`` calls (which legitimately use their own fingerprints) stay out of the record. The
-    subclass is a subclass of ``PrecomputeRefLogpsRankConsistentMixin``, which is exactly the class
-    set ``_defining_module`` skips — so wrapping here cannot displace the guard it is measuring.
-    """
-    base = DistributedDPOTrainer if kind == "dpo" else DistributedKTOTrainer
-
-    class SpyingTrainer(base):
-        def _precompute_ref_logps(self, dataset, name, batch_size):
-            original = Dataset._get_cache_file_path
-
-            def spy(dataset_self, fingerprint):
-                path = original(dataset_self, fingerprint)
-                recorded.append(path)
-                return path
-
-            Dataset._get_cache_file_path = spy
-            try:
-                return super()._precompute_ref_logps(dataset, name, batch_size)
-            finally:
-                Dataset._get_cache_file_path = original
-
-    return SpyingTrainer
+TRAINERS = {"dpo": DistributedDPOTrainer, "kto": DistributedKTOTrainer}
 
 
 def all_ranks_agree(value, ctx) -> bool:
     gathered: list = [None] * ctx.world_size
     dist.all_gather_object(gathered, value)
     return all(peer == gathered[0] for peer in gathered)
-
-
-def any_rank_differs(value, ctx) -> bool:
-    gathered: list = [None] * ctx.world_size
-    dist.all_gather_object(gathered, value)
-    return any(peer != gathered[0] for peer in gathered)
 
 
 @gpu_test_main(exact_world_size=2, prefix="ep_preference_precompute")
@@ -227,34 +182,14 @@ def run(ctx):
     patch_moe_model_for_ep(model, config.create_ep_config())
     create_ep_buffers(model)
 
-    # ── Anti-vacuity for the mechanism check: the raw cache-key input MUST diverge across ranks.
-    # If it did not (a dense model, or EP that never sharded the experts), the identical-path check
-    # below would pass with the guard deleted and prove nothing.
-    trl_module = TRL_MODULES[kind]
-    hash_module = trl_module.hash_module
-    checks["raw_model_hash_diverges_across_ranks"] = any_rank_differs(hash_module(model), ctx)
-
-    dataset = shared_dataset(kind, ctx)
-    args = build_args(kind, ctx.output_dir)
-    recorded: list[str] = []
-    trainer = spying_trainer_class(kind, recorded)(
+    trainer = TRAINERS[kind](
         model=model,
-        args=args,
-        train_dataset=dataset,
+        args=build_args(kind, ctx.output_dir),
+        train_dataset=rank_private_dataset(kind, ctx, "train"),
         processing_class=tokenizer,
         parallelism_config=config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
-
-    # ── The mechanism: one cache path, derived identically everywhere, written by rank 0, present
-    # for all. This is the deadlock precondition; with the guard removed the paths fork on the
-    # sharded expert hash and the non-main ranks read a file nobody wrote.
-    checks["sweep_derived_a_cache_path"] = bool(recorded)
-    cache_path = recorded[0] if recorded else ""
-    checks["precompute_cache_path_identical_across_ranks"] = all_ranks_agree(cache_path, ctx)
-    checks["precompute_cache_file_exists_on_every_rank"] = os.path.exists(cache_path)
-    # The patched symbol is restored, so nothing downstream inherits a broadcasting hash.
-    checks["hash_module_restored_after_sweep"] = trl_module.hash_module is hash_module
 
     # ── The values: the cached columns vs a DENSE reference over the trainer's OWN tokenized rows.
     prepared = trainer.train_dataset
@@ -292,7 +227,7 @@ def run(ctx):
         # broken reference trivially).
         checks[f"{column}_finite"] = bool(torch.isfinite(actual).all())
         checks[f"{column}_nondegenerate"] = bool(actual.std() > 1.0 and actual.abs().min() > 1.0)
-        # Every rank must hold rank 0's values byte-for-byte (they all read one cache file).
+        # Every rank must hold the same values byte-for-byte, each from its own gather.
         checks[f"{column}_identical_across_ranks"] = all_ranks_agree(actual.tolist(), ctx)
         if column in controls:
             control_error = max_relative_error(
@@ -310,13 +245,13 @@ def run(ctx):
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    # ── Pre-sharded data + one rank-0-authoritative cache would train every non-zero rank on rank
-    # 0's log-probs; that must raise rather than silently mis-train.
+    # ── Pre-sharded data + one gathered set of log-probs would train every non-zero rank on rank 0's
+    # log-probs; that must raise rather than silently mis-train.
     try:
-        spying_trainer_class(kind, [])(
+        TRAINERS[kind](
             model=model,
             args=build_args(kind, ctx.output_dir + "/presharded"),
-            train_dataset=shared_dataset(kind, ctx),
+            train_dataset=rank_private_dataset(kind, ctx, "presharded"),
             processing_class=tokenizer,
             parallelism_config=config,
             dataset_presharded=True,

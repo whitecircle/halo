@@ -421,8 +421,9 @@ def copy_checkpoint_aux_files(
 
     Skips every top-level weight file and safetensors index, which the caller writes fresh, but
     preserves the resume sidecars (``scheduler.pt``, ``router_balancing_biases.pt``,
-    ``reference_logps.pt``, ``rng_state_*``) a resume-from-merged run restores; ``include_resume_sidecars=False`` drops them, for an artifact
-    that describes no single run (an N-way merge).
+    ``reference_logps.pt``, ``rng_state_*``) a resume-from-merged run restores;
+    ``include_resume_sidecars=False`` drops them, for an artifact that describes no single run (an
+    N-way merge).
 
     Subdirectories are copied whole, weight files included: a SentenceTransformer module directory
     carries weights no caller rewrites, and filtering them out leaves ``modules.json`` pointing at

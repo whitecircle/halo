@@ -103,11 +103,11 @@ _PP_PAIR_LOSSES: dict[str, Callable[[float, torch.Tensor, torch.Tensor, torch.Te
 class DistributedDPOTrainer(PrecomputeRefLogpsRankConsistentMixin, DistributedTrainerMixin, DPOTrainer):
     """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
 
-    ``PrecomputeRefLogpsRankConsistentMixin`` keeps ``precompute_ref_log_probs`` (the EP/TP
-    full-finetune reference path) from deadlocking on its rank-divergent disk cache and carries its
-    columns across a resume; it precedes ``DistributedTrainerMixin`` so its checkpoint hook wins. PP is
-    precompute-only with the reference log-probs shipped as dataset columns; the PP contract is in
-    ``_pp_loss_adapter``.
+    ``PrecomputeRefLogpsRankConsistentMixin`` runs ``precompute_ref_log_probs`` (the EP/TP
+    full-finetune reference path) on the DP axis, attaches its columns in memory on every rank and
+    carries them across a resume; it precedes ``DistributedTrainerMixin`` so its checkpoint hook
+    wins. PP is precompute-only with the reference log-probs shipped as dataset columns; the PP
+    contract is in ``_pp_loss_adapter``.
     """
 
     _tag_names = ["trl", "dpo"]
@@ -207,6 +207,14 @@ class DistributedDPOTrainer(PrecomputeRefLogpsRankConsistentMixin, DistributedTr
     def _required_ref_logps_columns(self) -> tuple[str, ...]:
         """Both columns TRL's DPO sweep would write; present ⇒ the sweep is skipped."""
         return _REF_LOGPS_COLUMNS
+
+    def _reference_settings(self) -> dict:
+        """The collator's truncation and ``ld_alpha``'s reshaping of the summed reference log-probs."""
+        return {
+            "max_length": self.args.max_length,
+            "truncation_mode": self.args.truncation_mode,
+            "ld_alpha": self.ld_alpha,
+        }
 
     def _pp_loss_adapter(self) -> PPLossAdapter:
         """DPO's pipeline-loss contract: interleaved pairs + dataset-precomputed reference log-probs.

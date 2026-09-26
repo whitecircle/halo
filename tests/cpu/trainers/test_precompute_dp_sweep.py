@@ -1,10 +1,10 @@
 """``PrecomputeRefLogpsRankConsistentMixin`` pins TRL's reference sweep to the data-parallel axis.
 
-TRL builds the sweep's loader with ``accelerator.prepare`` and reassembles the results with
-``accelerator.gather``, both keyed on the GLOBAL rank. The sweep runs inside TRL's ``__init__``, when
-the model already carries its load-time TP attention shards and EP/ETP expert wrappers, so siblings
-forwarding different rows hit shape-coupled collectives. These tests drive the mixin over a stub base
-shaped like TRL's ``_precompute_ref_logps``.
+The sweep builds its loader with ``accelerator.prepare`` and reassembles the results with
+``accelerator.gather_for_metrics``, both keyed on the GLOBAL rank. It runs inside TRL's ``__init__``,
+when the model already carries its load-time TP attention shards and EP/ETP expert wrappers, so
+siblings forwarding different rows hit shape-coupled collectives. These tests drive the mixin's sweep
+over a stub reference forward.
 """
 
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from accelerate import PartialState
-from datasets import Dataset, concatenate_datasets
+from datasets import Dataset
 from torch.utils.data import DataLoader, SequentialSampler
 
 PartialState()
@@ -49,25 +49,27 @@ def _fake_dataset() -> Dataset:
     return dataset
 
 
-class _TrlLikeBase:
-    """Stands in for TRL's ``_precompute_ref_logps``: prepare a loader, gather every batch, append
-    the gathered values as the reference column."""
+class _ReferenceForward:
+    """Stands in for TRL's per-batch reference forward: each row's log-prob is its row index, and
+    the rows this rank forwarded are recorded. The KL term is ``None``, as on a KL-free KTO loss."""
 
     _signature_columns = ["prompt_ids", "ref_logps"]
+    ref_model = None
+    args = SimpleNamespace(dataloader_num_workers=0, dataloader_pin_memory=False, resume_from_checkpoint=None)
 
     def _set_signature_columns_if_needed(self):
         pass
 
-    def _precompute_ref_logps(self, dataset, name, batch_size):
-        loader = self.accelerator.prepare(_dataloader())
-        self.observed_rows = [int(row) for batch in loader for row in batch]
-        self.observed_gathers = [[int(row) for row in self.accelerator.gather(batch)] for batch in loader]
-        gathered = [float(row) for step in self.observed_gathers for row in step]
-        return concatenate_datasets([dataset, Dataset.from_dict({"ref_logps": gathered})], axis=1)
+    def data_collator(self, rows):
+        return torch.tensor([row["prompt_ids"][0] for row in rows])
+
+    def compute_ref_log_probs(self, batch):
+        self.observed_rows.extend(int(row) for row in batch)
+        return batch.float(), None
 
 
-class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixin, _TrlLikeBase):
-    """Real mixin over a TRL-shaped base, with a world gather simulated from all ranks' shards."""
+class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixin, _ReferenceForward):
+    """Real mixin over a stub reference forward, with a world gather simulated from all ranks' shards."""
 
     def __init__(self, rank: int, *, presharded: bool = False, world_chunks=None):
         self.parallelism_config = _parallelism_config(rank)
@@ -75,6 +77,7 @@ class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixi
         self._init_reference_resume({})
         self._world_chunks = world_chunks or []
         self._gather_step = 0
+        self.observed_rows: list[int] = []
         self.accelerator = SimpleNamespace(
             device=torch.device("cpu"),
             split_batches=False,
@@ -88,10 +91,15 @@ class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixi
             prepare=lambda loader: self.accelerator.prepare_data_loader(loader),
             prepare_data_loader=self._unpinned_prepare_data_loader,
             gather=self._simulated_world_gather,
+            # accelerate's gather_for_metrics gathers through ``gather``, so the DP scoping applies.
+            gather_for_metrics=lambda data: self.accelerator.gather(data),
         )
 
     def _required_ref_logps_columns(self) -> tuple[str, ...]:
         return ("ref_logps",)
+
+    def _reference_settings(self) -> dict:
+        return {}
 
     def get_data_parallel_size(self) -> int:
         return self.parallelism_config.data_parallel_size
@@ -108,11 +116,11 @@ class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixi
             loader, num_processes=WORLD_SIZE, process_index=self.parallelism_config.global_rank
         )
 
-    def _simulated_world_gather(self, tensor):
+    def _simulated_world_gather(self, outputs):
         """Concatenate every rank's chunk for this step, in global-rank order (what NCCL returns)."""
         chunks = self._world_chunks[self._gather_step]
         self._gather_step += 1
-        return torch.cat(chunks)
+        return tuple(torch.cat(chunks).float() for _ in outputs)
 
 
 def _dp_shard_batches(rank: int) -> list[torch.Tensor]:
@@ -146,10 +154,10 @@ def test_sweep_loader_shards_by_dp_rank_not_global_rank():
 
 def test_sweep_gather_deduplicates_siblings_into_dataset_order():
     trainer = _Trainer(PROBE_RANK, world_chunks=_world_chunks_per_step())
-    trainer._precompute_ref_logps(_fake_dataset(), "train", BATCH_SIZE)
+    prepared = trainer._precompute_ref_logps(_fake_dataset(), "train", BATCH_SIZE)
 
-    flat = [row for step in trainer.observed_gathers for row in step]
-    assert flat == list(range(DATASET_SIZE)), "gathered log-probs must land in dataset order"
+    attached = [int(value) for value in prepared["ref_logps"]]
+    assert attached == list(range(DATASET_SIZE)), "gathered log-probs must land in dataset order"
 
 
 def test_sweep_restores_the_accelerator_hooks():
@@ -173,12 +181,12 @@ def test_presharded_dataset_is_rejected():
 def test_preference_trainers_supply_the_sweep_the_mixin_enters(trainer_cls):
     """``_Trainer`` above stubs only the TRL base — it composes the REAL two mixins, so everything
     this file proves is proved about that pairing, and the production trainers must be that pairing.
-    ``_precompute_ref_logps`` enters ``self.data_parallel_sweep()``, which the rank-consistent mixin
-    does not define: a trainer without the dataloader mixin dies with an AttributeError inside TRL's
+    ``_precompute_ref_logps`` enters ``self.data_parallel_sweep()``, which the precompute mixin does
+    not define: a trainer without the dataloader mixin dies with an AttributeError inside TRL's
     ``__init__``, and one that shadowed the sweep would silently run on the global-rank axis again.
 
     The other half of the wiring — the mixin's MRO position ahead of the concrete TRL trainer — is
-    pinned by ``test_precompute_rank_consistent.py::test_distributed_trainers_use_the_mixin``.
+    pinned by ``test_precompute_in_memory_attach.py::test_the_trainers_route_the_precompute_through_the_mixin``.
     """
     assert issubclass(trainer_cls, DataParallelDataLoaderMixin)
     assert trainer_cls.data_parallel_sweep is DataParallelDataLoaderMixin.data_parallel_sweep

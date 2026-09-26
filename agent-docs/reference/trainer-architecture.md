@@ -9,7 +9,7 @@ composes its seven sibling sub-mixins:
 
 | Sub-mixin | Owns |
 |---|---|
-| `CheckpointingMixin` | Save / resume, plus the LR-scheduler and router-balancing-bias sidecars |
+| `CheckpointingMixin` | Save / resume, plus the LR-scheduler and router-balancing-bias sidecars and a per-trainer sidecar hook |
 | `DataParallelDataLoaderMixin` | Parallelism-aware DP dataloaders |
 | `EpIntrospectionMixin` | EP module/param discovery, EP-safe gradient checkpointing |
 | `GradientSyncMixin` | The per-mode FSDP2 wrap, the QLoRA / deferred-EP / TP-replicated grad sweeps, the EP/DTensor-aware global-norm clips |
@@ -442,6 +442,9 @@ Around it the mixin keeps the non-weight parts of a checkpoint: `_save_checkpoin
 `save_total_limit` rotation until the new checkpoint is complete),
 `_persist_lr_scheduler_for_resume`, and `_persist_router_balancing_biases` /
 `_restore_router_balancing_biases` for the `router_balancing_biases.pt` sidecar.
+`_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation. The
+DPO/KTO precompute mixin overrides it to write `reference_logps.pt`; those trainers list the mixin
+ahead of `DistributedTrainerMixin` in their bases, so the empty default does not shadow it.
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
 guaranteed to be refused: `cp_size > 1`, a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1`

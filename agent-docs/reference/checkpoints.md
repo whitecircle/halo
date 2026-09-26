@@ -117,6 +117,7 @@ depends on whether the mode transforms the model at construction — see
 | `optimizer_meta.pt` | Yes | No | Topology fingerprint gating exact resume (+ `pp_stage_partition` under PP) |
 | `scheduler.pt` | Yes | Yes | LR scheduler state — re-persisted on every mode so resume continues the schedule |
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
+| `reference_logps.pt` | Yes | Yes | DPO/KTO `precompute_ref_log_probs` columns per split, attached on resume in place of the sweep ([DPO — Resuming a precompute run](../training-methods/preference/dpo.md#resuming-a-precompute-run)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
 
 `optimizer.pt` is dropped under every
@@ -378,10 +379,11 @@ python scripts/after_training/merge_ep_shards.py \
     --input_dir /path/to/sharded_checkpoint --output_dir /path/to/merged_checkpoint
 ```
 
-The merge copies the resume sidecars (`scheduler.pt`, `router_balancing_biases.pt`, `rng_state_*`)
-while excluding stale weight artifacts, so the merged directory resumes weights, scheduler and
-balancing biases — but **not** the optimizer: the per-rank `optimizer_shard_XXXXX.pt` files are
-weight-suffixed and dropped, so a resume from the merged directory warm-restarts. A resume pointed at
+The merge copies the resume sidecars (`scheduler.pt`, `router_balancing_biases.pt`,
+`reference_logps.pt`, `rng_state_*`) while excluding stale weight artifacts, so the merged directory
+resumes weights, scheduler, balancing biases and precomputed reference log-probs — but **not** the
+optimizer: the per-rank `optimizer_shard_XXXXX.pt` files are weight-suffixed and dropped, so a resume
+from the merged directory warm-restarts. A resume pointed at
 the unmerged directory raises the merge-first error directly.
 
 The merge requires a per-rank index carrying `ep_size`, so a gathered, PP or already-merged directory
@@ -651,6 +653,7 @@ save_total_limit: 3                 # keep last N, delete older
 save_only_model: false              # false: per-rank optimizer shards + scheduler + RNG
                                     #        (exact resume; same world size + layout required)
                                     # true:  weights + trainer_state + scheduler + balancing biases
+                                    #        + precomputed reference log-probs
                                     #        (warm restart, any world size)
 save_on_each_node: false            # multi-node; auto-forced true on a non-shared OUTPUT filesystem
 

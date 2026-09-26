@@ -1,96 +1,46 @@
-"""Rank-consistent reference-log-prob precompute cache for distributed preference trainers.
+"""Reference-log-prob precompute for the distributed preference trainers (DPO, KTO).
 
-TRL's ``precompute_ref_log_probs`` keys its disk cache on
-``Hasher.hash((dataset._fingerprint, hash_module(model)))``. Both inputs diverge across ranks:
-``hash_module`` hashes rank-sharded parameter values under EP/TP, and datasets' ``map`` emits a
-random per-process ``_fingerprint`` when it cannot hash the transform. TRL writes the file on the
-main process only and has every rank read it back, so with a divergent key the non-main ranks block
-on a path that was never written and the next collective forward deadlocks.
-
-The cached values are the full gathered log-probs, so one rank-0-authoritative cache is correct: this
-mixin broadcasts both key inputs from rank 0 for the duration of the precompute call.
+TRL's ``precompute_ref_log_probs`` sweeps the reference once inside ``__init__`` and hands the
+columns to every rank through an Arrow cache file the global main process writes and every rank
+reads back. Keyed on rank-sharded parameter hashes and random per-process fingerprints, that path
+diverges across ranks under EP/TP, and on per-node storage the file exists on one node only. This
+mixin runs the same sweep itself and attaches the gathered columns in memory on every rank, which
+already holds all of them after the gather, so no rank reads a file another rank wrote.
 
 TRL's sweep also shards its loader and gathers by global rank, which is incorrect whenever DP <
 world_size: the model already carries its TP attention shards and EP/ETP expert wrappers, so siblings
 forwarding different rows hit the TP and ``ReduceFromExpertTP`` collectives with mismatched token
 counts. ``data_parallel_sweep`` puts both ends back on the DP axis.
 
-With no separate reference model TRL sweeps the policy, and a Path-B resume builds the policy from
-the checkpoint before the trainer exists, so a sweep there would score the trained weights. The swept
-columns therefore ride every checkpoint (``REFERENCE_LOGPS_FILE``), and a resume attaches them in
-place of the sweep once their row count and token digest match the dataset.
+With no separate reference model the sweep scores the policy, and a Path-B resume builds the policy
+from the checkpoint before the trainer exists, so a sweep there would score the trained weights. The
+swept columns therefore ride every checkpoint (``REFERENCE_LOGPS_FILE``), and a resume attaches them
+in place of the sweep once their row count, token digests and reference settings match.
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import os
-import sys
 from collections.abc import Mapping, Sequence
 from functools import partial
-from types import ModuleType
 
 import numpy as np
 import pyarrow as pa
 import torch
 from accelerate.logging import get_logger
 from datasets import Dataset, concatenate_datasets
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.runtime import (
-    barrier_on_exit,
-    broadcast_from_rank0,
-    fs_aware_save_rank,
-    rank_consensus,
-    reject_across_ranks,
-)
+from src.distributed.runtime import barrier_on_exit, fs_aware_save_rank, rank_consensus, reject_across_ranks
 
 logger = get_logger(__name__, log_level="info")
 
-_METHOD = "_precompute_ref_logps"
 # Rows per Arrow batch the token digest reads: bounds the int64 copy of one batch's token ids.
 _DIGEST_BATCH_ROWS = 4096
-
-
-def _defining_module(instance: object) -> ModuleType | None:
-    """Module of the first MRO class below this mixin that defines ``_precompute_ref_logps``.
-
-    That is the concrete TRL trainer (``DPOTrainer`` / ``KTOTrainer``), whose module defines the
-    ``hash_module`` symbol used to build the cache key. Classes above the mixin — the mixin itself
-    and any trainer subclass layering more logic over it — are skipped: their modules define no
-    ``hash_module``, and matching one would disable the rank-consistent patch.
-    """
-    for klass in type(instance).__mro__:
-        if issubclass(klass, PrecomputeRefLogpsRankConsistentMixin):
-            continue
-        if _METHOD in klass.__dict__:
-            return sys.modules.get(klass.__module__)
-    return None
-
-
-@contextlib.contextmanager
-def _rank0_authoritative_module_hash(module: ModuleType | None):
-    """Temporarily replace ``module.hash_module`` so it returns rank 0's value on every rank.
-
-    ``hash_module`` hashes parameter values; under EP/TP those are rank-sharded, so the raw hash
-    diverges. The hash only keys the precompute cache (detecting a changed model across runs), so
-    rank 0's value is a correct, rank-consistent representative.
-    """
-    original = getattr(module, "hash_module", None) if module is not None else None
-    if original is None:
-        yield
-        return
-
-    def _consistent(mod):
-        return broadcast_from_rank0(original(mod))
-
-    module.hash_module = _consistent
-    try:
-        yield
-    finally:
-        module.hash_module = original
 
 
 def _is_token_type(arrow_type: pa.DataType) -> bool:
@@ -100,54 +50,59 @@ def _is_token_type(arrow_type: pa.DataType) -> bool:
     return pa.types.is_integer(arrow_type) or pa.types.is_boolean(arrow_type)
 
 
-def _token_digest(dataset: Dataset, columns: Sequence[str]) -> str:
-    """SHA-256 over ``columns`` in row order, list lengths included and every value widened to int64.
+def _token_digest(dataset: Dataset, column: str) -> str:
+    """SHA-256 of one column in row order: its list lengths and its values, each widened to int64.
 
     Content-derived, where ``dataset._fingerprint`` is not: TRL's tokenize map closes over the
     trainer, so the fingerprint hashes trainer state and turns random when that cannot be pickled.
+    Lengths and values stream into separate hashes, so the batch size does not enter the digest.
     """
-    digest = hashlib.sha256()
-    for column in columns:
-        digest.update(column.encode())
-        for batch in dataset.select_columns([column]).with_format("arrow").iter(batch_size=_DIGEST_BATCH_ROWS):
-            values = batch.column(column).combine_chunks()
-            if pa.types.is_list(values.type) or pa.types.is_large_list(values.type):
-                digest.update(values.value_lengths().to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
-                values = values.flatten()
-            digest.update(values.to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
-    return digest.hexdigest()
+    lengths, values = hashlib.sha256(), hashlib.sha256()
+    for batch in dataset.select_columns([column]).with_format("arrow").iter(batch_size=_DIGEST_BATCH_ROWS):
+        array = batch.column(column).combine_chunks()
+        if pa.types.is_list(array.type) or pa.types.is_large_list(array.type):
+            lengths.update(array.value_lengths().to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
+            array = array.flatten()
+        values.update(array.to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
+    return hashlib.sha256(lengths.digest() + values.digest()).hexdigest()
 
 
 def _attach_reference_columns(dataset: Dataset, columns: Mapping[str, torch.Tensor]) -> Dataset:
-    """``dataset`` with per-row reference log-prob columns appended, held in memory on this rank."""
-    appended = Dataset.from_dict({name: values.numpy() for name, values in columns.items()})
+    """``dataset`` with per-row reference log-prob columns appended as float32, in memory on this rank."""
+    appended = Dataset.from_dict({name: values.float().numpy() for name, values in columns.items()})
     return concatenate_datasets([dataset, appended], axis=1)
 
 
-def _saved_split_mismatch(entry: dict, num_rows: int, token_digest: str, needed: Sequence[str]) -> str | None:
+def _saved_split_mismatch(
+    entry: dict, num_rows: int, token_digests: Mapping[str, str], settings: Mapping, needed: Sequence[str]
+) -> str | None:
     """Why a saved split cannot serve this dataset, or ``None`` when it can."""
     missing = [column for column in needed if column not in entry["columns"]]
     if missing:
         return f"it lacks {missing}, carrying only {sorted(entry['columns'])} (a changed loss_type?)"
     if entry["num_rows"] != num_rows:
         return f"it was saved for {entry['num_rows']} rows and this dataset has {num_rows}"
-    if entry["token_digest"] != token_digest:
+    if entry["settings"] != settings:
+        return f"it was computed under {entry['settings']} and this run sets {dict(settings)}"
+    changed = sorted(
+        column for column, digest in token_digests.items() if entry["token_digests"].get(column) != digest
+    )
+    if changed:
         return (
-            "this dataset's token ids differ from the saved run's (a changed dataset, split, chat "
-            "template or tokenizer — or, for KTO's KL completions, per_device_train_batch_size)"
+            f"this dataset's {changed} differ from the saved run's (a changed dataset, split, chat template "
+            f"or tokenizer — or, for KTO's KL completions, per_device_train_batch_size)"
         )
     return None
 
 
 class PrecomputeRefLogpsRankConsistentMixin:
-    """Make TRL's ``precompute_ref_log_probs`` disk-cache path identical across ranks.
+    """Run TRL's ``precompute_ref_log_probs`` sweep on the DP axis and attach its columns per rank.
 
-    Without it, EP/TP full-finetune DPO/KTO deadlock on the first collective forward after the main
-    process writes a cache file that no other rank's (divergent) path reads. See the module
-    docstring for the mechanism. It also implements the skip for a dataset that already carries the
-    reference columns (``_required_ref_logps_columns``), which PP relies on, and carries the swept
-    columns across a resume. A trainer lists it ahead of ``DistributedTrainerMixin`` in its bases,
-    so its :meth:`_persist_trainer_sidecars` overrides the checkpointing default.
+    See the module docstring for the mechanism. It also implements the skip for a dataset that
+    already carries the reference columns (``_required_ref_logps_columns``), which PP relies on, and
+    carries the swept columns across a resume. A trainer lists it ahead of
+    ``DistributedTrainerMixin`` in its bases, so its :meth:`_persist_trainer_sidecars` overrides the
+    checkpointing default.
     """
 
     def _init_reference_resume(self, kwargs: dict) -> None:
@@ -157,6 +112,7 @@ class PrecomputeRefLogpsRankConsistentMixin:
         whether the policy's weights were built from it (a Path-B resume), as
         :class:`~src.training.script_runner.ScriptRuntime` resolves them.
         """
+        self._reference_resume_given = "resume_checkpoint" in kwargs
         self._reference_resume_checkpoint = kwargs.pop("resume_checkpoint", None)
         self._policy_from_checkpoint = kwargs.pop("policy_from_checkpoint", False)
         if self._policy_from_checkpoint and self._reference_resume_checkpoint is None:
@@ -164,22 +120,26 @@ class PrecomputeRefLogpsRankConsistentMixin:
         self._reference_logps_by_split: dict[str, dict] = {}
 
     def _required_ref_logps_columns(self) -> tuple[str, ...]:
-        """Reference log-prob columns whose presence makes TRL's sweep unnecessary.
+        """Reference log-prob columns, in the order TRL's ``compute_ref_log_probs`` returns them.
 
-        Each subclass names the columns its own TRL base would write; an empty default would
-        disable the short-circuit and leave PP without a reference, since a pipeline stage cannot
-        run the sweep.
+        Their presence in a dataset makes the sweep unnecessary. Each subclass names the columns its
+        own TRL base would write; an empty default would disable the short-circuit and leave PP
+        without a reference, since a pipeline stage cannot run the sweep.
         """
         raise NotImplementedError(f"{type(self).__name__} must name its reference log-prob columns")
+
+    def _reference_settings(self) -> dict:
+        """The run's knobs, besides the tokens, that shape the reference values TRL computes."""
+        raise NotImplementedError(f"{type(self).__name__} must name the settings its reference depends on")
 
     def _precompute_ref_logps(self, dataset, name, batch_size):
         """Trust dataset-supplied reference log-probs, restore a resumed run's, and sweep otherwise.
 
-        With every needed column present the sweep would recompute values the caller supplied (then
-        axis-1 concatenate duplicate columns), and under PP it cannot run at all — ``self.model`` is
-        a bare pipeline stage. The check precedes the pre-sharded rejection below, whose suggested
-        workaround is to precompute these columns before sharding. The PP construction gate
-        guarantees the columns exist, so the sweep only runs outside PP.
+        With every needed column present the sweep would recompute values the caller supplied, and
+        under PP it cannot run at all — ``self.model`` is a bare pipeline stage. The check precedes
+        the pre-sharded rejection below, whose suggested workaround is to precompute these columns
+        before sharding. The PP construction gate guarantees the columns exist, so the sweep only
+        runs outside PP.
 
         Swept and restored columns are kept for :meth:`_persist_trainer_sidecars`; dataset-supplied
         ones are not, since the dataset carries them again on resume.
@@ -191,57 +151,86 @@ class PrecomputeRefLogpsRankConsistentMixin:
         if self._dataset_presharded:
             raise ValueError(
                 "precompute_ref_log_probs=True is not supported with a pre-sharded dataset: each "
-                "rank holds a DIFFERENT shard, but TRL's sweep caches one rank-0-authoritative file "
-                "of reference log-probs and has every rank concatenate it onto its own rows — so "
-                "every non-zero data-parallel rank would train on rank 0's log-probs. Load the "
-                "dataset unsharded, or precompute the ref_chosen_logps/ref_rejected_logps "
-                "(ref_logps for KTO) columns into the dataset before sharding it."
+                "rank holds a DIFFERENT shard, but the sweep gathers one set of reference log-probs "
+                "in dataset order and every rank attaches it to its own rows — so every non-zero "
+                "data-parallel rank would train on rank 0's log-probs. Load the dataset unsharded, or "
+                "precompute the ref_chosen_logps/ref_rejected_logps (ref_logps for KTO) columns into "
+                "the dataset before sharding it."
             )
         if name in self._reference_logps_by_split:
             raise ValueError(
                 f"Two precomputed datasets share the name '{name}' (an eval_dataset key 'train'?), so "
                 f"their reference log-probs would share one {REFERENCE_LOGPS_FILE} entry. Rename it."
             )
+        if not self._reference_resume_given and self.ref_model is None and self.args.resume_from_checkpoint:
+            raise ValueError(
+                f"resume_from_checkpoint={self.args.resume_from_checkpoint!r} is set, but the trainer "
+                f"was built without resume_checkpoint/policy_from_checkpoint. TRL sweeps the reference "
+                f"inside __init__, before train() sees the checkpoint, so a policy loaded from it would "
+                f"be scored as its own reference. Pass resume_checkpoint (the resolved checkpoint, or "
+                f"None) and policy_from_checkpoint (whether the policy weights came from it)."
+            )
         if self._reference_resume_checkpoint is not None:
             restored = self._restore_reference_logps(dataset, name, needed)
             if restored is not None:
                 return restored
-        # Tokenization is deterministic, so only the fingerprint diverges — pinning it is safe.
-        dataset._fingerprint = broadcast_from_rank0(dataset._fingerprint)
-        with _rank0_authoritative_module_hash(_defining_module(self)), self.data_parallel_sweep():
-            prepared = super()._precompute_ref_logps(dataset, name, batch_size)
-        swept = prepared.select_columns(list(needed)).with_format("arrow")[:]
+        columns = self._sweep_reference_logps(dataset, name, batch_size, needed)
         self._reference_logps_by_split[name] = {
             "num_rows": len(dataset),
-            "token_digest": _token_digest(dataset, self._reference_input_columns(dataset, name)),
-            "columns": {column: torch.from_numpy(swept.column(column).to_numpy().copy()) for column in needed},
+            "token_digests": self._reference_input_digests(dataset, name),
+            "settings": self._reference_settings(),
+            "columns": columns,
         }
-        return prepared
+        return _attach_reference_columns(dataset, columns)
 
-    def _reference_input_columns(self, dataset, name: str) -> list[str]:
-        """The token-id and label columns among TRL's signature columns: what the reference read."""
+    def _sweep_reference_logps(self, dataset, name: str, batch_size: int, needed) -> dict[str, torch.Tensor]:
+        """TRL's reference sweep over ``dataset``, gathered on the DP axis into dataset order.
+
+        ``compute_ref_log_probs`` returns KTO's KL term as ``None`` when the loss has none, so the
+        non-``None`` outputs line up with ``needed``.
+        """
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            shuffle=False,
+        )
+        parts: dict[str, list[torch.Tensor]] = {column: [] for column in needed}
+        with self.data_parallel_sweep():
+            for batch in tqdm(self.accelerator.prepare(loader), desc=f"Computing reference log probs for {name}"):
+                outputs = tuple(value for value in self.compute_ref_log_probs(batch) if value is not None)
+                for column, value in zip(needed, self.accelerator.gather_for_metrics(outputs), strict=True):
+                    parts[column].append(value.float().cpu())
+        return {column: torch.cat(chunks) for column, chunks in parts.items()}
+
+    def _reference_input_digests(self, dataset, name: str) -> dict[str, str]:
+        """Token digest per token-id and label column among TRL's signature columns: what the
+        reference read."""
         self._set_signature_columns_if_needed()
         schema = dataset.features.arrow_schema
-        columns = sorted(
+        columns = [
             column
             for column in self._signature_columns
             if column in dataset.column_names and _is_token_type(schema.field(column).type)
-        )
+        ]
         if not columns:
             raise RuntimeError(
                 f"None of TRL's signature columns {self._signature_columns} is a token-id column of "
                 f"the '{name}' dataset ({dataset.column_names}), so its reference log-probs could not "
                 f"be matched to its rows on resume."
             )
-        return columns
+        return {column: _token_digest(dataset, column) for column in columns}
 
     def _restore_reference_logps(self, dataset, name: str, needed: tuple[str, ...]) -> Dataset | None:
         """Attach the ``name`` split's columns saved in the resume checkpoint, or ``None`` to sweep.
 
         Absent, a sweep is correct only when it scores untrained weights; with no separate reference
         model and the policy built from the checkpoint it would score the trained ones, which raises.
-        Present, the saved split must match this dataset's row count and token digest. Every verdict
-        is joined across ranks, so the raises and the sweep are taken by the whole world or none.
+        Present, the saved split must match this dataset's row count, token digests and reference
+        settings. Every verdict is joined across ranks, so the raises and the sweep are taken by the
+        whole world or none.
         """
         checkpoint = self._reference_resume_checkpoint
         saved, path = consensus_read(
@@ -260,13 +249,17 @@ class PrecomputeRefLogpsRankConsistentMixin:
         if not present_all:
             if self._policy_from_checkpoint and self.ref_model is None:
                 raise RuntimeError(
-                    f"Cannot resume precompute_ref_log_probs from {checkpoint}: it carries no saved "
-                    f"reference log-probs for the '{name}' dataset ({REFERENCE_LOGPS_FILE}), and they "
-                    f"cannot be recomputed. With no separate reference model TRL sweeps the policy, "
-                    f"and this resume built the policy from the checkpoint, so the sweep would score "
-                    f"the TRAINED weights as the reference and zero every log-ratio. Resume from a "
-                    f"checkpoint written with that file, supply the {list(needed)} columns computed "
-                    f"on the base model in the dataset, or restart from the base model."
+                    f"Cannot resume precompute_ref_log_probs from {checkpoint}: it holds no saved "
+                    f"reference log-probs for the '{name}' dataset ({REFERENCE_LOGPS_FILE} is missing "
+                    f"or lacks that split), and they cannot be recomputed here. With no separate "
+                    f"reference model the sweep scores the policy, and this resume built the policy "
+                    f"from the checkpoint, so the sweep would score the TRAINED weights as the "
+                    f"reference and zero every log-ratio. To recover, run this config for one step "
+                    f"from the base model into a scratch output_dir (--max_steps=1 "
+                    f"--save_strategy=steps --save_steps=1 --save_only_model=true "
+                    f"--resume_from_checkpoint=false) and copy its checkpoint-1/{REFERENCE_LOGPS_FILE} "
+                    f"into {checkpoint}; this resume then checks it against the dataset. Or supply "
+                    f"the {list(needed)} columns, computed on the base model, in the dataset."
                 )
             logger.info(
                 f"No saved reference log-probs for '{name}' in {checkpoint}; sweeping, since the "
@@ -274,21 +267,28 @@ class PrecomputeRefLogpsRankConsistentMixin:
             )
             return None
         num_rows = len(dataset)
-        token_digest = _token_digest(dataset, self._reference_input_columns(dataset, name))
-        mismatch = _saved_split_mismatch(entry, num_rows, token_digest, needed)
+        token_digests = self._reference_input_digests(dataset, name)
+        settings = self._reference_settings()
+        mismatch = _saved_split_mismatch(entry, num_rows, token_digests, settings, needed)
         reject_across_ranks(
             None
             if mismatch is None
             else (
                 f"{path} does not belong to this '{name}' dataset: {mismatch}. Each saved value is its "
-                f"own row's reference, so attaching them would score rows against other rows' "
-                f"references. Resume with the data configuration the checkpoint was written with."
+                f"own row's reference, so attaching them would score rows against references they "
+                f"were not computed for. Resume with the data and reference settings the checkpoint "
+                f"was written with."
             ),
             f"Restoring the '{name}' reference log-probs",
             exc_type=ValueError,
         )
         columns = {column: entry["columns"][column] for column in needed}
-        self._reference_logps_by_split[name] = {"num_rows": num_rows, "token_digest": token_digest, "columns": columns}
+        self._reference_logps_by_split[name] = {
+            "num_rows": num_rows,
+            "token_digests": token_digests,
+            "settings": settings,
+            "columns": columns,
+        }
         logger.info(f"Restored the '{name}' reference log-probs from {path}; skipping the sweep.")
         return _attach_reference_columns(dataset, columns)
 

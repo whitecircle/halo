@@ -63,7 +63,7 @@ identical worker randomness.
 Under PP the train loader is forced to `drop_last=True`: a pipeline would freeze its P2P shapes on
 the first step, so a short final batch would raise mid-epoch.
 
-**Third-party sweeps over the dataset.** TRL's `precompute_ref_log_probs` builds its own loader and
+**Sweeps over the dataset.** The `precompute_ref_log_probs` sweep builds its own loader and
 prepares it with the world-keyed accelerator, so it would shard by global rank and let TP/CP/expert-TP
 siblings forward *different* rows through a collective attention/expert path.
 
@@ -71,8 +71,8 @@ siblings forward *different* rows through a collective attention/expert path.
 `prepare_data_loader` routes to `_prepare_dataloader`, and the gather is deduplicated to one chunk
 per DP rank in DP order. It is an identity when `dp_size == world_size`.
 
-Pre-sharded datasets are rejected under `precompute_ref_log_probs`: TRL caches one
-rank-0-authoritative file that each rank would concatenate onto its own different shard.
+Pre-sharded datasets are rejected under `precompute_ref_log_probs`: the sweep gathers one set of
+log-probs in dataset order, which each rank would attach to its own different shard.
 
 The two paths shard by different indices — the standard path by global rank (one distinct batch per
 rank), the custom path by DP rank (ranks in a TP/CP group share a batch):
