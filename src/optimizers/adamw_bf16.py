@@ -45,16 +45,28 @@ def _adam_bf16_sr_kernel(
     wd_factor,
     n_elements,
     seed,  # one Philox call yields both noise streams
+    grad_scale_ptr,
+    HAS_GRAD_SCALE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused Adam update with stochastic rounding for bf16 params (reads bf16, computes fp32, SR-writes bf16)."""
-    pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    """Fused Adam update with stochastic rounding for bf16 params (reads bf16, computes fp32, SR-writes bf16).
+
+    ``grad_scale_ptr`` (with ``HAS_GRAD_SCALE``) is a device fp32 scalar multiplied into the gradient as it
+    is read: the deferred gradient-clip coefficient, which then costs no pass of its own over the grads.
+    """
+    # Each lane owns four consecutive elements and one Philox call: its 4 x 32 random bits give every
+    # element its own two 16-bit noise draws (high half for the second moment, low half for the weight).
+    # The Philox rounds, not memory, bounded the one-call-per-element form.
+    QUARTER: tl.constexpr = BLOCK_SIZE // 4
+    pid = tl.program_id(0).to(tl.int64)
+    lane = tl.arange(0, QUARTER)
+    offsets = pid * BLOCK_SIZE + (lane[:, None] * 4 + tl.arange(0, 4)[None, :])
     mask = offsets < n_elements
 
     p = tl.load(p_ptr + offsets, mask=mask).to(tl.float32)
     grad = tl.load(grad_ptr + offsets, mask=mask).to(tl.float32)
+    if HAS_GRAD_SCALE:
+        grad = grad * tl.load(grad_scale_ptr)
     ea = tl.load(ea_ptr + offsets, mask=mask).to(tl.float32)
     easq = tl.load(easq_ptr + offsets, mask=mask).to(tl.float32)
 
@@ -64,10 +76,10 @@ def _adam_bf16_sr_kernel(
     # exp_avg stored nearest: a signed ~zero-mean EMA, so truncation is already unbiased.
     tl.store(ea_ptr + offsets, ea.to(tl.bfloat16), mask=mask)
 
-    # One Philox call feeds both streams; the high 16 bits of a uniform uint32 are the SR noise.
-    rnd0, rnd1, _, _ = tl.randint4x(seed, offsets)
-    easq_noise = (rnd0.to(tl.uint32, bitcast=True) >> 16).to(tl.int32)
-    rand_noise = (rnd1.to(tl.uint32, bitcast=True) >> 16).to(tl.int32)
+    r0, r1, r2, r3 = tl.randint4x(seed, pid * QUARTER + lane)
+    bits = tl.reshape(tl.join(tl.join(r0, r1), tl.join(r2, r3)), (QUARTER, 4)).to(tl.uint32, bitcast=True)
+    easq_noise = (bits >> 16).to(tl.int32)
+    rand_noise = (bits & 0xFFFF).to(tl.int32)
 
     # SR the second moment: nearest rounding biases this non-negative accumulator upward, inflating
     # sqrt(v) and shrinking the effective step below lr.
@@ -112,8 +124,9 @@ def _triton_adam_bf16_step(
     beta1: float,
     beta2: float,
     sr_seeds: tuple[int, int] | None = None,
+    grad_scale: Tensor | None = None,
 ):
-    """Launch the fused Adam+SR Triton kernel for a single parameter."""
+    """Launch the fused Adam+SR Triton kernel for a single parameter (``grad_scale``: see the kernel)."""
     p_data = to_local(p.detach())
     grad_local = to_local(grad)
     ea_local = to_local(exp_avg)
@@ -144,7 +157,10 @@ def _triton_adam_bf16_step(
         wd_factor,
         n,
         seed,
+        grad_scale if grad_scale is not None else grad_flat,
+        HAS_GRAD_SCALE=grad_scale is not None,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=8,
     )
     torch.autograd.graph.increment_version(p)  # the raw-pointer store above is invisible to ATen
 
@@ -176,6 +192,7 @@ def _eager_adam_bf16_step(
     beta1: float,
     beta2: float,
     sr_seeds: tuple[int, int] | None = None,
+    grad_scale: Tensor | None = None,
 ):
     """Eager (non-Triton) Adam+SR step for a single bf16 parameter."""
     if sr_seeds is None:
@@ -183,6 +200,8 @@ def _eager_adam_bf16_step(
     easq_seed, weight_seed = sr_seeds
     p_data = to_local(p.detach())
     grad = to_local(grad)
+    if grad_scale is not None:
+        grad = grad.float() * grad_scale
     exp_avg = to_local(exp_avg)
     exp_avg_sq = to_local(exp_avg_sq)
 
@@ -239,6 +258,21 @@ class AdamWBF16(torch.optim.Optimizer):
         # Resolved per parameter at step time from the tensor's own device: the eager path is
         # equivalent, and gating on `torch.cuda.is_available()` would send a CPU param to Triton.
         self._use_triton = use_triton
+        self._grad_scale: Tensor | None = None
+
+    def defer_grad_scale(self, scale: Tensor) -> None:
+        """Multiply every gradient by ``scale`` (a device fp32 scalar) inside the next :meth:`step`.
+
+        The gradient clip hands its coefficient here instead of rescaling the gradients in place, so the
+        scale rides the optimizer's own read of each gradient rather than costing a separate pass over
+        all of them. The gradients themselves stay unscaled until the step; the scale applies once.
+        """
+        self._grad_scale = scale.detach().to(dtype=torch.float32).reshape(())
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        # A scale deferred for gradients that are being discarded must not reach the next step's.
+        self._grad_scale = None
+        super().zero_grad(set_to_none=set_to_none)
 
     def _triton_for(self, param: torch.Tensor) -> bool:
         """Whether ``param`` takes the fused kernel. Its device decides — Triton needs CUDA storage."""
@@ -252,6 +286,7 @@ class AdamWBF16(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        grad_scale, self._grad_scale = self._grad_scale, None
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
             lr = group["lr"]
@@ -302,6 +337,7 @@ class AdamWBF16(torch.optim.Optimizer):
                         beta1,
                         beta2,
                         sr_seeds,
+                        grad_scale,
                     )
 
             # Per-param updates (no _foreach_* — FSDP2 DTensor params can't mix with plain Tensors).
@@ -317,6 +353,8 @@ class AdamWBF16(torch.optim.Optimizer):
                 exp_avg_sq = to_local(state["exp_avg_sq"])
                 grad_fp32 = to_local(grad)
                 grad_fp32 = grad_fp32.float() if grad_fp32.dtype != torch.float32 else grad_fp32
+                if grad_scale is not None:
+                    grad_fp32 = grad_fp32 * grad_scale
 
                 exp_avg.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)

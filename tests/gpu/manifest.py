@@ -103,6 +103,11 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_deepgemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fa4_trainable_sink_rescale.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
+    "kernels/test_flex_sliding_attention.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "kernels/test_family_kernel_stack_numerics.py": TestSpec(
+        nproc=1, markers=("gpu", "full", "1gpu", "moe"), timeout=1800
+    ),
     "kernels/test_grouped_gemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_grouped_mm_empty_groups.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
     "kernels/test_liger_family_kernels.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
@@ -994,6 +999,8 @@ _UNMANIFESTED_BENCHMARKS = {
     "optimizers/bench_muon_qwen3_5.py",
     "profiling/bench_ep_buffer_backends.py",
     "profiling/benchmark_attention_implementations.py",
+    "profiling/gemma4/bench_attention.py",
+    "profiling/gemma4/bench_moe_block.py",
     "profiling/benchmark_collators.py",
     "profiling/benchmark_convergence.py",
     "profiling/benchmark_grouped_mm.py",

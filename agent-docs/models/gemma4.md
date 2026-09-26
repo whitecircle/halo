@@ -13,6 +13,7 @@
 - **Router is a sibling**, not a child — `Gemma4TextRouter` lives in `Gemma4TextDecoderLayer` next to the experts. The wrapper only replaces the experts; the router stays FSDP-managed.
 - Routing input: pre-normalized weights from the sibling router (per-expert-scaled, not raw logits).
 - Activation: tanh-GeGLU (fused gate_up), run through the fused Triton kernel (`src/kernels/fused_glu.py`) when the activation is the genuine `gelu_pytorch_tanh`; logged as `glu_combine=fused_gelu_tanh_mul`.
+- Norms: `Gemma4RMSNorm` (scaled and weightless) runs torch's fused `F.rms_norm`, which normalizes and multiplies the weight in fp32 and casts once — Gemma's own order. The Liger spec takes the norm role from upstream with `rms_norm_kernel="native"`.
 - Liger: every decoder layer keeps a dense `Gemma4TextMLP` beside its experts, which the wrapper never touches. The toolkit's delegating spec fuses it (`geglu`, probing the activation the same way) so it stays fused under EP, while upstream's `gemma4_text` applier serves the norms.
 
     The fused loss is forced off for `Gemma4ForConditionalGeneration` checkpoints, whose own head runs ([Liger Kernels](../optimization/liger-kernels.md#fused-loss-under-a-multimodal-wrapper)).
@@ -83,6 +84,12 @@ the towers too.
 **Long-context attention**: Gemma 4's full-attention layers run at `global_head_dim=512`, which every FlashAttention kernel and cuDNN SDPA reject (FA2 caps at 256; FA4's SM100 kernel overflows tensor memory).
 
 `load_distributed_model` redirects any FlashAttention impl to SDPA for Gemma 4, then `patch_sdpa_for_gemma4_long_seq()` forces the mem-efficient SDPA kernel, the only backend handling this head dim, with manual KV repeat (`use_gqa_in_sdpa → False`). That avoids the math kernel's `[B, heads, S, S]` score matrix, which OOMs at seq 32k. Set `attn_implementation: sdpa` to skip the warning.
+
+The model is then built with the attention implementation `sdpa_flex_sliding` (`src/models/patches/flex_sliding_attention.py`, family-agnostic, see [Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa)), whenever the run resolved to `sdpa` on CUDA:
+
+- **Sliding layers** (head_dim 256, window 1,024) run compiled FlexAttention with a block mask derived from the mask transformers built, so causality, the window, packed-document isolation and padding carry over and the tiles outside the window are skipped. One `BlockMask` per forward serves every sliding layer. Fwd+bwd per layer at 2,048 tokens on B300: 0.59 ms against 4.62 ms for mem-efficient SDPA with its dense mask.
+- **Global layers** run matmul-softmax-matmul attention (fp32 softmax, GQA without a KV copy), because the mem-efficient kernel is the only SDPA backend left for them, while a layer's saved scores fit `EAGER_GLOBAL_BUDGET_BYTES` (2 GiB: 16 heads at 4,096 tokens per row), and mem-efficient SDPA past it. Fwd+bwd per layer: 1.96 ms against 6.52 ms at 2,048 tokens, 29.1 ms against 66.0 ms at 8,192. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.
+- The vision and audio towers (bidirectional) keep SDPA. `HALO_FLEX_SLIDING=0` keeps plain SDPA for every layer.
 
 The KV-repeat override is not what makes the global layers legal — transformers 5.16 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 

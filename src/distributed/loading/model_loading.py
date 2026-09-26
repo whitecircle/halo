@@ -78,6 +78,7 @@ from src.models.patches.attention import (
     validate_attn_implementation,
 )
 from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 
@@ -333,6 +334,8 @@ def load_distributed_model(
             patch_flex_attention_compile("FSDP2 + trainable attention sinks NaN gradient fix")
 
     apply_family_attention_patches(model_config, attn_implementation)
+    # The patches above key on the resolved backend; the model is built with the sparse-window variant of it.
+    attn_implementation = resolve_flex_sliding_attn_implementation(model_config, attn_implementation)
 
     if use_liger_kernel:
         apply_liger_kernel(

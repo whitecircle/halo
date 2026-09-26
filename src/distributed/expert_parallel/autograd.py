@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 
 from src.distributed.expert_parallel.extension import deep_ep
+from src.kernels.moe_permute import gather_reduce_rows
 
 
 def _to_topk_weights(topk_weights: torch.Tensor) -> torch.Tensor:
@@ -172,9 +173,7 @@ class MoEGatherPermute(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_sorted):
         (inv_map,) = ctx.saved_tensors
-        pad = grad_sorted.new_zeros(1, grad_sorted.shape[1])
-        grad_tokens = torch.cat([grad_sorted, pad], 0)[inv_map].sum(dim=1)
-        return grad_tokens, None, None
+        return gather_reduce_rows(grad_sorted, inv_map), None, None
 
 
 class MoEScatterUnpermute(torch.autograd.Function):
@@ -184,8 +183,7 @@ class MoEScatterUnpermute(torch.autograd.Function):
     @staticmethod
     def forward(ctx, expert_out: torch.Tensor, sorted_token_idx: torch.Tensor, inv_map: torch.Tensor):
         ctx.save_for_backward(sorted_token_idx)
-        pad = expert_out.new_zeros(1, expert_out.shape[1])
-        return torch.cat([expert_out, pad], 0)[inv_map].sum(dim=1)
+        return gather_reduce_rows(expert_out, inv_map)
 
     @staticmethod
     def backward(ctx, grad_out):

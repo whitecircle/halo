@@ -26,7 +26,6 @@ from transformers.activations import ACT2FN
 from src.diagnostics.performance_monitor import get_performance_monitor
 from src.distributed.expert_parallel.autograd import (
     MoEGatherPermute,
-    MoEScatterUnpermute,
     ReduceFromExpertTP,
     ReplayCombineFunction,
     ReplayDispatchFunction,
@@ -50,10 +49,11 @@ from src.distributed.runtime import (
     is_global_main_process,
 )
 from src.env import env_flag
-from src.kernels.fused_glu import FusedGluMul, resolve_fused_glu_mul
+from src.kernels.fused_glu import FusedGluMul, packed_glu_mul, resolve_fused_glu_mul
 from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
 from src.kernels.grouped_mm_autograd import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
 from src.kernels.histogram import sync_free_bincount
+from src.kernels.moe_permute import MoEWeightedUnpermute
 from src.models.moe_balancing import (
     ROUTER_TOPK_FIELDS,
     NativeBalancingSlot,
@@ -795,7 +795,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
 
         ``inv_map[r, j]`` = the j-th sorted position whose recv token is ``r``, padded to ``width`` cols
         with sentinel ``N_sorted``. Sync-free (stable argsort + cumulative counts, no host round-trip).
-        Consumed by :class:`MoEGatherPermute` / :class:`MoEScatterUnpermute` to replace the bf16 atomic ``index_add_``.
+        Consumed by :class:`MoEGatherPermute` / :class:`MoEWeightedUnpermute` to replace the bf16 atomic ``index_add_``.
         """
         device = sorted_token_idx.device
         n_sorted = sorted_token_idx.shape[0]
@@ -874,6 +874,19 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
             return self._fused_glu_mul(gate, up)
         return self.act_fn(gate) * up
 
+    def _glu_combine_packed(self, gate_up: torch.Tensor) -> torch.Tensor:
+        """:meth:`_glu_combine` over a fused ``[gate | up]`` projection output.
+
+        When the latched combine has a packed form (:func:`~src.kernels.fused_glu.packed_glu_mul`, which
+        also sees through a clamp-binding ``functools.partial``), the kernel reads both halves in place and
+        returns one ``[..., 2M]`` gradient; any other combine takes the chunked path.
+        """
+        packed = packed_glu_mul(self._fused_glu_mul)
+        if packed is not None:
+            return packed(gate_up)
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self._glu_combine(gate, up)
+
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """Run this layer's expert activation over a synthetic projection output ``[T, 2M]``.
 
@@ -882,10 +895,10 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         traced, and a guard miss recompiles at the call site this warmup keeps warm. A family whose
         activation is not behind :meth:`_glu_combine` overrides this.
         """
+        if hasattr(self, "gate_up_proj"):
+            return self._glu_combine_packed(gate_up)
         gate, up = gate_up.chunk(2, dim=-1)
-        if not hasattr(self, "gate_up_proj"):
-            gate, up = gate.contiguous(), up.contiguous()
-        return self._glu_combine(gate, up)
+        return self._glu_combine(gate.contiguous(), up.contiguous())
 
     def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype) -> None:
         """JIT this layer's expert activation ahead of its first dispatch (once per layer).
@@ -954,9 +967,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
             activated = self._glu_combine(gate, up)
             return self._expert_proj_single(idx, activated, "down_proj")
         gate_up = self._expert_proj_single(idx, x, "gate_up_proj")
-        gate, up = gate_up.chunk(2, dim=-1)
-        activated = self._glu_combine(gate, up)
-        return self._expert_proj_single(idx, activated, "down_proj")
+        return self._expert_proj_single(idx, self._glu_combine_packed(gate_up), "down_proj")
 
     def _grouped_mm(
         self,
@@ -1105,9 +1116,11 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         with torch.amp.autocast("cuda", dtype=output_dtype):
             expert_out = compute_fn(sorted_tokens, offs, sorted_expert_ids)
 
-        expert_out = expert_out.to(output_dtype) * sorted_weights.unsqueeze(-1).to(output_dtype)
         if inv_map is not None:
-            return MoEScatterUnpermute.apply(expert_out, sorted_token_idx, inv_map)
+            return MoEWeightedUnpermute.apply(
+                expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
+            )
+        expert_out = expert_out.to(output_dtype) * sorted_weights.unsqueeze(-1).to(output_dtype)
         output = torch.zeros((tokens.shape[0], tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
         output.index_add_(0, sorted_token_idx, expert_out)
         return output
@@ -1140,9 +1153,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
 
         def compute(sorted_tokens, offs, _eids):
             gate_up = self._expert_proj(sorted_tokens, "gate_up_proj", offs, output_dtype)
-            gate, up = gate_up.chunk(2, dim=-1)
-            activated = self._glu_combine(gate, up)
-            return self._expert_proj(activated, "down_proj", offs, output_dtype)
+            return self._expert_proj(self._glu_combine_packed(gate_up), "down_proj", offs, output_dtype)
 
         return self._compute_experts_with_grouped_mm(tokens, experts, weights, output_dtype, compute)
 

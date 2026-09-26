@@ -63,7 +63,9 @@ The fix expresses both directions with no atomics via a precomputed `inv_map` (`
 
 It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm` builds `inv_map` via `_build_inv_map`). Below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) the plain `index_select` + `index_add_` is kept, since the extra `top_k`× read would cost ~4%.
 
-Above the gate the gather is materialized as `[recv_N, top_k, H]` before its sum: `top_k`× the recv buffer per MoE layer as a transient, in the forward unpermute and again in the permute's backward. That is ~5.6 GB per layer at GLM-5.3-Flash / Step-3.7-Flash shapes (16k tokens/rank at ep8, top-8, `H=4096`), most of it sentinel rows since a recv token averages `top_k / ep_size` local experts.
+Above the gate both reductions run as one Triton kernel (`src/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. The fused `[gate | up]` GLU output is read in place by the packed GLU kernels (`PACKED_GLU_MULS` in `src/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
+
+Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8, one B300), fwd+bwd: 2.13 / 3.40 / 10.81 ms at 2k / 8k / 32k tokens, against 2.47 / 5.22 / 17.37 ms for the padded-gather path with a separate weight multiply; peak transient −47% at 32k (`tests/gpu/profiling/gemma4/bench_moe_block.py`).
 
 | Qwen3.6-35b EP=8 | `index_add_` | atomic-free | win |
 |---|---|---|---|

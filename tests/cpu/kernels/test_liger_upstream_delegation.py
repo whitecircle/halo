@@ -47,8 +47,8 @@ PartialState()  # the orchestrator logs through accelerate's rank-aware logger
 DELEGATING_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.delegates_to_upstream]
 
 # The families the delegation exists for: upstream covers them, and the toolkit adds their GDN
-# blocks' gated norm (the Qwen families) or takes over a role upstream gets wrong for them (GptOss's
-# norm casting, Gemma 4's EP-surviving dense MLP). Named here so deleting a spec fails rather than
+# blocks' gated norm (the Qwen families) or takes over a role upstream gets wrong or runs slower for them
+# (GptOss's norm casting, Gemma 4's EP-surviving dense MLP, the Qwen3 MoE norms on the native kernel). Named here so deleting a spec fails rather than
 # shrinking the sweep.
 EXPECTED_DELEGATING_TYPES = {
     "qwen3_5",
@@ -56,6 +56,7 @@ EXPECTED_DELEGATING_TYPES = {
     "qwen3_5_moe",
     "qwen3_5_moe_text",
     "qwen3_next",
+    "qwen3_moe",
     "gpt_oss",
     "gemma4_text",
 }
@@ -116,7 +117,9 @@ def test_the_taken_over_roles_are_declared_where_upstreams_variant_is_wrong():
     by_type = {spec.model_types[0]: spec for spec in DELEGATING_SPECS}
     assert by_type["gpt_oss"].upstream_off == ("rms_norm",)
     assert by_type["gpt_oss"].rms_norm == ("GptOssRMSNorm",) and by_type["gpt_oss"].rms_norm_casting_mode == "gemma"
-    assert by_type["gemma4_text"].upstream_off == ("geglu",)
+    assert by_type["gemma4_text"].upstream_off == ("geglu", "rms_norm")
+    assert by_type["gemma4_text"].rms_norm == ("Gemma4RMSNorm",)
+    assert by_type["gemma4_text"].rms_norm_kernel == "native"
     assert by_type["gemma4_text"].glu_mlp == ("Gemma4TextMLP",)
     assert "gemma4_text" in orchestrator._TOOLKIT_GLU_SURVIVES_EP
     for model_type in ("qwen3_5_moe", "qwen3_next"):
@@ -415,11 +418,13 @@ failures = []
 for spec in [s for s in LIGER_FAMILY_SPECS if s.delegates_to_upstream]:
     module = importlib.import_module(spec.modeling_module)
     before = {name: obj for name, obj in vars(module).items() if isinstance(obj, type)}
+    forwards_before = {name: getattr(obj, "forward", None) for name, obj in before.items()}
     rope_before = getattr(module, "apply_rotary_pos_emb", None)
     applier = resolve_liger_applier(spec.model_types[0])
     names = set(inspect.signature(applier).parameters) - {"model"}
-    # The norm flag proves upstream ran unless the spec took that role over, where its rotary does.
-    proof = "rope" if "rms_norm" in spec.upstream_off else "rms_norm"
+    # The norm flag proves upstream ran unless the spec took that role over; then its fused-loss head,
+    # which every delegating family leaves to upstream, does (Liger computes no rotary for some of them).
+    proof = "fused_linear_cross_entropy" if "rms_norm" in spec.upstream_off else "rms_norm"
     applier(**{name: name in ("rms_norm", proof) for name in names})
     toolkit_roles = set(spec.gated_rms_norm) | set(spec.rms_norm)
     swapped = {n for n, obj in vars(module).items() if isinstance(obj, type) and before.get(n) is not obj}
@@ -431,8 +436,9 @@ for spec in [s for s in LIGER_FAMILY_SPECS if s.delegates_to_upstream]:
         cls = getattr(module, name)
         if getattr(cls, "_halo_liger_patched_role", None) != "rms_norm" or cls.__mro__[1] is not before[name]:
             failures.append(f"{spec.model_types[0]}: {name} is not the toolkit's subclass of the stock norm")
-    upstream_ran = bool(swapped - toolkit_roles) or (
-        proof == "rope" and getattr(module, "apply_rotary_pos_emb", None) is not rope_before
+    rebound = {n for n, fwd in forwards_before.items() if getattr(getattr(module, n), "forward", None) is not fwd}
+    upstream_ran = bool((swapped | rebound) - toolkit_roles) or (
+        getattr(module, "apply_rotary_pos_emb", None) is not rope_before
     )
     if not upstream_ran:
         failures.append(f"{spec.model_types[0]}: upstream's applier patched nothing — delegation did not run")
@@ -488,12 +494,13 @@ def test_ep_keeps_the_shared_expert_glu_a_delegating_spec_names():
     moe = types.SimpleNamespace(model_type="qwen3_5_moe", text_config=None, num_experts=64)
     assert orchestrator.liger_ep_disables_fused_glu(True, moe) is False
 
-    # Anti-vacuity, both directions: a non-delegating toolkit family keeps its GLU, and an upstream
-    # family — whose only GLU patch IS the routed-expert swap — still loses it.
+    # Anti-vacuity, both directions: a non-delegating toolkit family keeps its GLU, and a family whose
+    # only GLU patch IS upstream's routed-expert swap (Qwen3 MoE, whose spec takes over just the norm)
+    # still loses it.
     laguna = types.SimpleNamespace(model_type="laguna", text_config=None, num_experts=256)
     assert orchestrator.liger_ep_disables_fused_glu(True, laguna) is False
-    upstream_only = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=128)
-    assert orchestrator.liger_ep_disables_fused_glu(True, upstream_only) is True
+    routed_glu_only = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=128)
+    assert orchestrator.liger_ep_disables_fused_glu(True, routed_glu_only) is True
 
     # Gemma 4's dense MLP sits beside the experts in every decoder layer and survives the wrapper,
     # so the delegating spec that names it keeps `geglu` on — through the wrapper's text config too.
