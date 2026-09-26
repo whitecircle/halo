@@ -119,8 +119,7 @@ Launch eight processes.
 halo launch sft gemma4-sft.yaml -n 8
 ```
 
-Keep `attn_implementation: sdpa`. It is the supported attention backend for this checkpoint. Halo builds the model with its Gemma 4 variant of it: FlexAttention on the sliding-window layers and
-matmul attention on the global layers ([how and why](../../agent-docs/models/gemma4.md)).
+Keep `attn_implementation: sdpa`. It is the supported attention backend for this checkpoint.
 
 Do not enable `fp32_non_ep_params`. The router is outside the EP wrapper, and DeepEP combine expects BF16 data. Gemma 4 has no supported auxiliary-loss or bias-update balancing path, so keep `moe_balancing: none`.
 

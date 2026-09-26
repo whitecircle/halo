@@ -220,11 +220,9 @@ guides: [Expert](../parallelism/expert-parallelism.md) ·
 [Expert-Tensor](../parallelism/expert-tensor-parallelism.md) ·
 [Pipeline](../parallelism/pipeline-parallelism.md).
 
-## Turning off a fused kernel {#turning-off-a-fused-kernel}
+## Turning off a fused kernel
 
 The MoE fused kernels have no runtime fallback: one that fails to compile or launch raises at the first forward. They are validated on B300; on other GPUs, turn off the one that fails.
-
-`HALO_FLEX_SLIDING=0` sends every attention layer back to plain SDPA. The flex-sliding implementation applies only to runs that resolved to `sdpa` (Gemma 4, and other models with sliding-window layers or heads wider than 256), so it is the switch to try first when attention fails on those models.
 
 The fused GLU kernels (`src/kernels/fused_glu.py`) fall back to the eager combine on their own for CPU tensors and for any activation they do not compute exactly. They have no switch on CUDA.
 

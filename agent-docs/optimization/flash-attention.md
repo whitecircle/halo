@@ -109,7 +109,7 @@ The `reset_sinks` decision is recorded on the config instance, so the nested EP/
 
 **Gemma4** (5 full-attention layers at `global_head_dim=512`): FA2/FA3/FA4/cuDNN-SDPA all reject head_dim>256 (FA2 cap 256, cuDNN cap 128 on cu13, FA4's SM100 kernel overflows tensor memory and asserts in `flash_fwd_sm100`); math SDPA materializes `[B, heads, S, S]` (64 GB/layer at 32k → OOM).
 
-The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for Gemma4 (`model_is_gemma4`). `patch_sdpa_for_gemma4_long_seq` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. Gemma4 32k EP=8 then runs at peak ~155 GB/rank. The model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
+The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for Gemma4 (`model_is_gemma4`). `patch_sdpa_for_gemma4_long_seq` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. Gemma4 32k EP=8 then runs at peak ~155 GB/rank.
 
 **Qwen3.5 / Qwen3.6 / Qwen3-Next and GLM-4 MoE Lite (GLM-4.7-Flash)**: auto-fall back from FA4 to **SDPA** (`model_fa4_backward_nan_prone`). The FA4 beta backward emits **NaN gradients** on these models — forward is finite, the first backward goes non-finite and collapses loss to 0 (NaN `grad_norm`).
 
@@ -209,8 +209,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | No flash-attn | FA2 is still requested and the model build raises — set `attn_implementation: sdpa` yourself (CP then unavailable) |
 | GptOss | FA4 on Blackwell, FA3 on Hopper |
 | Qwen3.5 / Qwen3.6 / GLM-4.7-Flash | → SDPA (FA4 backward NaN) |
-| Gemma4 | → `sdpa_flex_sliding`: FlexAttention on the sliding layers, matmul attention (mem-efficient SDPA past a score-memory budget) on the head_dim-512 global layers ([Gemma 4](../models/gemma4.md)) |
-| Any other model resolved to SDPA with sliding-window layers or heads wider than 256 (no attention sinks) | → `sdpa_flex_sliding` ([below](#sliding-window-and-wide-head-layers-on-sdpa)) |
+| Gemma4 | → SDPA, mem-efficient kernel (head_dim 512) |
 | Bailing / Ling | → SDPA; a CP run must set `attn_implementation: sdpa` itself |
 | DeepSeek-V4 | → eager |
 | GLM-5 Next · Step-3.7 Flash · Inkling | → SDPA (upstream declares no flash support) |
@@ -241,13 +240,3 @@ The backward then recompiles every step: ~190 s/step vs ~10 s on gpt-oss-20b ep4
 ## Blackwell notes
 
 vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails on SM 10.0. See [Online GRPO](../training-methods/grpo/online-grpo.md#vllm-on-blackwell-b200).
-
-## Sliding-window and wide-head layers on SDPA
-
-A model whose run resolves to `sdpa` is built with `sdpa_flex_sliding` (`src/models/patches/flex_sliding_attention.py`) when its text config declares sliding-window layers (`layer_types`, or a `sliding_window` every layer uses unless `use_sliding_window` is off) or a head wider than 256. Sinks models (GptOss) keep `sdpa`. `HALO_FLEX_SLIDING=0` opts out.
-
-- **Sliding layers** run compiled FlexAttention with a `BlockMask` derived from the dense mask transformers built, so causality, the window, packed-document isolation and padding carry over and the tiles outside the window are skipped. Under SDPA the same layers compute every tile of the dense mask. The tuned tiles apply at head_dim 256 on SM100+ from 2,048 query tokens; other shapes use FlexAttention's defaults.
-- **Causal global layers** run matmul attention (fp32 softmax) where SDPA has only its mem-efficient kernel (head_dim above 256, or the flash backend disabled process-wide, as the Gemma 4 loader does) and the saved scores fit `EAGER_GLOBAL_BUDGET_BYTES`.
-- **Everything else** goes to the implementation registered as `sdpa`: bidirectional modules, dropout, float masks, `output_attentions`, and calls carrying sinks (`s_aux`), a softcap or a position bias.
-
-`tests/gpu/kernels/test_flex_sliding_attention.py` checks Gemma 4 and Mistral (a window on every layer) against the SDPA model, loss and every gradient, on packed rows longer than the window.
