@@ -51,7 +51,6 @@ def test_sr_unbiased_between_grid_points():
     standard error of the mean is ~ulp/(2*sqrt(N)), so a 0.3-ulp constant bias
     would be ~50 sigma away and fail loudly.
     """
-    torch.manual_seed(0)
     base = torch.tensor(1.0, dtype=torch.bfloat16).float()  # exact bf16 grid point
     ulp = _bf16_ulp(1.0)
     x = float(base) + 0.3 * ulp
@@ -64,7 +63,7 @@ def test_sr_unbiased_between_grid_points():
     # without paying torch's per-op CPU thread-pool overhead 20000x — which is minutes on a many-core
     # host. This is also the way SR is actually applied in the optimizer: to whole tensors, not scalars.
     n = 20000
-    samples = stochastic_round_to_bf16(torch.full((n,), x, dtype=torch.float32)).float()
+    samples = stochastic_round_to_bf16(torch.full((n,), x, dtype=torch.float32), seed=0).float()
 
     # Only the two bracketing grid points may appear.
     uniq = torch.unique(samples)
@@ -83,7 +82,7 @@ def test_sr_exact_on_grid_point():
     """A value exactly on a bf16 grid point rounds to itself every time (no noise)."""
     x = torch.tensor(2.0, dtype=torch.bfloat16).float().item()  # exactly representable
     # Vectorized: 2000 independent SR draws of an on-grid value in one call (see the unbiased test).
-    rs = stochastic_round_to_bf16(torch.full((2000,), x, dtype=torch.float32)).float()
+    rs = stochastic_round_to_bf16(torch.full((2000,), x, dtype=torch.float32), seed=0).float()
     assert torch.all(rs == x), f"on-grid value {x} rounded off-grid: {torch.unique(rs).tolist()}"
 
 
@@ -98,11 +97,10 @@ def _fresh_state(p):
 
 
 def _run_eager_step(seed, p0, grad):
-    """Run one eager Adam+SR step from identical inputs under a fixed RNG seed.
+    """Run one eager Adam+SR step from identical inputs under the SR seed pair ``(seed, seed + 1)``.
 
     Returns (param, exp_avg, exp_avg_sq) clones after the step.
     """
-    torch.manual_seed(seed)
     p = p0.clone()
     state = _fresh_state(p)
     _eager_adam_bf16_step(
@@ -116,13 +114,15 @@ def _run_eager_step(seed, p0, grad):
         wd_factor=1.0,
         beta1=0.9,
         beta2=0.999,
+        sr_seeds=(seed, seed + 1),
     )
     return p.clone(), state["exp_avg"].clone(), state["exp_avg_sq"].clone()
 
 
 def test_exp_avg_nearest_weight_and_easq_stochastic():
-    """Two eager steps from identical state under DIFFERENT RNG seeds:
-    exp_avg is bit-identical (nearest), while the weight and exp_avg_sq differ (SR).
+    """Two eager steps from identical state under DIFFERENT SR seeds:
+    exp_avg is bit-identical (nearest), while the weight and exp_avg_sq differ (SR) — and a rerun
+    under the SAME seed reproduces them, so the difference is the seed's noise.
     """
     torch.manual_seed(1234)
     p0 = (torch.randn(4096, dtype=torch.float32) * 0.02).to(torch.bfloat16)
@@ -131,6 +131,7 @@ def test_exp_avg_nearest_weight_and_easq_stochastic():
 
     p_a, ea_a, easq_a = _run_eager_step(11, p0, grad)
     p_b, ea_b, easq_b = _run_eager_step(99, p0, grad)
+    p_a2, _, easq_a2 = _run_eager_step(11, p0, grad)
 
     # exp_avg: nearest rounding -> deterministic regardless of the SR RNG state.
     assert torch.equal(ea_a, ea_b), "exp_avg must be bit-identical (nearest rounding, no SR)"
@@ -138,19 +139,16 @@ def test_exp_avg_nearest_weight_and_easq_stochastic():
     # weight + exp_avg_sq: stochastic rounding -> the two runs must differ somewhere.
     assert not torch.equal(p_a, p_b), "weight write must carry SR noise (differs across RNG seeds)"
     assert not torch.equal(easq_a, easq_b), "exp_avg_sq write must carry SR noise (differs across seeds)"
+    assert torch.equal(p_a, p_a2) and torch.equal(easq_a, easq_a2), "the SR seed must fully determine the noise"
 
 
 # 3. SR on exp_avg_sq removes the nearest-rounding second-moment bias (THE bite test)
 
 
-def _adam_easq_reference(grad_val, n_steps, beta2, sr=False, seed=0):
-    """fp32-accumulated second moment, then stored as bf16 each step.
-
-    sr=False -> nearest rounding (the biased path).
-    sr=True  -> stochastic rounding (matches AdamWBF16's eager path).
-    Returns the mean of the final bf16 exp_avg_sq.
+def _adam_easq_reference(grad_val, n_steps, beta2):
+    """fp32-accumulated second moment, then stored as nearest-rounded bf16 each step (the biased
+    path). Returns the mean of the final bf16 exp_avg_sq.
     """
-    torch.manual_seed(seed)
     size = 8192
     grad = torch.full((size,), grad_val, dtype=torch.bfloat16)
     easq = torch.zeros(size, dtype=torch.bfloat16)
@@ -158,7 +156,7 @@ def _adam_easq_reference(grad_val, n_steps, beta2, sr=False, seed=0):
         easq_fp32 = easq.float()
         g = grad.float()
         easq_fp32.mul_(beta2).addcmul_(g, g, value=1.0 - beta2)
-        easq = stochastic_round_to_bf16(easq_fp32) if sr else easq_fp32.to(torch.bfloat16)  # nearest
+        easq = easq_fp32.to(torch.bfloat16)
     return float(easq.float().mean())
 
 
@@ -191,7 +189,7 @@ def test_sr_removes_second_moment_bias():
     fp32_mean = float(easq_fp32.mean())
     assert fp32_mean > 0.0
 
-    nearest_mean = _adam_easq_reference(grad_val, n_steps, beta2, sr=False)
+    nearest_mean = _adam_easq_reference(grad_val, n_steps, beta2)
 
     # AdamWBF16 eager path: step the real optimizer many times with a constant grad.
     torch.manual_seed(7)

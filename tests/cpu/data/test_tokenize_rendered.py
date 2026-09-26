@@ -19,7 +19,6 @@ Usage:
 
 import pytest
 
-from src.data.pipeline.preferences import build_reward_preprocess_fn
 from src.data.pipeline.rendered import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
 from tests.common.utils import load_script_module
 
@@ -352,38 +351,6 @@ def test_for_generation_noop_without_trailing_specials():
         assert (
             tokenize_rendered(tok, text, for_generation=True)["input_ids"] == tokenize_rendered(tok, text)["input_ids"]
         ), type(tok).__name__
-
-
-def test_reward_preprocess_single_bos_for_bos_template():
-    """build_reward_preprocess_fn routes through tokenize_rendered: single BOS on both branches."""
-    fn = build_reward_preprocess_fn(BosTokenizer(), max_length=64)
-    out = fn(
-        {
-            "prompt": [[{"role": "user", "content": "q"}]],
-            "chosen": [[{"role": "assistant", "content": "good answer"}]],
-            "rejected": [[{"role": "assistant", "content": "bad"}]],
-        }
-    )
-    for key in ("input_ids_chosen", "input_ids_rejected"):
-        ids = out[key][0]
-        assert ids[0] == BOS_ID and BOS_ID not in ids[1:], f"{key} must carry exactly one BOS, got {ids}"
-
-
-def test_reward_preprocess_keeps_gemma4_bos():
-    """Reward path regression: gemma-4-style templates keep their BOS (a leading-BOS strip plus
-    add_special_tokens=True drops it)."""
-    tok = Gemma4StyleTokenizer()
-    fn = build_reward_preprocess_fn(tok, max_length=64)
-    out = fn(
-        {
-            "prompt": [[{"role": "user", "content": "q"}]],
-            "chosen": [[{"role": "assistant", "content": "good answer"}]],
-            "rejected": [[{"role": "assistant", "content": "bad"}]],
-        }
-    )
-    for key in ("input_ids_chosen", "input_ids_rejected"):
-        ids = out[key][0]
-        assert ids[0] == BOS_ID and ids.count(BOS_ID) == 1, f"{key} must keep the template BOS, got {ids}"
 
 
 def test_render_generation_prompt_keeps_bos_when_nothing_re_adds_it():

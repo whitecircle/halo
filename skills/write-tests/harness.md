@@ -42,7 +42,6 @@ It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body i
 | `ctx.output_dir`, `ctx.cache_dir` | per-rank isolated dirs (auto-cleaned) |
 | `ctx.on_teardown(fn)` | register a finalizer (e.g. `trainer.cleanup_ep`); run LIFO before teardown |
 | `ctx.barrier()` | `dist.barrier()` if initialized |
-| `ctx.broadcast_seed(seed=42)` | seed torch/cuda/random identically on all ranks (rank-0 value wins); returns the shared seed. Use when every rank must generate the **same** data. |
 | `ctx.broadcast_checks(checks)` | AND rank 0's verdict into this rank's dict, for a check only rank 0 can make (a served model's response, an HTTP probe). Merges rather than replaces, so a check that failed only on rank 1 survives — the harness exits per rank, and a rank-0-only failure would otherwise read as a teardown race. |
 | `ctx.metrics(trainer_or_cb)` | snapshot headline metrics from a trainer (or an `EfficiencyCallback`); returns `{}` if none attached |
 
@@ -73,12 +72,10 @@ from tests.common.harness import gpu_test_main
 
 @gpu_test_main(min_world_size=2, prefix="test_sft_ep")
 def run(ctx) -> dict:
-    ctx.broadcast_seed(42)               # every rank generates the SAME synthetic data
-
     # 1. Build a tiny model + deterministic synthetic dataset (NO Hub download on hot path).
     #    Load from a cached snapshot or a small local config.
     model, tokenizer = build_tiny_model(ctx)
-    dataset = make_synthetic_sft_dataset(seed=42)   # seeded, reproducible
+    dataset = make_synthetic_sft_dataset(seed=42)   # same seed on every rank: the SAME data
 
     # 2. Train a few REAL steps (>= 2 so the decrease check has signal).
     #    The body builds its own ParallelismConfig — ctx carries the launch, not the mode.

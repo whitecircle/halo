@@ -94,9 +94,9 @@ Rules:
 
 - **Behavior, not implementation** — loss is finite *and* decreases over ≥2 real steps
   (a 1-step run that skips the decrease check is a silent pass — require `len(losses) >= 2`).
-- **Deterministic seeded synthetic data** — generate problems from a fixed seed; use
-  `ctx.broadcast_seed()` when every rank must produce the *same* data (e.g. a parallel run
-  compared to a single-GPU reference).
+- **Deterministic seeded synthetic data** — generate problems from a fixed seed, the same one on
+  every rank when every rank must produce the *same* data (e.g. a parallel run compared to a
+  single-GPU reference).
 - **No hot-path downloads** — load from a cached snapshot / tiny local config; never hit the
   Hub mid-test.
 - **Cross-rank invariants** — an identical broadcast batch gives every rank the same loss

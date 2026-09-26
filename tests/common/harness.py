@@ -37,7 +37,6 @@ it is handled here via ``ctx``.
 """
 
 import functools
-import random
 import sys
 import traceback
 from collections.abc import Callable
@@ -89,21 +88,6 @@ class Ctx:
     def barrier(self) -> None:
         if dist.is_initialized():
             dist.barrier()
-
-    def broadcast_seed(self, seed: int = 42) -> int:
-        """Seed torch/random identically on all ranks (rank-0 value wins).
-
-        Use when every rank must generate the same data (a parallel-mode run
-        compared against a single-GPU reference). Returns the shared seed.
-        """
-        t = torch.tensor([seed], device=self.device)
-        if dist.is_initialized():
-            dist.broadcast(t, src=0)
-        shared = int(t.item())
-        torch.manual_seed(shared)
-        torch.cuda.manual_seed_all(shared)
-        random.seed(shared)
-        return shared
 
     def broadcast_checks(self, checks: dict[str, bool]) -> dict[str, bool]:
         """Share rank 0's verdict with every rank, without masking another rank's own failure.

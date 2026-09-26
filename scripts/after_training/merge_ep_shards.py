@@ -313,7 +313,6 @@ def merge_ep_shards(
         input_dir,
         output_dir,
         shard_files,
-        kind="EP",
         verbose=verbose,
         delete_input_shards=delete_input_shards,
     )

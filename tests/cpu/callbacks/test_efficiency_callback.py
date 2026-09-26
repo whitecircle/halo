@@ -8,7 +8,7 @@ import torch
 
 from src.callbacks import efficiency
 from src.callbacks.efficiency import _PRECISION_KEY_BY_LOWP, EfficiencyCallback, _detect_precision
-from src.callbacks.model_flops import _is_expert_param, compute_expert_params, estimate_model_flops_per_token
+from src.callbacks.model_flops import _is_expert_param, compute_expert_params, estimate_linear_flops_per_token
 from src.distributed.parallelism_config import LOWP_PRECISIONS
 from src.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops
 from src.models.moe_balancing import detect_moe_experts_topk
@@ -287,14 +287,14 @@ def test_detect_moe_config_no_config():
     assert ne == 0 and tk == 0, f"Expected (0, 0), got ({ne}, {tk})"
 
 
-def test_estimate_model_flops():
+def test_estimate_linear_flops():
     # 1B trainable params -> 6e9 flops per token
     num_params = 1_000_000_000
     # Create a single large parameter to represent ~1B params
     # We use a small tensor but override numel via a wrapper
     p = MockParam(num_params, dtype=torch.bfloat16, requires_grad=True)
     model = MockModel(named_params=[("weight", p)])
-    flops = estimate_model_flops_per_token(model)
+    flops = estimate_linear_flops_per_token(model)
     assert flops == 6 * num_params, f"Expected {6 * num_params}, got {flops}"
 
 
@@ -341,7 +341,7 @@ def test_warmup_skipping():
     assert cb.state.elapsed_step == 0, f"Expected elapsed_step=0 during warmup, got {cb.state.elapsed_step}"
 
 
-# Core accounting: estimate_model_flops_per_token, MFU, S-MFU, throughput.
+# Core accounting: FLOPS/token, MFU, S-MFU, throughput.
 # These pin the *values* of the numbers the callback reports to wandb.
 
 
@@ -353,7 +353,9 @@ def test_estimate_model_flops_includes_attention():
     model = MockModel(named_params=[("w", p)], config=config)
 
     seq_len = 512
-    flops = estimate_model_flops_per_token(model, seq_length=seq_len)
+    cb = EfficiencyCallback(_NO_PARALLELISM)
+    cb._initialize_model_flops(model, seq_len)
+    flops = cb.state.model_flops_per_token
     expected = 6 * n_params + 12 * 4 * seq_len * 128
     assert flops == expected, f"expected {expected}, got {flops}"
 
@@ -363,7 +365,9 @@ def test_estimate_model_flops_config_fallback():
     # All params frozen → requires_grad sum is 0, falls to all-params sum.
     p = MockParam(2000, requires_grad=False)
     model = MockModel(named_params=[("w", p)], config=MockConfig())
-    flops = estimate_model_flops_per_token(model, seq_length=128)
+    cb = EfficiencyCallback(_NO_PARALLELISM)
+    cb._initialize_model_flops(model, 128)
+    flops = cb.state.model_flops_per_token
     # No num_hidden_layers/hidden_size on the bare config → 0 attention flops.
     assert flops == 6 * 2000
 
@@ -481,12 +485,12 @@ def test_on_log_gates_diagnostics():
 def test_initialize_metrics_survives_unmeasurable_model():
     """A model the estimator cannot measure disables MFU instead of killing the run.
 
-    ``estimate_model_flops_per_token`` fails loud (no parameters AND no hidden_size /
+    ``estimate_linear_flops_per_token`` fails loud (no parameters AND no hidden_size /
     num_hidden_layers in the config); the callback is observability, so it must degrade.
     """
     shell = MockModel(named_params=[], config=MockConfig(model_type="mystery"))
     with pytest.raises(ValueError):  # the estimator itself stays fail-loud
-        estimate_model_flops_per_token(shell)
+        estimate_linear_flops_per_token(shell)
 
     cb = EfficiencyCallback(_NO_PARALLELISM)
     cb.model_ref = shell

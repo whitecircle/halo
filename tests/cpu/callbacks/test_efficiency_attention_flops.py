@@ -19,11 +19,10 @@ here, so these tests keep policing the callback if the partitioning heuristic ch
 """
 
 import pytest
-import torch
 from torch import nn
 
 from src.callbacks.efficiency import EfficiencyCallback
-from src.callbacks.model_flops import estimate_attention_flops, estimate_model_flops_per_token
+from src.callbacks.model_flops import rank_attention_flops, resolve_attention_layout
 from src.distributed.pipeline_parallel.split import (
     compute_layer_partition,
     head_cost_layer_equivalents,
@@ -107,6 +106,18 @@ def _tp_parallelism(tp_size: int):
     return make_parallelism_config(tp_size=tp_size, world_size=tp_size, gpus_per_node=tp_size)
 
 
+def _callback_state(tp_size: int, model: nn.Module | None = None):
+    """The estimates ``EfficiencyCallback`` stores for a TP-``tp_size`` rank holding ``model``."""
+    callback = EfficiencyCallback(_tp_parallelism(tp_size))
+    callback._initialize_model_flops(_Model(NUM_LAYERS) if model is None else model, SEQ_LEN)
+    return callback.state
+
+
+def _stage_attention_flops(model, pp_size: int, tp_size: int = 1) -> float:
+    """A pipeline stage's attention term, off the layout pair the callback composes it from."""
+    return rank_attention_flops(*resolve_attention_layout(model, pp_size), SEQ_LEN, tp_size)
+
+
 def test_premise_attention_is_a_material_share_of_the_estimate():
     """Guard the premise: at this geometry the attention term is large enough for the bug to matter."""
     assert _attention_flops(NUM_LAYERS) > 0.25 * _param_term(NUM_LAYERS), (
@@ -128,21 +139,20 @@ def test_premise_default_partition_is_uneven():
 @pytest.mark.parametrize("tp_size", TP_SIZES)
 def test_the_attention_term_scales_inversely_with_tp_size(tp_size):
     """A TP rank computes scores for 1/tp_size of the heads — against the formula AND the tp1 value."""
-    model = _Model(NUM_LAYERS)
-    got = estimate_attention_flops(model, SEQ_LEN, 1, tp_size)
+    got = _callback_state(tp_size).attention_flops_per_token
     expected = _attention_flops(NUM_LAYERS) / tp_size
 
     assert got == pytest.approx(expected, rel=1e-9), (
         f"attention FLOPs/token at tp_size={tp_size} is {got:.6e}, expected {expected:.6e} "
         f"(the tp1 value {_attention_flops(NUM_LAYERS):.6e} divided by {tp_size})"
     )
-    assert got == pytest.approx(estimate_attention_flops(model, SEQ_LEN, 1, 1) / tp_size, rel=1e-9)
+    assert got == pytest.approx(_callback_state(1).attention_flops_per_token / tp_size, rel=1e-9)
 
 
 @pytest.mark.parametrize("tp_size", TP_SIZES)
 def test_only_the_attention_term_moves_with_tp_size(tp_size):
     """The parameter term is TP-sharded via ``local_numel``; dividing it here too would double-count."""
-    total = estimate_model_flops_per_token(_Model(NUM_LAYERS), SEQ_LEN, 1, tp_size)
+    total = _callback_state(tp_size).model_flops_per_token
     residual = total - _attention_flops(NUM_LAYERS) / tp_size
 
     assert residual == pytest.approx(_param_term(NUM_LAYERS), rel=1e-9), (
@@ -158,16 +168,13 @@ def test_the_callback_applies_tp_size_to_both_estimates(tp_size):
     They are computed at two separate call sites; a fix applied to only one leaves MFU or S-MFU
     over-reporting under TP.
     """
-    baseline = EfficiencyCallback(_tp_parallelism(1))
-    baseline._initialize_model_flops(_Model(NUM_LAYERS), SEQ_LEN)
-
-    callback = EfficiencyCallback(_tp_parallelism(tp_size))
-    callback._initialize_model_flops(_Model(NUM_LAYERS), SEQ_LEN)
+    baseline = _callback_state(1)
+    state = _callback_state(tp_size)
 
     shard = _attention_flops(NUM_LAYERS) * (1.0 - 1.0 / tp_size)
     for name in ("model_flops_per_token", "active_model_flops_per_token"):
-        got = getattr(callback.state, name)
-        expected = getattr(baseline.state, name) - shard
+        got = getattr(state, name)
+        expected = getattr(baseline, name) - shard
         assert got == pytest.approx(expected, rel=1e-9), (
             f"{name} at tp_size={tp_size} is {got:.6e}, expected {expected:.6e} — the tp1 value minus "
             f"the {tp_size - 1}/{tp_size} of the attention term this rank does not compute"
@@ -179,7 +186,7 @@ def test_attention_flops_track_the_stages_own_layer_count(pp_size):
     """Every stage's attention term must match its real layer count, not the pp_size average."""
     for stage_index, (lo, hi) in enumerate(_default_partition(pp_size)):
         stage_layers = hi - lo
-        got = estimate_attention_flops(_Model(stage_layers), SEQ_LEN, pp_size)
+        got = _stage_attention_flops(_Model(stage_layers), pp_size)
         expected = _attention_flops(stage_layers)
         assert got == pytest.approx(expected, rel=1e-9), (
             f"pp{pp_size} stage {stage_index} holds {stage_layers} layers but its attention term "
@@ -191,18 +198,16 @@ def test_attention_flops_track_the_stages_own_layer_count(pp_size):
 @pytest.mark.parametrize("pp_size", [size for size in PP_SIZES if size > 1])
 def test_stage_terms_sum_to_the_whole_model(pp_size):
     """No layer's attention may be double-counted or dropped across the pipeline."""
-    total = sum(estimate_attention_flops(_Model(hi - lo), SEQ_LEN, pp_size) for lo, hi in _default_partition(pp_size))
-    assert total == pytest.approx(estimate_attention_flops(_Model(NUM_LAYERS), SEQ_LEN, 1), rel=1e-9)
+    total = sum(_stage_attention_flops(_Model(hi - lo), pp_size) for lo, hi in _default_partition(pp_size))
+    assert total == pytest.approx(_stage_attention_flops(_Model(NUM_LAYERS), 1), rel=1e-9)
 
 
 def test_both_axes_default_to_one():
     """The common path — neither axis enabled — must keep the full-depth, full-width attention term."""
-    model = _Model(NUM_LAYERS)
+    state = _callback_state(1)
 
-    assert estimate_attention_flops(model, SEQ_LEN) == pytest.approx(_attention_flops(NUM_LAYERS))
-    assert estimate_model_flops_per_token(model, SEQ_LEN) == pytest.approx(
-        _attention_flops(NUM_LAYERS) + _param_term(NUM_LAYERS)
-    )
+    assert state.attention_flops_per_token == pytest.approx(_attention_flops(NUM_LAYERS))
+    assert state.model_flops_per_token == pytest.approx(_attention_flops(NUM_LAYERS) + _param_term(NUM_LAYERS))
 
 
 @pytest.mark.parametrize(("pp_size", "tp_size"), [(1, 1), (4, 1), (1, 4), (2, 4)])
@@ -213,7 +218,7 @@ def test_the_config_depth_fallback_carries_both_divisors(pp_size, tp_size):
     class _Bare:
         config = _Config()
 
-    got = estimate_attention_flops(_Bare(), SEQ_LEN, pp_size, tp_size)
+    got = _stage_attention_flops(_Bare(), pp_size, tp_size)
     assert got == pytest.approx(_attention_flops(NUM_LAYERS / pp_size) / tp_size), (
         f"the fallback at pp{pp_size}/tp{tp_size} is {got:.6e}, expected the full-depth term divided by both axes"
     )
@@ -221,7 +226,11 @@ def test_the_config_depth_fallback_carries_both_divisors(pp_size, tp_size):
 
 def test_no_config_and_no_layers_omits_the_term():
     """Neither source available: omit the term rather than guess (documented under-estimate)."""
-    assert estimate_attention_flops(torch.nn.Identity(), SEQ_LEN, 1) == 0.0
+    state = _callback_state(1, nn.Linear(HIDDEN, HIDDEN, bias=False, device="meta"))
+
+    assert state.attention_layout is None
+    assert state.attention_flops_per_token == 0.0
+    assert state.model_flops_per_token == pytest.approx(_param_term(1))
 
 
 if __name__ == "__main__":

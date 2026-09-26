@@ -623,14 +623,15 @@ def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monk
 
 
 @pytest.mark.parametrize(
-    "module",
+    ("module", "progress_logger"),
     [
-        "scripts.before_training.convert_mistral4_bf16",
-        "scripts.before_training.convert_deepseek_v4_bf16",
-        "scripts.before_training.convert_glm5_bf16",
+        # The shared FP8 driver logs the per-shard progress of the converters that delegate to it.
+        ("scripts.before_training.convert_mistral4_bf16", "src.checkpoint.fp8_dequant"),
+        ("scripts.before_training.convert_deepseek_v4_bf16", "scripts.before_training.convert_deepseek_v4_bf16"),
+        ("scripts.before_training.convert_glm5_bf16", "src.checkpoint.fp8_dequant"),
     ],
 )
-def test_converter_progress_lines_survive_the_src_root_handler(module):
+def test_converter_progress_lines_survive_the_src_root_handler(module, progress_logger):
     """Importing anything under ``src`` installs a root handler at WARNING, and ``basicConfig`` is a
     no-op once the root has handlers — so an unforced call leaves these converters mute for the whole
     of a multi-hour, 100+ GiB run, with no way to tell progress from a hang.
@@ -640,8 +641,8 @@ def test_converter_progress_lines_survive_the_src_root_handler(module):
     """
     probe = (
         "import importlib, logging; import src; "
-        f"m = importlib.import_module({module!r}); "
-        "print('INFO_ENABLED', m.logger.isEnabledFor(logging.INFO))"
+        f"importlib.import_module({module!r}); "
+        f"print('INFO_ENABLED', logging.getLogger({progress_logger!r}).isEnabledFor(logging.INFO))"
     )
     completed = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True, cwd=_REPO_ROOT, check=True

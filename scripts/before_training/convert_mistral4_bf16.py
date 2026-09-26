@@ -17,7 +17,6 @@ Usage (inside the training image; point HF_HOME and the output at a large volume
 from __future__ import annotations
 
 import argparse
-import logging
 import math
 
 import torch
@@ -28,7 +27,6 @@ from src.checkpoint.tool_io import SAFETENSORS_FLOAT_DTYPES, header_numel
 from src.log import configure_cli_logging
 
 configure_cli_logging()
-logger = logging.getLogger(__name__)
 
 _SCALE_SUFFIX = "_scale_inv"
 # The quant sidecars, matched exactly: the per-weight dequant scale and the static activation scales.

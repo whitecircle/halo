@@ -24,7 +24,7 @@ from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.kernels.fused_glu import clamped_silu_mul_eager, fused_clamped_silu_mul
 from src.models.moe_balancing import resolve_balancing_mode
 from src.models.patches.attention import _model_is_deepseek_v4
-from src.models.patches.buffer_fixes import fix_rotary_inv_freq
+from src.models.patches.buffer_fixes import finalize_loaded_model
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import randomize_tid2eid
 
@@ -245,7 +245,7 @@ def test_topk_layer_selects_biased_but_gates_unbiased():
 # Per-rope-type inv_freq buffer fix
 
 
-def test_fix_rotary_inv_freq_covers_all_rotary_instances():
+def test_finalize_covers_all_rotary_instances():
     """Every DeepseekV4RotaryEmbedding (model-level + CSA/HCA compressors + indexer) must get its
     {main,compress}_inv_freq recomputed — a missed instance keeps garbage frequencies silently."""
     model = _tiny_model()
@@ -258,7 +258,7 @@ def test_fix_rotary_inv_freq_covers_all_rotary_instances():
             references[(i, lt)] = getattr(rot, f"{lt}_inv_freq").clone()
             getattr(rot, f"{lt}_inv_freq").fill_(-1.0)  # corrupt (as a bf16/meta load would)
 
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
 
     for (i, lt), ref in references.items():
         fixed = getattr(rotaries[i], f"{lt}_inv_freq")

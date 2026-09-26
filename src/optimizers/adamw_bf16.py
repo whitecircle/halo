@@ -111,7 +111,7 @@ def _triton_adam_bf16_step(
     wd_factor: float,
     beta1: float,
     beta2: float,
-    sr_seeds: tuple[int, int] | None = None,
+    sr_seeds: tuple[int, int],
 ):
     """Launch the fused Adam+SR Triton kernel for a single parameter."""
     p_data = to_local(p.detach())
@@ -127,9 +127,8 @@ def _triton_adam_bf16_step(
 
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
 
-    # Pre-drawn by ``step`` (structural) or drawn here for direct calls; the kernel uses only the
-    # first of the pair (see :func:`_draw_sr_seeds`).
-    seed = (sr_seeds if sr_seeds is not None else _draw_sr_seeds(use_triton=True))[0]
+    # The kernel uses only the first of the pair (see :func:`_draw_sr_seeds`).
+    seed = sr_seeds[0]
 
     _adam_bf16_sr_kernel[grid](
         p_flat,
@@ -149,16 +148,17 @@ def _triton_adam_bf16_step(
     torch.autograd.graph.increment_version(p)  # the raw-pointer store above is invisible to ATen
 
 
-def stochastic_round_to_bf16(x_fp32: Tensor, seed: int | None = None) -> Tensor:
+def stochastic_round_to_bf16(x_fp32: Tensor, seed: int) -> Tensor:
     """Convert an fp32 tensor to bf16 by stochastic rounding, modifying it in-place.
 
-    Noise comes from the rank-synchronized ``_SR_RNG``, not torch's default generator whose CUDA
-    state drifts per rank, so replicated bf16 params round identically across replicas.
+    Noise comes from ``seed``, drawn off the rank-synchronized ``_SR_RNG``, not torch's default
+    generator whose CUDA state drifts per rank, so replicated bf16 params round identically across
+    replicas.
     """
     x_fp32 = x_fp32.contiguous()
     bits = x_fp32.view(torch.int32)
     gen = torch.Generator(device=bits.device)
-    gen.manual_seed(seed if seed is not None else _SR_RNG.randint(0, 2**31 - 1))
+    gen.manual_seed(seed)
     bits += torch.randint(0, 0x10000, bits.shape, dtype=bits.dtype, device=bits.device, generator=gen)
     bits &= 0xFFFF0000
     return x_fp32.to(torch.bfloat16)
@@ -175,11 +175,9 @@ def _eager_adam_bf16_step(
     wd_factor: float,
     beta1: float,
     beta2: float,
-    sr_seeds: tuple[int, int] | None = None,
+    sr_seeds: tuple[int, int],
 ):
     """Eager (non-Triton) Adam+SR step for a single bf16 parameter."""
-    if sr_seeds is None:
-        sr_seeds = _draw_sr_seeds(use_triton=False)
     easq_seed, weight_seed = sr_seeds
     p_data = to_local(p.detach())
     grad = to_local(grad)

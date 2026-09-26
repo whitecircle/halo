@@ -36,7 +36,7 @@ from src.models.moe_balancing import (
     is_transient_balancing_router,
     resolve_balancing_mode,
 )
-from src.models.patches.buffer_fixes import fix_rotary_inv_freq
+from src.models.patches.buffer_fixes import finalize_loaded_model
 from tests.common.models import TINY_COHERE2_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
 
@@ -218,11 +218,11 @@ def test_tiny_save_load_roundtrip(tmp_path):
     assert torch.allclose(before, after, atol=1e-5)
 
 
-def test_fix_rotary_inv_freq_recomputes_generic_rotary():
+def test_finalize_recomputes_generic_rotary():
     model = _tiny_model()
     reference = model.model.rotary_emb.inv_freq.clone()
     model.model.rotary_emb.inv_freq = torch.zeros_like(reference)
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
     assert torch.allclose(model.model.rotary_emb.inv_freq, reference)
     assert model.model.rotary_emb.inv_freq.dtype == torch.float32
 

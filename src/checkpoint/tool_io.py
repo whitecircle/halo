@@ -247,7 +247,6 @@ def finalize_merged_checkpoint(
     output_dir: str,
     shard_files: list[str],
     *,
-    kind: str,
     verbose: bool,
     delete_input_shards: bool,
 ) -> None:
@@ -269,7 +268,7 @@ def finalize_merged_checkpoint(
         if verbose:
             print(f"Deleted {len(shard_files)} input shard files (--delete_input_shards)")  # noqa: T201 — CLI-facing
 
-    print(f"\n✓ Merged {kind} checkpoint saved to: {output_dir}")  # noqa: T201 — CLI-facing
+    print(f"\n✓ Merged EP checkpoint saved to: {output_dir}")  # noqa: T201 — CLI-facing
 
 
 def reject_sharded_checkpoint(checkpoint_dir: str) -> None:

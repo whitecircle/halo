@@ -1,8 +1,8 @@
 """Per-operation timing for EP training (opt-in via HALO_EP_PERF_PROFILE).
 
 The EP layers wrap their dispatch/compute/combine spans in :meth:`PerformanceMonitor.time_operation`
-to attribute the all-to-all communication fraction; the benchmark scripts read the resulting
-``.stats`` map. The gate is at the call site: the EP layer checks ``HALO_EP_PERF_PROFILE`` and routes
+to attribute the all-to-all communication fraction; only the EP benchmark
+(``tests/gpu/profiling/benchmark_sft_ep.py --comm_profile``) reads the resulting ``.stats`` map. The gate is at the call site: the EP layer checks ``HALO_EP_PERF_PROFILE`` and routes
 its spans to ``torch.profiler.record_function`` when profiling is off, so a monitor is created only
 when it will be used.
 """

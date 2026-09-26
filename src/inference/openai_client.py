@@ -71,13 +71,12 @@ def resolve_local_api_key() -> str:
     return env_str("VLLM_API_KEY") or env_str("OPENAI_API_KEY") or _LOCAL_SERVER_API_KEY
 
 
-def resolve_external_api_key(explicit: str | None = None) -> str | None:
-    """Key for a hosted (non-local) endpoint: explicit → ``OPENROUTER_API_KEY`` → ``OPENAI_API_KEY``.
+def resolve_external_api_key() -> str | None:
+    """Key for a hosted (non-local) endpoint: ``OPENROUTER_API_KEY`` → ``OPENAI_API_KEY``.
 
     Returns ``None`` when nothing is set; each caller decides whether that is fatal.
     """
-    explicit = explicit.strip() if explicit else None
-    return explicit or env_str("OPENROUTER_API_KEY") or env_str("OPENAI_API_KEY") or None
+    return env_str("OPENROUTER_API_KEY") or env_str("OPENAI_API_KEY") or None
 
 
 def create_openai_client(

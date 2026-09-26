@@ -4,28 +4,22 @@ chat-template map for both sides of a pair, and the vision pair's render.
 Batch-time collation of the vision pair is :mod:`src.data.collators.vlm_preference`.
 """
 
-from collections.abc import Callable
 from functools import partial
 from typing import Any
 
-from accelerate.logging import get_logger
 from datasets import Dataset, Features, Sequence, Value
 from datasets import Image as ImageFeature
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
 from src.data.pipeline.processing import DATASET_NUM_PROC, coordinated_map
-from src.data.pipeline.rendered import tokenize_rendered
 from src.data.pipeline.row_processors import normalize_vlm_conversation, prepare_generative_row
 from src.data.vlm import VLM_RAW_IMAGE_COLUMNS, process_vlm_conversation, render_vlm_text
-
-logger = get_logger(__name__)
 
 __all__ = [
     "MARGIN_COLUMN",
     "VLM_PREFERENCE_COLUMNS",
     "apply_chat_template_to_preference_data",
-    "build_reward_preprocess_fn",
     "normalize_preference_row",
     "prepare_preference_datasets",
     "prepare_generative_dataset",
@@ -203,68 +197,6 @@ def apply_chat_template_to_preference_data(
         row[field] = split_rendered_completion(prompt_text, full_text, field)
     row["prompt"] = prompt_text
     return row
-
-
-def build_reward_preprocess_fn(
-    tokenizer: PreTrainedTokenizer,
-    max_length: int,
-    tools_field: str | None = None,
-) -> Callable[[dict], dict]:
-    """Build the batched Bradley-Terry reward tokenization map function.
-
-    Chat-templates ``prompt + chosen`` and ``prompt + rejected`` (optional per-row tools from
-    ``tools_field``), tokenizing each to ``max_length``. Datasets without a ``prompt`` column
-    (implicit-prompt, e.g. Skywork-Reward: the shared turns live inside chosen/rejected) template
-    chosen/rejected whole.
-    """
-
-    def preprocess_function(examples):
-        new_examples = {
-            "input_ids_chosen": [],
-            "attention_mask_chosen": [],
-            "input_ids_rejected": [],
-            "attention_mask_rejected": [],
-        }
-        batch_size = len(examples["chosen"])
-        prompts_batch = examples["prompt"] if "prompt" in examples else [[]] * batch_size
-        tools_batch = examples[tools_field] if tools_field and tools_field in examples else [None] * batch_size
-        for prompt, chosen, rejected, tools_raw in zip(
-            prompts_batch,
-            examples["chosen"],
-            examples["rejected"],
-            tools_batch,
-            strict=False,
-        ):
-            # Batched columns carry the raw tools value, so wrap it as a single-key pseudo-row.
-            template_kwargs = chat_template_kwargs({tools_field: tools_raw} if tools_field else {}, False, tools_field)
-
-            for field, messages in (("prompt", prompt), ("chosen", chosen), ("rejected", rejected)):
-                reject_image_content(messages, f"reward field '{field}'")
-
-            chosen = tokenizer.apply_chat_template(
-                prompt + chosen,
-                tokenize=False,
-                add_generation_prompt=False,
-                **template_kwargs,
-            )
-            rejected = tokenizer.apply_chat_template(
-                prompt + rejected,
-                tokenize=False,
-                add_generation_prompt=False,
-                **template_kwargs,
-            )
-
-            tokenized_chosen = tokenize_rendered(tokenizer, chosen, truncation=True, max_length=max_length)
-            tokenized_rejected = tokenize_rendered(tokenizer, rejected, truncation=True, max_length=max_length)
-
-            new_examples["input_ids_chosen"].append(tokenized_chosen["input_ids"])
-            new_examples["attention_mask_chosen"].append(tokenized_chosen["attention_mask"])
-            new_examples["input_ids_rejected"].append(tokenized_rejected["input_ids"])
-            new_examples["attention_mask_rejected"].append(tokenized_rejected["attention_mask"])
-
-        return new_examples
-
-    return preprocess_function
 
 
 def prepare_preference_datasets(

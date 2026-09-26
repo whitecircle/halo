@@ -105,7 +105,7 @@ def _rotary_with_reference(theta: float = 1_000_000.0) -> tuple[Qwen3RotaryEmbed
 
 
 class _SlopeAttention(nn.Module):
-    """The shape ``fix_non_persistent_buffers`` keys on (Bailing Lightning-Attention slopes)."""
+    """The shape a ``_NON_PERSISTENT_FIXERS`` fixer keys on (Bailing Lightning-Attention slopes)."""
 
     def __init__(self):
         super().__init__()
@@ -149,7 +149,7 @@ def test_seam_recomputes_a_meta_inv_freq():
 
 
 def test_seam_materializes_non_rotary_buffer_families():
-    """Dropping the ``fix_non_persistent_buffers`` leg would strand Bailing slopes / Gemma4
+    """Dropping the ``_NON_PERSISTENT_FIXERS`` leg would strand Bailing slopes / Gemma4
     embed_scale on meta for every path that relies on the seam alone."""
     shell = _LoadedShell()
 

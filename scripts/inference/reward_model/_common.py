@@ -271,11 +271,11 @@ def require_single_output(logits) -> None:
 def encode_for_scoring(tokenizer, conversations: list[list[dict]], correct_answer: str | None) -> dict:
     """Tokenize ``conversations`` for the reward model the way its training rows were tokenized.
 
-    Render through the chat template, then :func:`tokenize_rendered` (the Bradley-Terry reward map's
-    own path, ``build_reward_preprocess_fn``), so BOS lands once on a tokenizer whose post-processor
-    prepends it: re-tokenizing the rendered text would double it and the scores would come from a
-    token sequence the model never trained on. A conversation past ``tokenizer.model_max_length``
-    (``--rm_max_seq_len``) raises :class:`OverlongConversationError`.
+    Render through the chat template, then :func:`tokenize_rendered`, so BOS lands once on a
+    tokenizer whose post-processor prepends it, as in TRL's reward tokenize map (``apply_chat_template``
+    tokenizing its own render without special tokens): re-tokenizing the rendered text would double
+    it and the scores would come from a token sequence the model never trained on. A conversation
+    past ``tokenizer.model_max_length`` (``--rm_max_seq_len``) raises :class:`OverlongConversationError`.
     """
     encoded = [
         tokenize_rendered(

@@ -165,8 +165,8 @@ _BACKENDS: dict[str, SearchBackend] = {
     "duckduckgo": SearchBackend(sync=_search_duckduckgo, async_=_async_search_duckduckgo),
 }
 
-# Fabricated snippets score ``tool_success_reward`` like a real search, so this backend is not
-# selectable from a training YAML; the demo playground opts in through the flag below.
+# Fabricated snippets score ``tool_success_reward`` like a real search, so naming this backend
+# requires the flag below (read per call); tests and smoke runs set it.
 _MOCK_BACKEND = SearchBackend(sync=_search_mock, async_=_async_search_mock)
 _ALLOW_MOCK_SEARCH_FLAG = "HALO_ALLOW_MOCK_SEARCH"
 

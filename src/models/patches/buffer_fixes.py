@@ -187,7 +187,7 @@ def _fix_single_inv_freq_rope(module: nn.Module, name: str) -> int | None:
                 f"Rotary module {name} ({type(module).__name__}) exposes no 'inv_freq' and no "
                 f"recognized per-layer-type buffer mapping ('rope_init_fns' / 'layer_types'), so "
                 f"its frequencies were NOT recomputed in fp32. If this family stores them under "
-                f"another attribute, extend fix_rotary_inv_freq — an uninitialized inv_freq "
+                f"another attribute, add a fixer to _ROTARY_FIXERS — an uninitialized inv_freq "
                 f"silently corrupts every position past the first few thousand tokens. Reported "
                 f"once per rotary class; every layer of this family is affected.",
             )
@@ -288,26 +288,6 @@ def _walk_and_fix(model: nn.Module, fixers: Sequence[tuple[str, Sequence[_Fixer]
     for count, (summary, _) in zip(counts, fixers, strict=True):
         if count > 0:
             logger.info(f"Fixed {count} {summary}")
-
-
-def fix_rotary_inv_freq(model: nn.Module) -> None:
-    """Recompute inv_freq in explicit float32 for all rotary embedding modules.
-
-    Under bf16 ``from_pretrained`` the ``base**(...)`` runs in bf16 and produces an inaccurate
-    inv_freq; under lazy loading it is uninitialized. ``dynamic_rope_update`` does not fix static
-    rope types (e.g. yarn).
-    """
-    _walk_and_fix(model, (_ROTARY_FIXERS,))
-
-
-def fix_non_persistent_buffers(model: nn.Module) -> None:
-    """Recompute non-persistent buffers ``from_pretrained`` / the lazy loaders leave unset.
-
-    Non-persistent buffers (absent from state_dict) hold uninitialized memory after
-    ``init_empty_weights()`` or stay on meta. Handles Bailing MoE Lightning-Attention-2 slopes and the
-    Gemma scaled embeddings' ``embed_scale``.
-    """
-    _walk_and_fix(model, (_NON_PERSISTENT_FIXERS,))
 
 
 def _retie_shared_weights(model: nn.Module) -> None:

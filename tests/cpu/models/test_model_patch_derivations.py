@@ -28,7 +28,7 @@ from transformers.models.zaya import modeling_zaya
 from src.distributed.fsdp import _should_cast_forward_inputs
 from src.distributed.loading.peft_setup import _peft_module_casting_to_bf16
 from src.models.patches.attention import model_fa4_backward_nan_prone
-from src.models.patches.buffer_fixes import fix_rotary_inv_freq
+from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.zaya import patch_zaya_fp32_interlayer_residual
 
 
@@ -161,7 +161,7 @@ def test_the_per_layer_type_rotary_recompute_rebuilds_only_the_buffers_that_exis
     model = nn.Module()
     model.rotary = _PerLayerTypeRotary()
 
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
 
     assert model.rotary.full_attention_inv_freq.dtype == torch.float32
     assert torch.allclose(model.rotary.full_attention_inv_freq, torch.full((4,), 3.0))
@@ -200,7 +200,7 @@ def test_the_layer_types_rotary_recompute_skips_a_type_the_family_does_not_rotat
     model = nn.Module()
     model.rotary = _LayerTypesRotary()
 
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
 
     assert model.rotary.full_attention_inv_freq.dtype == torch.float32
     assert torch.allclose(model.rotary.full_attention_inv_freq, torch.full((4,), 3.0))

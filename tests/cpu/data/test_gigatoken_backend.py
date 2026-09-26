@@ -13,7 +13,6 @@ from datasets import Dataset
 from PIL import Image
 
 from src.data.pipeline import tokenizer_backend as tb
-from src.data.pipeline.preferences import build_reward_preprocess_fn
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_dataset
 from src.data.pipeline.tokenizer_backend import (
@@ -176,23 +175,6 @@ def test_setup_model_and_tokenizer_resolves_backend():
     assert type(proxy) is GigatokenTokenizerProxy
     text = tokenizer.apply_chat_template(CONVERSATIONS[0], tokenize=False)
     assert list(proxy(text)["input_ids"]) == tokenizer(text)["input_ids"]
-
-
-def test_reward_preprocess_backend_parity():
-    """The Bradley-Terry reward map (shared non-SFT tokenization path) must produce identical
-    rows with the proxy."""
-    pytest.importorskip("gigatoken")
-
-    tokenizer = load_cached_tokenizer(MODEL_NAME)
-    proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
-    examples = {
-        "prompt": [[{"role": "user", "content": "Best emoji? 🚀"}]],
-        "chosen": [[{"role": "assistant", "content": "Rocket."}]],
-        "rejected": [[{"role": "assistant", "content": "None."}]],
-    }
-    base = build_reward_preprocess_fn(tokenizer, max_length=512)(examples)
-    swapped = build_reward_preprocess_fn(proxy, max_length=512)(examples)
-    assert {k: [list(v) for v in vs] for k, vs in swapped.items()} == base
 
 
 @pytest.mark.parametrize("mode", ["chat", "text"])

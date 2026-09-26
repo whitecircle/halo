@@ -116,7 +116,7 @@ def dump_distributed_stacks(
     target = _py_spy_artifact_dir(output_dir)
     _run_py_spy_per_pid(
         target,
-        _py_spy_target_pids(pids, include_self=True, include_children=True),
+        _py_spy_target_pids(pids, include_children=True),
         lambda pid, _target: ["py-spy", "dump", "--pid", str(pid)],
         timeout=_PY_SPY_DUMP_TIMEOUT_S,
         stdout_suffix=".txt",
@@ -165,7 +165,7 @@ def record_distributed_flamegraph(
     target = _py_spy_artifact_dir(output_dir)
     _run_py_spy_per_pid(
         target,
-        _py_spy_target_pids(pids, include_self=True, include_children=not this_rank_only),
+        _py_spy_target_pids(pids, include_children=not this_rank_only),
         _record_command,
         timeout=duration + _PY_SPY_RECORD_GRACE_S,
     )
@@ -222,16 +222,12 @@ def _py_spy_artifact_dir(output_dir: str | Path) -> Path:
     return target
 
 
-def _py_spy_target_pids(
-    pids: Iterable[int] | None,
-    *,
-    include_self: bool,
-    include_children: bool,
-) -> set[int]:
-    """Processes to attach to: explicit ``pids`` verbatim, else this process and/or torchrun's children."""
+def _py_spy_target_pids(pids: Iterable[int] | None, *, include_children: bool) -> set[int]:
+    """Processes to attach to: explicit ``pids`` verbatim, else this process plus, with
+    ``include_children``, torchrun's children."""
     if pids is not None:
         return set(pids)
-    targets = {os.getpid()} if include_self else set()
+    targets = {os.getpid()}
     if include_children:
         targets.update(torchrun_python_pids())
     return targets

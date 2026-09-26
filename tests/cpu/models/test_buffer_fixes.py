@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``fix_rotary_inv_freq`` tests (src/models/patches/buffer_fixes.py) — CPU-only.
+"""``finalize_loaded_model`` buffer-recompute tests (src/models/patches/buffer_fixes.py) — CPU-only.
 
 transformers 5 pops ``rope_theta``/``partial_rotary_factor`` off the config top level into
 ``config.rope_parameters``; a recompute that reads ``getattr(config, "rope_theta", 10000.0)``
@@ -25,7 +25,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
 from src.models.patches import buffer_fixes
-from src.models.patches.buffer_fixes import finalize_loaded_model, fix_rotary_inv_freq
+from src.models.patches.buffer_fixes import finalize_loaded_model
 
 
 def _model_with_rotary(theta: float) -> tuple[nn.Module, Qwen3RotaryEmbedding, torch.Tensor]:
@@ -40,7 +40,7 @@ def _model_with_rotary(theta: float) -> tuple[nn.Module, Qwen3RotaryEmbedding, t
 def test_recompute_preserves_nondefault_theta():
     model, rotary, reference = _model_with_rotary(theta=1_000_000.0)
     rotary.inv_freq.zero_()  # simulate the bf16/meta corruption the fixer repairs
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
     assert torch.allclose(rotary.inv_freq, reference), (
         f"inv_freq rebuilt with wrong rope base: got {rotary.inv_freq[1].item():.6f}, "
         f"expected {reference[1].item():.6f} (theta=1e6)"
@@ -51,7 +51,7 @@ def test_recompute_preserves_nondefault_theta():
 def test_recompute_default_theta():
     model, rotary, reference = _model_with_rotary(theta=10_000.0)
     rotary.inv_freq.zero_()
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
     assert torch.allclose(rotary.inv_freq, reference)
 
 
@@ -78,7 +78,7 @@ def test_per_layer_type_recompute_matches_model_init():
     for name in reference:
         getattr(rotary, name).zero_()  # simulate the bf16/meta corruption the fixer repairs
 
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
 
     rebuilt = dict(rotary.named_buffers())
     for name, expected in reference.items():
@@ -97,7 +97,7 @@ def test_vision_rotary_recompute_matches_model_init():
     rotary.inv_freq.zero_()
     rotary.original_inv_freq.zero_()
 
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
 
     assert torch.equal(rotary.inv_freq, reference)
     assert torch.equal(rotary.original_inv_freq, reference)
@@ -124,7 +124,7 @@ def test_recompute_preserves_declared_persistence():
     model, rotary, reference = _model_with_rotary(theta=10_000.0)
     rotary.register_buffer("inv_freq", rotary.inv_freq.clone(), persistent=True)
     rotary.inv_freq.zero_()
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
     assert torch.allclose(rotary.inv_freq, reference)
     assert "rotary_emb.inv_freq" in model.state_dict(), "recompute silently dropped a persistent buffer from saves"
 
@@ -194,7 +194,7 @@ def test_per_module_repair_is_not_logged_at_info(caplog):
     model, rotary, _reference = _model_with_rotary(theta=1_000_000.0)
     rotary.inv_freq.zero_()
 
-    fix_rotary_inv_freq(model)
+    finalize_loaded_model(model)
 
     messages = [r.message for r in caplog.records]
     assert not [m for m in messages if "rotary_emb" in m], f"per-module line still at INFO: {messages}"
@@ -209,14 +209,14 @@ def test_unrecognized_rotary_warns_once_per_class(caplog, monkeypatch):
     # in this worker silently un-warned.
     monkeypatch.setattr(buffer_fixes, "_WARNED_UNFIXED", set())
 
-    fix_rotary_inv_freq(_model_with_unknown_rotaries(4))
+    finalize_loaded_model(_model_with_unknown_rotaries(4))
 
     seen = [r for r in caplog.records if "_UnknownRotary" in r.message]
     assert len(seen) == 1, f"expected one line per rotary class, got {len(seen)}"
 
     monkeypatch.setattr(buffer_fixes, "_WARNED_UNFIXED", set())
     caplog.clear()
-    fix_rotary_inv_freq(_model_with_unknown_rotaries(1))
+    finalize_loaded_model(_model_with_unknown_rotaries(1))
     assert [r for r in caplog.records if "_UnknownRotary" in r.message], "anti-vacuity: it must still warn once"
 
 

@@ -1,4 +1,4 @@
-"""Environment-variable helpers for the toolkit's own knobs (``HALO_``/``DIST_``/``VLLM_``).
+"""Environment-variable helpers for the toolkit's own knobs (``HALO_``/``DIST_``/``VLLM_``/``SGLANG_``/``NVLINK_``).
 
 Booleans parse through :func:`env_flag` (``1/true/yes/on``, case-insensitive), numbers through
 :func:`env_int` / :func:`env_float` (warn and fall back rather than raise mid-run), strings through

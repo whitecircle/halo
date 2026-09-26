@@ -37,7 +37,7 @@ from src.data.pipeline.conversation import (
     IMAGE_PART_TYPE,
     conversation_carries_images,
 )
-from src.data.pipeline.preferences import apply_chat_template_to_preference_data, build_reward_preprocess_fn
+from src.data.pipeline.preferences import apply_chat_template_to_preference_data
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.pipeline.row_processors import (
     apply_chat_template_to_conversations,
@@ -318,19 +318,6 @@ def test_preference_renderer_refuses_an_image_content_part(field):
     row[field] = [{"role": row[field][0]["role"], "content": image_content}]
     with pytest.raises(ValueError, match="image content part"):
         apply_chat_template_to_preference_data(row, _UnreachableTokenizer())
-
-
-def test_reward_renderer_refuses_an_image_content_part():
-    """Bradley-Terry reward prep renders prompt+chosen and prompt+rejected itself."""
-    fn = build_reward_preprocess_fn(_UnreachableTokenizer(), max_length=64)
-    with pytest.raises(ValueError, match="image content part"):
-        fn(
-            {
-                "prompt": [IMAGE_TURNS[:1]],
-                "chosen": [[{"role": "assistant", "content": "a"}]],
-                "rejected": [[{"role": "assistant", "content": "b"}]],
-            }
-        )
 
 
 def test_generation_prompt_renderer_refuses_an_image_content_part():
