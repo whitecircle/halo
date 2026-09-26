@@ -777,8 +777,8 @@ class ParallelismConfig:
                     self.ep_size,
                     num_domains,
                     remedy=(
-                        f"Set expert_tp_size={members_per_domain} with ep_size={num_domains}, or use "
-                        f"NVLink-local EP (ep_scope='node')."
+                        f"Set expert_tensor_parallel_size={members_per_domain} with "
+                        f"expert_parallel_size={num_domains}, or use NVLink-local EP (ep_scope='node')."
                     ),
                 )
 
@@ -1074,12 +1074,13 @@ class ParallelismConfig:
             )
         except ValueError as exc:
             cp_note = f" ({budget} / cp_size={self.cp_size})" if self.cp_size > 1 else ""
-            length_note = "" if self.ep_declared_max_length else " (max_length: null → the model's context window)"
+            length_note = "" if self.ep_declared_max_length else " (no length cap → the model's context window)"
             raise ValueError(
-                f"Lower max_length or per_device_train_batch_size — or, for the cross-node Gin ceiling "
-                f"only, raise HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK. This run's declared token budget "
-                f"cannot be dispatched: per_device_train_batch_size × max_length={max_length}"
-                f"{length_note} gives {tokens_per_rank} tokens/rank"
+                f"Lower per_device_train_batch_size or the row-length cap (max_length, or "
+                f"max_prompt_length + max_completion_length where those two bound a row) — or, for the "
+                f"cross-node Gin ceiling only, raise HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK. This run's "
+                f"declared token budget cannot be dispatched: {self.ep_rows_per_device} row(s)/device × "
+                f"{max_length} tokens/row{length_note} gives {tokens_per_rank} tokens/rank"
                 f"{cp_note}, sized to a {capacity}-token DeepEP arena on an EP group of "
                 f"{self.ep_group_size} rank(s) (ep_scope={self.ep_scope}, nvlink_domain_size="
                 f"{self.nvlink_domain_size}, "

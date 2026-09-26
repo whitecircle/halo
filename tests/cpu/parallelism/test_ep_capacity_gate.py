@@ -225,8 +225,8 @@ def test_a_null_max_length_is_judged_against_the_models_own_context_window():
         config.validate_against_model_config(_wide(max_position_embeddings=_WIDE_INDEX_CEILING))
     text = str(err.value)
     assert "32-bit wire-index limit" in text, text
-    assert f"max_length={_WIDE_INDEX_CEILING}" in text, "the refusal must name the length it resolved"
-    assert "max_length: null" in text, "and say the number came from the model, not from the config"
+    assert f"{_WIDE_INDEX_CEILING} tokens/row" in text, "the refusal must name the length it resolved"
+    assert "no length cap" in text, "and say the number came from the model, not from the config"
 
 
 def test_a_null_max_length_under_the_ceiling_still_passes():
