@@ -4,6 +4,7 @@ from dataclasses import MISSING, fields
 from typing import TYPE_CHECKING
 
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.loading.tokenizer_setup import is_bounded_length
 
 if TYPE_CHECKING:
     from src.distributed.expert_parallel.config import ExpertLoraSpec
@@ -150,15 +151,32 @@ def parallelism_config_from_args(
         # The two factors stay separate because only one of them is knowable here: a config with no
         # max_length field at all (generation-shaped budgets) declares neither rows nor budget, while
         # ``max_length: null`` declares its rows and leaves the length to the gate's context-window
-        # resolution.
+        # resolution unless a bounded prompt + completion budget caps each row.
         ep_rows_per_device=(
             forward_rows_per_example(trainer_cls)
             * int(getattr(training_config, "per_device_train_batch_size", 0) or 0)
             if hasattr(training_config, "max_length")
             else 0
         ),
-        ep_declared_max_length=int(getattr(training_config, "max_length", 0) or 0),
+        ep_declared_max_length=declared_row_length(training_config),
     )
     if allow_low_precision:
         kwargs.update({name: getattr(dist_args, name) for name in _LOWP_KNOBS})
     return ParallelismConfig(**kwargs)
+
+
+def declared_row_length(training_config) -> int:
+    """The token cap a config puts on one training row, or 0 when it declares none.
+
+    ``max_length`` where set; otherwise a bounded prompt + completion budget, which the trainers that
+    carry both (offline GRPO) truncate each row to. 0 leaves the EP capacity gate to the model's
+    context window.
+    """
+    max_length = getattr(training_config, "max_length", None)
+    if is_bounded_length(max_length):
+        return int(max_length)
+    prompt = getattr(training_config, "max_prompt_length", None)
+    completion = getattr(training_config, "max_completion_length", None)
+    if is_bounded_length(prompt) and is_bounded_length(completion):
+        return int(prompt) + int(completion)
+    return 0
