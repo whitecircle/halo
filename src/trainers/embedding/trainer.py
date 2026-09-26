@@ -18,6 +18,7 @@ import transformers
 from datasets import Dataset, DatasetDict, IterableDataset
 from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
+from sentence_transformers.base.sampler import BatchSamplers
 from sentence_transformers.evaluation import SentenceEvaluator
 from sentence_transformers.losses import (
     AnglELoss,
@@ -179,6 +180,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             dataset_presharded=dataset_presharded,
             moe_balancing=moe_balancing,
         )
+        self._reject_batch_sampler_on_toolkit_loader(args)
 
         if loss is None and model is not None and args is not None:
             loss = create_loss(model, args)
@@ -209,6 +211,24 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         self._eval_embedding_accum: dict[str, list[float]] = {}
         self._setup_distributed_modes()
         self._validate_injected_lora_parallelism()
+
+    def _reject_batch_sampler_on_toolkit_loader(self, args: EmbeddingConfig | None) -> None:
+        """Refuse a batch sampler the toolkit's loader would drop.
+
+        The runs :meth:`get_train_dataloader` hands to the mixin's DP-sharded loader (TP/ETP, a
+        pre-sharded dataset) batch a plain sampler and never read ``batch_sampler``, so
+        ``no_duplicates`` would let in-batch duplicates through as false negatives, silently.
+        """
+        if args is None or not self._needs_custom_dataloader():
+            return
+        if BatchSamplers(args.batch_sampler) is BatchSamplers.BATCH_SAMPLER:
+            return
+        raise ValueError(
+            f"batch_sampler: {BatchSamplers(args.batch_sampler).value} is not applied under tensor or "
+            "expert-tensor parallelism or on a pre-sharded dataset: those runs batch through the toolkit's "
+            "DP-sharded loader, which builds plain batches. Set batch_sampler: batch_sampler, or train on "
+            "plain DP / pure EP, where the sentence-transformers loader applies it."
+        )
 
     def _validate_injected_lora_parallelism(self) -> None:
         """Reject in-place-injected LoRA under EP, where the save path cannot fold it.
