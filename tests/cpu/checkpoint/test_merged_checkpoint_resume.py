@@ -35,6 +35,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 import src.distributed.checkpoint.loader as loader_mod
 import src.distributed.checkpoint.peft as peft_mod
+import src.distributed.checkpoint.save as save_mod
 import src.distributed.expert_parallel.saving as saving_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE
@@ -101,7 +102,14 @@ class _ExpertOnlyModel(nn.Module):
         self.config = SimpleNamespace(_name_or_path=BASE)
 
 
-def _tiny_peft_model(seed: int) -> PeftModel:
+def _tiny_peft_model(
+    seed: int,
+    *,
+    dtype: torch.dtype = torch.float32,
+    tie_word_embeddings: bool = False,
+    target_modules: tuple[str, ...] = ("q_proj", "v_proj"),
+    lora_alpha: int = 8,
+) -> PeftModel:
     config = AutoConfig.for_model(
         "qwen3",
         vocab_size=64,
@@ -111,13 +119,13 @@ def _tiny_peft_model(seed: int) -> PeftModel:
         num_attention_heads=4,
         num_key_value_heads=2,
         max_position_embeddings=32,
-        tie_word_embeddings=False,
+        tie_word_embeddings=tie_word_embeddings,
         attn_implementation="eager",
     )
     torch.manual_seed(0)
-    model = AutoModelForCausalLM.from_config(config, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_config(config, dtype=dtype)
     torch.manual_seed(seed)
-    return get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"]))
+    return get_peft_model(model, LoraConfig(r=4, lora_alpha=lora_alpha, target_modules=list(target_modules)))
 
 
 def _save_context(model, *, tokenizer=None) -> CheckpointContext:
@@ -202,6 +210,23 @@ def test_expert_only_resume_adapter_is_the_standalone_adapter_save(tmp_path, mon
         "an adapter_config.json at the root makes from_pretrained load the base, not the merged weights"
     )
     assert not os.path.exists(os.path.join(checkpoint, ADAPTER_SAFETENSORS_FILE))
+
+
+def test_a_failed_adapter_write_leaves_no_marker(tmp_path, monkeypatch):
+    """The marker is the resume's verdict, so it must never outrun its adapter: a checkpoint whose
+    adapter write failed has to stay unmarked, where the loader refuses it as a merged checkpoint
+    without its adapter, rather than marked and missing the file it promises."""
+    monkeypatch.setattr(saving_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+
+    def full_disk(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(saving_mod, "save_file", full_disk)
+    checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
+
+    with pytest.raises(OSError, match="No space left"):
+        save_resume_adapter(_save_context(_ExpertOnlyModel()), checkpoint)
+    assert resume_adapter_dir(checkpoint) is None
 
 
 def test_mixed_resume_adapter_round_trips_through_the_adapter_restore(tmp_path, monkeypatch):
@@ -358,6 +383,37 @@ def test_the_merged_save_undoes_its_merge_exactly():
     assert plain_unmerge_drifts, "premise: a bf16 unmerge alone does not reverse the merge"
 
 
+def test_the_exact_unmerge_reaches_a_tied_base_weight():
+    """A LoRA'd ``lm_head`` tied to ``embed_tokens`` is one tensor, which ``named_parameters()`` lists
+    once, under the embedding's name rather than the ``.base_layer.`` one. A restore that walked the
+    de-duplicated names would leave that weight to the bf16 unmerge."""
+    model = _tiny_peft_model(
+        seed=1, dtype=torch.bfloat16, tie_word_embeddings=True, target_modules=("lm_head", "q_proj"), lora_alpha=64
+    )
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if ".lora_" in name:
+                param.normal_(std=0.5)
+    tied = model.base_model.model.lm_head.base_layer.weight
+    assert tied is model.base_model.model.model.embed_tokens.weight, "premise: the head is tied"
+    listed = [name for name, _ in model.named_parameters() if "lm_head.base_layer" in name]
+    assert not listed, "premise: the tied weight is listed once, as the embedding"
+    original = tied.detach().clone()
+
+    for _ in range(20):
+        with merged_adapters(model):
+            pass
+    plain_unmerge_drifts = not torch.equal(tied, original)
+    with torch.no_grad():
+        tied.copy_(original)
+    for _ in range(20):
+        with merged_adapters(model, restore_base=True):
+            pass
+
+    assert torch.equal(tied, original), "the tied base weight drifted through the merged saves"
+    assert plain_unmerge_drifts, "premise: a bf16 unmerge alone moves the tied weight"
+
+
 # --- the final export -----------------------------------------------------------------------
 
 
@@ -378,14 +434,17 @@ class _SaveModelTrainer(DistributedTrainerMixin):
 def test_the_final_export_carries_no_resume_adapter(tmp_path, monkeypatch):
     """``save_model`` writes the serving artifact; the resume adapter is a checkpoint sidecar, which
     ``_save_checkpoint`` adds. Nothing resumes from the final export (no trainer or optimizer state),
-    so an adapter copy there would only grow what gets served and pushed."""
-    written = _Recorder()
-    monkeypatch.setattr(checkpointing_mod, "save_checkpoint", lambda ctx, out: True)
-    monkeypatch.setattr(checkpointing_mod, "save_resume_adapter", written)
+    so an adapter copy there would only grow what gets served and pushed. The real saver ladder runs,
+    down to the merged EP write, so a resume-adapter write moved into any of it is caught."""
+    merged_writes, resume_writes = _Recorder(), _Recorder()
+    monkeypatch.setattr(save_mod, "save_ep_model", merged_writes)
+    monkeypatch.setattr(save_mod, "save_resume_adapter", resume_writes)
+    monkeypatch.setattr(checkpointing_mod, "save_resume_adapter", resume_writes)
 
     _SaveModelTrainer(_save_context(_ExpertOnlyModel())).save_model(str(tmp_path / "final"))
 
-    assert not written.calls
+    assert merged_writes.calls and merged_writes.calls[0][1]["merge_lora"], "premise: the merged save ran"
+    assert not resume_writes.calls
     assert resume_adapter_dir(str(tmp_path / "final")) is None
 
 

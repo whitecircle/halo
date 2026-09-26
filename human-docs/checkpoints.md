@@ -41,7 +41,10 @@ Every torchrun resume at the default `use_grouped_gemm: true` (dense included),
 and every EP, TP or CP resume, rebuilds the model *from* the checkpoint rather than
 loading weights back into a running model, which the fused-expert and CP-wrapped
 layouts cannot accept. One consequence: the training scripts must launch the
-resume, since they repoint the model source.
+resume, since they repoint the model source. LoRA checkpoints are the exception:
+the model is rebuilt from the base and the adapters are restored onto it, including
+for `merge_expert_lora_on_save`, whose checkpoints keep the unmerged adapters for
+exactly this.
 
 `load_best_model_at_end` is refused at startup for a full fine-tune under CP, on
 a MoE model wrapped for expert compute (plain FSDP2 at the default

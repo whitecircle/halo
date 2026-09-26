@@ -187,9 +187,12 @@ def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
     :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR` through the writer the non-merged save uses
     (:class:`PeftAdapterSaver` when a PeftModel carries an attention half,
     :func:`save_ep_lora_adapters` for expert-only), so the adapter restore reads them unchanged. Each
-    save rank then writes the marker the resume classifies on, after its own copy is complete.
-    Collective: every rank enters the adapter gathers.
+    save rank then writes the marker the resume classifies on, after its own copy is complete, so
+    a failed adapter write leaves no marker. Collective: every rank enters the adapter gathers.
     """
+    # Rank-uniform, and a no-op when sharded: a forward's transient unsharded params predate the
+    # last optimizer step, like every writer's.
+    reshard_fsdp2_modules(ctx.model)
     adapter_dir = os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
     peft_model = find_peft_model(ctx.model)
     if peft_model is not None:

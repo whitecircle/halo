@@ -493,6 +493,9 @@ save, or one written without it), raises rather than restart the adapters from i
 restored optimizer moments; a new run from those weights (`model_name_or_path` pointed at the
 checkpoint) is the way to continue.
 
+The adapter file is written at the save dtype (bf16), as the non-merged save's is, so the restore is
+exact for bf16 adapters; fp32 ones (`fp32_experts`, `fp32_non_ep_params`) resume rounded to bf16.
+
 `copy_checkpoint_aux_files` treats the adapter and its marker as resume sidecars: a tool output
 keeps them, an N-way merge drops them. `tests/gpu/trainers/lora/test_lora_merged_save_resume.py`
 pins the resume against an uninterrupted run: adapters bit-equal after the restore, first resumed

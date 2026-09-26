@@ -90,8 +90,9 @@ MAX_SEQ_LENGTH = 256
 # learning rate does.
 LEARNING_RATE = 2e-3
 # The first resumed step's forward reads only restored state, so it reproduces the uninterrupted
-# loss (measured 0.0 on every row); a frozen base one bf16 rounding step off shifts it by ~4e-4.
-FIRST_LOSS_TOL = 1e-5
+# loss (measured 0.0 on every row); fresh adapters over the merged weights miss by >=1.2e-4. The
+# bound leaves room for a kernel choice that differs between the two trainer builds.
+FIRST_LOSS_TOL = 1e-4
 # Later steps also carry the stochastic-rounding stream, which restarts on resume: measured up to
 # 2.2e-3, against >=5e-2 when the adapters resume fresh.
 LOSS_TOL = 5e-3

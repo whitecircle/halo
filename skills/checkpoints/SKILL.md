@@ -36,7 +36,8 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
   command; leave `model_name_or_path` at the base.** The scripts repoint the policy's weights at the
   checkpoint themselves (`resolve_resume_weights_source`, `src/training/environment.py`) under
   EP/ETP/EP+TP/EP+CP/CP/TP and, at the default `use_grouped_gemm: true`, every run, dense included
-  (an adapter-only checkpoint keeps the base and restores the adapter). The base keeps feeding the
+  (an adapter-only checkpoint, and a `merge_expert_lora_on_save` one through its
+  `resume_adapter.json` marker, keeps the base and restores the adapter). The base keeps feeding the
   DPO/KTO/SDPG reference and the dataset-compat check, so repointing `model_name_or_path` yourself
   moves the reference onto trained weights. The model loads the
   trained weights at construction and the loader skips the re-read; it restores `trainer_state.json`,
@@ -47,7 +48,9 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
   PP takes its own `_load_pp_stage` path. A model built from anything but the checkpoint (a custom
   script) makes the loader **refuse the resume** under EP/CP and TP+DP rather than continue on the base
   weights (`loader.py`); only an adapter-only checkpoint, which ships no base weights to check
-  against, still resumes quietly. `load_best_model_at_end` is refused under EP/CP full fine-tuning
+  against, still resumes quietly. A merge-on-save checkpoint inverts the check: it refuses a model
+  built from its own merged weights (the delta would apply twice), and an unmarked merged checkpoint
+  under an adapter run raises. `load_best_model_at_end` is refused under EP/CP full fine-tuning
   and TP+DP — export the best checkpoint directly. Owner:
   `agent-docs/reference/checkpoints.md#resuming-training`.
 - **A per-rank sharded checkpoint is NOT directly loadable.** `load_full_state_dict` refuses

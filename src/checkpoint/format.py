@@ -92,8 +92,9 @@ PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
 # A ``merge_expert_lora_on_save`` checkpoint's resume state: the unmerged adapter, written as the
 # non-merged save writes it, beside the merged weights that serve. A subdirectory, because an
 # ``adapter_config.json`` at the root makes ``from_pretrained`` load its base model instead of the
-# merged weights. The root marker is written last and is what classifies the checkpoint as
-# resume-from-base-plus-adapter: its presence is the verdict, its body names the directory.
+# merged weights. The root marker follows once the adapter is complete and classifies the checkpoint
+# as resume-from-base-plus-adapter: its presence is the verdict; the body only names the directory
+# for whoever reads the checkpoint.
 RESUME_ADAPTER_DIR = "resume_adapter"
 RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
 # Resume state like the sidecars below, but not weight-suffixed: the aux copy carries them by

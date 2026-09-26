@@ -187,14 +187,20 @@ def merged_adapters(model: torch.nn.Module | None, *, restore_base: bool = False
     ``None`` (no PEFT model in the tree) is a no-op, so callers can pass a lookup result directly.
 
     ``restore_base`` makes the unfold exact. In bf16, ``(w + d) - d`` misses ``w`` by a rounding step
-    wherever the fold changed the exponent, so the unmerge alone moves the frozen base a little on
-    every call. With it, the weights the merge rewrites (PEFT's ``.base_layer.`` params) are copied
-    first and written back after the unmerge: one extra copy of their local shards, no collective.
+    wherever the two roundings do not cancel (the fold changed the exponent, or landed on a tie), so
+    the unmerge alone moves the frozen base a little on every call. With it, the weights the merge
+    rewrites (PEFT's ``.base_layer.`` params) are copied first and written back after the unmerge:
+    one extra copy of their local shards, no collective. Duplicates are walked so a tied weight
+    (a LoRA'd ``lm_head`` sharing ``embed_tokens``) is found under its ``.base_layer.`` name too.
     """
     peft = model is not None and is_peft_model(model)
-    originals = []
+    originals = {}
     if peft and restore_base:
-        originals = [(param, param.data.clone()) for name, param in model.named_parameters() if ".base_layer." in name]
+        originals = {
+            id(param): (param, param.data.clone())
+            for name, param in model.named_parameters(remove_duplicate=False)
+            if ".base_layer." in name
+        }
     if peft:
         model.merge_adapter()
     try:
@@ -203,7 +209,7 @@ def merged_adapters(model: torch.nn.Module | None, *, restore_base: bool = False
         if peft:
             model.unmerge_adapter()
             with torch.no_grad():
-                for param, original in originals:
+                for param, original in originals.values():
                     param.data.copy_(original)
 
 

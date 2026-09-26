@@ -470,7 +470,8 @@ namespace is refused.
 expert-only **and** mixed runs alike. Without it a mixed adapter is resumable by this toolkit but foldable by
 no tool, since saving the adapters and merging afterwards hits exactly the refusal above. Each merged
 training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
-base, so the run continues exactly ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
+base, so the run continues from its trained adapters rather than the fold
+([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 
 It needs native grouped expert adapters to exist: `lora_target_modules` must name at least one expert
 projection, or `_validate_merge_expert_lora_save` raises.

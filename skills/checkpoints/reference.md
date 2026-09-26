@@ -32,12 +32,15 @@ additionally needs `ep_size` in the index metadata, not just the marker.
 - **Path B — load at construction** (EP, ETP, EP+TP, EP+CP, CP, TP, and at the default
   `use_grouped_gemm: true` every other run, dense included): `resolve_resume_weights_source`
   (`src/training/environment.py`) repoints the policy's weights source at the checkpoint dir (an
-  adapter-only one keeps the base), so `load_distributed_model()` builds the model from the trained
+  adapter-only one keeps the base, and so does a `merge_expert_lora_on_save` one, whose
+  `resume_adapter.json` marker sends the resume to its `resume_adapter/`), so
+  `load_distributed_model()` builds the model from the trained
   weights. `model_config` is not mutated — the DPO/KTO/SDPG reference and the dataset-compat check
   keep the base, so **leave `model_name_or_path` at the base**. An unmerged per-rank save raises
   here, before construction. The loader then skips the re-read: EP/CP always, `_load_tp` / `_load_fsdp2` when the model was
   constructed from that checkpoint. A model built from anything else makes the loader raise
-  (rank-0 verdict, broadcast) under EP/CP when the checkpoint ships base weights, and under TP+DP,
+  (rank-0 verdict, broadcast) under EP/CP when the checkpoint ships base weights (a marked
+  merge-on-save checkpoint inverts this: it refuses a model built from itself), and under TP+DP,
   whose strided dp-over-tp placement `distribute_tensor` does not invert; pure TP instead streams the
   checkpoint one tensor at a time per rank and `distribute_tensor`s each into the live placements
   (GptOss sinks sliced by `tp_rank`). `load_best_model_at_end` raises under EP/CP full fine-tuning
