@@ -22,8 +22,8 @@ the family's function **exactly**. The builder patches a role by subclassing the
 preserving its constructor signature and class name.
 
 Upstream Liger 0.8 covers Llama, Qwen2/3, Qwen3 MoE, Qwen3.5/3.6, Mistral, Mixtral, Gemma 2/3/4, GLM-4
-(incl. 4V MoE), OLMo 2/3, GptOss, Qwen3-Next and VLM wrappers; `qwen3_5*`, `qwen3_next`, `gpt_oss` and
-`gemma4_text` are extended or corrected by a [delegating spec](#upstream-covered-families-the-toolkit-extends).
+(incl. 4V MoE), OLMo 2/3, GptOss, Qwen3-Next and VLM wrappers; `qwen3_moe`, `qwen3_5*`, `qwen3_next`,
+`gpt_oss` and `gemma4_text` are extended or corrected by a [delegating spec](#upstream-covered-families-the-toolkit-extends).
 
 Toolkit-covered families (upstream has none). ✅ = patched, — = left unfused, with the reason:
 
@@ -114,17 +114,18 @@ has no spec either.
 
 ### Upstream-covered families the toolkit extends
 
-Qwen3.5 / 3.6, Qwen3-Next, GptOss and Gemma 4 resolve to a toolkit applier that **delegates**: upstream
+Qwen3 MoE, Qwen3.5 / 3.6, Qwen3-Next, GptOss and Gemma 4 resolve to a toolkit applier that **delegates**: upstream
 Liger's applier runs first with every flag it declares, and the spec adds the roles it leaves eager, or takes
 over (`upstream_off`) a role upstream gets wrong for the family.
 
 | Model | model_type | Upstream applier patches | Toolkit spec adds or takes over |
 |---|---|---|---|
+| Qwen3 MoE | `qwen3_moe` | RoPE, SwiGLU (`Qwen3MoeMLP`, `Qwen3MoeExperts`), FLCE | **takes over RMSNorm** with torch's fused `F.rms_norm` in the llama casting mode (`rms_norm_kernel="native"`: fp32 normalize, cast back, weight multiply in the activation dtype, as `Qwen3MoeRMSNorm` does) |
 | Qwen3.5 / 3.6 dense | `qwen3_5`, `qwen3_5_text` | RMSNorm, `Qwen3_5MLP`, FLCE | GDN gated norm → `fla` |
 | Qwen3.5 / 3.6 MoE | `qwen3_5_moe`, `qwen3_5_moe_text` | RMSNorm, FLCE | GDN gated norm → `fla`; **takes over `swiglu`**: shared-expert `Qwen3_5MoeMLP`, withholding upstream's [routed-expert swap](#routed-experts) |
 | Qwen3-Next | `qwen3_next` | RMSNorm, FLCE | GDN gated norm → `fla`; **takes over `swiglu`**: dense + shared-expert `Qwen3NextMLP`, withholding upstream's [routed-expert swap](#routed-experts) |
 | GptOss | `gpt_oss` | RoPE, FLCE | **takes over RMSNorm**: `GptOssRMSNorm` multiplies its weight in fp32 before the cast back (Gemma's casting mode); upstream applies the llama-cast `LigerRMSNorm`, a bf16-ULP deviation on every norm |
-| Gemma 4 | `gemma4_text` (the `gemma4` wrapper resolves here) | RMSNorm, FLCE | **takes over GeGLU**: `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its experts, so the EP wrapper never replaces it; the toolkit's fused GLU probes its activation and survives EP, where upstream's swap was force-off |
+| Gemma 4 | `gemma4_text` (the `gemma4` wrapper resolves here) | FLCE | **takes over RMSNorm** with torch's fused `F.rms_norm` (`rms_norm_kernel="native"`: fp32 normalize and weight multiply, one cast; covers the weightless `with_scale=False` norms too). At [2048, 2816] bf16 on one B300 it runs fwd+bwd in 51 µs against LigerRMSNorm's gemma mode at 203 µs, and launches in 75 µs against 218 µs, with the same error against fp64. **Takes over GeGLU**: `Gemma4TextMLP` is the dense MLP every decoder layer keeps beside its experts, so the EP wrapper never replaces it; the toolkit's fused GLU probes its activation and survives EP, where upstream's swap is forced off |
 
 `delegates_to_upstream` makes that a build-time contract: the upstream applier is looked up in liger-kernel's
 own registry (a family it stops covering fails at import), the delegating applier re-exports upstream's exact
@@ -190,6 +191,13 @@ Where an EP wrapper owns the routed experts, their activation is the toolkit's o
 Liger's: SwiGLU (`fused_silu_mul`) or tanh-GeGLU (`fused_gelu_tanh_mul`), chosen by probing the layer's
 `act_fn` and falling back to the family's eager combine when neither kernel computes it. It runs on the
 grouped-GEMM, per-expert-loop and ETP paths alike.
+
+One row-strided kernel pair (`src/kernels/fused_glu.py`) serves every combine, the clamped family's
+(GptOss, DeepSeek-V4, GLM-5 Next, Step-3.7) included: the activation, the clamp placement and GptOss's
+`up + 1` are `tl.constexpr`, `alpha` and the bound runtime arguments. On a layer storing one fused
+`[gate | up]` projection, `packed_glu_mul` resolves the latched combine (including a clamp-binding
+`functools.partial`) to its packed form, which reads both halves in place and writes one `[..., 2M]`
+gradient.
 
 Each wrapped layer logs the executed path at construction (`grouped_mm=True, glu_combine=fused_silu_mul`, or
 `glu_combine=eager`); `tests/gpu/kernels/test_fused_glu.py` checks BF16 and FP32 forward/backward numerics.

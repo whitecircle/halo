@@ -26,7 +26,6 @@ from transformers.activations import ACT2FN
 from src.diagnostics.performance_monitor import get_performance_monitor
 from src.distributed.expert_parallel.autograd import (
     MoEGatherPermute,
-    MoEScatterUnpermute,
     ReduceFromExpertTP,
     ReplayCombineFunction,
     ReplayDispatchFunction,
@@ -50,10 +49,11 @@ from src.distributed.runtime import (
     is_global_main_process,
 )
 from src.env import env_flag
-from src.kernels.fused_glu import FusedGluMul, resolve_fused_glu_mul
+from src.kernels.fused_glu import FusedGluMul, packed_glu_mul, resolve_fused_glu_mul
 from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
 from src.kernels.grouped_mm_autograd import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
 from src.kernels.histogram import sync_free_bincount
+from src.kernels.moe_permute import MoEWeightedUnpermute
 from src.models.moe_balancing import (
     ROUTER_TOPK_FIELDS,
     NativeBalancingSlot,
@@ -74,11 +74,9 @@ EXPERT_LORA_RANK_MULTIPLE = GROUPED_MM_STRIDE_ALIGNMENT_BYTES // torch.bfloat16.
 _SHARED_OVERLAP_ENABLED = env_flag("HALO_EP_SHARED_OVERLAP")
 _SHARED_OVERLAP_STREAMS: dict[int, torch.cuda.Stream] = {}
 
-# Token counts the expert-activation warmup traces at. Triton specializes a runtime integer argument
-# on divisibility by 16, and these kernels take the element count (tokens × local intermediate width)
-# as one: 16 tokens is divisible for every width, 1 token is not whenever the width is not. Warming
-# both keeps either compile out of the dispatch→combine span.
-_ACTIVATION_WARMUP_TOKENS = (16, 1)
+# Tokens the expert-kernel warmup runs. The kernels do not specialize on their row count
+# (``do_not_specialize``), so one count compiles the binary every dispatch size runs.
+_WARMUP_TOKENS = 16
 
 # Floor added to a top-k weight sum before renormalizing by it (DeepSeek-V3's own 1e-20), shared by
 # every family whose upstream router renormalizes with one.
@@ -799,7 +797,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
 
         ``inv_map[r, j]`` = the j-th sorted position whose recv token is ``r``, padded to ``width`` cols
         with sentinel ``N_sorted``. Sync-free (stable argsort + cumulative counts, no host round-trip).
-        Consumed by :class:`MoEGatherPermute` / :class:`MoEScatterUnpermute` to replace the bf16 atomic ``index_add_``.
+        Consumed by :class:`MoEGatherPermute` / :class:`MoEWeightedUnpermute` to replace the bf16 atomic ``index_add_``.
         """
         device = sorted_token_idx.device
         n_sorted = sorted_token_idx.shape[0]
@@ -866,10 +864,11 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     def _glu_combine(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         """Combine the GLU halves into the activated intermediate: ``act_fn(gate) * up``.
 
-        The overridable seam for every base GLU compute path (fused/separate loop, grouped-GEMM, ETP
-        separate-GLU); a family with a non-standard combine (DeepseekV4's clamped SwiGLU) overrides this
-        instead of re-implementing the compute templates. GptOss's interleaved-bias compute paths never
-        reach it.
+        The seam every base GLU compute path (fused/separate loop, grouped-GEMM, ETP separate-GLU)
+        combines through. A family with a non-standard combine latches its kernel in ``_fused_glu_mul``
+        (DeepSeek-V4 and GLM-5 Next a clamp-binding ``functools.partial`` of the clamped SwiGLU) rather
+        than re-implementing the compute templates; an override of this method is honoured by
+        :meth:`_glu_combine_packed` too. GptOss's interleaved-bias compute paths never reach it.
 
         A fused kernel is used where the activation is one the kernels implement (SiLU, tanh-GELU),
         selected by :meth:`_resolve_activation` from the activation itself rather than a per-family flag.
@@ -877,6 +876,20 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         if self._fused_glu_mul is not None:
             return self._fused_glu_mul(gate, up)
         return self.act_fn(gate) * up
+
+    def _glu_combine_packed(self, gate_up: torch.Tensor) -> torch.Tensor:
+        """:meth:`_glu_combine` over a fused ``[gate | up]`` projection output.
+
+        When the latched combine has a packed form (:func:`~src.kernels.fused_glu.packed_glu_mul`, which
+        also sees through a clamp-binding ``functools.partial``) and :meth:`_glu_combine` is not
+        overridden, the kernel reads both halves in place and returns one ``[..., 2M]`` gradient; any
+        other combine takes the chunked path through :meth:`_glu_combine`.
+        """
+        packed = packed_glu_mul(self._fused_glu_mul)
+        if packed is not None and type(self)._glu_combine is EPMoELayerBase._glu_combine:
+            return packed(gate_up)
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self._glu_combine(gate, up)
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """Run this layer's expert activation over a synthetic projection output ``[T, 2M]``.
@@ -886,25 +899,26 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         traced, and a guard miss recompiles at the call site this warmup keeps warm. A family whose
         activation is not behind :meth:`_glu_combine` overrides this.
         """
+        if hasattr(self, "gate_up_proj"):
+            return self._glu_combine_packed(gate_up)
         gate, up = gate_up.chunk(2, dim=-1)
-        if not hasattr(self, "gate_up_proj"):
-            gate, up = gate.contiguous(), up.contiguous()
-        return self._glu_combine(gate, up)
+        return self._glu_combine(gate.contiguous(), up.contiguous())
 
-    def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype) -> None:
-        """JIT this layer's expert activation ahead of its first dispatch (once per layer).
+    def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
+        """JIT this layer's expert kernels ahead of its first dispatch (once per layer).
 
-        The activation is the one lazily-compiled callable inside the dispatch→combine span: every
-        expert combine on the roster is a Triton kernel, compiled on first call per dtype and constexpr
-        set. Left cold it compiles between the two collectives while every peer waits in DeepEP's
-        barrier, whose budget bounds rank skew.
+        The expert activation and the fused permute/unpermute are the lazily-compiled callables inside
+        the dispatch→combine span (and, in backward, between the combine's and the dispatch's backward):
+        every one is a Triton kernel, compiled on first call per dtype and constexpr set. Left cold they
+        compile between two collectives while every peer waits in DeepEP's barrier, whose budget bounds
+        rank skew.
 
         Both grad modes run, since the forward and backward kernels are separate compilations and the
         backward is built only when a grad is first requested; ``enable_grad`` rather than the ambient
         mode, because under gradient checkpointing the first forward runs under ``no_grad`` and would
         leave the backward kernel to the recompute. Inputs are leaves, so no warmup gradient
-        accumulates, and both token counts of :data:`_ACTIVATION_WARMUP_TOKENS` run because Triton
-        specializes each compilation on the element count's divisibility.
+        accumulates. One token count (:data:`_WARMUP_TOKENS`) covers every dispatch size: the kernels
+        do not specialize on their row count.
 
         Skipped at ``ep_size == 1``: no all-to-all, so no barrier for a compiling rank to stall.
         """
@@ -914,26 +928,39 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         # down_proj is [E, M, H] in matmul convention on every layout (ETP included), so dim 1 is the
         # local intermediate width the activation sees — the fused projection output is twice it.
         width = 2 * self.down_proj.shape[1]
-        for tokens in _ACTIVATION_WARMUP_TOKENS:
-            # An inference-mode forward cannot build an autograd graph, and never runs a backward.
-            if not torch.is_inference_mode_enabled():
-                # Identity saved-tensor hooks: this runs inside the checkpointed block, and a
-                # non-reentrant checkpoint packs everything saved there through its own hooks, so the
-                # backward below would unpack one, trigger that checkpoint's recompute mid-forward and
-                # replay a dispatch the original pass has not made yet.
-                with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
-                    gate_up = self._activation_warmup_input(tokens, width, device, dtype, requires_grad=True)
-                    torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
-            with torch.no_grad():
-                self._warm_expert_activation(
-                    self._activation_warmup_input(tokens, width, device, dtype, requires_grad=False)
-                )
+        # An inference-mode forward cannot build an autograd graph, and never runs a backward.
+        if not torch.is_inference_mode_enabled():
+            # Identity saved-tensor hooks: this runs inside the checkpointed block, and a non-reentrant
+            # checkpoint packs everything saved there through its own hooks, so the backward below would
+            # unpack one, trigger that checkpoint's recompute mid-forward and replay a dispatch the
+            # original pass has not made yet.
+            with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
+                gate_up = self._warmup_input((_WARMUP_TOKENS, width), device, dtype, requires_grad=True)
+                torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
+                # The fused permute runs only on the grouped path, and there only at top_k >= ep_size
+                # (_compute_experts, _sort_tokens_for_grouped_mm).
+                if self._grouped_mm_enabled() and top_k >= self.ep_size:
+                    self._warm_permute_kernels(hidden, top_k, device, dtype)
+        with torch.no_grad():
+            self._warm_expert_activation(self._warmup_input((_WARMUP_TOKENS, width), device, dtype))
+
+    def _warm_permute_kernels(self, hidden: int, top_k: int, device: torch.device, dtype: torch.dtype) -> None:
+        """Run the fused permute's backward and the weighted unpermute forward and backward once, over
+        every token routed to ``top_k`` rows (the unpermute forward is the same kernel in both grad modes)."""
+        sorted_token_idx = torch.arange(_WARMUP_TOKENS, device=device).repeat_interleave(top_k)
+        inv_map = self._build_inv_map(sorted_token_idx, _WARMUP_TOKENS, top_k)
+        tokens = self._warmup_input((_WARMUP_TOKENS, hidden), device, dtype, requires_grad=True)
+        expert_out = self._warmup_input((sorted_token_idx.numel(), hidden), device, dtype, requires_grad=True)
+        weights = self._warmup_input((sorted_token_idx.numel(),), device, dtype, requires_grad=True)
+        permuted = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
+        unpermuted = MoEWeightedUnpermute.apply(expert_out, weights, sorted_token_idx, inv_map)
+        torch.autograd.grad(permuted.sum() + unpermuted.sum(), (tokens, expert_out, weights))
 
     @staticmethod
-    def _activation_warmup_input(
-        tokens: int, width: int, device: torch.device, dtype: torch.dtype, *, requires_grad: bool
+    def _warmup_input(
+        shape: tuple[int, ...], device: torch.device, dtype: torch.dtype, *, requires_grad: bool = False
     ) -> torch.Tensor:
-        """One synthetic projection output ``[T, 2M]``, drawn from no generator.
+        """One synthetic kernel operand, drawn from no generator.
 
         The warmup runs inside the gradient-checkpointed region, whose recompute restores the RNG to
         region entry: a random draw here would run in the forward but not in the recompute (the warmup
@@ -941,7 +968,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         would see a different sample than the loss was computed from. The kernels compile on shape and
         dtype, so the values do not matter.
         """
-        return torch.zeros(tokens, width, device=device, dtype=dtype, requires_grad=requires_grad)
+        return torch.zeros(shape, device=device, dtype=dtype, requires_grad=requires_grad)
 
     def _expert_forward(self, idx: int, x: torch.Tensor) -> torch.Tensor:
         """One local expert's forward for the per-expert loop, the seam :meth:`_compute_experts` hands
@@ -958,9 +985,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
             activated = self._glu_combine(gate, up)
             return self._expert_proj_single(idx, activated, "down_proj")
         gate_up = self._expert_proj_single(idx, x, "gate_up_proj")
-        gate, up = gate_up.chunk(2, dim=-1)
-        activated = self._glu_combine(gate, up)
-        return self._expert_proj_single(idx, activated, "down_proj")
+        return self._expert_proj_single(idx, self._glu_combine_packed(gate_up), "down_proj")
 
     def _grouped_mm(
         self,
@@ -1109,9 +1134,11 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         with torch.amp.autocast("cuda", dtype=output_dtype):
             expert_out = compute_fn(sorted_tokens, offs, sorted_expert_ids)
 
-        expert_out = expert_out.to(output_dtype) * sorted_weights.unsqueeze(-1).to(output_dtype)
         if inv_map is not None:
-            return MoEScatterUnpermute.apply(expert_out, sorted_token_idx, inv_map)
+            return MoEWeightedUnpermute.apply(
+                expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
+            )
+        expert_out = expert_out.to(output_dtype) * sorted_weights.unsqueeze(-1).to(output_dtype)
         output = torch.zeros((tokens.shape[0], tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
         output.index_add_(0, sorted_token_idx, expert_out)
         return output
@@ -1144,9 +1171,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
 
         def compute(sorted_tokens, offs, _eids):
             gate_up = self._expert_proj(sorted_tokens, "gate_up_proj", offs, output_dtype)
-            gate, up = gate_up.chunk(2, dim=-1)
-            activated = self._glu_combine(gate, up)
-            return self._expert_proj(activated, "down_proj", offs, output_dtype)
+            return self._expert_proj(self._glu_combine_packed(gate_up), "down_proj", offs, output_dtype)
 
         return self._compute_experts_with_grouped_mm(tokens, experts, weights, output_dtype, compute)
 
@@ -1496,7 +1521,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         """
         # Before the dispatch, not inside the span: a first-call trace between dispatch and combine
         # stalls every peer in DeepEP's barrier.
-        self._warm_activation_graphs(flat.device, input_dtype)
+        self._warm_activation_graphs(flat.device, input_dtype, flat.shape[-1], experts.shape[1])
 
         if self._capture_routing:
             # Capture the global expert ids before dispatch localizes them; int16 (num_experts < 32768).

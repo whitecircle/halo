@@ -57,13 +57,15 @@ The atomic-free path runs the EP step at ~6,310 vs ~1,256 tok/s/GPU for the defa
 
 ### The atomic-free gather-reduce permute
 
-The token permute/unpermute (`MoEGatherPermute`, `MoEScatterUnpermute`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step: 4.3 ms/call vs gpt-oss (top-4, 4 local/rank) 0.38 ms/call (11× gap, pure collision rate).
+The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step: 4.3 ms/call vs gpt-oss (top-4, 4 local/rank) 0.38 ms/call (11× gap, pure collision rate).
 
 The permute expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded), turning the scatter into gather + reduction (numerically identical to `index_add_`, float64-checked fwd+bwd).
 
-It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm` builds `inv_map` via `_build_inv_map`). Below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) the plain `index_select` + `index_add_` is kept, since the extra `top_k`× read would cost ~4%.
+It is gated on **`top_k ≥ ep_size`** (`base_layer._sort_tokens_for_grouped_mm` builds `inv_map` via `_build_inv_map`). The atomic-free path pays for building `inv_map` and wins only where many rows add into the same token, which is what `top_k ≥ ep_size` means. Below that (gpt-oss top-4 at EP8, the top-8 families at `ep16`, DeepSeek-V4-Flash top-6 at `ep8`) a received token lands on few local rows, the atomics rarely collide, and the plain `index_select` + `index_add_` is kept.
 
-Above the gate the gather is materialized as `[recv_N, top_k, H]` before its sum: `top_k`× the recv buffer per MoE layer as a transient, in the forward unpermute and again in the permute's backward. That is ~5.6 GB per layer at GLM-5.3-Flash / Step-3.7-Flash shapes (16k tokens/rank at ep8, top-8, `H=4096`), most of it sentinel rows since a recv token averages `top_k / ep_size` local experts.
+Above the gate both reductions run as one Triton kernel (`src/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. The fused `[gate | up]` GLU output is read in place by the packed GLU kernels (`PACKED_GLU_MULS` in `src/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
+
+Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300: 2.09 / 3.33 / 10.56 ms at 2k / 8k / 32k tokens, against 2.45 / 4.99 / 16.46 ms for the padded-gather permute Halo v1.0.0 runs (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way), and 42% less peak transient memory at 32k: 3.8 against 6.6 GiB (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
 | Qwen3.6-35b EP=8 | `index_add_` | atomic-free | win |
 |---|---|---|---|

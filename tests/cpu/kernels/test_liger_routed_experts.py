@@ -22,6 +22,7 @@ the rest of the process.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import types
@@ -268,6 +269,34 @@ class _SwigluOffApplier(_RecordingApplier):
         super().__call__(rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu)
 
 
+def _stub_upstream(monkeypatch, model_type: str) -> _RecordingApplier:
+    """Record upstream's applier for ``model_type`` instead of letting it patch transformers.
+
+    A toolkit applier that delegates (Qwen3 MoE's, for its norms) holds upstream's function from import
+    time, so its bound ``upstream`` is stubbed too, and the HF classes its own roles rebind are guarded so
+    monkeypatch restores them: otherwise the real upstream applier runs and Liger's patches stay applied
+    for the rest of the session.
+    """
+    applier = _RecordingApplier()
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, model_type, applier)
+    toolkit = orchestrator._TOOLKIT_LIGER_APPLIERS.get(model_type)
+    if toolkit is not None:
+        # The delegating applier also hands upstream the model instance, which the recorder does not take.
+        def upstream(model=None, **flags):
+            return applier(**flags)
+
+        monkeypatch.setattr(toolkit, "upstream", upstream)
+        module = importlib.import_module(toolkit.spec.modeling_module)
+        for name in (*toolkit.spec.rms_norm, *toolkit.spec.gated_rms_norm, *toolkit.spec.glu_mlp):
+            monkeypatch.setattr(module, name, getattr(module, name))
+    return applier
+
+
+def _toolkit_takes_over(model_type: str, role: str) -> bool:
+    toolkit = orchestrator._TOOLKIT_LIGER_APPLIERS.get(model_type)
+    return toolkit is not None and role in toolkit.spec.upstream_off
+
+
 def _moe_config(model_type: str) -> types.SimpleNamespace:
     return types.SimpleNamespace(model_type=model_type, text_config=None, num_experts=64)
 
@@ -314,14 +343,15 @@ def test_an_unwrapped_moe_hands_upstream_no_swiglu(monkeypatch, model_type, need
     Qwen3-MoE is unwrapped only at ``ep_size: 1`` with grouped GEMM off; Mixtral has no EP layer class,
     so it is unwrapped under every configuration, the grouped-GEMM default included.
     """
-    applier = _RecordingApplier()
-    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, model_type, applier)
+    applier = _stub_upstream(monkeypatch, model_type)
     config = _moe_config(model_type)
     applied = orchestrator.apply_liger_kernel(config, None, needs_ep_wrappers=needs_ep_wrappers)
     assert applied["swiglu"] is False
     assert applier.calls[-1]["swiglu"] is False, "upstream's applier still received swiglu on"
     assert config._halo_liger_applied_config["swiglu"] is False, "the effective record must say what ran"
-    assert applier.calls[-1]["rms_norm"] is True, "only swiglu goes; the other kernels still apply"
+    assert applied["rms_norm"] is True, "only swiglu goes; the other kernels still apply"
+    # A role the toolkit took over (Qwen3 MoE's norm) is withheld from upstream, which must not patch it too.
+    assert applier.calls[-1]["rms_norm"] is not _toolkit_takes_over(model_type, "rms_norm")
 
     # Anti-vacuity: the same family without experts keeps its fused SwiGLU.
     dense = types.SimpleNamespace(model_type=model_type, text_config=None)
@@ -333,8 +363,7 @@ def test_an_explicit_swiglu_request_cannot_bring_liger_experts_back(monkeypatch,
 
     The pinned re-application config keeps it off too, since TRL re-applies upstream's applier alone.
     """
-    applier = _RecordingApplier()
-    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "qwen3_moe", applier)
+    applier = _stub_upstream(monkeypatch, "qwen3_moe")
     config = _moe_config("qwen3_moe")
     with caplog.at_level(logging.WARNING, logger="src.kernels.liger.orchestrator"):
         applied = orchestrator.apply_liger_kernel(config, {"swiglu": True}, needs_ep_wrappers=False)
@@ -362,7 +391,9 @@ def test_the_trainer_re_sanitization_forces_the_swap_off_too(model_type, paralle
     """
     config = _trainer_liger_config(_tiny_config(model_type), {"swiglu": True, "rms_norm": True}, **parallelism)
     assert config["swiglu"] is False, "HF's re-application would hand upstream swiglu on the routed experts"
-    assert config["rms_norm"] is True, "only swiglu goes; the other kernels still apply"
+    # The other kernels still apply, except a role the toolkit took over (Qwen3 MoE's norm): HF's
+    # re-application would bind upstream's variant over it.
+    assert config["rms_norm"] is not _toolkit_takes_over(model_type, "rms_norm")
 
 
 @pytest.mark.parametrize(("model_type", "role"), [("gpt_oss", "rms_norm"), ("gemma4_text", "geglu")])
@@ -424,7 +455,7 @@ def test_a_toolkit_entry_that_is_not_a_liger_applier_is_refused(monkeypatch):
 
 def test_under_an_ep_wrapper_the_soft_gate_still_decides(monkeypatch):
     """The wrapper replaces the experts, so upstream's swap is inert there and an explicit request stands."""
-    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "qwen3_moe", _RecordingApplier())
+    _stub_upstream(monkeypatch, "qwen3_moe")
     assert orchestrator.liger_routed_expert_overrides(True, _moe_config("qwen3_moe")) == {}
     assert orchestrator.apply_liger_kernel(_moe_config("qwen3_moe"), None, needs_ep_wrappers=True)["swiglu"] is False
     explicit = orchestrator.apply_liger_kernel(_moe_config("qwen3_moe"), {"swiglu": True}, needs_ep_wrappers=True)
