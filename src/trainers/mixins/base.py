@@ -558,7 +558,8 @@ class DistributedTrainerMixin(
                 register_forward_generation_hook(self.model)
             # modules_to_save swaps in a router copy the ctor-time DP-sync hook never saw.
             self._reattach_ep_router_grad_sync_for_peft()
-            self._validate_ep_peft_trainable_params_synced()
+            # Every EP run, wrapped or not: the parameters its EP modules sync themselves.
+            self._reject_unsynced_trainable_params(self.model, self._fsdp_exclusions().params)
         self._validate_expert_lora_realized()
         # After the wrap and after TRL's dropout disabling, so they read what the run will actually use.
         self._validate_expert_lora_peft_config()
@@ -675,40 +676,6 @@ class DistributedTrainerMixin(
         if attached and is_global_main_process():
             logger.info(f"  Re-attached EP router DP-sync hook to {attached} trainable modules_to_save params")
 
-    def _validate_ep_peft_trainable_params_synced(self):
-        """Raise if a trainable param inside an EP module has no gradient sync (any EP run).
-
-        EP modules are FSDP-ignored; their grads stay DP-consistent only via the EP layer's own hooks
-        and deferred sweep, which cover exactly the params each family declares (experts + LoRA,
-        router, replicated submodules). A trainable param outside that set would drift across DP
-        ranks.
-        """
-        offenders = []
-        for module in self._find_ep_modules():
-            synced = module.synced_trainable_param_ids()
-            offenders += [name for name, p in module.named_parameters() if p.requires_grad and id(p) not in synced]
-        if offenders:
-            shown = "\n".join(f"  - {n}" for n in offenders[:10])
-            more = f"\n  ... and {len(offenders) - 10} more" if len(offenders) > 10 else ""
-            if find_peft_model(self.model) is not None:
-                remedy = (
-                    "EP experts are trained via native grouped-LoRA (list expert projections in "
-                    "lora_target_modules); the router/gate is trainable via lora_modules_to_save (its "
-                    "DP-sync hook is re-attached automatically). modules_to_save on any other EP-internal "
-                    "submodule is unsupported — remove it or target it through the native EP-LoRA path."
-                )
-            else:
-                remedy = (
-                    "The EP family wrapper must declare every trainable weight it owns: expert shards in "
-                    "expert_named_params() (via _EXPERT_WEIGHT_ATTR_ROOTS) and replicated submodules in "
-                    "replicated_named_params(), so the layer's grad-sync hooks cover it."
-                )
-            raise RuntimeError(
-                f"{len(offenders)} trainable param(s) inside EP-wrapped modules have no gradient "
-                f"sync — they would drift across DP ranks and silently corrupt the run:\n"
-                f"{shown}{more}\n\n{remedy}"
-            )
-
     def _validate_merge_expert_lora_save(self):
         """Fail fast where ``merge_expert_lora_on_save`` cannot produce the merged checkpoint.
 
@@ -809,17 +776,19 @@ class DistributedTrainerMixin(
             "model through load_distributed_model, which attaches the mesh."
         )
 
-    def _reject_unsynced_fsdp_exclusions(self, model: nn.Module, excluded: Iterable[nn.Parameter]) -> None:
-        """Raise on every rank if FSDP2 would leave out a trainable parameter that nothing else syncs.
+    def _reject_unsynced_trainable_params(self, model: nn.Module, candidates: Iterable[nn.Parameter]) -> None:
+        """Raise on every rank if a trainable parameter in ``candidates`` has no gradient sync.
 
-        A parameter outside every shard group keeps its local gradient unless an EP layer's hooks or
+        ``candidates`` sit outside FSDP2's shard groups: a wrap's exclusions, or the parameters of the EP
+        modules that sync their own gradients. Such a parameter keeps its local gradient unless its EP
+        layer's hooks (``synced_trainable_param_ids``: experts + LoRA, router, replicated submodules) or
         the deferred post-backward sweep average it; without either it trains on this rank's batch only
         and drifts across DP ranks while every loss stays finite. Collective: every rank must call it.
         """
-        excluded_set = IdentityParamSet(excluded)
+        candidate_set = IdentityParamSet(candidates)
         ep_config = getattr(self, "_ep_config", None)
-        # The deferred sweep averages every trainable non-DTensor parameter, and an excluded one is never
-        # a DTensor.
+        # The deferred sweep averages every trainable non-DTensor parameter, and a parameter outside the
+        # shard groups is never a DTensor.
         deferred = ep_config is not None and ep_config.defer_grad_sync
         covered: set[int] = set()
         for module in self._find_ep_modules():
@@ -828,18 +797,30 @@ class DistributedTrainerMixin(
         unsynced = [
             name
             for name, param in model.named_parameters()
-            if param.requires_grad and param in excluded_set and not deferred and id(param) not in covered
+            if param.requires_grad and param in candidate_set and not deferred and id(param) not in covered
         ]
         reason = None
         if unsynced:
+            shown = "\n".join(f"  - {name}" for name in unsynced[:10])
+            more = f"\n  ... and {len(unsynced) - 10} more" if len(unsynced) > 10 else ""
+            if find_peft_model(model) is not None:
+                remedy = (
+                    "EP experts are trained via native grouped-LoRA (list expert projections in "
+                    "lora_target_modules); the router/gate is trainable via lora_modules_to_save (its "
+                    "DP-sync hook is re-attached automatically). modules_to_save on any other EP-internal "
+                    "submodule is unsupported — remove it or target it through the native EP-LoRA path."
+                )
+            else:
+                remedy = (
+                    "The EP family wrapper must declare every trainable weight it owns: expert shards in "
+                    "expert_named_params() (via _EXPERT_WEIGHT_ATTR_ROOTS) and replicated submodules in "
+                    "replicated_named_params(), so the layer's grad-sync hooks cover it."
+                )
             reason = (
-                f"FSDP2 would leave out {len(unsynced)} trainable parameter(s) that no other gradient sync "
-                f"covers, so each would train on its own rank's batch and drift across DP ranks: "
-                f"{unsynced[:10]}. Only frozen parameters and the parameters of EP layers that sync their "
-                f"own gradients may be left out: an EP family wrapper must declare every trainable weight "
-                f"it owns (expert_named_params() / replicated_named_params())."
+                f"{len(unsynced)} trainable parameter(s) outside FSDP2's shard groups have no other gradient "
+                f"sync — they would drift across DP ranks and silently corrupt the run:\n{shown}{more}\n\n{remedy}"
             )
-        reject_across_ranks(reason, "FSDP2 exclusions")
+        reject_across_ranks(reason, "unsynced trainable parameters")
 
     def _apply_dp_fsdp2(
         self,
@@ -860,7 +841,7 @@ class DistributedTrainerMixin(
         """
         config = self.parallelism_config
         excluded_params = list(excluded_params)
-        self._reject_unsynced_fsdp_exclusions(model, excluded_params)
+        self._reject_unsynced_trainable_params(model, excluded_params)
         applied = setup_fsdp2_for_dp(
             model,
             dp_size,

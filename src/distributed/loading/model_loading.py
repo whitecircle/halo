@@ -497,11 +497,12 @@ def _sequential_load_to_cuda(
     common_kwargs: dict,
     *,
     keep_fp32: bool,
+    ep_wrapped: bool,
 ) -> PreTrainedModel:
     """Load to CPU one rank at a time (low CPU peak), move to this rank's GPU, then
     free CPU memory. Shared by the EP+TP sequential fallback and the TP-MoE loader.
 
-    ``keep_fp32`` is :func:`cast_loaded_parameters`'."""
+    ``keep_fp32`` and ``ep_wrapped`` are :func:`cast_loaded_parameters`'."""
     with sequential_load_within_node(max_concurrent=max_concurrent):
         model = from_pretrained_verified(
             model_class,
@@ -509,7 +510,7 @@ def _sequential_load_to_cuda(
             device_map="cpu",
             **common_kwargs,
         )
-        cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
+        cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
         model = model.to(f"cuda:{local_rank}")
         gc.collect()
         torch.cuda.empty_cache()
@@ -525,11 +526,12 @@ def _from_pretrained_on_local_gpu(
     common_kwargs: dict,
     *,
     keep_fp32: bool,
+    ep_wrapped: bool,
 ) -> PreTrainedModel:
     """``from_pretrained`` straight onto this rank's GPU, one rank at a time per node.
 
     With ``_init_from_scratch`` in ``common_kwargs``, builds from config with random weights instead.
-    ``keep_fp32`` is :func:`cast_loaded_parameters`'.
+    ``keep_fp32`` and ``ep_wrapped`` are :func:`cast_loaded_parameters`'.
     """
     if common_kwargs.pop("_init_from_scratch", False):
         config = common_kwargs.get("config")
@@ -547,7 +549,7 @@ def _from_pretrained_on_local_gpu(
             ddp_kwargs = {"device_map": {"": local_rank}, **common_kwargs}
             model = from_pretrained_verified(model_class, model_name_or_path, **ddp_kwargs)
     # Both branches: a remote-code class can declare parameters fp32 in __init__ (Ling 3.0's KDA state).
-    cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
+    cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32, ep_wrapped=ep_wrapped)
     finalize_loaded_model(model)
     return model
 
@@ -707,6 +709,7 @@ def _load_ep_tp_model(
             pc.max_concurrent_loading,
             common_kwargs,
             keep_fp32=pc.fp32_non_ep_params,
+            ep_wrapped=True,
         )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
         model = _apply_ep_wrappers(model, ep_config)
@@ -808,6 +811,7 @@ def _load_tp_moe_model(
         pc.max_concurrent_loading,
         common_kwargs,
         keep_fp32=pc.fp32_non_ep_params,
+        ep_wrapped=pc.needs_ep_wrappers,
     )
     _apply_attention_only_tp(model, rank, tp_size, dp_size)
 
@@ -906,6 +910,7 @@ def _load_undistributed_model(
         pc.max_concurrent_loading,
         common_kwargs,
         keep_fp32=pc.fp32_non_ep_params,
+        ep_wrapped=ep_wrappers,
     )
     if ep_wrappers:
         model = _apply_ep_wrappers(model, pc.create_ep_config())

@@ -76,7 +76,7 @@ def load_model_for_cp(
             device_map="cpu",
             **model_kwargs,
         )
-        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params)
+        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params, ep_wrapped=ep_config is not None)
         model = move_model_to_local_device(model)
 
     # Before the CP wrap, on the inner HF model: the wrapper carries no tie_weights.

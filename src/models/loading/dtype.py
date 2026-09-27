@@ -97,14 +97,14 @@ def cast_parameters_to_run_dtype(
     ``keep_fp32`` leaves fp32 parameters as stored, for a run that upcasts to fp32 masters anyway
     (``fp32_non_ep_params``): a round trip through the run dtype would discard the checkpoint's
     precision before the upcast. The training loaders apply it outside the MoE blocks EP wraps
-    (``cast_loaded_parameters``), and the EP lazy loader materializes the same keys in fp32. Parameters only: a float buffer may be fp32 by design (Zaya's
-    balancing biases). A ``dtype`` that is not a ``torch.dtype`` ("auto", None) leaves the model as
-    loaded.
+    (``cast_loaded_parameters``), and the EP lazy loader materializes the same keys in fp32.
+    Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases). A ``dtype`` that
+    is not a ``torch.dtype`` ("auto", None) leaves the model as loaded.
 
     Raises on a 1-byte float (fp8) parameter (:func:`reject_fp8_tensor`), and on a tensor-subclass
-    parameter: rebinding a DTensor's ``.data`` leaves its local
-    shard in the old dtype, which is why the dense TP loader, loading straight into DTensors, does not
-    call this (no dense family pins a parameter).
+    parameter: rebinding a DTensor's ``.data`` leaves its local shard in the old dtype, which is why
+    the dense TP loader, loading straight into DTensors, does not call this (no dense family pins a
+    parameter).
     """
     if not isinstance(dtype, torch.dtype):
         return

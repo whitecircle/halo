@@ -259,7 +259,8 @@ def build_tiny_family_checkpoint(
 
     Sharded, so the checkpoint carries the index a family's attention projection names are read from
     (:func:`tests.common.peft_helpers.attention_target_modules`). Without ``tokenizer`` the tiny config's
-    own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
+    own vocab is kept and no tokenizer is saved; Gemma 4's builder sizes its per-layer table from the
+    tokenizer's vocab and needs one. ``fp32_pins`` stores the family's fp32-pinned parameters
     at full fp32 precision, as a release does, rather than rounded through bf16.
     """
     overrides = dict(family.text_overrides)

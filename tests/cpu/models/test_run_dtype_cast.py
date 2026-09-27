@@ -190,22 +190,49 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
     assert params_off_dtype(model, torch.bfloat16) == []
 
 
-def test_fp32_masters_keep_stored_values_outside_the_moe_blocks_only(pinned_checkpoints):
-    """``fp32_non_ep_params`` upcasts non-EP parameters alone, so a parameter inside a block EP wraps
-    trains at the run dtype even when it loaded fp32."""
+@pytest.mark.parametrize("ep_wrapped", [True, False])
+def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpoints, ep_wrapped):
+    """``fp32_non_ep_params`` upcasts non-EP parameters alone, so a parameter inside a block that gets EP
+    wrappers trains at the run dtype even when it loaded fp32; without wrappers it is upcast too, and
+    keeps its stored value like the pins."""
     model = TINY_MOE_FAMILIES["inkling_text"].load_class.from_pretrained(
         pinned_checkpoints["inkling_text"], dtype=torch.bfloat16
     )
     blocks = ep_claimed_blocks(model)
     in_block = next(param for _path, block in blocks for param in block.parameters())
     in_block.data = in_block.data.float()
-    pinned = {name: param.detach().clone() for name, param in model.named_parameters() if param.dtype == torch.float32}
+    stored = {name: param.detach().clone() for name, param in model.named_parameters() if param.dtype == torch.float32}
 
-    cast_loaded_parameters(model, torch.bfloat16, keep_fp32=True)
+    cast_loaded_parameters(model, torch.bfloat16, keep_fp32=True, ep_wrapped=ep_wrapped)
 
-    assert blocks and in_block.dtype == torch.bfloat16
-    kept = {name: param for name, param in model.named_parameters() if name in pinned and param is not in_block}
-    assert kept and all(torch.equal(param.detach(), pinned[name]) for name, param in kept.items())
+    assert blocks and in_block.dtype == (torch.bfloat16 if ep_wrapped else torch.float32)
+    kept = {name: param for name, param in model.named_parameters() if name in stored and param is not in_block}
+    assert kept and all(torch.equal(param.detach(), stored[name]) for name, param in kept.items())
+
+
+@pytest.fixture(scope="module")
+def roster_checkpoints(tmp_path_factory) -> dict[str, str]:
+    root = tmp_path_factory.mktemp("roster")
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    checkpoints = {family: str(root / family) for family in TINY_MOE_FAMILIES}
+    for family, path in checkpoints.items():
+        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path, tokenizer)
+    return checkpoints
+
+
+@pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
+def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, family):
+    """Holds ``PINNED_FP32_FAMILIES`` to the roster: a family whose class starts pinning parameters, or
+    stops, fails here. None pins one inside a MoE block, the premise of the EP loaders' block cast."""
+    tiny = TINY_MOE_FAMILIES[family]
+    model = tiny.load_class.from_pretrained(
+        roster_checkpoints[family], dtype=torch.bfloat16, trust_remote_code=tiny.trust_remote_code
+    )
+    fp32 = set(params_off_dtype(model, torch.bfloat16))
+    in_blocks = {f"{path}.{name}" for path, block in ep_claimed_blocks(model) for name, _ in block.named_parameters()}
+
+    assert bool(fp32) == (family in PINNED_FP32_FAMILIES)
+    assert not fp32 & in_blocks
 
 
 def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):

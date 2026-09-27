@@ -200,7 +200,7 @@ class GradientSyncMixin:
             )
         mp_policy = create_mixed_precision_policy_v2(self.args, fp32_master_weights=config.fp32_non_ep_params)
         excluded_params = self._fsdp_exclusions().params
-        self._reject_unsynced_fsdp_exclusions(self.model, excluded_params)
+        self._reject_unsynced_trainable_params(self.model, excluded_params)
         apply_fsdp2_per_layer(
             self.model,
             device_mesh[MeshDim.DP],

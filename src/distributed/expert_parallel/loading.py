@@ -51,15 +51,15 @@ _T = TypeVar("_T")
 logger = get_logger(__name__)
 
 
-def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool) -> None:
+def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep_wrapped: bool) -> None:
     """:func:`cast_parameters_to_run_dtype` on a freshly loaded model, EP-aware.
 
-    ``keep_fp32`` (the run keeps fp32 masters, ``fp32_non_ep_params``) keeps stored fp32 values only
-    outside the MoE blocks EP wraps: the upcast covers non-EP parameters alone, so a parameter inside
-    one trains at the run dtype.
+    ``keep_fp32`` (the run keeps fp32 masters, ``fp32_non_ep_params``) keeps stored fp32 values for the
+    parameters the trainer's fp32 upcast covers, which skips EP parameters: with ``ep_wrapped`` (the
+    MoE blocks get EP wrappers) a parameter inside one trains at the run dtype.
     """
     cast_parameters_to_run_dtype(model, dtype, keep_fp32=keep_fp32)
-    if keep_fp32:
+    if keep_fp32 and ep_wrapped:
         for _path, block in ep_claimed_blocks(model):
             cast_parameters_to_run_dtype(block, dtype)
 
@@ -337,7 +337,7 @@ def _load_ep_model_huggingface(
             revision=revision,
             **model_kwargs,
         )
-        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params)
+        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params, ep_wrapped=True)
 
         logger.info(f"[Rank {rank}] Applying EP patching...")
         model = patch_moe_model_for_ep(model, ep_config)

@@ -184,7 +184,7 @@ layer registers at construction on the *original* router param, one that never s
 (`fsdp_shard_ep1_experts`) and the multi-node deferred sweep already cover it.
 
 `modules_to_save` on any **other** EP-internal submodule is unsupported:
-`_validate_ep_peft_trainable_params_synced` raises naming any trainable param left inside an EP module with
+`_reject_unsynced_trainable_params` raises naming any trainable param left inside an EP module with
 no gradient sync — it would otherwise silently drift across DP ranks. Its sibling
 `_validate_lora_ep_compatibility` (`src/trainers/mixins/validation.py`) rejects stock-PEFT LoRA layers placed
 inside EP modules.

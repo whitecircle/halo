@@ -9,7 +9,7 @@ re-attach the DP-average hook to the copy or its grad silently drifts across DP 
 which FAILS when a piece of the wiring breaks:
 
   1. Setup: the trainer builds without the loud safety net firing
-     (``_validate_ep_peft_trainable_params_synced``), the router copy is trainable, and it is the
+     (``_reject_unsynced_trainable_params``), the router copy is trainable, and it is the
      ``modules_to_save`` copy (``.modules_to_save.`` in the name), not the frozen original.
   2. POSITIVE — DP sync: a backward with RANK-DISTINCT inputs leaves the router copy's grad IDENTICAL
      on every rank (the re-attached hook all-reduced it). This is the whole point: without the reattach
@@ -152,7 +152,7 @@ def run(ctx) -> dict:
         remove_unused_columns=False,
         dataloader_num_workers=0,
     )
-    # If _validate_ep_peft_trainable_params_synced were to fire wrongly, or reattach were missing so a
+    # If _reject_unsynced_trainable_params were to fire wrongly, or reattach were missing so a
     # trainable router copy went unsynced, construction raises here — the test fails loudly.
     trainer = DistributedSFTTrainer(
         model=model,
