@@ -24,7 +24,7 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 | Vendoring | `src/models/<name>/` + a side-effect import in `src/models/loading/model_preparation.py` |
 | Configs | `examples/sft/<family>/` |
 | Tests | `tests/gpu/parallelism/ep/`, `tests/gpu/trainers/sft/`, `tests/cpu/models/`, `tests/gpu/manifest.py` |
-| Docs | `agent-docs/models/<name>.md`, `agent-docs/models/README.md`, the supported-models tables in `agent-docs/parallelism/expert-parallelism.md` and `agent-docs/optimization/grouped-gemm.md`, `CLAUDE.md` |
+| Docs | the per-family page and every family roster listed in step 7 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` — agent-docs, human-docs and `CLAUDE.md` |
 
 There is no registry file to edit. `MOE_LAYER_MAP` (`patching.py`) is built by walking the
 `EPMoELayerBase` subclass tree, and the CP map the same way — a duplicate HF class name raises at

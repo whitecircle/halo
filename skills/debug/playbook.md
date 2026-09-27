@@ -10,7 +10,7 @@ from those files — do not paraphrase them.
 
 | Symptom | Likely cause | Enable / inspect | Fix |
 |---------|--------------|------------------|-----|
-| EP job stops at startup, before any model load: `ValueError: ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` | Multiple >2-rank DeepEP dispatch groups inside ONE NVLink domain — `num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size` (e.g. ep4 on an 8-GPU domain; the unit is the **domain**, not the OS node). Their combine barriers would race FSDP2's DP-wide NCCL (`elastic` faults with `Invalid access of peer GPU memory over nvlink`, `legacy` deadlocks) — full mechanism and evidence in the `parallelism` skill (`matrix.md`, row *Multi-group >2-rank EP on one NVLink domain*) | Rejected at config time (`_validate_single_domain_multigroup_ep`, `src/distributed/parallelism_config.py`); `EpIntrospectionMixin._setup_ep_gradient_checkpointing` (`src/trainers/mixins/ep_introspection.py`) re-checks a hand-built config | Use **ep_size=2 or ep_size = nvlink_domain_size** (one dispatch group per domain). For finer expert sharding combine EP with **ETP** (`ep4+etp2` fills the domain and passes) — attention TP leaves `ep_group_size` untouched and lands on the same rejection |
+| EP job stops at startup, before any model load: `ValueError: parallelism config failed on … First (rank 0): ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` | Multiple >2-rank DeepEP dispatch groups inside ONE NVLink domain — `num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size` (e.g. ep4 on an 8-GPU domain; the unit is the **domain**, not the OS node). Their combine barriers would race FSDP2's DP-wide NCCL (`elastic` faults with `Invalid access of peer GPU memory over nvlink`, `legacy` deadlocks) — full mechanism and evidence in the `parallelism` skill (`matrix.md`, row *Multi-group >2-rank EP on one NVLink domain*) | Rejected at config time (`_validate_single_domain_multigroup_ep`, `src/distributed/parallelism_config.py`); `EpIntrospectionMixin._setup_ep_gradient_checkpointing` (`src/trainers/mixins/ep_introspection.py`) re-checks a hand-built config | Use **ep_size=2 or ep_size = nvlink_domain_size** (one dispatch group per domain). For finer expert sharding combine EP with **ETP** (`ep4+etp2` fills the domain and passes) — attention TP leaves `ep_group_size` untouched and lands on the same rejection |
 | loss=NaN on the **first backward**, qwen3.5 / qwen3.6 / Qwen3-Next / GLM-4 MoE Lite | FA4 beta + head_dim 256 + partial rotary (qwen3.x output-gate + GQA 16:2; GLM-4 MoE Lite MLA 256-wide qk/v) | Confirm the auto fallback fired (`model_fa4_backward_nan_prone` → SDPA in `resolve_attn_implementation`, `src/models/patches/attention.py`) | Do **not** force `flash_attention_4`; let it fall back to SDPA. gpt-oss is unaffected |
 | OOM / attention error on **gemma4** at long seq | head_dim=512 blocks FA2; needs mem-efficient SDPA + manual KV repeat | — | Auto-applied: the FA→SDPA swap in `resolve_attn_implementation` and `patch_sdpa_for_gemma4_long_seq` (`src/models/patches/attention.py`) via `apply_family_attention_patches` (`src/models/loading/model_preparation.py`, called from the loader; no `enable_gqa`). Cap seq (~20k) if still tight |
 | `gradient_checkpointing_enable` raises on **Zaya** | A toolkit patch clears the family's GC support flag: backward recompute through CCA's `nn.Conv1d` is an env-level cuDNN/CUDA 13.2 fault on the Blackwell image | — | Run Zaya **without GC** (plain FSDP2, EP, or EP+ETP all work GC-off). EP+GC unsupported by design (CCA+EDA recompute cascades); TP/CP incompatible |
@@ -26,9 +26,10 @@ from those files — do not paraphrase them.
 
 ## 2. Enabling the `debugging.py` helpers
 
-All helpers are opt-in and zero-cost when their env var is unset. The accepted
-truthy values are `1`, `true`, `yes`, `on` (`env_flag`, `src/env.py`); a set-but-empty
-value counts as unset and yields the default.
+The consistency checks (§2.1) run only where you add a call — the toolkit ships none; the py-spy
+helpers (§2.2, §2.4) run when you invoke `py_spy_diag.py` or call them in-script. For
+`HALO_TP_CONSISTENCY_CHECK` the accepted truthy values are `1`, `true`, `yes`, `on` (`env_flag`,
+`src/env.py`); a set-but-empty value counts as unset and yields the default.
 
 ### 2.1 Cross-rank consistency — `assert_consistent` / `assert_tensor_shape_consistent`
 Catches a shape/value divergence as a clear error instead of a downstream NCCL hang. The toolkit
@@ -87,7 +88,7 @@ Wrap the OOMing region or enable alongside the profiler, then drop the `.pickle`
 on <https://pytorch.org/memory_viz> for a per-allocation flame graph:
 ```yaml
 enable_torch_profiler: true
-profiler_record_memory_snapshot: true  # dumps mem-<label>-rankNN.pickle over the active window
+profiler_record_memory_snapshot: true  # mem-<label>-rankNN.pickle: end of the first active step → one step past the window
 ```
 ```python
 from src.diagnostics.profiling import cuda_memory_history, log_cuda_memory, reset_peak_memory_stats

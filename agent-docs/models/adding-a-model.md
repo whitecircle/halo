@@ -146,7 +146,7 @@ The merge itself is `merge_shards_to_hf` on the class. The base fused-GLU implem
 
 **6. Tests.** The DeepSeek-V4 trio is the template: an EP-vs-FSDP equivalence test (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`).
 
-**7. Wire the docs.** A supported family gets `agent-docs/models/<name>.md`, a matrix row in [Supported Models](README.md), an entry in the models `README.md`, the `CLAUDE.md` model lists, and an `examples/sft/<family>/` config.
+**7. Wire the docs.** A supported family gets `agent-docs/models/<name>.md`, an `examples/sft/<family>/` config, and a row in every family roster: the compatibility matrix and per-family list in [Supported Models](README.md), the supported-models tables in [Expert Parallelism](../parallelism/expert-parallelism.md) and [Grouped GEMM](../optimization/grouped-gemm.md), the wrapped-families list in [Parallelism](../parallelism/README.md), the human guide's [Supported Models](../../human-docs/models.md) and [Supported Matrix](../../human-docs/supported-matrix.md#model-families) tables, and the `CLAUDE.md` family list and Models index.
 
 ## Add CP support
 
@@ -180,7 +180,7 @@ The wrapper must split Q/K/V into the local-rank slice before all-to-all, apply 
 If a model isn't in transformers yet, or its `trust_remote_code` conflicts with the v5 pin, vendor it — and remove the vendoring at step 5 once upstream ships the family.
 
 1. **Copy `configuration_*.py` and `modeling_*.py`** into `src/models/<name>/`.
-2. **Register in a module**, not in the package `__init__.py` — every package init under `src/` carries a docstring only (`tests/cpu/conventions/test_package_inits.py`). Put the calls in `src/models/<name>/registration.py`:
+2. **Register in a module**, not in the package `__init__.py` — every package init under `src/` but the `src/__init__.py` bootstrap carries a docstring only (`tests/cpu/conventions/test_package_inits.py`). Put the calls in `src/models/<name>/registration.py`:
 
     ```python
     AutoConfig.register("<name>", YourConfig)

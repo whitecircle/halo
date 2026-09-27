@@ -72,7 +72,7 @@ rank; rank 0's values are broadcast and any disagreeing rank warns.
 
 ## Tuning knobs worth knowing
 
-Halo has around twenty more `HALO_*` knobs, all optional and all defaulted to
+Halo has some thirty more `HALO_*` knobs, all optional and all defaulted to
 production-sane values. They're read through `src/env.py`, so booleans accept
 `1/true/yes/on`, and a non-numeric value warns and falls back instead of
 crashing mid-run. These are the ones that come up:
@@ -98,7 +98,7 @@ weight-sync dial-back address, are read by the trainer. See
 [Rollout Servers](rollout-servers.md).
 
 The rest — DeepEP buffer sizing, gradient-bucket geometry, low-precision cache
-switches, weight-sync timeouts, the EP profiling switches — are catalogued with
+switches, weight-sync timeouts, the EP profiling switches — are cataloged with
 their defaults in the
 [Configuration Reference](../agent-docs/reference/configuration-reference.md) ↗;
 the `HALO_TEST_*` and `*_SERVER_URL` variables belong to the test launcher and

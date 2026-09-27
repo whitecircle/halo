@@ -41,7 +41,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` | the collator factory, the packing and padding-free collators, and SMPO's padding-free forward |
 | `src/models/attention_layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
 | `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep and the last pipeline stage, which apply the same verdict |
-| `src/checkpoint/format.py` | the on-disk checkpoint spellings, save-dtype casts, config/state-dict read-write — torch + safetensors only, no `torch.distributed` | the parallel save paths and the standalone `scripts/after_training/` tools |
+| `src/checkpoint/format.py` | the on-disk checkpoint spellings, save-dtype casts, config/state-dict read-write — torch, safetensors and transformers, no `torch.distributed` | the parallel save paths and the standalone `scripts/after_training/` tools |
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules | the loader, the preprocessing pipeline and the scripts — without a boto3 import |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected | the S3 dataset cache and the per-shard cache of a sharded pre-processed dataset, so their crash and staleness semantics cannot drift |
 | `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads and the default-bucket helpers | the loader, the preprocessing pipeline, `ShardedDatasetLoader`, the inference scripts and the `scripts/before_training/s3_datasets.py` CLI |
@@ -52,6 +52,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/data/vlm.py` | the VLM chat render, the processor call and the over-length refusal | the runtime collators, the offline bake and the run-intent probe, so a batch and a bake of one row tokenize identically |
 | `src/data/pipeline/preprocessed_metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts | the training entry points and the loader, which read the stamp without importing the bake that wrote the rows |
 | `src/configs/rollout_config.py` | `RolloutConfig` | built by `AsyncTrainingConfig`, received pickled by the Ray rollout actors — keeping the Ray import out of `src.configs` |
+| `src/distributed/nccl/addresses.py` | host-address classification (`is_loopback`) — standard library only | the weight-sync clients and the Ray rollout actors — without pulling the client's torch, DTensor and NCCL transport into the actors |
 
 `src/distributed/runtime.py` therefore holds rank/world state, barriers, the cross-rank
 rejection/consensus seams, the process-group timeouts and DTensor resolution only; anything a
@@ -72,7 +73,7 @@ Thirteen trainers share this shape: SFT, SMPO, DPO, KTO, offline/online/async en
 online SDPG, teacher and self distillation, reward, classification, and
 embedding. All support EP, TP, and ETP. CP is limited to SFT and SMPO. PP is
 [not yet available in this release](../parallelism/pipeline-parallelism.md); `_supports_pp` marks
-SFT, SMPO, DPO, KTO, reward, classification, and offline GRPO for when it lands. The per-trainer
+SFT, SMPO, DPO, KTO, reward, classification, and offline GRPO. The per-trainer
 matrix and the reason behind each exclusion are in
 [Trainer Architecture](trainer-architecture.md#trainer-compatibility).
 

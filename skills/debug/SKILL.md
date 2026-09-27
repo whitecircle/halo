@@ -38,9 +38,9 @@ the others never reach.
    py-spy fails with `Permission denied`.
 2. Suspect a shape/value divergence upstream of the stuck collective →
    `HALO_TP_CONSISTENCY_CHECK=1` + `assert_tensor_shape_consistent(t, group=..., label=...)`.
-3. An EP job that stops at startup with `ValueError: ep_size=N on a single M-GPU NVLink domain
-   forms K concurrent >2-rank DeepEP dispatch groups` is a rejected topology, not a hang — see the
-   **DeepEP fault** branch.
+3. An EP job that stops at startup with `ValueError: parallelism config failed on … First (rank 0):
+   ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` is a
+   rejected topology, not a hang — see the **DeepEP fault** branch.
 
 ### OOM (CUDA out of memory)
 1. Find *what* holds memory: `profiler_record_memory_snapshot: true` (or `cuda_memory_history(...)`)
@@ -59,17 +59,18 @@ the others never reach.
 2. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
    check `fp32_grad_reduce` / `fp32_non_ep_params`.
-3. Localize the first NaN with `HALO_TP_CONSISTENCY_CHECK=1` + `assert_consistent` on
-   the suspect tensor across the group.
+3. `assert_consistent` does not find a NaN: it compares a hash across ranks, so a NaN every rank
+   computes identically passes. It helps only where ranks that must agree (TP-replicated
+   activations) diverge — add the call there, then `HALO_TP_CONSISTENCY_CHECK=1`.
 
 ### DeepEP fault (EP crash, combine-barrier deadlock)
 - **Multiple >2-rank dispatch groups in one NVLink domain are rejected at config time**
   (`ep_size > 2` with `nvlink_domain_size > ep_group_size`, e.g. ep4 on an 8-GPU domain): startup
-  raises `ValueError: ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP
-  dispatch groups …` before any model load (`_validate_single_domain_multigroup_ep`,
-  `parallelism_config.py`); `EpIntrospectionMixin._setup_ep_gradient_checkpointing` re-checks a
-  hand-built config. Run anyway, their combine barriers race FSDP2's DP-wide NCCL (`elastic`
-  faults, `legacy` deadlocks). **Fix: use
+  raises `ValueError: parallelism config failed on … First (rank 0): ep_size=N on a single M-GPU
+  NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` before any model load
+  (`_validate_single_domain_multigroup_ep`, `parallelism_config.py`);
+  `EpIntrospectionMixin._setup_ep_gradient_checkpointing` re-checks a hand-built config. Run anyway,
+  their combine barriers race FSDP2's DP-wide NCCL (`elastic` faults, `legacy` deadlocks). **Fix: use
   ep_size=2 or ep_size = nvlink_domain_size** (one group per domain). For finer sharding
   combine EP with **ETP** (`ep4+etp2`) — TP leaves `ep_group_size` untouched.
   Per-symptom row: [playbook.md](playbook.md) §1. Mechanism and measured evidence live once,

@@ -60,7 +60,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 - **Unwrapped MoE experts** — `swiglu` off, even when requested, where Halo does not wrap the routed experts (`ep_size: 1` with `use_grouped_gemm: false`, or a family with no EP layer class) and upstream liger-kernel holds the flag, which its MoE appliers use to install `LigerExperts` (input gradient wrong on Blackwell in the pinned release). The flag goes whole, so upstream's dense, shared-expert and vision SwiGLU on such a model run eager too ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
 
 - **TP** (`tp_size > 1`) — `cross_entropy` and `fused_linear_cross_entropy` off; the `lm_head` logits are DTensor-sharded across the vocab dim, so a fused softmax would see a partial vocab.
-- **CP or PP** (`cp_size > 1` or `pp_size > 1`) — same two off: the CP wrapper or the last pipeline stage computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.
+- **CP or PP** (`cp_size > 1` or `pp_size > 1`; PP is [not yet available in this release](../parallelism/pipeline-parallelism.md)) — same two off: the CP wrapper or the last pipeline stage computes the loss outside the model's forward, so the fused path never fires and its memory saving does not exist.
 
 `fused_linear_cross_entropy` is otherwise opt-in, defaulting on only for DeepSeek-V4, GLM-4 MoE Lite, and Zaya. Override individual kernels with `liger_kernel_config`:
 
@@ -192,7 +192,7 @@ Start with the gradop config; if OOM, try the full one. A hand-written accelerat
 
 | `optim` | Optimizer | Memory/param | Best for |
 |---|---|---|---|
-| `adamw_torch_fused` | PyTorch fused AdamW | 12 B (FP32 master) | Default, most stable |
+| `adamw_torch_fused` | PyTorch fused AdamW | 12 B over fp32 params (`bf16: false`) | Default, most stable |
 | (auto with `bf16: true`) | AdamWBF16 (stochastic rounding) | 6 B | Memory-constrained |
 | `muon` | Muon (Newton-Schulz) | ~4 B on 2D params | Faster convergence on matrix params |
 | `flash_adamw` | FlashAdamW (quantized states) | ~5 B | Maximum memory savings, drop-in AdamW |
@@ -236,4 +236,4 @@ EP is orthogonal to data parallelism; only TP, CP, and ETP reduce it — `data_p
 | `HALO_DATA_ROOT` | `~/.cache/halo` | Toolkit scratch root (S3 dataset cache, profiler artifacts) |
 | `TMPDIR` | `/tmp` | Temp files |
 
-Point the cache/scratch/temp vars at a **verified** large mounted volume (`df -h` / `findmnt` — a `/mnt` path is not always a big array). Secrets (`WANDB_API_KEY` / `HF_TOKEN` / `AWS_*`) come from `.env` and are never auto-loaded. Full catalogue: [Configuration Reference](../reference/configuration-reference.md#environment-variables).
+Point the cache/scratch/temp vars at a **verified** large mounted volume (`df -h` / `findmnt` — a `/mnt` path is not always a big array). Secrets (`WANDB_API_KEY` / `HF_TOKEN` / `AWS_*`) come from `.env` and are never auto-loaded. Full catalog: [Configuration Reference](../reference/configuration-reference.md#environment-variables).
