@@ -422,9 +422,12 @@ def make_disable_adapter_fsdp2_safe(peft_model: nn.Module, fsdp_root: nn.Module)
     registered at exit, while FSDP2 copies each sharded param's flag onto its unsharded twin at every
     unshard. A reference pass that is the first forward after a reshard enters on the sharded params
     and, with the forward's unsharded params left registered, exits on those: the sharded adapters stay
-    frozen for the rest of the run. Resharding every FSDP2 module under ``fsdp_root`` (the module the
-    wrap was applied to, so its root group is included) before peft's exit lands the restore on the
-    sharded params, whichever set entry saw. Per-rank, and a no-op without FSDP2. Idempotent.
+    frozen for the rest of the run. So when the trainable params registered at exit are not the ones
+    registered at entry, every FSDP2 module under ``fsdp_root`` (the module the wrap was applied to, so
+    its root group is included) is resharded before peft's exit, which lands the restore on the sharded
+    params. A pass that enters on the unsharded params a policy forward left registered exits on the
+    same ones and reshards nothing, so the backward that follows reuses them instead of re-gathering.
+    Per-rank, and a no-op without FSDP2. Idempotent.
     """
     if getattr(peft_model, "_fsdp2_safe_disable_adapter", False):
         return
@@ -432,11 +435,13 @@ def make_disable_adapter_fsdp2_safe(peft_model: nn.Module, fsdp_root: nn.Module)
 
     @contextlib.contextmanager
     def _fsdp2_safe_disable_adapter():
+        trainable_at_entry = {name: param for name, param in fsdp_root.named_parameters() if param.requires_grad}
         with disable_adapter():
             try:
                 yield
             finally:
-                reshard_fsdp2_modules(fsdp_root)
+                if any(fsdp_root.get_parameter(name) is not param for name, param in trainable_at_entry.items()):
+                    reshard_fsdp2_modules(fsdp_root)
 
     peft_model.disable_adapter = _fsdp2_safe_disable_adapter
     peft_model._fsdp2_safe_disable_adapter = True
