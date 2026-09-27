@@ -41,8 +41,6 @@ CP_SIZE = 2
 TP_SIZE = 2
 MAX_SEQ_LENGTH = 64
 SEED = 42
-# Every TP rank computes the loss from the same all-reduced attention output.
-TP_RANK_LOSS_SPREAD_ABS = 1e-2
 
 
 def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
@@ -302,7 +300,7 @@ def test_tp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_
 
     # TP is a sharded rearrangement of one computation, so every rank must agree.
     spread = world_spread(loss_value)
-    checks["tp_losses_consistent"] = spread < TP_RANK_LOSS_SPREAD_ABS
+    checks["tp_losses_consistent"] = spread < TOL.ep_identical_batch_rank_spread_abs
     log(f"  TP loss consistency (spread={spread:.2e}): {'PASS' if checks['tp_losses_consistent'] else 'FAIL'}")
 
     tp_diff = abs(loss_value - baseline_loss)
