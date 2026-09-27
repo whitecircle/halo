@@ -26,7 +26,12 @@ from scripts.after_training.merge_ep_shards import (
     _group_expert_weights,
     merge_ep_shards,
 )
-from src.checkpoint.format import EP_SHARD_KEY_RE
+from src.checkpoint.format import (
+    EP_SHARD_KEY_RE,
+    REFERENCE_LOGPS_FILE,
+    ROUTER_BALANCING_BIASES_FILE,
+    SCHEDULER_STATE_FILE,
+)
 from src.checkpoint.shard_writer import StageShardWriter
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, resolve_ep_merge_layer_class
@@ -45,6 +50,7 @@ from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.training.environment import _classify_resume_checkpoint
 
 # The whole-dict oracle the streamed merge is pinned against (test-only; see its module docstring).
 from tests.common.ep_merge_oracle import post_process_merged_weights
@@ -582,6 +588,35 @@ def test_merge_copies_auxiliary_files():
         assert os.path.exists(os.path.join(output_dir, "tokenizer.json"))
         # Output is HF-style model-*.safetensors; the input shard names are rewritten, not copied.
         assert not any(".shard_" in k for k in _load_merged(output_dir))
+
+
+def test_the_merged_directory_is_the_resume_source_the_shards_are_not():
+    """A resume refuses the per-rank shards and names this merge as the way back, so the merged
+    directory must carry every resume sidecar byte for byte. Without ``reference_logps.pt`` a
+    precompute DPO/KTO resume, whose policy is built from these weights, has no untrained reference
+    left to sweep and raises."""
+    sidecars = (
+        REFERENCE_LOGPS_FILE,
+        SCHEDULER_STATE_FILE,
+        ROUTER_BALANCING_BIASES_FILE,
+        "rng_state_0.pth",
+        "rng_state_1.pth",
+    )
+    with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as output_dir:
+        _write_ep_checkpoint(input_dir, "gpt_oss", _gptoss_shards(), 2)
+        for name in sidecars:
+            with open(os.path.join(input_dir, name), "wb") as f:
+                f.write(name.encode())
+        assert _classify_resume_checkpoint(input_dir) == "invalid"
+
+        merge_ep_shards(input_dir, output_dir, verbose=False)
+
+        assert _classify_resume_checkpoint(output_dir) == "full"
+        for name in sidecars:
+            path = os.path.join(output_dir, name)
+            assert os.path.isfile(path), f"{name} was dropped by the merge"
+            with open(path, "rb") as f:
+                assert f.read() == name.encode(), f"{name} changed on its way through the merge"
 
 
 def _gathered_reference(layer_cls, fused_flinear):

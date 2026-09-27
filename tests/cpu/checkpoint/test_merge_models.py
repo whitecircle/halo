@@ -28,6 +28,14 @@ from torch.profiler import ProfilerActivity, profile
 from transformers import CONFIG_MAPPING
 from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 
+from src.checkpoint.format import (
+    ADAPTER_CONFIG_FILE,
+    ADAPTER_SAFETENSORS_FILE,
+    REFERENCE_LOGPS_FILE,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
+    write_resume_adapter_marker,
+)
 from tests.common.utils import load_script_module
 
 mm = load_script_module("scripts/after_training/merge_models.py")
@@ -297,14 +305,21 @@ def _build_tiny_qwen35(out_dir: Path, seed: int) -> None:
 
 def test_end_to_end_linear_merge_qwen3_5():
     """Merge two tiny Qwen3.5 checkpoints (linear 0.5/0.5), reload, verify average + a forward pass.
-    Also pins that resume sidecars planted beside the tokenizer source do NOT ship: they describe
-    one input run's state, and the merged artifact has no such run."""
+    Also pins that resume state planted beside the tokenizer source does NOT ship: it describes one
+    input run, and the merged artifact has no such run. That covers a merge-on-save checkpoint's
+    resume adapter too, whose marker would resume the merge from the base plus that one input's
+    adapter."""
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         a, b, out = Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         _build_tiny_qwen35(a, seed=0)
         _build_tiny_qwen35(b, seed=1)
-        for sidecar in ("scheduler.pt", "rng_state_0.pth", "router_balancing_biases.pt"):
+        sidecars = ("scheduler.pt", "rng_state_0.pth", "router_balancing_biases.pt", REFERENCE_LOGPS_FILE)
+        for sidecar in sidecars:
             (a / sidecar).write_bytes(b"x")
+        (a / RESUME_ADAPTER_DIR).mkdir()
+        (a / RESUME_ADAPTER_DIR / ADAPTER_CONFIG_FILE).write_text("{}")
+        save_file({"lora_A": torch.ones(2, 2)}, str(a / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE))
+        write_resume_adapter_marker(str(a))
 
         mm.merge_models(
             model_specs=[str(a), str(b)],
@@ -316,8 +331,8 @@ def test_end_to_end_linear_merge_qwen3_5():
             verbose=False,
         )
 
-        for sidecar in ("scheduler.pt", "rng_state_0.pth", "router_balancing_biases.pt"):
-            assert not (out / sidecar).exists(), f"{sidecar} is one input run's resume state, not the merge's"
+        for entry in (*sidecars, RESUME_ADAPTER_MARKER_FILE, RESUME_ADAPTER_DIR):
+            assert not (out / entry).exists(), f"{entry} is one input run's resume state, not the merge's"
 
         # Reload as the real Qwen3.5 class — proves config/shards/index are valid.
         merged = Qwen3_5MoeForCausalLM.from_pretrained(out, dtype=torch.bfloat16)
