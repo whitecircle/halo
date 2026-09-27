@@ -15,12 +15,11 @@ from transformers import AutoModelForCausalLM
 
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
-from src.distributed.expert_parallel.loading import load_ep_model
+from src.distributed.expert_parallel.loading import cast_loaded_parameters, load_ep_model
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.filesystem import sequential_load_within_node
 from src.distributed.runtime import get_global_rank, move_model_to_local_device
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.dtype import cast_parameters_to_run_dtype
 from src.models.patches.attention import revalidate_attn_kwarg
 from src.models.patches.buffer_fixes import finalize_loaded_model
 
@@ -55,8 +54,8 @@ def load_model_for_cp(
             the state-dict expert paths land on the inner HF model, not on the CP wrapper. Without
             it a MoE under pure CP pays the Liger swiglu/geglu force-off without the grouped-GEMM
             speedup it buys.
-        keep_fp32_params: the run keeps fp32 masters (``fp32_non_ep_params``), so fp32 parameters
-            keep their stored values (see :func:`cast_parameters_to_run_dtype`).
+        keep_fp32_params: :func:`cast_loaded_parameters`' ``keep_fp32`` (the run keeps fp32 masters,
+            ``fp32_non_ep_params``).
     """
     if model_class is None:
         model_class = AutoModelForCausalLM
@@ -77,7 +76,7 @@ def load_model_for_cp(
             device_map="cpu",
             **model_kwargs,
         )
-        cast_parameters_to_run_dtype(model, dtype, keep_fp32=keep_fp32_params)
+        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params)
         model = move_model_to_local_device(model)
 
     # Before the CP wrap, on the inner HF model: the wrapper carries no tie_weights.
@@ -104,6 +103,7 @@ def load_model_for_ep_cp(
     max_concurrent_loading: int | None = None,
     lazy: bool = True,
     revision: str | None = None,
+    keep_fp32_params: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """Load a MoE model with both EP and Ulysses CP support.
@@ -114,6 +114,7 @@ def load_model_for_ep_cp(
             ``from_pretrained`` + EP patching (vs lazy safetensors).
         revision: Hub revision pin, passed to :func:`load_ep_model` so the lazy
             snapshot resolution reads the pinned checkpoint.
+        keep_fp32_params: passed to :func:`load_ep_model`.
 
     Note:
         Router grads averaged by ``world_size``, correct for CP: each rank's
@@ -133,6 +134,7 @@ def load_model_for_ep_cp(
         max_concurrent_loading=max_concurrent_loading,
         lazy=lazy,
         revision=revision,
+        keep_fp32_params=keep_fp32_params,
         **model_kwargs,
     )
 

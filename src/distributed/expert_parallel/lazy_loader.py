@@ -44,6 +44,7 @@ from src.distributed.expert_parallel.expert_weights import (
 from src.distributed.expert_parallel.hub_conversion import resolve_conversion_steps
 from src.distributed.expert_parallel.patching import (
     create_ep_buffers,
+    ep_claimed_blocks,
     patch_moe_model_for_ep,
 )
 from src.distributed.filesystem import fs_aware_main_first
@@ -590,6 +591,15 @@ def lazy_load_prologue(
     )
 
 
+def _fp32_non_ep_param_keys(model: nn.Module) -> frozenset[str]:
+    """The meta shell's fp32 parameters outside the MoE blocks EP wraps: what an eager load leaves fp32
+    (the class's pins, remote-code fp32 declarations) and a run keeping fp32 masters keeps as stored."""
+    ep_keys = {f"{path}.{name}" for path, block in ep_claimed_blocks(model) for name, _ in block.named_parameters()}
+    return frozenset(
+        name for name, param in model.named_parameters() if param.dtype == torch.float32 and name not in ep_keys
+    )
+
+
 def load_ep_model_lazy(
     model_name_or_path: str,
     ep_config: EPConfig,
@@ -597,12 +607,15 @@ def load_ep_model_lazy(
     dtype=None,
     trust_remote_code: bool = True,
     model_class=None,
+    keep_fp32_params: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """Load a MoE model for EP using lazy safetensors slicing.
 
     All ranks run in parallel, each reading only its own expert slice from disk. Handles both fused 3D
     checkpoints (GptOss, LFM2, GLM4) and individual-expert checkpoints (Qwen3, Qwen3.5, Bailing).
+    ``keep_fp32_params`` materializes in fp32 what the eager loaders keep fp32 under
+    ``cast_loaded_parameters(keep_fp32=True)``: the shell's fp32 parameters outside the MoE blocks.
     """
     if model_class is None:
         model_class = AutoModelForCausalLM
@@ -633,6 +646,7 @@ def load_ep_model_lazy(
     )
     model, plans, dtype = base.model, base.plans, base.dtype
     weight_map, ckpt_format = base.weight_map, base.ckpt_format
+    keep_fp32 = _fp32_non_ep_param_keys(model) if keep_fp32_params else frozenset()
 
     # Every step from here to the reject below is rank-local: each rank reads only the shards holding
     # its own experts, and its expert range decides which keys it fuses and how long each slice is.
@@ -694,7 +708,7 @@ def load_ep_model_lazy(
     # and at ep64 most of them hold other ranks' experts.
     live_shards = sorted({plan.shard_file for plan in plans if plan.action != WeightAction.IGNORE})
     loader = SafetensorsWeightLoader(model_name_or_path, live_shards, device=device)
-    guard.run(partial(loader.load_into_model, model, plans, dtype=dtype))
+    guard.run(partial(loader.load_into_model, model, plans, dtype=dtype, keep_fp32=keep_fp32))
 
     gc.collect()
     if torch.cuda.is_available():

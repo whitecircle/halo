@@ -14,7 +14,7 @@ parameter in bf16 after the load, and trains two SFT steps (see ``tests/common/p
     ranks, which an adapter left out of FSDP2's shard groups does not.
   * ``--ep 2``: the EP loaders, which already cast, as the control.
   * ``--fp32-masters`` (``fp32_non_ep_params``): the pins keep the checkpoint's stored fp32 values
-    instead of a bf16 round trip before the trainer's upcast.
+    instead of a bf16 round trip before the trainer's upcast, at ep1 and through the EP lazy loader.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_fp32_pinned_params.py \

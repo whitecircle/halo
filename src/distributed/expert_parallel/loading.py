@@ -24,6 +24,7 @@ from src.distributed.expert_parallel.lazy_loader import (
 )
 from src.distributed.expert_parallel.patching import (
     create_ep_buffers,
+    ep_claimed_blocks,
     patch_moe_model_for_ep,
 )
 from src.distributed.filesystem import sequential_load_within_node
@@ -48,6 +49,19 @@ from src.models.patches.buffer_fixes import finalize_loaded_model
 _T = TypeVar("_T")
 
 logger = get_logger(__name__)
+
+
+def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool) -> None:
+    """:func:`cast_parameters_to_run_dtype` on a freshly loaded model, EP-aware.
+
+    ``keep_fp32`` (the run keeps fp32 masters, ``fp32_non_ep_params``) keeps stored fp32 values only
+    outside the MoE blocks EP wraps: the upcast covers non-EP parameters alone, so a parameter inside
+    one trains at the run dtype.
+    """
+    cast_parameters_to_run_dtype(model, dtype, keep_fp32=keep_fp32)
+    if keep_fp32:
+        for _path, block in ep_claimed_blocks(model):
+            cast_parameters_to_run_dtype(block, dtype)
 
 
 def decide_lazy_loadable(local_dir: str | None, layout_supported: Callable[[str], bool]) -> bool:
@@ -162,6 +176,7 @@ def load_ep_model(
     max_concurrent_loading: int | None = None,
     lazy: bool = True,
     revision: str | None = None,
+    keep_fp32_params: bool = False,
     **model_kwargs,
 ) -> torch.nn.Module:
     """Load a MoE model for EP training.
@@ -172,6 +187,7 @@ def load_ep_model(
     back to per-rank ``from_pretrained`` + EP patch. ``model_name_or_path`` may be a
     Hub id (resolved to the cached snapshot dir), local path, or EP checkpoint dir. ``config`` is the
     caller's already-loaded model config, required so that no loader re-reads it per rank.
+    ``keep_fp32_params`` is :func:`cast_loaded_parameters`' ``keep_fp32`` on either path.
     """
     rank = get_global_rank()
 
@@ -196,6 +212,7 @@ def load_ep_model(
                 model_class=model_class,
                 max_concurrent_loading=max_concurrent_loading,
                 revision=revision,
+                keep_fp32_params=keep_fp32_params,
                 **model_kwargs,
             ),
         )
@@ -221,6 +238,7 @@ def load_ep_model(
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,
                 model_class=model_class,
+                keep_fp32_params=keep_fp32_params,
                 **model_kwargs,
             ),
         )
@@ -248,6 +266,7 @@ def load_ep_model(
             model_class=model_class,
             max_concurrent_loading=max_concurrent_loading,
             revision=revision,
+            keep_fp32_params=keep_fp32_params,
             **model_kwargs,
         ),
     )
@@ -277,6 +296,7 @@ def _load_ep_model_huggingface(
     model_class=None,
     max_concurrent_loading: int | None = None,
     revision: str | None = None,
+    keep_fp32_params: bool = False,
     **model_kwargs,
 ) -> torch.nn.Module:
     """Load EP model from HuggingFace checkpoint.
@@ -317,7 +337,7 @@ def _load_ep_model_huggingface(
             revision=revision,
             **model_kwargs,
         )
-        cast_parameters_to_run_dtype(model, dtype)
+        cast_loaded_parameters(model, dtype, keep_fp32=keep_fp32_params)
 
         logger.info(f"[Rank {rank}] Applying EP patching...")
         model = patch_moe_model_for_ep(model, ep_config)

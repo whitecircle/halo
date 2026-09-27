@@ -205,12 +205,16 @@ class SafetensorsWeightLoader:
         model: nn.Module,
         plans: list[WeightPlan],
         dtype: torch.dtype | None = None,
+        keep_fp32: frozenset[str] = frozenset(),
     ):
         """Materialize weights and assign to the model's parameters.
 
         EXPERT_SHARD: only the local expert slice is read from disk.
         REPLICATE: full tensor is read.
         IGNORE: skipped.
+
+        Every float parameter takes ``dtype``, except the ``keep_fp32`` model keys, which take fp32:
+        the parameters an eager load keeps fp32 for a run that holds fp32 masters.
 
         Every materialized tensor is shape-checked against the live target before assignment, since
         this path bypasses ``from_pretrained``'s own size-mismatch check.
@@ -233,15 +237,14 @@ class SafetensorsWeightLoader:
                     shard_len=plan.shard_end - plan.shard_start if sharded else None,
                 )
                 # Every float parameter, overriding the class's _keep_in_fp32_modules[_strict]:
-                # FSDP2 rejects mixed dtypes in one shard group, and the EP from_pretrained fallback
-                # re-casts to match. Parameters only: a float buffer may be fp32 by design (Zaya's
-                # balancing biases).
+                # FSDP2 rejects mixed dtypes in one shard group, and the eager loaders cast to match.
+                # Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases).
                 if (
                     dtype is not None
                     and tensor.is_floating_point()
                     and isinstance(_target_tensor(model, plan.model_key), nn.Parameter)
                 ):
-                    tensor = tensor.to(dtype)
+                    tensor = tensor.to(torch.float32 if plan.model_key in keep_fp32 else dtype)
 
                 assign_tensor_to_model(model, plan.model_key, tensor)
                 loaded += 1

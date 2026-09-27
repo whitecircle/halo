@@ -999,9 +999,9 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_glm5_next.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "glm5"), timeout=1200
     ),
-    # The families transformers pins parameters of in fp32, loaded through the ep1 grouped-GEMM and plain
-    # FSDP2 loaders (the CP, TP-MoE and EP+TP sequential sites are checked statically on CPU), with ep2 as
-    # the control and fp32-masters rows whose pins must keep their stored values.
+    # The families transformers pins parameters of in fp32, loaded through the ep1 grouped-GEMM, plain
+    # FSDP2 and EP lazy loaders (the CP, TP-MoE and EP+TP sequential sites are checked statically on CPU),
+    # with ep2 as the dtype control and fp32-masters rows whose pins must keep their stored values.
     "trainers/sft/test_sft_fp32_pinned_params.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "ep", "lora", "moe", "deepseek_v4", "glm5", "inkling"),
@@ -1012,6 +1012,8 @@ MANIFEST: dict[str, TestSpec] = {
             "--family inkling_text --mode full --ep 1 --no-grouped-gemm",
             "--family inkling_text --mode full --ep 1 --no-grouped-gemm --fp32-masters",
             "--family inkling_text --mode full --ep 1 --fp32-masters",
+            "--family inkling_text --mode full --ep 2 --fp32-masters",
+            "--family glm5_next --mode full --ep 2 --fp32-masters",
             "--family deepseek_v4 --mode expert_lora --ep 1",
             "--family glm5_next --mode mixed --ep 1",
             "--family deepseek_v4 --mode full --ep 2",

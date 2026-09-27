@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
@@ -160,10 +160,11 @@ def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, chec
     return {"checks": checks, "metrics": metrics}
 
 
-def _pins_hold_stored_fp32(model: torch.nn.Module, base_dir: str) -> tuple[bool, str]:
+def _pins_hold_stored_fp32(model: torch.nn.Module, family: str, base_dir: str) -> tuple[bool, str]:
     """Every pinned parameter is fp32 and bitwise the checkpoint's stored value, which a bf16 round trip
     would change (the premise, checked too)."""
-    reference = dict(AutoModelForCausalLM.from_pretrained(base_dir, dtype=torch.float32).named_parameters())
+    load_class = TINY_MOE_FAMILIES[family].load_class
+    reference = dict(load_class.from_pretrained(base_dir, dtype=torch.float32).named_parameters())
     pinned = sorted(fp32_pinned_param_names(model))
     lossy = [name for name in pinned if not torch.equal(reference[name], reference[name].bfloat16().float())]
     if not lossy:
@@ -185,7 +186,7 @@ def run_pinned_family_row(ctx, family: str, mode: str, pc: ParallelismConfig) ->
     checks: dict[str, bool] = {}
     if pc.fp32_non_ep_params:
         # Other fp32 parameters are the run's own (fp32_non_ep_params forces an fp32 router).
-        checks["pins_hold_stored_fp32"], detail = _pins_hold_stored_fp32(model, base_dir)
+        checks["pins_hold_stored_fp32"], detail = _pins_hold_stored_fp32(model, family, base_dir)
         log(f"{family} {mode} ep{pc.ep_size} fp32 masters: {detail}")
     else:
         off = base_params_off_run_dtype(model)

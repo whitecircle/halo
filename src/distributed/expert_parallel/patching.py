@@ -37,6 +37,12 @@ def build_moe_layer_map() -> dict[str, type[EPMoELayerBase]]:
 MOE_LAYER_MAP = build_moe_layer_map()
 
 
+def ep_claimed_blocks(model: nn.Module) -> list[tuple[str, nn.Module]]:
+    """``(path, block)`` for every MoE block :func:`patch_moe_model_for_ep` wraps, on a model not yet
+    patched: the modules whose parameters become EP parameters."""
+    return [(path, module) for path, module in model.named_modules() if type(module).__name__ in MOE_LAYER_MAP]
+
+
 def patch_moe_model_for_ep(
     model: nn.Module,
     ep_config: EPConfig,

@@ -85,7 +85,8 @@ def cast_parameters_to_run_dtype(
 
     ``keep_fp32`` leaves fp32 parameters as stored, for a run that upcasts to fp32 masters anyway
     (``fp32_non_ep_params``): a round trip through the run dtype would discard the checkpoint's
-    precision before the upcast. The EP loaders, lazy one included, round them. Parameters only: a float buffer may be fp32 by design (Zaya's
+    precision before the upcast. The training loaders apply it outside the MoE blocks EP wraps
+    (``cast_loaded_parameters``), and the EP lazy loader materializes the same keys in fp32. Parameters only: a float buffer may be fp32 by design (Zaya's
     balancing biases). A ``dtype`` that is not a ``torch.dtype`` ("auto", None) leaves the model as
     loaded.
 

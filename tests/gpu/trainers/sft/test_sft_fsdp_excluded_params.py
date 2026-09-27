@@ -58,7 +58,7 @@ def _router_only(ctx) -> dict:
 def _glm5_next_mixed_uncast(ctx) -> dict:
     base_dir, _ = tiny_family_checkpoint(ctx, "glm5_next")
     pc = ParallelismConfig(ep_size=1)
-    with mock.patch.object(model_loading, "cast_parameters_to_run_dtype", lambda *args, **kwargs: None):
+    with mock.patch.object(model_loading, "cast_loaded_parameters", lambda *args, **kwargs: None):
         model, tokenizer, peft_config = load_row_model(base_dir, "mixed", pc)
     pins = base_params_off_run_dtype(model)
     log(f"{len(pins)} base params left off {RUN_DTYPE}: {pins[:6]}")

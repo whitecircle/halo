@@ -24,7 +24,7 @@ The KDA kernels accept a `cu_seqlens` kwarg (fla convention) that the toolkit co
 Three consequences for a training config:
 
 - **Pin `attn_implementation: sdpa`.** The modeling file declares only the v4-era `_supports_flash_attn_2`, which transformers v5 ignores in favor of `_supports_flash_attn`, so an auto-selected flash label (FA4 on Blackwell, FA3 on Hopper) is refused at model build. The KDA layers run their own `fla` kernels either way.
-- **`fp32_non_ep_params: true` keeps the KDA state in fp32 (optional).** The modeling file declares `A_log` and `dt_bias` in fp32; without the flag the loaders cast them to the run dtype with every other parameter ([Load precision](README.md#load-precision)). With it they train, with the other non-expert parameters, as fp32 masters (compute stays bf16), from their stored fp32 values at `ep_size: 1` and from bf16-rounded ones under EP.
+- **`fp32_non_ep_params: true` keeps the KDA state in fp32 (optional).** The modeling file declares `A_log` and `dt_bias` in fp32; without the flag the loaders cast them to the run dtype with every other parameter ([Load precision](README.md#load-precision)). With it they train, with the other non-expert parameters, as fp32 masters from their stored fp32 values (compute stays bf16).
 
     At `expert_parallel_size: 1` pair it with **`fsdp_shard_ep1_experts: false`**: the upcast skips every EP-wrapper parameter, so FSDP-managed replicated experts would sit bf16 inside the same fp32 shard group and `ParallelismConfig` refuses the combination at config time. Above ep1 the knob has no effect; the experts are FSDP-ignored anyway.
 

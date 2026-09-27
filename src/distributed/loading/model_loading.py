@@ -29,6 +29,7 @@ from src.distributed.expert_parallel.lazy_loader import (
     load_ep_model_lazy,
 )
 from src.distributed.expert_parallel.loading import (
+    cast_loaded_parameters,
     decide_lazy_loadable,
     load_ep_model,
     reject_ep_sharded_checkpoint,
@@ -500,7 +501,7 @@ def _sequential_load_to_cuda(
     """Load to CPU one rank at a time (low CPU peak), move to this rank's GPU, then
     free CPU memory. Shared by the EP+TP sequential fallback and the TP-MoE loader.
 
-    ``keep_fp32`` is :func:`cast_parameters_to_run_dtype`'s."""
+    ``keep_fp32`` is :func:`cast_loaded_parameters`'."""
     with sequential_load_within_node(max_concurrent=max_concurrent):
         model = from_pretrained_verified(
             model_class,
@@ -508,7 +509,7 @@ def _sequential_load_to_cuda(
             device_map="cpu",
             **common_kwargs,
         )
-        cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
+        cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
         model = model.to(f"cuda:{local_rank}")
         gc.collect()
         torch.cuda.empty_cache()
@@ -528,7 +529,7 @@ def _from_pretrained_on_local_gpu(
     """``from_pretrained`` straight onto this rank's GPU, one rank at a time per node.
 
     With ``_init_from_scratch`` in ``common_kwargs``, builds from config with random weights instead.
-    ``keep_fp32`` is :func:`cast_parameters_to_run_dtype`'s.
+    ``keep_fp32`` is :func:`cast_loaded_parameters`'.
     """
     if common_kwargs.pop("_init_from_scratch", False):
         config = common_kwargs.get("config")
@@ -546,7 +547,7 @@ def _from_pretrained_on_local_gpu(
             ddp_kwargs = {"device_map": {"": local_rank}, **common_kwargs}
             model = from_pretrained_verified(model_class, model_name_or_path, **ddp_kwargs)
     # Both branches: a remote-code class can declare parameters fp32 in __init__ (Ling 3.0's KDA state).
-    cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
+    cast_loaded_parameters(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
     finalize_loaded_model(model)
     return model
 
@@ -691,6 +692,7 @@ def _load_ep_tp_model(
             dtype=common_kwargs.get("dtype"),
             trust_remote_code=common_kwargs.get("trust_remote_code", True),
             model_class=model_class,
+            keep_fp32_params=pc.fp32_non_ep_params,
             **_lazy_loader_passthrough(common_kwargs),
         )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
@@ -698,10 +700,13 @@ def _load_ep_tp_model(
     else:
         if pc.ep_lazy_loading:
             logger.info(f"[Rank {rank}] Lazy path unavailable, falling back to sequential loading")
-        # Rounds fp32 pins like the lazy path it stands in for: which path loads is a filesystem
-        # verdict, and it must not change the numbers.
         model = _sequential_load_to_cuda(
-            model_name_or_path, model_class, local_rank, pc.max_concurrent_loading, common_kwargs, keep_fp32=False
+            model_name_or_path,
+            model_class,
+            local_rank,
+            pc.max_concurrent_loading,
+            common_kwargs,
+            keep_fp32=pc.fp32_non_ep_params,
         )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
         model = _apply_ep_wrappers(model, ep_config)
@@ -828,6 +833,7 @@ def _load_ep_cp_model(
         model_class=model_class,
         max_concurrent_loading=pc.max_concurrent_loading,
         lazy=pc.ep_lazy_loading,
+        keep_fp32_params=pc.fp32_non_ep_params,
         **common_kwargs,
     )
     logger.info(f"Model loaded with EP+CP (ep={pc.ep_size}, cp={pc.cp_size})")
@@ -847,6 +853,7 @@ def _load_ep_model(
         model_class=model_class,
         max_concurrent_loading=pc.max_concurrent_loading,
         lazy=pc.ep_lazy_loading,
+        keep_fp32_params=pc.fp32_non_ep_params,
         **common_kwargs,
     )
     scope_str = "node-local" if pc.is_node_local_ep else "cross-node"

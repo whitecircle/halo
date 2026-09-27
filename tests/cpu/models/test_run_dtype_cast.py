@@ -27,6 +27,8 @@ from trl import ModelConfig
 
 import scripts.training.embedding as embedding_script
 from src.configs.embedding_config import EmbeddingConfig
+from src.distributed.expert_parallel.loading import cast_loaded_parameters
+from src.distributed.expert_parallel.patching import ep_claimed_blocks
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.models.loading.dtype import cast_parameters_to_run_dtype
@@ -41,7 +43,8 @@ from tests.common.utils import REPO_ROOT, params_off_dtype
 # The loaders log through accelerate's logger, which requires an initialized state.
 PartialState()
 
-CAST = "cast_parameters_to_run_dtype"
+# The run-dtype cast, directly or through its EP-aware wrapper.
+CASTS = frozenset({"cast_parameters_to_run_dtype", "cast_loaded_parameters"})
 FINALIZE = "finalize_loaded_model"
 
 # The calls that materialize weights through ``from_pretrained``, and so inherit the fp32 pins: the two
@@ -187,6 +190,24 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
     assert params_off_dtype(model, torch.bfloat16) == []
 
 
+def test_fp32_masters_keep_stored_values_outside_the_moe_blocks_only(pinned_checkpoints):
+    """``fp32_non_ep_params`` upcasts non-EP parameters alone, so a parameter inside a block EP wraps
+    trains at the run dtype even when it loaded fp32."""
+    model = TINY_MOE_FAMILIES["inkling_text"].load_class.from_pretrained(
+        pinned_checkpoints["inkling_text"], dtype=torch.bfloat16
+    )
+    blocks = ep_claimed_blocks(model)
+    in_block = next(param for _path, block in blocks for param in block.parameters())
+    in_block.data = in_block.data.float()
+    pinned = {name: param.detach().clone() for name, param in model.named_parameters() if param.dtype == torch.float32}
+
+    cast_loaded_parameters(model, torch.bfloat16, keep_fp32=True)
+
+    assert blocks and in_block.dtype == torch.bfloat16
+    kept = {name: param for name, param in model.named_parameters() if name in pinned and param is not in_block}
+    assert kept and all(torch.equal(param.detach(), pinned[name]) for name, param in kept.items())
+
+
 def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
     """The default embedding path loads through SentenceTransformer's own ``from_pretrained``."""
     base = tmp_path / "base"
@@ -247,7 +268,9 @@ def test_the_eager_load_surface_is_pinned():
 
 @pytest.mark.parametrize("loader", sorted(EAGER_LOADERS), ids=lambda loader: loader[1])
 def test_every_eager_loader_casts_and_finalizes(loader):
-    assert {CAST, FINALIZE} <= _eager_loaders()[loader]
+    calls = _eager_loaders()[loader]
+    assert calls & CASTS
+    assert FINALIZE in calls
 
 
 if __name__ == "__main__":
