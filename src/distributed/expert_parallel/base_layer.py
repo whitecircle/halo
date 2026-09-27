@@ -1455,6 +1455,30 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
             return self._compute_experts_gmm(tokens, experts, weights, output_dtype)
         return self._compute_experts_weighted(tokens, experts, weights, output_dtype, self._expert_forward)
 
+    def _rank_uniform_dispatch_input(self, flat: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """``flat`` as a grad-requiring leaf when this layer's experts train but no dispatch operand
+        requires grad (expert-only LoRA or fine-tuning); ``flat`` itself otherwise.
+
+        With no grad-requiring operand the dispatch builds no autograd node, and the combine joins the
+        graph only through the expert output: a constant on a rank whose experts received no token. That
+        rank's backward then skips DeepEP collectives its peers enter, here and in every later layer
+        whose input loses grad through it, which hangs the barrier, mispairs collectives, or leaves its
+        loss with no grad at all. The leaf gives every rank the same dispatch and combine nodes. Its
+        gradient is discarded, so no parameter gradient changes. The cost, in the first such layer of a
+        forward only (its combined output requires grad downstream), is the dispatch backward's
+        all-to-all and the expert compute's input-grad path.
+
+        Not applied outside a grad-enabled training forward, or at ``ep_size == 1``, which has no
+        transport.
+        """
+        if flat.requires_grad or weights.requires_grad:
+            return flat
+        if not (self.training and torch.is_grad_enabled()) or self.ep_size <= 1:
+            return flat
+        if not any(param.requires_grad for _, param in self.expert_named_params()):
+            return flat
+        return flat.detach().requires_grad_()
+
     def _dispatch_compute_combine(
         self, flat: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, input_dtype: torch.dtype
     ) -> torch.Tensor:
@@ -1483,6 +1507,8 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
             # upstream of it trains on a 1/expert_tp_size gradient.
             flat = SumGradAcrossGroup.apply(flat, self.expert_tp_group)
             weights = SumGradAcrossGroup.apply(weights, self.expert_tp_group)
+
+        flat = self._rank_uniform_dispatch_input(flat, weights)
 
         with self._perf("ep.dispatch"):
             recv_x, recv_topk_idx, recv_topk_weights, handle = self._gc_dispatch(flat, experts, weights)

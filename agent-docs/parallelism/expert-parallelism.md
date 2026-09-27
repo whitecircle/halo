@@ -282,6 +282,15 @@ it never enters.
 [post-backward sweep](multi-node.md#deferred-cross-replica-sync). `ep_group_size == 1` under
 `fsdp_shard_ep1_experts` is the exception, since FSDP2 already owns those experts.
 
+**Expert-only training** (native expert LoRA, or experts alone unfrozen) leaves nothing upstream of
+the first MoE layer requiring grad. A rank whose experts received no token would then compute a
+constant there, and its backward would skip the DeepEP collectives its peers enter: a barrier hang,
+mispaired collectives, or no grad on its loss at all. `_rank_uniform_dispatch_input` makes such a
+dispatch input a grad-requiring leaf in a grad-enabled training forward at `ep_size > 1`, so every
+rank builds the same dispatch/combine graph. The leaf's gradient is discarded; the added work is one
+dispatch-backward all-to-all and the expert compute's input-grad path, in the first such layer of
+each forward.
+
 **Gradient clipping** is custom because experts are distributed
 (`_compute_global_grad_norm`, `src/trainers/mixins/grad_sync.py`): local expert grad-norm² per rank → TP shard
 norms batch-`all_reduce(SUM)`ed via `._local_tensor` → expert norms `all_reduce(SUM)`ed over the

@@ -379,6 +379,12 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_ep_hook_divide_zero_token.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"), timeout=900
     ),
+    "parallelism/ep/test_ep_expert_only_rank_uniform_graph.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", "lora", "gptoss", "qwen3", "zaya"),
+        timeout=600,
+        args_matrix=("--family qwen3_moe", "--family gpt_oss", "--family zaya"),
+    ),
     "parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "deepseek_v4"), timeout=900
     ),
@@ -710,6 +716,12 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "trainers/lora/test_lora_ep_experts.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1200
+    ),
+    "trainers/lora/test_lora_ep_experts_idle_rank.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "zaya"),
+        timeout=600,
+        args_matrix=("--idle all", "--idle first"),
     ),
     "trainers/lora/test_lora_ep_router_modules_to_save.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1200
