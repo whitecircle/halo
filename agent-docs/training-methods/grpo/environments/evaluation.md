@@ -15,7 +15,7 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--dataset` / `--config` / `--split` | — / none / `test` | Hub id or `save_to_disk` dir |
+| `--dataset` / `--config` / `--split` | — / none / `test` | Hub id or `save_to_disk` dir. A coding benchmark that ships one split reads its own (HLCE: `train`) and refuses any other |
 | `--base_url` / `--api_key` / `--model` | local vLLM / `$VLLM_API_KEY`, `$OPENAI_API_KEY`, else a placeholder / — | Endpoint and model name |
 | `--training_config <yaml>` | none | Grade under a run's contract (below) |
 | `--num_examples` / `--num_samples` | 100 (50 coding) / 1 | Rows scored; episodes per row |
