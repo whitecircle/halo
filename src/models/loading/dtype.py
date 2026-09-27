@@ -1,14 +1,16 @@
-"""Run precision: ``dtype`` resolution and the process-global fp32 matmul pin.
+"""Run precision: ``dtype`` resolution, the loaded-parameter cast and the process-global fp32 matmul pin.
 
 Depends on torch and TRL only: the name-to-``torch.dtype`` table every ``--dtype`` flag derives its
-choices from, the ``model_init_kwargs`` normalizer, the run-dtype and quantization resolvers, and the
-matmul pin. A CLI or entry point can therefore resolve a dtype, or apply the pin, without importing
-the model-loading stack (which reaches ``src.args`` and back into ``src.training``).
+choices from, the ``model_init_kwargs`` normalizer, the run-dtype and quantization resolvers, the
+parameter cast the training loaders apply, and the matmul pin. A CLI or entry point can therefore
+resolve a dtype, or apply the pin, without importing the model-loading stack (which reaches
+``src.args`` and back into ``src.training``).
 """
 
 import warnings
 
 import torch
+import torch.nn as nn
 from trl import get_quantization_config
 
 from src.env import env_str
@@ -67,6 +69,35 @@ def resolve_training_dtype(config) -> torch.dtype:
     if getattr(config, "fp16", False):
         return torch.float16
     return torch.float32
+
+
+def cast_parameters_to_run_dtype(model: nn.Module, dtype: torch.dtype | str | None) -> None:
+    """Cast every floating parameter of a freshly loaded ``model`` to the run's ``dtype`` (in place).
+
+    ``from_pretrained`` keeps a family's ``_keep_in_fp32_modules[_strict]`` parameters in fp32
+    (DeepSeek-V4 norms and hyper-connections, GLM-5 Next KDA state, Inkling short convolutions).
+    FSDP2 rejects mixed dtypes in one shard group, and DeepSeek-V4's fp32 norms promote activations
+    into its run-dtype projections. The training and scoring loaders call this right after the load,
+    before any parallel wrapper, so a family trains in one precision whatever the parallelism (the EP
+    lazy loader casts per tensor to the same effect); conversion tools keep the pins. The dense TP
+    loader is the exception: it loads straight into DTensors, and a tensor-subclass parameter raises
+    here, since rebinding a DTensor's ``.data`` leaves its local shard in the old dtype. No dense family
+    pins a parameter. Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases,
+    ``e_score_correction_bias``). A ``dtype`` that is not a ``torch.dtype`` ("auto", None) leaves the
+    model as loaded.
+    """
+    if not isinstance(dtype, torch.dtype):
+        return
+    for name, param in model.named_parameters():
+        if not param.is_floating_point() or param.dtype == dtype:
+            continue
+        if type(param.data) is not torch.Tensor:
+            raise TypeError(
+                f"Cannot cast {name!r}, a {type(param.data).__name__} ({param.dtype}), to the run dtype "
+                f"{dtype}: cast_parameters_to_run_dtype runs on the freshly loaded model, before any "
+                f"parallel wrap."
+            )
+        param.data = param.data.to(dtype)
 
 
 def resolve_quantization_config(model_config, training_config):

@@ -37,6 +37,7 @@ from src.distributed.runtime import (
     move_model_to_local_device,
 )
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
+from src.models.loading.dtype import cast_parameters_to_run_dtype
 from src.models.loading.lazy_safetensors.weights import (
     has_safetensors_checkpoint,
     resolve_run_dtype,
@@ -316,16 +317,7 @@ def _load_ep_model_huggingface(
             revision=revision,
             **model_kwargs,
         )
-
-        # Match the lazy loader's uniform parameter dtype: from_pretrained honors
-        # _keep_in_fp32_modules[_strict] (Inkling pins its short convolutions in fp32) and FSDP2
-        # rejects mixed-dtype parameters in one shard group. Parameters only: casting buffers would
-        # downcast fp32 state a family keeps deliberately (Zaya's balancing biases). The isinstance
-        # guard skips the "auto" spelling, which nn.Module.to reads as a device.
-        if isinstance(dtype, torch.dtype):
-            for param in model.parameters():
-                if param.is_floating_point() and param.dtype != dtype:
-                    param.data = param.data.to(dtype)
+        cast_parameters_to_run_dtype(model, dtype)
 
         logger.info(f"[Rank {rank}] Applying EP patching...")
         model = patch_moe_model_for_ep(model, ep_config)

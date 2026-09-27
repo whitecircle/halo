@@ -60,11 +60,9 @@ HF_HOME=$D/hf python scripts/before_training/convert_deepseek_v4_bf16.py \
     --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir $D/models/DeepSeek-V4-Flash-BF16
 ```
 
-Budget ~910 GB disk (~330 GB download cache + ~580 GB BF16 output) and ~580 GB of host RAM: the model is materialized on CPU. The script routes through transformers' dequantizing loader (`FineGrainedFP8Config(dequantize=True)`) and writes a **uniform BF16** checkpoint: transformers' `_keep_in_fp32_modules_strict` would keep the HC/norm modules fp32, whose fp32 outputs crash the eager bf16 forward on a dtype mismatch. Those modules upcast internally, so flattening is safe — the EP loader materializes uniform bf16 the same way.
+Budget ~910 GB disk (~330 GB download cache + ~580 GB BF16 output) and ~580 GB of host RAM: the model is materialized on CPU. The script routes through transformers' dequantizing loader (`FineGrainedFP8Config(dequantize=True)`) and writes a **uniform BF16** checkpoint: transformers' `_keep_in_fp32_modules_strict` would keep the HC/norm modules fp32, whose fp32 outputs crash the eager bf16 forward on a dtype mismatch. Those modules upcast internally, so flattening is safe.
 
-A plain `from_pretrained` load (non-EP) resurrects the fp32 pins even from the uniform-BF16 checkpoint, and that mix does not wrap: `fully_shard` asserts one original parameter dtype per shard group, so a multi-GPU wrapper-less FSDP2 run fails at wrap — the same failure Ling 3.0's fp32 KDA parameters produce ([Ling 3.0](bailing.md#ling-30)).
-
-Train V4 under EP (every shipped config), where the lazy loader materializes uniform bf16 and `fp32_experts` / `fp32_non_ep_params` are the supported way to hold masters in fp32. A single-GPU run needs none of this and computes the pins in fp32. Where a mixed-precision policy does cast pins, a wrap-time warning lists the affected modules (`_warn_fp32_pins_cast_by_policy`); the fp32-sensitive paths upcast internally anyway, so the cast affects weight-value rounding only.
+A `from_pretrained` load resurrects the pins even from this checkpoint; every training loader casts them back to the run dtype ([Load precision](README.md#load-precision)), so V4 trains uniform bf16 under EP, ep1, plain FSDP2 and on one GPU alike. `fp32_experts` / `fp32_non_ep_params` are the supported way to hold masters in fp32; where the FSDP2 mixed-precision policy then computes pinned modules in bf16, a wrap-time warning lists them (`_warn_fp32_pins_cast_by_policy`). The fp32-sensitive paths upcast internally, so the cast affects weight-value rounding only.
 
 ## Liger
 

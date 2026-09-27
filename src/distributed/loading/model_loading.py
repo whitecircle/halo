@@ -62,7 +62,11 @@ from src.kernels.liger.orchestrator import apply_liger_kernel
 from src.kernels.lowp.mixed_precision import apply_mixed_precision_compute
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
 from src.models.loading.config_levels import configs_declaring, set_config_field_run_scoped
-from src.models.loading.dtype import configure_float32_matmul_precision, resolve_model_dtype
+from src.models.loading.dtype import (
+    cast_parameters_to_run_dtype,
+    configure_float32_matmul_precision,
+    resolve_model_dtype,
+)
 from src.models.loading.model_preparation import (
     apply_family_attention_patches,
     auto_load_model,
@@ -500,6 +504,7 @@ def _sequential_load_to_cuda(
             device_map="cpu",
             **common_kwargs,
         )
+        cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"))
         model = model.to(f"cuda:{local_rank}")
         gc.collect()
         torch.cuda.empty_cache()
@@ -533,6 +538,7 @@ def _from_pretrained_on_local_gpu(
         with sequential_load_within_node(max_concurrent=max_concurrent):
             ddp_kwargs = {"device_map": {"": local_rank}, **common_kwargs}
             model = from_pretrained_verified(model_class, model_name_or_path, **ddp_kwargs)
+        cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"))
     finalize_loaded_model(model)
     return model
 
@@ -917,6 +923,7 @@ def load_model_from_pretrained(
         )
 
         model = auto_load_model(model, model_class=model_cls, **model_init_kwargs)
+        cast_parameters_to_run_dtype(model, model_init_kwargs.get("dtype"))
         finalize_loaded_model(model)
         if run_scoped_cache_off:
             set_config_field_run_scoped(model.config, "use_cache", False)

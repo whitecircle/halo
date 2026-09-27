@@ -38,7 +38,7 @@ The lazy loaders read the same declarative entries through the family's `_HUB_CO
 
 The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank: 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
 
-`from_pretrained` honors the family's fp32 pin, which covers the **short convolutions** (`_keep_in_fp32_modules_strict`: `k_sconv`/`v_sconv`/`attn_sconv`/`mlp_sconv`); `load_ep_model` then re-casts parameters to the run dtype, since FSDP2 rejects mixed-dtype parameters in one shard group — the sconvs train in bf16 here, a deliberate trade validated by the multi-node runs below.
+The family's fp32 pin covers the **short convolutions** (`_keep_in_fp32_modules_strict`: `k_sconv`/`v_sconv`/`attn_sconv`/`mlp_sconv`). Every training loader casts them to the run dtype ([Load precision](README.md#load-precision)), so the sconvs train in bf16 — a deliberate trade validated by the multi-node runs below.
 
 ## Why CP and TP are out
 

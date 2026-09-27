@@ -17,7 +17,7 @@ from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.dtype import resolve_training_dtype
+from src.models.loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from src.models.loading.model_preparation import (
     apply_family_attention_patches,
     auto_load_model,
@@ -55,6 +55,8 @@ def load_frozen_auxiliary_model(
       gap: an unset request pins the reference to SDPA while the policy takes FA4 on Blackwell.
     * the sinks policy is applied here rather than by the caller, since ``reset_sinks=True`` is what
       permits a sink-dropping backend; skipping the reset leaves GptOss running sdpa over live sinks.
+    * every floating parameter takes ``dtype``, as in the policy loaders: a family's fp32-pinned
+      modules would otherwise score in a different precision than the policy they anchor.
     * ``excuse_task_head=False`` keeps the coverage gate on the task head: this model is only scored,
       so an absent head means a randomly initialized one on one side of the objective.
 
@@ -83,6 +85,7 @@ def load_frozen_auxiliary_model(
             model = from_pretrained_verified(AutoModelForImageTextToText, model_name_or_path, **load_kwargs)
         else:
             model = auto_load_model(model_name_or_path, **load_kwargs)
+    cast_parameters_to_run_dtype(model, dtype)
 
     # Repairs non-persistent buffers; an uninitialized inv_freq biases every logprob this model scores.
     finalize_loaded_model(model)

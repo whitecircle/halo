@@ -24,9 +24,9 @@ The KDA kernels accept a `cu_seqlens` kwarg (fla convention) that the toolkit co
 Three consequences for a training config:
 
 - **Pin `attn_implementation: sdpa`.** The modeling file declares only the v4-era `_supports_flash_attn_2`, which transformers v5 ignores in favor of `_supports_flash_attn`, so an auto-selected flash label (FA4 on Blackwell, FA3 on Hopper) is refused at model build. The KDA layers run their own `fla` kernels either way.
-- **Set `fp32_non_ep_params: true`.** The KDA layers hold `A_log` and `dt_bias` in fp32 and `from_pretrained` does not unify them, so the model reaches FSDP2 with mixed parameter dtypes and `fully_shard` asserts one original dtype per shard group.
+- **Set `fp32_non_ep_params: true`.** The modeling file declares the KDA `A_log` and `dt_bias` in fp32, and every loader casts them to the run dtype with the rest ([Load precision](README.md#load-precision)); this upcast is what trains them, with the other non-expert parameters, as fp32 masters. Compute stays bf16.
 
-    Upcasting the non-expert parameters to fp32 masters is what makes the wrap legal; compute stays bf16. At `expert_parallel_size: 1` pair it with **`fsdp_shard_ep1_experts: false`**: the upcast skips every EP-wrapper parameter, so FSDP-managed replicated experts would sit bf16 inside the same fp32 shard group and `ParallelismConfig` refuses the combination at config time. Above ep1 the knob has no effect; the experts are FSDP-ignored anyway.
+    At `expert_parallel_size: 1` pair it with **`fsdp_shard_ep1_experts: false`**: the upcast skips every EP-wrapper parameter, so FSDP-managed replicated experts would sit bf16 inside the same fp32 shard group and `ParallelismConfig` refuses the combination at config time. Above ep1 the knob has no effect; the experts are FSDP-ignored anyway.
 
 - **Override `rope_scaling`.** The config ships `rope_scaling: null`, which transformers v5 normalizes into a dict carrying no `"factor"`; the MLA layers then read `config.rope_scaling["factor"]` and raise `KeyError`. Pass the minimal replacement and nothing more:
 

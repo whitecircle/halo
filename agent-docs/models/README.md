@@ -75,6 +75,10 @@ Families spell the count and the width differently (`num_experts`, `num_local_ex
 
 **Hybrid families** — [Qwen3.5 / 3.6](qwen3_5.md) (GatedDeltaNet), [LFM-2](lfm2.md) (short convolution), [GLM-5 Next](glm5-next.md) (KDA) and [Bailing](bailing.md)'s Ling 3.0 (KDA) / Ring (Lightning Attention) interleave linear or convolutional attention with standard attention. Their MoE side runs under EP, but the sequence-axis recurrence cannot be split, so CP is unavailable on released checkpoints.
 
+## Load precision
+
+The training and scoring loaders cast each floating parameter to the run dtype right after `from_pretrained` and before any EP/TP/CP wrapper (`cast_parameters_to_run_dtype` in `src/models/loading/dtype.py`; the EP lazy loader casts per tensor to the same effect). That overrides transformers' `_keep_in_fp32_modules[_strict]` — DeepSeek-V4's norms and hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so a family trains in one precision under every parallelism mode; FSDP2 refuses mixed dtypes in one shard group. Buffers keep their dtype (`e_score_correction_bias`, Zaya's balancing biases), and `fp32_non_ep_params` / `fp32_experts` hold fp32 masters. Two loads skip the cast: the checkpoint conversion tools, which keep the pins, and the dense TP loader, which loads straight into DTensors (no dense family pins a parameter).
+
 ## Per-family pages
 
 The matrix carries each family's supported modes; the per-family page covers model-specific caveats (attention quirks, checkpoint variants, balancing).

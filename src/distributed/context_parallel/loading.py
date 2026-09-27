@@ -20,6 +20,7 @@ from src.distributed.expert_parallel.patching import create_ep_buffers, patch_mo
 from src.distributed.filesystem import sequential_load_within_node
 from src.distributed.runtime import get_global_rank, move_model_to_local_device
 from src.models.loading.checkpoint_coverage import from_pretrained_verified
+from src.models.loading.dtype import cast_parameters_to_run_dtype
 from src.models.patches.attention import revalidate_attn_kwarg
 from src.models.patches.buffer_fixes import finalize_loaded_model
 
@@ -73,6 +74,7 @@ def load_model_for_cp(
             device_map="cpu",
             **model_kwargs,
         )
+        cast_parameters_to_run_dtype(model, dtype)
         model = move_model_to_local_device(model)
 
     # Before the CP wrap, on the inner HF model: the wrapper carries no tie_weights.
