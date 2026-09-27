@@ -27,6 +27,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import log, step_losses
@@ -134,9 +135,9 @@ def run(ctx):
         checks["sinks_nonzero"] = False
 
     # Verify EP layers exist
-    ep_layers = [m for _, m in model.named_modules() if hasattr(m, "ep_config")]
-    checks["ep_layers"] = len(ep_layers) > 0
-    log(f"  EP layers found: {len(ep_layers)} {'PASS' if ep_layers else 'FAIL'}")
+    wrapped = ep_layers(model)
+    checks["ep_layers"] = len(wrapped) > 0
+    log(f"  EP layers found: {len(wrapped)} {'PASS' if wrapped else 'FAIL'}")
 
     # ── Training ───────────────────────────────────────────────────
     sft_config = SFTConfig(

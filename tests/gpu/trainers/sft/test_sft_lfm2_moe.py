@@ -45,7 +45,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import LFM2_24B_A2B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, step_losses
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 MODEL_NAME = LFM2_24B_A2B
 NUM_TRAIN_SAMPLES = 32
@@ -69,23 +69,6 @@ MODES = {
         "sft_extra": {"ddp_find_unused_parameters": True},
     },
 }
-
-
-def validate_results(trainer, train_result) -> dict[str, bool]:
-    """Finiteness and step-count checks on a finished run."""
-    losses = step_losses(trainer)
-    grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
-
-    log(f"Per-step losses: {[f'{l:.4f}' for l in losses]}")
-    if grad_norms:
-        log(f"Per-step grad norms: {[f'{g:.2f}' for g in grad_norms]}")
-
-    return {
-        "training_loss_finite": bool(torch.isfinite(torch.tensor(train_result.training_loss))),
-        "step_losses_finite": all(torch.isfinite(torch.tensor(l)) for l in losses),
-        "grad_norms_finite": all(torch.isfinite(torch.tensor(g)) for g in grad_norms),
-        "completed_all_steps": train_result.global_step == NUM_TRAIN_STEPS,
-    }
 
 
 def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
@@ -182,7 +165,7 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
     final_loss = final_eval.get("eval_loss", float("inf"))
     log(f"Loss: {initial_loss:.4f} -> {final_loss:.4f}")
 
-    checks.update(validate_results(trainer, train_result))
+    checks.update(training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True))
     checks["final_eval_loss_finite"] = bool(torch.isfinite(torch.tensor(final_loss)))
 
     trainer.cleanup_ep()

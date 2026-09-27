@@ -29,9 +29,10 @@ from src.env import env_int, env_str
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_single_turn_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_5_MOE_35B
-from tests.common.utils import gpu_mem_gb, log, step_losses
+from tests.common.utils import gpu_mem_gb, log, training_run_checks
 
 # Test Configuration
 
@@ -87,8 +88,8 @@ def run(ctx):
     log(f"Model loaded: {model.config.model_type} ({type(model).__name__})")
     log(f"GPU memory after load: {gpu_mem_gb():.1f}GB")
 
-    ep_layers = sum(1 for m in model.modules() if hasattr(m, "ep_config"))
-    log(f"EP MoE layers: {ep_layers}")
+    ep_layer_count = len(ep_layers(model))
+    log(f"EP MoE layers: {ep_layer_count}")
 
     config = SFTConfig(
         output_dir=ctx.output_dir,
@@ -144,20 +145,9 @@ def run(ctx):
     final_loss = final_eval.get("eval_loss", float("inf"))
     log(f"Loss: {initial_loss:.4f} -> {final_loss:.4f}")
 
-    losses = step_losses(trainer)
-    grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
-    log(f"Per-step losses: {[f'{l:.4f}' for l in losses]}")
-    if grad_norms:
-        log(f"Per-step grad norms: {[f'{g:.2f}' for g in grad_norms]}")
-
-    checks = {
-        "train_loss_finite": bool(torch.isfinite(torch.tensor(train_result.training_loss))),
-        "step_losses_finite": all(torch.isfinite(torch.tensor(l)) for l in losses),
-        "trained_all_steps": train_result.global_step == NUM_TRAIN_STEPS,
-        "final_eval_loss_finite": bool(torch.isfinite(torch.tensor(final_loss))),
-    }
-    if grad_norms:
-        checks["grad_norms_finite"] = all(torch.isfinite(torch.tensor(g)) for g in grad_norms)
+    checks = training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
+    checks["ep_layers_wrapped"] = ep_layer_count > 0
+    checks["final_eval_loss_finite"] = bool(torch.isfinite(torch.tensor(final_loss)))
     return {"checks": checks}
 
 

@@ -43,6 +43,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, log
@@ -68,7 +69,7 @@ def run(ctx):
     )
 
     num_experts = model.config.num_local_experts
-    n_ep_layers = sum(1 for _, m in model.named_modules() if hasattr(m, "ep_config"))
+    n_ep_layers = len(ep_layers(model))
     log(f"  EP layers (ep_size=1): {n_ep_layers}, num_local_experts={num_experts}")
     assert n_ep_layers > 0, "model was not EP-wrapped at ep_size=1 — grouped-GEMM wrappers missing"
 

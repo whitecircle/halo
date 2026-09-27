@@ -50,6 +50,7 @@ from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import cleanup_memory, log
@@ -140,9 +141,7 @@ def gather_is_full(reshard, tokenizer, local_rank, output_dir):
     wrapped.zero_grad(set_to_none=True)
     wrapped(input_ids=ids, attention_mask=torch.ones_like(ids), labels=ids.clone()).loss.backward()
 
-    layer = next(
-        m for _, m in wrapped.named_modules() if hasattr(m, "ep_config") and hasattr(m, "gather_expert_state_dict")
-    )
+    layer = next(m for m in ep_layers(wrapped) if hasattr(m, "gather_expert_state_dict"))
     raw = getattr(layer, "gate_proj_gmm" if hasattr(layer, "gate_proj_gmm") else "gate_up_proj").data
     raw_sharded = isinstance(raw, DTensor) and raw.to_local().numel() < raw.numel()
 

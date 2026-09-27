@@ -45,7 +45,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from tests.common.distributed import ensure_model_downloaded
-from tests.common.ep_reference import broadcast_reference, dense_reference, fixed_chat_batch
+from tests.common.ep_reference import broadcast_reference, dense_reference, ep_layers, fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.tolerances import TOL
@@ -181,13 +181,13 @@ def run_ep_forward(batch):
 
     log(f"  GPU memory after load: {gpu_mem_gb():.2f} GB")
 
-    ep_layers = [m for _, m in model.named_modules() if hasattr(m, "ep_config")]
-    log(f"  EP layers found: {len(ep_layers)}")
+    wrapped = ep_layers(model)
+    log(f"  EP layers found: {len(wrapped)}")
     # Without EP wrappers this compares a dense model to itself and every check below scores perfectly.
-    if not ep_layers:
+    if not wrapped:
         raise RuntimeError("EP=2 load produced no EP-wrapped layers — the comparison would be vacuous")
 
-    layer = ep_layers[0]
+    layer = wrapped[0]
     log(f"  Expert range (rank {rank}): [{layer.expert_start}, {layer.expert_end})")
     log(f"  Experts per rank: {layer.experts_per_rank}")
 

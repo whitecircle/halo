@@ -31,6 +31,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import log, step_losses
@@ -80,9 +81,7 @@ def run(ctx):
         attn_implementation="flash_attention_2",
         use_liger_kernel=True,
     )
-    etp_layers = [
-        m for _, m in model.named_modules() if hasattr(m, "ep_config") and getattr(m, "expert_tp_size", 1) > 1
-    ]
+    etp_layers = [m for m in ep_layers(model) if getattr(m, "expert_tp_size", 1) > 1]
     log(f"ETP layers (expert_tp_size>1): {len(etp_layers)}")
     assert etp_layers, "no ETP-wrapped layers found"
 

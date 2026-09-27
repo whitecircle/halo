@@ -61,7 +61,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_MOE_RING_MINI
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, step_losses
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 # Test Configuration
 
@@ -143,26 +143,6 @@ def get_logged_token_accuracy(trainer) -> tuple[float, float]:
     peak = max(accuracies)
     tail = accuracies[-10:] if len(accuracies) >= 10 else accuracies
     return peak, sum(tail) / len(tail)
-
-
-# Validation
-
-
-def validate_results(trainer, train_result, mode_config: dict) -> dict[str, bool]:
-    """Finiteness and step-count checks on a finished run."""
-    losses = step_losses(trainer)
-    grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
-
-    log(f"Per-step losses: {[f'{l:.4f}' for l in losses]}")
-    if grad_norms:
-        log(f"Per-step grad norms: {[f'{g:.2f}' for g in grad_norms]}")
-
-    return {
-        "training_loss_finite": bool(torch.isfinite(torch.tensor(train_result.training_loss))),
-        "step_losses_finite": all(torch.isfinite(torch.tensor(l)) for l in losses),
-        "grad_norms_finite": all(torch.isfinite(torch.tensor(g)) for g in grad_norms),
-        "completed_all_steps": train_result.global_step == mode_config["max_steps"],
-    }
 
 
 # Generic Mode Runner
@@ -273,7 +253,7 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
     final_loss = final_eval.get("eval_loss", float("inf"))
     log(f"Eval loss: {initial_loss:.4f} -> {final_loss:.4f}")
 
-    checks.update(validate_results(trainer, train_result, mode_config))
+    checks.update(training_run_checks(train_result, trainer, mode_config["max_steps"], grad_norms=True))
     checks["final_eval_loss_finite"] = bool(torch.isfinite(torch.tensor(final_loss)))
 
     # Overfit verification: check peak token accuracy from training logs

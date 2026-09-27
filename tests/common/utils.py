@@ -333,13 +333,19 @@ def step_losses(trainer) -> list[float]:
 
 
 def training_run_checks(
-    train_result, trainer, max_steps: int, *, loss_band: tuple[float, float] | None = None
+    train_result,
+    trainer,
+    max_steps: int,
+    *,
+    loss_band: tuple[float, float] | None = None,
+    grad_norms: bool = False,
 ) -> dict[str, bool]:
-    """The finished-run checks the SFT and LoRA mode suites share, each logged with its verdict.
+    """The finished-run checks the SFT and LoRA suites share, each logged with its verdict.
 
     ``loss_finite`` (the reported training loss), ``all_steps_finite`` (every logged step loss),
-    ``steps_completed`` (``max_steps`` optimizer steps ran) and, given ``loss_band``,
-    ``loss_reasonable``: the reported training loss strictly inside it.
+    ``steps_completed`` (``max_steps`` optimizer steps ran), given ``loss_band`` ``loss_reasonable``
+    (the reported training loss strictly inside it), and with ``grad_norms`` ``grad_norms_finite``
+    (every logged gradient norm).
     """
     training_loss = train_result.training_loss
     losses = step_losses(trainer)
@@ -359,6 +365,13 @@ def training_run_checks(
         low, high = loss_band
         checks["loss_reasonable"] = low < training_loss < high
         log(f"  Loss in band ({low}, {high}): {'PASS' if checks['loss_reasonable'] else 'FAIL'} ({training_loss:.4f})")
+    if grad_norms:
+        norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
+        checks["grad_norms_finite"] = all(math.isfinite(norm) for norm in norms)
+        log(
+            f"  All grad norms finite: {'PASS' if checks['grad_norms_finite'] else 'FAIL'} "
+            f"({[f'{norm:.2f}' for norm in norms]})"
+        )
     return checks
 
 

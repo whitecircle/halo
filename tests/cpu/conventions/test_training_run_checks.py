@@ -20,8 +20,10 @@ STEP_LOSSES = [2.5, 2.1, 1.8]
 EVAL_ENTRY = {"eval_loss": math.nan, "epoch": 1.0}
 
 
-def _run(step_losses, *, training_loss=2.1, global_step=MAX_STEPS, extra_entries=()):
+def _run(step_losses, *, training_loss=2.1, global_step=MAX_STEPS, extra_entries=(), grad_norms=None):
     history = [{"loss": loss, "step": step} for step, loss in enumerate(step_losses, start=1)]
+    for entry, norm in zip(history, grad_norms or (), strict=False):
+        entry["grad_norm"] = norm
     trainer = SimpleNamespace(state=SimpleNamespace(log_history=[*history, *extra_entries]))
     return SimpleNamespace(training_loss=training_loss, global_step=global_step), trainer
 
@@ -53,6 +55,18 @@ def test_each_check_fails_on_its_own_breach(run_kwargs, failed):
     result, trainer = _run(kwargs.pop("step_losses", STEP_LOSSES), **kwargs)
     checks = training_run_checks(result, trainer, MAX_STEPS, loss_band=LM_TRAINING_LOSS_BAND)
     assert [name for name, ok in checks.items() if not ok] == failed
+
+
+@pytest.mark.parametrize("bad_norm", [math.inf, math.nan])
+def test_the_grad_norm_check_fails_on_a_non_finite_norm(bad_norm):
+    result, trainer = _run(STEP_LOSSES, grad_norms=[1.5, bad_norm, 0.9])
+    assert training_run_checks(result, trainer, MAX_STEPS, grad_norms=True)["grad_norms_finite"] is False
+    assert "grad_norms_finite" not in training_run_checks(result, trainer, MAX_STEPS), "the check is opt-in"
+
+
+def test_the_grad_norm_check_passes_on_finite_norms():
+    result, trainer = _run(STEP_LOSSES, grad_norms=[1.5, 1.2, 0.9])
+    assert training_run_checks(result, trainer, MAX_STEPS, grad_norms=True)["grad_norms_finite"] is True
 
 
 def test_a_non_finite_eval_entry_is_not_a_step_loss():
