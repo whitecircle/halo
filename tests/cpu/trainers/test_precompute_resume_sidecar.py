@@ -17,20 +17,31 @@ resumed one (``tests/common/preference_precompute.py``).
 """
 
 import contextlib
+import hashlib
+import os
+import re
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pytest
 import torch
 from accelerate import PartialState
 from datasets import Dataset, Features, List, Value, concatenate_datasets
+from trl import DPOConfig, KTOConfig, ModelConfig
 
 import src.trainers.preference.precompute as precompute_mod
+from src.args.distributed_args import DistributedArguments
+from src.args.dpo_args import DPOScriptArguments
+from src.args.kto_args import KTOScriptArguments
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin, _token_digest
+from src.training.environment import detect_resume_checkpoint
+from src.training.parser import H4ArgumentParser
 from src.training.script_runner import ScriptRuntime
 from tests.common.preference_precompute import (
     BASE,
+    MAX_LENGTH,
     N_ROWS,
     REFERENCE_COLUMNS,
     TOKEN_COLUMNS,
@@ -42,6 +53,12 @@ from tests.common.preference_precompute import (
 )
 
 PartialState()
+
+# The dataclasses scripts/training/preference/{dpo,kto}.py parse their config into.
+SCRIPT_CONFIGS = {
+    "dpo": (DPOScriptArguments, DPOConfig, ModelConfig, DistributedArguments),
+    "kto": (KTOScriptArguments, KTOConfig, ModelConfig, DistributedArguments),
+}
 
 
 @pytest.fixture(params=sorted(TRAINERS))
@@ -118,6 +135,40 @@ def test_a_policy_built_from_the_checkpoint_without_saved_columns_refuses(kind, 
     assert trainer.compute_ref_log_probs.batches == 0
 
 
+def test_the_named_recovery_parses_into_a_fresh_one_step_save(kind, tmp_path):
+    """The flags the refusal prints go through the entry script's own parser onto the config that
+    resumed: they must start a fresh run from the base that saves checkpoint-1 and stops, outside
+    the run's own output_dir, whose rotation could otherwise delete the checkpoint being recovered.
+    Anything less and the recovery the refusal names cannot produce the sidecar it asks for."""
+    run_dir = tmp_path / "run"
+    resumed_from = run_dir / "checkpoint-7"
+    resumed_from.mkdir(parents=True)
+    (resumed_from / "trainer_state.json").write_text("{}")
+    trainer = _resumed(kind, resumed_from)
+    with pytest.raises(RuntimeError, match="To recover") as raised:
+        trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+    assert "on every node" in str(raised.value), "per-node storage needs a copy on each node"
+    recovery = re.findall(r"--\w+=[^\s)]+", str(raised.value))
+    assert recovery, "the refusal names no flags to recover with"
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"model_name_or_path: base/model\noutput_dir: {run_dir}\nbf16: false\nuse_cpu: true\n"
+        f"precompute_ref_log_probs: true\nsave_total_limit: 1\nresume_from_checkpoint: {resumed_from}\n"
+    )
+    as_resumed = H4ArgumentParser(SCRIPT_CONFIGS[kind]).parse_yaml_and_args(str(config_path), [])[1]
+    assert detect_resume_checkpoint(as_resumed) == str(resumed_from), "premise: the config resumes"
+
+    config = H4ArgumentParser(SCRIPT_CONFIGS[kind]).parse_yaml_and_args(str(config_path), recovery)[1]
+
+    assert detect_resume_checkpoint(config) is None, "the recovery run must start from the base"
+    assert (config.max_steps, config.save_strategy, config.save_steps) == (1, "steps", 1)
+    assert config.save_only_model is True
+    assert os.path.commonpath([os.path.abspath(config.output_dir), str(run_dir)]) != str(run_dir), (
+        f"the recovery writes into the resumed run's output_dir ({config.output_dir})"
+    )
+
+
 @pytest.mark.parametrize(
     ("policy_from_checkpoint", "ref_model"),
     [(False, None), (True, torch.nn.Linear(1, 1))],
@@ -161,8 +212,12 @@ def test_every_column_the_reference_reads_is_in_the_digest(tmp_path, kind, bumpe
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     trainer = _resumed(kind, tmp_path)
 
-    with pytest.raises(ValueError, match=f"'{bumped}'"):
+    with pytest.raises(ValueError, match=f"'{bumped}'") as raised:
         trainer._precompute_ref_logps(token_rows(kind, bump=bumped), "train", 2)
+    if bumped == "KL_completion_ids":
+        # TRL pairs the KL completions within map batches of the per-device size, across num_proc shards.
+        assert "per_device_train_batch_size" in str(raised.value)
+        assert "dataset_num_proc" in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -188,6 +243,79 @@ def test_changed_reference_settings_refuse(tmp_path, kind, changed):
 
     with pytest.raises(ValueError, match="computed under"):
         trainer._precompute_ref_logps(token_rows(kind), "train", 2)
+
+
+@pytest.mark.parametrize(
+    ("policy_from_checkpoint", "ref_model"),
+    [(False, None), (True, torch.nn.Linear(1, 1))],
+    ids=["policy_from_base", "separate_reference"],
+)
+@pytest.mark.parametrize("changed", ["rows", "max_length"])
+def test_a_mismatched_split_is_swept_where_the_reference_weights_are_untrained(
+    kind, tmp_path, policy_from_checkpoint, ref_model, changed
+):
+    """Where the sweep scores untrained weights (an adapter or merged-adapter resume builds the
+    policy from the base; a separate reference model), a saved split that no longer matches is
+    simply re-derived, as such a resume always did: only a sweep over trained weights must refuse."""
+    _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
+    trainer = precompute_trainer(
+        kind,
+        weights=BASE,
+        resume_checkpoint=str(tmp_path),
+        policy_from_checkpoint=policy_from_checkpoint,
+        ref_model=ref_model,
+        max_length=8 if changed == "max_length" else MAX_LENGTH,
+    )
+    rows = token_rows(kind, N_ROWS - 1) if changed == "rows" else token_rows(kind)
+
+    prepared = trainer._precompute_ref_logps(rows, "train", 2)
+
+    assert trainer.compute_ref_log_probs.batches > 0, "the mismatched split was neither refused nor swept"
+    assert len(prepared) == len(rows)
+    trainer._persist_trainer_sidecars(str(tmp_path / "next"))
+    swept = torch.load(tmp_path / "next" / REFERENCE_LOGPS_FILE, weights_only=True)["train"]
+    assert swept["num_rows"] == len(rows)
+    assert swept["settings"]["max_length"] == trainer.args.max_length
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda entry: entry.pop("token_digests"),
+        lambda entry: entry.update(num_rows="4"),
+        lambda entry: entry["columns"].update({name: values[:-1] for name, values in entry["columns"].items()}),
+    ],
+    ids=["missing_key", "mistyped_rows", "short_columns"],
+)
+def test_a_malformed_saved_split_is_a_mismatch_not_a_crash(kind, tmp_path, corrupt):
+    """A malformed entry must reach the verdict every rank joins: raised on one node's bad copy
+    alone, it would leave the others waiting in the collective that follows."""
+    _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
+    saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)
+    corrupt(saved["train"])
+    torch.save(saved, tmp_path / REFERENCE_LOGPS_FILE)
+
+    with pytest.raises(ValueError, match="does not belong to this 'train' dataset"):
+        _resumed(kind, tmp_path)._precompute_ref_logps(token_rows(kind), "train", 2)
+    from_base = precompute_trainer(kind, resume_checkpoint=str(tmp_path), policy_from_checkpoint=False)
+    from_base._precompute_ref_logps(token_rows(kind), "train", 2)
+    assert from_base.compute_ref_log_probs.batches > 0
+
+
+def test_a_split_the_resumed_run_skips_rides_into_its_checkpoints(kind, tmp_path):
+    """A resume with its eval split switched off still writes that split's saved reference into the
+    checkpoints it makes, so a later resume that turns eval back on restores it rather than refusing."""
+    base = _save_base_run(kind, tmp_path / "a", {"train": token_rows(kind), "eval": token_rows(kind, 3)})
+    train_only = _resumed(kind, tmp_path / "a")
+    train_only._precompute_ref_logps(token_rows(kind), "train", 2)
+    train_only._persist_trainer_sidecars(str(tmp_path / "b"))
+
+    with_eval = _resumed(kind, tmp_path / "b")
+    prepared = with_eval._precompute_ref_logps(token_rows(kind, 3), "eval", 2)
+
+    assert with_eval.compute_ref_log_probs.batches == 0
+    for name in REFERENCE_COLUMNS[kind]:
+        assert torch.equal(column(prepared, name), column(base["eval"], name))
 
 
 def test_a_kto_resume_that_needs_the_kl_column_the_save_lacks_refuses(tmp_path):
@@ -320,6 +448,40 @@ def test_the_token_digest_reads_content_in_row_order():
 
     assert _token_digest(Dataset.from_dict({"ids": list(reversed(ids))}), "ids") != digest
     assert _token_digest(Dataset.from_dict({"ids": [[5], [6, 7], [8, 9, 10]]}), "ids") != digest
+
+
+class _RecordingHash:
+    """``hashlib.sha256`` that records the size of every update it takes."""
+
+    def __init__(self, sizes: list[int], data: bytes = b""):
+        self._hash = hashlib.sha256(data)
+        self._sizes = sizes
+
+    def update(self, data: bytes) -> None:
+        self._sizes.append(len(data))
+        self._hash.update(data)
+
+    def digest(self) -> bytes:
+        return self._hash.digest()
+
+    def hexdigest(self) -> str:
+        return self._hash.hexdigest()
+
+
+def test_the_token_digest_hashes_in_bounded_chunks(monkeypatch):
+    """Long rows must not widen a whole batch to int64 at once (32k-token rows by the thousand are
+    gigabytes per rank), and the chunking must not change the digest a checkpoint already holds."""
+    ids = [list(range(50)), list(range(50, 100))]
+    digest = _token_digest(Dataset.from_dict({"ids": ids}), "ids")
+    sizes: list[int] = []
+    monkeypatch.setattr(precompute_mod, "_DIGEST_CHUNK_VALUES", 3)
+    monkeypatch.setattr(
+        precompute_mod, "hashlib", SimpleNamespace(sha256=lambda data=b"": _RecordingHash(sizes, data))
+    )
+
+    assert _token_digest(Dataset.from_dict({"ids": ids}), "ids") == digest
+    # The two rows' lengths are one 16-byte update; every value update is at most three int64s.
+    assert sizes and max(sizes) <= 3 * 8, f"a hash update took {max(sizes)} bytes"
 
 
 def test_the_trainers_checkpoint_hook_is_the_precompute_mixins(kind):

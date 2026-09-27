@@ -276,11 +276,13 @@ def main():
     logger.info("SAVING MODEL AND TOKENIZER")
     logger.info(f"Saving to: {args.output_dir}")
 
+    # A new base: a resume sidecar of a source training checkpoint would restore that run over it.
     save_full_checkpoint(
         model,
         args.output_dir,
         processing_class=processing_class,
         source_dir=args.model_id,
+        include_resume_sidecars=False,
         max_shard_size=args.max_shard_size,
     )
 

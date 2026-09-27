@@ -16,7 +16,7 @@ import os
 import re
 import shutil
 from collections.abc import Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
@@ -91,10 +91,10 @@ TRAINING_PROVENANCE_FILE = "training_provenance.json"
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
 # A ``merge_expert_lora_on_save`` checkpoint's resume state: the unmerged adapter, written as the
 # non-merged save writes it, beside the merged weights that serve. A subdirectory, because an
-# ``adapter_config.json`` at the root makes ``from_pretrained`` load its base model instead of the
-# merged weights. The root marker follows once the adapter is complete and classifies the checkpoint
-# as resume-from-base-plus-adapter: its presence is the verdict; the body only names the directory
-# for whoever reads the checkpoint.
+# ``adapter_config.json`` at the root makes ``from_pretrained`` load that adapter on top of the
+# merged weights, which already hold its delta. The root marker follows once the adapter is complete
+# and classifies the checkpoint as resume-from-base-plus-adapter: its presence is the verdict; the
+# body only names the directory for whoever reads the checkpoint.
 RESUME_ADAPTER_DIR = "resume_adapter"
 RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
 # Resume state like the sidecars below, but not weight-suffixed: the aux copy carries them by
@@ -598,6 +598,12 @@ def write_resume_adapter_marker(checkpoint_dir: str) -> None:
     """
     with open(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE), "w") as fh:
         json.dump({"adapter_dir": RESUME_ADAPTER_DIR}, fh, indent=2)
+
+
+def remove_resume_adapter_marker(checkpoint_dir: str) -> None:
+    """Unmark ``checkpoint_dir``, so it no longer resumes from its adapter; a no-op when unmarked."""
+    with suppress(FileNotFoundError):
+        os.remove(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE))
 
 
 def resume_adapter_dir(checkpoint_dir: str) -> str | None:

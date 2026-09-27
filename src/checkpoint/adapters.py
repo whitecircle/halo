@@ -317,11 +317,13 @@ def merge_adapter_into_base(
 
     log(f"Saving merged model to {output_dir}...")
     os.makedirs(output_dir, exist_ok=True)
+    # The base's resume state describes the base's own run, not this merge of an adapter into it.
     save_full_checkpoint(
         merged_model,
         output_dir,
         processing_class=processing_class,
         source_dir=base_model_path,
+        include_resume_sidecars=False,
         max_shard_size=max_shard_size,
     )
     copy_training_sidecars(adapter_dir, output_dir)

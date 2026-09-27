@@ -327,15 +327,15 @@ class CheckpointLoader:
         restored = restore_adapters(checkpoint, model, is_cp_mode=is_cp_mode)
         if ships_base_weights and restored is None and _trains_adapters(model):
             # Only a merged save ships base weights from an adapter run: without its resume adapter
-            # the adapters restart from init while their optimizer moments are restored.
+            # the adapters restart from init on weights that already hold their delta.
             raise ValueError(
                 f"EP/CP resume from {checkpoint}: it ships base weights and no adapter, but this run "
                 f"trains adapters — a merge_expert_lora_on_save checkpoint without its resume adapter "
                 f"(no {RESUME_ADAPTER_MARKER_FILE}: a torn save, or one written without it). Resuming "
-                f"would restart the adapters from initialization on top of the merged weights while "
-                f"restoring their optimizer state. Resume from a checkpoint that carries its resume "
-                f"adapter, or start a new run from these merged weights (model_name_or_path: "
-                f"{checkpoint}, without resume_from_checkpoint)."
+                f"would restart the adapters from initialization on top of merged weights that already "
+                f"hold their trained delta, continuing neither the run nor its base. Resume from a "
+                f"checkpoint that carries its resume adapter, or start a new run from these merged "
+                f"weights (model_name_or_path: {checkpoint}, without resume_from_checkpoint)."
             )
 
     def _load_tp(self, checkpoint: str, model=None, *, for_best_model: bool = False) -> None:

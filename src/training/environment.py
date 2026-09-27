@@ -23,6 +23,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 from src.checkpoint.format import (
     ADAPTER_WEIGHT_NAMES,
+    RESUME_ADAPTER_MARKER_FILE,
     has_whole_model_weight_file,
     is_sharded_checkpoint,
     resume_adapter_dir,
@@ -260,9 +261,14 @@ def _checkpoint_has_full_model_weights(checkpoint: str) -> bool:
     return has_whole_model_weight_file(checkpoint) and not is_sharded_checkpoint(checkpoint)
 
 
+def _has_adapter_file(directory: str) -> bool:
+    return any(os.path.isfile(os.path.join(directory, name)) for name in ADAPTER_WEIGHT_NAMES)
+
+
 def _classify_resume_checkpoint(checkpoint: str) -> str:
     """Classify a resume checkpoint as ``"merged_adapter"`` (a ``merge_expert_lora_on_save``
-    checkpoint, resumed from its resume adapter), ``"full"`` (loadable weights), ``"adapter"``
+    checkpoint, resumed from its resume adapter), ``"merged_adapter_missing"`` (marked, but that
+    adapter directory holds no adapter file), ``"full"`` (loadable weights), ``"adapter"``
     (adapter-only), or ``"invalid"`` (none of these, e.g. an unmerged sharded save). Pure function of
     the on-disk layout.
 
@@ -270,11 +276,12 @@ def _classify_resume_checkpoint(checkpoint: str) -> str:
     beside it: its weights are as loadable as a full fine-tune's. Both adapter spellings count
     (``ADAPTER_WEIGHT_NAMES``): ``PeftAdapterSaver`` falls back to ``adapter_model.bin``, and the
     loader restores either."""
-    if resume_adapter_dir(checkpoint) is not None:
-        return "merged_adapter"
+    merged_adapter_dir = resume_adapter_dir(checkpoint)
+    if merged_adapter_dir is not None:
+        return "merged_adapter" if _has_adapter_file(merged_adapter_dir) else "merged_adapter_missing"
     if _checkpoint_has_full_model_weights(checkpoint):
         return "full"
-    if any(os.path.isfile(os.path.join(checkpoint, name)) for name in ADAPTER_WEIGHT_NAMES):
+    if _has_adapter_file(checkpoint):
         return "adapter"
     return "invalid"
 
@@ -314,6 +321,13 @@ def resolve_resume_weights_source(checkpoint: str | None, model_config, parallel
             f"the weight reload, so training would silently continue from BASE weights. If this is a "
             f"sharded EP checkpoint, merge it first (scripts/after_training/merge_ep_shards.py) and "
             f"resume from the merged directory."
+        )
+    if decision == "merged_adapter_missing":
+        # Before the policy load, which would build the whole base only for the loader to refuse.
+        raise ValueError(
+            f"Cannot resume from '{checkpoint}': its {RESUME_ADAPTER_MARKER_FILE} says it resumes from "
+            f"its adapter, but {resume_adapter_dir(checkpoint)} holds no adapter file, so the adapters "
+            f"would resume from initialization. Resume from a complete checkpoint."
         )
     if decision == "full":
         if is_global_main_process():

@@ -27,6 +27,7 @@ from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
+    remove_resume_adapter_marker,
     save_dtype_caster,
     write_merged_index,
     write_resume_adapter_marker,
@@ -45,6 +46,7 @@ from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.runtime import (
     DeferredRankFailure,
     barrier_on_exit,
+    fs_aware_save_rank,
     is_local_main_process,
     is_output_shared_filesystem,
     resolve_param_tensor,
@@ -187,8 +189,9 @@ def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
     :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR` through the writer the non-merged save uses
     (:class:`PeftAdapterSaver` when a PeftModel carries an attention half,
     :func:`save_ep_lora_adapters` for expert-only), so the adapter restore reads them unchanged. Each
-    save rank then writes the marker the resume classifies on, after its own copy is complete, so
-    a failed adapter write leaves no marker. Collective: every rank enters the adapter gathers.
+    save rank then writes the marker the resume classifies on, after its own copy is complete. With
+    any older marker removed before the save began (:func:`remove_stale_resume_marker`), a failed
+    adapter write leaves no marker. Collective: every rank enters the adapter gathers.
     """
     # Rank-uniform, and a no-op when sharded: a forward's transient unsharded params predate the
     # last optimizer step, like every writer's.
@@ -204,6 +207,20 @@ def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
         if ctx.is_save_rank:
             write_resume_adapter_marker(checkpoint_dir)
             logger.info(f"Saved the resume adapter of merged checkpoint {checkpoint_dir}")
+
+
+def remove_stale_resume_marker(checkpoint_dir: str) -> None:
+    """Remove a resume marker an earlier save left in ``checkpoint_dir``, before this save rewrites it.
+
+    A run resumed from an earlier checkpoint saves the same ``checkpoint-N`` again, in place, and
+    whatever marker that directory holds describes the abandoned save: until a new one lands it would
+    vouch for the old adapter beside the new weights and trainer state. Removed first, whatever the
+    run writes next, a save torn before its own marker is refused on resume instead. Fenced: every
+    rank enters, and each FS-aware save rank clears its own copy.
+    """
+    with barrier_on_exit():
+        if fs_aware_save_rank():
+            remove_resume_adapter_marker(checkpoint_dir)
 
 
 def reject_unhandled_pp_axes(config, phase: str) -> None:

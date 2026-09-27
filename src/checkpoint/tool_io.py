@@ -94,7 +94,15 @@ _SAFETENSORS_DTYPE_BYTES = {
 }
 
 
-def save_full_checkpoint(model, output_dir: str, processing_class=None, source_dir=None, **save_kwargs) -> None:
+def save_full_checkpoint(
+    model,
+    output_dir: str,
+    processing_class=None,
+    source_dir=None,
+    *,
+    include_resume_sidecars: bool = True,
+    **save_kwargs,
+) -> None:
     """``save_pretrained`` plus the non-weight files a conversion tool's output directory needs.
 
     Order matters: ``source_dir``'s non-weight files are carried over before the save so the live
@@ -107,6 +115,10 @@ def save_full_checkpoint(model, output_dir: str, processing_class=None, source_d
     first, because the recorded conversions carry quantizer rewrites ``save_pretrained`` cannot
     invert. ``source_dir`` doubles as the config schema source when the caller passes one.
 
+    ``include_resume_sidecars`` is :func:`~src.checkpoint.format.copy_checkpoint_aux_files`'s: a tool
+    whose output is a new base model rather than the source run's weights passes ``False``, so no
+    resume of that output restores the source run's state over it.
+
     Full-model saves only: an unmerged ``PeftModel`` save writes adapter files alone.
     """
     if is_peft_model(model):
@@ -118,7 +130,7 @@ def save_full_checkpoint(model, output_dir: str, processing_class=None, source_d
         _restore_pristine_weight_conversions(model)
     os.makedirs(output_dir, exist_ok=True)
     if source_dir is not None and os.path.isdir(source_dir):
-        copy_checkpoint_aux_files(source_dir, output_dir)
+        copy_checkpoint_aux_files(source_dir, output_dir, include_resume_sidecars=include_resume_sidecars)
     sanitize_generation_config(model)
     model.save_pretrained(output_dir, **save_kwargs)
     if not model.can_generate():

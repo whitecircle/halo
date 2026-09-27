@@ -34,7 +34,7 @@ from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.peft import PeftAdapterSaver, find_peft_model
-from src.distributed.checkpoint.save import save_checkpoint, save_resume_adapter
+from src.distributed.checkpoint.save import remove_stale_resume_marker, save_checkpoint, save_resume_adapter
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.runtime import (
@@ -159,6 +159,10 @@ class CheckpointingMixin:
         writes would leave one checkpoint with no optimizer state. For the same reason the base's
         rank-0 optimizer.pt stays in place until its replacement shards are written.
         """
+        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+        output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
+        # Any run type: a marker left in a directory this save rewrites is stale by definition.
+        remove_stale_resume_marker(output_dir)
         # Do not force save_only_model for EP/CP here: it drops scheduler.pt and RNG.
         guard = DeferredRankFailure(f"checkpoint write to step {self.state.global_step}")
         save_total_limit = self.args.save_total_limit
@@ -180,8 +184,6 @@ class CheckpointingMixin:
                 f"save's collectives completed: {guard.reason}"
             )
         guard.reject()
-        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-        output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
         self._save_merged_checkpoint_resume_adapter(output_dir)
         # save_only_model drops scheduler.pt on every mode, re-warming the LR from step 0 on resume.
         self._persist_lr_scheduler_for_resume(trial)

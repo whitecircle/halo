@@ -260,24 +260,32 @@ def test_an_unproducible_optimizer_state_keeps_the_previous_checkpoint(tmp_path,
 def test_a_merged_checkpoint_gets_its_resume_adapter_before_rotation(tmp_path, monkeypatch, save_only_model):
     """A ``merge_expert_lora_on_save`` checkpoint resumes from its unmerged adapters, a sidecar like
     the optimizer shards: written into the new checkpoint while the previous one still exists, and
-    under ``save_only_model`` too, where the adapters are still the only exact trained weights."""
+    under ``save_only_model`` too, where the adapters are still the only exact trained weights. The
+    save first unmarks the step's directory, before the base save writes anything into it: a resumed
+    run saving a step it already saved rewrites that checkpoint, whose old marker would otherwise
+    vouch for the old adapter until the new one lands."""
     trainer = _Trainer(str(tmp_path), merge_expert_lora_on_save=True)
     trainer.args.save_only_model = save_only_model
     previous = _plant_previous_checkpoint(str(tmp_path))
     _record_rotation(monkeypatch, trainer.events)
 
+    def recording_unmark(checkpoint_dir):
+        trainer.events.append(("unmark", checkpoint_dir))
+
     def recording_resume_adapter(ctx, checkpoint_dir):
         trainer.events.append(("resume_adapter", ctx, checkpoint_dir, os.path.isdir(previous)))
 
+    monkeypatch.setattr(checkpointing_mod, "remove_stale_resume_marker", recording_unmark)
     monkeypatch.setattr(checkpointing_mod, "save_resume_adapter", recording_resume_adapter)
 
     trainer._save_checkpoint(model=None, trial=None)
 
     new_ckpt = os.path.join(str(tmp_path), "checkpoint-2")
+    unmark = ("unmark", new_ckpt)
     resume_adapter = ("resume_adapter", "checkpoint context", new_ckpt, True)
     trainer_sidecars = ("trainer_sidecars", "checkpoint-2", True)
     shards = [] if save_only_model else [("shards_written", True, True)]
-    assert trainer.events == [("base_save", None), resume_adapter, trainer_sidecars, *shards, ("rotate", 1)]
+    assert trainer.events == [unmark, ("base_save", None), resume_adapter, trainer_sidecars, *shards, ("rotate", 1)]
 
 
 def test_an_unmerged_run_writes_no_resume_adapter(tmp_path, monkeypatch):

@@ -39,8 +39,12 @@ from src.distributed.runtime import barrier_on_exit, fs_aware_save_rank, rank_co
 
 logger = get_logger(__name__, log_level="info")
 
-# Rows per Arrow batch the token digest reads: bounds the int64 copy of one batch's token ids.
-_DIGEST_BATCH_ROWS = 4096
+# Rows per Arrow batch the token digest reads, and values per int64 copy it hashes: together they
+# bound its transient memory whatever the row length (a 32k-token row is 256 KiB widened).
+_DIGEST_BATCH_ROWS = 256
+_DIGEST_CHUNK_VALUES = 1 << 22
+# What every saved split entry holds, by type; anything else is refused as a mismatch.
+_ENTRY_SCHEMA = {"num_rows": int, "token_digests": Mapping, "settings": Mapping, "columns": Mapping}
 
 
 def _is_token_type(arrow_type: pa.DataType) -> bool:
@@ -55,7 +59,8 @@ def _token_digest(dataset: Dataset, column: str) -> str:
 
     Content-derived, where ``dataset._fingerprint`` is not: TRL's tokenize map closes over the
     trainer, so the fingerprint hashes trainer state and turns random when that cannot be pickled.
-    Lengths and values stream into separate hashes, so the batch size does not enter the digest.
+    Lengths and values stream into separate hashes, so neither the batch size nor the chunking
+    enters the digest.
     """
     lengths, values = hashlib.sha256(), hashlib.sha256()
     for batch in dataset.select_columns([column]).with_format("arrow").iter(batch_size=_DIGEST_BATCH_ROWS):
@@ -63,7 +68,9 @@ def _token_digest(dataset: Dataset, column: str) -> str:
         if pa.types.is_list(array.type) or pa.types.is_large_list(array.type):
             lengths.update(array.value_lengths().to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
             array = array.flatten()
-        values.update(array.to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
+        for start in range(0, len(array), _DIGEST_CHUNK_VALUES):
+            chunk = array.slice(start, _DIGEST_CHUNK_VALUES)
+            values.update(chunk.to_numpy(zero_copy_only=False).astype(np.int64).tobytes())
     return hashlib.sha256(lengths.digest() + values.digest()).hexdigest()
 
 
@@ -74,14 +81,28 @@ def _attach_reference_columns(dataset: Dataset, columns: Mapping[str, torch.Tens
 
 
 def _saved_split_mismatch(
-    entry: dict, num_rows: int, token_digests: Mapping[str, str], settings: Mapping, needed: Sequence[str]
+    entry: object, num_rows: int, token_digests: Mapping[str, str], settings: Mapping, needed: Sequence[str]
 ) -> str | None:
-    """Why a saved split cannot serve this dataset, or ``None`` when it can."""
-    missing = [column for column in needed if column not in entry["columns"]]
+    """Why a saved split cannot serve this dataset, or ``None`` when it can.
+
+    Total over whatever the file held: a malformed entry is a mismatch, never a raise, since one
+    node's bad copy must reach the verdict every rank joins rather than fail on that rank alone.
+    """
+    if not isinstance(entry, Mapping) or not all(isinstance(entry.get(k), t) for k, t in _ENTRY_SCHEMA.items()):
+        return f"its entry is not a saved reference split (expected {sorted(_ENTRY_SCHEMA)})"
+    columns = entry["columns"]
+    missing = [column for column in needed if column not in columns]
     if missing:
-        return f"it lacks {missing}, carrying only {sorted(entry['columns'])} (a changed loss_type?)"
+        return f"it lacks {missing}, carrying only {sorted(columns)} (a changed loss_type?)"
     if entry["num_rows"] != num_rows:
         return f"it was saved for {entry['num_rows']} rows and this dataset has {num_rows}"
+    malformed = [
+        column
+        for column in needed
+        if not isinstance(columns[column], torch.Tensor) or tuple(columns[column].shape) != (num_rows,)
+    ]
+    if malformed:
+        return f"its {malformed} do not hold one value per row"
     if entry["settings"] != settings:
         return f"it was computed under {entry['settings']} and this run sets {dict(settings)}"
     changed = sorted(
@@ -90,7 +111,7 @@ def _saved_split_mismatch(
     if changed:
         return (
             f"this dataset's {changed} differ from the saved run's (a changed dataset, split, chat template "
-            f"or tokenizer — or, for KTO's KL completions, per_device_train_batch_size)"
+            f"or tokenizer — or, for KTO's KL completions, per_device_train_batch_size or dataset_num_proc)"
         )
     return None
 
@@ -118,6 +139,9 @@ class PrecomputeRefLogpsRankConsistentMixin:
         if self._policy_from_checkpoint and self._reference_resume_checkpoint is None:
             raise ValueError("policy_from_checkpoint=True needs the resume_checkpoint the policy was built from.")
         self._reference_logps_by_split: dict[str, dict] = {}
+        # The resume checkpoint's saved splits, carried into this run's checkpoints for the splits
+        # it does not precompute itself (an eval split switched off), so a later resume still has them.
+        self._resumed_reference_logps: dict[str, object] = {}
 
     def _required_ref_logps_columns(self) -> tuple[str, ...]:
         """Reference log-prob columns, in the order TRL's ``compute_ref_log_probs`` returns them.
@@ -226,11 +250,11 @@ class PrecomputeRefLogpsRankConsistentMixin:
     def _restore_reference_logps(self, dataset, name: str, needed: tuple[str, ...]) -> Dataset | None:
         """Attach the ``name`` split's columns saved in the resume checkpoint, or ``None`` to sweep.
 
-        Absent, a sweep is correct only when it scores untrained weights; with no separate reference
-        model and the policy built from the checkpoint it would score the trained ones, which raises.
-        Present, the saved split must match this dataset's row count, token digests and reference
-        settings. Every verdict is joined across ranks, so the raises and the sweep are taken by the
-        whole world or none.
+        A sweep is correct only when it scores untrained weights. With no separate reference model
+        and the policy built from the checkpoint it would score the trained ones, so there a saved
+        split must exist and match this dataset's row count, token digests and reference settings,
+        or the resume raises. Anywhere else an absent or mismatched split is swept. Every verdict is
+        joined across ranks, so the raises and the sweep are taken by the whole world or none.
         """
         checkpoint = self._reference_resume_checkpoint
         saved, path = consensus_read(
@@ -239,7 +263,11 @@ class PrecomputeRefLogpsRankConsistentMixin:
             what=REFERENCE_LOGPS_FILE,
             checkpoint=checkpoint,
         )
-        entry = (saved or {}).get(name)
+        if not isinstance(saved, Mapping):
+            saved = {}
+        self._resumed_reference_logps = dict(saved)
+        entry = saved.get(name)
+        sweep_scores_trained_weights = self._policy_from_checkpoint and self.ref_model is None
         present_all, present_any = rank_consensus(entry is not None)
         if present_any and not present_all:
             raise RuntimeError(
@@ -247,7 +275,9 @@ class PrecomputeRefLogpsRankConsistentMixin:
                 f"the nodes' copies differ. Resume from a complete checkpoint."
             )
         if not present_all:
-            if self._policy_from_checkpoint and self.ref_model is None:
+            if sweep_scores_trained_weights:
+                # Outside the run's own output_dir, whose rotation could otherwise delete this checkpoint.
+                scratch = f"{os.path.dirname(os.path.abspath(checkpoint))}-reference-recovery"
                 raise RuntimeError(
                     f"Cannot resume precompute_ref_log_probs from {checkpoint}: it holds no saved "
                     f"reference log-probs for the '{name}' dataset ({REFERENCE_LOGPS_FILE} is missing "
@@ -255,11 +285,14 @@ class PrecomputeRefLogpsRankConsistentMixin:
                     f"reference model the sweep scores the policy, and this resume built the policy "
                     f"from the checkpoint, so the sweep would score the TRAINED weights as the "
                     f"reference and zero every log-ratio. To recover, run this config for one step "
-                    f"from the base model into a scratch output_dir (--max_steps=1 "
-                    f"--save_strategy=steps --save_steps=1 --save_only_model=true "
-                    f"--resume_from_checkpoint=false) and copy its checkpoint-1/{REFERENCE_LOGPS_FILE} "
-                    f"into {checkpoint}; this resume then checks it against the dataset. Or supply "
-                    f"the {list(needed)} columns, computed on the base model, in the dataset."
+                    f"from the base model into a scratch directory (--output_dir={scratch} "
+                    f"--max_steps=1 --save_strategy=steps --save_steps=1 --save_only_model=true "
+                    f"--resume_from_checkpoint=null) and copy its checkpoint-1/{REFERENCE_LOGPS_FILE} "
+                    f"into {checkpoint}, on every node when checkpoints are node-local; this resume "
+                    f"then checks it against the dataset. A checkpoint whose save stopped before this "
+                    f"file can take the previous checkpoint's copy instead, which holds the same "
+                    f"values. Or supply the {list(needed)} columns, computed on the base model, in the "
+                    f"dataset."
                 )
             logger.info(
                 f"No saved reference log-probs for '{name}' in {checkpoint}; sweeping, since the "
@@ -270,6 +303,15 @@ class PrecomputeRefLogpsRankConsistentMixin:
         token_digests = self._reference_input_digests(dataset, name)
         settings = self._reference_settings()
         mismatch = _saved_split_mismatch(entry, num_rows, token_digests, settings, needed)
+        if not sweep_scores_trained_weights:
+            matches_all, _ = rank_consensus(mismatch is None)
+            if not matches_all:
+                logger.info(
+                    f"The saved '{name}' reference log-probs in {path} do not match this dataset "
+                    f"({mismatch or 'on another rank'}); sweeping, since the reference weights are not "
+                    f"the checkpoint's."
+                )
+                return None
         reject_across_ranks(
             None
             if mismatch is None
@@ -296,13 +338,15 @@ class PrecomputeRefLogpsRankConsistentMixin:
         """Write the swept or restored reference columns into every checkpoint of the run.
 
         The next resume attaches them rather than sweeping a policy that may by then hold trained
-        weights. Written on the FS-aware save rank(s), so each node of a non-shared output
-        filesystem holds its own copy, and fenced so a failed write cannot strand the peers.
+        weights. The resume checkpoint's other splits ride along unchanged, for a later resume that
+        precomputes them again. Written on the FS-aware save rank(s), so each node of a non-shared
+        output filesystem holds its own copy, and fenced so a failed write cannot strand the peers.
         """
         super()._persist_trainer_sidecars(checkpoint_dir)
-        if not self._reference_logps_by_split:
+        splits = {**self._resumed_reference_logps, **self._reference_logps_by_split}
+        if not splits:
             return
         with barrier_on_exit():
             if fs_aware_save_rank():
                 os.makedirs(checkpoint_dir, exist_ok=True)
-                torch.save(self._reference_logps_by_split, os.path.join(checkpoint_dir, REFERENCE_LOGPS_FILE))
+                torch.save(splits, os.path.join(checkpoint_dir, REFERENCE_LOGPS_FILE))

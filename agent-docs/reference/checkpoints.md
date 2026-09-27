@@ -477,9 +477,13 @@ but cannot resume from them: the bf16 fold loses part of the delta, and the opti
 to the adapters. So `_save_checkpoint` adds the unmerged adapter to every training checkpoint, in
 `resume_adapter/`, through the writer the non-merged save uses (`PeftAdapterSaver` for a mixed run,
 `save_ep_lora_adapters` for expert-only). The root marker `resume_adapter.json` follows once every
-save rank's copy is complete. A subdirectory, because an `adapter_config.json` at the root makes
-`from_pretrained` load the base it names instead of the merged weights. The final `save_model()`
-export carries neither: nothing resumes from it.
+save rank's copy is complete. Every checkpoint save, whatever the run, first removes a marker
+already in its step's directory (a resumed run saving a step it saved before), so a save that stops
+before its own adapter lands is unmarked rather than vouching for the abandoned run's adapter. A subdirectory, because an
+`adapter_config.json` at the root makes `from_pretrained` load that adapter on top of the merged
+weights, which already hold its delta. vLLM, SGLang and `from_pretrained` read only the root, so none
+of them loads `resume_adapter/`, the marker or the `.pt` sidecars from a checkpoint that has its root
+weights. The final `save_model()` export carries neither: nothing resumes from it.
 
 The save leaves the run bit-identical. A bf16 `(w + d) - d` is not always `w`, so the attention merge
 is undone by writing back the base weights it rewrote (`merged_adapters(restore_base=True)`) rather
@@ -488,18 +492,22 @@ than by the unmerge alone.
 On resume the marker is the verdict, never the files beside it. `resolve_resume_weights_source` keeps
 `model_name_or_path`, and the loader restores `resume_adapter/` onto the base-built model. It refuses
 a model built from the merged weights (the delta would apply twice) and a marked checkpoint missing
-its adapter. A merged checkpoint without the marker, resumed by a run that trains adapters (a torn
-save, or one written without it), raises rather than restart the adapters from init under their
-restored optimizer moments; a new run from those weights (`model_name_or_path` pointed at the
-checkpoint) is the way to continue.
+its adapter, which `resolve_resume_weights_source` catches first, before the policy load. A merged
+checkpoint without the marker, resumed by a run that trains adapters (a torn save, or one written
+without it), raises rather than restart the adapters from init on weights that already hold their
+delta; a new run from those weights (`model_name_or_path` pointed at the checkpoint) is the way to
+continue.
 
 The adapter file is written at the save dtype (bf16), as the non-merged save's is, so the restore is
 exact for bf16 adapters; fp32 ones (`fp32_experts`, `fp32_non_ep_params`) resume rounded to bf16.
 
-`copy_checkpoint_aux_files` treats the adapter and its marker as resume sidecars: a tool output
-keeps them, an N-way merge drops them. `tests/gpu/trainers/lora/test_lora_merged_save_resume.py`
-pins the resume against an uninterrupted run: adapters bit-equal after the restore, first resumed
-loss identical.
+`copy_checkpoint_aux_files` treats the adapter and its marker as resume sidecars: a tool whose
+output is the same run's weights (`convert_to_bf16`, `merge_ep_shards`, `unfuse_moe_experts`,
+`reset_sinks`, `quantize_to_lowp`, `reattach_vision_tower`) keeps them, and a tool whose output is a
+new base drops them with every other resume sidecar (`merge_models`, `patch_vocab.py`, and
+`merge_adapter_into_base`, the shared fold behind `merge_peft_adapters.py` and `convert_to_bf16
+--merge_adapter`). `tests/gpu/trainers/lora/test_lora_merged_save_resume.py` pins the resume against an uninterrupted
+run: adapters bit-equal after the restore, first resumed loss identical.
 
 ## Accelerate / FSDP checkpoints
 
