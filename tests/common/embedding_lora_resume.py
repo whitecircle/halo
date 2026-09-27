@@ -5,16 +5,15 @@ training checkpoint also carries the unfolded trainable tensors (``resume_adapte
 the resume classifies on, so resume builds from the base, re-injects, and restores them. The model is
 built and adapted by the script's own ``build_sentence_transformer`` + ``inject_lora``, in bf16, with
 dropout off, over each backbone family the plain data-parallel path takes (:data:`FAMILIES`), with
-the adapters on the attention projections, on the input embedding beside them, or on the input
-embedding alone (:data:`LORA_TARGETS`):
+the adapters on the attention projections, on the input embedding beside them, on the input
+embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
 
   1. Uninterrupted: ``TOTAL_STEPS`` steps, checkpoint at ``SAVE_AT_STEP``; the trainable tensors are
      gathered right after that save (``on_save``).
   2. The checkpoint serves: stock ``SentenceTransformer`` and ``AutoModel.from_pretrained`` load it with
-     no missing or unexpected keys and it encodes; its LoRA targets hold PEFT's merge of the resume
-     adapter's tensors (``base + scaling · B @ A``, transposed for an embedding), which are the live
-     ones at the save bit for bit and move every target's base; the root holds no adapter file or
-     config.
+     no missing or unexpected keys and it encodes; its LoRA targets hold what PEFT's own in-place
+     merge of the live adapters at the save writes, bit for bit, and move every target's base; the
+     resume adapter holds those live tensors bit for bit; the root holds no adapter file or config.
   3. Resume through the production resolver: the policy source is the base; after the restore
      (``on_train_begin``) every trainable tensor is BIT-EQUAL to the saved one; the first resumed loss
      equals the uninterrupted one within ``FIRST_LOSS_TOL`` (its forward reads only restored state),
@@ -67,7 +66,7 @@ from transformers import (
     Qwen3Config,
     TrainerCallback,
 )
-from trl import ModelConfig
+from trl import ModelConfig, get_peft_config
 
 import src.optimizers.adamw_bf16 as adamw_bf16_mod
 from scripts.training.embedding import build_sentence_transformer, inject_lora
@@ -93,6 +92,7 @@ from tests.common.models import (
     TINY_QWEN3_CONFIG,
     TINY_QWEN35_CONFIG,
 )
+from tests.common.peft_helpers import injected_lora_merge
 from tests.common.utils import cleanup_memory, log, step_losses, tensors_equal_at_narrower_dtype
 
 
@@ -122,8 +122,8 @@ FAMILIES = {
     ),
     "gpt_oss": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", GptOssConfig, TINY_GPTOSS_CONFIG),
 }
-# What ``--lora`` adapts; ``off`` is a full fine-tune.
-LORA_TARGETS = ("attention", "mixed", "embedding", "off")
+# What ``--lora`` adapts, and how (``dora``); ``off`` is a full fine-tune.
+LORA_TARGETS = ("attention", "mixed", "embedding", "dora", "off")
 TRAIN_MODES = ("single", "fsdp", "ddp", "presharded")
 # Refused under LoRA, trained under a full fine-tune.
 PARALLEL_MODES = {"tp": {"tp_size": 2}, "ep": {"ep_size": 2}}
@@ -131,7 +131,6 @@ MODES = TRAIN_MODES + tuple(PARALLEL_MODES)
 
 LORA_R = 8
 LORA_ALPHA = 16
-SCALING = LORA_ALPHA / LORA_R
 SEED = 42
 TOTAL_STEPS = 6
 SAVE_AT_STEP = 3
@@ -158,12 +157,6 @@ MIN_INFORMATIVE_LOSS = 0.5
 # accelerate instead of FSDP2-wrapping the model itself.
 ACCELERATE_LAUNCH_ENV = {"ACCELERATE_MIXED_PRECISION": "bf16"}
 _SPECIAL_TOKENS = ("[PAD]", "[UNK]", "[EOS]")
-# PEFT's adapter spellings: the A factor's key suffix -> the B factor's, and whether the delta is
-# ``(B @ A)ᵀ`` (an embedding's A is ``[r, vocab]``) rather than ``B @ A``.
-_ADAPTER_SUFFIXES = {
-    ".lora_A.default.weight": (".lora_B.default.weight", False),
-    ".lora_embedding_A.default": (".lora_embedding_B.default", True),
-}
 
 
 def _lora_targets(family: Family, lora: str) -> tuple[str, ...] | None:
@@ -174,8 +167,24 @@ def _lora_targets(family: Family, lora: str) -> tuple[str, ...] | None:
         "attention": family.targets,
         "mixed": (family.embedding, *family.targets),
         "embedding": (family.embedding, "lm_head"),
+        "dora": family.targets,
         "off": None,
     }[lora]
+
+
+def _model_config(family: Family, source: str, lora: str) -> ModelConfig:
+    """The script's model arguments for this row: the source, and the LoRA the ``--lora`` choice sets."""
+    targets = _lora_targets(family, lora)
+    return ModelConfig(
+        model_name_or_path=source,
+        attn_implementation=family.attn_implementation,
+        use_peft=targets is not None,
+        lora_r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=0.0,
+        lora_target_modules=list(targets) if targets is not None else None,
+        use_dora=lora == "dora",
+    )
 
 
 def _parallelism_config(mode: str, lora: str) -> ParallelismConfig:
@@ -262,24 +271,9 @@ def _config(output_dir: str, family: Family, *, save: bool) -> EmbeddingConfig:
     )
 
 
-def _build(
-    ctx,
-    family: Family,
-    source: str,
-    config: EmbeddingConfig,
-    parallelism_config: ParallelismConfig,
-    targets: tuple[str, ...] | None,
-):
+def _build(ctx, model_config: ModelConfig, config: EmbeddingConfig, parallelism_config: ParallelismConfig):
     """The model exactly as the script builds and adapts it for this run shape."""
-    model_config = ModelConfig(
-        model_name_or_path=source,
-        attn_implementation=family.attn_implementation,
-        use_peft=targets is not None,
-        lora_r=LORA_R,
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=0.0,
-        lora_target_modules=list(targets) if targets is not None else None,
-    )
+    source = model_config.model_name_or_path
     dist_args = DistributedArguments()
     mode_suffix = parallelism_config.mode_string or "standard"
     runtime = ScriptRuntime(parallelism_config, mode_suffix, ctx.local_rank, None, source)
@@ -295,7 +289,7 @@ def _make_trainer(ctx, family: Family, mode: str, lora: str, source: str, output
     config = _config(output_dir, family, save=save)
     parallelism_config = _parallelism_config(mode, lora)
     return EmbeddingTrainer(
-        model=_build(ctx, family, source, config, parallelism_config, _lora_targets(family, lora)),
+        model=_build(ctx, _model_config(family, source, lora), config, parallelism_config),
         args=config,
         train_dataset=_pairs(ctx, mode),
         parallelism_config=parallelism_config,
@@ -367,27 +361,23 @@ def _mode_checks(ctx, mode: str, lora: str, trainer: EmbeddingTrainer) -> dict[s
     return checks
 
 
-def _backbone_prefix(model: SentenceTransformer) -> str:
+def backbone_prefix(model: SentenceTransformer) -> str:
     backbone = model[0].auto_model
     return next(name for name, module in model.named_modules() if module is backbone) + "."
 
 
 def _expected_fold(
-    base: dict[str, torch.Tensor], adapters: dict[str, torch.Tensor], prefix: str
+    model_config: ModelConfig, adapters: dict[str, torch.Tensor], prefix: str, device
 ) -> dict[str, torch.Tensor]:
-    """PEFT's merge per LoRA target, at the save dtype, keyed by the backbone's names."""
-    expected = {}
-    for key, lora_a in adapters.items():
-        for a_suffix, (b_suffix, transposed) in _ADAPTER_SUFFIXES.items():
-            if not key.endswith(a_suffix):
-                continue
-            module = key[len(prefix) : -len(a_suffix)]
-            delta = adapters[key[: -len(a_suffix)] + b_suffix].float() @ lora_a.float()
-            weight = base[f"{module}.weight"]
-            expected[f"{module}.weight"] = cast_to_save_dtype(
-                (weight.float() + SCALING * (delta.T if transposed else delta)).to(weight.dtype)
-            )
-    return expected
+    """What PEFT's own in-place merge writes per LoRA target, keyed by the backbone's names: the base in
+    bf16 on the run's device, the script's LoRA injected, ``adapters`` (keyed by the ST's names) loaded
+    and every LoRA layer merged."""
+    model = AutoModel.from_pretrained(model_config.model_name_or_path, dtype=torch.bfloat16).to(device)
+    # TRL's builder, not the script's: its exclusion scan is collective, and this runs on rank 0 alone.
+    merged = injected_lora_merge(
+        model, get_peft_config(model_config), {key[len(prefix) :]: value.to(device) for key, value in adapters.items()}
+    )
+    return {key: cast_to_save_dtype(value.cpu()) for key, value in merged.items() if key.endswith(".weight")}
 
 
 def _loads_and_encodes(directory: str, device) -> dict[str, bool]:
@@ -408,7 +398,7 @@ def _loads_and_encodes(directory: str, device) -> dict[str, bool]:
 
 def _serving_checks(
     checkpoint: str,
-    base_source: str,
+    model_config: ModelConfig,
     at_save: dict[str, torch.Tensor],
     prefix: str,
     embedding: str | None,
@@ -428,9 +418,9 @@ def _serving_checks(
         os.path.exists(os.path.join(checkpoint, name)) for name in (ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE)
     )
     checks.update(_loads_and_encodes(checkpoint, device))
-    base = AutoModel.from_pretrained(base_source, dtype=torch.bfloat16).state_dict()
+    base = AutoModel.from_pretrained(model_config.model_name_or_path, dtype=torch.bfloat16).state_dict()
     # From the live tensors at the save: the resume adapter's own are under test above.
-    expected = _expected_fold(base, at_save, prefix)
+    expected = _expected_fold(model_config, at_save, prefix, device)
     served = AutoModel.from_pretrained(checkpoint, dtype=torch.bfloat16).state_dict()
     unfolded = sorted(
         key for key, value in expected.items() if key not in served or not torch.equal(served[key], value)
@@ -466,7 +456,7 @@ def _refusal_row(ctx, family: Family, mode: str, lora: str, source: str, shared_
     """LoRA under TP / EP: the script's loader for that shape, then the trainer must refuse the adapters."""
     config = _config(os.path.join(shared_dir, f"refused_{mode}"), family, save=False)
     parallelism_config = _parallelism_config(mode, lora)
-    model = _build(ctx, family, source, config, parallelism_config, _lora_targets(family, lora))
+    model = _build(ctx, _model_config(family, source, lora), config, parallelism_config)
     error = None
     try:
         trainer = EmbeddingTrainer(
@@ -502,7 +492,7 @@ def _uninterrupted(ctx, family: Family, mode: str, lora: str, base_source: str, 
     log(f"\n[1/4] Uninterrupted {TOTAL_STEPS}-step run, checkpoint at step {SAVE_AT_STEP}...")
     trainer = _make_trainer(ctx, family, mode, lora, base_source, train_out, save=True)
     checks.update(_mode_checks(ctx, mode, lora, trainer))
-    prefix = _backbone_prefix(trainer.model)
+    prefix = backbone_prefix(trainer.model)
     # Expert weights live in the EP layer's own layout (this rank's experts under EP), not the hub's.
     expert_weights = {
         f"{name}.{param_name}"[len(prefix) :]
@@ -608,7 +598,7 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str = "att
     serving = (
         _serving_checks(
             checkpoint,
-            base_source,
+            _model_config(family, base_source, lora),
             run.at_save,
             run.prefix,
             family.embedding if family.embedding in _lora_targets(family, lora) else None,

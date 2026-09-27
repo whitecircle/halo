@@ -3,7 +3,7 @@
 
 The single-process row of :func:`tests.common.embedding_lora_resume.run_embedding_lora_resume`: plain tensors,
 the base Trainer's ``optimizer.pt``. ``--lora`` picks the adapted modules (``attention``, ``mixed``,
-``embedding``), or ``off`` for a full fine-tune. The full tier's families, beyond the core one of
+``embedding``, ``dora``), or ``off`` for a full fine-tune. The full tier's families, beyond the core one of
 ``test_embedding_lora_resume_1gpu.py``.
 
 Usage:

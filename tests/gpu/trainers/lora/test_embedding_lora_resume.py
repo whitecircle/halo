@@ -5,9 +5,9 @@ The body is :func:`tests.common.embedding_lora_resume.run_embedding_lora_resume`
 shape: ``fsdp`` (torchrun: mixin FSDP2, DTensor adapters), ``ddp`` (what ``accelerate launch`` with a
 MULTI_GPU config runs), ``presharded`` (FSDP2 over per-rank dataset slices), ``tp`` or ``ep``, where LoRA only
 checks the refusal. ``--lora`` picks the adapted modules (``attention``, the input embedding beside them as
-``mixed``, or ``embedding`` alone), or ``off`` for a full fine-tune. The core tier's rows; the rest of the
-family roster is ``test_embedding_lora_resume_roster.py``, the one-GPU rows
-``test_embedding_lora_resume_1gpu.py``.
+``mixed``, ``embedding`` alone, or DoRA on the attention projections as ``dora``), or ``off`` for a full fine-
+tune. The core tier's rows; the rest of the family roster is ``test_embedding_lora_resume_roster.py``, the
+one-GPU rows ``test_embedding_lora_resume_1gpu.py``.
 
 Usage:
     torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_embedding_lora_resume.py --family bert --mode fsdp

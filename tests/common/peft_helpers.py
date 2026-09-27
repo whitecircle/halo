@@ -15,6 +15,7 @@ Modes:
 
 from __future__ import annotations
 
+import copy
 import glob
 import json
 import os
@@ -26,7 +27,8 @@ import torch
 from accelerate.utils import extract_model_from_parallel
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
-from peft import PeftModel
+from peft import PeftModel, inject_adapter_in_model
+from peft.tuners.lora import LoraLayer
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM
@@ -481,3 +483,27 @@ def unwrap(trainer_model):
 
 def is_expert_lora_active(model) -> bool:
     return has_ep_lora(model)
+
+
+def merged_lora_targets(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """What PEFT's own in-place merge writes into each LoRA target of ``model``, which it modifies:
+    every ``LoraLayer`` merged, its base layer's tensors keyed by the plain module names."""
+    merged = {}
+    for name, module in model.named_modules():
+        if isinstance(module, LoraLayer):
+            module.merge()
+            for key, value in module.get_base_layer().named_parameters():
+                merged[f"{name}.{key}"] = value.detach()
+    return merged
+
+
+def injected_lora_merge(
+    model: torch.nn.Module, lora_config, adapters: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """:func:`merged_lora_targets` of ``model`` with ``lora_config`` injected in place and ``adapters``
+    (keyed by ``model``'s own names) loaded: the oracle for a save that folds those adapters."""
+    inject_adapter_in_model(copy.deepcopy(lora_config), model)
+    loaded = model.load_state_dict(adapters, strict=False)
+    if loaded.unexpected_keys:
+        raise AssertionError(f"the oracle does not take every adapter tensor: {loaded.unexpected_keys[:3]}")
+    return merged_lora_targets(model)

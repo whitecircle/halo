@@ -40,11 +40,9 @@ class _SentenceTransformerLike(nn.Module):
 def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: str = "3GB"):
     backbone = _Backbone()
     if has_lora:
-        # inject_adapter_in_model's in-place layout: "<module>.lora_A.<adapter>.weight".
-        adapters = nn.Module()
-        adapters.lora_A = nn.ModuleDict({"default": nn.Linear(4, 2, bias=False)})
-        adapters.lora_B = nn.ModuleDict({"default": nn.Linear(2, 4, bias=False)})
-        backbone.add_module("q_proj", adapters)
+        inject_adapter_in_model(LoraConfig(r=2, lora_alpha=8, target_modules=["linear"]), backbone)
+        with torch.no_grad():
+            backbone.linear.lora_B["default"].weight.normal_()  # zero-init, which would fold to the base
     top = _SentenceTransformerLike(backbone)
 
     host = object.__new__(EmbeddingTrainer)
@@ -126,7 +124,7 @@ def test_gathered_lora_save_retains_only_on_the_writer(monkeypatch, tmp_path):
     ctx = _context(host, monkeypatch)
     seen = {}
 
-    def _gather(model, retain: bool = True):
+    def _gather(model, retain: bool = True, items=None):
         seen["retain"] = retain
         return {}
 
@@ -139,28 +137,22 @@ def test_gathered_lora_save_retains_only_on_the_writer(monkeypatch, tmp_path):
     assert "wrote" not in seen  # a non-writer rank runs the collective and nothing else
 
 
-def test_gathered_lora_save_writes_through_the_shared_writer(monkeypatch, tmp_path):
-    """The merged dict must go through ``write_gathered_checkpoint``.
+def test_gathered_lora_save_writes_the_fold_through_the_shared_writer(monkeypatch, tmp_path):
+    """The folded tensors must go through ``write_gathered_checkpoint``, under the plain names.
 
-    Writing it straight to ``save_sharded_state_dict`` skips ``normalize_gathered_state_dict``, so an
+    Writing them straight to ``save_sharded_state_dict`` skips ``normalize_gathered_state_dict``, so an
     fp32-master run exports fp32 while the same model under EP/TP exports the save dtype, a MoE
     backbone exports module-fused expert keys vLLM rejects, and there is no ``.bin`` recovery.
     """
     host, backbone, _ = _host(has_lora=True, is_save_rank=True)
-    # The fixture's adapters are plain modules, not LoraLayers; the fold factor is not under test here.
-    host._lora_scaling = lambda backbone: 1.0
     ctx = _context(host, monkeypatch)
+    layer = backbone.linear
+    expected = layer.base_layer.weight + layer.get_delta_weight("default")
     written = {}
-
-    monkeypatch.setattr(
-        embedding_module,
-        "gather_saveable_tensors",
-        lambda model, retain=True: {"linear.base_layer.weight": torch.zeros(4, 4)},
-    )
 
     def _write(model, state_dict, output_dir, max_shard_size=None):
         written["model"] = model
-        written["keys"] = sorted(state_dict)
+        written["state_dict"] = state_dict
         written["max_shard_size"] = max_shard_size
 
     monkeypatch.setattr(embedding_module, "write_gathered_checkpoint", _write)
@@ -169,19 +161,9 @@ def test_gathered_lora_save_writes_through_the_shared_writer(monkeypatch, tmp_pa
 
     assert written["model"] is backbone
     assert written["max_shard_size"] == ctx.max_shard_size
-    assert written["keys"] == ["linear.weight"]  # adapters folded, base_layer spelling gone
+    assert sorted(written["state_dict"]) == ["linear.weight"]  # adapters folded, base_layer spelling gone
+    assert torch.equal(written["state_dict"]["linear.weight"], expected.detach())
     assert host.processing_class.saved_to == str(tmp_path)
-
-
-def test_lora_fold_factor_is_the_live_adapter_scaling_or_a_raise():
-    """The fold multiplies ``B @ A`` by the adapter's ``lora_alpha / r``; a guessed 1.0 would export
-    wrong merged weights whenever the two differ, so a backbone with no LoraLayer scaling raises."""
-    backbone = inject_adapter_in_model(LoraConfig(r=2, lora_alpha=8, target_modules=["linear"]), _Backbone())
-    assert EmbeddingTrainer._lora_scaling(None, backbone) == 4.0
-
-    unscaled, _, _ = _host(has_lora=True)
-    with pytest.raises(RuntimeError, match="no LoraLayer with an adapter scaling"):
-        EmbeddingTrainer._lora_scaling(None, unscaled._get_unwrapped_model())
 
 
 def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():

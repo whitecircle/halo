@@ -85,7 +85,7 @@ the whole sequence on one rank. Tensor and expert-tensor parallelism batch throu
 cannot apply `no_duplicates`, so they refuse it: set `batch_sampler: batch_sampler` there (as
 `--batch_sampler=batch_sampler` on the command line). LoRA (`use_peft: true`) is supported on the
 plain data-parallel path only and rejected under EP, ETP and TP; its targets may include the input
-embedding (`embed_tokens`), and DoRA is refused. Its saves fold the adapters into the weights, so the
+embedding (`embed_tokens`), and DoRA applies. Its saves fold the adapters into the weights, so the
 output loads as a plain `SentenceTransformer`; training checkpoints also keep the unfolded adapters,
 which `resume_from_checkpoint` restores onto the base.
 

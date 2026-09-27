@@ -22,6 +22,7 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset
 from peft import LoraConfig, TaskType, inject_adapter_in_model
+from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer
 
 from src.checkpoint.format import save_dtype_caster
@@ -294,7 +295,7 @@ def check_lora_save_roundtrip(ctx, shared_dir: str) -> bool:
 
     # collective gather — must run on ALL ranks
     backbone = trainer._get_unwrapped_model()
-    scaling = trainer._lora_scaling(backbone)
+    scaling = next(module.scaling["default"] for module in backbone.modules() if isinstance(module, LoraLayer))
     full = gather_saveable_tensors(backbone, retain=True)
     target = next(
         k[: -len(".base_layer.weight")]

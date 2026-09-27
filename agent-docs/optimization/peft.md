@@ -332,9 +332,12 @@ Each NCCL weight sync forwards every base weight with its adapter folded in, und
 un-adapted base.
 
 The fold is out of place, one tensor at a time as the sync sends it (`lora_folded` in
-`src/models/structure.py`): the value PEFT's `merge_adapter` would write, bit for bit, on Linear,
-Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA (an FSDP2-sharded DoRA
-embedding reduces its norm across shards, one bf16 rounding step off). The frozen base is never
+`src/models/structure.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
+for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA (an
+FSDP2-sharded DoRA embedding reduces its norm across shards, one bf16 rounding step off). Against a
+single-device merge, a large delta folded on FSDP2 shards can differ by rounding on part of the
+elements it moves: DTensor may contract the sharded rank dim of `B @ A` shard-locally and sum the bf16
+partials (about a tenth of the moved elements of BERT's 30522-row embedding). The frozen base is never
 written: PEFT's in-place merge followed by its unmerge would not give it back, since in bf16 `(w + d) - d`
 misses `w` by a rounding step wherever the two roundings do not cancel. The fold holds one tensor's
 temporaries at a time, so it adds nothing to the sync's peak: on Qwen3-8B at FSDP2 dp2 a sync peaks
@@ -349,14 +352,13 @@ which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all
 
 The embedding trainer is SentenceTransformer-based. `use_peft: true` injects LoRA into the underlying
 transformer via `peft.inject_adapter_in_model` (not `SentenceTransformer.add_adapter`) and freezes every
-non-adapter param. Plain LoRA only: 4-bit QLoRA is rejected on the ST loader, and DoRA, `lora_bias` and conv
-targets at trainer construction, since the save's fold has no form for them; linear and input-embedding
-targets fold. In-place injection never reads `lora_task_type`.
+non-adapter param. 4-bit QLoRA is rejected on the ST loader, and a layer the out-of-place fold does not
+cover ([above](#online-rl--rollout-server-weight-sync)) at trainer construction. In-place injection never reads `lora_task_type`.
 
 Runs under standard / FSDP2 data parallelism only; EP and TP are rejected at trainer construction (the EP
 save path has no adapter-merge step, so the checkpoint would carry adapter keys that reload as random base
-weights). Saves fold the adapters into the weights; training checkpoints also keep them unfolded, which a
-resume restores onto the base ([Embedding — Saving](../training-methods/embedding.md#saving)).
+weights). Saves fold the adapters into the weights with the weight sync's out-of-place fold; training
+checkpoints also keep them unfolded, which a resume restores onto the base ([Embedding — Saving](../training-methods/embedding.md#saving)).
 
 ## Quantized training (QLoRA)
 

@@ -8,7 +8,7 @@ import inspect
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import sentence_transformers
@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import transformers
 from datasets import Dataset, DatasetDict, IterableDataset
-from peft.tuners.lora import LoraLayer
+from peft.tuners.lora import LoraModel
 from safetensors.torch import save_file
 from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
 from sentence_transformers.base.sampler import BatchSamplers
@@ -71,6 +71,7 @@ from src.distributed.runtime import (
 from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import restore_special_token_ids
 from src.models.loading.tokenizer_setup import pristine_model_max_length
+from src.models.structure import lora_fold_targets, lora_folded, normalize_peft_param_name, persistent_buffers
 from src.trainers.mixins.base import DistributedTrainerMixin
 
 logger = logging.getLogger(__name__)
@@ -99,14 +100,6 @@ _SCALE_LOSSES = frozenset(
 )
 
 
-# The key segment of each LoRA A factor the save folds -> its B factor's, and whether PEFT's delta
-# is the transpose of ``B @ A`` (an embedding's A is ``[r, vocab]``).
-_LORA_FOLD_SEGMENTS = {
-    ".lora_A.": (".lora_B.", False),
-    ".lora_embedding_A.": (".lora_embedding_B.", True),
-}
-
-
 def create_loss(model: SentenceTransformer, config: EmbeddingConfig) -> nn.Module:
     """Create a loss function from config, optionally wrapping with MatryoshkaLoss."""
     loss_type = config.loss_type
@@ -131,58 +124,25 @@ def create_loss(model: SentenceTransformer, config: EmbeddingConfig) -> nn.Modul
     return loss
 
 
-def _merge_injected_lora_state_dict(state_dict: dict, scaling: float) -> dict:
-    """Fold ``inject_adapter_in_model`` LoRA into base weights within a gathered state dict.
+def _folded_backbone_items(backbone: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+    """The backbone's saveable tensors with its injected LoRA folded in, under the base model's names.
 
     The injected model is not a ``PeftModel``, so a plain save would write the adapter keys verbatim
-    and reload as random base weights. Each ``nn.Linear`` / ``nn.Embedding`` target becomes a plain
-    ``<m>.weight`` holding PEFT's own merge (``get_delta_weight``): ``base + scaling · B @ A`` for a
-    linear target and ``base + scaling · (B @ A)ᵀ`` for an embedding one (``lora_embedding_A`` is
-    ``[r, vocab]``, ``lora_embedding_B`` ``[hidden, r]``); the adapter and ``base_layer`` keys are
-    dropped. Any ``lora_`` tensor left over raises: a DoRA magnitude, a ``lora_bias`` or a conv
-    adapter has no such fold, and written as a stray key it would be dropped at load. Each fp32
-    delta is built only while its own weight is merged, so the writer holds one at a time.
+    and reload as random base weights. Each base tensor a LoRA layer adapts is folded out of place
+    with PEFT's merge (:func:`~src.models.structure.lora_folded`), the adapter tensors are dropped and
+    ``base_layer`` is spelled out, one tensor at a time. Under FSDP2 each fold is a DTensor collective,
+    issued in ``named_parameters`` order on every rank.
     """
-    # prefix -> (A key, B key, transposed), for the factor pairs whose delta has the base's shape.
-    pairs: dict[str, tuple[str, str, bool]] = {}
-    for a_segment, (b_segment, transposed) in _LORA_FOLD_SEGMENTS.items():
-        for a_key, lora_a in state_dict.items():
-            if a_segment not in a_key:
-                continue
-            prefix = a_key.split(a_segment)[0]
-            b_key = a_key.replace(a_segment, b_segment, 1)
-            lora_b = state_dict.get(b_key)
-            base = state_dict.get(f"{prefix}.base_layer.weight")
-            if lora_b is None or base is None or lora_a.dim() != 2 or lora_b.dim() != 2 or prefix in pairs:
-                continue
-            product = (lora_b.shape[0], lora_a.shape[1])
-            if lora_b.shape[1] != lora_a.shape[0] or tuple(base.shape) != (product[::-1] if transposed else product):
-                continue
-            pairs[prefix] = (a_key, b_key, transposed)
-    folded = {key for a_key, b_key, _ in pairs.values() for key in (a_key, b_key)}
-
-    merged: dict[str, torch.Tensor] = {}
-    for k, v in state_dict.items():
-        if k in folded:
-            continue
-        if k.endswith(".base_layer.weight"):
-            prefix = k[: -len(".base_layer.weight")]
-            if prefix in pairs:
-                a_key, b_key, transposed = pairs[prefix]
-                delta = state_dict[b_key].float() @ state_dict[a_key].float()
-                v = (v.float() + scaling * (delta.T if transposed else delta)).to(v.dtype)
-            merged[f"{prefix}.weight"] = v
-        elif k.endswith(".base_layer.bias"):
-            merged[f"{k[: -len('.base_layer.bias')]}.bias"] = v
-        else:
-            merged[k] = v
-    if unfolded := sorted(k for k in merged if "lora_" in k):
-        raise NotImplementedError(
-            f"Embedding training folds only plain linear and embedding LoRA into the saved weights; "
-            f"{len(unfolded)} adapter tensors have no such fold (DoRA, lora_bias or a conv adapter?): "
-            f"{unfolded[:KEY_PREVIEW_COUNT]}. Drop those options or target modules, or full fine-tune."
-        )
-    return merged
+    folds = lora_fold_targets(backbone)
+    for name, param in backbone.named_parameters():
+        plain = normalize_peft_param_name(name, LoraModel.prefix)
+        if plain is not None:
+            layers = folds.get(id(param))
+            yield plain, lora_folded(param, layers) if layers else param.data
+    for name, buffer in persistent_buffers(backbone):
+        plain = normalize_peft_param_name(name, LoraModel.prefix)
+        if plain is not None:
+            yield plain, buffer
 
 
 def _trainable_tensors(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -313,8 +273,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     def _validate_injected_lora_parallelism(self) -> None:
         """Reject in-place-injected LoRA under EP, where the save path cannot fold it.
 
-        The injected-LoRA branch of :meth:`_save_distributed_embedding_model` merges the adapters out
-        of a plain gathered state dict, which under EP holds this rank's expert shards under their
+        The injected-LoRA branch of :meth:`_save_distributed_embedding_model` folds the adapters into
+        the backbone's own parameter walk, which under EP holds this rank's expert shards under their
         local names, producing a checkpoint no loader accepts. TP is rejected one level up by the
         mixin's LoRA gate. Runs after wrapping, on the live model.
         """
@@ -329,20 +289,12 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         )
 
     def _validate_injected_lora_foldable(self) -> None:
-        """Dry-run the save's fold over the backbone's parameter shapes (meta tensors, no copies).
-
-        An adapter the fold cannot express (DoRA, ``lora_bias``, a conv target) then raises here, on
-        every rank, instead of on the save rank alone at the first checkpoint, where its peers would
-        block in the save's next collective.
+        """Refuse an injected adapter the save cannot fold (:func:`~src.models.structure.lora_fold_targets`:
+        ``nn.MultiheadAttention`` LoRA, trainable tokens, a variant other than DoRA). Structural, so it
+        raises here on every rank rather than on the save rank alone at the first checkpoint, where its
+        peers would block in the save's next collective.
         """
-        backbone = self._get_unwrapped_model()
-        if not self._has_injected_lora(backbone):
-            return
-        shapes = {
-            name: torch.empty(param.shape, dtype=param.dtype, device="meta")
-            for name, param in backbone.named_parameters()
-        }
-        _merge_injected_lora_state_dict(shapes, scaling=1.0)
+        lora_fold_targets(self._get_unwrapped_model())
 
     def _get_unwrapped_model(self) -> nn.Module:
         """The SentenceTransformer's transformer backbone (``auto_model``), for the backbone-specific
@@ -368,23 +320,6 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         ``inject_lora``'s own; this path builds no native expert LoRA for it to mistake."""
         backbone = backbone if backbone is not None else self._get_unwrapped_model()
         return any("lora_" in name for name, _ in backbone.named_parameters())
-
-    def _lora_scaling(self, backbone: nn.Module) -> float:
-        """Active-adapter LoRA scaling read from a live LoraLayer (same factor the forward used).
-
-        Raises when no LoraLayer carries one: folding at a guessed 1.0 would export wrong merged
-        weights whenever ``lora_alpha != r``.
-        """
-        for module in backbone.modules():
-            if isinstance(module, LoraLayer) and getattr(module, "scaling", None):
-                adapters = list(module.active_adapters) or list(module.scaling.keys())
-                if adapters:
-                    return float(module.scaling[adapters[0]])
-        raise RuntimeError(
-            "The backbone carries injected LoRA weights but no LoraLayer with an adapter scaling, so "
-            "the factor to fold them into the base weights is unknown; folding at 1.0 would export "
-            "wrong weights whenever lora_alpha != r."
-        )
 
     def compute_loss(
         self,
@@ -734,8 +669,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
 
         Everything but in-place-injected LoRA goes through the shared ``save_checkpoint`` ladder, so
         embedding exports get the same save dtype, hub expert layout, shard size and ``.bin``
-        fallback as other trainers. Injected LoRA is not a ``PeftModel``, so its adapters must be
-        folded into the gathered dict before it is written.
+        fallback as other trainers. Injected LoRA is not a ``PeftModel``, so its adapters are folded
+        into the tensors as they are gathered (:func:`_folded_backbone_items`).
 
         Every branch gathers on every rank (collectives) and writes only on the save rank.
         """
@@ -746,9 +681,10 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         with barrier_on_exit():
             if self._has_injected_lora(backbone):
                 # Gather on all ranks (collective); only the writer retains (else N× host RAM per node).
-                state_dict = gather_saveable_tensors(backbone, retain=ctx.is_save_rank)
+                state_dict = gather_saveable_tensors(
+                    backbone, retain=ctx.is_save_rank, items=_folded_backbone_items(backbone)
+                )
                 if ctx.is_save_rank:
-                    state_dict = _merge_injected_lora_state_dict(state_dict, self._lora_scaling(backbone))
                     write_gathered_checkpoint(backbone, state_dict, output_dir, max_shard_size=ctx.max_shard_size)
                     if ctx.tokenizer is not None:
                         ctx.tokenizer.save_pretrained(output_dir)

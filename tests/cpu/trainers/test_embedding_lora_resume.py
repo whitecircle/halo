@@ -11,7 +11,7 @@ bit-reproducible):
 
 * layout: the adapter file holds exactly the live trainable tensors at save time, bit for bit, the
   root holds no adapter file or config, and the folded weights load with stock
-  ``SentenceTransformer`` / ``AutoModel`` as ``base + scaling · B @ A`` of those same tensors; a failed
+  ``SentenceTransformer`` / ``AutoModel`` as PEFT's merge of those same tensors; a failed
   adapter write leaves no marker;
 * the final ``save_model`` export carries no resume state;
 * classification: the marker sends the policy load to the base;
@@ -25,10 +25,10 @@ bit-reproducible):
   checkpoint, with ``save_only_model`` too;
 * a non-shared filesystem: two one-rank "nodes" each write a complete resume adapter to their own
   directory and each restores its own; one node missing its copy raises on both;
-* an input-embedding target (``word_embeddings``, beside the attention targets or alone): its
-  ``lora_embedding_A``/``_B`` fold as ``base + scaling · (B @ A)ᵀ``, the checkpoint carries them in its
-  resume adapter, and the run resumes exactly; an adapter the fold cannot express (DoRA) is refused
-  at construction;
+* other targets and variants (the input embedding ``word_embeddings`` beside the attention targets or
+  alone, DoRA): the checkpoint serves PEFT's own merge, carries every trainable tensor in its resume
+  adapter, and the run resumes exactly; an adapter the save cannot fold (``nn.MultiheadAttention``
+  LoRA) is refused at construction;
 * a full fine-tune: the weight loader the trainer resumes through covers the names its saves write.
 
     python tests/cpu/trainers/test_embedding_lora_resume.py
@@ -43,10 +43,17 @@ import pytest
 import torch
 from accelerate import PartialState
 from datasets import Dataset
+from peft import LoraConfig, inject_adapter_in_model
 from safetensors.torch import load_file
 from sentence_transformers import SentenceTransformer
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import AutoModel, BertConfig, BertModel, PreTrainedTokenizerFast, TrainerCallback
+from transformers import (
+    AutoModel,
+    BertConfig,
+    BertModel,
+    PreTrainedTokenizerFast,
+    TrainerCallback,
+)
 from transformers.trainer_utils import rotate_checkpoints
 from trl import ModelConfig
 
@@ -69,7 +76,9 @@ from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
+from tests.common.embedding_lora_resume import backbone_prefix
 from tests.common.gloo import run_gloo_ranks
+from tests.common.peft_helpers import injected_lora_merge
 from tests.common.utils import step_losses
 
 WORDS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", *(f"w{i}" for i in range(60))]
@@ -223,34 +232,20 @@ def _copy(checkpoint: str, destination) -> str:
     return shutil.copytree(checkpoint, str(destination))
 
 
-# PEFT's adapter spellings: the A factor's key suffix -> the B factor's, and whether the delta is
-# ``(B @ A)ᵀ`` (an embedding's A is ``[r, vocab]``) rather than ``B @ A``.
-_ADAPTER_SUFFIXES = {
-    ".lora_A.default.weight": (".lora_B.default.weight", False),
-    ".lora_embedding_A.default": (".lora_embedding_B.default", True),
-}
+def _expected_fold(
+    base: str, adapters: dict[str, torch.Tensor], prefix: str, lora: LoraConfig
+) -> dict[str, torch.Tensor]:
+    """What PEFT's own in-place merge writes per LoRA target, from ``adapters`` keyed by the ST's names:
+    the base loaded, the same adapters injected and loaded, every LoRA layer merged."""
+    merged = injected_lora_merge(
+        BertModel.from_pretrained(base), lora, {key[len(prefix) :]: value for key, value in adapters.items()}
+    )
+    return {key: cast_to_save_dtype(value.clone()) for key, value in merged.items() if key.endswith(".weight")}
 
 
-def _expected_fold(base: str, adapters: dict[str, torch.Tensor], backbone_prefix: str) -> dict[str, torch.Tensor]:
-    """PEFT's merge per LoRA target at the save dtype, from ``adapters`` keyed by the ST's names."""
-    base_state = BertModel.from_pretrained(base).state_dict()
-    expected = {}
-    for key, lora_a in adapters.items():
-        for a_suffix, (b_suffix, transposed) in _ADAPTER_SUFFIXES.items():
-            if not key.endswith(a_suffix):
-                continue
-            module = key[len(backbone_prefix) : -len(a_suffix)]
-            delta = adapters[key[: -len(a_suffix)] + b_suffix].float() @ lora_a.float()
-            weight = base_state[f"{module}.weight"]
-            expected[f"{module}.weight"] = cast_to_save_dtype(
-                (weight.float() + SCALING * (delta.T if transposed else delta)).to(weight.dtype)
-            )
-    return expected
-
-
-def _backbone_prefix(model: SentenceTransformer) -> str:
-    backbone = model[0].auto_model
-    return next(name for name, module in model.named_modules() if module is backbone) + "."
+def _lora_config(target_modules=TARGET_MODULES, **lora) -> LoraConfig:
+    """The ``LoraConfig`` ``inject_lora`` builds for :func:`_lora_model`'s settings."""
+    return LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=0.0, target_modules=list(target_modules), **lora)
 
 
 def _assert_serves_the_fold(
@@ -259,16 +254,17 @@ def _assert_serves_the_fold(
     adapters: dict[str, torch.Tensor],
     prefix: str,
     folds: int = NUM_LAYERS * len(TARGET_MODULES),
+    lora: LoraConfig | None = None,
 ) -> None:
     backbone, info = AutoModel.from_pretrained(directory, output_loading_info=True)
     problems = {kind: info[kind] for kind in ("missing_keys", "unexpected_keys", "mismatched_keys") if info[kind]}
     assert not problems, f"stock from_pretrained does not load the folded weights cleanly: {problems}"
     served = backbone.state_dict()
     assert not [key for key in served if ".lora_" in key or ".base_layer." in key]
-    expected = _expected_fold(base, adapters, prefix)
+    expected = _expected_fold(base, adapters, prefix, lora or _lora_config())
     assert len(expected) == folds, f"premise: one fold per LoRA target, got {sorted(expected)}"
     for key, value in expected.items():
-        assert torch.equal(served[key].to(value.dtype), value), f"{key} is not base + scaling · B @ A of the adapters"
+        assert torch.equal(served[key].to(value.dtype), value), f"{key} is not PEFT's merge of the adapters"
     embeddings = SentenceTransformer(directory, device="cpu").encode(["w1 w2 w3", "w4 w5"], convert_to_tensor=True)
     assert embeddings.shape[0] == 2 and torch.isfinite(embeddings).all()
 
@@ -290,7 +286,7 @@ def test_a_training_checkpoint_carries_its_resume_adapter_beside_the_fold(run):
         assert not os.path.exists(os.path.join(checkpoint, name)), (
             f"{name} at the root would make from_pretrained load the base it names instead of the fold"
         )
-    _assert_serves_the_fold(checkpoint, run.base, saved, _backbone_prefix(run.trainer.model))
+    _assert_serves_the_fold(checkpoint, run.base, saved, backbone_prefix(run.trainer.model))
 
 
 def test_a_failed_adapter_write_leaves_the_checkpoint_unmarked(run, tmp_path, monkeypatch):
@@ -315,7 +311,7 @@ def test_the_final_export_is_a_serving_artifact_without_resume_state(run):
 
     assert resume_adapter_dir(final) is None
     assert not os.path.exists(os.path.join(final, RESUME_ADAPTER_DIR))
-    _assert_serves_the_fold(final, run.base, run.final, _backbone_prefix(run.trainer.model))
+    _assert_serves_the_fold(final, run.base, run.final, backbone_prefix(run.trainer.model))
 
 
 # --- classification -------------------------------------------------------------------------
@@ -385,7 +381,7 @@ def test_load_best_model_at_end_restores_the_best_checkpoints_adapters(run, tmp_
     assert not unequal, f"the live adapters are not the best checkpoint's: {unequal[:3]}"
     final = str(tmp_path / "final")
     trainer.save_model(final)
-    _assert_serves_the_fold(final, run.base, saved, _backbone_prefix(trainer.model))
+    _assert_serves_the_fold(final, run.base, saved, backbone_prefix(trainer.model))
 
 
 # --- refusals -------------------------------------------------------------------------------
@@ -542,87 +538,104 @@ def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):
     assert first[0] != first[1], "premise: the two nodes hold different tensors"
 
 
-# --- input-embedding targets ----------------------------------------------------------------
+# --- other targets and variants ---------------------------------------------------------------
 
 
 @pytest.fixture(
     scope="module",
-    # (targets, adapted modules). TRL collapses a one-entry list into a string, which PEFT reads as a
-    # regex, so embedding-only is spelled as a user writes it: the embedding beside an lm_head the
-    # headless backbone lacks.
+    # (lora_target_modules, other LoRA settings, adapted modules). TRL collapses a one-entry list into a
+    # string, which PEFT reads as a regex, so embedding-only is spelled as a user writes it: the
+    # embedding beside an lm_head the headless backbone lacks.
     params=[
-        ((EMBEDDING_TARGET, *TARGET_MODULES), 1 + NUM_LAYERS * len(TARGET_MODULES)),
-        ((EMBEDDING_TARGET, "lm_head"), 1),
+        ((EMBEDDING_TARGET, *TARGET_MODULES), {}, 1 + NUM_LAYERS * len(TARGET_MODULES)),
+        ((EMBEDDING_TARGET, "lm_head"), {}, 1),
+        ((EMBEDDING_TARGET, *TARGET_MODULES), {"use_dora": True}, 1 + NUM_LAYERS * len(TARGET_MODULES)),
     ],
-    ids=["embedding-and-attention", "embedding-only"],
+    ids=["embedding-and-attention", "embedding-only", "dora"],
 )
-def embedding_run(request, tmp_path_factory):
-    """``run`` with the input embedding among the targets: PEFT adapts it as a ``lora.Embedding``,
-    whose ``lora_embedding_A``/``_B`` are neither ``lora_A`` nor ``lora_B``."""
+def variant_run(request, tmp_path_factory):
+    """``run`` with another target set or variant: PEFT adapts the input embedding as a
+    ``lora.Embedding``, whose ``lora_embedding_A``/``_B`` are neither ``lora_A`` nor ``lora_B``, and DoRA
+    adds a ``lora_magnitude_vector`` its merge rescales by."""
     PartialState()
-    targets, folds = request.param
-    root = tmp_path_factory.mktemp("embedding_lora_embedding_target")
+    targets, lora, folds = request.param
+    root = tmp_path_factory.mktemp("embedding_lora_variant")
     base = _tiny_base(root / "base")
     at_save = _Snapshot("save")
-    trainer = _trainer(_lora_model(base, seed=1, target_modules=targets), root / "out", callbacks=[at_save])
+    trainer = _trainer(_lora_model(base, seed=1, target_modules=targets, **lora), root / "out", callbacks=[at_save])
     trainer.train()
     return SimpleNamespace(
         base=base,
         targets=targets,
+        lora=lora,
         folds=folds,
         checkpoint=str(root / "out" / f"checkpoint-{SAVE_AT_STEP}"),
         at_save=at_save.tensors,
         losses=step_losses(trainer),
         final=_trainable(trainer.model),
-        prefix=_backbone_prefix(trainer.model),
+        prefix=backbone_prefix(trainer.model),
     )
 
 
-def test_an_embedding_target_is_folded_into_the_served_table(embedding_run):
-    """The checkpoint serves ``base + scaling · (B @ A)ᵀ`` as the plain ``word_embeddings.weight``, with no
-    adapter key left over, and its resume adapter holds the embedding factors bit for bit."""
-    embedding_a = [key for key in embedding_run.at_save if key.endswith(".lora_embedding_A.default")]
-    assert len(embedding_a) == 1 and embedding_run.at_save[embedding_a[0]].abs().sum() > 0, (
+def test_every_target_serves_peft_merge_of_its_adapters(variant_run):
+    """The checkpoint serves PEFT's merge (``(B @ A)ᵀ`` for the embedding, DoRA's rescale) under the plain
+    names, with no adapter key left over, and its resume adapter holds every trainable tensor bit for bit."""
+    moved = [
+        key for key, value in variant_run.at_save.items() if key.endswith(".lora_embedding_A.default") and value.any()
+    ]
+    assert moved or EMBEDDING_TARGET not in variant_run.targets, (
         "premise: training moved the zero-init embedding A factor, so an unfolded table is detectable"
     )
-    assert resume_adapter_dir(embedding_run.checkpoint) is not None
-    saved = load_file(os.path.join(embedding_run.checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
-    assert set(saved) == set(embedding_run.at_save)
-    assert all(torch.equal(saved[key], value) for key, value in embedding_run.at_save.items())
+    assert resume_adapter_dir(variant_run.checkpoint) is not None
+    saved = load_file(os.path.join(variant_run.checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
+    assert set(saved) == set(variant_run.at_save)
+    assert all(torch.equal(saved[key], value) for key, value in variant_run.at_save.items())
     _assert_serves_the_fold(
-        embedding_run.checkpoint, embedding_run.base, saved, embedding_run.prefix, embedding_run.folds
+        variant_run.checkpoint,
+        variant_run.base,
+        saved,
+        variant_run.prefix,
+        variant_run.folds,
+        _lora_config(variant_run.targets, **variant_run.lora),
     )
 
 
-def test_an_embedding_target_resumes_bit_equal_and_reproduces_the_run(embedding_run, tmp_path):
+def test_every_target_resumes_bit_equal_and_reproduces_the_run(variant_run, tmp_path):
     source = resolve_resume_weights_source(
-        embedding_run.checkpoint, SimpleNamespace(model_name_or_path=embedding_run.base), ParallelismConfig()
+        variant_run.checkpoint, SimpleNamespace(model_name_or_path=variant_run.base), ParallelismConfig()
     )
-    assert source == embedding_run.base
+    assert source == variant_run.base
     restored = _Snapshot("train_begin")
-    trainer = _trainer(
-        _lora_model(source, seed=2, target_modules=embedding_run.targets), tmp_path / "resumed", callbacks=[restored]
-    )
+    model = _lora_model(source, seed=2, target_modules=variant_run.targets, **variant_run.lora)
+    trainer = _trainer(model, tmp_path / "resumed", callbacks=[restored])
 
-    trainer.train(resume_from_checkpoint=embedding_run.checkpoint)
+    trainer.train(resume_from_checkpoint=variant_run.checkpoint)
 
-    assert set(restored.tensors) == set(embedding_run.at_save)
-    unequal = [key for key, value in embedding_run.at_save.items() if not torch.equal(restored.tensors[key], value)]
+    assert set(restored.tensors) == set(variant_run.at_save)
+    unequal = [key for key, value in variant_run.at_save.items() if not torch.equal(restored.tensors[key], value)]
     assert not unequal, f"adapters not restored bit-equal: {unequal[:3]}"
     resumed = step_losses(trainer)[-(TOTAL_STEPS - SAVE_AT_STEP) :]
-    assert resumed == embedding_run.losses[SAVE_AT_STEP:]
+    assert resumed == variant_run.losses[SAVE_AT_STEP:]
     final = _trainable(trainer.model)
-    assert all(torch.equal(final[key], value) for key, value in embedding_run.final.items())
+    assert all(torch.equal(final[key], value) for key, value in variant_run.final.items())
 
 
-def test_an_adapter_the_fold_cannot_express_is_refused_at_construction(tmp_path):
-    """DoRA's magnitude has no ``B @ A`` fold. Refused when the trainer is built, on every rank, rather
-    than on the save rank alone at the first checkpoint, where its peers would block in the save."""
-    PartialState()
-    base = _tiny_base(tmp_path / "base")
+class _AttentionBackbone(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = torch.nn.MultiheadAttention(8, 2)
 
-    with pytest.raises(NotImplementedError, match="have no such fold"):
-        _trainer(_lora_model(base, seed=1, use_dora=True), tmp_path / "out")
+
+def test_an_adapter_the_save_cannot_fold_is_refused_at_construction():
+    """An ``nn.MultiheadAttention`` LoRA has no out-of-place fold. Refused when the trainer is built, on
+    every rank, rather than on the save rank alone at the first checkpoint, where its peers would
+    block in the save's collectives."""
+    backbone = inject_adapter_in_model(LoraConfig(r=2, target_modules=["attn"]), _AttentionBackbone())
+    host = _host(backbone)
+    host._get_unwrapped_model = lambda: backbone
+
+    with pytest.raises(NotImplementedError, match="cannot be folded out of place"):
+        EmbeddingTrainer._validate_injected_lora_foldable(host)
 
 
 # --- full fine-tune -------------------------------------------------------------------------

@@ -50,14 +50,17 @@ def resolve_retained(items: Iterable[tuple[str, torch.Tensor]], *, retain: bool)
     return resolved
 
 
-def gather_saveable_tensors(model: nn.Module, *, retain: bool) -> dict[str, torch.Tensor]:
+def gather_saveable_tensors(
+    model: nn.Module, *, retain: bool, items: Iterable[tuple[str, torch.Tensor]] | None = None
+) -> dict[str, torch.Tensor]:
     """Everything a gathered save writes for ``model``: parameters, persistent buffers, GptOss sinks.
 
     Non-persistent buffers (rotary caches, masks) are recomputed on load and stay out. GptOss under
     FA2 drops ``sinks`` from ``named_parameters()``; they are re-emitted neutralized so the reload
-    matches, and ``setdefault`` leaves a live sink alone. Purely local, hence retain-only.
+    matches, and ``setdefault`` leaves a live sink alone. Purely local, hence retain-only. ``items``
+    replaces the walk, as in :func:`saveable_items` (the embedding save's folded LoRA).
     """
-    state_dict = resolve_retained(saveable_items(model), retain=retain)
+    state_dict = resolve_retained(saveable_items(model, items), retain=retain)
     if retain:
         for name, tensor in neutralized_gpt_oss_sinks(model).items():
             state_dict.setdefault(name, tensor)
