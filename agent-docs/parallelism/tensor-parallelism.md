@@ -258,8 +258,9 @@ Transformers validates no head count of its own, so without it the run dies on t
 reshape, after the whole checkpoint has been pulled and placed on every rank.
 
 **Axis combinations.** TP composes with EP only. TP+CP, TP+ETP, EP+TP+ETP and PP+TP are refused by
-the [allowlist](README.md#supported-combinations); multi-domain multi-group EP+TP is rejected
-separately (`_validate_tp`).
+the [allowlist](README.md#supported-combinations). EP+TP also meets two topology rejections:
+single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domain multi-group EP
+([Multi-Node → EP+TP](multi-node.md#eptp-mode)).
 
 **Knobs.** Everything below raises unless the verdict says otherwise.
 

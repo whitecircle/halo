@@ -134,7 +134,7 @@ Safe single-node pure-EP shapes — one group, or 2-rank groups:
 - **`ep_size == 2`** → many 2-rank groups, clean.
 
 The only 4-way expert split left on 8 GPUs is EP+**ETP** (`ep4 + etp2`), which the gate accepts
-because `ep_group_size` then fills the domain, and which is GPU-validated
+because `ep_group_size` then fills the domain; the GPU test matrix runs `ep2 + etp4` instead
 ([ETP validation rules](expert-tensor-parallelism.md#validation-rules)). Attention **TP does not
 help** at all: it leaves `ep_group_size` untouched, so `ep4 + tp2` is rejected exactly like bare
 `ep4`.
@@ -232,12 +232,11 @@ What an EP run has to plan around:
       disables), above which an EFA proxy-GIN dispatch **wedges instead of erroring**. Intra-node
       NVLink dispatch is validated to 65536 tokens per rank.
 
-    The Gin cap is the binding limit on `per_device_train_batch_size × max_length` for any
+    The Gin cap is the binding limit on `per_device_train_batch_size` × sequence length for any
     `ep_scope=global` run spanning more than one NVLink domain
     ([AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)). Both ceilings are also
-    applied before the load, against the declared budget:
-    `rows-per-forward × per_device_train_batch_size × max_length`, with `max_length: null` resolved
-    to the model's own context window (the largest budget that spelling can mean).
+    applied before the load, against the run's declared per-rank budget
+    ([DeepEP → Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit)).
 
 - **The dispatched count is `per_device_train_batch_size × tokens-per-sequence`.** It does not scale
   with `num_generations` or `gradient_accumulation_steps`, and the buffer is per-rank, so raising
@@ -489,7 +488,7 @@ topology rejections sit on top: single-domain multi-group EP with `ep_size > 2`
 | `use_grouped_gemm: false` | drops the wrappers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `_validate_expert_lora_realized` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_validate_fsdp_settings` |
 | `use_hsdp` | rejected — EP already shards over the EP group | `_validate_hsdp` |
-| `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build — fused AdamW cannot mix plain expert tensors with FSDP2 DTensors. `fp32_non_ep_params: true` (fp32 masters on the non-expert params), `muon` and `flash_adamw` build | `mixins/base.py` |
+| `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `mixins/base.py` |
 | `ref_model` (explicit) | rejected — the reference is never parallelized, so its log-probs would not match the policy | `_validate_reference_model` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `model_loading.py`, `ParallelismValidationMixin` |

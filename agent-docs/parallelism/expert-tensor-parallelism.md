@@ -96,8 +96,9 @@ Enforced in `src/distributed/parallelism_config.py` before model loading:
 - Cross-node EP (`ep_scope=global`) + ETP is supported as **one ETP group per NVLink domain** only:
   `expert_tp_size == EP members per domain` and `ep_size == domains spanned`. A finer split that
   would straddle a domain boundary is rejected — the ETP all-reduce must stay on NVLink.
-- Multi-domain multi-group EP+ETP is rejected — the in-backward cross-replica expert grad sync races
-  the DeepEP combine across domains.
+- Multi-domain multi-group EP+ETP is rejected — expert-TP keeps the deferred cross-replica DP path
+  (`is_deferred_dp`) off, so FSDP2's DP-wide reduce-scatter would race the narrower DeepEP combine
+  across domains.
 
     This rule, not the one above, is what refuses `ep2+etp4` and `ep4+etp2` on 2×8 (both leave
     `ep_group_size=8` under a 16-rank world), at either scope; `ep2+etp8` is the working shape.
@@ -108,14 +109,14 @@ Enforced in `src/distributed/parallelism_config.py` before model loading:
   domain, for instance.
 
 > [!NOTE]
-> **`ep4+etp2` on 8 GPUs is validated**
+> **`ep4+etp2` on 8 GPUs passes the gate**
 >
 > It is the only 4-way expert split on a single 8-GPU node, and it clears the racy-EP gate that
 > refuses bare `ep4` because ETP raises `ep_group_size` to the full domain —
-> [Expert Parallelism](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs). For a
-> 4-way *expert-FFN* split without that topology, `ep2+etp4` reaches the same 8-way total split
-> through 2-rank dispatch groups, at DP 2 instead of DP 4; it is what the 8-GPU Mistral4 matrix
-> (`tests/gpu/manifest.py`) runs.
+> [Expert Parallelism](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs). The GPU
+> test matrix does not run it. For a 4-way *expert-FFN* split without that topology, `ep2+etp4`
+> reaches the same 8-way total split through 2-rank dispatch groups, at DP 2 instead of DP 4; it is
+> what the 8-GPU Mistral4 and Cohere2 MoE matrices (`tests/gpu/manifest.py`) run.
 
 ETP reduces data parallelism — it counts toward `max(tp_size, cp_size, expert_tp_size)` in the
 `dp_size` formula owned by [Distributed Data Loading](data-loading.md#data-parallel-size). On 8 GPUs

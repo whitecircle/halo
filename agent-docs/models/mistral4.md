@@ -10,7 +10,7 @@
 
 EP+ETP (`ep_size>1` and `expert_tp_size>1`) is experimental; its expert-TP groups stay NVLink-local, and it cannot combine with attention TP (`tp_size>1`). The Mistral4 suite runs `ep_size=2, expert_tp_size=4`; the sibling `ep_size=4, expert_tp_size=2` is a legal shape that this model's matrix does not cover.
 
-`ep4+etp2` clears the racy-EP gate because ETP raises `ep_group_size` to the domain, even though DeepEP still forms the two 4-rank dispatch groups the gate rejects for bare `ep4` — and that validation does not clear bare `ep4` on 8 (`is_racy_single_domain_multigroup_ep`). See [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md).
+`ep4+etp2` passes the racy-EP gate (`is_racy_single_domain_multigroup_ep`) because ETP raises `ep_group_size` to the domain, even though DeepEP still forms the two 4-rank dispatch groups the gate rejects for bare `ep4`; bare `ep4` on 8 stays rejected. See [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md).
 
 ¹ A valid shape that has not been run on this model. Node-local EP+CP requires `ep_group_size == nvlink_domain_size`, so on 8-GPU nodes `ep_size=8` exactly; `cp_size` then only has to divide the domain.
 

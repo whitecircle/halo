@@ -166,13 +166,16 @@ model would pay that cost for no speedup. Dense models under CP get no EP config
 ```bash
 # CP-only (any supported model, long sequences)
 torchrun --nproc_per_node=4 scripts/training/sft.py \
-    examples/sft/qwen3/qwen3-4b-ultrachat.yaml --context_parallel_size=4
+    examples/sft/qwen3/qwen3-4b-ultrachat.yaml --context_parallel_size=4 --packing=false
 
-# EP+CP (MoE, ep_group_size must equal the NVLink domain)
+# EP+CP (MoE, node-local EP with ep_group_size equal to the NVLink domain)
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-    --expert_parallel_size=8 --context_parallel_size=2
+    --expert_parallel_size=8 --ep_scope=node --context_parallel_size=2 --packing=false
 ```
+
+Both example configs set `packing: true` (refused under CP), and the gpt-oss one sets
+`ep_scope: global` (refused under CP), so the commands override them.
 
 Programmatic: `parallelism_config=ParallelismConfig(ep_size=8, cp_size=8)`.
 

@@ -282,9 +282,13 @@ trajectories.
 
 Both this ceiling and the cross-node Gin one are applied **at config time** as well, before any weight
 is read. `ParallelismConfig.validate_against_model_config` sizes the run's declared budget
-(`per_device_train_batch_size × max_length`, divided by `cp_size`, doubled for DPO, SMPO and reward,
-which forward chosen and rejected together) through the same `ep_dispatch_capacity` alignment the
-dispatcher uses and refuses it there, naming the budget, the capacity and the EP group.
+(`per_device_train_batch_size` × the declared row length, divided by `cp_size`, doubled for DPO, SMPO
+and reward, which forward chosen and rejected together) through the same `ep_dispatch_capacity`
+alignment the dispatcher uses and refuses it there, naming the budget, the capacity and the EP group.
+
+The row length is `max_length`, or `max_prompt_length + max_completion_length` for offline GRPO,
+which refuses `max_length`. A length left unbounded (`max_length: null`, or an uncapped prompt or
+completion) resolves to the model's context window, the largest budget it can mean.
 
 The dispatcher's check stays the backstop for the batch actually in hand, and is the only check for a
 training config with no `max_length` field (online and async GRPO), which declares no budget. Whether

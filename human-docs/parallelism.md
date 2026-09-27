@@ -45,12 +45,14 @@ explanation before touching the GPUs. The rules people actually hit:
   between (say EP=4 on 8 GPUs) is rejected: the MoE routing collectives race
   FSDP2's DP-wide ones, and the default buffer backend faults where the legacy
   one deadlocks. For a 4-way expert split on 8 GPUs, `ep4 + etp2` is the
-  validated shape — the gate compares `ep_size × expert_tp_size` against the
+  shape the gate accepts — it compares `ep_size × expert_tp_size` against the
   domain, and 8 fills it. `ep4 + tp2` is **not**: attention TP leaves that product
   at 4 and lands back on the same rejection.
 - **TP and node-local EP can't leave the NVLink domain** — the node on a
   typical 8-GPU host, the whole rack on NVL72. EP *can* span domains with
   `--ep_scope=global` on a proper RDMA fabric — see [Clusters](clusters.md).
+  EP+TP across domains needs one EP group spanning the whole job
+  (`ep_size` = world size).
 - **EP+CP needs node-local EP filling the whole domain**: `ep_scope` must stay
   node, and `ep_size × expert_tp_size` must equal the NVLink domain size
   (`ep8` on an 8-GPU node). Global-scope EP with CP is rejected.

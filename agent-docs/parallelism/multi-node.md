@@ -141,8 +141,8 @@ which moving the cross-replica average out of the backward does not address.
 | EP+TP | 16 | 1 | 2 | 1 | 1 | global | 8 |
 | EP+ETP per domain | 2 | 1 | 1 | 8 | 1 | global | 2 |
 
-Every `PP > 1` column value is rejected at config time — pipeline parallelism is
-[not yet available in this release](pipeline-parallelism.md).
+The PP column stays 1: `pipeline_parallel_size > 1` is rejected at config time — pipeline
+parallelism is [not yet available in this release](pipeline-parallelism.md).
 
 Three shapes are narrower than they look; all are rejected at config time, not at runtime:
 
@@ -156,12 +156,12 @@ Three shapes are narrower than they look; all are rejected at config time, not a
 - **EP+CP requires `ep_group_size == nvlink_domain_size`** — on 8-GPU nodes, `ep_size=8` exactly.
   `ep2+cp2` and `ep4+cp2` are rejected, as is cross-domain EP under CP (`ep_scope=global`).
 
-- **EP+ETP across domains** needs a single dispatch group covering the job *and* exactly one ETP
+- **EP+ETP across domains** needs a single EP group covering the job *and* exactly one ETP
   group per domain: `expert_tp_size == nvlink_domain_size` and `ep_size == domain count`, which
   keeps the ETP all-reduce on NVLink. On 2×8 that leaves `ep2+etp8`.
 
     Anything narrower (`ep2+etp4`, `ep4+etp2`) has `ep_group_size` below the world and is refused
-    one rule earlier, by the multi-dispatch-group check (`world_size // ep_group_size > 1`):
+    one rule earlier, by the multi-EP-group check (`world_size // ep_group_size > 1`):
     expert-TP keeps `is_deferred_dp` off, so FSDP2's DP-wide reduce-scatter would race the narrower
     DeepEP combine across domains. Both raise at either `ep_scope`.
 
@@ -192,7 +192,7 @@ correct mean because `world_size = num_batches × cp_size`.
 
 **HSDP (`--use_hsdp`):** the default 1D full-shard path sends every shard collective over RDMA. `--use_hsdp`
 switches to a 2D `(dp_replicate, dp_shard)` mesh that shards within each NVLink domain and
-replicates across domains, so only one gradient all-reduce crosses RDMA per step. See
+replicates across domains, so only one gradient all-reduce crosses RDMA per backward. See
 [Data Parallelism → HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel). Rejected with EP,
 TP, EP+TP, Expert-TP, and PP.
 
@@ -205,16 +205,25 @@ own tiling group and counted once. The global norm is `sqrt(expert² + non_exper
 ## EP+TP mode
 
 TP (DTensor) shards attention within each NVLink domain; EP (DeepEP) distributes experts; FSDP2
-syncs DP across domains. Rules (`_validate_tp`): `tp_size <= nvlink_domain_size` and divides it;
-`ep_size` is a multiple of `tp_size`; cross-domain EP under TP must be a **single** EP group
-spanning the job; DP = `stage_world_size / tp_size`. Mechanism and load path:
-[tensor-parallelism.md](tensor-parallelism.md#eptp-mode).
+syncs DP across domains. Attention TP leaves `ep_group_size` at `ep_size`, so it adds no expert
+sharding. DP = `stage_world_size / tp_size`. Rules, all checked at config time:
+
+- `tp_size` divides the NVLink domain, and `ep_size` is a multiple of `tp_size` (`_validate_tp`).
+- **One domain:** the
+  [single-domain multi-group rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)
+  applies unchanged, so `ep_size` is 2 or fills the domain. `ep2+tp2` on 8 GPUs (four 2-rank EP
+  groups) passes; `ep4+tp2` is rejected like bare `ep4`.
+- **More than one domain:** a **single** EP group spanning the job (`ep_size == stage_world_size`,
+  which `ep_scope=auto` resolves to `global`); multi-group EP+TP is rejected
+  ([why](#configuration-matrix)).
+
+Mechanism and load path: [tensor-parallelism.md](tensor-parallelism.md#eptp-mode).
 
 ![EP + TP on two nodes: each node runs a node-local TP group over NVLink while all 16 ranks form one global EP group whose DeepEP all-to-all crosses RDMA, and FSDP2 shards the non-expert parameters over the dp-2 per-TP-position pairs](../assets/diagrams/ep_multi_node_layout.png)
 
-Valid shapes: single node — `ep8/tp8` (DP 1) or `ep8/tp4` (DP 2, one 8-rank EP group spanning two TP
-groups); 2×8 — `ep16` global with `tp8` (DP 2) or `tp4` (DP 4). At DP=1 there is no inter-node FSDP
-sync.
+Valid shapes: single node — `ep8/tp8` (DP 1), `ep8/tp4` (DP 2, one 8-rank EP group spanning two TP
+groups), `ep8/tp2` (DP 4) or `ep2/tp2` (DP 4); 2×8 — `ep16` global with `tp8` (DP 2), `tp4` (DP 4)
+or `tp2` (DP 8). At DP=1 there is no inter-node FSDP sync.
 
 ## ParallelismConfig
 
