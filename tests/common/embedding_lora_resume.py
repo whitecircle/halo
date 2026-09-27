@@ -30,15 +30,16 @@ embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
      not hold it; TP and EP build from the checkpoint. Every parameter is BIT-EQUAL to the saved one
      after the restore, and the losses and final weights track as above.
   4. The best-model load (``_load_best_model`` onto the resumed run, trained past the checkpoint)
-     brings the checkpoint's weights back bit for bit. Skipped on a model wrapped for expert compute
-     (EP, or a MoE under TP at the default grouped GEMM), whose base weights load only at
-     construction and whose ``load_best_model_at_end`` the startup gate refuses.
+     brings the checkpoint's weights back bit for bit. A model wrapped for expert compute (EP, or a
+     MoE under TP at the default grouped GEMM) loads its base weights only at construction, and TP
+     over FSDP2 cannot invert its stacked shards: there the load must be refused, not keep the last
+     weights.
 
 Modes (:data:`MODES`): ``single`` (one process), ``fsdp`` (torchrun: mixin FSDP2, DTensor params),
 ``ddp`` (what ``accelerate launch`` with a MULTI_GPU config runs: accelerate's DDP over plain
-tensors), ``presharded`` (FSDP2 over per-rank dataset slices, batched by the toolkit's loader), ``tp``
-and ``ep`` (the script's TP / EP loader). Under LoRA, ``tp`` and ``ep`` only check that the trainer
-refuses the injected adapters at construction.
+tensors), ``presharded`` (FSDP2 over per-rank dataset slices, batched by the toolkit's loader), ``tp``,
+``tpdp`` (TP over FSDP2, four ranks) and ``ep`` (the script's TP / EP loader). Under LoRA, ``tp`` and
+``ep`` only check that the trainer refuses the injected adapters at construction.
 
 The scripts stay separate because the manifest launches each at one world size and one tier.
 """
@@ -125,8 +126,8 @@ FAMILIES = {
 # What ``--lora`` adapts, and how (``dora``); ``off`` is a full fine-tune.
 LORA_TARGETS = ("attention", "mixed", "embedding", "dora", "off")
 TRAIN_MODES = ("single", "fsdp", "ddp", "presharded")
-# Refused under LoRA, trained under a full fine-tune.
-PARALLEL_MODES = {"tp": {"tp_size": 2}, "ep": {"ep_size": 2}}
+# Refused under LoRA, trained under a full fine-tune. ``tpdp`` is TP over FSDP2 (four ranks: tp 2, dp 2).
+PARALLEL_MODES = {"tp": {"tp_size": 2}, "tpdp": {"tp_size": 2}, "ep": {"ep_size": 2}}
 MODES = TRAIN_MODES + tuple(PARALLEL_MODES)
 
 LORA_R = 8
@@ -346,6 +347,8 @@ def _mode_checks(ctx, mode: str, lora: str, trainer: EmbeddingTrainer) -> dict[s
         checks["mode_is_single_process"] = ctx.world_size == 1 and not trainer._fsdp_wrapped
     elif mode == "ddp":
         checks["mode_is_accelerate_ddp"] = trainer._accelerate_manages_ddp and not trainer._fsdp_wrapped
+    elif mode == "tpdp":
+        checks["mode_is_tp_over_fsdp2"] = trainer.parallelism_config.is_tp_mode and trainer._fsdp_wrapped
     elif mode == "tp":
         checks["mode_is_pure_tp_with_dtensor_params"] = (
             trainer.parallelism_config.is_tp_mode
@@ -555,15 +558,24 @@ def _full_finetune_row(ctx, family: Family, mode: str, base_source: str, shared_
     checks["final_weights_match_uninterrupted"] = drift < FINAL_WEIGHT_RTOL
     log(f"  final weights, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {FINAL_WEIGHT_RTOL})")
 
+    log(f"\n[4/4] Best-model load of {checkpoint} onto the resumed run...")
+    trainer.state.best_model_checkpoint = checkpoint
     # A model wrapped for expert compute (EP, or the default grouped GEMM on a MoE) reloads its base
-    # weights only at construction, and the startup gate refuses load_best_model_at_end for it.
-    if not run.expert_weights:
-        log(f"\n[4/4] Best-model load of {checkpoint} onto the resumed run...")
+    # weights only at construction, and TP+DP's stacked shards do not invert: the loader refuses both
+    # rather than keep the last weights, as the startup gate refuses load_best_model_at_end for them.
+    if run.expert_weights or mode == "tpdp":
+        refusal = None
+        try:
+            trainer._load_best_model()
+        except (ValueError, RuntimeError) as e:
+            refusal = str(e)
+        log(f"  best-model load: {'refused: ' + refusal.splitlines()[0][:120] if refusal else 'ACCEPTED'}")
+        checks["best_model_load_is_refused"] = refusal is not None and "cannot reload" in refusal
+    else:
         before = _trainable_snapshot(trainer.model)
         checks["premise_resumed_run_trained_past_the_checkpoint"] = not _bit_equal(
             run.at_save, before, "live before the best-model load vs at save"
         )
-        trainer.state.best_model_checkpoint = checkpoint
         trainer._load_best_model()
         after = _trainable_snapshot(trainer.model)
         checks["best_model_load_restores_the_checkpoint_bit_equal"] = _bit_equal(

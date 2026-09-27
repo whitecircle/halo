@@ -707,6 +707,12 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=600,
     ),
+    "trainers/lora/test_embedding_lora_resume_4gpu.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "tp", "moe", "qwen3", "gptoss"),
+        args_matrix=("--family qwen3", "--family qwen3_5", "--family gpt_oss"),
+        timeout=900,
+    ),
     "trainers/lora/test_embedding_lora_resume_roster.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "tp", "ep", "moe", "qwen3", "gemma4", "gptoss"),

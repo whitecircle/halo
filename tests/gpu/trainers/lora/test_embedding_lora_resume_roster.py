@@ -19,7 +19,8 @@ from tests.common.harness import gpu_test_main
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
-parser.add_argument("--mode", choices=[mode for mode in MODES if mode != "single"], required=True)
+# One process and TP over FSDP2 take their own world sizes (the _1gpu and _4gpu scripts).
+parser.add_argument("--mode", choices=[mode for mode in MODES if mode not in ("single", "tpdp")], required=True)
 parser.add_argument("--lora", choices=LORA_TARGETS, default="attention")
 ARGS, _ = parser.parse_known_args()
 
