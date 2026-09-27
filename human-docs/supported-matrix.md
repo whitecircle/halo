@@ -34,8 +34,11 @@ SDPA or eager where no Flash kernel serves the family; the padded-batch scripts
 when the YAML sets none. Gemma 4 gets no flash path at all (FA2 caps head_dim at
 256 and FA4 overflows tensor memory at its 512-wide global layers); Qwen3.5/3.6
 and GLM-4 MoE Lite are demoted off FA4 alone (its backward NaNs at their shapes)
-and keep FA3 on Hopper; GLM-5 Next, Step-3.7 Flash, Inkling, Laguna and
-Bailing/Ling run without one; DeepSeek-V4 needs eager.
+and keep FA3 on Hopper; GLM-5 Next, Step-3.7 Flash and Inkling fall back to
+SDPA on their own; DeepSeek-V4 needs eager. Bailing/Ling and Laguna get no
+automatic fallback: set `attn_implementation: sdpa` yourself, as their shipped
+configs do — on Bailing/Ling a flash label, the auto-selected one included,
+fails the model build.
 
 Context parallelism picks its own kernel and ignores the configured label — FA3
 on Hopper, FA4 on Blackwell, FA2 otherwise — and rejects SDPA except where a

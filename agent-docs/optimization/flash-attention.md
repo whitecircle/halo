@@ -210,7 +210,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | GptOss | FA4 on Blackwell, FA3 on Hopper |
 | Qwen3.5 / Qwen3.6 / GLM-4.7-Flash | → SDPA (FA4 backward NaN) |
 | Gemma4 | → SDPA, mem-efficient kernel (head_dim 512) |
-| Bailing / Ling | → SDPA; a CP run must set `attn_implementation: sdpa` itself |
+| Bailing / Ling | no fallback: the flash label fails the model build — set `attn_implementation: sdpa` |
 | DeepSeek-V4 | → eager |
 | GLM-5 Next · Step-3.7 Flash · Inkling | → SDPA (upstream declares no flash support) |
 | Context Parallelism | FA3 on Hopper, FA4 on Blackwell — FA2 for the FA4-NaN families |
