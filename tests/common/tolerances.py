@@ -21,8 +21,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class _Tolerances:
     # ── Cross-rank agreement ────────────────────────────────────────────────
-    # Identical broadcast batch, so only the combine reduction order varies; 1e-3 is headroom over
-    # that reorder, and a real mis-dispatch moves one rank's loss well past it.
+    # Identical batch on every rank, so only a reduction order varies (the EP combine; TP's partial-sum
+    # all-reduce hands every rank one sum); 1e-3 is headroom over that reorder, and a real mis-dispatch
+    # or mis-shard moves one rank's loss well past it.
     ep_identical_batch_rank_spread_abs: float = 1e-3
 
     # ── Parallel mode vs single-GPU / FSDP reference ────────────────────────

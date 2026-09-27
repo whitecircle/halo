@@ -35,7 +35,7 @@ from src.distributed.runtime import barrier
 from src.env import env_str
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
-from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss, fixed_text_batch
+from tests.common.checkpoint_io import TP_RESUME_PROBE_TEXT, ResumeCapture, fixed_batch_loss, fixed_text_batch
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
@@ -65,11 +65,6 @@ SEED = 42
 # By-value weight-restoration probes (catch a silent-base-weights / corrupted-gather resume)
 
 LOSS_TOL = 1e-2  # TP forward is deterministic, so restored weights must reproduce L_pre tightly.
-# The sequence the fixed-batch loss is scored on before the save and after the resume.
-FIXED_TEXT = (
-    "User: What is 17 plus 25?\nAssistant: The answer is 42. "
-    "The TP gather and re-shard must survive a checkpoint save and resume intact."
-)
 
 
 # Phase 1: Train + Save Checkpoint
@@ -147,7 +142,7 @@ def phase1_train_and_save(
         log(f"Phase 1 step losses: {[f'{l:.4f}' for l in losses]}")
 
         # Fixed-batch loss on the TRAINED weights (before they're freed) — the by-value anchor for resume.
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
+        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
         l_pre = fixed_batch_loss(trainer.model, ids, labels)
         log(f"Phase 1 L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
@@ -258,7 +253,7 @@ def phase2_resume_and_train(
         assert trainer._has_ep_layers if _IS_EP else trainer.is_tp_mode, f"expected {_MODE} mode active"
 
         # Capture restored state at on_train_begin (post-resume, pre-first-step).
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
+        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
         resume_capture = ResumeCapture(trainer, ids, labels)
         trainer.add_callback(resume_capture)
 

@@ -40,7 +40,7 @@ from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.utils import gpu_mem_gb, log, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -169,23 +169,16 @@ def run(ctx) -> dict:
     log(f"GPU memory after training: {gpu_mem_gb():.1f}GB")
 
     log("\n--- Validating results ---")
-    log_history = trainer.state.log_history
+    losses = step_losses(trainer)
+    grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
 
-    step_losses = []
-    grad_norms = []
-    for entry in log_history:
-        if "loss" in entry and "eval_loss" not in entry:
-            step_losses.append(entry["loss"])
-        if "grad_norm" in entry:
-            grad_norms.append(entry["grad_norm"])
-
-    log(f"Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"Per-step losses: {[f'{l:.4f}' for l in losses]}")
     if grad_norms:
         log(f"Per-step grad norms: {[f'{g:.2f}' for g in grad_norms]}")
 
     checks = {
         "loss_finite": bool(torch.isfinite(torch.tensor(train_result.training_loss))),
-        "step_losses_finite": all(torch.isfinite(torch.tensor(l)) for l in step_losses),
+        "step_losses_finite": all(torch.isfinite(torch.tensor(l)) for l in losses),
         "grad_norms_finite": bool(grad_norms) and all(torch.isfinite(torch.tensor(g)) for g in grad_norms),
         "steps_completed": train_result.global_step == NUM_TRAIN_STEPS,
     }

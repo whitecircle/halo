@@ -42,6 +42,7 @@ from src.distributed.runtime import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import LFM2_24B_A2B
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, step_losses
@@ -119,9 +120,9 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
 
     checks: dict[str, bool] = {}
     if parallelism_config.needs_ep_wrappers:
-        ep_layers = sum(1 for m in model.modules() if hasattr(m, "ep_config"))
-        log(f"EP MoE layers detected: {ep_layers}")
-        checks["ep_layers_wrapped"] = ep_layers > 0
+        wrapped = len(ep_layers(model))
+        log(f"EP MoE layers detected: {wrapped}")
+        checks["ep_layers_wrapped"] = wrapped > 0
 
     sft_kwargs = {
         "output_dir": os.path.join(ctx.output_dir, mode_key),

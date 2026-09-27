@@ -34,7 +34,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss, fixed_text_batch
+from tests.common.checkpoint_io import TP_RESUME_PROBE_TEXT, ResumeCapture, fixed_batch_loss, fixed_text_batch
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -61,11 +61,6 @@ SEED = 42
 # forward loss on a FIXED batch must match to bf16 round-trip noise; a corrupted gather
 # (dropped/mis-sharded weights) shifts it by >>1.
 LOSS_TOL = 1e-2
-# The sequence the fixed-batch loss is scored on before the save and after the resume.
-FIXED_TEXT = (
-    "User: What is 17 plus 25?\nAssistant: The answer is 42. "
-    "The TP gather and re-shard must survive a checkpoint save and resume intact."
-)
 
 
 # Checkpoint file verification
@@ -171,7 +166,7 @@ def phase1_train_and_save(
         log(f"Phase 1 step losses: {[f'{l:.4f}' for l in losses]}")
 
         # Reference forward loss on a FIXED batch with the trained (== saved) weights.
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
+        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
         l_pre = fixed_batch_loss(trainer.model, ids, labels)
         log(f"Phase 1 L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
@@ -276,7 +271,7 @@ def phase2_resume_and_train(
         assert trainer.is_tp_mode, "trainer.is_tp_mode should be True"
 
         # Capture restored state at on_train_begin (post-resume, pre-first-step).
-        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
+        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
         resume_capture = ResumeCapture(trainer, ids, labels)
         trainer.add_callback(resume_capture)
 

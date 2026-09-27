@@ -56,7 +56,7 @@ LORA_ALPHA = 16
 WINDOW_SIZE = 5
 
 
-def _analyze_convergence(step_losses: list[float], window_size: int = WINDOW_SIZE) -> dict[str, bool]:
+def _analyze_convergence(losses: list[float], window_size: int = WINDOW_SIZE) -> dict[str, bool]:
     """Analyze loss trajectory for convergence signals.
 
     Returns dict of check_name -> passed. Checks:
@@ -67,17 +67,17 @@ def _analyze_convergence(step_losses: list[float], window_size: int = WINDOW_SIZ
     """
     checks = {}
 
-    all_finite = all(math.isfinite(l) for l in step_losses)
+    all_finite = all(math.isfinite(l) for l in losses)
     checks["all_finite"] = all_finite
     log(f"  All losses finite: {'PASS' if all_finite else 'FAIL'}")
 
-    if not all_finite or len(step_losses) < window_size * 2:
-        log(f"  Insufficient data for convergence analysis ({len(step_losses)} steps, need {window_size * 2})")
+    if not all_finite or len(losses) < window_size * 2:
+        log(f"  Insufficient data for convergence analysis ({len(losses)} steps, need {window_size * 2})")
         return checks
 
     windows = []
-    for i in range(0, len(step_losses) - window_size + 1, window_size):
-        window = step_losses[i : i + window_size]
+    for i in range(0, len(losses) - window_size + 1, window_size):
+        window = losses[i : i + window_size]
         windows.append(sum(window) / len(window))
 
     log(f"  Window means ({window_size}-step): {[f'{w:.4f}' for w in windows]}")
@@ -103,7 +103,7 @@ def _analyze_convergence(step_losses: list[float], window_size: int = WINDOW_SIZ
         log(f"  No divergence: PASS (all windows < {divergence_threshold:.4f})")
 
     # Catches a late blow-up only: the uniform baseline, ln(vocab) ~ 12.2 for GptOss, sits below 20.
-    final_loss = step_losses[-1]
+    final_loss = losses[-1]
     final_reasonable = final_loss < 20
     checks["final_loss_reasonable"] = final_reasonable
     log(f"  Final loss reasonable (<20): {'PASS' if final_reasonable else 'FAIL'} ({final_loss:.4f})")

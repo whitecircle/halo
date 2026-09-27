@@ -400,7 +400,7 @@ def run_mode_test(
     all_checks: dict[str, bool] = {}
 
     log(f"\n  -- Phase 1: Train + Save ({mode_name}) --")
-    train_ok, training_loss, step_losses = train_and_save(
+    train_ok, training_loss, _ = train_and_save(
         mode_name=mode_name,
         parallelism_config=parallelism_config,
         tokenizer=tokenizer,

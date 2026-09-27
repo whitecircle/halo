@@ -19,8 +19,13 @@ from transformers import TrainerCallback
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, load_full_state_dict
 from tests.common.utils import local_optimizer_state
 
-# Truncation bound for a :func:`fixed_text_batch` sequence; the one-sentence probes stay under it.
+# Truncation bound for a :func:`fixed_text_batch` sequence; the short probe texts stay under it.
 FIXED_TEXT_BATCH_MAX_TOKENS = 64
+# The fixed-batch probe of the TP resume suites, scored before the save and after the resume.
+TP_RESUME_PROBE_TEXT = (
+    "User: What is 17 plus 25?\nAssistant: The answer is 42. "
+    "The TP gather and re-shard must survive a checkpoint save and resume intact."
+)
 
 
 def written_keys(output_dir: str) -> set[str]:

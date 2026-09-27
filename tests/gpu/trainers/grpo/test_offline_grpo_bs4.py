@@ -257,10 +257,10 @@ def run(ctx):
         result = run_single_loss_type(loss_type, MODEL_NAME, tokenizer, train_dataset, eval_dataset, output_dir)
 
         loss = result["loss"]
-        step_losses = result["step_losses"]
+        losses = result["step_losses"]
 
         log(f"    Final loss: {loss:.6f}")
-        log(f"    Step losses: {[f'{l:.4f}' for l in step_losses]}")
+        log(f"    Step losses: {[f'{l:.4f}' for l in losses]}")
         if result["pos_logps"]:
             log(f"    Positive logps (first/last): {result['pos_logps'][0]:.4f} / {result['pos_logps'][-1]:.4f}")
         if result["neg_logps"]:
@@ -271,7 +271,7 @@ def run(ctx):
         checks[f"{loss_type}_loss_finite"] = finite
         log(f"    Loss finite: {'PASS' if finite else 'FAIL'}")
 
-        all_finite = all(math.isfinite(l) for l in step_losses)
+        all_finite = all(math.isfinite(l) for l in losses)
         checks[f"{loss_type}_all_steps_finite"] = all_finite
         log(f"    All steps finite: {'PASS' if all_finite else 'FAIL'}")
 
