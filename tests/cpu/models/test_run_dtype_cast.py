@@ -23,16 +23,26 @@ import torch
 import torch.nn as nn
 from accelerate import PartialState
 from bitsandbytes.nn import Linear4bit, Params4bit
+from safetensors.torch import save_file
 from torch.distributed.tensor import Shard, distribute_tensor
+from transformers import AutoConfig
 from trl import ModelConfig
 
 import scripts.training.embedding as embedding_script
+import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
+import src.distributed.pipeline_parallel.lazy_loader as pp_lazy_loader
 from src.configs.embedding_config import EmbeddingConfig
+from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.lazy_loader import fp32_non_ep_param_keys, load_ep_model_lazy
 from src.distributed.expert_parallel.loading import cast_loaded_parameters
 from src.distributed.expert_parallel.patching import ep_claimed_blocks
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_model_from_pretrained
+from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.models.loading.dtype import cast_parameters_to_run_dtype
+from src.models.loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from src.models.loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.structure import fp32_pinned_param_names
 from tests.common.distributed import fake_process_group_mesh
@@ -260,6 +270,142 @@ def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, fa
 
     assert bool(fp32) == (family in PINNED_FP32_FAMILIES)
     assert not fp32 & in_blocks
+
+
+@pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
+def test_a_config_built_shell_carries_the_pins_from_pretrained_loads(roster_checkpoints, family):
+    """The lazy loaders read what to keep in fp32 off the meta shell, which is config-built when the
+    meta ``from_pretrained`` fails or the checkpoint is a per-node pipeline save. ``from_config`` applies
+    no fp32 pin of its own, so the two shells must agree on every family."""
+    tiny = TINY_MOE_FAMILIES[family]
+    path = roster_checkpoints[family]
+    config = AutoConfig.from_pretrained(path, trust_remote_code=tiny.trust_remote_code)
+    shells = [
+        instantiate_on_meta(
+            path,
+            tiny.load_class,
+            config,
+            dtype=torch.bfloat16,
+            trust_remote_code=tiny.trust_remote_code,
+            config_only=config_only,
+        )
+        for config_only in (False, True)
+    ]
+
+    kept = [fp32_non_ep_param_keys(shell, ep_wrapped=True) for shell in shells]
+    assert kept[0] == kept[1]
+    assert bool(kept[0]) == (family in PINNED_FP32_FAMILIES)
+
+
+@pytest.fixture(scope="module")
+def stored_fp32_checkpoints(tmp_path_factory) -> dict[str, str]:
+    """The pinned families saved as a release stores them: the pins at full fp32, the rest bf16."""
+    root = tmp_path_factory.mktemp("stored_fp32")
+    checkpoints = {family: str(root / family) for family in PINNED_FP32_FAMILIES}
+    for family, path in checkpoints.items():
+        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path, fp32_pins=True)
+    return checkpoints
+
+
+def _config_built_shell(*args, **kwargs):
+    return instantiate_on_meta(*args, **{**kwargs, "config_only": True})
+
+
+def _load_with(loader: str, family: str, path: str, keep_fp32: bool, monkeypatch) -> nn.Module:
+    """``family`` loaded at bf16 through ``loader``, with ``fp32_non_ep_params`` as ``keep_fp32``.
+
+    The lazy loaders run with EP patching stubbed (it needs DeepEP and process groups) under an ep1
+    config, and the PP loader as its single stage; a ``config_shell`` loader plans against the
+    config-built meta shell instead of ``from_pretrained``'s.
+    """
+    tiny = TINY_MOE_FAMILIES[family]
+    if loader == "path_string":
+        args = types.SimpleNamespace(model_init_kwargs={"dtype": torch.bfloat16}, gradient_checkpointing=False)
+        model, _ = load_model_from_pretrained(
+            path, args, tiny.load_class, parallelism_config=ParallelismConfig(fp32_non_ep_params=keep_fp32)
+        )
+        return model
+    for module in (ep_lazy_loader, pp_lazy_loader):
+        monkeypatch.setattr(module, "patch_moe_model_for_ep", lambda model, *args, **kwargs: model)
+        monkeypatch.setattr(module, "create_ep_buffers", lambda *args, **kwargs: None)
+        if loader.endswith("config_shell"):
+            monkeypatch.setattr(module, "instantiate_on_meta", _config_built_shell)
+    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1)
+    config = AutoConfig.from_pretrained(path)
+    common = {
+        "dtype": torch.bfloat16,
+        "trust_remote_code": False,
+        "model_class": tiny.load_class,
+        "keep_fp32_params": keep_fp32,
+    }
+    if loader.startswith("ep_lazy"):
+        return load_ep_model_lazy(path, ep_config, config, **common)
+    return load_pp_stage_model(path, 0, 1, config=config, ep_config=ep_config, **common)
+
+
+FP32_MASTER_LOADERS = ("path_string", "ep_lazy", "ep_lazy_config_shell", "pp_stage", "pp_stage_config_shell")
+
+
+@pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
+@pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
+@pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
+def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, family, loader, keep_fp32, monkeypatch):
+    """Without ``fp32_non_ep_params`` every parameter loads bf16, as the flag-less loaders always did.
+    With it exactly the parameters ``from_pretrained`` pins load fp32, bitwise the checkpoint's stored
+    values, which a bf16 round trip would change; nothing else is widened."""
+    tiny = TINY_MOE_FAMILIES[family]
+    path = stored_fp32_checkpoints[family]
+    pinned = set(params_off_dtype(tiny.load_class.from_pretrained(path, dtype=torch.bfloat16), torch.bfloat16))
+    stored = dict(tiny.load_class.from_pretrained(path, dtype=torch.float32).named_parameters())
+    assert pinned and any(not torch.equal(stored[name], stored[name].bfloat16().float()) for name in pinned)
+
+    model = _load_with(loader, family, path, keep_fp32, monkeypatch)
+
+    fp32 = {name: param for name, param in model.named_parameters() if param.dtype == torch.float32}
+    assert set(params_off_dtype(model, torch.bfloat16)) == set(fp32)
+    assert set(fp32) == (pinned if keep_fp32 else set())
+    assert all(torch.equal(param.detach(), stored[name]) for name, param in fp32.items())
+
+
+@pytest.mark.parametrize("ep_wrapped", [True, False])
+def test_the_lazy_keep_set_leaves_out_ep_wrapped_blocks(pinned_checkpoints, ep_wrapped):
+    """The lazy loaders' twin of :func:`cast_loaded_parameters`: a parameter inside a block EP wraps
+    trains at the run dtype, so only an unwrapped load keeps it fp32."""
+    tiny = TINY_MOE_FAMILIES["inkling_text"]
+    checkpoint = pinned_checkpoints["inkling_text"]
+    shell = instantiate_on_meta(
+        checkpoint,
+        tiny.load_class,
+        AutoConfig.from_pretrained(checkpoint),
+        dtype=torch.bfloat16,
+        trust_remote_code=False,
+    )
+    pins = set(params_off_dtype(shell, torch.bfloat16))
+    in_block = next(
+        f"{path}.{name}" for path, block in ep_claimed_blocks(shell) for name, _ in block.named_parameters()
+    )
+    shell.get_parameter(in_block).data = shell.get_parameter(in_block).data.float()
+
+    kept = fp32_non_ep_param_keys(shell, ep_wrapped=ep_wrapped)
+
+    assert pins and kept == (pins if ep_wrapped else pins | {in_block})
+
+
+@pytest.mark.parametrize("keep_fp32", [frozenset(), frozenset({"weight"})], ids=["cast", "kept"])
+def test_the_weight_loader_keeps_only_the_named_keys_fp32(tmp_path, keep_fp32):
+    stored = {"weight": torch.randn(8, 8), "bias": torch.randn(8)}
+    save_file(stored, str(tmp_path / "model.safetensors"))
+    plans = [WeightPlan(WeightAction.REPLICATE, "model.safetensors", key, key) for key in stored]
+    with torch.device("meta"):
+        model = nn.Linear(8, 8)
+    loader = SafetensorsWeightLoader(str(tmp_path), ["model.safetensors"], device="cpu")
+
+    loader.load_into_model(model, plans, dtype=torch.bfloat16, keep_fp32=keep_fp32)
+
+    for key, value in stored.items():
+        param = model.get_parameter(key)
+        expected = value if key in keep_fp32 else value.bfloat16()
+        assert param.dtype == expected.dtype and torch.equal(param.detach(), expected)
 
 
 def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):

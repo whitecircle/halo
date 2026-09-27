@@ -97,7 +97,7 @@ def cast_parameters_to_run_dtype(
     ``keep_fp32`` leaves fp32 parameters as stored, for a run that upcasts to fp32 masters anyway
     (``fp32_non_ep_params``): a round trip through the run dtype would discard the checkpoint's
     precision before the upcast. The training loaders apply it outside the MoE blocks EP wraps
-    (``cast_loaded_parameters``), and the EP lazy loader materializes the same keys in fp32.
+    (``cast_loaded_parameters``), and the EP and PP lazy loaders materialize the same keys in fp32.
     Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases). "auto" and None
     leave the model as loaded. A ``Parameter`` subclass is left alone: that is a quantizer's storage
     (bnb's ``Params4bit``, whose ``bnb_4bit_quant_storage`` may be a float dtype), and a cast would

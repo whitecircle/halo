@@ -29,6 +29,7 @@ from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.lazy_loader import (
     CheckpointFormat,
     ExpertFuser,
+    fp32_non_ep_param_keys,
     lazy_load_prologue,
 )
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
@@ -111,6 +112,7 @@ def load_pp_stage_model(
     dtype: torch.dtype | None = None,
     trust_remote_code: bool = True,
     model_class=None,
+    keep_fp32_params: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """Load only this pipeline stage's decoder layers, streamed from safetensors.
@@ -120,6 +122,8 @@ def load_pp_stage_model(
     and ``resize_token_embeddings()`` keep working for every PP-enabled script.
     ``build_pipeline_stage`` finishes the split — it reads the partition back off
     :data:`~src.distributed.pipeline_parallel.stage.PP_STAGE_PARTITION_ATTR`.
+    ``keep_fp32_params`` (the run keeps fp32 masters) materializes in fp32 what an eager load leaves
+    fp32 outside the EP-wrapped MoE blocks, as the EP lazy loader does.
 
     Raises:
         ValueError: the model's structure cannot be split (see
@@ -200,6 +204,8 @@ def load_pp_stage_model(
     # checkpoint index and disk_to_model use.
     slice_backbone_to_stage(model, lo, hi)
     setattr(model, PP_STAGE_PARTITION_ATTR, partition)
+    # After the slice: the kept keys must be in the stage's own numbering, the one ``plans`` now uses.
+    keep_fp32 = fp32_non_ep_param_keys(model, ep_wrapped=ep_config is not None) if keep_fp32_params else frozenset()
     reject_across_ranks(_unresolved_plans_reason(model, plans, pp_rank, lo, hi), _PP_LOAD_LABEL)
 
     # The rank-local materialization steps below raise stage-dependent errors (a shape mismatch or
@@ -229,7 +235,7 @@ def load_pp_stage_model(
     )
 
     loader = SafetensorsWeightLoader(model_path, sorted({plan.shard_file for plan in live}), device=device)
-    guard.run(partial(loader.load_into_model, model, plans, dtype=dtype))
+    guard.run(partial(loader.load_into_model, model, plans, dtype=dtype, keep_fp32=keep_fp32))
 
     gc.collect()
     if torch.cuda.is_available():

@@ -632,6 +632,7 @@ def _load_pp_stage_model(
         dtype=common_kwargs.get("dtype"),
         trust_remote_code=common_kwargs.get("trust_remote_code", True),
         model_class=model_class,
+        keep_fp32_params=pc.fp32_non_ep_params,
         **_lazy_loader_passthrough(common_kwargs),
     )
 
@@ -923,11 +924,14 @@ def load_model_from_pretrained(
     model,
     args=None,
     model_cls=None,
+    *,
+    parallelism_config: ParallelismConfig | None = None,
 ):
     """Load a model from a pretrained path string, resolving its dtype; returns ``(model, model_id)``.
 
     An already-instantiated model must have ``model_init_kwargs`` unset. ``model_cls`` None → resolved
-    via `resolve_auto_model_class()`.
+    via `resolve_auto_model_class()`. Under ``parallelism_config.fp32_non_ep_params`` the stored fp32
+    parameters are kept for the trainer's fp32 upcast; no EP wrapper follows this load.
     """
     if isinstance(model, str):
         model_id = model
@@ -947,7 +951,11 @@ def load_model_from_pretrained(
         # An unset or "auto" dtype loads at the checkpoint's own dtype (recorded on the config), pins
         # aside; the cast unifies the pins to it.
         requested = model_init_kwargs.get("dtype")
-        cast_parameters_to_run_dtype(model, requested if isinstance(requested, torch.dtype) else model.config.dtype)
+        cast_parameters_to_run_dtype(
+            model,
+            requested if isinstance(requested, torch.dtype) else model.config.dtype,
+            keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params,
+        )
         finalize_loaded_model(model)
         if run_scoped_cache_off:
             set_config_field_run_scoped(model.config, "use_cache", False)

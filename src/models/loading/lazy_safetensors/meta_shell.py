@@ -14,7 +14,8 @@ import traceback
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
-from transformers import GenerationConfig
+from transformers import GenerationConfig, PreTrainedModel
+from transformers.core_model_loading import build_glob_alternation
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from src.models.loading.lazy_safetensors.weights import resolve_run_dtype
@@ -63,6 +64,27 @@ def _restore_checkpoint_generation_config(model: nn.Module, model_name_or_path: 
             raise
 
 
+def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
+    """Give a config-built shell the fp32 pins ``from_pretrained`` loads at ``dtype``.
+
+    ``from_pretrained`` keeps the ``_keep_in_fp32_modules[_strict]`` parameters in fp32 through its
+    dtype plan, which ``from_config`` never applies. The lazy loaders read which parameters load fp32
+    off the shell (a run keeping fp32 masters keeps those as stored), so a config-built shell without
+    the pins would round them through ``dtype``. Matched with transformers' own glob rule, on meta
+    parameters: nothing is allocated. A module that is not a transformers model declares no pins.
+    """
+    if not isinstance(model, PreTrainedModel):
+        return
+    plan = model._get_dtype_plan(dtype)
+    if not plan:
+        return
+    pattern, group_to_glob, _ = build_glob_alternation(list(plan))
+    for name, param in model.named_parameters():
+        match = pattern.search(name)
+        if match is not None:
+            param.data = param.data.to(plan[group_to_glob[match.lastgroup]])
+
+
 def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code: bool, **model_kwargs) -> nn.Module:
     """Build the model shell from the config alone: parameters on meta, buffers real.
 
@@ -74,7 +96,9 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
 
     ``from_pretrained`` is not used inside the context: it would stream every checkpoint tensor into
     host RAM. Only ``dtype`` / ``attn_implementation`` are forwarded, since ``from_config`` hands
-    anything else straight to ``__init__``, and the rest is already resolved into ``config``.
+    anything else straight to ``__init__``, and the rest is already resolved into ``config``. The
+    fp32 pins ``from_pretrained`` would apply are applied after the build
+    (:func:`_apply_fp32_dtype_plan`), so both shells carry the same parameter dtypes.
     """
     kwargs: dict = {"dtype": dtype}
     if "attn_implementation" in model_kwargs:
@@ -91,7 +115,7 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
         factory = model_class._from_config
     try:
         with init_empty_weights(include_buffers=False):
-            return factory(config, **kwargs)
+            model = factory(config, **kwargs)
     except Exception as e:
         if isinstance(e, ValueError) and any(
             frame.name == _ATTN_IMPLEMENTATION_CHECK for frame in traceback.extract_tb(e.__traceback__)
@@ -110,6 +134,8 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
             f"architecture from the checkpoint would materialize every tensor in host RAM. Load it "
             f"with ep_lazy_loading=False (PP: without a lazy stage load)."
         ) from e
+    _apply_fp32_dtype_plan(model, dtype)
+    return model
 
 
 def _materialize_nonpersistent_buffers_from_config_twin(

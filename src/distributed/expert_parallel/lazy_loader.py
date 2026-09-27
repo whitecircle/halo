@@ -593,10 +593,12 @@ def lazy_load_prologue(
     )
 
 
-def _fp32_non_ep_param_keys(model: nn.Module) -> frozenset[str]:
-    """The meta shell's fp32 parameters outside the MoE blocks EP wraps: what an eager load leaves fp32
-    (the class's pins, remote-code fp32 declarations) and a run keeping fp32 masters keeps as stored."""
-    ep_keys = {f"{path}.{name}" for path, block in ep_claimed_blocks(model) for name, _ in block.named_parameters()}
+def fp32_non_ep_param_keys(model: nn.Module, *, ep_wrapped: bool) -> frozenset[str]:
+    """The meta shell's fp32 parameters a run keeping fp32 masters keeps as stored: what an eager load
+    leaves fp32 (the class's pins, remote-code fp32 declarations), except, with ``ep_wrapped``, those
+    inside the MoE blocks EP wraps, which train at the run dtype."""
+    blocks = ep_claimed_blocks(model) if ep_wrapped else []
+    ep_keys = {f"{path}.{name}" for path, block in blocks for name, _ in block.named_parameters()}
     return frozenset(
         name for name, param in model.named_parameters() if param.dtype == torch.float32 and name not in ep_keys
     )
@@ -648,7 +650,7 @@ def load_ep_model_lazy(
     )
     model, plans, dtype = base.model, base.plans, base.dtype
     weight_map, ckpt_format = base.weight_map, base.ckpt_format
-    keep_fp32 = _fp32_non_ep_param_keys(model) if keep_fp32_params else frozenset()
+    keep_fp32 = fp32_non_ep_param_keys(model, ep_wrapped=True) if keep_fp32_params else frozenset()
 
     # Every step from here to the reject below is rank-local: each rank reads only the shards holding
     # its own experts, and its expert range decides which keys it fuses and how long each slice is.

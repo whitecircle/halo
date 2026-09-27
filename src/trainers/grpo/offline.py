@@ -413,7 +413,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, DistributedTrainerMixin, Trainer):
         self._reject_inert_max_length(args, parallelism_config)
         self._reject_pp_explicit_options(args, parallelism_config, peft_config, compute_metrics)
 
-        model, model_id = load_model_from_pretrained(model, args)
+        model, model_id = load_model_from_pretrained(model, args, parallelism_config=parallelism_config)
 
         # QLoRA's bf16 adapter cast leaves activations fp32, so every adapted linear's forward needs
         # the autocast region compute_loss opens.
