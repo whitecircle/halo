@@ -1001,15 +1001,19 @@ def test_defer_grad_sync_accepted_wherever_fsdp2_reduces_per_microstep(shape):
 
 
 @pytest.mark.parametrize(
-    "shape",
+    ("shape", "named_knob"),
     [
-        {"world_size": 16, "pp_size": 2},  # the schedule already reduces once per optimizer step
-        {"tp_size": 8},  # pure TP: data_parallel_size=1 applies no FSDP2 wrap
+        # the schedule already reduces once per optimizer step
+        ({"world_size": 16, "pp_size": 2}, "pipeline_parallel_size=2"),
+        # pure TP: data_parallel_size=1 applies no FSDP2 wrap
+        ({"tp_size": 8}, "tensor_parallel_size=8"),
     ],
 )
-def test_defer_grad_sync_rejected_without_a_per_microstep_reduce(shape):
-    with pytest.raises(ValueError, match="fsdp_defer_grad_sync"):
+def test_defer_grad_sync_rejected_without_a_per_microstep_reduce(shape, named_knob):
+    """The refusal names the knobs a user sets, not the config's internal field names."""
+    with pytest.raises(ValueError, match="fsdp_defer_grad_sync") as excinfo:
         create_config(fsdp_defer_grad_sync=True, **shape)
+    assert named_knob in str(excinfo.value)
 
 
 def test_reshard_rejects_ep():

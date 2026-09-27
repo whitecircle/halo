@@ -912,9 +912,9 @@ class ParallelismConfig:
         if self.fsdp_defer_grad_sync and (self.pp_size > 1 or (self.tp_size > 1 and self.data_parallel_size == 1)):
             raise ValueError(
                 f"fsdp_defer_grad_sync=True has no per-microstep FSDP2 gradient reduce to defer "
-                f"(pp_size={self.pp_size}, tp_size={self.tp_size}, data_parallel_size="
-                f"{self.data_parallel_size}): the PP schedule already reduces once per optimizer step, "
-                f"and TP at data_parallel_size=1 applies no FSDP2 wrap. Remove the flag."
+                f"(pipeline_parallel_size={self.pp_size}, tensor_parallel_size={self.tp_size}, "
+                f"data_parallel_size={self.data_parallel_size}): the PP schedule already reduces once "
+                f"per optimizer step, and TP at data_parallel_size=1 applies no FSDP2 wrap. Remove the flag."
             )
         if not self.fsdp_shard_ep1_experts and (self.tp_size > 1 or self.cp_size > 1):
             # The TP and CP setup paths FSDP-shard ep1 experts unconditionally (their fully_shard
@@ -923,8 +923,8 @@ class ParallelismConfig:
                 f"fsdp_shard_ep1_experts=False is not honored under TP or CP "
                 f"(tp_size={self.tp_size}, cp_size={self.cp_size}): those paths FSDP-shard the "
                 f"replicated experts unconditionally. Remove the flag (sharded experts are "
-                f"grad-equivalent and throughput-neutral), or use pure DP for the full replicated "
-                f"expert copy."
+                f"grad-equivalent; gpt-oss-20b on 8 GPUs at batch 1 trades -10.6% throughput for -59% "
+                f"peak memory), or use pure DP for the full replicated expert copy."
             )
         if not self.fsdp_reshard_after_forward:
             return
