@@ -9,7 +9,13 @@ from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, l
 from src.data.pipeline.preprocessed_metadata import is_preprocessed_dataset
 from src.data.pipeline.processing import coordinated_filter, missing_render_column_splits, require_render_column
 from src.data.probe_consensus import agree_probe_across_ranks
-from src.data.sources.paths import DATA_FILE_BUILDERS, hub_repo_id, parse_dataset_source, parse_hub_spec
+from src.data.sources.paths import (
+    DATA_FILE_BUILDERS,
+    eval_split_name,
+    hub_repo_id,
+    parse_dataset_source,
+    parse_hub_spec,
+)
 from src.data.sources.s3_client import load_dataset_from_s3_uri
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_RAW_IMAGE_COLUMNS, carried_image_columns
@@ -205,8 +211,9 @@ def _load_dataset_from_path(
     """Load a dataset and ensure train/test splits; returns ``(dataset, sharded)``.
 
     For sharded datasets each rank loads only its assigned shards when data_parallel_size > 1
-    (``sharded=True``, each DP rank then holding a rank-specific slice). Without a test split:
-    re-split train by test_size, else use the first 100 train rows as test.
+    (``sharded=True``, each DP rank then holding a rank-specific slice). A source with no test split
+    reads its validation split as test; with neither, train is re-split by test_size, else its first
+    100 rows are used as test.
     ``placeholder_test=False`` returns a train-only source as a train-only ``DatasetDict`` instead.
     """
     # Cross-rank-agreed probe: a per-rank S3-creds fault must not split ranks onto different data
@@ -243,6 +250,10 @@ def _load_dataset_from_path(
                     f"Dataset {path} has no 'train' split (available splits: {available}). "
                     f"Append an '@split' selector to pick one, e.g. '{path}@{suggestion}'."
                 )
+            held_out = eval_split_name(dataset)
+            if held_out not in (None, "test"):
+                logger.info(f"Dataset {path} has no test split; its {held_out!r} split is the test split")
+                dataset["test"] = dataset.pop(held_out)
             if "test" not in dataset:
                 if test_size is not None:
                     dataset = dataset["train"].train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)

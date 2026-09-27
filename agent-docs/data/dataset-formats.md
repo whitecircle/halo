@@ -8,11 +8,12 @@ Sources are S3, HuggingFace Hub (including the `:config` and `@split` suffixes),
 ## Splits and combining
 
 A dataset must have a `train` split; loading raises otherwise (with an `@split` suggestion). With no
-`test` split the toolkit splits off `test_size` from train, or falls back to the first 100 samples.
+`test` split a `validation` split is read as the test split; with neither, the toolkit splits off
+`test_size` from train, or falls back to the first 100 samples.
 
-Setting `test_size` on an **already-split** dataset re-splits it: train and test are concatenated
-and re-divided, destroying the curated split. Pin the split you want with `@split` to keep
-`test_size` splitting only that one (`openai/gsm8k:main@train`).
+Setting `test_size` on an **already-split** dataset (a `test` split, or a `validation` read as one)
+re-splits it: train and test are concatenated and re-divided, destroying the curated split. Pin the
+split you want with `@split` to keep `test_size` splitting only that one (`openai/gsm8k:main@train`).
 
 A sharded or pre-processed dataset carries the split decided at preparation time; `test_size` there
 is ignored with a warning.
@@ -31,9 +32,10 @@ dataset_ratio:
 The pipeline loads each source, filters rows whose conversation field is `None` or `[]`,
 ratio-subsets, normalizes the schema, and concatenates.
 
-A source that ships no `test` split contributes training rows only. The corpus test split comes from
-the sources that ship one, and only a corpus where none does falls back to a placeholder cut from its
-own train rows (set `test_size` to carve a held-out split from every source instead).
+A source that ships neither a `test` nor a `validation` split contributes training rows only. The
+corpus test split comes from the sources that ship one, and only a corpus where none does falls back
+to a placeholder cut from its own train rows (set `test_size` to carve a held-out split from every
+source instead).
 
 `_normalize_dataset_schema` (`src/data/sources/loading.py`) keeps the intersection over train and
 test together: a column missing from any dataset, or whose feature type differs across them, is

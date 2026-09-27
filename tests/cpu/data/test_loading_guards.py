@@ -15,6 +15,8 @@ Two guards pinned here:
 * a corpus entry whose source ships no test split contributes training rows only: the placeholder
   test split is the last resort for a corpus with no held-out data anywhere, never a per-entry filler
   that dilutes a sibling pool's real one.
+* a source that ships ``validation`` and no ``test`` evaluates on its validation rows, not on the
+  placeholder cut from the rows it trains on.
 
 Run: pytest tests/cpu/data/test_loading_guards.py
 """
@@ -486,6 +488,58 @@ def test_test_size_carves_a_held_out_split_from_a_train_only_entry():
     finally:
         shutil.rmtree(with_test)
         shutil.rmtree(train_only)
+
+
+def _save_train_validation_dataset(directory: str, train: Dataset, validation: Dataset) -> str:
+    """Write a source whose held-out split is named ``validation`` (``rajpurkar/squad``'s layout)."""
+    DatasetDict({"train": train, "validation": validation}).save_to_disk(directory)
+    return directory
+
+
+def test_a_source_with_no_test_split_evaluates_on_its_validation_split(caplog):
+    temp_dir = tempfile.mkdtemp()
+    try:
+        _save_train_validation_dataset(temp_dir, _pool(6, 0), _pool(3, 100))
+
+        with caplog.at_level(logging.INFO, logger=_LOADING_LOGGER):
+            ds = load_datasets(temp_dir, test_size=None, dataset_ratio=1, conversation_field="messages")
+
+        assert sorted(ds["test"]["row_id"]) == [100, 101, 102], "the test split must be the validation rows"
+        assert sorted(ds["train"]["row_id"]) == list(range(6))
+        assert "validation" not in ds
+        assert any("'validation' split is the test split" in r.getMessage() for r in caplog.records)
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_a_validation_only_list_entry_contributes_its_validation_rows_as_test():
+    with_test = tempfile.mkdtemp()
+    with_validation = tempfile.mkdtemp()
+    try:
+        _save_raw_dataset(with_test, _pool(4, 0), _pool(2, 100))
+        _save_train_validation_dataset(with_validation, _pool(4, 200), _pool(2, 300))
+
+        ds = load_datasets(
+            [with_test, with_validation], test_size=None, dataset_ratio=1, conversation_field="messages"
+        )
+
+        assert sorted(ds["test"]["row_id"]) == [100, 101, 300, 301], ds["test"]["row_id"]
+        assert sorted(ds["train"]["row_id"]) == [0, 1, 2, 3, 200, 201, 202, 203]
+    finally:
+        shutil.rmtree(with_test)
+        shutil.rmtree(with_validation)
+
+
+def test_a_test_split_is_read_before_a_validation_split():
+    temp_dir = tempfile.mkdtemp()
+    try:
+        DatasetDict({"train": _pool(4, 0), "test": _pool(2, 100), "validation": _pool(2, 200)}).save_to_disk(temp_dir)
+
+        ds = load_datasets(temp_dir, test_size=None, dataset_ratio=1, conversation_field="messages")
+
+        assert sorted(ds["test"]["row_id"]) == [100, 101], ds["test"]["row_id"]
+    finally:
+        shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":
