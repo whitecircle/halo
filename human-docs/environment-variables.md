@@ -10,8 +10,9 @@ substitution, and the vLLM file's training service loads it into the container.
 **The image already sets the tricky ones** — NCCL tuning, CUDA connection
 limits, the TF32 fix. Don't paste `-e NCCL_*=...` flags in from other clusters;
 the baked defaults are deliberate. The exceptions are the EFA recipe
-(`make ... EFA=1`) and `NCCL_SOCKET_IFNAME` on a multi-homed host — see
-[Clusters](clusters.md).
+(`make ... EFA=1`), the no-fabric recipe a GRPO trainer shares with its rollout
+server ([cookbook container](cookbooks/README.md#start-the-training-container)),
+and `NCCL_SOCKET_IFNAME` on a multi-homed host — see [Clusters](clusters.md).
 
 ## Paths — pass these, pointed at a big disk
 
@@ -59,7 +60,7 @@ whose big disk lives elsewhere and every `make` target mounts and caches there.
 | `DIST_STORE_TIMEOUT_HOURS` | `4` | raise when one rank's model download or corpus pack runs longer than four hours while the others wait; this is not the NCCL watchdog |
 | `DIST_NCCL_TIMEOUT_MINUTES` | `30` | raise when 100B-scale gathered checkpoint saves or large cross-node all-to-alls outlast the NCCL watchdog |
 | `NVLINK_DOMAIN_SIZE` | GPUs per node | `72` on an NVL72 rack, whose NVLink domain spans the rack |
-| `NCCL_SOCKET_IFNAME` | `^docker,veth` in the compose bases and `make test-gpu-vllm`/`-sglang`; `^lo,docker,veth,tailscale` under `EFA=1` and the EFA overlays; otherwise unset | pin NCCL to the fast NIC on multi-homed nodes |
+| `NCCL_SOCKET_IFNAME` | `^docker,veth` in the compose bases, `make test-gpu-vllm`/`-sglang` and the no-fabric GRPO recipe; `^lo,docker,veth,tailscale` under `EFA=1` and the EFA overlays; otherwise unset | pin NCCL to the fast NIC on multi-homed nodes |
 | `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` | unset | AWS EFA only: the trainer via `make ... EFA=1`, a rollout server via its compose EFA overlay — see [Clusters](clusters.md) |
 
 A side variable inherits the umbrella while unset and overrides it once set.

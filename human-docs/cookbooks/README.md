@@ -54,7 +54,6 @@ docker run --rm -it --gpus all --network host --ipc=host --shm-size=128g \
   -e HF_TOKEN -e WANDB_API_KEY \
   -e HF_HOME=/data/hf -e HF_DATASETS_CACHE=/data/hf/datasets \
   -e TMPDIR=/data/tmp -e HALO_DATA_ROOT=/data \
-  -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_SOCKET_IFNAME=^docker,veth \
   -v "$(pwd)":/workspace -v "$HALO_SCRATCH":/data -w /workspace \
   "$HALO_IMAGE" bash
 ```
@@ -63,9 +62,12 @@ Training, inference and conversion commands run inside this container, where
 `/data` is `$HALO_SCRATCH`: a run that writes `/data/checkpoints/<run>` leaves it
 at `$HALO_SCRATCH/checkpoints/<run>` on the host.
 
-The `NCCL_*` line is the same-host, no-fabric recipe the compose servers default to; the
-GRPO weight sync hangs at its first collective when the trainer and the server pick
-different transports. For a server on another node, put both ends on the EFA recipe instead
+A GRPO trainer and its rollout server must pick the same NCCL transport, or the weight
+sync hangs at its first collective. On a host with no RDMA fabric, add
+`-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_SOCKET_IFNAME=^docker,veth` to the
+`docker run` above for a GRPO run: the recipe the compose servers default to. On an EFA
+host put both ends on the EFA recipe instead: a trainer left at `Socket` there sends every
+collective over TCP and breaks DeepEP
 ([Servers on other nodes](../../agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa) ↗).
 
 ## Serve from the host

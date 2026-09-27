@@ -231,9 +231,11 @@ output_dir: /data/checkpoints/glm-4.7-flash-grpo
 
 The SFT's `glm-chat.jinja` renders no tools, so GRPO switches to `glm-native.jinja`, the
 upstream template with its tool-call and observation turns
-([chat templates](../../agent-docs/models/glm4.md#chat-templates) ↗). The server must serve
-the same file. On the host ([server setup](README.md#serve-from-the-host)), copy it onto the
-scratch volume:
+([chat templates](../../agent-docs/models/glm4.md#chat-templates) ↗). Its generation prompt
+opens `<think>`, so rollouts start in thinking mode where the SFT trained the non-thinking
+render; add `rollout_chat_template_kwargs: {enable_thinking: false}` to keep them
+non-thinking. The server must serve the same file. On the host
+([server setup](README.md#serve-from-the-host)), copy it onto the scratch volume:
 
 ```bash
 cp jinja-templates/glm/glm-native.jinja "$HALO_SCRATCH/"

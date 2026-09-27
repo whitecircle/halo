@@ -321,7 +321,7 @@ Besides these, `num_nodes`, `num_nvlink_domains`, `ep_group_size`, `data_paralle
 
 Two more carry no `DistributedArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`src/training/parallelism_args.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
 
-A trainer whose config declares no `max_length` field stamps neither and leaves the ceiling to the dispatcher's runtime backstop. `max_length: null` still stamps the rows; the gate then takes `max_prompt_length + max_completion_length` where both are bounded (offline GRPO), else the model's context window.
+A trainer whose config declares no `max_length` field stamps neither and leaves the ceiling to the dispatcher's runtime backstop. `max_length: null` still stamps the rows; the gate then takes `max_prompt_length + max_completion_length` where the config bounds both (offline GRPO, or SMPO with both shares set), else the model's context window.
 
 Five knobs are implemented inside the mixin's own FSDP2 wrap and are therefore **ignored under `accelerate launch`** (accelerate owns the wrap): `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fsdp_defer_grad_sync`, `fp32_grad_reduce`. Setting any of them on an accelerate launch logs one warning — use `torchrun`. Accelerate's own `no_sync` already skips the gradient reduce on a window's non-final microsteps, so `fsdp_defer_grad_sync` has nothing to add there.
 

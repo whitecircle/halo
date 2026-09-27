@@ -468,6 +468,7 @@ Native-tool parsers per family:
 | Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text, so no tool ever runs); with a thinking budget (`rollout_max_thinking_tokens`, or an env's per-effort `thinking_tokens` profile) also `VLLM_REASONING_PARSER=gemma4` and `VLLM_USE_V2_MODEL_RUNNER=0`, else every request 400s |
 | LFM-2 | `lfm2` (pythonic calls between `<\|tool_call_start\|>` and `<\|tool_call_end\|>`) |
 | Laguna | `poolside_v1` (`<tool_call>` with `<arg_key>`/`<arg_value>` pairs) |
+| Step-3.7 Flash | `step3p5` (`<tool_call>` around `<function=…>`/`<parameter=…>` XML) |
 | most others | `hermes` (JSON inside `<tool_call>` tags) |
 
 `docker-compose.vllm.yml` defaults **both** containers to the no-fabric recipe (`NCCL_IB_DISABLE=1`

@@ -286,9 +286,9 @@ is read. `ParallelismConfig.validate_against_model_config` sizes the run's decla
 and reward, which forward chosen and rejected together) through the same `ep_dispatch_capacity`
 alignment the dispatcher uses and refuses it there, naming the budget, the capacity and the EP group.
 
-The row length is `max_length`, or `max_prompt_length + max_completion_length` for offline GRPO,
-which refuses `max_length`. A length left unbounded (`max_length: null`, or an uncapped prompt or
-completion) resolves to the model's context window, the largest budget it can mean.
+The row length is `max_length`; where that is unbounded, `max_prompt_length + max_completion_length`
+when the config bounds both (offline GRPO, which refuses `max_length`, or SMPO with both shares set);
+otherwise the model's context window, the largest budget the config can mean.
 
 The dispatcher's check stays the backstop for the batch actually in hand, and is the only check for a
 training config with no `max_length` field (online and async GRPO), which declares no budget. Whether

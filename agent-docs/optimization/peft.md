@@ -275,10 +275,10 @@ fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchm
 | LoRA r=64, attn + experts | 457M (3.86%) | 7,586 | 32.0 GB |
 
 **LoRA under EP is far leaner than full fine-tuning.** The frozen base carries no gradients or optimizer
-state, so every variant peaks at 28–32 GB against full fine-tuning's 77.3 GB at this shape (batch 1); its
-throughput comes from another run set, so compare it within that page. Experts-only ties attention-only
-because the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either
-alone.
+state, so every variant peaks at 28–32 GB against full fine-tuning's 77.3 GB at this shape (batch 1);
+full fine-tuning's throughput comes from a different run set, so compare it only within that page.
+Experts-only ties attention-only because the grouped expert adapters fold into the grouped-GEMM compute;
+attn + experts is slower than either alone.
 
 On `qwen3-30b-a3b` (128 experts) experts-only r=64 is 9.39% trainable at 5,034 tok/s/GPU and 46.8 GB. At
 batch 1 the step is communication-bound, so tok/s/GPU varies ±10% run-to-run.

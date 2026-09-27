@@ -18,9 +18,9 @@ GPU, so a number scales by the GPU count:
 | GPT-OSS 20B, 32k context | 8 GPUs, `ep8 + cp8`, checkpointing on | 6,000 |
 
 Two things to read out of that table. Expert parallelism costs throughput — at
-batch 4 and 4k `ep1` runs about 2× `ep8` on the same model — because it trades
-local parameters for all-to-all traffic, so pick the *lowest* EP that fits rather
-than the largest your GPUs allow. And context parallelism is a way to afford a
+batch 4, 4k and matched checkpointing `ep1` runs about 2× `ep8` on the same
+model — because it trades local parameters for all-to-all traffic, so pick the
+*lowest* EP that fits rather than the largest your GPUs allow. And context parallelism is a way to afford a
 long sequence, not a way to go faster: it holds memory nearly flat from 16k to
 64k tokens and buys no speed. Sharding buys capacity — a 119B MoE trains on four
 GPUs at `ep2 + etp2` — and you pay for it in tokens per second.
@@ -74,7 +74,7 @@ the baseline runs no expert parallelism, and its FSDP2 `full_shard` re-gathers
 all 20.7B parameters every micro-step, a fixed cost a short step cannot hide,
 while its AdamW keeps 12 bytes per parameter of fp32 state where `AdamWBF16`
 keeps 6. At the same ZeRO-3 sharding and expert kernel, dense Halo still leads
-1.4–2.7×. The `ep8` shape trades some of that speed back for memory:
+1.2–2.7×. The `ep8` shape trades some of that speed back for memory:
 1.3–2.1× TRL at about half its footprint. None of it costs convergence — TRL,
 dense Halo, `ep2` and `ep8` all land within ~1% of the same loss over 200 seeded
 steps.

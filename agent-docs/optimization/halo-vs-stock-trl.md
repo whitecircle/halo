@@ -48,8 +48,8 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 - **EP8 trades throughput for memory** — 1.3–2.1× TRL at ~½ its memory (26 vs 48 GB at 4k·b1).
 - **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP wrapper: both sides shard every
-  param 8-way with the same kernel, and EP1 still leads 1.4× (4k·b1) to 2.7× (16k) on throughput *and*
-  memory. **Prefer z2 at short sequence, z3 when memory-tight.**
+  param 8-way with the same kernel, and EP1 still leads 1.2× (4k·b2) to 2.7× (16k·b1) on throughput, and
+  on memory everywhere but 16k·b2 (68.4 vs 55.6 GB). **Prefer z2 at short sequence, z3 when memory-tight.**
 
     TRL is slower because `full_shard` re-gathers all 20.7B params every microstep, a fixed cost a short
     step cannot hide. That is why EP1 z3 is −38% vs its own z2 at 4k·b1 but only −5% at 16k·b1.
