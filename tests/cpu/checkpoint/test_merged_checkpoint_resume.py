@@ -460,11 +460,9 @@ def test_an_unmarked_full_checkpoint_still_resumes_a_full_fine_tune(tmp_path):
 # --- the merged save leaves the run untouched ------------------------------------------------
 
 
-def test_the_merged_save_undoes_its_merge_exactly():
-    """The save folds the attention adapters into their bf16 base weights in place and unfolds them
-    after the write. ``(w + d) - d`` is not ``w`` in bf16, so without ``restore_base`` every merged
-    save moves the frozen base of the run it checkpoints, and no resume of that checkpoint can
-    reproduce the run."""
+def _bf16_lora_linear() -> tuple[PeftModel, nn.Parameter]:
+    """A bf16 LoRA'd linear whose adapter is large enough that a plain merge and unmerge moves the
+    base weight, and that base weight."""
     torch.manual_seed(0)
     model = get_peft_model(
         nn.Sequential(nn.Linear(64, 64, bias=False)).to(torch.bfloat16),
@@ -474,7 +472,15 @@ def test_the_merged_save_undoes_its_merge_exactly():
         for name, param in model.named_parameters():
             if ".lora_" in name:
                 param.normal_(std=0.5)
-    base = next(param for name, param in model.named_parameters() if ".base_layer." in name)
+    return model, next(param for name, param in model.named_parameters() if ".base_layer." in name)
+
+
+def test_the_merged_save_undoes_its_merge_exactly():
+    """The save folds the attention adapters into their bf16 base weights in place and unfolds them
+    after the write. ``(w + d) - d`` is not ``w`` in bf16, so without ``restore_base`` every merged
+    save moves the frozen base of the run it checkpoints, and no resume of that checkpoint can
+    reproduce the run."""
+    model, base = _bf16_lora_linear()
     original = base.detach().clone()
 
     with merged_adapters(model):
@@ -488,6 +494,23 @@ def test_the_merged_save_undoes_its_merge_exactly():
     assert folded, "the body must see the merged weights"
     assert torch.equal(base, original), "the merged save moved the frozen base"
     assert plain_unmerge_drifts, "premise: a bf16 unmerge alone does not reverse the merge"
+
+
+def test_the_merged_checkpoint_save_restores_the_base(tmp_path, monkeypatch):
+    """``save_ep_checkpoint`` itself holds the merge open over the merged write, so it is the call that
+    has to ask for the exact unfold; the premise that the plain one drifts is the test above's."""
+    model, base = _bf16_lora_linear()
+    original = base.detach().clone()
+    written = []
+
+    def merged_write(model, output_dir, **kwargs):
+        written.append((kwargs["adapters_merged"], not torch.equal(base, original)))
+
+    monkeypatch.setattr(save_mod, "save_ep_model", merged_write)
+    save_mod.save_ep_checkpoint(_save_context(model), str(tmp_path / "checkpoint-1"))
+
+    assert written == [(True, True)], "premise: the merged write sees the folded base"
+    assert torch.equal(base, original), "the merged checkpoint save moved the frozen base"
 
 
 def test_the_exact_unmerge_reaches_a_tied_base_weight():
