@@ -54,7 +54,7 @@ from src.checkpoint.format import (
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.checkpoint.loader import built_from_checkpoint, weights_read_from
+from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
 from src.distributed.checkpoint.peft import copy_full_tensor
 from src.distributed.checkpoint.save import save_checkpoint
 from src.distributed.checkpoint.write import gather_saveable_tensors, resolve_retained
@@ -646,6 +646,9 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                     f"run from its folded weights (model_name_or_path: {resume_from_checkpoint}, without "
                     f"resume_from_checkpoint)."
                 )
+            # The loader reshards what it is handed, the backbone; the FSDP2 root group is the whole
+            # SentenceTransformer, whose eval forward before a best-model load leaves it unsharded.
+            reshard_fsdp2_modules(self._top_level_model())
             super()._load_from_checkpoint(resume_from_checkpoint, model, for_best_model=for_best_model)
             return
         if not marked:
@@ -699,6 +702,18 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         del saved
         if is_global_main_process():
             logger.info(f"Restored {len(live)} injected-LoRA tensors from {path}")
+
+    def _checkpoint_loader(self) -> CheckpointLoader:
+        """The mixin's weight loader, re-pointed at the backbone the savers write.
+
+        Every save writes the ``auto_model`` backbone's names (:meth:`_checkpoint_context`), so a
+        loader handed the ``SentenceTransformer``, whose names carry its ``0.<module>.`` prefix, would
+        match none of them, and the FSDP2 / TP coverage gates would refuse every full fine-tune reload.
+        The optimizer store keeps the ``SentenceTransformer``, whose parameters the optimizer steps.
+        """
+        return CheckpointLoader(
+            dataclasses.replace(self._checkpoint_load_context(), model=self._get_unwrapped_model())
+        )
 
     def _checkpoint_context(self) -> CheckpointContext:
         """The mixin's context, re-pointed at the backbone.

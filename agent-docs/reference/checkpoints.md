@@ -30,7 +30,9 @@ every trainer.
 config beside it. Its in-place-injected LoRA is not a `PeftModel`, so `PeftAdapterSaver` never sees
 it: that branch skips the ladder, folds the adapter into the gathered state dict and writes it
 through `write_gathered_checkpoint`. Its training checkpoints resume from a `resume_adapter/`
-([Merge-on-save checkpoints](#merge-on-save-checkpoints)).
+([Merge-on-save checkpoints](#merge-on-save-checkpoints)). The weight loader is re-pointed at the
+backbone the same way (`_checkpoint_loader`), so a full fine-tune's FSDP2 / TP reload matches the saved
+names; the optimizer store keeps the `SentenceTransformer`, whose parameters the optimizer steps.
 
 **Gathered saves** (the default everywhere) produce HuggingFace-compatible checkpoints loadable with
 `from_pretrained()`. The optional **per-rank sharded EP save** (`save_sharded_ep`) is a

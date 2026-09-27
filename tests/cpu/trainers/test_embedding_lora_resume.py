@@ -28,7 +28,8 @@ bit-reproducible):
 * an input-embedding target (``word_embeddings``, beside the attention targets or alone): its
   ``lora_embedding_A``/``_B`` fold as ``base + scaling · (B @ A)ᵀ``, the checkpoint carries them in its
   resume adapter, and the run resumes exactly; an adapter the fold cannot express (DoRA) is refused
-  at construction.
+  at construction;
+* a full fine-tune: the weight loader the trainer resumes through covers the names its saves write.
 
     python tests/cpu/trainers/test_embedding_lora_resume.py
 """
@@ -59,10 +60,12 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     cast_to_save_dtype,
+    read_checkpoint_key_set,
     resume_adapter_dir,
 )
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed import runtime
+from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
@@ -620,6 +623,27 @@ def test_an_adapter_the_fold_cannot_express_is_refused_at_construction(tmp_path)
 
     with pytest.raises(NotImplementedError, match="have no such fold"):
         _trainer(_lora_model(base, seed=1, use_dora=True), tmp_path / "out")
+
+
+# --- full fine-tune -------------------------------------------------------------------------
+
+
+def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path):
+    """Every save writes the backbone's names, so the loader a full fine-tune resumes through must
+    hold the backbone: handed the SentenceTransformer (``0.<module>.*``) it matches none of them, and
+    the FSDP2 / TP reloads refuse the checkpoint at their coverage gate. The optimizer store keeps the
+    SentenceTransformer, whose parameters the optimizer steps."""
+    PartialState()
+    base = _tiny_base(tmp_path / "base")
+    _trainer(SentenceTransformer(base, device="cpu"), tmp_path / "out", max_steps=SAVE_AT_STEP).train()
+    checkpoint = str(tmp_path / "out" / f"checkpoint-{SAVE_AT_STEP}")
+    trainer = _trainer(SentenceTransformer(base, device="cpu"), tmp_path / "resumed")
+
+    loader_model = trainer._checkpoint_loader().ctx.model
+    covered, unmatched, _matched, _total = resume_numel_coverage(loader_model, read_checkpoint_key_set(checkpoint))
+
+    assert covered and not unmatched, f"the loader's model misses the saved names: {sorted(unmatched)[:3]}"
+    assert trainer._optimizer_store().ctx.model is trainer.model
 
 
 if __name__ == "__main__":

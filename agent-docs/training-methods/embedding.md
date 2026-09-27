@@ -83,6 +83,8 @@ Saves route through the shared `save_checkpoint` ladder ([Checkpoints](../refere
 
 The fold serves but cannot resume, so every LoRA training checkpoint also carries the unfolded trainable tensors in `resume_adapter/` (live dtype, top-level parameter names) and the root marker `resume_adapter.json`; on a non-shared filesystem each node's save rank writes its own copy. Resume builds from `model_name_or_path` (the base), the script re-injects the adapters, and `EmbeddingTrainer._load_from_checkpoint` restores them bit-exact before the optimizer state; the folded weights are never read. It refuses a model loaded from the checkpoint itself, a marked checkpoint missing its adapter file, an adapter file for other target modules or rank, a LoRA run resuming an unmarked checkpoint, and a full fine-tune resuming a marked one. The final `save_model()` export carries no resume state ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 
+A full fine-tune resumes through the shared checkpoint loader, which `EmbeddingTrainer._checkpoint_loader` points at the backbone the saves write; the optimizer state stays keyed by the `SentenceTransformer`. Under FSDP2 and pure TP it reads the checkpoint on a best-model load and on a resume whose model was built from the base (FSDP2 at `use_grouped_gemm: false`).
+
 ## What to watch
 
 Metrics come from a separate `torch.no_grad()` encoding pass on logging steps, capped at 256 samples per padded text group; evaluation runs it every batch under an `eval_` prefix (`eval_embed/norm`, …).
@@ -102,7 +104,7 @@ pytest tests/cpu/trainers tests/cpu/config/test_embedding_pipeline_alignment.py 
 torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_embedding.py
 ```
 
-The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save and the LoRA merge on `sentence-transformers/paraphrase-MiniLM-L3-v2`. `tests/gpu/trainers/lora/test_embedding_lora_resume*.py` resume a LoRA run from its mid checkpoint against the uninterrupted one per backbone family (BERT, Qwen3, Qwen3.5, Gemma 4, GPT-OSS) and run shape (one GPU, FSDP2, accelerate DDP, pre-sharded data), and check that TP and EP refuse the adapters.
+The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save and the LoRA merge on `sentence-transformers/paraphrase-MiniLM-L3-v2`. `tests/gpu/trainers/lora/test_embedding_lora_resume*.py` resume a run from its mid checkpoint against the uninterrupted one per backbone family (BERT, Qwen3, Qwen3.5, Gemma 4, GPT-OSS) and run shape (one GPU, FSDP2, accelerate DDP, pre-sharded data): LoRA on the attention projections, on the input embedding beside them or alone (`--lora`), where TP and EP must refuse the adapters, and a full fine-tune (`--lora off`), which also runs under TP (Qwen3, Qwen3.5, GPT-OSS) and EP (Gemma 4, GPT-OSS) and checks the best-model load wherever the model has no EP layers.
 
 ## Related pages
 
