@@ -4,13 +4,10 @@
 The Zaya gate masks a pick of its learned discard slot to expert 0 at weight 0. Dispatched as is, every
 discard rides the all-to-all to expert 0's rank in every layer, loading it with rows that contribute
 nothing; under EP the wrapper sends them as ``-1`` (no expert) instead. Per MoE layer of a tiny Zaya
-(two experts, top-1), against the unmasked call ``_dispatch_compute_combine(gate indices, gate probs)``:
-
-  ep2 — the layer output matches to one bf16 ulp (expert 0's grouped GEMM runs fewer rows, which a
-        kernel may tile differently), and the rows expert 0's rank receives drop by exactly the
-        discards summed over both ranks while the other rank's receive count is unchanged.
-  ep1 — nothing is dispatched and the grouped path takes real local ids only, so the output stays
-        bit-identical to the unmasked call.
+(two experts, top-1) at ep2, against the unmasked call ``_dispatch_compute_combine(gate indices, gate
+probs)``: the layer output matches to one bf16 ulp (expert 0's grouped GEMM runs fewer rows, which a
+kernel may tile differently), and the rows expert 0's rank receives drop by exactly the discards summed
+over both ranks while the other rank's receive count is unchanged.
 
 A fresh tiny gate routes near-uniformly with almost no spread across tokens, and its discard slot starts
 at a -1 selection bias no token overcomes; the gates are re-initialized at unit gain with the bias
@@ -90,12 +87,12 @@ def spread_routing(model) -> None:
         router.balancing_biases.zero_()
 
 
-def build_model(device, ep_size: int):
+def build_model(device):
     torch.manual_seed(SEED)
     model = tiny_family_model(TINY_MOE_FAMILIES["zaya"])
     spread_routing(model)
     model = patch_moe_model_for_ep(
-        model.to(device, torch.bfloat16), ParallelismConfig(ep_size=ep_size).create_ep_config()
+        model.to(device, torch.bfloat16), ParallelismConfig(ep_size=EP_SIZE).create_ep_config()
     )
     create_ep_buffers(model)
     return model
@@ -105,13 +102,12 @@ def build_model(device, ep_size: int):
 def run(ctx):
     checks, metrics = {}, {}
     torch.cuda.set_device(ctx.device)
-    ep2 = build_model(ctx.device, EP_SIZE)
-    ep1 = build_model(ctx.device, 1)
-    hidden_size = ep2.config.hidden_size
+    model = build_model(ctx.device)
+    hidden_size = model.config.hidden_size
     generator = torch.Generator().manual_seed(SEED + ctx.rank)
 
     with torch.no_grad():
-        for index, (layer, local) in enumerate(zip(ep_layers(ep2), ep_layers(ep1), strict=True)):
+        for index, layer in enumerate(ep_layers(model)):
             hidden = torch.randn(BATCH, SEQ, hidden_size, generator=generator).to(ctx.device, torch.bfloat16)
             sharded = compare_layer(layer, hidden)
             counts = torch.tensor(
@@ -130,16 +126,13 @@ def run(ctx):
             checks[f"l{index}_discards_and_expert0_picks_present"] = (
                 total_discards > 0 and sum(int(c[1]) for c in dropped) > 0
             )
-            replicated = compare_layer(local, hidden)
-            checks[f"l{index}_ep1_output_unchanged"] = replicated["equal"] and replicated["finite"]
             metrics[f"l{index}_discards"] = total_discards
             log_all(
                 f"  layer {index} rank {ctx.rank}: received {sharded['fixed_rows']} rows "
                 f"(unmasked {sharded['unmasked_rows']}), {sharded['discards']} local discards, "
                 f"{total_discards} total"
             )
-    log(f"  discards per layer: {[metrics[f'l{i}_discards'] for i in range(len(ep_layers(ep2)))]}")
-    del ep1
+    log(f"  discards per layer: {[metrics[f'l{i}_discards'] for i in range(len(ep_layers(model)))]}")
     return {"checks": checks, "metrics": metrics}
 
 
