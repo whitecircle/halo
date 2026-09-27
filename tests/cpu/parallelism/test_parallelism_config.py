@@ -13,9 +13,11 @@ import pytest
 import torch.distributed as dist
 
 from src.args.distributed_args import DistributedArguments
-from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.config import EPConfig, ExpertLoraSpec
 from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
+from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import create_config, make_parallelism_config
 
@@ -733,8 +735,6 @@ def test_parallelism_config_from_args_basic():
         patch(f"{_MOD}.get_global_rank", return_value=0),
         patch(f"{_MOD}.is_global_main_process", return_value=True),
     ):
-        from src.training.parallelism_args import parallelism_config_from_args
-
         # Non-default values on the knobs most prone to silent drift, so the asserts below fail if
         # the builder drops them back to ParallelismConfig defaults instead of forwarding.
         args = _DistArgs()
@@ -755,8 +755,6 @@ def test_parallelism_config_from_args_rejects_pp_when_unsupported():
     gate fires far later."""
     args = _DistArgs()
     args.pipeline_parallel_size = 2
-    from src.training.parallelism_args import parallelism_config_from_args
-
     try:
         parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin)
         raise AssertionError("a _supports_pp=False trainer must reject pipeline_parallel_size=2")
@@ -774,8 +772,6 @@ def test_parallelism_config_from_args_rejects_lowp_when_disallowed():
         patch(f"{_MOD}.get_global_rank", return_value=0),
         patch(f"{_MOD}.is_global_main_process", return_value=True),
     ):
-        from src.training.parallelism_args import parallelism_config_from_args
-
         try:
             parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=False)
             raise AssertionError("Should have raised ValueError")
@@ -793,8 +789,6 @@ def test_parallelism_config_from_args_lowp_allowed_for_sft():
         patch(f"{_MOD}.get_global_rank", return_value=0),
         patch(f"{_MOD}.is_global_main_process", return_value=True),
     ):
-        from src.training.parallelism_args import parallelism_config_from_args
-
         cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=True)
         assert cfg.lowp_precision == "fp8"
 
@@ -1220,9 +1214,6 @@ def test_expert_lora_reaches_validation_through_the_builder():
     weights, because the EP export skips the adapter keys and ``PeftAdapterSaver`` never engages
     (expert-only LoRA leaves no attention ``PeftModel`` to find). Nothing errors, at any point.
     """
-    from src.distributed.expert_parallel.config import ExpertLoraSpec
-    from src.training.parallelism_args import parallelism_config_from_args
-
     spec = ExpertLoraSpec(r=8, alpha=16.0)
     with (
         patch(f"{_MOD}.get_global_world_size", return_value=8),
@@ -1236,8 +1227,6 @@ def test_expert_lora_reaches_validation_through_the_builder():
         # The same spec under PP must be REJECTED, which only happens if it reached __post_init__.
         # Built directly: the from_args builder refuses pipeline_parallel_size > 1 outright in this
         # release (the schedule engine is not shipped), before the constructor's validators run.
-        from src.distributed.parallelism_config import ParallelismConfig
-
         try:
             ParallelismConfig(ep_size=4, pp_size=2, expert_lora=spec)
             raise AssertionError("PP + expert LoRA must be rejected at config time, but was accepted")
@@ -1262,8 +1251,6 @@ def test_epconfig_second_timing_rejects_expert_lora_with_etp():
     """A HAND-BUILT ``EPConfig`` (bypassing ``ParallelismConfig``) must still refuse expert LoRA
     under ETP — the shared raiser keeps the two timings' messages identical; this pins that the
     second timing actually fires."""
-    from src.distributed.expert_parallel.config import EPConfig, ExpertLoraSpec
-
     try:
         EPConfig(
             ep_size=1,
