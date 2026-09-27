@@ -77,8 +77,8 @@ def reject_fp8_tensor(name: str, tensor: torch.Tensor, dtype: torch.dtype | None
     if tensor.is_floating_point() and tensor.element_size() == 1:
         raise ValueError(
             f"{name!r} is stored in {tensor.dtype}: this is a quantized fp8 checkpoint, and casting it "
-            f"to {dtype} would drop its block scales. Convert it to bf16 once "
-            f"(scripts/before_training/convert_*_bf16.py where the family has one) and train from that."
+            f"to {dtype} would drop its block scales. Dequantize it to bf16 once and train from that "
+            f"(scripts/before_training/ has converters for DeepSeek-V4, GLM-5 and Mistral 4)."
         )
 
 
@@ -98,17 +98,23 @@ def cast_parameters_to_run_dtype(
     (``fp32_non_ep_params``): a round trip through the run dtype would discard the checkpoint's
     precision before the upcast. The training loaders apply it outside the MoE blocks EP wraps
     (``cast_loaded_parameters``), and the EP lazy loader materializes the same keys in fp32.
-    Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases). A ``dtype`` that
-    is not a ``torch.dtype`` ("auto", None) leaves the model as loaded.
+    Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases). "auto" and None
+    leave the model as loaded. A ``Parameter`` subclass is left alone: that is a quantizer's storage
+    (bnb's ``Params4bit``, whose ``bnb_4bit_quant_storage`` may be a float dtype), and a cast would
+    re-encode its packed bytes as values.
 
-    Raises on a 1-byte float (fp8) parameter (:func:`reject_fp8_tensor`), and on a tensor-subclass
-    parameter: rebinding a DTensor's ``.data`` leaves its local shard in the old dtype, which is why
-    the dense TP loader, loading straight into DTensors, does not call this (no dense family pins a
-    parameter).
+    Raises on any other ``dtype`` (a name the caller should have resolved), on a 1-byte float (fp8)
+    parameter (:func:`reject_fp8_tensor`), and on a tensor-subclass parameter off the run dtype:
+    rebinding a DTensor's ``.data`` leaves its local shard in the old dtype, which is why the dense TP
+    loader, loading straight into DTensors, does not call this (no dense family pins a parameter).
     """
-    if not isinstance(dtype, torch.dtype):
+    if dtype in ("auto", None):
         return
+    if not isinstance(dtype, torch.dtype):
+        raise TypeError(f"cast_parameters_to_run_dtype takes a torch.dtype, 'auto' or None, not {dtype!r}.")
     for name, param in model.named_parameters():
+        if type(param) is not nn.Parameter and issubclass(type(param), nn.Parameter):
+            continue
         if not param.is_floating_point() or param.dtype == dtype or (keep_fp32 and param.dtype == torch.float32):
             continue
         reject_fp8_tensor(name, param, dtype)

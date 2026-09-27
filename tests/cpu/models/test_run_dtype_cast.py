@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.nn as nn
 from accelerate import PartialState
+from bitsandbytes.nn import Linear4bit, Params4bit
 from torch.distributed.tensor import Shard, distribute_tensor
 from trl import ModelConfig
 
@@ -131,8 +132,34 @@ def test_an_fp8_parameter_refuses_the_cast():
     model = _Mixed()
     model.pinned.weight = nn.Parameter(model.pinned.weight.detach().to(torch.float8_e4m3fn), requires_grad=False)
 
-    with pytest.raises(ValueError, match=r"'pinned\.weight'.*convert_\*_bf16\.py"):
+    with pytest.raises(ValueError, match=r"'pinned\.weight'.*Dequantize it to bf16"):
         cast_parameters_to_run_dtype(model, torch.bfloat16)
+
+
+@pytest.mark.parametrize("run_dtype", [torch.float16, torch.float32])
+def test_a_quantized_parameter_keeps_its_float_storage(run_dtype):
+    """A QLoRA base stored as ``bnb_4bit_quant_storage: bfloat16`` holds packed 4-bit codes in a bf16
+    tensor; casting that tensor to another run dtype would rewrite the codes as if they were values."""
+    model = _Mixed()
+    model.quantized = Linear4bit(64, 64, bias=False, quant_storage=torch.bfloat16, quant_type="nf4")
+    model.quantized.weight = Params4bit(
+        torch.randn(64, 64, dtype=torch.bfloat16), requires_grad=False, quant_storage=torch.bfloat16, quant_type="nf4"
+    )
+    model.quantized.to("cpu")
+    weight = model.quantized.weight
+    packed = weight.data.clone()
+
+    cast_parameters_to_run_dtype(model, run_dtype)
+
+    assert weight.bnb_quantized and weight.dtype == torch.bfloat16
+    assert model.quantized.weight is weight and torch.equal(weight.data, packed)
+    assert model.pinned.weight.dtype == run_dtype
+
+
+def test_an_unresolved_dtype_name_is_refused():
+    """A name reaching the cast unresolved would otherwise leave the pins mixed in silently."""
+    with pytest.raises(TypeError, match="'bfloat16'"):
+        cast_parameters_to_run_dtype(_Mixed(), "bfloat16")
 
 
 def test_a_sharded_parameter_refuses_the_cast():

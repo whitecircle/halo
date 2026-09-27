@@ -177,7 +177,7 @@ def test_an_fp8_disk_tensor_is_refused(tmp_path):
     save_file({"weight": torch.randn(3, H).to(torch.float8_e4m3fn)}, str(tmp_path / "model.safetensors"))
     loader = SafetensorsWeightLoader(str(tmp_path), ["model.safetensors"], device="cpu")
 
-    with pytest.raises(ValueError, match=r"'weight'.*convert_\*_bf16\.py"):
+    with pytest.raises(ValueError, match=r"'weight'.*Dequantize it to bf16"):
         loader.load_into_model(model, [plan], dtype=torch.bfloat16)
     assert model.weight.dtype == torch.float32
 
@@ -241,7 +241,7 @@ def test_an_fp8_per_expert_fusion_is_refused(tmp_path):
     """Per-expert fp8 weights reach the fuser rather than the loader, and are refused there too."""
     weight_map = _per_expert_checkpoint(tmp_path, experts=list(range(E_GLOBAL)), dtype=torch.float8_e4m3fn)
 
-    with pytest.raises(ValueError, match=r"gate_up_proj.*convert_\*_bf16\.py"):
+    with pytest.raises(ValueError, match=r"gate_up_proj.*Dequantize it to bf16"):
         _fuse(tmp_path, _MoEModel(), weight_map, ep_start=4, ep_end=8, dtype=torch.bfloat16)
 
 
