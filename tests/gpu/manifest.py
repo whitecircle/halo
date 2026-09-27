@@ -769,6 +769,64 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=_MERGED_RESUME_FAMILY_ROWS,
         timeout=1200,
     ),
+    # Tiny random-init models, no server: one dense and one MoE family under every sharding PEFT LoRA
+    # syncs in, x adapter shape; the sweep below runs the same rows for every other family served.
+    "trainers/lora/test_lora_weight_sync_exact.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "lora", "ep", "etp", "moe", "qwen3"),
+        args_matrix=(
+            "--family qwen3 --mode fsdp",
+            "--family qwen3_moe --mode ep1 --adapters peft",
+            "--family qwen3_moe --mode ep1 --adapters mixed",
+            "--family qwen3_moe --mode ep2 --adapters peft",
+            "--family qwen3_moe --mode ep2 --adapters mixed",
+            "--family qwen3_moe --mode etp2 --adapters peft",
+        ),
+        timeout=900,
+    ),
+    "trainers/lora/test_lora_weight_sync_exact_families.py": TestSpec(
+        nproc=2,
+        markers=(
+            "gpu",
+            "full",
+            "2gpu",
+            "lora",
+            "ep",
+            "etp",
+            "moe",
+            "gptoss",
+            "qwen3",
+            "glm4",
+            "gemma4",
+            "bailing",
+            "lfm2",
+            "step3p7",
+        ),
+        args_matrix=(
+            "--family qwen3_5 --mode fsdp",
+            *(
+                f"--family {family} --mode {shape}"
+                for family in (
+                    "gpt_oss",
+                    "qwen3_5_moe",
+                    "glm4_moe_lite",
+                    "laguna",
+                    "gemma4",
+                    "lfm2_moe",
+                    "bailing_moe",
+                    "step3p7",
+                )
+                for shape in (
+                    "ep1 --adapters peft",
+                    "ep1 --adapters mixed",
+                    "ep2 --adapters peft",
+                    "ep2 --adapters mixed",
+                    "etp2 --adapters peft",
+                )
+            ),
+        ),
+        timeout=900,
+    ),
     "trainers/lora/test_lora_ep_convergence.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1000
     ),

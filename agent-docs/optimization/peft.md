@@ -331,6 +331,14 @@ Before each NCCL weight sync the trainer merges the adapter into the base, forwa
 base-model param names (PEFT prefixes stripped, `lora_*` params skipped), then unmerges to keep training.
 Without the merge, the server would generate from the un-adapted base.
 
+The unmerge alone does not give the frozen base back: in bf16 `(w + d) - d` misses `w` by a rounding step
+wherever the two roundings do not cancel, and the misses compound over a run's syncs. So the sync copies
+the LoRA'd base weights before the merge and writes them back after the unmerge
+(`merged_adapters(restore_base=True)`, as the merged save does). The copy is this rank's shard of them
+(the whole LoRA'd base in a single-process run), held while the dense params are sent; the experts go
+first, outside it. On Qwen3-8B at FSDP2 dp2 it adds 1.4 GiB per rank for attention LoRA (18% of the
+rank's weight shard) and 6.5 GiB with every linear layer adapted.
+
 Both trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_sync.py`),
 which also folds in the EP / FSDP2 / TP gathers; the merge is a collective on all ranks under FSDP2.
 
@@ -494,6 +502,10 @@ torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_ep.py
 # merge_expert_lora_on_save checkpoint: servable, and resumed exactly against an uninterrupted run
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_merged_save_resume.py \
     --family gpt_oss --adapters mixed
+# weight syncs leave the frozen base bit-identical (no server); ..._exact_families.py sweeps every
+# other family the sync serves under the same modes (fsdp dense; ep1 / ep2 / etp2 MoE)
+torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_weight_sync_exact.py \
+    --family qwen3_moe --mode ep2 --adapters mixed
 
 # Adapters on an on-policy run, asserted on the SERVED policy (needs a live vLLM server):
 # attention LoRA under EP and pure ETP, native grouped expert LoRA under EP

@@ -1,16 +1,25 @@
 """Weight-sync stand-ins shared by the suites: an offline client, a recording wire, a recording sender,
-a stock model."""
+a stock model, and the probes of what a LoRA push leaves behind."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import NamedTuple
 from unittest.mock import patch
 
 import torch
+from accelerate.utils import is_peft_model
+from peft.tuners.lora import LoraLayer
 from torch import nn
 from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
+import src.trainers.grpo.rollout.weight_sync as weight_sync
+from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
+from src.distributed.runtime import DeferredRankFailure, materialize_dtensor, to_local
+from src.models.structure import merged_adapters
+from src.trainers.mixins.ep_introspection import named_ep_layers
 
 
 def offline_sglang_client(base_url: str = "http://localhost:30000") -> SGLangWeightSyncClient:
@@ -92,12 +101,17 @@ class RecordingSender:
     """The engine end of ``gather_and_send_weights``, with no NCCL and no server: records every forward.
 
     ``keep_values`` also keeps a detached clone of each tensor, for a value comparison; leave it off on
-    a full-size checkpoint, whose forwarded weights the clones would hold a second time.
+    a full-size checkpoint, whose forwarded weights the clones would hold a second time. Carries the
+    client calls ``sync_weights_to_client`` makes around the push, so the trainers' own entry point can
+    drive it too.
     """
 
     def __init__(self, keep_values: bool = False):
         self.keep_values = keep_values
         self.params: list[ForwardedParam] = []
+
+    def scope_co_load_groups(self, module_names) -> None:
+        pass
 
     def update_named_param(self, name: str, data: torch.Tensor) -> None:
         value = data.detach().clone() if self.keep_values else None
@@ -106,6 +120,61 @@ class RecordingSender:
     def reset_prefix_cache(self) -> None:
         pass
 
+    def abort_weight_update(self) -> None:
+        pass
+
     @property
     def names(self) -> list[str]:
         return [param.name for param in self.params]
+
+
+def local_parameters(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Every parameter as this rank holds it, resharded first: the registration a sync reads. Rank-local."""
+    reshard_fsdp2_modules(model)
+    return {name: to_local(param.data).detach().clone() for name, param in model.named_parameters()}
+
+
+def moved_parameters(before: dict[str, torch.Tensor], after: dict[str, torch.Tensor]) -> list[str]:
+    """Names in ``before`` whose tensor in ``after`` is not bit-identical."""
+    return [name for name, value in before.items() if not torch.equal(value, after[name])]
+
+
+def lora_bases_and_merges(model: nn.Module) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Per PEFT-LoRA'd weight, under its live name: the full frozen base, and the base with the delta
+    added as PEFT's merge adds it (``w += delta`` in the weight's dtype). Collective on DTensor
+    shards: every rank calls it."""
+    reshard_fsdp2_modules(model)
+    bases, merges = {}, {}
+    for name, module in model.named_modules():
+        if not isinstance(module, LoraLayer):
+            continue
+        key = f"{name}.base_layer.weight"
+        bases[key] = materialize_dtensor(module.get_base_layer().weight.data).clone()
+        merges[key] = bases[key].clone()
+        for adapter in module.active_adapters:
+            merges[key] += materialize_dtensor(module.get_delta_weight(adapter))
+    return bases, merges
+
+
+def as_pushed(model: nn.Module, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """``tensors``, keyed by live-tree name, as the push hands them to the engine: through the sync's
+    own forwarder, so the EP export renames, the PEFT name normalization and a hub-namespace revert
+    (Step-3.7) spell them exactly as a push does. Rank-local."""
+    recorder = RecordingSender(keep_values=True)
+    guard = DeferredRankFailure("expected push")
+    prefix = model.prefix if is_peft_model(model) else None
+    forwarder = weight_sync._HubForwarder(recorder, model, named_ep_layers(model), prefix, guard)
+    for name, tensor in tensors.items():
+        forwarder.send(name, tensor)
+    forwarder.flush()
+    if guard.reason is not None:
+        raise RuntimeError(f"the sync's forwarder refused the expected tensors: {guard.reason}")
+    return {param.name: param.value for param in recorder.params}
+
+
+@contextmanager
+def without_the_base_write_back() -> Iterator[None]:
+    """The sync with the fold's exact restore dropped, so only the bf16 unmerge reverses it: the
+    negative control for a suite asserting that pushes leave the frozen base untouched."""
+    with patch.object(weight_sync, "merged_adapters", lambda peft_model, **_: merged_adapters(peft_model)):
+        yield

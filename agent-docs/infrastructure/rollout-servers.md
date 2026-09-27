@@ -59,6 +59,10 @@ The gather **reshards the FSDP2 modules first**. A forward leaves their transien
 registered while the optimizer steps the shards. Reading the registered params would ship a policy
 one optimizer step behind and fold a PEFT merge into a copy the next unshard discards.
 
+A LoRA run's sync folds the adapters into the base for the dense half and writes the frozen base back
+bit for bit afterwards, at the cost of one copy of the LoRA'd base shards
+([PEFT](../optimization/peft.md#online-rl--rollout-server-weight-sync)).
+
 ### Group rendezvous
 
 Each client hosts its group's rendezvous on the trainer: a TCP store on `group_port` that the

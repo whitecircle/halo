@@ -4,9 +4,9 @@ Both push the trained policy to the rollout server over the vendored NCCL client
 first, then the FSDP2-DP / TP shards of every dense param. The gathers must run on **every** rank
 (``full_tensor()`` and ``gather_expert_state_dict`` are collectives that hang if a rank skips them),
 while only the forwarding rank (global-main, TP-rank 0 under TP) sends. PEFT/LoRA is folded into the
-base and forwarded under base-model param names. Every family is gathered in its own hub checkpoint
-layout, which both engines' loaders read; which families an engine serves at all is read off its
-client class at construction.
+base and forwarded under base-model param names, and the frozen base is written back exactly after
+the unfold. Every family is gathered in its own hub checkpoint layout, which both engines' loaders
+read; which families an engine serves at all is read off its client class at construction.
 
 Those sends sit between the gathers, so each runs under a :class:`DeferredRankFailure` and the verdict
 is taken at a rank-uniform ``reject``; a forwarding rank raising mid-loop would otherwise leave every
@@ -23,6 +23,7 @@ from functools import partial
 from typing import Any
 
 import torch
+from accelerate.utils import is_peft_model
 from transformers.core_model_loading import (
     WeightConverter,
     WeightRenaming,
@@ -430,8 +431,9 @@ def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
     """Gather EP + dense/TP weights from ``model`` and forward to the engine via ``sender``.
 
     Runs on **every** rank (the gathers are collective); ``sender`` is the engine client on the
-    forwarding rank and ``None`` elsewhere. PEFT/LoRA is merged and forwarded under base-model names.
-    The caller flushes afterwards with ``sender.reset_prefix_cache()``. Returns whether ``model`` is PEFT.
+    forwarding rank and ``None`` elsewhere. The experts go first, then the dense params with PEFT/LoRA
+    merged and forwarded under base-model names. The caller flushes afterwards with
+    ``sender.reset_prefix_cache()``. Returns whether ``model`` is PEFT.
     """
     # FSDP2 leaves a forward's transient unsharded params registered while the optimizer steps the
     # shards, so the params a mid-training sync finds registered predate the last update: every
@@ -444,16 +446,21 @@ def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
     # that rank alone. Raising there would drop it out of the gather order its peers follow, so record
     # and carry on and let the reject decide.
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
-    with merged_adapters(model) as peft:
-        # Live EP layers, not is_ep_mode: ep_size==1 is still EP-wrapped and the dense path ships an
-        # unloadable layout.
-        ep_layers = named_ep_layers(model)
-        forwarder = (
-            guard.run(partial(_HubForwarder, sender, model, ep_layers, model.prefix if peft else None, guard))
-            if sender
-            else None
-        )
-        _send_ep_expert_weights(ep_layers, forwarder, guard)
+    peft = is_peft_model(model)
+    # Live EP layers, not is_ep_mode: ep_size==1 is still EP-wrapped and the dense path ships an
+    # unloadable layout.
+    ep_layers = named_ep_layers(model)
+    forwarder = (
+        guard.run(partial(_HubForwarder, sender, model, ep_layers, model.prefix if peft else None, guard))
+        if sender
+        else None
+    )
+    # Experts first, outside the PEFT merge: the expert gather folds native expert-LoRA into its own
+    # copy, and it is the sync's largest rank-local allocation, which the base copy below must not join.
+    _send_ep_expert_weights(ep_layers, forwarder, guard)
+    # restore_base: a bf16 unmerge misses the frozen base by a rounding step, and the sync repeats
+    # every few steps for the whole run, so the miss would compound into a base the run never loaded.
+    with merged_adapters(model, restore_base=True):
         _send_dense_weights(model, ep_layers, forwarder)
     # Collective on every rank. Raises on all of them with the forwarding rank's cause, after the
     # adapters are unmerged, so a failed sync leaves the trainer's own weights untouched.
