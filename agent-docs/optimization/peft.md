@@ -349,8 +349,9 @@ which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all
 
 The embedding trainer is SentenceTransformer-based. `use_peft: true` injects LoRA into the underlying
 transformer via `peft.inject_adapter_in_model` (not `SentenceTransformer.add_adapter`) and freezes every
-non-adapter param. Plain LoRA only: 4-bit QLoRA is rejected on the ST loader. In-place injection never reads
-`lora_task_type`.
+non-adapter param. Plain LoRA only: 4-bit QLoRA is rejected on the ST loader, and DoRA, `lora_bias` and conv
+targets at trainer construction, since the save's fold has no form for them; linear and input-embedding
+targets fold. In-place injection never reads `lora_task_type`.
 
 Runs under standard / FSDP2 data parallelism only; EP and TP are rejected at trainer construction (the EP
 save path has no adapter-merge step, so the checkpoint would carry adapter keys that reload as random base

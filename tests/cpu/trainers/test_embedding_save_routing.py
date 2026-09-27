@@ -17,6 +17,8 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 
+from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.trainer import EmbeddingTrainer
 
@@ -180,6 +182,21 @@ def test_lora_fold_factor_is_the_live_adapter_scaling_or_a_raise():
     unscaled, _, _ = _host(has_lora=True)
     with pytest.raises(RuntimeError, match="no LoraLayer with an adapter scaling"):
         EmbeddingTrainer._lora_scaling(None, unscaled._get_unwrapped_model())
+
+
+def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():
+    """An EP layer adopts the block's shared experts as children, so a target list that reaches only
+    those puts every adapter inside it. The run still trains injected LoRA: it must be folded on save
+    and refused under EP, which an EP-excluding scan would miss."""
+    layer = EPGemma4MoELayer.__new__(EPGemma4MoELayer)  # the class only; EP construction needs a mesh
+    nn.Module.__init__(layer)
+    layer.shared_expert = nn.Linear(4, 4, bias=False)
+    backbone = _Backbone()
+    backbone.add_module("moe", layer)
+    inject_adapter_in_model(LoraConfig(r=2, lora_alpha=4, target_modules=["shared_expert"]), backbone)
+    assert find_ep_layers(backbone) == [("moe", layer)], "premise: the adapters sit inside an EP layer"
+
+    assert EmbeddingTrainer._has_injected_lora(None, backbone)
 
 
 def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatch, tmp_path):

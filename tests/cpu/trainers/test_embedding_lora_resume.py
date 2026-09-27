@@ -24,7 +24,11 @@ bit-reproducible):
 * ordering: the resume adapter and its marker are on disk before rotation removes the previous
   checkpoint, with ``save_only_model`` too;
 * a non-shared filesystem: two one-rank "nodes" each write a complete resume adapter to their own
-  directory and each restores its own; one node missing its copy raises on both.
+  directory and each restores its own; one node missing its copy raises on both;
+* an input-embedding target (``word_embeddings``, beside the attention targets or alone): its
+  ``lora_embedding_A``/``_B`` fold as ``base + scaling · (B @ A)ᵀ``, the checkpoint carries them in its
+  resume adapter, and the run resumes exactly; an adapter the fold cannot express (DoRA) is refused
+  at construction.
 
     python tests/cpu/trainers/test_embedding_lora_resume.py
 """
@@ -67,6 +71,8 @@ from tests.common.utils import step_losses
 
 WORDS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", *(f"w{i}" for i in range(60))]
 TARGET_MODULES = ("query", "value")
+EMBEDDING_TARGET = "word_embeddings"
+NUM_LAYERS = 2
 LORA_R = 4
 # alpha != r, so a fold at a guessed scaling of 1.0 would not match.
 LORA_ALPHA = 8
@@ -89,7 +95,7 @@ def _tiny_base(path) -> str:
     config = BertConfig(
         vocab_size=len(WORDS),
         hidden_size=16,
-        num_hidden_layers=2,
+        num_hidden_layers=NUM_LAYERS,
         num_attention_heads=2,
         intermediate_size=32,
         max_position_embeddings=32,
@@ -99,7 +105,9 @@ def _tiny_base(path) -> str:
     return str(path)
 
 
-def _lora_model(source: str, *, seed: int, target_modules=TARGET_MODULES, r: int = LORA_R) -> SentenceTransformer:
+def _lora_model(
+    source: str, *, seed: int, target_modules=TARGET_MODULES, r: int = LORA_R, **lora
+) -> SentenceTransformer:
     """``source`` loaded, then LoRA-injected by the embedding script's own ``inject_lora``."""
     torch.manual_seed(seed)  # the adapter init draws from the global generator
     model = SentenceTransformer(source, device="cpu")
@@ -110,6 +118,7 @@ def _lora_model(source: str, *, seed: int, target_modules=TARGET_MODULES, r: int
         lora_alpha=LORA_ALPHA,
         lora_dropout=0.0,
         lora_target_modules=list(target_modules),
+        **lora,
     )
     inject_lora(model, model_config, DistributedArguments())
     return model
@@ -211,19 +220,28 @@ def _copy(checkpoint: str, destination) -> str:
     return shutil.copytree(checkpoint, str(destination))
 
 
+# PEFT's adapter spellings: the A factor's key suffix -> the B factor's, and whether the delta is
+# ``(B @ A)ᵀ`` (an embedding's A is ``[r, vocab]``) rather than ``B @ A``.
+_ADAPTER_SUFFIXES = {
+    ".lora_A.default.weight": (".lora_B.default.weight", False),
+    ".lora_embedding_A.default": (".lora_embedding_B.default", True),
+}
+
+
 def _expected_fold(base: str, adapters: dict[str, torch.Tensor], backbone_prefix: str) -> dict[str, torch.Tensor]:
-    """``base + scaling · B @ A`` per LoRA target at the save dtype, from ``adapters`` keyed by the ST's names."""
+    """PEFT's merge per LoRA target at the save dtype, from ``adapters`` keyed by the ST's names."""
     base_state = BertModel.from_pretrained(base).state_dict()
     expected = {}
     for key, lora_a in adapters.items():
-        if not key.endswith(".lora_A.default.weight"):
-            continue
-        module = key[len(backbone_prefix) : -len(".lora_A.default.weight")]
-        lora_b = adapters[key.replace(".lora_A.", ".lora_B.")]
-        weight = base_state[f"{module}.weight"]
-        expected[f"{module}.weight"] = cast_to_save_dtype(
-            (weight.float() + SCALING * (lora_b.float() @ lora_a.float())).to(weight.dtype)
-        )
+        for a_suffix, (b_suffix, transposed) in _ADAPTER_SUFFIXES.items():
+            if not key.endswith(a_suffix):
+                continue
+            module = key[len(backbone_prefix) : -len(a_suffix)]
+            delta = adapters[key[: -len(a_suffix)] + b_suffix].float() @ lora_a.float()
+            weight = base_state[f"{module}.weight"]
+            expected[f"{module}.weight"] = cast_to_save_dtype(
+                (weight.float() + SCALING * (delta.T if transposed else delta)).to(weight.dtype)
+            )
     return expected
 
 
@@ -232,14 +250,20 @@ def _backbone_prefix(model: SentenceTransformer) -> str:
     return next(name for name, module in model.named_modules() if module is backbone) + "."
 
 
-def _assert_serves_the_fold(directory: str, base: str, adapters: dict[str, torch.Tensor], prefix: str) -> None:
+def _assert_serves_the_fold(
+    directory: str,
+    base: str,
+    adapters: dict[str, torch.Tensor],
+    prefix: str,
+    folds: int = NUM_LAYERS * len(TARGET_MODULES),
+) -> None:
     backbone, info = AutoModel.from_pretrained(directory, output_loading_info=True)
     problems = {kind: info[kind] for kind in ("missing_keys", "unexpected_keys", "mismatched_keys") if info[kind]}
     assert not problems, f"stock from_pretrained does not load the folded weights cleanly: {problems}"
     served = backbone.state_dict()
     assert not [key for key in served if ".lora_" in key or ".base_layer." in key]
     expected = _expected_fold(base, adapters, prefix)
-    assert len(expected) == 2 * len(TARGET_MODULES), f"premise: one fold per LoRA target, got {sorted(expected)}"
+    assert len(expected) == folds, f"premise: one fold per LoRA target, got {sorted(expected)}"
     for key, value in expected.items():
         assert torch.equal(served[key].to(value.dtype), value), f"{key} is not base + scaling · B @ A of the adapters"
     embeddings = SentenceTransformer(directory, device="cpu").encode(["w1 w2 w3", "w4 w5"], convert_to_tensor=True)
@@ -513,6 +537,89 @@ def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):
         assert result == "PASS", f"rank {rank}: {result}"
     first = [(tmp_path / f"first_tensor_{rank}.txt").read_text() for rank in range(2)]
     assert first[0] != first[1], "premise: the two nodes hold different tensors"
+
+
+# --- input-embedding targets ----------------------------------------------------------------
+
+
+@pytest.fixture(
+    scope="module",
+    # (targets, adapted modules). TRL collapses a one-entry list into a string, which PEFT reads as a
+    # regex, so embedding-only is spelled as a user writes it: the embedding beside an lm_head the
+    # headless backbone lacks.
+    params=[
+        ((EMBEDDING_TARGET, *TARGET_MODULES), 1 + NUM_LAYERS * len(TARGET_MODULES)),
+        ((EMBEDDING_TARGET, "lm_head"), 1),
+    ],
+    ids=["embedding-and-attention", "embedding-only"],
+)
+def embedding_run(request, tmp_path_factory):
+    """``run`` with the input embedding among the targets: PEFT adapts it as a ``lora.Embedding``,
+    whose ``lora_embedding_A``/``_B`` are neither ``lora_A`` nor ``lora_B``."""
+    PartialState()
+    targets, folds = request.param
+    root = tmp_path_factory.mktemp("embedding_lora_embedding_target")
+    base = _tiny_base(root / "base")
+    at_save = _Snapshot("save")
+    trainer = _trainer(_lora_model(base, seed=1, target_modules=targets), root / "out", callbacks=[at_save])
+    trainer.train()
+    return SimpleNamespace(
+        base=base,
+        targets=targets,
+        folds=folds,
+        checkpoint=str(root / "out" / f"checkpoint-{SAVE_AT_STEP}"),
+        at_save=at_save.tensors,
+        losses=step_losses(trainer),
+        final=_trainable(trainer.model),
+        prefix=_backbone_prefix(trainer.model),
+    )
+
+
+def test_an_embedding_target_is_folded_into_the_served_table(embedding_run):
+    """The checkpoint serves ``base + scaling · (B @ A)ᵀ`` as the plain ``word_embeddings.weight``, with no
+    adapter key left over, and its resume adapter holds the embedding factors bit for bit."""
+    embedding_a = [key for key in embedding_run.at_save if key.endswith(".lora_embedding_A.default")]
+    assert len(embedding_a) == 1 and embedding_run.at_save[embedding_a[0]].abs().sum() > 0, (
+        "premise: training moved the zero-init embedding A factor, so an unfolded table is detectable"
+    )
+    assert resume_adapter_dir(embedding_run.checkpoint) is not None
+    saved = load_file(os.path.join(embedding_run.checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
+    assert set(saved) == set(embedding_run.at_save)
+    assert all(torch.equal(saved[key], value) for key, value in embedding_run.at_save.items())
+    _assert_serves_the_fold(
+        embedding_run.checkpoint, embedding_run.base, saved, embedding_run.prefix, embedding_run.folds
+    )
+
+
+def test_an_embedding_target_resumes_bit_equal_and_reproduces_the_run(embedding_run, tmp_path):
+    source = resolve_resume_weights_source(
+        embedding_run.checkpoint, SimpleNamespace(model_name_or_path=embedding_run.base), ParallelismConfig()
+    )
+    assert source == embedding_run.base
+    restored = _Snapshot("train_begin")
+    trainer = _trainer(
+        _lora_model(source, seed=2, target_modules=embedding_run.targets), tmp_path / "resumed", callbacks=[restored]
+    )
+
+    trainer.train(resume_from_checkpoint=embedding_run.checkpoint)
+
+    assert set(restored.tensors) == set(embedding_run.at_save)
+    unequal = [key for key, value in embedding_run.at_save.items() if not torch.equal(restored.tensors[key], value)]
+    assert not unequal, f"adapters not restored bit-equal: {unequal[:3]}"
+    resumed = step_losses(trainer)[-(TOTAL_STEPS - SAVE_AT_STEP) :]
+    assert resumed == embedding_run.losses[SAVE_AT_STEP:]
+    final = _trainable(trainer.model)
+    assert all(torch.equal(final[key], value) for key, value in embedding_run.final.items())
+
+
+def test_an_adapter_the_fold_cannot_express_is_refused_at_construction(tmp_path):
+    """DoRA's magnitude has no ``B @ A`` fold. Refused when the trainer is built, on every rank, rather
+    than on the save rank alone at the first checkpoint, where its peers would block in the save."""
+    PartialState()
+    base = _tiny_base(tmp_path / "base")
+
+    with pytest.raises(NotImplementedError, match="have no such fold"):
+        _trainer(_lora_model(base, seed=1, use_dora=True), tmp_path / "out")
 
 
 if __name__ == "__main__":

@@ -99,6 +99,14 @@ _SCALE_LOSSES = frozenset(
 )
 
 
+# The key segment of each LoRA A factor the save folds -> its B factor's, and whether PEFT's delta
+# is the transpose of ``B @ A`` (an embedding's A is ``[r, vocab]``).
+_LORA_FOLD_SEGMENTS = {
+    ".lora_A.": (".lora_B.", False),
+    ".lora_embedding_A.": (".lora_embedding_B.", True),
+}
+
+
 def create_loss(model: SentenceTransformer, config: EmbeddingConfig) -> nn.Module:
     """Create a loss function from config, optionally wrapping with MatryoshkaLoss."""
     loss_type = config.loss_type
@@ -127,30 +135,53 @@ def _merge_injected_lora_state_dict(state_dict: dict, scaling: float) -> dict:
     """Fold ``inject_adapter_in_model`` LoRA into base weights within a gathered state dict.
 
     The injected model is not a ``PeftModel``, so a plain save would write the adapter keys verbatim
-    and reload as random base weights. Emit plain ``<m>.weight = base + scaling * (B @ A)`` and drop
-    the adapter/base_layer keys. DoRA unsupported (non-linear magnitude reparam).
+    and reload as random base weights. Each ``nn.Linear`` / ``nn.Embedding`` target becomes a plain
+    ``<m>.weight`` holding PEFT's own merge (``get_delta_weight``): ``base + scaling · B @ A`` for a
+    linear target and ``base + scaling · (B @ A)ᵀ`` for an embedding one (``lora_embedding_A`` is
+    ``[r, vocab]``, ``lora_embedding_B`` ``[hidden, r]``); the adapter and ``base_layer`` keys are
+    dropped. Any ``lora_`` tensor left over raises: a DoRA magnitude, a ``lora_bias`` or a conv
+    adapter has no such fold, and written as a stray key it would be dropped at load. Each fp32
+    delta is built only while its own weight is merged, so the writer holds one at a time.
     """
-    if any(".lora_magnitude_vector." in k for k in state_dict):
-        raise NotImplementedError("Merging DoRA adapters on save is not supported for embedding training.")
-
-    lora_a = {k.split(".lora_A.")[0]: v for k, v in state_dict.items() if ".lora_A." in k}
-    lora_b = {k.split(".lora_B.")[0]: v for k, v in state_dict.items() if ".lora_B." in k}
+    # prefix -> (A key, B key, transposed), for the factor pairs whose delta has the base's shape.
+    pairs: dict[str, tuple[str, str, bool]] = {}
+    for a_segment, (b_segment, transposed) in _LORA_FOLD_SEGMENTS.items():
+        for a_key, lora_a in state_dict.items():
+            if a_segment not in a_key:
+                continue
+            prefix = a_key.split(a_segment)[0]
+            b_key = a_key.replace(a_segment, b_segment, 1)
+            lora_b = state_dict.get(b_key)
+            base = state_dict.get(f"{prefix}.base_layer.weight")
+            if lora_b is None or base is None or lora_a.dim() != 2 or lora_b.dim() != 2 or prefix in pairs:
+                continue
+            product = (lora_b.shape[0], lora_a.shape[1])
+            if lora_b.shape[1] != lora_a.shape[0] or tuple(base.shape) != (product[::-1] if transposed else product):
+                continue
+            pairs[prefix] = (a_key, b_key, transposed)
+    folded = {key for a_key, b_key, _ in pairs.values() for key in (a_key, b_key)}
 
     merged: dict[str, torch.Tensor] = {}
     for k, v in state_dict.items():
-        if ".lora_A." in k or ".lora_B." in k:
+        if k in folded:
             continue
         if k.endswith(".base_layer.weight"):
             prefix = k[: -len(".base_layer.weight")]
-            w = v
-            if prefix in lora_a and prefix in lora_b:
-                delta = scaling * (lora_b[prefix].float() @ lora_a[prefix].float())
-                w = (v.float() + delta).to(v.dtype)
-            merged[f"{prefix}.weight"] = w
+            if prefix in pairs:
+                a_key, b_key, transposed = pairs[prefix]
+                delta = state_dict[b_key].float() @ state_dict[a_key].float()
+                v = (v.float() + scaling * (delta.T if transposed else delta)).to(v.dtype)
+            merged[f"{prefix}.weight"] = v
         elif k.endswith(".base_layer.bias"):
             merged[f"{k[: -len('.base_layer.bias')]}.bias"] = v
         else:
             merged[k] = v
+    if unfolded := sorted(k for k in merged if "lora_" in k):
+        raise NotImplementedError(
+            f"Embedding training folds only plain linear and embedding LoRA into the saved weights; "
+            f"{len(unfolded)} adapter tensors have no such fold (DoRA, lora_bias or a conv adapter?): "
+            f"{unfolded[:KEY_PREVIEW_COUNT]}. Drop those options or target modules, or full fine-tune."
+        )
     return merged
 
 
@@ -259,6 +290,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         self._eval_embedding_accum: dict[str, list[float]] = {}
         self._setup_distributed_modes()
         self._validate_injected_lora_parallelism()
+        self._validate_injected_lora_foldable()
 
     def _reject_batch_sampler_on_toolkit_loader(self, args: EmbeddingConfig | None) -> None:
         """Refuse a batch sampler the toolkit's loader would drop.
@@ -296,6 +328,22 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             "--expert_parallel_size, or full fine-tune this model."
         )
 
+    def _validate_injected_lora_foldable(self) -> None:
+        """Dry-run the save's fold over the backbone's parameter shapes (meta tensors, no copies).
+
+        An adapter the fold cannot express (DoRA, ``lora_bias``, a conv target) then raises here, on
+        every rank, instead of on the save rank alone at the first checkpoint, where its peers would
+        block in the save's next collective.
+        """
+        backbone = self._get_unwrapped_model()
+        if not self._has_injected_lora(backbone):
+            return
+        shapes = {
+            name: torch.empty(param.shape, dtype=param.dtype, device="meta")
+            for name, param in backbone.named_parameters()
+        }
+        _merge_injected_lora_state_dict(shapes, scaling=1.0)
+
     def _get_unwrapped_model(self) -> nn.Module:
         """The SentenceTransformer's transformer backbone (``auto_model``), for the backbone-specific
         introspection the base contract limits this to; whole-model work uses ``_top_level_model``.
@@ -314,9 +362,12 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         return super()._get_unwrapped_model()
 
     def _has_injected_lora(self, backbone: nn.Module | None = None) -> bool:
-        """True if ``inject_adapter_in_model`` added LoRA layers (in-place, so not a PeftModel)."""
+        """True if ``inject_adapter_in_model`` added LoRA layers (in-place, so not a PeftModel), of
+        any kind and anywhere: an embedding target's ``lora_embedding_A``/``_B`` count as a linear
+        one's do, and so does an adapter on a shared expert an EP layer adopted. The name test is
+        ``inject_lora``'s own; this path builds no native expert LoRA for it to mistake."""
         backbone = backbone if backbone is not None else self._get_unwrapped_model()
-        return any((".lora_A." in n) or (".lora_B." in n) for n, _ in backbone.named_parameters())
+        return any("lora_" in name for name, _ in backbone.named_parameters())
 
     def _lora_scaling(self, backbone: nn.Module) -> float:
         """Active-adapter LoRA scaling read from a live LoraLayer (same factor the forward used).
