@@ -188,7 +188,7 @@ def _apply_fsdp2(
         logger.info(f"  ✓ FSDP2 ({label}) applied for data parallelism ({sharded} shard groups)")
 
 
-def _warn_fp32_pins_cast_by_policy(model: nn.Module, mp_policy: MixedPrecisionPolicy | None) -> None:
+def _warn_fp32_pins_cast_by_policy(model: nn.Module, mp_policy: MixedPrecisionPolicy) -> None:
     """Warn (once, at wrap time) when the FSDP2 policy will compute fp32-pinned params in low precision.
 
     ``MixedPrecisionPolicy`` casts per fully_shard group with no per-parameter dtype mechanism, so
@@ -197,7 +197,7 @@ def _warn_fp32_pins_cast_by_policy(model: nn.Module, mp_policy: MixedPrecisionPo
     transformers class attributes, so a family without them, or an EP load that materializes uniform
     bf16, warns about nothing.
     """
-    if mp_policy is None or mp_policy.param_dtype in (None, torch.float32):
+    if mp_policy.param_dtype in (None, torch.float32):
         return
     pinned = fp32_pinned_param_names(model)
     cast_params = [name for name, p in model.named_parameters() if p.dtype == torch.float32 and name in pinned]
@@ -233,7 +233,7 @@ def _tied_parameters(model: nn.Module) -> "IdentityParamSet":
 def apply_fsdp2_per_layer(
     model: nn.Module,
     dp_mesh: DeviceMesh,
-    mp_policy: MixedPrecisionPolicy | None,
+    mp_policy: MixedPrecisionPolicy,
     reshard_after_forward: bool,
     ignored_params: "IdentityParamSet",
 ) -> int:

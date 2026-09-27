@@ -31,6 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 from peft import get_peft_model
+from torch.distributed.fsdp import MixedPrecisionPolicy
 from transformers import (
     Cohere2MoeConfig,
     Cohere2MoeForCausalLM,
@@ -320,7 +321,11 @@ def _owning_units(model: nn.Module) -> dict[int, nn.Module]:
 
     with patch.object(fsdp, "fully_shard", side_effect=record):
         fsdp.apply_fsdp2_per_layer(
-            model, dp_mesh=None, mp_policy=None, reshard_after_forward=False, ignored_params=IdentityParamSet()
+            model,
+            dp_mesh=None,
+            mp_policy=MixedPrecisionPolicy(),
+            reshard_after_forward=False,
+            ignored_params=IdentityParamSet(),
         )
 
     owner: dict[int, nn.Module] = {}

@@ -73,7 +73,7 @@ def test_fp32_policy_and_pinless_families_are_silent(caplog):
     fp32_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
     assert _warning_text(caplog, _PinnedModel(), fp32_policy) == ""
     assert _warning_text(caplog, _PinlessModel(), _bf16_policy()) == ""
-    assert _warning_text(caplog, _PinnedModel(), None) == ""
+    assert _warning_text(caplog, _PinnedModel(), MixedPrecisionPolicy()) == ""
 
 
 if __name__ == "__main__":

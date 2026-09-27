@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 import pytest
 import torch.nn as nn
+from torch.distributed.fsdp import MixedPrecisionPolicy
 from transformers import GenerationMixin, PretrainedConfig, PreTrainedModel
 
 import src.distributed.fsdp as fsdp
@@ -96,7 +97,7 @@ def _shard_calls(model):
         count = fsdp.apply_fsdp2_per_layer(
             model,
             dp_mesh=None,
-            mp_policy=None,
+            mp_policy=MixedPrecisionPolicy(),
             reshard_after_forward=False,
             ignored_params=IdentityParamSet(),
         )
@@ -170,7 +171,7 @@ def test_the_refusal_fires_before_anything_is_wrapped():
             fsdp.apply_fsdp2_per_layer(
                 _UnreachableLayerListDecoder(),
                 dp_mesh=None,
-                mp_policy=None,
+                mp_policy=MixedPrecisionPolicy(),
                 reshard_after_forward=False,
                 ignored_params=IdentityParamSet(),
             )
