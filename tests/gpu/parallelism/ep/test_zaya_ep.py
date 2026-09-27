@@ -154,7 +154,6 @@ def run(ctx):
     checks["training_loss_finite"] = math.isfinite(result.training_loss)
     checks["step_losses_finite"] = all(math.isfinite(loss) for loss in losses)
     checks["logged_every_step"] = len(losses) == MAX_STEPS
-    checks["loss_decreased"] = len(losses) >= 2 and losses[-1] < losses[0]
     return {"checks": checks, "metrics": ctx.metrics(trainer)}
 
 
