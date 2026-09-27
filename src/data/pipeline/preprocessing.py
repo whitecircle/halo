@@ -76,6 +76,9 @@ _VLM_ROW_DATA_ERRORS = (
     TemplateError,
 )
 
+# The held-out split under its other common name, baked as "test" when the input carries no "test".
+_EVAL_SPLIT_ALIAS = "validation"
+
 
 def _completion_only_labels(
     input_ids: list[int],
@@ -575,6 +578,29 @@ def _reject_unconsumed_image_columns(dataset: Dataset | DatasetDict, config: Pre
     )
 
 
+def _resolve_baked_splits(dataset: Dataset | DatasetDict) -> tuple[Dataset | None, Dataset | None]:
+    """The input's ``(train, test)`` pair, refusing any split the artifact would not carry.
+
+    The artifact holds only ``train`` and ``test``, and training evaluates on a placeholder cut from
+    train when ``test`` is absent, so a split outside the pair would vanish without a trace. A lone
+    ``validation`` split is baked as ``test``; next to a ``test`` split it is refused like any other.
+    """
+    if isinstance(dataset, Dataset):
+        return dataset, None
+    test_source = next((name for name in ("test", _EVAL_SPLIT_ALIAS) if name in dataset), None)
+    unbaked = sorted(set(dataset) - {"train", test_source})
+    if unbaked:
+        raise ValueError(
+            f"The input carries split(s) {unbaked} that the prepared dataset would not hold: it bakes "
+            f"only 'train' and 'test' (a lone '{_EVAL_SPLIT_ALIAS}' split is baked as 'test'). Remove "
+            f"them from the input, or point --input at the train split alone (an '@train' suffix on a "
+            f"Hub ID, or the split's own directory of a saved DatasetDict) and cut 'test' with --test-size."
+        )
+    if test_source == _EVAL_SPLIT_ALIAS:
+        logger.info(f"Baking the input's '{_EVAL_SPLIT_ALIAS}' split as the prepared dataset's 'test' split")
+    return dataset.get("train"), dataset[test_source] if test_source else None
+
+
 def preprocess_dataset(
     dataset: Dataset | DatasetDict,
     tokenizer_or_processor: Any,
@@ -583,9 +609,10 @@ def preprocess_dataset(
 ) -> dict[str, Any]:
     """Preprocess a dataset: tokenize, optionally pack, and optionally shard/save.
 
-    For VLM, pass the processor instead of a tokenizer and set config.is_vlm=True. Returns a dict with
-    "train"/"test" datasets, "metadata", and (if output_dir is given and num_shards > 1)
-    "shard_indices". At num_shards <= 1 the splits are saved unsharded (``save_to_disk``).
+    For VLM, pass the processor instead of a tokenizer and set config.is_vlm=True. A DatasetDict input
+    bakes its "train" and "test" splits, a lone "validation" split as "test", and refuses any other.
+    Returns a dict with "train"/"test" datasets, "metadata", and (if output_dir is given and
+    num_shards > 1) "shard_indices". At num_shards <= 1 the splits are saved unsharded (``save_to_disk``).
     """
     result = {}
 
@@ -601,12 +628,7 @@ def preprocess_dataset(
 
     _reject_unconsumed_image_columns(dataset, config)
 
-    if isinstance(dataset, DatasetDict):
-        train_data = dataset.get("train")
-        test_data = dataset.get("test")
-    else:
-        train_data = dataset
-        test_data = None
+    train_data, test_data = _resolve_baked_splits(dataset)
 
     # Refused before the tokenization pass: training rejects a sharded dataset without a test split,
     # while an unsharded one is handed a placeholder test split at load.
