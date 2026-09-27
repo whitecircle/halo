@@ -155,15 +155,15 @@ class GradientSyncMixin:
     def _setup_ep_gradient_sync(self) -> None:
         """FSDP2 for the EP (and EP+CP) gradient sync: experts FSDP-ignored, everything else sharded.
 
-        One module-tree walk feeds both the presence check and the wrap: ``_ep_fsdp_ignored_modules``
+        One module-tree walk feeds both the presence check and the wrap: ``_fsdp_exclusions``
         inspects every parameter's dtype, so deriving it twice doubles that pass over the model.
         """
         config = self.parallelism_config
         # Rank-block width, not the global world (identical without PP).
         if config.stage_world_size <= 1:
             return
-        ignored = self._ep_fsdp_ignored_modules()
-        if not ignored[0] and config.is_ep_mode:
+        exclusions = self._fsdp_exclusions()
+        if not exclusions.ep_modules and config.is_ep_mode:
             raise RuntimeError(
                 "EP mode is active but no EP-patched modules found in the model. "
                 "This means expert gradient synchronization will not work — experts "
@@ -172,7 +172,7 @@ class GradientSyncMixin:
             )
         self._apply_ep_aware_dp_fsdp2(
             self.model,
-            ignored=ignored,
+            exclusions=exclusions,
             fallback_dp_size=config.stage_world_size,
             dp_replicate_size=config.dp_replicate_size,
             topo=f", HSDP {config.dp_replicate_size}×{config.dp_shard_size}" if config.is_hsdp else "",
@@ -199,9 +199,14 @@ class GradientSyncMixin:
                 "over; load the model through load_distributed_model."
             )
         mp_policy = create_mixed_precision_policy_v2(self.args, fp32_master_weights=config.fp32_non_ep_params)
-        ignored_set = IdentityParamSet(self._ignored_params(self._ep_fsdp_ignored_modules()[2]) or ())
+        excluded_params = self._fsdp_exclusions().params
+        self._reject_unsynced_fsdp_exclusions(self.model, excluded_params)
         apply_fsdp2_per_layer(
-            self.model, device_mesh[MeshDim.DP], mp_policy, config.fsdp_reshard_after_forward, ignored_set
+            self.model,
+            device_mesh[MeshDim.DP],
+            mp_policy,
+            config.fsdp_reshard_after_forward,
+            IdentityParamSet(excluded_params),
         )
         self._fsdp_wrapped = True
         logger.info(
@@ -224,7 +229,7 @@ class GradientSyncMixin:
         self._apply_dp_fsdp2(
             self._top_level_model(),
             config.stage_world_size,
-            ignored_modules=self._find_fsdp_incompatible_modules(),
+            excluded_params=self._fsdp_exclusions().params,
             dp_replicate_size=config.dp_replicate_size,
             topo=f", HSDP {config.dp_replicate_size}×{config.dp_shard_size}" if config.is_hsdp else "",
             detail="applied for CP gradient sync",

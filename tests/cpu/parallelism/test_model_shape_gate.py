@@ -10,7 +10,7 @@ before any of that.
 The same gate carries the ``fp32_non_ep_params`` + FSDP-managed-ep1-experts refusal. That triple puts
 fp32 dense parameters next to bf16 expert ones in one ``fully_shard`` group, and torch aborts with a
 bare "FSDP expects uniform original parameter dtype" **after the whole model has loaded**. It cannot
-live at the wrap-time seam (``_ep_fsdp_ignored_modules``): that walks the LIVE module tree, and under
+live at the wrap-time seam (``_fsdp_exclusions``): that walks the LIVE module tree, and under
 PP a hybrid stack can leave one stage with no MoE layer at all — the MoE stages would raise while the
 dense stages walked on into the wrap, hanging the job instead of failing it. Here it is pure
 arithmetic over ``config.json`` and therefore runs identically on every rank.
@@ -30,7 +30,7 @@ from transformers import CONFIG_MAPPING
 
 from src.distributed.parallelism_config import ParallelismConfig, _divisors_up_to
 from src.models.moe_balancing import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_shard_width
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.mixins.base import DistributedTrainerMixin, FsdpExclusions
 from tests.common.parallelism import make_parallelism_config
 
 _MOD = "src.distributed.parallelism_config"
@@ -199,17 +199,17 @@ def test_the_dtype_gate_is_inert_without_the_knob():
     _config(8, ep_size=1).validate_against_model_config(_Cfg(**_MOE))
 
 
-# The wrap-time counterpart: ``_ep_fsdp_ignored_modules`` must stay silent
+# The wrap-time counterpart: ``_fsdp_exclusions`` must stay silent
 
 
-def _stub(*, experts_fsdp_managed: bool, fp32_non_ep_params: bool, ep_modules, incompatible=()):
-    """Only what the wrap-time seam reads: the two config flags and the two module finders."""
+def _stub(*, experts_fsdp_managed: bool, fp32_non_ep_params: bool, ep_modules, dtype_params=()):
+    """Only what the wrap-time seam reads: the two config flags and the two finders."""
     return SimpleNamespace(
         parallelism_config=SimpleNamespace(
             experts_fsdp_managed=experts_fsdp_managed, fp32_non_ep_params=fp32_non_ep_params
         ),
         _find_ep_modules=lambda: list(ep_modules),
-        _find_fsdp_incompatible_modules=lambda: list(incompatible),
+        _dtype_excluded_params=lambda: list(dtype_params),
     )
 
 
@@ -219,43 +219,45 @@ def test_the_wrap_time_seam_does_not_re_refuse_the_triple():
     it. A guard re-added here is what this pins against."""
     stub = _stub(experts_fsdp_managed=True, fp32_non_ep_params=True, ep_modules=[nn.Linear(4, 4)])
 
-    assert DistributedTrainerMixin._ep_fsdp_ignored_modules(stub) == ([], [], [])
+    assert DistributedTrainerMixin._fsdp_exclusions(stub) == FsdpExclusions([], [], [])
 
 
 def test_fsdp_managed_ep1_experts_hand_the_experts_to_fsdp():
-    """The accepted half of the same branch: the EP modules are dropped from the ignored set (that IS
+    """The accepted half of the same branch: the EP modules are dropped from the exclusions (that IS
     how FSDP comes to own their reduce-scatter), so empty lists here are the behaviour."""
     expert = nn.Linear(4, 4)
     stub = _stub(experts_fsdp_managed=True, fp32_non_ep_params=False, ep_modules=[expert])
 
-    ep_modules, dtype_incompatible, merged = DistributedTrainerMixin._ep_fsdp_ignored_modules(stub)
+    exclusions = DistributedTrainerMixin._fsdp_exclusions(stub)
 
-    assert ep_modules == []
-    assert dtype_incompatible == []
-    assert expert not in merged
+    assert exclusions.ep_modules == []
+    assert exclusions.dtype_params == []
+    assert not any(p is expert.weight for p in exclusions.params)
 
 
-def test_experts_outside_fsdp_stay_ignored():
+def test_experts_outside_fsdp_stay_excluded():
     """``ep_group_size > 1`` (real EP, and pure ETP): the EP layer syncs its own expert grads, so the
-    experts must remain in FSDP's ignored set."""
+    experts' parameters must remain out of FSDP's shard groups."""
     expert = nn.Linear(4, 4)
     stub = _stub(experts_fsdp_managed=False, fp32_non_ep_params=True, ep_modules=[expert])
 
-    ep_modules, _dtype_incompatible, merged = DistributedTrainerMixin._ep_fsdp_ignored_modules(stub)
+    exclusions = DistributedTrainerMixin._fsdp_exclusions(stub)
 
-    assert ep_modules == [expert]
-    assert merged == [expert]
+    assert exclusions.ep_modules == [expert]
+    assert [id(p) for p in exclusions.params] == [id(p) for p in expert.parameters()]
 
 
-def test_a_module_that_is_both_ep_and_dtype_incompatible_is_ignored_once():
-    """``merged`` feeds FSDP's ``ignored_params``; a duplicated module there is a silent hazard."""
+def test_a_parameter_that_is_both_ep_and_dtype_excluded_is_excluded_once():
+    """``params`` feeds FSDP's ``ignored_params``; a duplicated parameter there is a silent hazard."""
     expert = nn.Linear(4, 4)
-    stub = _stub(experts_fsdp_managed=False, fp32_non_ep_params=False, ep_modules=[expert], incompatible=[expert])
+    stub = _stub(
+        experts_fsdp_managed=False, fp32_non_ep_params=False, ep_modules=[expert], dtype_params=[expert.weight]
+    )
 
-    _ep_modules, dtype_incompatible, merged = DistributedTrainerMixin._ep_fsdp_ignored_modules(stub)
+    exclusions = DistributedTrainerMixin._fsdp_exclusions(stub)
 
-    assert dtype_incompatible == [expert]
-    assert merged == [expert]
+    assert [id(p) for p in exclusions.dtype_params] == [id(expert.weight)]
+    assert [id(p) for p in exclusions.params] == [id(p) for p in expert.parameters()]
 
 
 if __name__ == "__main__":

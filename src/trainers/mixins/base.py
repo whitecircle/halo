@@ -11,7 +11,7 @@ import os
 import time
 from collections.abc import Iterable
 from dataclasses import fields
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -37,6 +37,7 @@ from src.distributed.expert_parallel.dispatcher import (
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.expert_parallel.saving import validate_ep_sharded_save
 from src.distributed.fsdp import (
+    IdentityParamSet,
     make_disable_adapter_fsdp2_safe,
     reshard_fsdp2_modules,
     reshard_label,
@@ -55,6 +56,7 @@ from src.distributed.runtime import (
     is_output_shared_filesystem,
     nccl_safe_broadcast,
     rank_consensus,
+    reject_across_ranks,
 )
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from src.kernels.liger.orchestrator import (
@@ -109,6 +111,21 @@ _TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss", "liger_loss")
 # Peak-allocated fraction of device memory above which the post-first-step margin warning fires.
 # A rank this close to full after the first optimizer step OOMs on a later backward.
 _MEMORY_MARGIN_WARN_RATIO = 0.92
+
+
+class FsdpExclusions(NamedTuple):
+    """What an FSDP2 wrap leaves out of its shard groups.
+
+    ``ep_modules`` sync their own gradients (EP hooks or the deferred sweep) and are left out whole,
+    except under ``experts_fsdp_managed``, where FSDP2's reduce-scatter is their only sync.
+    ``dtype_params`` are frozen parameters whose dtype no trainable parameter shares (a base under
+    differently typed adapters); they are taken one by one, so a trainable child of the module that owns
+    one stays in its shard group. ``params`` is both, deduplicated by identity.
+    """
+
+    ep_modules: list[nn.Module]
+    dtype_params: list[nn.Parameter]
+    params: list[nn.Parameter]
 
 
 def thin_memory_margin_message(peak_bytes: int, total_bytes: int, rank: int) -> str | None:
@@ -792,18 +809,44 @@ class DistributedTrainerMixin(
             "model through load_distributed_model, which attaches the mesh."
         )
 
-    @staticmethod
-    def _ignored_params(modules: Iterable[nn.Module]) -> list[nn.Parameter] | None:
-        """Flatten modules into the ``ignored_params`` list FSDP2 takes, or None when there are none."""
-        params = [p for module in modules for p in module.parameters()]
-        return params or None
+    def _reject_unsynced_fsdp_exclusions(self, model: nn.Module, excluded: Iterable[nn.Parameter]) -> None:
+        """Raise on every rank if FSDP2 would leave out a trainable parameter that nothing else syncs.
+
+        A parameter outside every shard group keeps its local gradient unless an EP layer's hooks or
+        the deferred post-backward sweep average it; without either it trains on this rank's batch only
+        and drifts across DP ranks while every loss stays finite. Collective: every rank must call it.
+        """
+        excluded_set = IdentityParamSet(excluded)
+        ep_config = getattr(self, "_ep_config", None)
+        # The deferred sweep averages every trainable non-DTensor parameter, and an excluded one is never
+        # a DTensor.
+        deferred = ep_config is not None and ep_config.defer_grad_sync
+        covered: set[int] = set()
+        for module in self._find_ep_modules():
+            if not module.ep_config.experts_fsdp_managed:
+                covered |= module.synced_trainable_param_ids()
+        unsynced = [
+            name
+            for name, param in model.named_parameters()
+            if param.requires_grad and param in excluded_set and not deferred and id(param) not in covered
+        ]
+        reason = None
+        if unsynced:
+            reason = (
+                f"FSDP2 would leave out {len(unsynced)} trainable parameter(s) that no other gradient sync "
+                f"covers, so each would train on its own rank's batch and drift across DP ranks: "
+                f"{unsynced[:10]}. Only frozen parameters and the parameters of EP layers that sync their "
+                f"own gradients may be left out: an EP family wrapper must declare every trainable weight "
+                f"it owns (expert_named_params() / replicated_named_params())."
+            )
+        reject_across_ranks(reason, "FSDP2 exclusions")
 
     def _apply_dp_fsdp2(
         self,
         model: nn.Module,
         dp_size: int,
         *,
-        ignored_modules: Iterable[nn.Module] = (),
+        excluded_params: Iterable[nn.Parameter] = (),
         dp_group: dist.ProcessGroup | None = None,
         dp_replicate_size: int = 1,
         topo: str = "",
@@ -816,11 +859,13 @@ class DistributedTrainerMixin(
         from the others on either. ``topo``/``detail`` carry only the mode-specific log text.
         """
         config = self.parallelism_config
+        excluded_params = list(excluded_params)
+        self._reject_unsynced_fsdp_exclusions(model, excluded_params)
         applied = setup_fsdp2_for_dp(
             model,
             dp_size,
             self.args,
-            ignored_params=self._ignored_params(ignored_modules),
+            ignored_params=excluded_params or None,
             dp_group=dp_group,
             reshard_after_forward=config.fsdp_reshard_after_forward,
             fp32_master_weights=config.fp32_non_ep_params,
@@ -836,7 +881,8 @@ class DistributedTrainerMixin(
     def _setup_standard_data_parallel(self):
         """Setup standard data parallel gradient sync (no EP/CP/TP) via FSDP v2.
 
-        PEFT/QLoRA models with mixed/quantized dtypes pass incompatible params as ignored_params.
+        A frozen base whose dtype differs from its adapters' stays out of the shard groups
+        (:meth:`_fsdp_exclusions`); QLoRA skips FSDP2 altogether.
         """
         # Rank-block width, not the global world: a PP stage's FSDP must never span other stages.
         world_size = self.parallelism_config.stage_world_size
@@ -851,9 +897,9 @@ class DistributedTrainerMixin(
             logger.info("✓ QLoRA gradient sync (FSDP2 skipped: quantized 4-bit base weights)")
             return
 
-        incompatible_modules = self._find_fsdp_incompatible_modules()
+        excluded = self._fsdp_exclusions().params
         dp_replicate_size = self.parallelism_config.dp_replicate_size
-        extra = f", {len(incompatible_modules)} incompatible modules ignored" if incompatible_modules else ""
+        extra = f", {len(excluded)} dtype-excluded params" if excluded else ""
         topo = (
             f", HSDP {dp_replicate_size}×{world_size // dp_replicate_size}"
             if dp_replicate_size > 1
@@ -862,36 +908,21 @@ class DistributedTrainerMixin(
         self._apply_dp_fsdp2(
             self.model,
             world_size,
-            ignored_modules=incompatible_modules,
+            excluded_params=excluded,
             dp_replicate_size=dp_replicate_size,
             topo=topo,
             detail=f"applied for data parallel gradient sync ({world_size} ranks{extra})",
         )
 
-    def _find_fsdp_incompatible_modules(self) -> list[nn.Module]:
-        """Modules whose params differ from the trainable dtype (frozen bf16 base under fp32 adapters,
-        or uint8 quantized layers). Passed as ignored_params so only trainable-dtype modules sync.
-        """
-        trainable_dtypes = {p.dtype for p in self.model.parameters() if p.requires_grad}
-        all_dtypes = {p.dtype for p in self.model.parameters()}
-
-        if len(all_dtypes) <= 1:
-            return []
-
+    def _dtype_excluded_params(self) -> list[nn.Parameter]:
+        """Frozen parameters whose dtype no trainable parameter shares (a frozen bf16 base under fp32
+        adapters, uint8 quantized weights). Taken per parameter: excluding the module that owns one
+        would take that module's trainable children out of the shard groups with it."""
+        params = list(self.model.parameters())
+        trainable_dtypes = {p.dtype for p in params if p.requires_grad}
         if not trainable_dtypes:
             return []
-
-        incompatible = []
-        for module in self.model.modules():
-            module_params = list(module.parameters(recurse=False))
-            if not module_params:
-                continue
-
-            module_dtypes = {p.dtype for p in module_params}
-            if not module_dtypes.issubset(trainable_dtypes):
-                incompatible.append(module)
-
-        return incompatible
+        return [p for p in params if not p.requires_grad and p.dtype not in trainable_dtypes]
 
     def _reject_fsdp_knobs_under_qlora(self) -> None:
         """QLoRA skips FSDP2 entirely (``fully_shard`` cannot wrap bnb's non-float Params4bit), so
@@ -944,12 +975,11 @@ class DistributedTrainerMixin(
 
         return None
 
-    def _ep_fsdp_ignored_modules(self) -> tuple[list[nn.Module], list[nn.Module], list[nn.Module]]:
-        """``(ep_modules, dtype_incompatible, merged)``: the FSDP ignored-module inputs shared by
-        every EP-aware wrap (EP/EP+TP modes and the PP stage wrap).
+    def _fsdp_exclusions(self) -> FsdpExclusions:
+        """The parameters every FSDP2 wrap leaves out (see :class:`FsdpExclusions`).
 
         fsdp_shard_ep1_experts: only when experts are truly replicated (ep_group_size==1). Drop
-        them from ignored_params so FSDP shards them; the EP layer skips its own grad hooks so
+        them from the exclusions so FSDP shards them; the EP layer skips its own grad hooks so
         FSDP reduce-scatter is the sole expert sync. No effect when ep_group_size>1 (incl pure ETP).
         """
         config = self.parallelism_config
@@ -957,15 +987,16 @@ class DistributedTrainerMixin(
         if config.experts_fsdp_managed:
             # The fp32_non_ep_params × managed-experts clash is refused at config time, rank-symmetrically.
             ep_modules = []
-        dtype_incompatible = self._find_fsdp_incompatible_modules()
-        merged = list({id(m): m for m in ep_modules + dtype_incompatible}.values())
-        return ep_modules, dtype_incompatible, merged
+        dtype_params = self._dtype_excluded_params()
+        ep_params = [p for module in ep_modules for p in module.parameters()]
+        params = list({id(p): p for p in ep_params + dtype_params}.values())
+        return FsdpExclusions(ep_modules, dtype_params, params)
 
     def _apply_ep_aware_dp_fsdp2(
         self,
         model: nn.Module,
         *,
-        ignored: tuple[list[nn.Module], list[nn.Module], list[nn.Module]],
+        exclusions: FsdpExclusions,
         fallback_dp_size: int,
         fallback_dp_group: dist.ProcessGroup | None = None,
         dp_replicate_size: int = 1,
@@ -973,15 +1004,15 @@ class DistributedTrainerMixin(
     ) -> None:
         """FSDP2 wrap for a model carrying EP wrappers, shared by the EP mode and the PP stage wrap.
 
-        ``ignored`` is :meth:`_ep_fsdp_ignored_modules`' triple, passed in rather than re-derived
-        (that derivation walks every parameter's dtype).
+        ``exclusions`` is :meth:`_fsdp_exclusions`, passed in rather than re-derived (that derivation
+        walks every parameter's dtype).
 
         Deferred-DP topologies (``is_deferred_dp``) shard the non-expert params over the EP group,
         since the reduce-scatter must share the DeepEP combine's membership, with the cross-replica
         DP average deferred to :meth:`_sync_deferred_expert_grads`. Everything else shards over the
         caller's DP scope (the world without PP, the stage group under PP).
         """
-        ep_modules, dtype_incompatible, all_ignored_modules = ignored
+        ep_modules, dtype_params, excluded_params = exclusions
         ep_cfg = require_ep_config(self._ep_config)
         if ep_cfg.is_deferred_dp:
             # Sharded over the EP group, not the stage: non-expert memory per rank is `replicas`x
@@ -997,7 +1028,7 @@ class DistributedTrainerMixin(
             self._apply_dp_fsdp2(
                 model,
                 ep_cfg.ep_group_size,
-                ignored_modules=all_ignored_modules,
+                excluded_params=excluded_params,
                 dp_group=ep_cfg.process_group,
                 topo=f", EP-group {ep_cfg.ep_group_size}-way{topo}",
                 detail=(
@@ -1006,11 +1037,11 @@ class DistributedTrainerMixin(
                 ),
             )
         else:
-            extra = f", {len(dtype_incompatible)} dtype-incompatible" if dtype_incompatible else ""
+            extra = f", {len(dtype_params)} dtype-excluded params" if dtype_params else ""
             self._apply_dp_fsdp2(
                 model,
                 fallback_dp_size,
-                ignored_modules=all_ignored_modules,
+                excluded_params=excluded_params,
                 dp_group=fallback_dp_group,
                 dp_replicate_size=dp_replicate_size,
                 topo=topo,

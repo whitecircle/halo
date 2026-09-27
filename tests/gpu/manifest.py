@@ -1019,6 +1019,13 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
+    # At ep1, trainable parameters beside a frozen parameter of another dtype stay in their shard group.
+    "trainers/sft/test_sft_fsdp_excluded_params.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "lora", "moe", "glm4", "glm5"),
+        args_matrix=("--case router_only", "--case glm5_next_mixed_uncast"),
+        timeout=900,
+    ),
     "trainers/sft/test_sft_fp32_pinned_params_single_gpu.py": TestSpec(
         nproc=1,
         markers=("gpu", "core", "1gpu", "moe", "deepseek_v4"),

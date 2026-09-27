@@ -437,7 +437,7 @@ class PipelineTrainerMixin:
             # the FSDP2 wrap is left to do here.
             self._apply_ep_aware_dp_fsdp2(
                 stage,
-                ignored=self._ep_fsdp_ignored_modules(),
+                exclusions=self._fsdp_exclusions(),
                 fallback_dp_size=config.stage_world_size,
                 fallback_dp_group=self._pp_stage_group,
                 topo=topo,

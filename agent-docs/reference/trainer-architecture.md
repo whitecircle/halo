@@ -205,7 +205,9 @@ with EP modules in `ignored_params`, except at `ep_group_size == 1` —
 [below](#gradient-synchronization)); it handles EP, pure ETP, and EP+ETP. CP setup validates the
 model is already a `UlyssesCPModelWrapper` (wrapped at load time). FSDP2 (`fully_shard`,
 `reshard_after_forward` from `fsdp_reshard_after_forward`, default `false`) carries non-EP gradient
-sync wherever DP > 1 — pure TP and EP+TP at DP=1 skip the wrap entirely.
+sync wherever DP > 1 — pure TP and EP+TP at DP=1 skip the wrap entirely. The wrap leaves out
+frozen parameters of a dtype no trainable parameter shares, and raises if it would leave out a
+trainable one nothing else syncs ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 QLoRA skips FSDP2 on both the plain-DP and the CP path (`fully_shard` cannot wrap bnb's non-float
 `Params4bit`). `_setup_qlora_gradient_sync` sets a flag rather than per-parameter hooks, whose
