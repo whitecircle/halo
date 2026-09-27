@@ -20,8 +20,8 @@ fp32_experts: true
 fp32_non_ep_params: true
 
 # --- Attention & kernels ---
-attn_implementation: sdpa             # the remote code carries no transformers-v5 flash flag, so every
-                                      #   flash label is refused at build and the loader falls back to SDPA
+attn_implementation: sdpa             # the remote code carries no transformers-v5 flash flag, so a flash
+                                      #   label (the unset default auto-selects one) is refused at model build
 packing: true
 max_length: 24000
 

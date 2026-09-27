@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import traceback
 
 import torch
 import torch.nn as nn
@@ -19,6 +20,10 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from src.models.loading.lazy_safetensors.weights import resolve_run_dtype
 
 logger = logging.getLogger(__name__)
+
+# The transformers model-build step that refuses an attention implementation the class does not
+# support, on every load path; a failure raised under it is a config choice, not a lazy-load limit.
+_ATTN_IMPLEMENTATION_CHECK = "_check_and_adjust_attn_implementation"
 
 
 def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
@@ -88,6 +93,13 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
         with init_empty_weights(include_buffers=False):
             return factory(config, **kwargs)
     except Exception as e:
+        if any(frame.name == _ATTN_IMPLEMENTATION_CHECK for frame in traceback.extract_tb(e.__traceback__)):
+            raise ValueError(
+                f"{model_class.__name__} refuses attn_implementation={kwargs.get('attn_implementation')!r} "
+                f"at model build ({type(e).__name__}: {e}), on every load path, lazy or not. Set "
+                f"attn_implementation to one the architecture supports: sdpa, or eager where sdpa is the "
+                f"one refused."
+            ) from e
         # On the fallback path the caller's warning has already named the from_pretrained failure;
         # on the config_only path this build is the only attempt, so the message claims no more.
         raise RuntimeError(

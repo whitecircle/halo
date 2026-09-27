@@ -16,7 +16,7 @@ load-bearing and neither is visible from a passing training run:
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, GptOssConfig, GptOssForCausalLM, LlamaConfig
+from transformers import AutoModelForCausalLM, GptOssConfig, GptOssForCausalLM, LlamaConfig, LlamaForCausalLM
 
 from src.distributed.expert_parallel.lazy_loader import instantiate_on_meta
 from src.models.loading.lazy_safetensors.meta_shell import _instantiate_from_config_on_meta
@@ -189,6 +189,34 @@ def test_a_refused_attention_backend_fails_the_lazy_build():
             trust_remote_code=False,
             attn_implementation="flash_attention_4",
         )
+
+
+class _NoFlashLlama(LlamaForCausalLM):
+    """Refuses flash through transformers' own class flag, as a remote-code family declaring only the
+    v4-era ``_supports_flash_attn_2`` does."""
+
+    _supports_flash_attn = False
+
+
+@pytest.mark.parametrize("config_only", [False, True])
+def test_an_architecture_refusal_names_the_attention_label_not_lazy_loading(tmp_path, config_only):
+    """``ep_lazy_loading=False`` builds the same class with the same label and hits the same refusal,
+    so the remedy must be the label itself."""
+    config = LlamaConfig(
+        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, vocab_size=64
+    )
+    LlamaForCausalLM(config).save_pretrained(tmp_path, safe_serialization=True)
+    with pytest.raises(ValueError, match="refuses attn_implementation='flash_attention_4'") as raised:
+        instantiate_on_meta(
+            str(tmp_path),
+            _NoFlashLlama,
+            config,
+            dtype=torch.bfloat16,
+            trust_remote_code=False,
+            config_only=config_only,
+            attn_implementation="flash_attention_4",
+        )
+    assert "ep_lazy_loading" not in str(raised.value)
 
 
 if __name__ == "__main__":
