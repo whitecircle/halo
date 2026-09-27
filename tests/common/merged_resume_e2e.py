@@ -22,7 +22,10 @@ or 1 (experts FSDP-sharded as DTensors, DP=2), with ``cp_size`` 2 under EP+CP:
      final adapters sit within ``FINAL_ADAPTER_RTOL`` of its. A resumed process restarts the
      stochastic-rounding stream of the bf16 optimizer (``_SR_RNG``), which the uninterrupted run
      would otherwise have advanced past the save, so both restart it at the step after the save: the
-     comparison is then of the restored state alone.
+     comparison is then of the restored state alone. DeepEP's default dispatch hands out receive slots
+     with atomics, so the order an expert's tokens arrive in, and with it the rounding of each expert
+     adapter gradient summed over them, changes from run to run; the body builds every DeepEP buffer in
+     deterministic mode, or two identical runs could part by that rounding alone.
   4. A kill between the base save and the resume adapter leaves the merged weights without their
      marker. Resumed through the production resolver, that checkpoint builds the policy from its own
      merged weights, and the resume must refuse on every rank rather than restart the adapters from
@@ -33,6 +36,7 @@ on every rank.
 """
 
 import argparse
+import functools
 import math
 import os
 import random
@@ -57,6 +61,7 @@ from src.checkpoint.format import (
 )
 from src.distributed.context_parallel.validation import UlyssesConfigError
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
+from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.structure import unwrap_model
@@ -83,10 +88,10 @@ MAX_SEQ_LENGTH = 256
 LEARNING_RATE = 2e-3
 # Seed both runs restart the bf16 optimizer's stochastic-rounding stream from.
 SR_SEED = 0xB165EED
-# Measured on B300 over the 60 training rows (every family, adapter shape and layout): every resumed
-# step's loss equals the uninterrupted run's exactly (|delta| 0.0), and the final adapters sit within
-# 4.6e-6 relative L2 (mixed rows; 0.0 on most). Adapters resumed fresh over the merged weights, the
-# failure this pins, miss the first step by >=1.2e-4, later steps by >=5e-2 and the adapters by ~1.0.
+# Measured on B300 over the 66 training rows (every family, adapter shape and layout): every resumed
+# step's loss equals the uninterrupted run's exactly (|delta| 0.0), and so do the final adapters
+# (relative L2 0.0). Adapters resumed fresh over the merged weights, the failure this pins, miss the
+# first step by >=1.2e-4, later steps by >=5e-2 and the adapters by ~1.0.
 LOSS_TOL = 1e-4
 FINAL_ADAPTER_RTOL = 1e-4
 
@@ -129,6 +134,13 @@ def _local_parameters(model) -> dict[str, torch.Tensor]:
 def _restart_sr_stream() -> None:
     """Restart the bf16 optimizer's stochastic-rounding stream, as a fresh process does."""
     adamw_bf16_mod._SR_RNG = random.Random(SR_SEED)
+
+
+def _pin_deterministic_dispatch() -> None:
+    """Build every DeepEP ``ElasticBuffer`` of this process in deterministic mode, which places each
+    received token by source rank and token index rather than by atomic claim order."""
+    buffer_cls = deep_ep().ElasticBuffer
+    buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
 
 
 class _SaveCapture(TrainerCallback):
@@ -248,6 +260,8 @@ def _relative_l2(a: dict[str, torch.Tensor], b: dict[str, torch.Tensor]) -> floa
 def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size: int) -> dict:
     """The four phases above for one family, adapter shape and layout; returns the harness result."""
     tiny = TINY_MOE_FAMILIES[family]
+    if ep_size > 1:
+        _pin_deterministic_dispatch()
     log(
         f"\n{'=' * 70}\n  merge_expert_lora_on_save resume: {family}, {adapters} adapters, "
         f"ep{ep_size} cp{cp_size} on {WORLD_SIZE} ranks\n{'=' * 70}"

@@ -509,8 +509,10 @@ new base drops them with every other resume sidecar (`merge_models`, `patch_voca
 --merge_adapter`).
 
 The merged-resume GPU body (`tests/common/merged_resume_e2e.py`) pins the resume against an
-uninterrupted run whose stochastic-rounding stream restarts at the same step: adapters bit-equal
-after the restore, every resumed step's loss identical. It also pins the refusal of the same
+uninterrupted run whose stochastic-rounding stream restarts at the same step, with DeepEP's
+dispatch in deterministic mode (its default claims receive slots with atomics, so the expert
+gradients' summation order varies run to run): adapters bit-equal after the restore, every resumed
+step's loss and the final adapters identical. It also pins the refusal of the same
 checkpoint without its resume adapter, on every EP family's tiny model, expert-only and mixed, at
 ep2, ep1's DTensor experts and EP+CP (a family Ulysses cannot run is refused at load instead).
 `tests/gpu/trainers/lora/test_lora_merged_save_resume.py` holds the `core` rows,
