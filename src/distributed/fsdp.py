@@ -422,25 +422,36 @@ def make_disable_adapter_fsdp2_safe(peft_model: nn.Module, fsdp_root: nn.Module)
     registered at exit, while FSDP2 copies each sharded param's flag onto its unsharded twin at every
     unshard. A reference pass that is the first forward after a reshard enters on the sharded params
     and, with the forward's unsharded params left registered, exits on those: the sharded adapters stay
-    frozen for the rest of the run. So when the trainable params registered at exit are not the ones
-    registered at entry, every FSDP2 module under ``fsdp_root`` (the module the wrap was applied to, so
-    its root group is included) is resharded before peft's exit, which lands the restore on the sharded
-    params. A pass that enters on the unsharded params a policy forward left registered exits on the
-    same ones and reshards nothing, so the backward that follows reuses them instead of re-gathering.
+    frozen for the rest of the run. So when the params registered in the trainable slots at exit are not
+    the ones registered at entry, every FSDP2 module under ``fsdp_root`` (the module the wrap was applied
+    to, so its root group is included) is resharded before peft's exit, which lands the restore on the
+    sharded params. A pass that enters on the unsharded params a policy forward left registered exits on
+    the same ones and reshards nothing, so the backward that follows reuses them instead of re-gathering.
+    The trainable ``(module, name)`` slots are read once here: FSDP2 swaps the objects registered in a
+    slot, never the slot, and a walk of the whole module tree on every pass would cost several ms.
     Per-rank, and a no-op without FSDP2. Idempotent.
     """
     if getattr(peft_model, "_fsdp2_safe_disable_adapter", False):
         return
     disable_adapter = peft_model.disable_adapter
+    trainable_slots = [
+        (module, name)
+        for module in fsdp_root.modules()
+        for name, param in module.named_parameters(recurse=False)
+        if param.requires_grad
+    ]
 
     @contextlib.contextmanager
     def _fsdp2_safe_disable_adapter():
-        trainable_at_entry = {name: param for name, param in fsdp_root.named_parameters() if param.requires_grad}
+        registered_at_entry = [getattr(module, name) for module, name in trainable_slots]
         with disable_adapter():
             try:
                 yield
             finally:
-                if any(fsdp_root.get_parameter(name) is not param for name, param in trainable_at_entry.items()):
+                if any(
+                    getattr(module, name) is not param
+                    for (module, name), param in zip(trainable_slots, registered_at_entry, strict=True)
+                ):
                     reshard_fsdp2_modules(fsdp_root)
 
     peft_model.disable_adapter = _fsdp2_safe_disable_adapter
