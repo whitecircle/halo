@@ -2,7 +2,9 @@
 
 :class:`CheckpointLoader` implements the weight restore paths; optimizer state and the LR scheduler
 are handled by :class:`~src.distributed.checkpoint.optimizer.OptimizerShardStore`, adapters by
-:func:`~src.distributed.checkpoint.peft.restore_adapters`. Resume policy only — the file reads it
+:func:`~src.distributed.checkpoint.peft.restore_adapters`. :func:`weights_read_from` and
+:func:`built_from_checkpoint` are its construction-identity probe, public for the trainers whose own
+restores refuse a model built from the checkpoint. Resume policy only — the file reads it
 drives (:class:`StreamingCheckpointReader`, :func:`read_checkpoint_key_set`) live in the format leaf,
 shared with the standalone tools.
 """
@@ -30,7 +32,7 @@ from src.checkpoint.format import (
 )
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.coordination import KEY_PREVIEW_COUNT, all_ranks_ok, joined_streaming_reader
-from src.distributed.checkpoint.peft import find_peft_model, restore_adapters
+from src.distributed.checkpoint.peft import copy_full_tensor, find_peft_model, restore_adapters
 from src.distributed.checkpoint.save import reject_unhandled_pp_axes
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
@@ -56,7 +58,7 @@ logger = logging.getLogger(__name__)
 _MIN_RESUME_COVERAGE_FRACTION = 0.5
 
 
-def _weights_read_from(model) -> str | None:
+def weights_read_from(model) -> str | None:
     """Where the live model's weights were read, or None for a from-config random init.
 
     ``load_distributed_model`` stamps ``_loaded_weights_from`` (None under ``init_from_scratch``,
@@ -70,7 +72,7 @@ def _weights_read_from(model) -> str | None:
     return str(getattr(getattr(live, "config", None), "_name_or_path", "")) or None
 
 
-def _built_from_checkpoint(live_source: str | None, checkpoint: str) -> bool:
+def built_from_checkpoint(live_source: str | None, checkpoint: str) -> bool:
     """Whether a model whose weights were read from ``live_source`` was built from ``checkpoint``.
 
     ``realpath`` identity, so a symlinked or relative spelling of the same directory still counts;
@@ -206,7 +208,7 @@ class CheckpointLoader:
 
         if self._needs_skip_weight_load():
             live_model = model if model is not None else ctx.model
-            live_source = _weights_read_from(live_model)
+            live_source = weights_read_from(live_model)
             # Base weights only load at construction, so both refusals below turn on whether this
             # checkpoint ships base weights (an adapter-only one has none to reload). Decided on rank 0:
             # ``realpath`` resolves locally, so per-rank branching splits the world on a non-shared FS.
@@ -215,7 +217,7 @@ class CheckpointLoader:
             read_failed = False
             merged_resume_adapter = None
             if is_global_main_process():
-                built_from_ckpt = _built_from_checkpoint(live_source, resume_from_checkpoint)
+                built_from_ckpt = built_from_checkpoint(live_source, resume_from_checkpoint)
                 merged_resume_adapter = resume_adapter_dir(resume_from_checkpoint)
                 try:
                     has_base = bool(read_checkpoint_key_set(resume_from_checkpoint)) or is_sharded_checkpoint(
@@ -379,8 +381,8 @@ class CheckpointLoader:
         # repoint model_name_or_path at the checkpoint on resume), so the re-read is waste. Decided on
         # rank 0, since ``realpath`` resolves locally. Best-model loads must still read: the live
         # weights trained past it.
-        live_source = _weights_read_from(model)
-        constructed_from_ckpt = broadcast_from_rank0(_built_from_checkpoint(live_source, checkpoint))
+        live_source = weights_read_from(model)
+        constructed_from_ckpt = broadcast_from_rank0(built_from_checkpoint(live_source, checkpoint))
         if not for_best_model and constructed_from_ckpt:
             if is_global_main_process():
                 logger.info(f"TP resume: model was constructed from {checkpoint}; skipping the weight reload.")
@@ -467,13 +469,13 @@ class CheckpointLoader:
         self._reject_sharded_resume(checkpoint)
 
         # EP experts only load at construction, so a model not built from the checkpoint resumes base
-        # experts. The signal is ``_weights_read_from`` (None for a from-config init), not
+        # experts. The signal is ``weights_read_from`` (None for a from-config init), not
         # ``config._name_or_path``, which survives a build that read no weights. Both inputs are
         # rank-local (``ep_moe_layers()`` is stage-dependent, ``realpath`` resolves per node), so
         # every rank joins the verdict before acting rather than raising inside the gate.
-        live_source = _weights_read_from(stage)
+        live_source = weights_read_from(stage)
         reason = None
-        if stage.ep_moe_layers() and not _built_from_checkpoint(live_source, checkpoint):
+        if stage.ep_moe_layers() and not built_from_checkpoint(live_source, checkpoint):
             whence = _construction_whence(live_source, "stage")
             reason = (
                 f"a stage's EP expert weights only load at construction, so resume requires the model "
@@ -514,15 +516,8 @@ class CheckpointLoader:
                             f"parameter/buffer to load into — a state-dict hook the PP loader does "
                             f"not understand."
                         )
-                    value = reader.get(global_name).to(target.dtype)
-                    data = target.data if isinstance(target, torch.nn.Parameter) else target
-                    if isinstance(data, DTensor):
-                        # Default ``src_data_rank``: the stage's mesh rank 0 broadcasts its read, so
-                        # the stage's DP replicas hold one node's bytes and the collective stays inside
-                        # the stage's mesh (``_load_tp`` slices per rank with ``src_data_rank=None``).
-                        value = distribute_tensor(value, data.device_mesh, data.placements)
-                    data.copy_(value)
-                    del value
+                    # A DTensor target is a collective inside this stage's own mesh.
+                    copy_full_tensor(target, reader.get(global_name))
 
         if is_global_main_process():
             logger.info(f"✓ PP stage checkpoint loaded from {checkpoint} ({len(local_by_global)} tensors)")
@@ -643,8 +638,8 @@ class CheckpointLoader:
         # 100B+ state dict is waste. Keyed on where the weights were read (an ``init_from_scratch``
         # build matches on ``_name_or_path`` yet holds random weights) and decided on rank 0, since
         # ``realpath`` resolves locally. Best-model loads must still read: the live weights trained on.
-        weights_source = _weights_read_from(model)
-        constructed_from_ckpt = broadcast_from_rank0(_built_from_checkpoint(weights_source, resume_from_checkpoint))
+        weights_source = weights_read_from(model)
+        constructed_from_ckpt = broadcast_from_rank0(built_from_checkpoint(weights_source, resume_from_checkpoint))
         if not for_best_model and constructed_from_ckpt:
             if is_global_main_process():
                 logger.info(f"FSDP2 resume: model was constructed from {resume_from_checkpoint}; skipping re-load.")

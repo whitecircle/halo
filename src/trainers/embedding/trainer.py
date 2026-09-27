@@ -35,7 +35,6 @@ from sentence_transformers.losses import (
     OnlineContrastiveLoss,
     TripletLoss,
 )
-from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 from transformers.data.data_collator import DataCollator
@@ -44,7 +43,6 @@ from trl.trainer.utils import disable_dropout_in_model
 
 import src.trainers.embedding.sentence_transformers_compat  # noqa: F401  installs ST's gradient-checkpointing signatures
 from src.checkpoint.adapters import adapter_weight_paths, read_adapter_file
-from src.checkpoint.config_export import checkpoint_source_ref
 from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
@@ -56,6 +54,8 @@ from src.checkpoint.format import (
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
+from src.distributed.checkpoint.loader import built_from_checkpoint, weights_read_from
+from src.distributed.checkpoint.peft import copy_full_tensor
 from src.distributed.checkpoint.save import save_checkpoint
 from src.distributed.checkpoint.write import gather_saveable_tensors, resolve_retained
 from src.distributed.fsdp import reshard_fsdp2_modules
@@ -620,13 +620,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         ``distribute_tensor``, a mesh collective issued in sorted key order on every rank.
         """
         adapter_dir = os.path.join(checkpoint, RESUME_ADAPTER_DIR)
-        source = checkpoint_source_ref(self._get_unwrapped_model())
-        built_from_checkpoint = broadcast_from_rank0(
-            is_global_main_process()
-            and source is not None
-            and os.path.realpath(source) == os.path.realpath(checkpoint)
-        )
-        if built_from_checkpoint:
+        # realpath resolves node-locally, so rank 0's verdict is the world's.
+        if broadcast_from_rank0(built_from_checkpoint(weights_read_from(self._get_unwrapped_model()), checkpoint)):
             raise ValueError(
                 f"{checkpoint} holds folded weights, which already carry the adapter delta, and resume "
                 f"restores the unfolded adapters from {adapter_dir} onto the BASE model. This model was "
@@ -649,11 +644,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         reject_across_ranks(_resume_adapter_mismatch(saved, live, path), "Injected-LoRA resume", ValueError)
         with torch.no_grad():
             for name in sorted(live):
-                target = live[name]
-                value = saved[name].to(target.dtype)
-                if isinstance(target, DTensor):
-                    value = distribute_tensor(value, target.device_mesh, target.placements)
-                target.copy_(value)
+                copy_full_tensor(live[name], saved[name])
         del saved
         if is_global_main_process():
             logger.info(f"Restored {len(live)} injected-LoRA tensors from {path}")

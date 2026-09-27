@@ -3,7 +3,8 @@
 :class:`PeftAdapterSaver` is invoked by ``save_model`` before the mode ladder: DTensor-LoRA gather,
 CP key normalization, or the standard ``save_pretrained`` path. :func:`restore_adapters` is the
 resume counterpart, needed because EP/CP rebuild the model with zero-init adapters; both directions
-share the CP key remap defined here.
+share the CP key remap defined here. :func:`copy_full_tensor` is the DTensor-aware write the restores
+share, the PP stage load and the embedding trainer's resume adapter included.
 """
 
 from __future__ import annotations
@@ -367,6 +368,22 @@ class PeftAdapterSaver:
         return config or peft_config
 
 
+def copy_full_tensor(target: torch.Tensor, value: torch.Tensor) -> None:
+    """Copy the whole tensor ``value`` into the live parameter or buffer ``target``, at its dtype.
+
+    A DTensor target is written through ``distribute_tensor`` at the default ``src_data_rank``: mesh
+    rank 0's copy is broadcast, so every replica holds one node's bytes, and the call is a mesh
+    collective that callers issue in the same key order on every rank. ``CheckpointLoader._load_tp``
+    slices per rank instead, since its ranks each need the full tensor and it joins the key set
+    explicitly. A plain target takes ``value`` as is.
+    """
+    data = target.data if isinstance(target, torch.nn.Parameter) else target
+    value = value.to(data.dtype)
+    if isinstance(data, DTensor):
+        value = distribute_tensor(value, data.device_mesh, data.placements)
+    data.copy_(value)
+
+
 def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
     """Restore LoRA adapters when base-weight reload is skipped (EP/CP).
 
@@ -456,13 +473,7 @@ def _load_peft_adapter_state(peft_model, attn_state: dict) -> list[str]:
             if param is None:
                 unexpected.append(key)
                 continue
-            value = value.to(param.dtype)
-            if isinstance(param.data, DTensor):
-                # Default ``src_data_rank``: mesh rank 0's read is broadcast, so every DP replica
-                # holds one node's adapter bytes (``_load_tp`` slices per rank instead, since its
-                # ranks each need the full tensor and it joins the key set explicitly).
-                value = distribute_tensor(value, param.data.device_mesh, param.data.placements)
-            param.data.copy_(value)
+            copy_full_tensor(param, value)
     return unexpected
 
 
