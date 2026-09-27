@@ -905,7 +905,8 @@ class ParallelismConfig:
         if not self.fsdp_reshard_after_backward and (self.tp_size > 1 or self.pp_size > 1):
             raise ValueError(
                 f"fsdp_reshard_after_backward=False is only wired through the plain-DP/CP/EP torchrun "
-                f"path (tp_size={self.tp_size}, pp_size={self.pp_size}): the TP setup shards through "
+                f"path (tensor_parallel_size={self.tp_size}, pipeline_parallel_size={self.pp_size}): the TP "
+                f"setup shards through "
                 f"its own fully_shard calls and PP already pins params unsharded per stage. Remove "
                 f"the flag for those modes."
             )
@@ -921,7 +922,8 @@ class ParallelismConfig:
             # replaces the params), so the flag would have no effect.
             raise ValueError(
                 f"fsdp_shard_ep1_experts=False is not honored under TP or CP "
-                f"(tp_size={self.tp_size}, cp_size={self.cp_size}): those paths FSDP-shard the "
+                f"(tensor_parallel_size={self.tp_size}, context_parallel_size={self.cp_size}): those paths "
+                f"FSDP-shard the "
                 f"replicated experts unconditionally. Remove the flag (sharded experts are "
                 f"grad-equivalent; gpt-oss-20b on 8 GPUs at batch 1 trades -10.6% throughput for -59% "
                 f"peak memory), or use pure DP for the full replicated expert copy."

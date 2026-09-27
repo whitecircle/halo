@@ -294,12 +294,16 @@ def test_validate_multi_domain_multigroup_ep_etp_rejected():
 def test_validate_shard_ep1_experts_off_under_tp_cp_rejected():
     """fsdp_shard_ep1_experts=False is a silent no-op under TP/CP (their wraps shard experts
     unconditionally) — the config must refuse rather than not honor the flag."""
-    for axis_kwargs in ({"tp_size": 2}, {"cp_size": 2}):
+    for axis_kwargs, named_knob in (
+        ({"tp_size": 2}, "tensor_parallel_size=2"),
+        ({"cp_size": 2}, "context_parallel_size=2"),
+    ):
         try:
             create_config(fsdp_shard_ep1_experts=False, world_size=8, gpus_per_node=8, **axis_kwargs)
             raise AssertionError(f"Should have raised ValueError for {axis_kwargs}")
         except ValueError as e:
             assert "fsdp_shard_ep1_experts=False is not honored under TP or CP" in str(e), e
+            assert named_knob in str(e), e
     # Pure DP keeps the full replicated-expert copy — the flag's documented purpose.
     cfg = create_config(fsdp_shard_ep1_experts=False, world_size=8, gpus_per_node=8)
     assert cfg.experts_fsdp_managed is False
@@ -969,16 +973,18 @@ def test_reshard_after_backward_false_is_gated():
     on plain DP."""
     create_config(world_size=8, fsdp_reshard_after_backward=False)
     create_config(cp_size=2, world_size=8, fsdp_reshard_after_backward=False)
-    for bad in (
-        {"fsdp_reshard_after_forward": True},
-        {"tp_size": 2},
-        {"pp_size": 2, "world_size": 16},  # 8-rank stages = one NVLink domain each (valid PP shape)
+    for bad, named_knob in (
+        ({"fsdp_reshard_after_forward": True}, "fsdp_reshard_after_forward"),
+        ({"tp_size": 2}, "tensor_parallel_size=2"),
+        # 8-rank stages = one NVLink domain each (valid PP shape)
+        ({"pp_size": 2, "world_size": 16}, "pipeline_parallel_size=2"),
     ):
         try:
             create_config(**{"world_size": 8, "fsdp_reshard_after_backward": False, **bad})
             raise AssertionError(f"Should have raised ValueError for reshard_after_backward=False + {bad}")
         except ValueError as e:
             assert "fsdp_reshard_after_backward" in str(e)
+            assert named_knob in str(e), e
 
 
 @pytest.mark.parametrize(
