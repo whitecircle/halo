@@ -45,7 +45,7 @@ matryoshka_dimensions: [256, 128, 64, 32]
 | `normalize_embeddings` | `true` | L2-normalize output embeddings |
 | `max_length` | `512` | Truncation length; `null` or non-positive → the backbone's context window |
 | `disable_dropout` | `false` | Disable dropout while training |
-| `batch_sampler` | `batch_sampler` | `no_duplicates` / `no_duplicates_hashed` (MNRL — avoids in-batch false negatives), `group_by_label` (batch-triplet losses) |
+| `batch_sampler` | `batch_sampler` | `no_duplicates` / `no_duplicates_hashed` (MNRL — avoids in-batch false negatives), `group_by_label` (batch-triplet losses). Refused under TP, ETP or a pre-sharded dataset: those runs batch through the toolkit's DP-sharded loader, which builds plain batches |
 
 `pooling_mode`, `normalize_embeddings` and `max_length` describe the pipeline both loading paths train: the EP/TP path builds the `SentenceTransformer` modules from them, the standard path aligns the checkpoint's `modules.json` to them.
 
@@ -60,9 +60,14 @@ python scripts/training/embedding.py examples/embedding/qwen3/embedding-qwen3-4b
 # EP (MoE, 8 GPUs)
 torchrun --nproc_per_node=8 scripts/training/embedding.py \
     examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml
+
+# TP (2 GPUs): the DP-sharded loader takes only the plain batch sampler
+torchrun --nproc_per_node=2 scripts/training/embedding.py \
+    examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml \
+    --tensor_parallel_size=2 --batch_sampler=batch_sampler
 ```
 
-`halo launch embedding <config> --nproc 8` builds the same line. Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/embedding/`; all four run `loss_type: mnrl`, `pooling_mode: lasttoken`, `max_length: 512`, `batch_sampler: no_duplicates`.
+`halo launch embedding <config> --nproc 8` builds the same line. Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/embedding/`; all four run `loss_type: mnrl`, `pooling_mode: lasttoken`, `max_length: 512`, `batch_sampler: no_duplicates` (override it to `batch_sampler` under TP or ETP).
 
 Qwen3-Embedding-4B is a decoder-based embedder: use `pooling_mode: lasttoken`, not `mean`. It is long-context, so keep `max_length` small unless you embed long documents.
 

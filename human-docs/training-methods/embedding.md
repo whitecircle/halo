@@ -81,8 +81,10 @@ halo launch embedding examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.ya
 
 Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/embedding/`. Expert,
 tensor and expert-tensor parallelism all work; context parallelism does not, because pooling needs
-the whole sequence on one rank. LoRA (`use_peft: true`) is supported on the plain data-parallel path
-only and rejected under EP, ETP and TP.
+the whole sequence on one rank. Tensor and expert-tensor parallelism batch through a loader that
+cannot apply `no_duplicates`, so they refuse it: set `batch_sampler: batch_sampler` there (as
+`--batch_sampler=batch_sampler` on the command line). LoRA (`use_peft: true`) is supported on the
+plain data-parallel path only and rejected under EP, ETP and TP.
 
 ## What this path does not take
 
