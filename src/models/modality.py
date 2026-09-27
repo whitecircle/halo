@@ -6,6 +6,7 @@ Whether a run takes the VLM path (a multimodal checkpoint plus image data) is
 """
 
 import logging
+import traceback
 
 from transformers import AutoConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
@@ -36,6 +37,9 @@ _VLM_NAME_HINTS = (
 # Warn once per model path, not once per call: is_vlm_model runs from five call sites per rank.
 _NAME_HEURISTIC_WARNED: set[str] = set()
 
+# transformers' gate refusing a config whose class is remote code the caller did not trust.
+_REMOTE_CODE_GATE = "resolve_trust_remote_code"
+
 
 def _probe_checkpoint_config(model_name_or_path: str, revision: str | None, trust_remote_code: bool):
     """The checkpoint's config for the modality verdict, ``None`` when the hub read itself fails.
@@ -43,11 +47,19 @@ def _probe_checkpoint_config(model_name_or_path: str, revision: str | None, trus
     Only the hub read is caught: this runs inside a store coordination phase, and falling back to
     the name heuristic on a coordination failure would let the timed-out rank pick a different
     ``Auto*`` class than its peers, which hangs. An unreadable config fails for every rank alike, so
-    the heuristic verdict stays uniform.
+    the heuristic verdict stays uniform. A remote-code config under ``trust_remote_code: false`` is
+    not a hub failure: the model load refuses the same config, after the datasets are in, so it is
+    refused here, on every rank alike.
     """
     try:
         return AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
     except Exception as exc:  # unreachable or missing config: fall back to the name heuristic
+        if any(frame.name == _REMOTE_CODE_GATE for frame in traceback.extract_tb(exc.__traceback__)):
+            raise ValueError(
+                f"'{model_name_or_path}' defines its architecture in remote code, which this run does not "
+                f"trust (trust_remote_code: false), so the model load would refuse it. Set "
+                f"trust_remote_code: true to run that code."
+            ) from exc
         # Warned because the fallback can disagree with the config answer, and this runs before the
         # cache is warm: a rank that reaches the hub and one that does not would pick different
         # Auto* classes for the same run, so the divergence has to be visible in the log.
