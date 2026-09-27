@@ -29,10 +29,8 @@ every trainer.
 `SentenceTransformer` `nn.Sequential` at the `auto_model` backbone, then writes the ST pipeline
 config beside it. Its in-place-injected LoRA is not a `PeftModel`, so `PeftAdapterSaver` never sees
 it: that branch skips the ladder, folds the adapter into the gathered state dict and writes it
-through `write_gathered_checkpoint`. Its training checkpoints resume from a `resume_adapter/`
-([Merge-on-save checkpoints](#merge-on-save-checkpoints)). The weight loader is re-pointed at the
-backbone the same way (`_checkpoint_loader`), so a full fine-tune's FSDP2 / TP reload matches the saved
-names; the optimizer store keeps the `SentenceTransformer`, whose parameters the optimizer steps.
+through `write_gathered_checkpoint`. How it resumes, LoRA or full fine-tune:
+[Embedding — Saving](../training-methods/embedding.md#saving).
 
 **Gathered saves** (the default everywhere) produce HuggingFace-compatible checkpoints loadable with
 `from_pretrained()`. The optional **per-rank sharded EP save** (`save_sharded_ep`) is a
@@ -199,7 +197,7 @@ layouts.
 tied-embedding models outright when it splits the model.
 
 The `.bin`-then-sweep fallback belongs to `write_gathered_checkpoint`, the whole-dict writer the
-injected-LoRA embedding merge uses: it needs a dict still whole after the failure, which a streamed
+injected-LoRA embedding save uses: it needs a dict still whole after the failure, which a streamed
 save does not hold. Only the config write is gated on the model carrying one; a model without a
 config still gets normalized weights in safetensors.
 
@@ -490,9 +488,9 @@ SGLang and `from_pretrained` read only the root, so none of them loads `resume_a
 or the `.pt` sidecars from a checkpoint that has its root weights. The final `save_model()` export
 carries neither: nothing resumes from it.
 
-The save leaves the run bit-identical. A bf16 `(w + d) - d` is not always `w`, so the attention merge
-is undone by writing back the base weights it rewrote (`merged_adapters(restore_base=True)`) rather
-than by the unmerge alone.
+The save leaves the run bit-identical: the attention adapters fold out of place into each tensor as it
+is written, with the weight sync's fold ([PEFT](../optimization/peft.md#online-rl--rollout-server-weight-sync)),
+so the frozen base is never written.
 
 On resume the marker is the verdict, never the files beside it. `resolve_resume_weights_source` keeps
 `model_name_or_path`, and the loader restores `resume_adapter/` onto the base-built model. It refuses
@@ -515,14 +513,8 @@ new base drops them with every other resume sidecar (`merge_models`, `patch_voca
 
 Covering test: `tests/common/merged_resume_e2e.py` (exact resume against an uninterrupted run).
 
-An embedding LoRA checkpoint takes the same marker and directory. Its in-place-injected adapters are
-not a `PeftModel`, so `EmbeddingTrainer` writes them itself (it overrides
-`_save_merged_checkpoint_resume_adapter`): every trainable tensor, at its live dtype, under the
-top-level `SentenceTransformer`'s parameter names, with no `adapter_config.json` — nothing but the
-resume reads it, and the restore is bit-exact. The restore is its own `_load_from_checkpoint`, which
-copies the tensors into the base-built model (FSDP2 DTensors through `distribute_tensor`) and never
-reads the folded weights; the refusals above apply, plus an adapter file whose names or shapes differ
-from the live trainable set ([Embedding](../training-methods/embedding.md#saving)).
+An embedding LoRA checkpoint takes the same marker and directory, written and restored by
+`EmbeddingTrainer` itself ([Embedding — Saving](../training-methods/embedding.md#saving)).
 
 ## Accelerate / FSDP checkpoints
 
@@ -643,7 +635,8 @@ Because the Path-B base is rebuilt fresh, two classes of trained state are resto
 
     That call warns on partial matches and raises if *every* saved key is unmatched, so a silent
     zero-init resume cannot pass quietly. Expert adapters that **no** EP layer can receive raise
-    too ([PEFT](../optimization/peft.md#checkpoint-saving)).
+    too, and so does a LoRA scaling that differs from the one the saved `adapter_config.json`
+    records ([PEFT](../optimization/peft.md#checkpoint-saving)).
 
 - **Wrapper-added params** (`_restore_extra_trained_params`) — anything the unwrapped model declares
   in `_extra_checkpoint_param_names`, read tensor-by-name

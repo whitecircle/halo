@@ -414,7 +414,8 @@ sends, and resets the vLLM prefix cache — see
 [the gather](../training-methods/grpo/online-grpo.md#weight-sync) for what it collects.
 EP layers are found by `isinstance(module, EPMoELayerBase)` rather than an `ep_config` probe (a PEFT
 `modules_to_save` wrapper forwards `__getattr__` and would match the wrapper too), and PEFT/LoRA is
-merged into the base for the gather and forwarded under base-model param names.
+folded out of place into each base weight as it is sent, under base-model param names, without writing
+the frozen base ([PEFT](../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
 ## FSDP2 output capturing
 

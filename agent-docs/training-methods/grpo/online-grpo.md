@@ -118,9 +118,10 @@ A rank-0 preflight reads the served `max_model_len` from `/v1/models` and raises
 
 Weights are pushed before the **next** generation, not at the optimizer step: TRL syncs when `state.global_step` has moved since `_last_loaded_step`. That sentinel is per-process (`-1`) and `TrainerState` never carries it, so a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)).
 
-`validate_weight_sync_support` refuses seven shapes at construction:
+`validate_weight_sync_support` refuses eight shapes at construction:
 
 - QLoRA (`load_in_4bit` / `load_in_8bit`): bnb-packed storage corrupts the served policy.
+- A PEFT layer the sync cannot fold (LoRA on `nn.MultiheadAttention`, trainable tokens, quantized LoRA, a variant other than DoRA, a grouped conv), or a PEFT adapter on a tensor its dense push does not send, such as EP expert weights ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 - GptOss sinks removed by the `flash_attention_2` `reset_sinks` reset, and `train_sinks: true`.
 - Model types in the client's `UNSERVABLE_MODEL_TYPES`, and EP families setting `_supports_weight_sync = False` ([per-family restrictions](../../parallelism/expert-parallelism.md#per-family-ep-restrictions)).
 - An EP family with no live EP wrapper: `expert_parallel_size: 1` with `use_grouped_gemm: false`.
@@ -158,7 +159,7 @@ Set `expert_parallel_size` to the training-GPU count so the trainer ranks form *
 
 Add `use_peft: true` and the `lora_*` fields. LoRA runs under FSDP2 DP, EP and pure ETP; any adapter on the TP-sharded backbone is **rejected under TP and EP+TP** (`_validate_lora_tp_compatibility`, `src/trainers/mixins/validation.py`), because PEFT keeps `lora_A`/`lora_B` as plain tensors outside the TP graph. Native expert adapters too.
 
-The weight sync folds the adapter into each base weight as it sends it, so vLLM serves the plain base; under EP the gather folds native expert-LoRA in too ([PEFT](../../optimization/peft.md#hyperparameters)).
+The weight sync folds the adapter into each base weight out of place as it sends it, so vLLM serves the adapted policy with no adapter loaded and the trainer's frozen base is never written; under EP the gather folds native expert-LoRA in too ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
 ## Data flow and batch construction
 

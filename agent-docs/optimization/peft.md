@@ -8,7 +8,7 @@ under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibil
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
 Most trainers take it. The embedding trainer
-accepts plain LoRA only ([below](#embedding-models)).
+accepts LoRA and DoRA, not QLoRA ([below](#embedding-models)).
 
 ## Supported methods
 
@@ -324,8 +324,7 @@ in every mode ([DPO → Reference model](../training-methods/preference/dpo.md#r
 ## Online RL — rollout-server weight sync
 
 Online and Async GRPO with Environments generate rollouts from a separate rollout server — vLLM or SGLang
-([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which serves the **plain base
-model** with no adapter.
+([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which loads **no adapter**.
 
 Each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
 (PEFT prefixes stripped, `lora_*` params skipped). Without the fold, the server would generate from the
@@ -333,32 +332,32 @@ un-adapted base.
 
 The fold is out of place, one tensor at a time as the sync sends it (`lora_folded` in
 `src/models/structure.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
-for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA (an
-FSDP2-sharded DoRA embedding reduces its norm across shards, one bf16 rounding step off). Against a
-single-device merge, a large delta folded on FSDP2 shards can differ by rounding on part of the
-elements it moves: DTensor may contract the sharded rank dim of `B @ A` shard-locally and sum the bf16
-partials (about a tenth of the moved elements of BERT's 30522-row embedding). The frozen base is never
-written: PEFT's in-place merge followed by its unmerge would not give it back, since in bf16 `(w + d) - d`
-misses `w` by a rounding step wherever the two roundings do not cancel. The fold holds one tensor's
-temporaries at a time, so it adds nothing to the sync's peak: on Qwen3-8B at FSDP2 dp2 a sync peaks
-1.16 GiB over what is allocated, as an in-place merge does, whether attention or every linear layer is
-adapted. A PEFT layer the fold does not cover (LoRA on `nn.MultiheadAttention`, trainable tokens, a
-variant other than DoRA, a grouped conv) is refused when the trainer is built.
+for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA. A fold
+on FSDP2 shards can differ from a single-device merge by rounding, since the delta's contraction is
+summed across shards. The frozen base is never written: PEFT's in-place merge followed by its unmerge
+would not give it back, since in bf16 `(w + d) - d` misses `w` by a rounding step wherever the two
+roundings do not cancel. The fold holds one tensor's temporaries at a time, so it adds at most one
+local shard of the largest adapted tensor (a full copy on one device) to the sync's peak. A PEFT layer
+the fold does not cover (LoRA on `nn.MultiheadAttention`, trainable tokens, quantized LoRA, a variant
+other than DoRA, a grouped conv) is refused when the trainer is built, and so is a PEFT adapter on a
+tensor the sync's dense push does not send (an EP layer's expert weights, which take native expert LoRA),
+since only that push folds PEFT adapters. Each sync checks again: the layers before it streams, the
+targets as its dense push ends.
 
 Both trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_sync.py`),
 which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all ranks under FSDP2.
 
 ## Embedding models
 
-The embedding trainer is SentenceTransformer-based. `use_peft: true` injects LoRA into the underlying
-transformer via `peft.inject_adapter_in_model` (not `SentenceTransformer.add_adapter`) and freezes every
-non-adapter param. 4-bit QLoRA is rejected on the ST loader, and a layer the out-of-place fold does not
-cover ([above](#online-rl--rollout-server-weight-sync)) at trainer construction. In-place injection never reads `lora_task_type`.
+The embedding trainer is SentenceTransformer-based. `use_peft: true` injects LoRA into the transformer
+backbone only (`model[0].auto_model`) via `peft.inject_adapter_in_model` (not
+`SentenceTransformer.add_adapter`) and freezes every non-adapter param. 4-bit QLoRA is rejected on the ST
+loader, and a layer the out-of-place fold does not cover ([above](#online-rl--rollout-server-weight-sync))
+at trainer construction. In-place injection never reads `lora_task_type`.
 
 Runs under standard / FSDP2 data parallelism only; EP and TP are rejected at trainer construction (the EP
 save path has no adapter-merge step, so the checkpoint would carry adapter keys that reload as random base
-weights). Saves fold the adapters into the weights with the weight sync's out-of-place fold; training
-checkpoints also keep them unfolded, which a resume restores onto the base ([Embedding — Saving](../training-methods/embedding.md#saving)).
+weights). Saving and resume: [Embedding — Saving](../training-methods/embedding.md#saving).
 
 ## Quantized training (QLoRA)
 
@@ -434,7 +433,7 @@ raises on the label rather than returning a half-adapted model: `EXPERT_LORA` fo
 
 The mixed label keeps every `LoraConfig` field beside it, plus an `ep_expert_lora` block recording the expert
 half's `r`/`lora_alpha`/`lora_dropout`/`use_rslora`/`expert_projections`; resume reads the tensors directly
-and never parses the file.
+and the file only for its scaling check (below).
 
 The repo's merge and convert scripts check those markers (`assert_no_expert_lora_adapter`) and fall through
 to a tensor-key scan when the config is absent or carries a stock `peft_type`, so an unmarked directory
@@ -444,7 +443,10 @@ holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
 `restore_adapters` (`src/distributed/checkpoint/peft.py`), which `CheckpointLoader` calls. Resuming expert adapters into a run that does not build them (EP off,
 `use_grouped_gemm: false`, or the expert projections dropped from `lora_target_modules`) raises rather than
-discarding them.
+discarding them. So does a changed LoRA scaling: resume compares the scaling inputs the saved
+`adapter_config.json` records (`lora_alpha`, `use_rslora`, `use_dora`, `alpha_pattern`, and the expert
+half's `lora_alpha` and `use_rslora`) with the live run's, since names and shapes would still match and
+the delta would silently rescale. A missing `adapter_config.json` raises too.
 
 Under CP the saved (normalized) keys are mapped back onto live wrapper spelling by
 `remap_cp_adapter_keys_to_live`, through the shared `strip_peft_adapter_segment`, which drops the
@@ -491,10 +493,10 @@ base, so the run continues from its trained adapters rather than the fold
 It needs native grouped expert adapters to exist: `lora_target_modules` must name at least one expert
 projection, or `_validate_merge_expert_lora_save` raises.
 
-Both halves are folded: expert deltas inside each family's `gather_expert_state_dict`, attention deltas via a
-`merge_adapter` held across the write. Afterwards the adapters are unmerged and the base weights the merge
-rewrote are written back bit for bit (a bf16 unmerge alone misses by a rounding step), so training
-continues unchanged. The fold happens
+Both halves are folded: expert deltas inside each family's `gather_expert_state_dict`, PEFT (attention)
+deltas out of place into each tensor as it is written, with the weight sync's fold
+([above](#online-rl--rollout-server-weight-sync)). The frozen base is never written, so training continues
+unchanged. The fold happens
 in the gathered EP save under mixin-managed FSDP2 (torchrun); it is rejected under accelerate-managed FSDP
 and with `save_sharded_ep: true`.
 

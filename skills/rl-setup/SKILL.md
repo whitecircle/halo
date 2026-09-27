@@ -76,8 +76,9 @@ and full launch examples see [`wiring.md`](wiring.md).
    multi-rank FSDP2 DP, *every* rank joins the collective gather
    (each EP layer's `gather_expert_state_dict` for experts, `materialize_dtensor`
    plus `iter_tp_sharded_non_dtensor_full` for the hand-sliced TP shards) and only the
-   global-main TP-rank-0 process sends; LoRA adapters are merged into the base
-   and forwarded under base-model names. Routing multi-rank DP through the
+   global-main TP-rank-0 process sends; LoRA adapters are folded out of place
+   into each base weight as it is sent (the frozen base is never written) and
+   forwarded under base-model names. Routing multi-rank DP through the
    single-process path would deadlock right after vLLM pauses, so this is not
    optional.
 
