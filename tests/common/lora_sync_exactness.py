@@ -7,18 +7,20 @@ misses ``w`` by a rounding step wherever the two roundings do not cancel, and th
 few steps for the whole run. ``test_lora_weight_sync_exact.py`` runs a representative dense and MoE
 family per mode; ``test_lora_weight_sync_exact_families.py`` sweeps every other family the sync serves.
 
-A row is one tiny random-init family (``--family``) under one sharding (``--mode``: ``fsdp`` for a
-dense model; ``ep1`` with FSDP-sharded DTensor experts, ``ep2`` with plain experts, or pure ETP
-``etp2`` for a MoE) with stock PEFT on the token mixers' projections (every linear layer on a dense
-model), alone or mixed with native expert LoRA (``--adapters``). Syncs run through the trainers' own
-entry (``sync_trainer_weights``, no server), and the row must:
+A row is one tiny random-init family of :mod:`tests.common.tiny_models` (``--family``: a dense one,
+or a MoE one under its ``model_type``) under one sharding (``--mode``: ``fsdp`` for a dense model;
+``ep1`` with FSDP-sharded DTensor experts, ``ep2`` with plain experts, or pure ETP ``etp2`` for a
+MoE) with stock PEFT on the token mixers' projections (every linear layer on a dense model), alone or
+mixed with native expert LoRA (``--adapters``). Syncs run through the trainers' own entry
+(``sync_trainer_weights``, no server), and the row must:
 
-  1. Cover the roster and the layout it names: the family table holds every EP family some engine
-     takes an online update for, derived from the layer registry and the clients' refusals; the
-     production gate (``validate_weight_sync_support``) admits the model for at least one engine; the
-     LoRA'd base weights are FSDP2 DTensor shards (pure ETP included, whose FSDP2 spans the world at
-     data parallel 1); experts are DTensor at ep1 and plain otherwise; a mixed row carries native
-     expert adapters.
+  1. Cover the roster and the layout it names: the tiny MoE roster has a model for every EP family
+     some engine takes an online update for (the syncable roster, derived from the layer registry and
+     the clients' refusals, which ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the
+     manifest rows to); the production gate (``validate_weight_sync_support``) admits the model for
+     at least one engine; the LoRA'd base weights are FSDP2 DTensor shards (pure ETP included, whose
+     FSDP2 spans the world at data parallel 1); experts are DTensor at ep1 and plain otherwise; a
+     mixed row carries native expert adapters.
   2. Across a sync after each of ``STEP_SYNCS`` optimizer steps, leave every frozen parameter
      bit-identical while the adapters train.
   3. With the adapters of the next step fixed, ``PUSHES`` syncs (a recording sender on the forwarding
@@ -44,71 +46,40 @@ TP is no mode: every LoRA shape is refused at trainer construction under TP.
 
 import argparse
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    Gemma4ForCausalLM,
-    Gemma4TextConfig,
-    Glm4MoeLiteConfig,
-    Glm4MoeLiteForCausalLM,
-    GptOssConfig,
-    GptOssForCausalLM,
-    LagunaConfig,
-    LagunaForCausalLM,
-    Lfm2MoeConfig,
-    Lfm2MoeForCausalLM,
-    Qwen3_5ForCausalLM,
-    Qwen3_5MoeForCausalLM,
-    Qwen3_5MoeTextConfig,
-    Qwen3_5TextConfig,
-    Qwen3Config,
-    Qwen3ForCausalLM,
-    Qwen3MoeConfig,
-    Qwen3MoeForCausalLM,
-    TrainerCallback,
-)
-from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
-from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
+from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-import src.trainers.grpo.rollout.weight_sync as weight_sync
+import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
+import src.models.structure as structure
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes, has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.distributed.runtime import broadcast_from_rank0
 from src.models.structure import lora_fold_targets, unwrap_framework_wrappers
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.models import (
-    BAILING_MOE_LING_MINI,
-    QWEN3_0_6B,
-    TINY_BAILING_MOE_CONFIG,
-    TINY_GEMMA4_MOE_CONFIG,
-    TINY_GLM4_MOE_LITE_CONFIG,
-    TINY_GPTOSS_CONFIG,
-    TINY_LAGUNA_CONFIG,
-    TINY_LFM2_MOE_CONFIG,
-    TINY_QWEN3_CONFIG,
-    TINY_QWEN3_MOE_CONFIG,
-    TINY_QWEN35_CONFIG,
-    TINY_QWEN35_MOE_CONFIG,
-    TINY_STEP3P7_CONFIG,
-    TINY_STEP3P7_VISION_CONFIG,
-)
+from tests.common.distributed import world_all
+from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import load_peft_model, mixer_linear_leaves
+from tests.common.tiny_models import (
+    TINY_DENSE_FAMILY,
+    TINY_MOE_FAMILIES,
+    TINY_QWEN35_DENSE_FAMILY,
+    TinyFamily,
+    shared_tiny_family_checkpoint,
+    tiny_family_model,
+)
 from tests.common.utils import log, log_all
 from tests.common.weight_sync import (
     RecordingSender,
@@ -144,73 +115,9 @@ DENSE_MODES = ("fsdp",)
 # Logical expert projections, resolved per family by split_expert_lora_targets; on a dense model the
 # same names are its MLP, which stock PEFT adapts.
 MLP_TARGETS = ["gate_proj", "up_proj", "down_proj"]
-
-
-@dataclass(frozen=True)
-class Family:
-    """A tiny random-init model at the tokenizer's vocab, and the EP registry key it builds (``None``
-    for a dense family)."""
-
-    build: Callable[[AutoTokenizer], torch.nn.Module]
-    model_type: str | None = None
-
-
-def _vocab(tokenizer) -> dict:
-    return {
-        "vocab_size": len(tokenizer),
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-
-
-def _bailing(tokenizer) -> torch.nn.Module:
-    """Remote code: the config class is the one the hub checkpoint ships, shrunk to the tiny shape."""
-    apply_remote_code_compat_shims()
-    config = AutoConfig.from_pretrained(BAILING_MOE_LING_MINI, trust_remote_code=True)
-    for key, value in {**TINY_BAILING_MOE_CONFIG, **_vocab(tokenizer)}.items():
-        setattr(config, key, value)
-    return AutoModelForCausalLM.from_config(config, trust_remote_code=True)
-
-
-def _step3p7(tokenizer) -> torch.nn.Module:
-    """The family ships no text-only CausalLM, so the composite, its image token inside the vocab."""
-    config = Step3p7Config(
-        text_config={**TINY_STEP3P7_CONFIG, **_vocab(tokenizer)},
-        vision_config=dict(TINY_STEP3P7_VISION_CONFIG),
-        image_token_id=2000,
-    )
-    return Step3p7ForConditionalGeneration(config)
-
-
-FAMILIES: dict[str, Family] = {
-    "qwen3": Family(lambda tok: Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, **_vocab(tok)}))),
-    "qwen3_5": Family(lambda tok: Qwen3_5ForCausalLM(Qwen3_5TextConfig(**{**TINY_QWEN35_CONFIG, **_vocab(tok)}))),
-    "gpt_oss": Family(lambda tok: GptOssForCausalLM(GptOssConfig(**{**TINY_GPTOSS_CONFIG, **_vocab(tok)})), "gpt_oss"),
-    "qwen3_moe": Family(
-        lambda tok: Qwen3MoeForCausalLM(Qwen3MoeConfig(**{**TINY_QWEN3_MOE_CONFIG, **_vocab(tok)})), "qwen3_moe"
-    ),
-    "qwen3_5_moe": Family(
-        lambda tok: Qwen3_5MoeForCausalLM(Qwen3_5MoeTextConfig(**{**TINY_QWEN35_MOE_CONFIG, **_vocab(tok)})),
-        "qwen3_5_moe_text",
-    ),
-    "glm4_moe_lite": Family(
-        lambda tok: Glm4MoeLiteForCausalLM(Glm4MoeLiteConfig(**{**TINY_GLM4_MOE_LITE_CONFIG, **_vocab(tok)})),
-        "glm4_moe_lite",
-    ),
-    "laguna": Family(lambda tok: LagunaForCausalLM(LagunaConfig(**{**TINY_LAGUNA_CONFIG, **_vocab(tok)})), "laguna"),
-    # The per-layer-input table is indexed by the same token ids as the embedding.
-    "gemma4": Family(
-        lambda tok: Gemma4ForCausalLM(
-            Gemma4TextConfig(**{**TINY_GEMMA4_MOE_CONFIG, **_vocab(tok), "vocab_size_per_layer_input": len(tok)})
-        ),
-        "gemma4_text",
-    ),
-    "lfm2_moe": Family(
-        lambda tok: Lfm2MoeForCausalLM(Lfm2MoeConfig(**{**TINY_LFM2_MOE_CONFIG, **_vocab(tok)})), "lfm2_moe"
-    ),
-    "bailing_moe": Family(_bailing, "bailing_moe"),
-    "step3p7": Family(_step3p7, "step3p7"),
-}
+# The dense rows' models, which run under ``fsdp`` alone; the MoE rows run the syncable part of
+# ``TINY_MOE_FAMILIES`` (:func:`syncable_moe_families`).
+DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
 # The core-tier rows: one dense and one MoE family; the full tier sweeps the rest.
 REPRESENTATIVE_FAMILIES = ("qwen3", "qwen3_moe")
 
@@ -229,14 +136,26 @@ def syncable_ep_classes() -> set[type]:
     }
 
 
-def parse_row(families: tuple[str, ...]) -> argparse.Namespace:
-    """``--family`` (one of ``families``), ``--mode`` and ``--adapters``, refusing a shape no run takes."""
+def syncable_moe_families() -> tuple[str, ...]:
+    """The ``TINY_MOE_FAMILIES`` whose EP layer class is in :func:`syncable_ep_classes`."""
+    registry, syncable = ep_layer_class_by_model_type(), syncable_ep_classes()
+    return tuple(sorted(name for name in TINY_MOE_FAMILIES if registry[name] in syncable))
+
+
+def row_families() -> tuple[str, ...]:
+    """Every ``--family`` a row may name: the dense ones and the syncable MoE roster."""
+    return (*DENSE_FAMILIES, *syncable_moe_families())
+
+
+def parse_row(families: Iterable[str], argv: list[str] | None = None) -> argparse.Namespace:
+    """``--family`` (one of ``families``), ``--mode`` and ``--adapters`` from ``argv`` (the command line
+    by default), refusing a shape no run takes."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--family", choices=families, required=True)
+    parser.add_argument("--family", choices=sorted(families), required=True)
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     parser.add_argument("--adapters", choices=("peft", "mixed"), default="peft")
-    args, _ = parser.parse_known_args()
-    dense = FAMILIES[args.family].model_type is None
+    args, _ = parser.parse_known_args(argv)
+    dense = args.family in DENSE_FAMILIES
     if dense != (args.mode in DENSE_MODES):
         parser.error(f"--mode {args.mode} is not a {'dense' if dense else 'MoE'} sharding")
     if args.adapters == "mixed" and (dense or MODES[args.mode].get("expert_tp_size", 1) > 1):
@@ -244,25 +163,9 @@ def parse_row(families: tuple[str, ...]) -> argparse.Namespace:
     return args
 
 
-def _all_ranks(local: bool, device) -> bool:
-    flag = torch.tensor([1 if local else 0], device=device)
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-    return bool(flag.item())
-
-
 def _is_adapter(name: str) -> bool:
     """PEFT's ``...lora_A.default.weight`` and the native expert ``..._lora_A`` alike."""
     return "lora_" in name
-
-
-def _build_tiny_checkpoint(family: str, target_dir: str, tokenizer) -> list[str]:
-    """Rank 0: the family's seeded tiny model and the tokenizer, saved; returns its token-mixer leaves,
-    the PEFT targets (MLA, fused QKV, gated and linear attention spell them differently)."""
-    torch.manual_seed(SEED)
-    model = FAMILIES[family].build(tokenizer).to(torch.bfloat16)
-    model.save_pretrained(target_dir)
-    tokenizer.save_pretrained(target_dir)
-    return mixer_linear_leaves(model)
 
 
 def _expert_bases_and_merges(peft_model) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -302,7 +205,7 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
     """Record every tensor the sync folds: the bytes requested as its fold starts and the fold's own
     peak over that. A fold that kept anything past its tensor would show as a start that grows along
     the walk."""
-    fold = weight_sync.lora_folded
+    fold = structure.lora_folded
 
     def recorded(param, layers):
         torch.cuda.synchronize()
@@ -313,7 +216,7 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
         record.append((start, _requested_bytes("peak") - start))
         return folded
 
-    with patch.object(weight_sync, "lora_folded", recorded):
+    with patch.object(structure, "lora_folded", recorded):
         yield
 
 
@@ -405,7 +308,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
     experts = [
         param for layer in layers.values() for attr, param in layer.expert_named_params() if not _is_adapter(attr)
     ]
-    model_type = FAMILIES[family].model_type
+    model_type = None if family in DENSE_FAMILIES else family
     admitted = []
     for backend in rollout_backends():
         try:
@@ -415,7 +318,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
             log(f"  {backend} refuses the sync: {str(refusal).splitlines()[0][:160]}")
     layout = {
         "family_table_covers_the_syncable_roster": {
-            ep_layer_class_by_model_type()[f.model_type] for f in FAMILIES.values() if f.model_type
+            ep_layer_class_by_model_type()[name] for name in syncable_moe_families()
         }
         == syncable_ep_classes(),
         "weight_sync_gate_admits_the_family": bool(admitted),
@@ -470,14 +373,15 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     """Drive one (family x mode x adapters) row; every rank runs it."""
     log(f"\n{'=' * 70}\n  LoRA weight sync leaves the base exact: {family}, {mode}, {adapters}\n{'=' * 70}")
     checks: dict[str, bool] = {}
-    shared = [ctx.output_dir]
-    dist.broadcast_object_list(shared, src=0)
-    base_dir = os.path.join(shared[0], "tiny_base")
+    output_dir = broadcast_from_rank0(ctx.output_dir)
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    leaves = [_build_tiny_checkpoint(family, base_dir, tokenizer) if ctx.rank == 0 else None]
-    dist.broadcast_object_list(leaves, src=0)
-    dense = FAMILIES[family].model_type is None
-    targets = leaves[0] + (MLP_TARGETS if dense or adapters == "mixed" else [])
+    dense = family in DENSE_FAMILIES
+    tiny = DENSE_FAMILIES[family] if dense else TINY_MOE_FAMILIES[family]
+    base_dir = shared_tiny_family_checkpoint(ctx, tiny, f"lora_sync_exactness_{family}", tokenizer, SEED)
+    # The PEFT targets, off the module tree: MLA, fused QKV, gated and linear attention spell them
+    # differently.
+    leaves = broadcast_from_rank0(mixer_linear_leaves(tiny_family_model(tiny, tokenizer)) if ctx.rank == 0 else None)
+    targets = leaves + (MLP_TARGETS if dense or adapters == "mixed" else [])
 
     parallelism_config = ParallelismConfig(**MODES[mode])
     model, tokenizer, peft_config = load_peft_model(
@@ -493,7 +397,7 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     trainer = DistributedSFTTrainer(
         model=model,
         args=SFTConfig(
-            output_dir=os.path.join(shared[0], "train_out"),
+            output_dir=os.path.join(output_dir, "train_out"),
             max_steps=STEP_SYNCS + 1 + CONTROL_STEPS,
             per_device_train_batch_size=2,
             learning_rate=LEARNING_RATE,
@@ -518,7 +422,7 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     unwrapped = unwrap_framework_wrappers(trainer.model)
     peft_model = find_peft_model(unwrapped)
     layout = _layout_checks(family, mode, adapters, unwrapped, peft_model)
-    checks.update({name: _all_ranks(ok, ctx.device) for name, ok in layout.items()})
+    checks.update({name: world_all(ok, ctx.device) for name, ok in layout.items()})
 
     log(
         f"\n  {STEP_SYNCS} step syncs, {PUSHES} fixed-adapter pushes, {CONTROL_STEPS} step syncs inside an "
@@ -539,15 +443,15 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     trainer.train()
 
     trained = moved_parameters(state["start"], state["before_pushes"])
-    checks["frozen_base_bit_identical_across_step_syncs"] = _all_ranks(
+    checks["frozen_base_bit_identical_across_step_syncs"] = world_all(
         not any(not _is_adapter(name) for name in trained), ctx.device
     )
-    checks["adapters_trained_between_syncs"] = _all_ranks(any(map(_is_adapter, trained)), ctx.device)
+    checks["adapters_trained_between_syncs"] = world_all(any(map(_is_adapter, trained)), ctx.device)
     moved = moved_parameters(state["before_pushes"], state["after_pushes"])
-    checks["frozen_base_bit_identical_after_pushes"] = _all_ranks(
+    checks["frozen_base_bit_identical_after_pushes"] = world_all(
         not any(not _is_adapter(name) for name in moved), ctx.device
     )
-    checks["adapters_bit_identical_after_pushes"] = _all_ranks(not any(map(_is_adapter, moved)), ctx.device)
+    checks["adapters_bit_identical_after_pushes"] = world_all(not any(map(_is_adapter, moved)), ctx.device)
     checks["negative_control_moves_the_base"] = bool(state["drifted"]) and state["drifted"][-1] > 0
     log(f"  step syncs moved {len(trained)} local parameters, pushes moved {len(moved)} {moved[:3]}")
 
@@ -559,15 +463,15 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     out_of_place = max(state["peaks"]["out_of_place"][1:])
     lora_local = sum(state["start"][name].numel() * state["start"][name].element_size() for name in lora_bases)
     starts = [start for start, _ in state["folds"]]
-    checks["folds_recorded"] = _all_ranks(len(state["folds"]) == len(lora_fold_targets(unwrapped)), ctx.device)
-    checks["each_fold_within_bound"] = _all_ranks(
+    checks["folds_recorded"] = world_all(len(state["folds"]) == len(lora_fold_targets(unwrapped)), ctx.device)
+    checks["each_fold_within_bound"] = world_all(
         all(peak <= FOLD_PEAK_BOUND * largest_fold for _, peak in state["folds"]), ctx.device
     )
-    checks["folds_keep_nothing_across_tensors"] = _all_ranks(
+    checks["folds_keep_nothing_across_tensors"] = world_all(
         bool(starts) and max(starts) - min(starts) <= largest_fold, ctx.device
     )
     # Premise: a copy of the whole LoRA'd shard would exceed the bound on this row.
-    checks["memory_bound_discriminates"] = _all_ranks(lora_local > FOLD_PEAK_BOUND * largest_fold, ctx.device)
+    checks["memory_bound_discriminates"] = world_all(lora_local > FOLD_PEAK_BOUND * largest_fold, ctx.device)
     log_all(f"  step-sync peaks: out of place {state['peaks']['out_of_place']}, in place {state['peaks']['in_place']}")
     extra = torch.tensor(float(out_of_place - max(state["peaks"]["in_place"])), device=ctx.device)
     dist.all_reduce(extra, op=dist.ReduceOp.MAX)

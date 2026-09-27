@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import torch
 from accelerate.logging import get_logger
@@ -53,6 +53,15 @@ MERGED_ADAPTER_CONFIG_DIR = "original_adapter_config"
 EXPERT_LORA_PEFT_TYPE = "EXPERT_LORA"
 MIXED_EXPERT_LORA_PEFT_TYPE = "LORA_WITH_EP_EXPERT_LORA"
 EXPERT_LORA_PEFT_TYPES = frozenset({EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE})
+# Where a mixed attention+expert ``adapter_config.json`` describes its expert half; the expert-only one
+# carries the same fields at the top level.
+EXPERT_LORA_CONFIG_KEY = "ep_expert_lora"
+
+# The ``LoraConfig`` fields a LoRA delta is scaled by (and, under DoRA, reparametrized with). A resume
+# under other values restores every adapter tensor by name and shape and rescales the delta, so the
+# values recorded beside the adapter are what refuse it. The native expert adapters record the first two.
+LORA_SCALING_FIELDS = ("lora_alpha", "use_rslora", "use_dora", "alpha_pattern")
+EXPERT_LORA_SCALING_FIELDS = ("lora_alpha", "use_rslora")
 
 # What PEFT appends below the adapted module's own path in a saved key.
 _ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
@@ -169,6 +178,42 @@ def read_adapter_file(path: str) -> dict:
     return torch.load(path, map_location="cpu", weights_only=True)
 
 
+def lora_scaling_mismatch(adapter_dir: str, attention: Mapping | None, expert: Mapping | None = None) -> str | None:
+    """Why the adapter in ``adapter_dir`` was trained at another LoRA scaling than the live run, or None.
+
+    ``attention`` is the live ``LoraConfig`` as a dict, ``expert`` the live native expert adapters'
+    config fields (None for a half the run does not train); each is held to the ``adapter_config.json``
+    beside the adapter on :data:`LORA_SCALING_FIELDS` / :data:`EXPERT_LORA_SCALING_FIELDS`. A missing
+    config is a reason too, since nothing else records the scaling. Rank-local read.
+    """
+    if attention is None and expert is None:
+        return None
+    config_path = os.path.join(adapter_dir, ADAPTER_CONFIG_FILE)
+    if not os.path.isfile(config_path):
+        return (
+            f"{config_path} is missing, so the LoRA scaling the adapter beside it was trained at cannot be "
+            f"held to this run's. Resume from a complete checkpoint."
+        )
+    with open(config_path) as fh:
+        saved = json.load(fh)
+    halves = [("", saved, attention, LORA_SCALING_FIELDS)]
+    halves.append(("expert ", saved.get(EXPERT_LORA_CONFIG_KEY, saved), expert, EXPERT_LORA_SCALING_FIELDS))
+    changed = [
+        f"{half}{field}: saved {recorded.get(field)!r}, live {live.get(field)!r}"
+        for half, recorded, live, fields in halves
+        if live is not None
+        for field in fields
+        if recorded.get(field) != live.get(field)
+    ]
+    if not changed:
+        return None
+    return (
+        f"the adapter at {adapter_dir} was trained at another LoRA scaling than this run ({'; '.join(changed)}): "
+        f"its tensors would restore by name and shape and every delta would be rescaled. Resume with the "
+        f"lora_alpha / use_rslora / use_dora / alpha_pattern it was saved with."
+    )
+
+
 def cast_adapter_state_to_save_dtype(state: dict) -> dict:
     """Adapter-file cast honouring the balancing export contract: balancing tensors (a
     ``modules_to_save`` router's bias riding along with the clone) stay at trained dtype, as in every
@@ -193,7 +238,7 @@ def _expert_lora_merge_remedy(adapter_dir: str, *, mixed: bool) -> str:
     ``merge_expert_lora_on_save``, which folds them inside
     :func:`~src.distributed.checkpoint.save.save_ep_checkpoint`'s gathered save. On the mixed shape
     that flag also routes the write past :class:`PeftAdapterSaver` and folds the attention half
-    (``merged_adapters`` held open over it), so ``mixed`` only selects the wording.
+    into each tensor it writes, so ``mixed`` only selects the wording.
     """
     if mixed:
         shape = (

@@ -1,7 +1,8 @@
 """Weight-sync stand-ins shared by the suites: an offline client, a recording wire, a recording sender,
 a stock model, and the probes of what a LoRA push leaves behind."""
 
-from collections.abc import Iterator
+import copy
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import NamedTuple
 from unittest.mock import patch
@@ -17,7 +18,6 @@ from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.runtime import DeferredRankFailure, materialize_dtensor, to_local
-from src.models.structure import merged_adapters
 from src.trainers.grpo.rollout.weight_sync import _HubForwarder
 from src.trainers.mixins.ep_introspection import named_ep_layers
 
@@ -128,15 +128,31 @@ class RecordingSender:
         return [param.name for param in self.params]
 
 
-def local_parameters(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Every parameter as this rank holds it, resharded first: the registration a sync reads. Rank-local."""
+def local_parameters(
+    model: nn.Module, keep: Callable[[str, nn.Parameter], bool] | None = None
+) -> dict[str, torch.Tensor]:
+    """Every parameter as this rank holds it, resharded first: the registration a sync reads. ``keep``
+    narrows the copy to the ``(name, param)`` it accepts, for a policy too large to copy whole.
+    Rank-local."""
     reshard_fsdp2_modules(model)
-    return {name: to_local(param.data).detach().clone() for name, param in model.named_parameters()}
+    return {
+        name: to_local(param.data).detach().clone()
+        for name, param in model.named_parameters()
+        if keep is None or keep(name, param)
+    }
 
 
 def moved_parameters(before: dict[str, torch.Tensor], after: dict[str, torch.Tensor]) -> list[str]:
     """Names in ``before`` whose tensor in ``after`` is not bit-identical."""
     return [name for name, value in before.items() if not torch.equal(value, after[name])]
+
+
+def merged_by_peft(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Every parameter of a copy of unsharded ``model`` after PEFT's own in-place ``merge_adapter``, by
+    live name: the oracle a fold is held to bit for bit (:func:`as_pushed` spells it as a push)."""
+    merged = copy.deepcopy(model)
+    merged.merge_adapter()
+    return {name: param.detach().clone() for name, param in merged.named_parameters()}
 
 
 def lora_bases_and_merges(model: nn.Module) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -182,5 +198,8 @@ def folded_in_place(peft_model: nn.Module) -> Iterator[None]:
     Resharded first, as the sync itself is, so the merge lands on the shards the sync reads.
     """
     reshard_fsdp2_modules(peft_model)
-    with merged_adapters(peft_model, restore_base=False):
+    peft_model.merge_adapter()
+    try:
         yield
+    finally:
+        peft_model.unmerge_adapter()

@@ -46,6 +46,7 @@ from tests.common.peft_helpers import (
     unwrap,
 )
 from tests.common.utils import local_optimizer_state, log, max_or_nan, optimizer_state_matches, step_losses
+from tests.common.weight_sync import local_parameters, moved_parameters
 
 # Greedy, one token, top-k: the assertion is "these numbers moved", so the probe must be the least
 # noisy generation an engine can give. Every supported engine returns this exact shape from
@@ -125,6 +126,15 @@ def served_policy_delta(after: dict[str, float], before: dict[str, float]) -> fl
     if not shared:
         return float("inf")
     return max_or_nan(abs(after[token] - before[token]) for token in shared)
+
+
+def served_policy_moved(after: dict[str, float], before: dict[str, float]) -> bool:
+    """Whether ``after`` probes a different policy from ``before``: both probes finite and not identical.
+
+    A NaN compares unequal to itself, so a probe of an engine serving NaN would otherwise read as moved.
+    """
+    finite = all(bool(probe) and all(math.isfinite(v) for v in probe.values()) for probe in (after, before))
+    return finite and after != before
 
 
 def record_served_baseline(server_url: str, model_name: str, checks: dict[str, bool]) -> dict[str, float]:
@@ -308,29 +318,22 @@ def _unshard_with_a_forward(model, device: torch.device) -> None:
         model(input_ids=torch.ones(1, UNSHARD_FORWARD_TOKENS, dtype=torch.long, device=device))
 
 
-def frozen_base_snapshot(model) -> list[tuple[str, torch.nn.Parameter, torch.Tensor]]:
-    """The frozen weights an adapter fold must give back bit-identical, each with this rank's copy:
-    every PEFT-wrapped base weight (what the fold rewrites, in whichever layers the targets hit) and
-    the rest of layer 0 (expert banks included). Resharded first, so the handles are the sharded
-    params every unshard leaves in place.
+def frozen_base_weights(model) -> dict[str, torch.Tensor]:
+    """This rank's copy of the frozen weights an adapter fold must give back bit-identical, compared
+    across the syncs by :func:`~tests.common.weight_sync.moved_parameters`: every PEFT-wrapped base
+    weight (what the fold rewrites, in whichever layers the targets hit) and the rest of layer 0
+    (expert banks included), rather than a second copy of a full-size policy.
 
     No served-policy probe can see a fold that wrote into the base, since the engine is meant to
     receive base+adapter, so the only witness is the trainer's own weights before and after the
     syncs.
     """
-    reshard_fsdp2_modules(unwrap(model))
-    return [
-        (name, param, local_view(param.data))
-        for name, param in model.named_parameters()
-        if ("layers.0." in name or ".base_layer." in name)
+    return local_parameters(
+        model,
+        keep=lambda name, param: ("layers.0." in name or ".base_layer." in name)
         and not param.requires_grad
-        and param.dtype.is_floating_point
-    ]
-
-
-def moved_frozen_weights(snapshot: list[tuple[str, torch.nn.Parameter, torch.Tensor]]) -> list[str]:
-    """The weights of ``snapshot`` whose local storage is no longer bit-identical. Rank-local."""
-    return [name for name, param, before in snapshot if not torch.equal(local_view(param.data), before)]
+        and param.dtype.is_floating_point,
+    )
 
 
 def perturbation_round(
@@ -353,11 +356,11 @@ def perturbation_round(
 
     ``expert_stream`` says this policy's sync must carry expert tensors, which is where the
     non-vacuity count goes; a dense policy has none and counts the tensors it does move.
-    ``check_base_untouched`` adds the adapter fold's other half (:func:`frozen_base_snapshot`).
+    ``check_base_untouched`` adds the adapter fold's other half (:func:`frozen_base_weights`).
     """
     reshard_fsdp2_modules(unwrap(model))
     what, targets, stream_count = _perturbation_targets(model, adapter)
-    base = frozen_base_snapshot(model) if adapter is not None and check_base_untouched else []
+    base = frozen_base_weights(model) if adapter is not None and check_base_untouched else {}
     _unshard_with_a_forward(model, ctx.device)
     _apply_perturbation(targets, adapter)
     # Guard on the number that can go missing: a full fine-tune of a MoE policy has to move expert
@@ -371,7 +374,7 @@ def perturbation_round(
     push()
 
     if base:
-        moved = moved_frozen_weights(base)
+        moved = moved_parameters(base, frozen_base_weights(model))
         checks["sync_left_the_base_weights_alone"] = not moved
         log(f"  frozen layer-0 weights the push moved: {len(moved)}/{len(base)} {moved[:3]}")
     return what
@@ -389,9 +392,11 @@ def _push_moves_served_policy(
     ctx.barrier()
     if ctx.rank == 0:
         after = probe_top_logprobs(server_url, model_name)
-        checks[check] = after != before
-        if after == before:
-            log(f"  IDENTICAL logprobs after a {stream}-only perturbation: the {stream} stream did not land")
+        checks[check] = served_policy_moved(after, before)
+        if not checks[check]:
+            log(
+                f"  IDENTICAL or non-finite logprobs after a {stream}-only perturbation: the {stream} stream did not land"
+            )
         log(f"  post-{stream}-sync: { {k: round(v, 4) for k, v in after.items()} }")
     ctx.barrier()
 

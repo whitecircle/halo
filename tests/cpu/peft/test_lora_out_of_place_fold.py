@@ -10,21 +10,22 @@ under the embedding's name), both halves of that tie adapted (two layers fold in
 merge order), and two active adapters on one layer. Each case is pinned against PEFT's own merge of a
 copy of the model, through ``lora_folded`` and through the whole push, with the model's own
 parameters bit-identical afterwards. A layer whose merge the fold cannot reproduce must be refused by
-the trainers' construction gate, not pushed unfolded.
+the trainers' construction gate, not pushed unfolded, and so must a PEFT target the dense push, the
+only path that folds PEFT adapters, does not send (an EP layer's expert bank): the push refuses it
+before streaming anything.
 
 Run: ``python tests/cpu/peft/test_lora_out_of_place_fold.py`` (or ``pytest -m cpu``).
 """
-
-import copy
 
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-from src.models.structure import lora_fold_targets, lora_folded, normalize_peft_param_name
+from src.models.structure import lora_fold_targets, lora_folded
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, validate_weight_sync_support
-from tests.common.weight_sync import RecordingSender, local_parameters, moved_parameters
+from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.weight_sync import RecordingSender, as_pushed, local_parameters, merged_by_peft, moved_parameters
 
 _DIM = 16
 _VOCAB = 32
@@ -61,6 +62,33 @@ class _MoeNet(nn.Module):
     def __init__(self):
         super().__init__()
         self.experts = _Experts()
+
+    def forward(self, x):  # pragma: no cover - never called
+        return x
+
+
+class _EPExperts(StubEPLayerBase):
+    """The same bank on an EP layer, which the expert gather sends as it is and the dense push skips."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.randn(4, _DIM, 2 * _DIM))
+
+    def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
+        return {"gate_up_proj": self.gate_up_proj.detach()}
+
+    @classmethod
+    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
+        return {}
+
+
+class _EPMoeNet(nn.Module):
+    """An EP expert bank beside a dense layer the push would send."""
+
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(_DIM, _DIM)
+        self.experts = _EPExperts()
 
     def forward(self, x):  # pragma: no cover - never called
         return x
@@ -109,18 +137,11 @@ def _lora_model(case: str, dtypes: tuple[torch.dtype, torch.dtype]) -> nn.Module
     return model
 
 
-def _merged_by_peft(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Every parameter of a copy of ``model`` after PEFT's in-place ``merge_adapter``, by live name."""
-    merged = copy.deepcopy(model)
-    merged.merge_adapter()
-    return {name: param.detach().clone() for name, param in merged.named_parameters()}
-
-
 @pytest.mark.parametrize("dtypes", sorted(_DTYPES))
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
     model = _lora_model(case, _DTYPES[dtypes])
-    expected = _merged_by_peft(model)
+    expected = merged_by_peft(model)
     before = local_parameters(model)
 
     targets = lora_fold_targets(model)
@@ -136,6 +157,8 @@ def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
     wrong = sorted(name for name, value in folded.items() if not torch.equal(value, expected[name]))
     assert not wrong, f"folded out of place differently from PEFT's merge: {wrong}"
     assert not moved_parameters(before, local_parameters(model)), "the fold wrote the model's own weights"
+    leaked = sorted(key for layers in targets.values() for layer in layers for key in layer._caches)
+    assert not leaked, f"the fold left variant caches behind: {leaked}"
 
 
 @pytest.mark.parametrize("case", sorted(_CASES))
@@ -143,11 +166,7 @@ def test_the_push_carries_the_peft_merge(case):
     """The whole push, names included: every forwarded tensor is the one PEFT's merge would hold
     under that base-model name. A tied head's delta rides on the embedding name the push sends."""
     model = _lora_model(case, _DTYPES["bf16"])
-    expected = {
-        normalized: value
-        for name, value in _merged_by_peft(model).items()
-        if (normalized := normalize_peft_param_name(name, model.prefix)) is not None
-    }
+    expected = as_pushed(model, merged_by_peft(model))
     before = local_parameters(model)
 
     sender = RecordingSender(keep_values=True)
@@ -155,6 +174,10 @@ def test_the_push_carries_the_peft_merge(case):
     pushed = {param.name: param.value for param in sender.params}
 
     assert pushed, "premise: the push forwarded tensors"
+    assert set(pushed) == set(expected), (
+        f"the push missed {sorted(set(expected) - set(pushed))} and forwarded {sorted(set(pushed) - set(expected))} "
+        f"beyond PEFT's merge"
+    )
     wrong = sorted(name for name, value in pushed.items() if not torch.equal(value, expected[name]))
     assert not wrong, f"pushed tensors differ from PEFT's merge: {wrong}"
     assert not moved_parameters(before, local_parameters(model)), "the push wrote the model's own weights"
@@ -183,8 +206,19 @@ def test_a_layer_the_fold_cannot_reproduce_is_refused_at_construction(build, con
     """PEFT's merge would fold (or refuse) these too; the out-of-place fold has no formula for them, so
     the trainers' construction gate refuses them rather than push their base unfolded."""
     model = get_peft_model(build(), LoraConfig(r=4, lora_alpha=8, **config))
-    with pytest.raises(NotImplementedError, match="cannot be folded out of place"):
+    with pytest.raises(ValueError, match="cannot be folded out of place"):
         validate_weight_sync_support(model, "vllm")
+
+
+def test_a_peft_target_the_dense_push_skips_is_refused():
+    """PEFT LoRA on an EP layer's expert bank: the expert gather sends the bank without PEFT's delta,
+    so the served experts would miss it. The construction gate refuses it before any sync, and a push
+    that reaches it anyway raises on every rank as it ends rather than completing unfolded."""
+    model = get_peft_model(_EPMoeNet(), LoraConfig(r=4, lora_alpha=8, target_parameters=["experts.gate_up_proj"]))
+    with pytest.raises(ValueError, match="does not send through its dense push"):
+        validate_weight_sync_support(model, "vllm")
+    with pytest.raises(ValueError, match="does not send through its dense push"):
+        gather_and_send_weights(model, RecordingSender())
 
 
 if __name__ == "__main__":

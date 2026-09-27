@@ -62,10 +62,10 @@ from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTra
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
-from tests.common.on_policy_e2e import probe_top_logprobs
+from tests.common.on_policy_e2e import frozen_base_weights, probe_top_logprobs, served_policy_moved
 from tests.common.ports import free_port
 from tests.common.utils import cleanup_memory, log
-from tests.common.weight_sync import local_parameters, moved_parameters
+from tests.common.weight_sync import moved_parameters
 
 MODEL_NAME = QWEN3_0_6B
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
@@ -130,15 +130,8 @@ def create_grpo_dataset(num_samples: int, seed: int = SEED) -> Dataset:
     return Dataset.from_list(data)
 
 
-def lora_base_weights(trainer) -> dict[str, torch.Tensor]:
-    """Copies of the PEFT-wrapped base weights. Frozen, so each step's sync must leave them
-    bit-identical."""
-    params = local_parameters(trainer.accelerator.unwrap_model(trainer.model))
-    return {name: value for name, value in params.items() if ".base_layer." in name}
-
-
 def assert_syncs_left_the_base_alone(trainer, before: dict[str, torch.Tensor]) -> None:
-    moved = moved_parameters(before, lora_base_weights(trainer))
+    moved = moved_parameters(before, frozen_base_weights(trainer.accelerator.unwrap_model(trainer.model)))
     assert before and not moved, f"the weight syncs moved {len(moved)}/{len(before)} frozen base weights: {moved[:3]}"
     log(f"  {len(before)} frozen base weights bit-identical across the training syncs")
 
@@ -467,7 +460,9 @@ def test_environmental_grpo_e2e():
         )
         for url in VLLM_SERVER_URLS:
             after = probe_top_logprobs(url, MODEL_NAME)
-            assert after != before[url], f"{url} still serves the pre-sync policy — the sync never reached it"
+            assert served_policy_moved(after, before[url]), (
+                f"{url} still serves the pre-sync policy, or non-finite logprobs — the sync never reached it"
+            )
         log(f"  forced sync moved the served policy on all {len(VLLM_SERVER_URLS)} server(s)")
 
     finally:
@@ -530,7 +525,7 @@ def test_online_grpo_lora_e2e():
             "peft_config did not produce a PeftModel"
         )
         log("  Trainer created (PeftModel). Training + syncing merged LoRA weights to vLLM...")
-        base_before = lora_base_weights(trainer)
+        base_before = frozen_base_weights(trainer.accelerator.unwrap_model(trainer.model))
         trainer.train()
         log("  Online GRPO+LoRA training completed (PEFT weight sync OK)!")
         assert_syncs_left_the_base_alone(trainer, base_before)
@@ -606,7 +601,7 @@ def test_environmental_grpo_lora_e2e():
             "peft_config did not produce a PeftModel"
         )
         log("  Trainer created (PeftModel). Training + syncing merged LoRA weights to vLLM...")
-        base_before = lora_base_weights(trainer)
+        base_before = frozen_base_weights(trainer.accelerator.unwrap_model(trainer.model))
         trainer.train()
         log("  Environmental GRPO+LoRA training completed (PEFT weight sync OK)!")
         assert_syncs_left_the_base_alone(trainer, base_before)

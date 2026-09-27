@@ -122,7 +122,7 @@ def test_merge_guard_reports_the_mixed_shape(tmp_path):
 
     ``merge_expert_lora_on_save`` covers the mixed shape too — ``save_model`` routes it past
     ``PeftAdapterSaver`` to ``save_ep_checkpoint``, which folds the expert deltas in the family
-    gather and the attention deltas via ``merged_adapters``
+    gather and the attention deltas into each tensor it writes
     (``tests/cpu/peft/test_merge_expert_lora_save_guard.py`` pins that routing). Calling the shape
     resume-only and sending the user back to a retrain with expert-only ``lora_target_modules``
     costs a full run for what a re-save produces.

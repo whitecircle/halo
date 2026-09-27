@@ -58,7 +58,13 @@ from src.distributed.runtime import (
 )
 from src.distributed.tensor_parallel.state_dict import gather_tp_sharded_non_dtensor_params
 from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
-from src.models.structure import normalize_peft_param_name, persistent_buffers, unwrap_model
+from src.models.structure import (
+    LoraFolds,
+    lora_folded_data,
+    normalize_peft_param_name,
+    persistent_buffers,
+    unwrap_model,
+)
 
 logger = get_logger(__name__)
 
@@ -68,9 +74,8 @@ def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[
 
     Composes the CP attention-prefix strip with the PEFT base-name normalization, so a checkpoint
     written off a CP-wrapped and/or PEFT-wrapped module tree still loads with ``from_pretrained``.
-    ``peft_prefix`` is set only on the merged-adapter save path, where the caller holds
-    :func:`~src.models.structure.merged_adapters` open: every adapter param's delta is already inside
-    its base weight and the adapter tensors are dropped.
+    ``peft_prefix`` is set only on the merged-adapter save path, which folds every adapter's delta
+    into its base tensor as it is written, so the adapter tensors are dropped.
 
     Name-based and therefore rank-uniform: the drop decision gates a ``full_tensor()`` collective.
     """
@@ -120,7 +125,7 @@ def save_ep_model(
     cp_key_remap: bool = False,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     merge_lora: bool = False,
-    adapters_merged: bool = False,
+    lora_folds: LoraFolds | None = None,
 ):
     """Save an EP model to a HuggingFace-compatible safetensors checkpoint.
 
@@ -131,18 +136,18 @@ def save_ep_model(
     (default) gathers an HF-standard checkpoint. ``cp_key_remap`` rewrites CP attention keys
     (required for EP+CP). ``merge_lora=True`` folds native grouped-LoRA deltas into the gathered base.
 
-    ``adapters_merged`` asserts the caller holds :func:`~src.models.structure.merged_adapters` open
-    over this call, which puts the attention deltas into the base weights being written.
+    ``lora_folds`` (:func:`~src.models.structure.lora_fold_targets` of the PeftModel) folds the PEFT
+    adapters' deltas into the base tensors as they are written, out of place.
     """
     model = unwrap_model(model)
     peft_prefix = None
     if is_peft_model(model):
-        if not adapters_merged:
+        if lora_folds is None:
             raise ValueError(
-                "save_ep_model received a PeftModel without adapters_merged=True. The gathered base "
-                "weights would not carry the LoRA delta, so the checkpoint would be base-quality "
-                "while looking trained. Wrap the call in merged_adapters(peft_model), or route "
-                "adapter-only saves through PeftAdapterSaver."
+                "save_ep_model received a PeftModel without lora_folds. The gathered base weights "
+                "would not carry the LoRA delta, so the checkpoint would be base-quality while looking "
+                "trained. Pass lora_fold_targets(peft_model), or route adapter-only saves through "
+                "PeftAdapterSaver."
             )
         peft_prefix = model.prefix
         # A PeftModel wraps outside the CP wrapper and unwrap_model stops at it, so under EP+CP every
@@ -165,6 +170,7 @@ def save_ep_model(
             max_shard_size=max_shard_size,
             merge_lora=merge_lora,
             peft_prefix=peft_prefix,
+            lora_folds=lora_folds,
         )
 
 
@@ -176,6 +182,7 @@ def _save_ep_gathered(
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     merge_lora: bool = False,
     peft_prefix: str | None = None,
+    lora_folds: LoraFolds | None = None,
 ):
     """Save EP model by gathering expert weights, in HuggingFace-standard layout.
 
@@ -213,10 +220,13 @@ def _save_ep_gathered(
         # rank, or savers and non-savers disagree on the collective schedule and the save hangs.
         if remap(name) is None:
             continue
+        # One tensor at a time; a folded DTensor's delta is a collective every rank enters.
+        data = lora_folded_data(param, lora_folds)
         if is_save_rank:
-            state_dict[name] = cast(name, resolve_param_tensor(param.data))
+            state_dict[name] = cast(name, resolve_param_tensor(data))
         else:
-            materialize_dtensor(param.data)
+            materialize_dtensor(data)
+        del data
 
     # Same filter as the params above: a modules_to_save copy duplicates its module's buffers, and
     # the frozen `original_module` side must not reach the checkpoint. Name-based, so every rank
@@ -275,7 +285,9 @@ def _save_ep_gathered(
     # unfuse/re-interleave, so the fold is layout-correct for every family.
     expert_keys = 0
     for layer_name, module in ep_layers:
-        gathered = gather_ep_layer_weights(layer_name, module, merge_lora=merge_lora, retain=is_save_rank)
+        gathered = gather_ep_layer_weights(
+            layer_name, module, merge_lora=merge_lora, retain=is_save_rank, lora_folds=lora_folds
+        )
         if gathered:  # non-savers gather onto the device and keep nothing
             guard.run(partial(stage_expert_layer, gathered))
         expert_keys += len(gathered)

@@ -35,8 +35,10 @@ from transformers import (
     Lfm2MoeConfig,
     Lfm2MoeForCausalLM,
     PreTrainedModel,
+    Qwen3_5ForCausalLM,
     Qwen3_5MoeForCausalLM,
     Qwen3_5MoeTextConfig,
+    Qwen3_5TextConfig,
     Qwen3Config,
     Qwen3ForCausalLM,
     Qwen3MoeConfig,
@@ -69,6 +71,7 @@ from tests.common.models import (
     TINY_MISTRAL4_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
+    TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
@@ -251,6 +254,8 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
 }
 # The dense model the family sweeps pair with the MoE roster.
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
+# The dense Qwen3.5 text model (gated DeltaNet and attention layers), which the MoE roster does not carry.
+TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None) -> PreTrainedModel:

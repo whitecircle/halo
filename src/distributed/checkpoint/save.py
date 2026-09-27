@@ -53,7 +53,7 @@ from src.distributed.runtime import (
 )
 from src.distributed.tensor_parallel.checkpoint import save_tp_model
 from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
-from src.models.structure import merged_adapters, unwrap_model
+from src.models.structure import lora_fold_targets, unwrap_model
 
 logger = logging.getLogger(__name__)
 
@@ -157,28 +157,27 @@ def save_ep_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     With native grouped-LoRA on experts, writes a standalone adapter unless
     ``merge_expert_lora_on_save`` requests a merged checkpoint. That merge covers both halves of a
     mixed run: the expert deltas fold inside each family's gather, and any attention adapters fold
-    into their base weights for the duration of the write. A training checkpoint also carries the
-    unmerged adapters it resumes from (:func:`save_resume_adapter`).
+    into each base tensor as it is written, out of place (:func:`~src.models.structure.lora_folded`,
+    the weight sync's fold), so the save never writes the trainer's own weights. A training
+    checkpoint also carries the unmerged adapters it resumes from (:func:`save_resume_adapter`).
     """
     if ctx.has_expert_lora and not ctx.merge_expert_lora_on_save:
         save_ep_lora_adapters(
             ctx.model, output_dir, adapter_config=_expert_lora_adapter_config(ctx), tokenizer=ctx.tokenizer
         )
         return
-    # Collective and rank-uniform: merge_adapter is an in-place DTensor op under FSDP2, and the
-    # unmerge on exit leaves the adapters trainable after an intermediate merged save. restore_base
-    # keeps that save from moving the frozen base, which a resume of this checkpoint would not see.
-    with merged_adapters(find_peft_model(ctx.model), restore_base=True) as adapters_merged:
-        save_ep_model(
-            ctx.model,
-            output_dir,
-            tokenizer=ctx.tokenizer,
-            sharded=ctx.save_sharded_ep,
-            cp_key_remap=ctx.is_cp_mode,
-            max_shard_size=ctx.max_shard_size,
-            merge_lora=ctx.has_expert_lora and ctx.merge_expert_lora_on_save,
-            adapters_merged=adapters_merged,
-        )
+    # Structural, so a layer the fold cannot reproduce raises on every rank before any gather.
+    peft_model = find_peft_model(ctx.model)
+    save_ep_model(
+        ctx.model,
+        output_dir,
+        tokenizer=ctx.tokenizer,
+        sharded=ctx.save_sharded_ep,
+        cp_key_remap=ctx.is_cp_mode,
+        max_shard_size=ctx.max_shard_size,
+        merge_lora=ctx.has_expert_lora and ctx.merge_expert_lora_on_save,
+        lora_folds=lora_fold_targets(peft_model) if peft_model is not None else None,
+    )
 
 
 def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
@@ -203,8 +202,17 @@ def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
         PeftAdapterSaver().save(replace(ctx, tokenizer=None), peft_model, adapter_dir)
     else:
         save_ep_lora_adapters(ctx.model, adapter_dir, adapter_config=_expert_lora_adapter_config(ctx))
+    mark_resume_adapter_complete(checkpoint_dir, is_save_rank=ctx.is_save_rank)
+
+
+def mark_resume_adapter_complete(checkpoint_dir: str, *, is_save_rank: bool) -> None:
+    """Write the marker a resume classifies ``checkpoint_dir`` on, once its resume adapter is on disk.
+
+    Shared by every writer of a resume adapter, the embedding trainer's included. Fenced: every rank
+    enters, and each save rank marks its own copy only after its own adapter write completed.
+    """
     with barrier_on_exit():
-        if ctx.is_save_rank:
+        if is_save_rank:
             write_resume_adapter_marker(checkpoint_dir)
             logger.info(f"Saved the resume adapter of merged checkpoint {checkpoint_dir}")
 

@@ -66,6 +66,7 @@ from tests.common.on_policy_e2e import (
     record_served_baseline,
     record_step_losses,
     served_policy_delta,
+    served_policy_moved,
     shared_output_dir,
     sink_round,
 )
@@ -354,9 +355,9 @@ def run_env_grpo_e2e(
 
     if ctx.rank == 0:
         after = probe_top_logprobs(server_url, model_name)
-        checks["forced_sync_moved_the_served_policy"] = after != pre_perturb
-        if after == pre_perturb:
-            log(f"  IDENTICAL logprobs after a {what} perturbation: the weight sync did not land")
+        checks["forced_sync_moved_the_served_policy"] = served_policy_moved(after, pre_perturb)
+        if not checks["forced_sync_moved_the_served_policy"]:
+            log(f"  IDENTICAL or non-finite logprobs after a {what} perturbation: the weight sync did not land")
         log(f"  post-forced-sync: { {k: round(v, 4) for k, v in after.items()} }")
         # A failed update leaves the engine partially written, and both engines' docs say to discard
         # such a server rather than keep serving from it, so check that it still answers.
@@ -405,7 +406,7 @@ def run_env_grpo_e2e(
         # comparison below with nothing pushed. It is also the state a resume that skipped its push
         # would leave behind, bit for bit.
         moved_off = probe_top_logprobs(server_url, model_name)
-        checks["engine_moved_off_the_checkpoint_policy"] = moved_off != pre_perturb
+        checks["engine_moved_off_the_checkpoint_policy"] = served_policy_moved(moved_off, pre_perturb)
     ctx.barrier()
 
     # A fresh model and trainer, as a resumed job starts. The client is closed first: its group port
@@ -464,7 +465,7 @@ def run_env_grpo_e2e(
         after_resume = probe_top_logprobs(server_url, model_name)
         # A skipped push leaves the engine bit-identical to what phase 1 left there (the server is
         # idle and the probe is greedy), so this half is exact on every row.
-        checks["resume_left_the_stale_engine_state"] = after_resume != moved_off
+        checks["resume_left_the_stale_engine_state"] = served_policy_moved(after_resume, moved_off)
         to_checkpoint = served_policy_delta(after_resume, pre_perturb)
         # Both pushes send the same tensors, so the two probes must agree exactly on every row.
         checks["resumed_rollouts_served_the_checkpoint_policy"] = after_resume == pre_perturb

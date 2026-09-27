@@ -7,8 +7,8 @@ silently wrong rather than broken:
 
   * the ``base_model.model.`` prefix and ``.base_layer`` infix PEFT introduces must come off, or
     ``from_pretrained`` matches nothing and leaves those weights randomly initialised;
-  * adapter tensors must be dropped — ``merged_adapters`` has already folded their delta into the
-    base weight, so writing them too would apply it twice on a PEFT-aware reload;
+  * adapter tensors must be dropped — the save folds their delta into the base weight as it writes
+    it, so writing them too would apply it twice on a PEFT-aware reload;
   * a ``modules_to_save`` pair must collapse to the TRAINED copy, not the frozen ``original_module``
     one. Reachable under EP via ``lora_modules_to_save: [router]``, which the EP layer's own gather
     walks.
@@ -88,7 +88,7 @@ def test_cp_only_remap_is_unchanged_without_peft():
 def test_save_ep_model_refuses_an_unmerged_peft_model(tmp_path):
     """Without the fold the gathered base carries no delta — a base-quality checkpoint that looks trained."""
     peft_model = get_peft_model(_TinyLM(), LoraConfig(target_modules=["q_proj"]))
-    with pytest.raises(ValueError, match="adapters_merged"):
+    with pytest.raises(ValueError, match="lora_folds"):
         save_ep_model(peft_model, str(tmp_path))
 
 

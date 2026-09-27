@@ -194,6 +194,17 @@ def world_any(flag: bool, device=None) -> bool:
     return bool(local.item())
 
 
+def world_all(flag: bool, device=None) -> bool:
+    """True if ``flag`` holds on every rank. Collective.
+
+    For a property each rank checks on its own shard (a rank-local bit-identity read): one rank
+    failing it fails the world.
+    """
+    local = torch.tensor(float(bool(flag)), device=device or torch.device("cuda", torch.cuda.current_device()))
+    dist.all_reduce(local, op=dist.ReduceOp.MIN)
+    return bool(local.item())
+
+
 def world_min(value: float, device=None) -> float:
     """The smallest ``value`` across all ranks. Collective.
 

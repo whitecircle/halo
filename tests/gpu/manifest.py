@@ -568,6 +568,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--tp-size 2",
             "--ep-size 1 --peft lora",
             "--ep-size 1 --resume",
+            "--ep-size 1 --peft lora --resume",
             "--ep-size 1 --routing-replay rollout",
             "--ep-size 1 --peft lora --routing-replay rollout",
             "--tp-size 2 --routing-replay rollout",
@@ -609,7 +610,7 @@ MANIFEST: dict[str, TestSpec] = {
     # additionally stand up Ray actors.
     "trainers/grpo/test_online_grpo_vllm_e2e.py": TestSpec(
         nproc=1,
-        markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"),
+        markers=("gpu", "full", "1gpu", "lora", "qwen3", "vllm_server"),
         args_matrix=(
             "--mode online",
             "--mode sdpg",
@@ -674,7 +675,8 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # Embedding resume, family x run shape x --lora (attention / mixed / embedding adapters, off = full
     # fine-tune). Core: every data-parallel shape on the ST encoder, FSDP2 and the TP refusal on a
-    # decoder, the input-embedding targets and the full fine-tune's FSDP2 / pre-sharded / TP reloads;
+    # decoder, the input-embedding targets and the full fine-tune's FSDP2 / pre-sharded / TP reloads,
+    # and --head: a projection head after the pooling, refused under FSDP2 and TP, accepted under DDP;
     # the roster scripts carry the other families and the EP rows.
     "trainers/lora/test_embedding_lora_resume.py": TestSpec(
         nproc=2,
@@ -692,6 +694,10 @@ MANIFEST: dict[str, TestSpec] = {
             "--family qwen3 --mode fsdp --lora off",
             "--family qwen3 --mode presharded --lora off",
             "--family qwen3 --mode tp --lora off",
+            "--family bert --mode fsdp --head",
+            "--family bert --mode fsdp --lora off --head",
+            "--family bert --mode ddp --head",
+            "--family qwen3 --mode tp --lora off --head",
         ),
         timeout=900,
     ),
@@ -872,6 +878,7 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # Tiny random-init models, no server: one dense and one MoE family under every sharding PEFT LoRA
     # syncs in, x adapter shape; the sweep below runs the same rows for every other family served.
+    # tests/cpu/conventions/test_tiny_family_roster.py holds both to the syncable tiny-family roster.
     "trainers/lora/test_lora_weight_sync_exact.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "lora", "ep", "etp", "moe", "qwen3"),
@@ -908,13 +915,13 @@ MANIFEST: dict[str, TestSpec] = {
             *(
                 f"--family {family} --mode {shape}"
                 for family in (
-                    "gpt_oss",
-                    "qwen3_5_moe",
-                    "glm4_moe_lite",
-                    "laguna",
-                    "gemma4",
-                    "lfm2_moe",
                     "bailing_moe",
+                    "gemma4_text",
+                    "glm4_moe_lite",
+                    "gpt_oss",
+                    "laguna",
+                    "lfm2_moe",
+                    "qwen3_5_moe_text",
                     "step3p7",
                 )
                 for shape in (

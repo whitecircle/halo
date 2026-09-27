@@ -34,6 +34,7 @@ import src.distributed.checkpoint.save as save_mod
 import src.trainers.mixins.base as mixin_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
 import src.trainers.mixins.grad_sync as grad_sync_mod
+from src.models.structure import lora_folded_data
 from src.trainers.mixins.base import DistributedTrainerMixin
 
 
@@ -160,15 +161,22 @@ def _mixed_run_model():
 def _run_save(trainer):
     """Drive ``save_model`` with the two terminal writers faked, and report which one ran.
 
-    ``save_ep_model`` records the LIVE weight of the LoRA-wrapped projection at call time — the
-    tensor its gather would put on disk — which is what distinguishes a merged write from an
-    adapter-only one.
+    ``save_ep_model`` records what its walk would put on disk for the LoRA-wrapped projection (the
+    live weight with the ``lora_folds`` it was handed folded in) and the live weight itself, which
+    is what distinguishes a merged write from an adapter-only one.
     """
     ep_calls: list[dict] = []
     wrapped = trainer.model.base_model.model.q_proj
 
     def _fake_save_ep_model(_model, _output_dir, **kwargs):
-        ep_calls.append({**kwargs, "written_weight": wrapped.base_layer.weight.detach().clone()})
+        weight = wrapped.base_layer.weight
+        ep_calls.append(
+            {
+                **kwargs,
+                "written_weight": lora_folded_data(weight, kwargs["lora_folds"]).detach().clone(),
+                "live_weight": weight.detach().clone(),
+            }
+        )
 
     adapter_saver = MagicMock()
     with (
@@ -185,9 +193,9 @@ def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
 
     ``PeftAdapterSaver`` never merges, so a mixed run that lands there gets the resume-only adapter
     file. The flag must route past it to ``save_ep_checkpoint``, which asks the gather for the
-    expert deltas (``merge_lora``) while holding ``merged_adapters`` open (``adapters_merged``) — and
-    the assertion on the live weight is what proves that second half is not just a flag being passed:
-    the base weight the gather would write carries the attention delta.
+    expert deltas (``merge_lora``) and hands it the attention fold targets (``lora_folds``) — and
+    the assertion on the written weight is what proves that second half is not just a flag being
+    passed: the base weight the walk would write carries the attention delta, the live one does not.
     """
     model = _mixed_run_model()
     trainer = _SaveRoutingTrainer(model, True, str(tmp_path))
@@ -198,13 +206,12 @@ def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
     adapter_saver.save.assert_not_called()
     assert len(ep_calls) == 1, "the mixed run never reached the merged EP save"
     assert ep_calls[0]["merge_lora"] is True, "expert deltas would not be folded into the gather"
-    assert ep_calls[0]["adapters_merged"] is True
     assert not torch.equal(ep_calls[0]["written_weight"], unmerged), (
-        "the base weight handed to the gather is the frozen one — the attention delta was not folded"
+        "the base weight the walk would write is the frozen one — the attention delta was not folded"
     )
-    # Unmerged again afterwards, the base written back exactly, so the re-save the merge guard
-    # recommends is repeatable mid-run: merge_adapter is paired with unmerge_adapter rather than
-    # merge_and_unload dissolving the PeftModel.
+    # Folded out of place: the live base is the frozen one during and after the save, and the
+    # PeftModel stays unmerged, so the re-save the merge guard recommends is repeatable mid-run.
+    assert torch.equal(ep_calls[0]["live_weight"], unmerged), "the save wrote the fold into the live base"
     wrapped = model.base_model.model.q_proj
     assert not wrapped.merged
     assert torch.equal(wrapped.base_layer.weight, unmerged)

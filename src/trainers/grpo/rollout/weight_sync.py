@@ -19,12 +19,12 @@ because the engine loads by hub name and skips an unknown one without error.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from functools import partial
 from typing import Any
 
 import torch
 from accelerate.utils import is_peft_model
-from peft.tuners.lora import LoraLayer
 from transformers.core_model_loading import (
     WeightConverter,
     WeightRenaming,
@@ -57,9 +57,10 @@ from src.models.moe_balancing import (
 )
 from src.models.patches.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from src.models.structure import (
+    LoraFolds,
     base_transformers_model,
     lora_fold_targets,
-    lora_folded,
+    lora_folded_data,
     model_has_quantized_params,
     normalize_peft_param_name,
     unwrap_framework_wrappers,
@@ -86,7 +87,8 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
       (``Params4bit`` uint8) the server rejects.
     - **PEFT layers the sync cannot fold** (:func:`~src.models.structure.lora_fold_targets`): the
       delta of an ``nn.MultiheadAttention`` LoRA, trainable tokens or another tuner layer would never
-      reach the pushed weights.
+      reach the pushed weights; nor would one on a tensor the dense push does not send (an EP layer's
+      expert weights, whose gather folds only the native expert LoRA).
     - **GptOss with sinks removed** (the flash_attention_2 ``reset_sinks`` reset): the removed
       ``sinks`` slots leave ``named_parameters``, so nothing is pushed for them and the rollout engine
       keeps serving the pretrained sinks against a sink-free trainer, with no error at sync time.
@@ -116,9 +118,12 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
             "corrupt the served policy. Use plain LoRA (use_peft without load_in_4bit/load_in_8bit) "
             "or full fine-tuning."
         )
-    lora_fold_targets(model)
-    # Refused rather than repaired (the second failure class above): every checkpoint writer re-emits
-    # neutralized sinks, but this sync forwards named_parameters and has no such seam.
+    ep_layers = named_ep_layers(model)
+    _reject_unpushed_folds(
+        model, lora_fold_targets(model), {id(param) for _name, param in _dense_params(model, ep_layers)}
+    )
+    # Refused rather than repaired: every checkpoint writer re-emits neutralized sinks, but this sync
+    # forwards named_parameters and has no such seam.
     if neutralized_gpt_oss_sinks(model):
         raise ValueError(
             "GptOss weight sync with sinks removed by the flash_attention_2 reset_sinks reset: the "
@@ -158,7 +163,7 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
     # experts as the engine loads them. Without a wrapper the dense walk forwards the stock module
     # tree's fused expert tensors under module names — a layout no engine loader is validated against
     # and one the per-expert loaders skip before their "not found" warning.
-    if families and not named_ep_layers(model):
+    if families and not ep_layers:
         raise ValueError(
             f"{', '.join(sorted({cls.__name__ for _where, cls in families}))} resolves for model_type "
             f"{sorted(config_model_types(model))}, but the model carries no live EP wrapper (ep_size 1 with "
@@ -207,6 +212,36 @@ def _sync_contract_classes(model: torch.nn.Module) -> list[tuple[str, type[EPMoE
 def _is_ep_expert_param(name: str, ep_layers: dict[str, EPMoELayerBase]) -> bool:
     """True if ``name`` is an expert weight of one of the EP layers (handled by the EP gather)."""
     return any(name.startswith(root + ".") and is_expert_weight_attr(name[len(root) + 1 :]) for root in ep_layers)
+
+
+def _dense_params(
+    model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]
+) -> Iterator[tuple[str, torch.nn.Parameter]]:
+    """The parameters :func:`_send_dense_weights` gathers and sends, in ``named_parameters`` order:
+    all but the EP experts (the expert gather's) and the hand-sliced TP shards (sent gathered by the
+    drain), which are not DTensors, so shipping this rank's slice under the full name would corrupt
+    them."""
+    hand_sliced = tp_sharded_non_dtensor_suffixes(model)
+    for name, param in model.named_parameters():
+        if _is_ep_expert_param(name, ep_layers) or (hand_sliced and name.endswith(hand_sliced)):
+            continue
+        yield name, param
+
+
+def _reject_unpushed_folds(model: torch.nn.Module, folds: LoraFolds, pushed: set[int]) -> None:
+    """Raise if a LoRA fold target is not among ``pushed``, the ids of the tensors the dense push sends.
+
+    Only that push folds PEFT adapters, so the delta of any other target would never reach the engine.
+    Structural, so every rank raises alike.
+    """
+    unpushed = folds.keys() - pushed
+    if unpushed:
+        names = sorted(name for name, param in model.named_parameters() if id(param) in unpushed)
+        raise ValueError(
+            f"PEFT LoRA adapts {names}, which the weight sync does not send through its dense push, the "
+            f"only path that folds PEFT adapters: the served weights would miss their delta. EP expert "
+            f"weights take native expert LoRA (list the expert projections in lora_target_modules)."
+        )
 
 
 def _hub_param_name(name: str, ep_layers: dict[str, EPMoELayerBase]) -> str:
@@ -328,7 +363,8 @@ def _send_ep_expert_weights(
     for layer_name, module in ep_layers.items():
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
-        # The PEFT fold covers only the attention adapters, so the native expert-LoRA is folded here.
+        # The dense push folds the PEFT adapters, none of which sit on expert weights, so the native
+        # expert LoRA is folded here.
         gather = partial(module.gather_expert_state_dict, "cuda", merge_lora=True, retain=retain)
         # Guarded only where it retains: a non-retaining rank runs the same collectives and keeps
         # nothing, so a raise there is a group-wide failure rather than this rank's own.
@@ -355,34 +391,30 @@ def _send_dense_weights(
     model: torch.nn.Module,
     ep_layers: dict[str, EPMoELayerBase],
     forwarder: _HubForwarder | None,
-    folds: dict[int, list[LoraLayer]],
+    folds: LoraFolds,
 ) -> None:
     """Gather non-expert (dense) params — one ``full_tensor()`` over FSDP2 DP and TP — and forward them.
 
     HF's ``tp_plan`` styles (dense) and the toolkit's attention-only TP (every MoE path) both place
     their shards as DTensors on the TP mesh, so ``materialize_dtensor`` returns each one full;
-    only the hand-sliced params need their own gather.
+    only the hand-sliced params need their own gather. Raises, on every rank, if a PEFT fold target
+    was not among them (:func:`_reject_unpushed_folds`).
     """
-    # Hand-sliced TP shards (GptOss sinks) are not DTensors: shipping this rank's slice under the
-    # full-tensor name would corrupt the weights, so skip here; the drain loop below sends them gathered.
-    hand_sliced = tp_sharded_non_dtensor_suffixes(model)
-
+    folded: set[int] = set()
     # Stream gather→send→drop (a dict = full dense copy/rank: OOM at 70B+); param order keeps collectives in step.
-    for name, param in model.named_parameters():
-        if _is_ep_expert_param(name, ep_layers):
-            continue
-        if hand_sliced and name.endswith(hand_sliced):
-            continue
-        layers = folds.get(id(param))
+    for name, param in _dense_params(model, ep_layers):
+        if id(param) in folds:
+            folded.add(id(param))
         # Folded one tensor at a time, so the only extra memory is this param's temporaries. The fold
         # and the gather are collectives on every rank.
-        data = materialize_dtensor(lora_folded(param, layers) if layers else param.data)
+        data = materialize_dtensor(lora_folded_data(param, folds))
         if forwarder is not None:
             # A plain unfolded param aliases the live weight; the client buffers a snapshot, so it is
             # sent without a clone.
             forwarder.send(name, data)
         # Dropped before the next gather, so two full tensors are never alive at once.
         del data
+    _reject_unpushed_folds(model, folds, folded)
 
     # Every rank drains this (collective); only the forwarding rank sends.
     for name, full_tensor in iter_tp_sharded_non_dtensor_full(model):
@@ -467,7 +499,8 @@ def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
     )
     # Out of place, not PEFT's merge/unmerge: in bf16 the unmerge misses the frozen base by a rounding
     # step, and the sync repeats every few steps for the whole run. Resolved before any tensor streams,
-    # so a layer it cannot fold raises first.
+    # so a layer it cannot fold raises first; a target the push would not send is refused at
+    # construction and checked again as the push ends.
     folds = lora_fold_targets(model)
     _send_ep_expert_weights(ep_layers, forwarder, guard)
     _send_dense_weights(model, ep_layers, forwarder, folds)

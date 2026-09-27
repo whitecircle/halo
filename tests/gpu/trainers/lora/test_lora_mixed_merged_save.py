@@ -7,7 +7,7 @@ grouped LoRA on the EP experts (grouped ``[E, K, r]`` tensors PEFT cannot wrap).
 save is resume-only — no merge tool folds it, because ``PeftModel.merge_and_unload`` drops every
 expert delta. ``merge_expert_lora_on_save`` therefore routes the write through
 ``save_ep_checkpoint``, which folds BOTH halves: the expert deltas inside each family's gather,
-and the attention deltas via ``merge_adapter`` held open for the duration of the write.
+and the attention deltas into each base tensor as it is written, out of place.
 
 Each check fails when a piece of that wiring breaks:
 
@@ -18,14 +18,12 @@ Each check fails when a piece of that wiring breaks:
   3. Key hygiene: the merged checkpoint carries no ``base_model.`` prefix, no ``.base_layer`` infix,
      no ``lora_`` tensor and no ``original_module`` duplicate. A leaked PEFT prefix is exactly what
      makes ``from_pretrained`` load nothing and leave those weights randomly initialised.
-  4. Value correctness: the tensors on disk are the live model's MERGED weights, gathered through the
-     same seams the save uses, bit for bit: this test's merge and the save's both fold into the same
-     base, since each writes the base back exactly afterwards. The base is compared too, to prove the
-     merge moved something and the check is not vacuous.
+  4. Value correctness: the tensors on disk are the base plus the delta as PEFT's merge adds it
+     (``w += delta``, computed here from the live adapters), bit for bit. The base is compared too, to
+     prove the merge moved something and the check is not vacuous.
   5. The save is non-destructive: every LoRA-wrapped base weight and every adapter is bit-identical
      afterwards, and the adapters are still trainable — so an intermediate merged checkpoint does not
-     silently end the run's training (``merge_adapter`` is paired with ``unmerge_adapter``, unlike
-     ``merge_and_unload``, which would dissolve the PeftModel).
+     silently end the run's training.
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -53,7 +51,7 @@ from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str
-from src.models.structure import merged_adapters, normalize_peft_param_name
+from src.models.structure import normalize_peft_param_name
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
@@ -61,6 +59,7 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.peft_helpers import load_peft_model
 from tests.common.utils import log
+from tests.common.weight_sync import lora_bases_and_merges
 
 # Model/attn/EP are env-overridable exactly as in test_lora_ep_experts.py, so one file sweeps the
 # other MoE storage layouts (fused-GLU, separate-GLU, per-expert-unfused) and the ep1 grouped-GEMM
@@ -278,10 +277,16 @@ def run(ctx) -> dict:
     # local reads and file I/O only — so a failure on one rank reports itself instead of leaving
     # its peer parked in a gather that will never complete.
     sample_keys = _pick_sample_keys(unwrapped)
-    with merged_adapters(peft_model):
-        expected = _sample_merged_weights(unwrapped, sample_keys)  # what the save must write
+    _bases, merges = lora_bases_and_merges(peft_model)
+    # What the save must write: the base plus the delta, as PEFT's merge adds it.
+    expected = {
+        key: merges[name].to(torch.bfloat16).cpu()
+        for name in merges
+        if (key := normalize_peft_param_name(name, peft_model.prefix)) in sample_keys
+    }
+    del merges
     unmerged = _sample_merged_weights(unwrapped, sample_keys)  # the frozen base, for non-vacuity
-    # What merge_adapter mutates (LoRA-wrapped base weights) and what it must not (the adapters).
+    # The LoRA-wrapped base weights and the adapters, which the save must not write.
     before = _weight_snapshot(unwrapped)
 
     log("\n[3/5] Saving merged checkpoint (both halves folded)...")
@@ -289,12 +294,11 @@ def run(ctx) -> dict:
     # the ranks are already in step.
     trainer.save_model(merged_dir)
 
-    # 5. merge_adapter must have been undone. Asserted on the weights rather than on a second
-    # forward: it is the direct statement of the invariant, and a post-save EP forward would add
-    # a DeepEP dispatch minutes after the previous one, which the NVLink barrier can time out on.
+    # 5. Asserted on the weights rather than on a second forward: it is the direct statement of the
+    # invariant, and a post-save EP forward would add a DeepEP dispatch minutes after the previous
+    # one, which the NVLink barrier can time out on. Bit-identical, base weights included: a bf16
+    # merge undone by an unmerge, (w+d)-d, misses w by a rounding step.
     after = _weight_snapshot(unwrapped)
-    # Bit-identical, base weights included: the save writes back what its merge rewrote rather than
-    # trusting a bf16 unmerge, whose (w+d)-d misses w by a rounding step.
     changed = sorted(k for k, v in after.items() if not torch.equal(v, before[k]))
     checks["save_left_weights_unchanged"] = not changed
     checks["adapters_still_trainable"] = any(p.requires_grad for n, p in unwrapped.named_parameters() if "lora_" in n)
@@ -316,9 +320,9 @@ def run(ctx) -> dict:
     log("\n[5/5] Comparing the written tensors against the live MERGED weights...")
     written = _read_checkpoint_tensors(merged_dir, sample_keys)
 
-    # Bitwise: `expected` comes from this test's own merge, which writes the base back exactly, so
-    # save_model merges from the same base. A key absent from the checkpoint counts as a mismatch, not
-    # a KeyError — "the save dropped it" is one of the failures this catches.
+    # Bitwise: `expected` is the same base plus the same delta the save folds. A key absent from the
+    # checkpoint counts as a mismatch, not a KeyError — "the save dropped it" is one of the failures
+    # this catches.
     def _is_the_merged_weight(key: str) -> bool:
         return key in written and torch.equal(written[key], expected[key])
 

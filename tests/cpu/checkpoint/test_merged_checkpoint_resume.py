@@ -14,15 +14,17 @@ through the real writers, classifier and loader:
 * loader: the adapters come from ``resume_adapter/`` onto a base-built model; a model built from the
   merged weights (the delta twice), a marked checkpoint missing its adapter, and an unmarked merged
   checkpoint under an adapter run (adapters from init under restored moments) each raise;
-* the merged save undoes its in-place attention merge exactly, so the run it checkpoints is the run
-  a resume reproduces;
+* the merged save writes PEFT's own merge of the attention adapters, folded out of place, so the run
+  it checkpoints is the run a resume reproduces;
 * the final ``save_model`` export carries no resume adapter.
 
     python tests/cpu/checkpoint/test_merged_checkpoint_resume.py
 """
 
+import copy
 import json
 import os
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -46,6 +48,7 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     SAFETENSORS_WEIGHTS_FILE,
+    load_full_state_dict,
     resume_adapter_dir,
 )
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
@@ -53,7 +56,6 @@ from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.peft import restore_adapters
 from src.distributed.checkpoint.save import save_resume_adapter
 from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.models.structure import merged_adapters
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
 from tests.common.ep_stubs import StubEPLayerBase
@@ -354,6 +356,44 @@ def test_mixed_resume_adapter_round_trips_through_the_adapter_restore(tmp_path, 
     assert all(torch.equal(expert_state[key].float(), value) for key, value in EXPERT_STATE.items())
 
 
+def test_the_adapter_restore_refuses_another_attention_lora_scaling(tmp_path):
+    """Names and shapes match, so without the recorded scaling the restore would rescale every delta."""
+    adapter_dir = str(tmp_path / "adapter")
+    _tiny_peft_model(seed=1, lora_alpha=8).save_pretrained(adapter_dir)
+
+    with pytest.raises(ValueError, match="lora_alpha: saved 8, live 16"):
+        restore_adapters(adapter_dir, _tiny_peft_model(seed=2, lora_alpha=16), is_cp_mode=False)
+    assert restore_adapters(adapter_dir, _tiny_peft_model(seed=2, lora_alpha=8), is_cp_mode=False) is not None
+    os.remove(os.path.join(adapter_dir, ADAPTER_CONFIG_FILE))
+    with pytest.raises(ValueError, match="is missing"):
+        restore_adapters(adapter_dir, _tiny_peft_model(seed=2, lora_alpha=8), is_cp_mode=False)
+
+
+class _ExpertLoraModel(_ExpertOnlyModel):
+    """An expert-only run's model whose EP layer built native expert LoRA from ``spec``."""
+
+    def __init__(self, spec: ExpertLoraSpec):
+        super().__init__()
+        self.experts = _ExpertLoraLayer()
+        self.experts.ep_config = SimpleNamespace(expert_lora=spec)
+
+
+def test_the_adapter_restore_refuses_another_expert_lora_scaling(tmp_path, monkeypatch):
+    monkeypatch.setattr(saving_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    applied = _Recorder()
+    monkeypatch.setattr(peft_mod, "apply_ep_lora_adapters", applied)
+    checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
+    save_resume_adapter(_save_context(_ExpertOnlyModel()), checkpoint)
+    adapter_dir = resume_adapter_dir(checkpoint)
+    rescaled = ExpertLoraSpec(r=SPEC.r, alpha=2 * SPEC.alpha, projections=SPEC.projections)
+
+    with pytest.raises(ValueError, match="expert lora_alpha"):
+        restore_adapters(adapter_dir, _ExpertLoraModel(rescaled), is_cp_mode=False)
+    assert not applied.calls, "the expert adapters were restored before the refusal"
+    assert restore_adapters(adapter_dir, _ExpertLoraModel(SPEC), is_cp_mode=False) is not None
+    assert applied.calls
+
+
 # --- classification -------------------------------------------------------------------------
 
 
@@ -460,88 +500,63 @@ def test_an_unmarked_full_checkpoint_still_resumes_a_full_fine_tune(tmp_path):
 # --- the merged save leaves the run untouched ------------------------------------------------
 
 
-def _bf16_lora_linear() -> tuple[PeftModel, nn.Parameter]:
-    """A bf16 LoRA'd linear whose adapter is large enough that a plain merge and unmerge moves the
-    base weight, and that base weight."""
-    torch.manual_seed(0)
-    model = get_peft_model(
-        nn.Sequential(nn.Linear(64, 64, bias=False)).to(torch.bfloat16),
-        LoraConfig(r=4, lora_alpha=64, target_modules=["0"]),
-    )
+def _trained_bf16_peft_model(**kwargs) -> PeftModel:
+    """A bf16 tiny PEFT model whose adapters carry a delta large enough to move every adapted weight
+    (PEFT zero-inits ``lora_B``, so an untouched adapter folds to nothing)."""
+    model = _tiny_peft_model(seed=1, dtype=torch.bfloat16, lora_alpha=64, **kwargs)
     with torch.no_grad():
         for name, param in model.named_parameters():
             if ".lora_" in name:
                 param.normal_(std=0.5)
-    return model, next(param for name, param in model.named_parameters() if ".base_layer." in name)
+    return model
 
 
-def test_the_merged_save_undoes_its_merge_exactly():
-    """The save folds the attention adapters into their bf16 base weights in place and unfolds them
-    after the write. ``(w + d) - d`` is not ``w`` in bf16, so without ``restore_base`` every merged
-    save moves the frozen base of the run it checkpoints, and no resume of that checkpoint can
-    reproduce the run."""
-    model, base = _bf16_lora_linear()
-    original = base.detach().clone()
-
-    with merged_adapters(model, restore_base=False):
-        pass
-    plain_unmerge_drifts = not torch.equal(base, original)
-    with torch.no_grad():
-        base.copy_(original)
-
-    with merged_adapters(model, restore_base=True) as merged:
-        folded = merged and not torch.equal(base, original)
-    assert folded, "the body must see the merged weights"
-    assert torch.equal(base, original), "the merged save moved the frozen base"
-    assert plain_unmerge_drifts, "premise: a bf16 unmerge alone does not reverse the merge"
+def _merged_save(model: PeftModel, out_dir) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """The real merged EP save of ``model``: what it wrote, and PEFT's own merge of a copy of ``model``."""
+    expected = copy.deepcopy(model).merge_and_unload().state_dict()
+    save_mod.save_ep_checkpoint(_save_context(model), str(out_dir))
+    return load_full_state_dict(str(out_dir)), expected
 
 
-def test_the_merged_checkpoint_save_restores_the_base(tmp_path, monkeypatch):
-    """``save_ep_checkpoint`` itself holds the merge open over the merged write, so it is the call that
-    has to ask for the exact unfold; the premise that the plain one drifts is the test above's."""
-    model, base = _bf16_lora_linear()
-    original = base.detach().clone()
-    written = []
+def test_the_merged_save_writes_the_peft_merge_and_no_weight_of_the_run(tmp_path):
+    """The save folds the attention adapters into each bf16 base tensor as it writes it, out of place:
+    the checkpoint holds PEFT's own merge bit for bit, and no parameter of the run it checkpoints
+    moves, so a resume of that checkpoint reproduces the run."""
+    model = _trained_bf16_peft_model()
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
 
-    def merged_write(model, output_dir, **kwargs):
-        written.append((kwargs["adapters_merged"], not torch.equal(base, original)))
+    written, expected = _merged_save(model, tmp_path)
 
-    monkeypatch.setattr(save_mod, "save_ep_model", merged_write)
-    save_mod.save_ep_checkpoint(_save_context(model), str(tmp_path / "checkpoint-1"))
+    after = dict(model.named_parameters())
+    assert not [name for name, value in before.items() if not torch.equal(value, after[name])], (
+        "the save moved the run"
+    )
+    targets = sorted(key for key in expected if key.endswith(("q_proj.weight", "v_proj.weight")))
+    base = {name.replace("base_model.model.", "").replace(".base_layer", ""): value for name, value in before.items()}
+    assert targets and all(not torch.equal(expected[key], base[key]) for key in targets), "premise: the delta moves"
+    assert not [key for key in targets if not torch.equal(written[key], expected[key])], "not PEFT's merge"
+    assert not any("lora_" in key or "base_layer" in key for key in written), "adapter keys reached the checkpoint"
 
-    assert written == [(True, True)], "premise: the merged write sees the folded base"
-    assert torch.equal(base, original), "the merged checkpoint save moved the frozen base"
 
-
-def test_the_exact_unmerge_reaches_a_tied_base_weight():
+def test_the_merged_save_folds_a_tied_base_weight():
     """A LoRA'd ``lm_head`` tied to ``embed_tokens`` is one tensor, which ``named_parameters()`` lists
-    once, under the embedding's name rather than the ``.base_layer.`` one. A restore that walked the
-    de-duplicated names would leave that weight to the bf16 unmerge."""
-    model = _tiny_peft_model(
-        seed=1, dtype=torch.bfloat16, tie_word_embeddings=True, target_modules=("lm_head", "q_proj"), lora_alpha=64
-    )
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if ".lora_" in name:
-                param.normal_(std=0.5)
+    once, under the embedding's name rather than the ``.base_layer.`` one; the fold is keyed by the
+    tensor, so the written weight still carries the head's delta and the live one stays the base."""
+    model = _trained_bf16_peft_model(tie_word_embeddings=True, target_modules=("lm_head", "q_proj"))
     tied = model.base_model.model.lm_head.base_layer.weight
     assert tied is model.base_model.model.model.embed_tokens.weight, "premise: the head is tied"
-    listed = [name for name, _ in model.named_parameters() if "lm_head.base_layer" in name]
-    assert not listed, "premise: the tied weight is listed once, as the embedding"
+    assert not [name for name, _ in model.named_parameters() if "lm_head.base_layer" in name], (
+        "premise: the tied weight is listed once, as the embedding"
+    )
     original = tied.detach().clone()
 
-    for _ in range(20):
-        with merged_adapters(model, restore_base=False):
-            pass
-    plain_unmerge_drifts = not torch.equal(tied, original)
-    with torch.no_grad():
-        tied.copy_(original)
-    for _ in range(20):
-        with merged_adapters(model, restore_base=True):
-            pass
+    with tempfile.TemporaryDirectory() as out_dir:
+        written, expected = _merged_save(model, out_dir)
 
-    assert torch.equal(tied, original), "the tied base weight drifted through the merged saves"
-    assert plain_unmerge_drifts, "premise: a bf16 unmerge alone moves the tied weight"
+    key = "model.embed_tokens.weight"
+    assert not torch.equal(expected[key], original), "premise: the head's delta moves the tied weight"
+    assert torch.equal(written[key], expected[key]), "the tied weight was written without the head's delta"
+    assert torch.equal(tied, original), "the save moved the tied base weight"
 
 
 # --- the final export -----------------------------------------------------------------------

@@ -33,6 +33,7 @@ from src.models.loading.dtype import cast_parameters_to_run_dtype, resolve_train
 from src.models.loading.tokenizer_setup import resolve_length_to_context
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from src.models.structure import tuner_adapter_param_ids
 from src.trainers.embedding.sentence_transformers_compat import PreloadedTransformer
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import run_training
@@ -202,13 +203,16 @@ def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config:
 
 
 def inject_lora(model: SentenceTransformer, model_config: ModelConfig, dist_args: DistributedArguments) -> None:
-    """Inject the run's LoRA into ``model`` in place and train the adapters alone; no-op without PEFT.
+    """Inject the run's LoRA into ``model``'s transformer backbone in place and train the adapters
+    alone; no-op without PEFT.
 
-    ``inject_adapter_in_model``, not ``SentenceTransformer.add_adapter``: that goes through
+    The backbone only: checkpoints fold and resume its adapters, and the trainer refuses any outside
+    it. ``inject_adapter_in_model``, not ``SentenceTransformer.add_adapter``: that goes through
     transformers' adapter API, which requires peft >= 0.19.1 while the image pins 0.18.1. EP/TP are
     rejected by the trainer's own gates, which see the injected adapters structurally.
     """
-    peft_config = build_peft_config(model, model_config)
+    backbone = model[0].auto_model
+    peft_config = build_peft_config(backbone, model_config)
     if peft_config is None:
         return
     # modules_to_save is unsupported here: the trainable copies are created, the freeze below
@@ -228,9 +232,10 @@ def inject_lora(model: SentenceTransformer, model_config: ModelConfig, dist_args
             "parameter after injection, so the sinks would train nowhere. Keep the sinks live and "
             "frozen instead (reset_sinks: false without train_sinks), or drop the adapters."
         )
-    inject_adapter_in_model(peft_config, model)
-    for name, param in model.named_parameters():
-        param.requires_grad = "lora_" in name
+    inject_adapter_in_model(peft_config, backbone)
+    adapters = tuner_adapter_param_ids(backbone)
+    for param in model.parameters():
+        param.requires_grad = id(param) in adapters
     if is_global_main_process():
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info(f"Applied LoRA adapters (r={model_config.lora_r}); trainable params: {trainable / 1e6:.2f}M")

@@ -31,7 +31,7 @@ from src.distributed.runtime import (
     resolve_param_tensor,
 )
 from src.models.loading.config_levels import config_sources
-from src.models.structure import persistent_buffers, unwrap_framework_wrappers
+from src.models.structure import LoraFolds, lora_folded_data, persistent_buffers, unwrap_framework_wrappers
 
 
 def ep_layer_classes() -> list[type[EPMoELayerBase]]:
@@ -251,7 +251,11 @@ def is_expert_weight_attr(param_name: str) -> bool:
 
 
 def gather_ep_layer_weights(
-    layer_name: str, module: EPMoELayerBase, merge_lora: bool = False, retain: bool = True
+    layer_name: str,
+    module: EPMoELayerBase,
+    merge_lora: bool = False,
+    retain: bool = True,
+    lora_folds: LoraFolds | None = None,
 ) -> dict[str, torch.Tensor]:
     """Gather a whole EP layer for checkpoint saving.
 
@@ -260,7 +264,9 @@ def gather_ep_layer_weights(
     family's hub spelling via :func:`to_hub_layer_key`. The replicated pass skips expert params via
     the layer's ``expert_named_params()``, the live expert attrs on this rank. ``merge_lora`` folds
     the grouped expert-LoRA delta into the base experts inside the per-family gather, before any
-    family-specific unfuse/re-interleave, so it applies to every layout.
+    family-specific unfuse/re-interleave, so it applies to every layout. ``lora_folds``
+    (:func:`~src.models.structure.lora_fold_targets`) folds PEFT adapters on the replicated params (a
+    LoRA'd shared expert) out of place.
 
     Every rank enters the same collectives, but only ``retain=True`` ranks keep the result: the
     others join each gather and return ``{}``, so neither the family's post-gather assembly
@@ -287,12 +293,12 @@ def gather_ep_layer_weights(
     for param_name, param in module.named_parameters():
         if param_name.split(".")[0] in expert_roots:
             continue
+        data = lora_folded_data(param, lora_folds)
         if retain:
-            gathered.setdefault(
-                f"{layer_name}.{to_hub_layer_key(param_name, layer_cls)}", resolve_param_tensor(param.data)
-            )
+            gathered.setdefault(f"{layer_name}.{to_hub_layer_key(param_name, layer_cls)}", resolve_param_tensor(data))
         else:
-            materialize_dtensor(param.data)  # same collective, without the host copy
+            materialize_dtensor(data)  # same collective, without the host copy
+        del data
 
     # Persistent only: a non-persistent buffer (rotary cache) is absent from the sharded save, and
     # exporting it here would break the "merged-from-sharded == gathered" invariant the merge relies on.

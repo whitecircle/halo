@@ -22,8 +22,6 @@ Run: ``python tests/cpu/peft/test_vllm_weight_sync_peft.py`` (or ``pytest -m cpu
 
 from __future__ import annotations
 
-import copy
-
 import pytest
 import torch
 import torch.nn as nn
@@ -32,7 +30,6 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, init_device_mesh
 
 from src.distributed.nccl.clients.base import snapshot_param
-from src.models.structure import normalize_peft_param_name
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, sync_weights_to_client
 from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import (
@@ -41,6 +38,7 @@ from tests.common.weight_sync import (
     folded_in_place,
     local_parameters,
     lora_bases_and_merges,
+    merged_by_peft,
     moved_parameters,
 )
 
@@ -91,23 +89,9 @@ def _build_lora_model() -> nn.Module:
     return model
 
 
-def _merged_reference(model: nn.Module) -> dict[str, torch.Tensor]:
-    """The base-named weights as they should appear *with the adapter folded in*."""
-    model.merge_adapter()
-    try:
-        ref = {}
-        for name, param in model.named_parameters():
-            normalized = normalize_peft_param_name(name, model.prefix)
-            if normalized is not None:
-                ref[normalized] = param.detach().clone()
-    finally:
-        model.unmerge_adapter()
-    return ref
-
-
 def test_peft_sync_broadcasts_merged_not_base():
     model = _build_lora_model()
-    merged = _merged_reference(model)
+    merged = as_pushed(model, merged_by_peft(model))
     assert "proj.weight" in merged
 
     client = _RecordingClient()
@@ -204,27 +188,13 @@ def test_repeated_pushes_leave_the_frozen_base_bit_identical():
     )
 
 
-def _merged_by_peft(model: nn.Module) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """An unsharded copy of ``model`` before and after PEFT's in-place merge, under the names the push
-    forwards."""
-    merged = copy.deepcopy(model)
-
-    def by_pushed_name() -> dict[str, torch.Tensor]:
-        named = ((normalize_peft_param_name(name, model.prefix), param) for name, param in merged.named_parameters())
-        return {name: param.detach().clone() for name, param in named if name is not None}
-
-    bases = by_pushed_name()
-    merged.merge_adapter()
-    return bases, by_pushed_name()
-
-
 def _fsdp2_push_worker(rank: int, use_dora: bool) -> None:
     """One rank of a real 2-way ``fully_shard``: the LoRA'd weights and their adapters are DTensor
     shards, so the fold and the gather take the sharded path, and every push must equal PEFT's merge
     of the unsharded model. Every collective runs before the first assertion, so a failing rank never
     strands its peer inside one."""
     model = _bf16_lora_policy(use_dora)
-    bases, merges = _merged_by_peft(model)
+    bases, merges = as_pushed(model, local_parameters(model)), as_pushed(model, merged_by_peft(model))
     mesh = init_device_mesh("cpu", (FSDP_WORLD_SIZE,))
     for block in model.base_model.model.layers:
         fully_shard(block, mesh=mesh, reshard_after_forward=False)

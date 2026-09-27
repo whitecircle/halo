@@ -19,8 +19,9 @@ bit-reproducible):
   the resumed steps reproduce the uninterrupted run's losses and final adapters exactly; the
   ``load_best_model_at_end`` load restores the best checkpoint's adapters the same way;
 * refusals: a marked checkpoint missing its adapter file, an unmarked (folded-only) checkpoint under an
-  injected-LoRA run, a model built from the folded weights, a run without injected LoRA, and a resume
-  adapter for other target modules or rank;
+  injected-LoRA run, a model built from the folded weights, a run without injected LoRA, a resume
+  adapter for other target modules or rank, and one trained at another LoRA scaling or without its
+  recorded scaling;
 * ordering: the resume adapter and its marker are on disk before rotation removes the previous
   checkpoint, with ``save_only_model`` too;
 * a non-shared filesystem: two one-rank "nodes" each write a complete resume adapter to their own
@@ -33,12 +34,16 @@ bit-reproducible):
   marker (a full fine-tune's checkpoint is full, a torn LoRA save unmarked); a marked checkpoint
   without its adapter is refused before the policy loads; a bf16 conversion keeps the resume state and
   resumes like its source, while a vocabulary patch, an adapter merge and an N-way merge carry none;
+* the backbone's own ``lora_``-named parameters (jina's parametrizations) are base weights, neither
+  taken for injected LoRA nor dropped by the fold nor trained; LoRA goes into the backbone only, an
+  adapter outside it is refused, and under FSDP2 so is a head outside it that trains or is sharded;
 * a full fine-tune: the weight loader the trainer resumes through covers the names its saves write.
 
     python tests/cpu/trainers/test_embedding_lora_resume.py
 """
 
 import datetime
+import json
 import os
 import shutil
 import sys
@@ -49,9 +54,13 @@ import torch
 from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model, inject_adapter_in_model
+from peft.tuners.tuners_utils import BaseTunerLayer
 from safetensors.torch import load_file
 from sentence_transformers import SentenceTransformer
+from sentence_transformers.models import Dense
 from tokenizers import Tokenizer, models, pre_tokenizers
+from torch.distributed.tensor import Shard, distribute_tensor
+from torch.nn.utils.parametrize import register_parametrization
 from transformers import (
     AutoModel,
     BertConfig,
@@ -85,6 +94,7 @@ from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
+from tests.common.distributed import fake_process_group_mesh
 from tests.common.embedding_lora_resume import backbone_prefix
 from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import injected_lora_merge
@@ -128,16 +138,24 @@ def _tiny_base(path) -> str:
 
 
 def _lora_model(
-    source: str, *, seed: int, target_modules=TARGET_MODULES, r: int = LORA_R, **lora
+    source: str,
+    *,
+    seed: int,
+    target_modules=TARGET_MODULES,
+    r: int = LORA_R,
+    lora_alpha: int = LORA_ALPHA,
+    model: SentenceTransformer | None = None,
+    **lora,
 ) -> SentenceTransformer:
-    """``source`` loaded, then LoRA-injected by the embedding script's own ``inject_lora``."""
+    """``source`` loaded (or ``model``, already built from it), then LoRA-injected by the embedding
+    script's own ``inject_lora``."""
     torch.manual_seed(seed)  # the adapter init draws from the global generator
-    model = SentenceTransformer(source, device="cpu")
+    model = model if model is not None else SentenceTransformer(source, device="cpu")
     model_config = ModelConfig(
         model_name_or_path=source,
         use_peft=True,
         lora_r=r,
-        lora_alpha=LORA_ALPHA,
+        lora_alpha=lora_alpha,
         lora_dropout=0.0,
         lora_target_modules=list(target_modules),
         **lora,
@@ -406,17 +424,22 @@ def test_a_marked_checkpoint_without_its_adapter_file_raises(run, tmp_path):
         trainer._load_from_checkpoint(checkpoint)
 
 
-def test_an_unmarked_folded_checkpoint_refuses_an_injected_lora_run(run, tmp_path):
+@pytest.mark.parametrize("built_from", ["resolver", "base"])
+def test_an_unmarked_folded_checkpoint_refuses_an_injected_lora_run(run, tmp_path, built_from):
     """The layout a torn save leaves: folded weights, no marker. The resolver takes it for a full
     checkpoint and builds from the fold; fresh adapters on top of it under restored optimizer moments
-    are the silent divergence, so the load raises."""
+    are the silent divergence, so the load raises. Built from the base too, where the adapter file the
+    torn save left would otherwise restore with nothing else to refuse it."""
     checkpoint = _copy(run.checkpoint, tmp_path / "checkpoint-2")
     os.remove(os.path.join(checkpoint, RESUME_ADAPTER_MARKER_FILE))
     source = resolve_resume_weights_source(
         checkpoint, SimpleNamespace(model_name_or_path=run.base), ParallelismConfig()
     )
     assert source == checkpoint, "premise: an unmarked fold resolves as a full checkpoint"
-    trainer = _trainer(_lora_model(source, seed=2), tmp_path / "out")
+    assert os.path.isfile(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE)), (
+        "premise: the adapter file is there to restore"
+    )
+    trainer = _trainer(_lora_model(source if built_from == "resolver" else run.base, seed=2), tmp_path / "out")
 
     with pytest.raises(ValueError, match="without a resume adapter"):
         trainer._load_from_checkpoint(checkpoint)
@@ -448,6 +471,29 @@ def test_a_resume_adapter_for_another_adapter_layout_is_refused(run, tmp_path, l
 
     with pytest.raises(ValueError, match="does not match this run's trainable tensors"):
         trainer._load_from_checkpoint(run.checkpoint)
+
+
+@pytest.mark.parametrize("lora", [{"lora_alpha": 2 * LORA_ALPHA}, {"use_rslora": True}], ids=["other-alpha", "rslora"])
+def test_a_resume_under_another_lora_scaling_is_refused(run, tmp_path, lora):
+    """The adapters would restore by name and shape and every delta would be rescaled: the scaling the
+    run saved with is recorded beside its resume adapter and held to the live one."""
+    trainer = _trainer(_lora_model(run.base, seed=2, **lora), tmp_path / "out")
+    before = _trainable(trainer.model)
+
+    with pytest.raises(ValueError, match="another LoRA scaling"):
+        trainer._load_from_checkpoint(run.checkpoint)
+    assert all(torch.equal(value, before[key]) for key, value in _trainable(trainer.model).items())
+
+
+def test_a_resume_adapter_without_its_recorded_scaling_is_refused(run, tmp_path):
+    checkpoint = _copy(run.checkpoint, tmp_path / "checkpoint-2")
+    with open(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_CONFIG_FILE)) as fh:
+        assert json.load(fh)["lora_alpha"] == LORA_ALPHA, "premise: the save records the run's scaling"
+    os.remove(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_CONFIG_FILE))
+    trainer = _trainer(_lora_model(run.base, seed=2), tmp_path / "out")
+
+    with pytest.raises(ValueError, match="is missing"):
+        trainer._load_from_checkpoint(checkpoint)
 
 
 # --- ordering -------------------------------------------------------------------------------
@@ -644,8 +690,122 @@ def test_an_adapter_the_save_cannot_fold_is_refused_at_construction():
     host = _host(backbone)
     host._get_unwrapped_model = lambda: backbone
 
-    with pytest.raises(NotImplementedError, match="cannot be folded out of place"):
+    with pytest.raises(ValueError, match="cannot be folded out of place"):
         EmbeddingTrainer._validate_injected_lora_foldable(host)
+
+
+# --- the backbone's own lora_ parameters, and modules outside the backbone ---------------------
+
+
+class _NativeLora(torch.nn.Module):
+    """A remote-code backbone's own LoRA, as jina-embeddings-v3 parametrizes its weights: base
+    parameters named ``lora_A`` / ``lora_B`` that no PEFT tuner layer owns."""
+
+    def __init__(self, features: int):
+        super().__init__()
+        self.lora_A = torch.nn.Parameter(0.1 * torch.randn(2, features))
+        self.lora_B = torch.nn.Parameter(0.1 * torch.randn(features, 2))
+
+    def forward(self, weight):
+        return weight + self.lora_B @ self.lora_A
+
+
+def _with_native_lora(model: SentenceTransformer) -> list[str]:
+    """Parametrize each attention ``key`` projection of ``model``'s backbone with :class:`_NativeLora`;
+    returns the backbone's names of the native factors."""
+    backbone = model[0].auto_model
+    for layer in backbone.encoder.layer:
+        key = layer.attention.self.key
+        register_parametrization(key, "weight", _NativeLora(key.in_features))
+    return [name for name, _ in backbone.named_parameters() if ".lora_" in name]
+
+
+def test_a_backbones_own_lora_parameters_are_not_injected_lora(run):
+    """Taken for injected LoRA, such a backbone's saves would fold and drop its own factors."""
+    model = SentenceTransformer(run.base, device="cpu")
+    native = _with_native_lora(model)
+
+    assert native, "premise: the backbone carries lora_-named parameters of its own"
+    assert not EmbeddingTrainer._has_injected_lora(_host(model))
+
+
+def test_the_fold_keeps_a_backbones_own_lora_parameters_and_trains_only_the_injected_ones(run):
+    """With injected LoRA on top, the fold drops the tensors the tuner layers own and nothing else, and
+    the script trains those alone."""
+    model = SentenceTransformer(run.base, device="cpu")
+    native = _with_native_lora(model)
+    _lora_model(run.base, seed=1, model=model)
+    backbone = model[0].auto_model
+
+    written = dict(embedding_module._folded_backbone_items(backbone))
+
+    assert EmbeddingTrainer._has_injected_lora(_host(model))
+    assert all(name in written for name in native), "the fold dropped the backbone's own LoRA factors"
+    assert not [key for key in written if ".lora_A.default" in key or ".base_layer" in key]
+    assert all(f"encoder.layer.{i}.attention.self.query.weight" in written for i in range(NUM_LAYERS))
+    trainable = [name for name, param in backbone.named_parameters() if param.requires_grad]
+    assert trainable and all(".default" in name for name in trainable), f"not the injected adapters: {trainable}"
+
+
+def _with_dense_head(model: SentenceTransformer) -> Dense:
+    """A trainable projection after the pooling, as some released embedding pipelines carry."""
+    dim = model.get_sentence_embedding_dimension()
+    dense = Dense(in_features=dim, out_features=dim)
+    model.append(dense)
+    return dense
+
+
+def test_the_script_injects_lora_into_the_backbone_only(run):
+    model = SentenceTransformer(run.base, device="cpu")
+    dense = _with_dense_head(model)
+
+    _lora_model(run.base, seed=1, target_modules=(*TARGET_MODULES, "linear"), model=model)
+
+    assert any(isinstance(module, BaseTunerLayer) for module in model[0].auto_model.modules())
+    assert not any(isinstance(module, BaseTunerLayer) for module in dense.modules()), "the head was adapted"
+
+
+def test_lora_outside_the_backbone_is_refused_at_construction(run, tmp_path):
+    """Checkpoints fold and resume the backbone's adapters only; one on the head would leave both."""
+    model = _lora_model(run.base, seed=1)
+    inject_adapter_in_model(LoraConfig(r=2, target_modules=["linear"]), _with_dense_head(model))
+
+    with pytest.raises(ValueError, match="LoRA adapters outside"):
+        _trainer(model, tmp_path / "out")
+
+
+def _wrapped_host(model: SentenceTransformer, *, fsdp: bool) -> EmbeddingTrainer:
+    host = _host(model)
+    host._fsdp_wrapped = fsdp
+    host.parallelism_config = ParallelismConfig()
+    return host
+
+
+def test_a_trainable_parameter_outside_the_backbone_is_refused_under_fsdp2(run):
+    """The save writes the head rank-locally and resume restores the backbone alone, so the head's
+    training is lost; a single process and DDP save and train the whole pipeline."""
+    model = SentenceTransformer(run.base, device="cpu")
+    _with_dense_head(model)
+
+    with pytest.raises(ValueError, match="outside the SentenceTransformer's transformer backbone"):
+        EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=True))
+    EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=False))
+
+
+def test_a_frozen_head_passes_unless_fsdp2_shards_it(run):
+    """A frozen head FSDP2 leaves whole (a dtype exclusion) saves whole; a sharded one would be saved
+    as this rank's shard."""
+    model = SentenceTransformer(run.base, device="cpu")
+    linear = _with_dense_head(model).linear
+    linear.requires_grad_(False)
+    EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=True))
+
+    with fake_process_group_mesh(rank=0, world_size=2) as mesh:
+        linear.weight = torch.nn.Parameter(
+            distribute_tensor(linear.weight.data, mesh, [Shard(0)]), requires_grad=False
+        )
+        with pytest.raises(ValueError, match="that FSDP2 shards"):
+            EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=True))
 
 
 # --- the resume-state rules every checkpoint follows ---------------------------------------------

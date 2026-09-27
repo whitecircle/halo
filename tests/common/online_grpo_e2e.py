@@ -51,11 +51,10 @@ from tests.common.on_policy_e2e import (
     adapter_file_agreement,
     expert_lora_under_etp_refusal,
     fresh_parallelism_config,
-    frozen_base_snapshot,
+    frozen_base_weights,
     load_policy,
     local_view,
     logged_lrs,
-    moved_frozen_weights,
     parallelism_engaged,
     perturbation_round,
     probe_top_logprobs,
@@ -66,11 +65,13 @@ from tests.common.on_policy_e2e import (
     record_scheduler_restore,
     record_served_baseline,
     record_step_losses,
+    served_policy_moved,
     shared_output_dir,
     sink_round,
 )
 from tests.common.peft_helpers import assert_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.utils import cleanup_memory, log
+from tests.common.weight_sync import moved_parameters
 
 # Deliberately short: every step is a full engine round-trip, and the properties under test are that
 # the sync landed and that the resume pushed, neither of which needs a converged policy.
@@ -404,7 +405,7 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
     ctx.barrier()
     if ctx.rank == 0:
         moved_off = probe_top_logprobs(server_url, model_name)
-        checks["engine_moved_off_the_checkpoint_policy"] = moved_off != checkpoint_policy
+        checks["engine_moved_off_the_checkpoint_policy"] = served_policy_moved(moved_off, checkpoint_policy)
         log(f"  engine moved off the checkpoint policy: {checks['engine_moved_off_the_checkpoint_policy']}")
     ctx.barrier()
 
@@ -554,10 +555,10 @@ def run_online_grpo_e2e(
     checks["parallelism_engaged"] = parallelism_engaged(trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size)
     log(f"  parallelism engaged: {checks['parallelism_engaged']} ({mode})")
 
-    adapters_before, base_before = {}, []
+    adapters_before, base_before = {}, {}
     if spec.adapter:
         adapters_before = snapshot_adapters(unwrap(trainer.model), expert_lora=spec.expert_lora)
-        base_before = frozen_base_snapshot(unwrap(trainer.model))
+        base_before = frozen_base_weights(unwrap(trainer.model))
         ok, detail = assert_only_adapters_trainable(unwrap(trainer.model))
         checks["only_adapters_trainable"] = ok
         log(f"  frozen base: {detail}")
@@ -570,7 +571,7 @@ def run_online_grpo_e2e(
     if spec.adapter:
         record_adapter_training(trainer, checks, before=adapters_before, expert_lora=spec.expert_lora, trained=trained)
         # Every step's sync folded the adapters in and out; the frozen base must come out as loaded.
-        moved = moved_frozen_weights(base_before)
+        moved = moved_parameters(base_before, frozen_base_weights(unwrap(trainer.model)))
         checks["training_syncs_left_the_base_weights_alone"] = bool(base_before) and not moved
         log(f"  frozen layer-0 weights the training syncs moved: {len(moved)}/{len(base_before)} {moved[:3]}")
 
@@ -583,9 +584,9 @@ def run_online_grpo_e2e(
 
     if ctx.rank == 0:
         after = probe_top_logprobs(server_url, model_name)
-        checks["forced_sync_moved_the_served_policy"] = after != before
-        if after == before:
-            log("  IDENTICAL logprobs after the perturbation: the weight sync did not land")
+        checks["forced_sync_moved_the_served_policy"] = served_policy_moved(after, before)
+        if not checks["forced_sync_moved_the_served_policy"]:
+            log("  IDENTICAL or non-finite logprobs after the perturbation: the weight sync did not land")
         # A failed update leaves the engine partially written, so check that it still answers.
         checks["server_usable_after_sync"] = bool(probe_top_logprobs(server_url, model_name))
     ctx.barrier()

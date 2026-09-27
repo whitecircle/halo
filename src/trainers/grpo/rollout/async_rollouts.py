@@ -542,8 +542,8 @@ class AsyncRolloutMixin:
             logger.debug(f"Synced weights to {num_servers} rollout servers (rolling) at step {self.state.global_step}")
         else:
             # One gather for every remaining case: the EP-wrapped layouts the engine cannot map (EP
-            # wrappers are present even at ep_size==1), PEFT (the gather merges the adapters and the
-            # engine serves the merged base), and plain dense, where ``update_model_params`` would
+            # wrappers are present even at ep_size==1), PEFT (the push folds the adapters into each
+            # base weight it sends, out of place), and plain dense, where ``update_model_params`` would
             # forward raw ``named_parameters()`` — which FSDP2 hands out as DTensors describing a
             # local shard under the global shape, so the broadcast reads past the shard.
             sync_weights_to_client(
