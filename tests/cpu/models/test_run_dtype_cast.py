@@ -139,7 +139,8 @@ def test_an_fp8_parameter_refuses_the_cast():
 @pytest.mark.parametrize("run_dtype", [torch.float16, torch.float32])
 def test_a_quantized_parameter_keeps_its_float_storage(run_dtype):
     """A QLoRA base stored as ``bnb_4bit_quant_storage: bfloat16`` holds packed 4-bit codes in a bf16
-    tensor; casting that tensor to another run dtype would rewrite the codes as if they were values."""
+    tensor; casting that tensor to another run dtype would rewrite the codes as if they were values.
+    Compared as bytes: a code pair can read as a bf16 NaN."""
     model = _Mixed()
     model.quantized = Linear4bit(64, 64, bias=False, quant_storage=torch.bfloat16, quant_type="nf4")
     model.quantized.weight = Params4bit(
@@ -147,12 +148,12 @@ def test_a_quantized_parameter_keeps_its_float_storage(run_dtype):
     )
     model.quantized.to("cpu")
     weight = model.quantized.weight
-    packed = weight.data.clone()
+    packed = weight.data.view(torch.uint8).clone()
 
     cast_parameters_to_run_dtype(model, run_dtype)
 
     assert weight.bnb_quantized and weight.dtype == torch.bfloat16
-    assert model.quantized.weight is weight and torch.equal(weight.data, packed)
+    assert model.quantized.weight is weight and torch.equal(weight.data.view(torch.uint8), packed)
     assert model.pinned.weight.dtype == run_dtype
 
 
