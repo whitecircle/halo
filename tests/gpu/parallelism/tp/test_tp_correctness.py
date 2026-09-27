@@ -44,7 +44,7 @@ from tests.common.distributed import ensure_model_downloaded, world_mean, world_
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, max_or_nan
 
 MODEL_NAME = QWEN3_0_6B
 TP_SIZE = 2
@@ -281,7 +281,7 @@ def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
     unwrapped = tp_model.module if hasattr(tp_model, "module") else tp_model
     tp_group = trainer._get_tp_process_group()
     tp_world = dist.get_world_size(group=tp_group)
-    checked, max_diff = 0, 0.0
+    checked, diffs = 0, []
     for _name, p in unwrapped.named_parameters():
         if p.grad is None:
             continue
@@ -291,7 +291,8 @@ def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
         gathered = [torch.empty_like(grad) for _ in range(tp_world)]
         dist.all_gather(gathered, grad.contiguous(), group=tp_group)
         checked += 1
-        max_diff = max(max_diff, max((g - gathered[0]).abs().max().item() for g in gathered))
+        diffs.extend((g - gathered[0]).abs().max().item() for g in gathered)
+    max_diff = max_or_nan(diffs, default=0.0)
     log_all(f"  TP-synced grads: {checked} params checked, max cross-TP diff {max_diff:.3e}")
     return max_diff == 0.0 and checked > 0, checked
 

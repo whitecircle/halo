@@ -45,7 +45,7 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import local_optimizer_state, log, optimizer_state_matches, step_losses
+from tests.common.utils import local_optimizer_state, log, max_or_nan, optimizer_state_matches, step_losses
 
 # Greedy, one token, top-k: the assertion is "these numbers moved", so the probe must be the least
 # noisy generation an engine can give. Every supported engine returns this exact shape from
@@ -119,7 +119,8 @@ def probe_top_logprobs(server_url: str, model_name: str) -> dict[str, float]:
 
 
 def served_policy_delta(after: dict[str, float], before: dict[str, float]) -> float:
-    """Largest logprob gap between two probes over the tokens they share; ``inf`` when they share none.
+    """Largest logprob gap between two probes over the tokens they share; ``inf`` when they share none,
+    NaN when any gap is NaN, so no comparison against it passes.
 
     Two probes of the same policy are bit-identical, so this is zero for them and a real number
     otherwise. It is a magnitude to compare against another magnitude, not a tolerance to pass.
@@ -127,7 +128,7 @@ def served_policy_delta(after: dict[str, float], before: dict[str, float]) -> fl
     shared = after.keys() & before.keys()
     if not shared:
         return float("inf")
-    return max(abs(after[token] - before[token]) for token in shared)
+    return max_or_nan(abs(after[token] - before[token]) for token in shared)
 
 
 def record_served_baseline(server_url: str, model_name: str, checks: dict[str, bool]) -> dict[str, float]:
@@ -325,21 +326,20 @@ def _frozen_base_handles(model) -> list[tuple[str, torch.nn.Parameter]]:
 
 
 def _worst_relative_drift(handles: list[tuple[str, torch.nn.Parameter]], before: list[torch.Tensor]) -> float:
-    """Largest change in ``handles`` since ``before``, relative to each tensor's own scale.
+    """Largest change in ``handles`` since ``before``, relative to each tensor's own scale; NaN when any
+    change is NaN, so the drift bound fails on it.
 
     Rank-local, so a parameter narrower in dim 0 than the DP mesh (Qwen3.5-MoE's ``[1, hidden]``
     ``shared_expert_gate``) leaves the trailing ranks an empty shard with nothing to witness; the
     ranks holding its rows still grade it.
     """
-    worst = 0.0
+    drifts = []
     for (_, param), reference in zip(handles, before, strict=True):
         if reference.numel() == 0:
             continue
         moved = (local_view(param.data) - reference).abs().max()
-        drift = float((moved / reference.abs().max().clamp(min=1e-6)).item())
-        # max() keeps its first argument over a NaN, so a non-finite drift is made the worst outright.
-        worst = max(worst, drift) if math.isfinite(drift) else math.inf
-    return worst
+        drifts.append(float((moved / reference.abs().max().clamp(min=1e-6)).item()))
+    return max_or_nan(drifts, default=0.0)
 
 
 def perturbation_round(

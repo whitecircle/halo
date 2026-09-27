@@ -7,10 +7,12 @@ probes, and the shared state-snapshot and assertion helpers.
 import ast
 import gc
 import importlib.util
+import math
 import os
 import pathlib
 import subprocess
 import sys
+from collections.abc import Iterable
 from types import ModuleType
 
 import torch
@@ -189,6 +191,20 @@ def fro_rel_err(actual: torch.Tensor, reference: torch.Tensor) -> float:
     if norm == 0.0:
         raise ValueError("relative error against a zero-norm reference is undefined")
     return (actual.double() - reference).norm().item() / norm
+
+
+def max_or_nan(values: Iterable[float], *, default: float | None = None) -> float:
+    """Largest of ``values``, or NaN when any of them is NaN.
+
+    The builtin ``max`` compares with ``>``, which is false against NaN, so a NaN survives only in first
+    position and is silently dropped anywhere else; a bound checked on the result must fail on it
+    instead. ``default`` is returned for an empty ``values``; without one, an empty input raises as
+    ``max`` does.
+    """
+    values = list(values)
+    if any(math.isnan(value) for value in values):
+        return math.nan
+    return max(values) if default is None else max(values, default=default)
 
 
 def log_spectrum_matrix(rows: int, cols: int, generator: torch.Generator, decades: float = 1.0) -> torch.Tensor:

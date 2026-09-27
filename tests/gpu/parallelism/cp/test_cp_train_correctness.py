@@ -44,7 +44,7 @@ from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, cos_sim, log, log_all
+from tests.common.utils import cleanup_memory, cos_sim, log, log_all, max_or_nan
 
 # Configuration
 
@@ -311,7 +311,7 @@ def test_training_equivalence(device, cp_size):
 
     # Check 1: Per-step loss closeness
     step_diffs = [abs(b - c) for b, c in zip(base_losses, cp_avg_losses, strict=False)]
-    max_step_diff = max(step_diffs)
+    max_step_diff = max_or_nan(step_diffs)
     loss_close = max_step_diff < TOL.parallel_vs_baseline_train_loss_abs
     checks["loss_trajectory_close"] = loss_close
     log(f"      Per-step diffs: {[f'{d:.4f}' for d in step_diffs]}")
