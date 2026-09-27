@@ -32,7 +32,7 @@ from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 # Configuration
 
@@ -156,11 +156,11 @@ def run(ctx) -> dict:
     # ── Collect metrics ─────────────────────────────────────────────
     training_loss = train_result.training_loss
     log_history = trainer.state.log_history
-    step_losses = [entry["loss"] for entry in log_history if "loss" in entry and "eval_loss" not in entry]
+    losses = step_losses(trainer)
 
     log("\n  --- Training Results ---")
     log(f"  Final training loss: {training_loss:.6f}")
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
 
     # Log GRPO-specific metrics if available
     reward_metrics = [entry.get("rewards/mean", None) for entry in log_history if "rewards/mean" in entry]
@@ -181,7 +181,7 @@ def run(ctx) -> dict:
     log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} (loss={training_loss:.6f})")
 
     # Check 2: All step losses are finite (no NaN/Inf)
-    all_finite = all(math.isfinite(l) for l in step_losses)
+    all_finite = all(math.isfinite(l) for l in losses)
     checks["all_steps_finite"] = all_finite
     log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
 

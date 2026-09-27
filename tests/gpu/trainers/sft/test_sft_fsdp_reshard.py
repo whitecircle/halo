@@ -42,7 +42,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 8
@@ -101,7 +101,7 @@ def run_sft(mode_name, parallelism_kwargs, reshard, tokenizer, output_dir):
         parallelism_config=parallelism_config,
     )
     trainer.train()
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     log(f"  losses: {[f'{x:.4f}' for x in losses]}")
 
     if hasattr(trainer, "cleanup_ep"):

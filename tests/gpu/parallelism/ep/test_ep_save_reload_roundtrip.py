@@ -48,7 +48,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier, is_global_main_process
 from src.env import env_flag, env_int, env_str
-from tests.common.checkpoint_io import fixed_batch_loss
+from tests.common.checkpoint_io import fixed_batch_loss, fixed_text_batch
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import GEMMA4_26B_A4B_PATCHED
@@ -69,17 +69,11 @@ EP_SCOPE = env_str("HALO_TEST_EP_RT_SCOPE", "auto")
 # Reloaded-vs-reference loss must match to bf16 round-trip noise. A dropped expert
 # axis shifts the loss by >>1, so this tolerance is comfortably discriminating.
 LOSS_TOL = TOL.resume_loss_abs
-
-
-def _fixed_batch(tokenizer, device):
-    """Deterministic single-sequence batch (same tokens pre- and post-reload)."""
-    text = (
-        "User: What is 17 plus 25?\nAssistant: The answer is 42. "
-        "Expert routing must survive a checkpoint save and reload intact."
-    )
-    enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
-    ids = enc["input_ids"].to(device)
-    return ids, ids.clone()
+# The sequence the fixed-batch loss is scored on before the save and after the reload.
+FIXED_TEXT = (
+    "User: What is 17 plus 25?\nAssistant: The answer is 42. "
+    "Expert routing must survive a checkpoint save and reload intact."
+)
 
 
 def _assert_index_keys(save_dir: str) -> list[str]:
@@ -140,7 +134,7 @@ def run(ctx):
     checks["ep_patched"] = len(ep_layers) > 0
     log(f"EP layers: {len(ep_layers)}")
 
-    ids, labels = _fixed_batch(tokenizer, ctx.device)
+    ids, labels = fixed_text_batch(tokenizer, ctx.device, FIXED_TEXT)
     ref_loss = fixed_batch_loss(model, ids, labels)
     log(f"Reference loss (pre-save): {ref_loss:.6f}")
     checks["ref_loss_finite"] = bool(torch.isfinite(torch.tensor(ref_loss)))

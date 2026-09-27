@@ -44,7 +44,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 5
@@ -177,11 +177,11 @@ def run(ctx):
 
     training_loss = train_result.training_loss
     log_history = trainer.state.log_history
-    step_losses = [e["loss"] for e in log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     eval_entries = [e for e in log_history if "eval_loss" in e]
 
     log(f"\n  Training loss: {training_loss:.6f}")
-    log(f"  Step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"  Step losses: {[f'{l:.4f}' for l in losses]}")
     for e in eval_entries:
         log(f"  Eval loss (step {e.get('step', '?')}): {e['eval_loss']:.6f}")
 
@@ -196,14 +196,14 @@ def run(ctx):
     checks["loss_finite"] = loss_finite
     log(f"  Loss finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
 
-    all_finite = all(math.isfinite(l) for l in step_losses)
+    all_finite = all(math.isfinite(l) for l in losses)
     checks["all_steps_finite"] = all_finite
     log(f"  All steps finite: {'PASS' if all_finite else 'FAIL'}")
 
-    if len(step_losses) >= 2:
-        decreased = step_losses[-1] < step_losses[0]
+    if len(losses) >= 2:
+        decreased = losses[-1] < losses[0]
         checks["loss_decreased"] = decreased
-        log(f"  Loss decreased: {'PASS' if decreased else 'FAIL'} ({step_losses[0]:.4f} -> {step_losses[-1]:.4f})")
+        log(f"  Loss decreased: {'PASS' if decreased else 'FAIL'} ({losses[0]:.4f} -> {losses[-1]:.4f})")
 
     if eval_entries:
         eval_finite = all(math.isfinite(e["eval_loss"]) for e in eval_entries)

@@ -38,7 +38,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_5_VLM_4B
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.utils import gpu_mem_gb, log, step_losses
 
 MODEL_NAME = QWEN3_5_VLM_4B
 NUM_TRAIN_SAMPLES = 32
@@ -169,15 +169,15 @@ def run(ctx):
     log(f"Loss: {initial_loss:.4f} -> {final_loss:.4f}")
 
     log_history = trainer.state.log_history
-    step_losses = [e["loss"] for e in log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
-    log(f"Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"Per-step losses: {[f'{l:.4f}' for l in losses]}")
     if grad_norms:
         log(f"Per-step grad norms: {[f'{g:.2f}' for g in grad_norms]}")
 
     checks = {
         "train_loss_finite": math.isfinite(train_result.training_loss),
-        "step_losses_finite": all(math.isfinite(l) for l in step_losses),
+        "step_losses_finite": all(math.isfinite(l) for l in losses),
         "trained_all_steps": train_result.global_step == NUM_TRAIN_STEPS,
         "final_eval_loss_finite": math.isfinite(final_loss),
     }

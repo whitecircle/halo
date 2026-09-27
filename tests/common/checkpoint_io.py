@@ -19,6 +19,9 @@ from transformers import TrainerCallback
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, load_full_state_dict
 from tests.common.utils import local_optimizer_state
 
+# Truncation bound for a :func:`fixed_text_batch` sequence; the one-sentence probes stay under it.
+FIXED_TEXT_BATCH_MAX_TOKENS = 64
+
 
 def written_keys(output_dir: str) -> set[str]:
     """Every tensor key present in the gathered checkpoint at ``output_dir`` (see module docstring)."""
@@ -41,6 +44,18 @@ def weight_files(output_dir: str, *, include_index: bool = False) -> list[str]:
         if os.path.isfile(index):
             names.append(SAFETENSORS_INDEX_FILE)
     return names
+
+
+def fixed_text_batch(tokenizer, device, text: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """``text`` as a one-sequence ``(input_ids, labels)`` batch for :func:`fixed_batch_loss`, every token
+    scored.
+
+    Tokenized identically on every call, so the loss before a save and after the reload or resume
+    compares the same tokens.
+    """
+    encoded = tokenizer(text, return_tensors="pt", truncation=True, max_length=FIXED_TEXT_BATCH_MAX_TOKENS)
+    input_ids = encoded["input_ids"].to(device)
+    return input_ids, input_ids.clone()
 
 
 def fixed_batch_loss(model, input_ids: torch.Tensor, labels: torch.Tensor) -> float:

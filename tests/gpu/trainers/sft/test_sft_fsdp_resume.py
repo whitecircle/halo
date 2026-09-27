@@ -32,12 +32,18 @@ from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
-from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss
+from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss, fixed_text_batch
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import assert_optimizer_state_bit_exact, cleanup_memory, local_optimizer_state, log
+from tests.common.utils import (
+    assert_optimizer_state_bit_exact,
+    cleanup_memory,
+    local_optimizer_state,
+    log,
+    step_losses,
+)
 
 # Configuration
 
@@ -56,20 +62,11 @@ SEED = 42
 # noise. A resume that leaves the model at fresh init (or corrupts the gather) shifts the
 # loss by >>1, so this is comfortably discriminating.
 LOSS_TOL = 1e-2
-
-
-# By-value continuity helpers
-
-
-def _fixed_batch(tokenizer, device):
-    """Deterministic single-sequence batch (identical tokens pre- and post-resume)."""
-    text = (
-        "User: What is 17 plus 25?\nAssistant: The answer is 42. "
-        "Optimizer moments and weights must survive a checkpoint save and resume intact."
-    )
-    enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
-    ids = enc["input_ids"].to(device)
-    return ids, ids.clone()
+# The sequence the fixed-batch loss is scored on before the save and after the resume.
+FIXED_TEXT = (
+    "User: What is 17 plus 25?\nAssistant: The answer is 42. "
+    "Optimizer moments and weights must survive a checkpoint save and resume intact."
+)
 
 
 # Checkpoint file verification
@@ -153,7 +150,7 @@ def phase1_train_and_save(
 ) -> tuple[dict[str, bool], list[float], float, dict]:
     """Train for SAVE_AT_STEP steps, verify checkpoint files on rank 0.
 
-    Returns (checks, step_losses, L_pre, optimizer_state) where L_pre is the forward loss on
+    Returns (checks, losses, L_pre, optimizer_state) where L_pre is the forward loss on
     a FIXED deterministic batch computed AFTER training but BEFORE save — the reference for
     the post-resume weight-continuity check in Phase 2 — and optimizer_state is this rank's
     view of the moments the checkpoint's shard holds, the reference for the bit-exact check.
@@ -201,14 +198,14 @@ def phase1_train_and_save(
     log(f"  Training for {SAVE_AT_STEP} steps...")
     train_result = trainer.train()
     training_loss = train_result.training_loss
-    step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     log(f"  Training loss: {training_loss:.6f}")
-    log(f"  Step losses:   {[f'{l:.4f}' for l in step_losses]}")
+    log(f"  Step losses:   {[f'{l:.4f}' for l in losses]}")
 
     # Reference forward loss on a FIXED batch with the trained (== saved) weights.
     # The checkpoint was written during train() at step SAVE_AT_STEP, so these are
     # exactly the weights resume must restore.
-    ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
+    ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
     l_pre = fixed_batch_loss(trainer.model, ids, labels)
     log(f"  L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
@@ -242,7 +239,7 @@ def phase1_train_and_save(
     del trainer, model
     cleanup_memory()
     ctx.barrier()
-    return checks, step_losses, l_pre, optimizer_state
+    return checks, losses, l_pre, optimizer_state
 
 
 # Phase 2: Resume from checkpoint
@@ -305,7 +302,7 @@ def phase2_resume_and_train(
     )
 
     # Capture restored state at on_train_begin (post-resume, pre-first-step).
-    ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
+    ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
     resume_capture = ResumeCapture(trainer, ids, labels, optimizer_state=True)
     trainer.add_callback(resume_capture)
 
@@ -313,23 +310,23 @@ def phase2_resume_and_train(
     train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
 
     training_loss = train_result.training_loss
-    step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     global_step = trainer.state.global_step
 
     log(f"  Training loss:  {training_loss:.6f}")
-    log(f"  Step losses:    {[f'{l:.4f}' for l in step_losses]}")
+    log(f"  Step losses:    {[f'{l:.4f}' for l in losses]}")
     log(f"  Final step:     {global_step} (expected {TOTAL_STEPS})")
 
     loss_ok = math.isfinite(training_loss)
     steps_ok = global_step == TOTAL_STEPS
-    all_finite = all(math.isfinite(l) for l in step_losses) if step_losses else True
+    all_finite = all(math.isfinite(l) for l in losses) if losses else True
 
     if not loss_ok:
         log(f"  ERROR: Loss not finite: {training_loss}")
     if not steps_ok:
         log(f"  ERROR: Expected {TOTAL_STEPS} global steps, got {global_step}")
     if not all_finite:
-        log(f"  ERROR: NaN/Inf in resumed step losses: {step_losses}")
+        log(f"  ERROR: NaN/Inf in resumed step losses: {losses}")
 
     checks = {
         "resume_loss_finite": loss_ok,
@@ -385,7 +382,7 @@ def phase2_resume_and_train(
     del trainer, model
     cleanup_memory()
     ctx.barrier()
-    return checks, step_losses
+    return checks, losses
 
 
 # Main

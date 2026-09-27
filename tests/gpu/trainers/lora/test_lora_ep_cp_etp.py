@@ -37,7 +37,7 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     verify_adapter_reload,
 )
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 MAX_STEPS = 5
@@ -128,12 +128,12 @@ def run_lora_ep_cp(
 
         checks = {}
         training_loss = train_result.training_loss
-        step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
 
         loss_finite = math.isfinite(training_loss)
         checks["loss_finite"] = loss_finite
         log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
-        log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+        log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
 
         steps_ok = train_result.global_step == MAX_STEPS
         checks["steps_completed"] = steps_ok
@@ -250,12 +250,12 @@ def run_lora_etp(
 
         checks = {}
         training_loss = train_result.training_loss
-        step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
 
         loss_finite = math.isfinite(training_loss)
         checks["loss_finite"] = loss_finite
         log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
-        log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+        log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
 
         steps_ok = train_result.global_step == MAX_STEPS
         checks["steps_completed"] = steps_ok

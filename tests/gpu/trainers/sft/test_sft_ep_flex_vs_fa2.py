@@ -35,7 +35,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 # Configuration
 
@@ -198,12 +198,12 @@ def run(ctx):
     # Collect metrics
     training_loss = train_result.training_loss
     log_history = trainer.state.log_history
-    step_losses = [e["loss"] for e in log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
 
     log("\n--- Metrics ---")
     log(f"Final loss: {training_loss:.6f}")
-    log(f"Step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"Step losses: {[f'{l:.4f}' for l in losses]}")
     log(f"Grad norms: {[f'{g:.4f}' for g in grad_norms]}")
 
     # Check sinks AFTER training
@@ -239,10 +239,10 @@ def run(ctx):
     log("\n--- Checks ---")
     checks = {}
 
-    checks["training_completed"] = len(step_losses) == NUM_TRAIN_STEPS
+    checks["training_completed"] = len(losses) == NUM_TRAIN_STEPS
     log(f"Training completed: {'PASS' if checks['training_completed'] else 'FAIL'}")
 
-    loss_finite = all(math.isfinite(l) for l in step_losses + [training_loss])
+    loss_finite = all(math.isfinite(l) for l in losses + [training_loss])
     checks["loss_finite"] = loss_finite
     log(f"Loss finite: {'PASS' if loss_finite else 'FAIL'}")
 

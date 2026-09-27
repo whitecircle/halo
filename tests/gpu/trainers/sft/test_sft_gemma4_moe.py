@@ -41,7 +41,7 @@ from tests.common.datasets import create_single_turn_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GEMMA4_26B_A4B_PATCHED
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.utils import gpu_mem_gb, log, step_losses
 
 MODEL_NAME = env_str("HALO_TEST_GEMMA4_MODEL", GEMMA4_26B_A4B_PATCHED)
 # EP size defaults to world_size (set inside main); HALO_TEST_EP forces a specific value.
@@ -188,14 +188,14 @@ def run(ctx):
     log(f"Final eval loss: {final_loss:.4f}")
     log(f"Loss: {initial_loss:.4f} -> {final_loss:.4f}")
 
-    step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
-    log(f"Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"Per-step losses: {[f'{l:.4f}' for l in losses]}")
     if grad_norms:
         log(f"Per-step grad norms: {[f'{g:.2f}' for g in grad_norms]}")
 
     checks["train_loss_finite"] = bool(torch.isfinite(torch.tensor(train_result.training_loss)))
-    checks["step_losses_finite"] = all(torch.isfinite(torch.tensor(l)) for l in step_losses)
+    checks["step_losses_finite"] = all(torch.isfinite(torch.tensor(l)) for l in losses)
     if grad_norms:
         checks["grad_norms_finite"] = all(torch.isfinite(torch.tensor(g)) for g in grad_norms)
     checks["trained_all_steps"] = train_result.global_step == NUM_TRAIN_STEPS

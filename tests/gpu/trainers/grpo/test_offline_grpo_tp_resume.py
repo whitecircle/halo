@@ -35,11 +35,11 @@ from src.distributed.runtime import barrier
 from src.env import env_str
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
-from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss
+from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss, fixed_text_batch
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 # Configuration
 
@@ -65,17 +65,11 @@ SEED = 42
 # By-value weight-restoration probes (catch a silent-base-weights / corrupted-gather resume)
 
 LOSS_TOL = 1e-2  # TP forward is deterministic, so restored weights must reproduce L_pre tightly.
-
-
-def _fixed_batch(tokenizer, device):
-    """Deterministic single-sequence batch (identical tokens pre- and post-resume)."""
-    text = (
-        "User: What is 17 plus 25?\nAssistant: The answer is 42. "
-        "The TP gather and re-shard must survive a checkpoint save and resume intact."
-    )
-    enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
-    ids = enc["input_ids"].to(device)
-    return ids, ids.clone()
+# The sequence the fixed-batch loss is scored on before the save and after the resume.
+FIXED_TEXT = (
+    "User: What is 17 plus 25?\nAssistant: The answer is 42. "
+    "The TP gather and re-shard must survive a checkpoint save and resume intact."
+)
 
 
 # Phase 1: Train + Save Checkpoint
@@ -90,7 +84,7 @@ def phase1_train_and_save(
     eval_dataset,
     output_dir,
 ) -> tuple[bool, list[float], float]:
-    """Train for SAVE_AT_STEP steps with TP=2, save checkpoint. Returns (ok, step_losses, l_pre).
+    """Train for SAVE_AT_STEP steps with TP=2, save checkpoint. Returns (ok, losses, l_pre).
 
     ``l_pre`` is the fixed-batch forward loss on the TRAINED weights — Phase 2 must reproduce it after
     resume (else the checkpoint did not restore the trained weights; the silent-base-weights regression).
@@ -148,12 +142,12 @@ def phase1_train_and_save(
         train_result = trainer.train()
 
         training_loss = train_result.training_loss
-        step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
         log(f"Phase 1 loss: {training_loss:.6f}")
-        log(f"Phase 1 step losses: {[f'{l:.4f}' for l in step_losses]}")
+        log(f"Phase 1 step losses: {[f'{l:.4f}' for l in losses]}")
 
         # Fixed-batch loss on the TRAINED weights (before they're freed) — the by-value anchor for resume.
-        ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
+        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
         l_pre = fixed_batch_loss(trainer.model, ids, labels)
         log(f"Phase 1 L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
@@ -168,7 +162,7 @@ def phase1_train_and_save(
                 log(f"Checkpoint files: {sorted(files)}")
             else:
                 log(f"ERROR: Checkpoint not found at {expected_ckpt}")
-                return False, step_losses, l_pre
+                return False, losses, l_pre
 
         loss_ok = math.isfinite(training_loss)
         if not loss_ok:
@@ -178,7 +172,7 @@ def phase1_train_and_save(
         cleanup_memory()
         barrier()
 
-        return loss_ok, step_losses, l_pre
+        return loss_ok, losses, l_pre
 
     except Exception as e:
         log(f"Phase 1 FAILED: {e}")
@@ -264,7 +258,7 @@ def phase2_resume_and_train(
         assert trainer._has_ep_layers if _IS_EP else trainer.is_tp_mode, f"expected {_MODE} mode active"
 
         # Capture restored state at on_train_begin (post-resume, pre-first-step).
-        ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
+        ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), FIXED_TEXT)
         resume_capture = ResumeCapture(trainer, ids, labels)
         trainer.add_callback(resume_capture)
 
@@ -272,14 +266,14 @@ def phase2_resume_and_train(
         train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
 
         training_loss = train_result.training_loss
-        step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
         log(f"Phase 2 loss: {training_loss:.6f}")
-        log(f"Phase 2 step losses: {[f'{l:.4f}' for l in step_losses]}")
+        log(f"Phase 2 step losses: {[f'{l:.4f}' for l in losses]}")
         log(f"Phase 2 global step: {trainer.state.global_step}")
 
         loss_ok = math.isfinite(training_loss)
         steps_ok = trainer.state.global_step == TOTAL_STEPS
-        all_finite = all(math.isfinite(l) for l in step_losses)
+        all_finite = all(math.isfinite(l) for l in losses)
 
         if not loss_ok:
             log(f"ERROR: Phase 2 loss not finite: {training_loss}")
@@ -295,7 +289,7 @@ def phase2_resume_and_train(
             del trainer, model
             cleanup_memory()
             barrier()
-            return False, step_losses
+            return False, losses
 
         l_post = cap["l_post"]
         loss_delta = abs(l_post - l_pre)
@@ -329,7 +323,7 @@ def phase2_resume_and_train(
         cleanup_memory()
         barrier()
 
-        return loss_ok and steps_ok and all_finite and weights_ok and optim_ok and sched_ok, step_losses
+        return loss_ok and steps_ok and all_finite and weights_ok and optim_ok and sched_ok, losses
 
     except Exception as e:
         log(f"Phase 2 FAILED: {e}")

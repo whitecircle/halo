@@ -38,7 +38,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_FSDP_STEPS", 4)
@@ -116,16 +116,16 @@ def run(ctx):
 
     log(f"\n[4/4] Training {MAX_STEPS} steps...")
     result = trainer.train()
-    step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     log(f"  ✓ Final loss: {result.training_loss:.4f}")
-    log(f"  ✓ Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"  ✓ Per-step losses: {[f'{l:.4f}' for l in losses]}")
     log(f"  ✓ HBM peak: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
 
     return {
         "checks": {
             "train_loss_finite": math.isfinite(result.training_loss),
-            "step_losses_finite": all(math.isfinite(x) for x in step_losses),
-            "logged_every_step": len(step_losses) == MAX_STEPS,
+            "step_losses_finite": all(math.isfinite(x) for x in losses),
+            "logged_every_step": len(losses) == MAX_STEPS,
         }
     }
 

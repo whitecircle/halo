@@ -31,7 +31,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 # Configuration
 
@@ -194,7 +194,7 @@ def run_single_loss_type(
     train_result = trainer.train()
     training_loss = train_result.training_loss
     log_history = trainer.state.log_history
-    step_losses = [entry["loss"] for entry in log_history if "loss" in entry and "eval_loss" not in entry]
+    losses = step_losses(trainer)
 
     # Collect per-split metrics
     pos_logps = [e.get("positive/logps_mean") for e in log_history if "positive/logps_mean" in e]
@@ -203,7 +203,7 @@ def run_single_loss_type(
     result = {
         "loss": training_loss,
         "global_step": trainer.state.global_step,
-        "step_losses": step_losses,
+        "step_losses": losses,
         "pos_logps": pos_logps,
         "neg_logps": neg_logps,
     }

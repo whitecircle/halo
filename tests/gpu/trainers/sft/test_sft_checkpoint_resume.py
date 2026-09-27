@@ -53,7 +53,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 # Overridable so the same harness can validate resume across model families.
 DEFAULT_MODEL = env_str("HALO_TEST_RESUME_MODEL", QWEN3_0_6B)
@@ -187,7 +187,7 @@ def phase1_train_and_save(
 ) -> tuple[bool, list[float], float]:
     """Train for SAVE_AT_STEP steps, verify checkpoint on rank 0.
 
-    Returns (ok, step_losses, L_pre) — L_pre is the fixed-batch forward loss with the
+    Returns (ok, losses, L_pre) — L_pre is the fixed-batch forward loss with the
     trained (== saved) weights, the reference for the Phase 2 weight-continuity check.
     """
     log(f"\n  Phase 1: Train {SAVE_AT_STEP} steps + save checkpoint ({mode})")
@@ -229,9 +229,9 @@ def phase1_train_and_save(
         log(f"  Training for {SAVE_AT_STEP} steps...")
         train_result = trainer.train()
         training_loss = train_result.training_loss
-        step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
         log(f"  Training loss: {training_loss:.6f}")
-        log(f"  Step losses:   {[f'{l:.4f}' for l in step_losses]}")
+        log(f"  Step losses:   {[f'{l:.4f}' for l in losses]}")
 
         ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
         l_pre = fixed_batch_loss(trainer.model, ids, labels)
@@ -239,7 +239,7 @@ def phase1_train_and_save(
 
         if not math.isfinite(training_loss):
             log(f"  ERROR: Loss not finite: {training_loss}")
-            return False, step_losses, l_pre
+            return False, losses, l_pre
 
         checkpoint_dir = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
         barrier()
@@ -258,9 +258,9 @@ def phase1_train_and_save(
         )
         dist.broadcast(result_t, src=0)
         if result_t.item() == 0:
-            return False, step_losses, l_pre
+            return False, losses, l_pre
 
-        return True, step_losses, l_pre
+        return True, losses, l_pre
 
     finally:
         del trainer, model
@@ -332,28 +332,28 @@ def phase2_resume_and_train(
         train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
 
         training_loss = train_result.training_loss
-        step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
         global_step = trainer.state.global_step
 
         log(f"  Training loss:  {training_loss:.6f}")
-        log(f"  Step losses:    {[f'{l:.4f}' for l in step_losses]}")
+        log(f"  Step losses:    {[f'{l:.4f}' for l in losses]}")
         log(f"  Final step:     {global_step} (expected {TOTAL_STEPS})")
 
         loss_ok = math.isfinite(training_loss)
         steps_ok = global_step == TOTAL_STEPS
-        all_finite = all(math.isfinite(l) for l in step_losses) if step_losses else True
+        all_finite = all(math.isfinite(l) for l in losses) if losses else True
 
         if not loss_ok:
             log(f"  ERROR: Loss not finite: {training_loss}")
         if not steps_ok:
             log(f"  ERROR: Expected {TOTAL_STEPS} global steps, got {global_step}")
         if not all_finite:
-            log(f"  ERROR: NaN/Inf in resumed step losses: {step_losses}")
+            log(f"  ERROR: NaN/Inf in resumed step losses: {losses}")
 
         cap = resume_capture.capture
         if cap is None:
             log("  ERROR: resume-capture callback did not fire (on_train_begin missed)")
-            return False, step_losses
+            return False, losses
 
         l_post = cap["l_post"]
         loss_delta = abs(l_post - l_pre)
@@ -377,7 +377,7 @@ def phase2_resume_and_train(
             )
 
         ok = loss_ok and steps_ok and all_finite and weights_ok and optim_ok
-        return ok, step_losses
+        return ok, losses
 
     finally:
         del trainer, model

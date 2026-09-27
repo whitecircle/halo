@@ -43,7 +43,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 NUM_TRAIN_SAMPLES = 32
@@ -224,9 +224,9 @@ def run(ctx):
     _install_sweep_divisor_probe(trainer, ep_config, sweep_verdict)
 
     train_result = trainer.train()
-    step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     log(f"\nFinal loss: {train_result.training_loss:.6f}")
-    log(f"Step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"Step losses: {[f'{l:.4f}' for l in losses]}")
 
     # Non-expert params are FSDP-sharded over the EP group (1D mesh of ep_group_size), NOT a 2D
     # HSDP mesh — the deferred sweep handles the cross-domain replica average. Confirm the
@@ -247,7 +247,7 @@ def run(ctx):
         "is_deferred_dp": ep_config.is_deferred_dp,
         "sharded_over_ep_group": sharded_over_ep_group,
         "loss_finite": math.isfinite(train_result.training_loss),
-        "loss_decreased": len(step_losses) >= 2 and step_losses[-1] < step_losses[0],
+        "loss_decreased": len(losses) >= 2 and losses[-1] < losses[0],
         "replica_consistency": _check_replica_consistency(model, ep_config),
         # Absent keys mean the probe never ran — the sweep did not fire, which is itself the
         # failure this file exists to catch, so they must not default to True.

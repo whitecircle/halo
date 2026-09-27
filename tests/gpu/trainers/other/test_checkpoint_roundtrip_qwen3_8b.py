@@ -60,7 +60,7 @@ from tests.common.distributed import (
     teardown_distributed,
 )
 from tests.common.models import QWEN3_8B
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 # Configuration
 
@@ -92,7 +92,7 @@ def train_and_save(
     """Train model and save checkpoint. All ranks must call this.
 
     Returns:
-        (success, training_loss, step_losses)
+        (success, training_loss, losses)
     """
     model = None
     trainer = None
@@ -151,9 +151,9 @@ def train_and_save(
 
         train_result = trainer.train()
         training_loss = train_result.training_loss
-        step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
         log(f"  Training loss: {training_loss:.6f}")
-        log(f"  Step losses: {[f'{l:.4f}' for l in step_losses]}")
+        log(f"  Step losses: {[f'{l:.4f}' for l in losses]}")
 
         # Save
         log(f"  [3/3] Saving checkpoint to {save_dir}...")
@@ -161,7 +161,7 @@ def train_and_save(
         dist.barrier()
         log("  Checkpoint saved")
 
-        return True, training_loss, step_losses
+        return True, training_loss, losses
 
     except Exception as e:
         log(f"  Train/save FAILED: {e}")

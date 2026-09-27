@@ -38,7 +38,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.peft_helpers import snapshot_adapters
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -193,14 +193,12 @@ def run_lora_ep_convergence(
         log(f"  Training for {MAX_STEPS} steps...")
         train_result = trainer.train()
 
-        step_losses = [
-            entry["loss"] for entry in trainer.state.log_history if "loss" in entry and "eval_loss" not in entry
-        ]
-        log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+        losses = step_losses(trainer)
+        log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
         log(f"  Final training loss: {train_result.training_loss:.6f}")
 
         log("\n  --- Convergence Analysis (LoRA+EP) ---")
-        checks = _analyze_convergence(step_losses)
+        checks = _analyze_convergence(losses)
 
         steps_ok = train_result.global_step == MAX_STEPS
         checks["steps_completed"] = steps_ok
@@ -212,7 +210,7 @@ def run_lora_ep_convergence(
         log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({lora_detail})")
 
         all_passed = all(checks.values())
-        detail = f"loss={step_losses[0]:.4f}->{step_losses[-1]:.4f}"
+        detail = f"loss={losses[0]:.4f}->{losses[-1]:.4f}"
         return all_passed, detail
 
     except Exception as e:

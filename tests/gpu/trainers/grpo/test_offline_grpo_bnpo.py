@@ -41,7 +41,7 @@ from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 20
@@ -193,24 +193,24 @@ def run_training(
     train_result = trainer.train()
 
     training_loss = train_result.training_loss
-    step_losses = [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     eval_losses = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
 
     metrics = {
         "training_loss": training_loss,
-        "step_losses": step_losses,
+        "step_losses": losses,
         "eval_losses": eval_losses,
     }
 
     log(f"\n  --- {mode_label} Results ---")
     log(f"  Training loss: {training_loss:.6f}")
-    log(f"  Step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"  Step losses: {[f'{l:.4f}' for l in losses]}")
     if eval_losses:
         log(f"  Eval losses: {[f'{l:.4f}' for l in eval_losses]}")
 
     checks = {}
     checks["loss_finite"] = math.isfinite(training_loss)
-    checks["all_steps_finite"] = all(math.isfinite(l) for l in step_losses)
+    checks["all_steps_finite"] = all(math.isfinite(l) for l in losses)
     checks["steps_completed"] = trainer.state.global_step == MAX_STEPS
     if not is_tp:
         checks["has_eval"] = len(eval_losses) > 0

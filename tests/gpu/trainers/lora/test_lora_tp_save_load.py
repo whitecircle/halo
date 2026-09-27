@@ -57,7 +57,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, step_losses
 
 # Configuration
 
@@ -383,11 +383,9 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
 
         log("[C.7] Validating training...")
         training_loss = train_result.training_loss
-        step_losses = [
-            entry["loss"] for entry in trainer.state.log_history if "loss" in entry and "eval_loss" not in entry
-        ]
+        losses = step_losses(trainer)
         log(f"  Training loss: {training_loss:.6f}")
-        log(f"  Per-step losses: {[f'{sl:.4f}' for sl in step_losses]}")
+        log(f"  Per-step losses: {[f'{sl:.4f}' for sl in losses]}")
 
         checks = {}
 
@@ -395,7 +393,7 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
         checks["loss_finite"] = loss_finite
         log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'}")
 
-        all_finite = all(math.isfinite(sl) for sl in step_losses)
+        all_finite = all(math.isfinite(sl) for sl in losses)
         checks["all_steps_finite"] = all_finite
         log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
 

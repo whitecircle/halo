@@ -45,7 +45,7 @@ from src.trainers.distillation.teacher_distillation import DistributedDistillati
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 NUM_TRAIN_SAMPLES = 32
@@ -219,14 +219,14 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
 
         training_loss = train_result.training_loss
         log_history = trainer.state.log_history
-        step_losses = [e["loss"] for e in log_history if "loss" in e and "eval_loss" not in e]
+        losses = step_losses(trainer)
         grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
         distill_losses = [e["distillation_loss"] for e in log_history if "distillation_loss" in e]
         sft_losses = [e["sft_loss"] for e in log_history if "sft_loss" in e]
 
         log("\n--- Metrics ---")
         log(f"Final loss: {training_loss:.6f}")
-        log(f"Step losses: {[f'{l:.4f}' for l in step_losses]}")
+        log(f"Step losses: {[f'{l:.4f}' for l in losses]}")
         if grad_norms:
             log(f"Grad norms: {[f'{g:.2f}' for g in grad_norms]}")
         if distill_losses:
@@ -237,10 +237,10 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
         log("\n--- Checks ---")
         checks = {}
 
-        checks["training_completed"] = len(step_losses) == NUM_TRAIN_STEPS
+        checks["training_completed"] = len(losses) == NUM_TRAIN_STEPS
         log(f"Training completed: {'PASS' if checks['training_completed'] else 'FAIL'}")
 
-        loss_finite = math.isfinite(training_loss) and all(math.isfinite(l) for l in step_losses)
+        loss_finite = math.isfinite(training_loss) and all(math.isfinite(l) for l in losses)
         checks["loss_finite"] = loss_finite
         log(f"Loss finite: {'PASS' if loss_finite else 'FAIL'}")
 

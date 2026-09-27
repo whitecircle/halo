@@ -26,7 +26,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 CP_SIZE = 2
@@ -112,22 +112,22 @@ def run(ctx):
 
     training_loss = train_result.training_loss
     log_history = trainer.state.log_history
-    step_losses = [e["loss"] for e in log_history if "loss" in e and "eval_loss" not in e]
+    losses = step_losses(trainer)
     grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
 
     log("\n--- Metrics ---")
     log(f"Final loss: {training_loss:.6f}")
-    log(f"Step losses: {[f'{lv:.4f}' for lv in step_losses]}")
+    log(f"Step losses: {[f'{lv:.4f}' for lv in losses]}")
 
     checks = {}
     loss_finite = all(
-        not (torch.isnan(torch.tensor(lv)) or torch.isinf(torch.tensor(lv))) for lv in step_losses + [training_loss]
+        not (torch.isnan(torch.tensor(lv)) or torch.isinf(torch.tensor(lv))) for lv in losses + [training_loss]
     )
     checks["loss_finite"] = loss_finite
     log(f"Loss finite: {'PASS' if loss_finite else 'FAIL'}")
 
-    if len(step_losses) >= 2:
-        first_loss, last_loss = step_losses[0], step_losses[-1]
+    if len(losses) >= 2:
+        first_loss, last_loss = losses[0], losses[-1]
         loss_decreased = last_loss < first_loss
         checks["loss_decreased"] = loss_decreased
         log(f"Loss decreased: {'PASS' if loss_decreased else 'FAIL'} ({first_loss:.4f} -> {last_loss:.4f})")

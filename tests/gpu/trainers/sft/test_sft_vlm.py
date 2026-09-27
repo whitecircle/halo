@@ -35,7 +35,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL_NAME = QWEN3_VL_2B
 MAX_STEPS = 5
@@ -225,12 +225,11 @@ def run(ctx):
     train_result = trainer.train()
 
     training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    step_losses = [entry["loss"] for entry in log_history if "loss" in entry and "eval_loss" not in entry]
+    losses = step_losses(trainer)
 
     log("\n  --- Training Results ---")
     log(f"  Final training loss: {training_loss:.6f}")
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+    log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
 
     log("\n  --- Assertions ---")
     checks = {}
@@ -239,7 +238,7 @@ def run(ctx):
     checks["loss_finite"] = loss_finite
     log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} (loss={training_loss:.6f})")
 
-    all_finite = all(math.isfinite(l) for l in step_losses)
+    all_finite = all(math.isfinite(l) for l in losses)
     checks["all_steps_finite"] = all_finite
     log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
 
