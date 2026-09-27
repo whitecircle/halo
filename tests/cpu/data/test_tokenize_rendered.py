@@ -453,9 +453,9 @@ def test_classification_row_maps_multi_labels_of_either_type(labels, expected):
 
 @pytest.mark.parametrize("sentinel", [-1, "-1"])
 def test_classification_row_skips_the_unlabeled_sentinel_in_a_multi_label_row(sentinel):
-    """``get_label_list`` warns about and REMOVES ``-1`` from the label list, so it has no id to look
-    up — the single-label branch passes it through, and a multi-hot row says the same thing by leaving
-    every slot at 0. Without the skip the row ``KeyError``s on a key the pipeline deliberately dropped.
+    """``build_label_list`` REMOVES ``-1`` from the class list, so it has no id to look up: a multi-hot
+    row reads it as absence, leaving its slot at 0. Without the skip the row ``KeyError``s on a key the
+    pipeline deliberately dropped.
     """
     module = _classification_script()
 

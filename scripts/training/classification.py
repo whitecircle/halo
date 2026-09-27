@@ -17,6 +17,7 @@ Usage:
 
 import torch.distributed as dist
 from accelerate.logging import get_logger
+from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
 from trl import ModelConfig
 
@@ -52,6 +53,10 @@ logger = get_logger(__name__, log_level="INFO")
 
 # A "no label" row, in the stringified form get_label_list gives every label.
 NO_LABEL_SENTINEL = "-1"
+
+# Every split whose labels join the class list: an eval split may hold a class train lacks, and a
+# split the run never reads still counts, so the head does not change shape with the eval setting.
+LABEL_SPLITS = ("train", "validation", "test")
 
 
 def tokenize_classification_row(
@@ -123,25 +128,67 @@ def require_prompt_or_text_column(train_columns: list[str], text_field: str | No
     )
 
 
-def drop_no_label_sentinel(label_list: list[str], is_multi_label: bool) -> list[str]:
-    """The stringified label set without the ``-1`` "no label" sentinel, refusing it on single-label data.
+def run_splits(training_config) -> tuple[str, ...]:
+    """The splits the run reads: train, and the ``test`` eval split when the run evaluates."""
+    evaluates = training_config.eval_strategy not in ("no", None) or training_config.eval_on_start
+    return ("train", "test") if evaluates else ("train",)
+
+
+def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
+    """Each label-bearing split's stringified label set, unioned across the world on a pre-sharded load.
+
+    A pre-sharded dataset leaves each rank part of a split's labels, giving a rank-divergent
+    num_labels and so a different [num_labels, hidden] score head per rank, which breaks the
+    FSDP2/DDP all-reduce over it.
+    """
+    labels = {split: set(get_label_list(ds, split)) for split in LABEL_SPLITS if split in ds}
+    if dataset_presharded and get_global_world_size() > 1:
+        gathered = [None] * get_global_world_size()
+        dist.all_gather_object(gathered, labels)
+        labels = {split: set().union(*(part[split] for part in gathered)) for split in labels}
+    return labels
+
+
+def refuse_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_multi_label: bool) -> None:
+    """Refuse the ``-1`` "no label" sentinel in a single-label split the run reads.
 
     A multi-hot row reads the sentinel as absence. A single-label row has no class to put it in:
-    ``-1`` would reach the cross-entropy as an out-of-range class index. Runs on the world-agreed
-    label set, before the model load, so every rank raises together.
+    ``-1`` would reach the cross-entropy as an out-of-range class index. A split the run never reads
+    is dropped before tokenization, so an unlabeled GLUE-style test split does not block a run that
+    does not evaluate. Runs on the world-agreed label sets, before the model load, so every rank
+    raises together.
     """
-    if NO_LABEL_SENTINEL not in label_list:
-        return label_list
-    if not is_multi_label:
+    if is_multi_label:
+        return
+    for split in used_splits:
+        if NO_LABEL_SENTINEL not in split_labels.get(split, ()):
+            continue
+        if split == "train":
+            remedy = "Filter those rows out, e.g. dataset.filter(lambda row: str(row['label']) != '-1')."
+        else:
+            remedy = (
+                "Evaluate on labeled rows instead: point dataset at the train split alone (e.g. "
+                "dataset: <hub id>@train) and cut the eval split from it with test_size, or set "
+                "eval_strategy: no."
+            )
         raise ValueError(
-            f"The single-label dataset carries the {NO_LABEL_SENTINEL!r} 'no label' sentinel (an unlabeled "
-            f"row, as in GLUE-style test splits). A single-label row has no class to put it in, and "
-            f"the loss would read it as an out-of-range class index. Filter those rows out, e.g. "
-            f"dataset.filter(lambda row: str(row['label']) != '-1')."
+            f"The '{split}' split of this single-label dataset carries the {NO_LABEL_SENTINEL!r} 'no "
+            f"label' sentinel (unlabeled rows, as in GLUE-style test splits), and the run reads that "
+            f"split. A single-label row has no class to put it in, and the loss would read it as an "
+            f"out-of-range class index. {remedy}"
         )
-    if is_global_main_process():
+
+
+def build_label_list(split_labels: dict[str, set[str]]) -> list[str]:
+    """The sorted class list: every split's labels, less the ``-1`` "no label" sentinel."""
+    for split, labels in split_labels.items():
+        eval_only = sorted(labels - split_labels["train"] - {NO_LABEL_SENTINEL})
+        if eval_only and is_global_main_process():
+            logger.warning(f"Labels {eval_only} in {split} set but not in training set, adding them")
+    union = set().union(*split_labels.values())
+    if NO_LABEL_SENTINEL in union and is_global_main_process():
         logger.warning(f"Label {NO_LABEL_SENTINEL} found in label list, removing it.")
-    return [label for label in label_list if label != NO_LABEL_SENTINEL]
+    return sorted(union - {NO_LABEL_SENTINEL})
 
 
 def get_label_list(raw_dataset, split="train") -> list[str]:
@@ -185,29 +232,10 @@ def main():
         if is_global_main_process():
             logger.info("Label type is list, doing multi-label classification")
 
-    label_list = get_label_list(ds, split="train")
-    for split in ["validation", "test"]:
-        if split in ds:
-            val_or_test_labels = get_label_list(ds, split=split)
-            diff = set(val_or_test_labels).difference(set(label_list))
-            if len(diff) > 0:
-                if is_global_main_process():
-                    logger.warning(f"Labels {diff} in {split} set but not in training set, adding them")
-                label_list += list(diff)
-
-    # A pre-sharded dataset leaves each rank part of the label set, giving a rank-divergent num_labels
-    # and so a different [num_labels, hidden] score head per rank, which breaks the FSDP2/DDP
-    # all-reduce over it. Union the label set across the world so every rank builds an identical head.
-    if dataset_presharded and get_global_world_size() > 1:
-        gathered = [None] * get_global_world_size()
-        dist.all_gather_object(gathered, list(label_list))
-        union = set()
-        for part in gathered:
-            union.update(part or [])
-        label_list = list(union)
-
-    label_list = drop_no_label_sentinel(label_list, is_multi_label)
-    label_list.sort()
+    used_splits = run_splits(classification_config)
+    split_labels = split_label_sets(ds, dataset_presharded)
+    refuse_unlabeled_rows(split_labels, used_splits, is_multi_label)
+    label_list = build_label_list(split_labels)
     num_labels = len(label_list)
     if num_labels <= 1:
         raise ValueError("You need more than one label to do classification.")
@@ -245,8 +273,9 @@ def main():
 
     log_model_info(model, tokenizer)
 
+    # Only the splits the run reads are tokenized; an unread one may hold rows no class id covers.
     ds = coordinated_map(
-        ds,
+        DatasetDict({split: ds[split] for split in used_splits}),
         tokenize_classification_row,
         num_proc=resolve_map_num_proc(classification_config.dataset_num_proc),
         batched=False,
@@ -265,7 +294,7 @@ def main():
     )
 
     train_dataset = ds["train"]
-    eval_dataset = ds["test"]
+    eval_dataset = ds.get("test")
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, classification_config)
 
