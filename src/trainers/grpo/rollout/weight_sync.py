@@ -3,10 +3,10 @@
 Both push the trained policy to the rollout server over the vendored NCCL client: EP expert shards
 first, then the FSDP2-DP / TP shards of every dense param. The gathers must run on **every** rank
 (``full_tensor()`` and ``gather_expert_state_dict`` are collectives that hang if a rank skips them),
-while only the forwarding rank (global-main, TP-rank 0 under TP) sends. PEFT/LoRA is folded into the
-base and forwarded under base-model param names, and the frozen base is written back exactly after
-the unfold. Every family is gathered in its own hub checkpoint layout, which both engines' loaders
-read; which families an engine serves at all is read off its client class at construction.
+while only the forwarding rank (global-main, TP-rank 0 under TP) sends. PEFT/LoRA is folded into each
+base weight out of place as it is sent, and forwarded under base-model param names; the frozen base
+is never written. Every family is gathered in its own hub checkpoint layout, which both engines'
+loaders read; which families an engine serves at all is read off its client class at construction.
 
 Those sends sit between the gathers, so each runs under a :class:`DeferredRankFailure` and the verdict
 is taken at a rank-uniform ``reject``; a forwarding rank raising mid-loop would otherwise leave every
@@ -24,6 +24,7 @@ from typing import Any
 
 import torch
 from accelerate.utils import is_peft_model
+from peft.tuners.lora import LoraLayer
 from transformers.core_model_loading import (
     WeightConverter,
     WeightRenaming,
@@ -57,7 +58,8 @@ from src.models.moe_balancing import (
 from src.models.patches.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from src.models.structure import (
     base_transformers_model,
-    merged_adapters,
+    lora_fold_targets,
+    lora_folded,
     model_has_quantized_params,
     normalize_peft_param_name,
     unwrap_framework_wrappers,
@@ -77,12 +79,14 @@ _HELD_CONVERTER_BUDGET_BYTES = WEIGHT_SYNC_CHUNK_BYTES
 def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
     """Construction gate for the trainers that push weights to the ``backend`` rollout engine.
 
-    Seven failure classes are rejected here rather than at the first sync:
+    Eight failure classes are rejected here rather than at the first sync:
 
     - **Quantized bases (QLoRA)**: ``_send_dense_weights`` forwards raw ``named_parameters`` storage
       under base-weight names, so a bnb-quantized base ships packed non-floating-point tensors
-      (``Params4bit`` uint8) the server rejects, and the per-sync LoRA merge/unmerge round-trip
-      through 4-bit weights is lossy.
+      (``Params4bit`` uint8) the server rejects.
+    - **PEFT layers the sync cannot fold** (:func:`~src.models.structure.lora_fold_targets`): the
+      delta of an ``nn.MultiheadAttention`` LoRA, trainable tokens or another tuner layer would never
+      reach the pushed weights.
     - **GptOss with sinks removed** (the flash_attention_2 ``reset_sinks`` reset): the removed
       ``sinks`` slots leave ``named_parameters``, so nothing is pushed for them and the rollout engine
       keeps serving the pretrained sinks against a sink-free trainer, with no error at sync time.
@@ -112,6 +116,7 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
             "corrupt the served policy. Use plain LoRA (use_peft without load_in_4bit/load_in_8bit) "
             "or full fine-tuning."
         )
+    lora_fold_targets(model)
     # Refused rather than repaired (the second failure class above): every checkpoint writer re-emits
     # neutralized sinks, but this sync forwards named_parameters and has no such seam.
     if neutralized_gpt_oss_sinks(model):
@@ -225,7 +230,7 @@ class _HubForwarder:
 
     Live-tree names go through three rewrites in order: :attr:`~EPMoELayerBase._EXPORT_KEY_RENAMES`
     inside EP layers (Laguna); the PEFT base-name normalization (adapter-only tensors are dropped,
-    their delta already merged); and, for a family declaring ``_EXPORTS_HUB_NAMESPACE`` (Step-3.7),
+    their delta already folded); and, for a family declaring ``_EXPORTS_HUB_NAMESPACE`` (Step-3.7),
     transformers' save-side conversion revert. Renames are one-to-one and stream; a tensor a reverse
     ``WeightConverter`` claims is held until :meth:`flush`, since a many-to-one revert needs all of
     its sources together while the engine loads one tensor at a time.
@@ -323,7 +328,7 @@ def _send_ep_expert_weights(
     for layer_name, module in ep_layers.items():
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
-        # PEFT's merge_adapter covers only the attention adapters, so the native expert-LoRA is folded here.
+        # The PEFT fold covers only the attention adapters, so the native expert-LoRA is folded here.
         gather = partial(module.gather_expert_state_dict, "cuda", merge_lora=True, retain=retain)
         # Guarded only where it retains: a non-retaining rank runs the same collectives and keeps
         # nothing, so a raise there is a group-wide failure rather than this rank's own.
@@ -350,6 +355,7 @@ def _send_dense_weights(
     model: torch.nn.Module,
     ep_layers: dict[str, EPMoELayerBase],
     forwarder: _HubForwarder | None,
+    folds: dict[int, list[LoraLayer]],
 ) -> None:
     """Gather non-expert (dense) params — one ``full_tensor()`` over FSDP2 DP and TP — and forward them.
 
@@ -367,11 +373,16 @@ def _send_dense_weights(
             continue
         if hand_sliced and name.endswith(hand_sliced):
             continue
-        data = materialize_dtensor(param.data)  # collective on every rank
+        layers = folds.get(id(param))
+        # Folded one tensor at a time, so the only extra memory is this param's temporaries. The fold
+        # and the gather are collectives on every rank.
+        data = materialize_dtensor(lora_folded(param, layers) if layers else param.data)
         if forwarder is not None:
-            # A plain param aliases the live weight, which the PEFT unmerge rewrites before the tail
-            # flush; the client buffers a snapshot, so no clone is needed here.
+            # A plain unfolded param aliases the live weight; the client buffers a snapshot, so it is
+            # sent without a clone.
             forwarder.send(name, data)
+        # Dropped before the next gather, so two full tensors are never alive at once.
+        del data
 
     # Every rank drains this (collective); only the forwarding rank sends.
     for name, full_tensor in iter_tp_sharded_non_dtensor_full(model):
@@ -431,16 +442,15 @@ def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
     """Gather EP + dense/TP weights from ``model`` and forward to the engine via ``sender``.
 
     Runs on **every** rank (the gathers are collective); ``sender`` is the engine client on the
-    forwarding rank and ``None`` elsewhere. The experts go first, then the dense params with PEFT/LoRA
-    merged and forwarded under base-model names. The caller flushes afterwards with
-    ``sender.reset_prefix_cache()``. Returns whether ``model`` is PEFT.
+    forwarding rank and ``None`` elsewhere. PEFT/LoRA is folded into each base weight out of place and
+    forwarded under base-model names. The caller flushes afterwards with ``sender.reset_prefix_cache()``.
+    Returns whether ``model`` is PEFT.
     """
     # FSDP2 leaves a forward's transient unsharded params registered while the optimizer steps the
     # shards, so the params a mid-training sync finds registered predate the last update: every
-    # per-step push would ship a policy one optimizer step behind, and the merge below would fold the
-    # adapter into a copy the next unshard discards. Same call the optimizer build and every
-    # checkpoint writer make, for the same reason. Rank-uniform: a rank that skipped it would also
-    # skip the DTensor gathers its peers enter.
+    # per-step push would ship a policy one optimizer step behind, folded from stale adapters. Same
+    # call the optimizer build and every checkpoint writer make, for the same reason. Rank-uniform: a
+    # rank that skipped it would also skip the DTensor gathers its peers enter.
     reshard_fsdp2_modules(model)
     # The forwarding rank's sends sit between the gathers below, and every one of them can fail on
     # that rank alone. Raising there would drop it out of the gather order its peers follow, so record
@@ -455,15 +465,14 @@ def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> bool:
         if sender
         else None
     )
-    # Experts first, outside the PEFT merge: the expert gather folds native expert-LoRA into its own
-    # copy, and it is the sync's largest rank-local allocation, which the base copy below must not join.
+    # Out of place, not PEFT's merge/unmerge: in bf16 the unmerge misses the frozen base by a rounding
+    # step, and the sync repeats every few steps for the whole run. Resolved before any tensor streams,
+    # so a layer it cannot fold raises first.
+    folds = lora_fold_targets(model)
     _send_ep_expert_weights(ep_layers, forwarder, guard)
-    # restore_base: a bf16 unmerge misses the frozen base by a rounding step, and the sync repeats
-    # every few steps for the whole run, so the miss would compound into a base the run never loaded.
-    with merged_adapters(model, restore_base=True):
-        _send_dense_weights(model, ep_layers, forwarder)
-    # Collective on every rank. Raises on all of them with the forwarding rank's cause, after the
-    # adapters are unmerged, so a failed sync leaves the trainer's own weights untouched.
+    _send_dense_weights(model, ep_layers, forwarder, folds)
+    # Collective on every rank. Raises on all of them with the forwarding rank's cause; the sync
+    # writes none of the trainer's own weights, so a failed one leaves them untouched.
     guard.reject()
     return peft
 

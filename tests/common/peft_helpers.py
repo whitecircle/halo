@@ -64,9 +64,10 @@ _DEFAULT_ATTENTION_TARGETS = ["q_proj", "v_proj"]
 _MOE_MODES = frozenset({"expert_lora", "mixed"})
 
 # Attention projections live under one of these containers depending on the family.
-_ATTENTION_LEAF = r"\.(?:self_attn|self_attention|attention|attn)\.([A-Za-z0-9_]+)"
-_ATTENTION_PROJ_RE = re.compile(_ATTENTION_LEAF + r"\.weight$")
-_ATTENTION_MODULE_RE = re.compile(_ATTENTION_LEAF + "$")
+_ATTENTION_CONTAINERS = ("self_attn", "self_attention", "attention", "attn")
+_ATTENTION_PROJ_RE = re.compile(rf"\.(?:{'|'.join(_ATTENTION_CONTAINERS)})\.([A-Za-z0-9_]+)\.weight$")
+# Token mixers a hybrid family interleaves with attention (Qwen3.5's GatedDeltaNet).
+_MIXER_MODULE_RE = re.compile(rf"\.(?:{'|'.join((*_ATTENTION_CONTAINERS, 'linear_attn'))})\.([A-Za-z0-9_]+)$")
 
 
 def _materialize(t: torch.Tensor) -> torch.Tensor:
@@ -103,14 +104,15 @@ def attention_target_modules(model_name: str, revision: str | None = None) -> li
     return sorted(name for name in found if name.endswith("_proj")) or list(_DEFAULT_ATTENTION_TARGETS)
 
 
-def attention_linear_leaves(model: torch.nn.Module) -> list[str]:
-    """Leaf names of every ``nn.Linear`` under an attention container of ``model``'s own module tree:
-    the attention targets of a tiny single-file checkpoint, which has no index to read them from."""
+def mixer_linear_leaves(model: torch.nn.Module) -> list[str]:
+    """Leaf names of every ``nn.Linear`` under a token mixer of ``model``'s own module tree (attention,
+    and a hybrid family's linear attention): the targets of a tiny single-file checkpoint, which has no
+    index to read them from."""
     return sorted(
         {
             match.group(1)
             for name, module in model.named_modules()
-            if isinstance(module, torch.nn.Linear) and (match := _ATTENTION_MODULE_RE.search(name))
+            if isinstance(module, torch.nn.Linear) and (match := _MIXER_MODULE_RE.search(name))
         }
     )
 

@@ -14,7 +14,7 @@ lives here is the axis x adapter table, the vLLM-server ``GRPOConfig``, the two 
 TP + LoRA refusal and SDPG's OPD term.
 
 ``adapter`` puts the row on a fold no full fine-tune needs: attention PEFT reaches the engine through
-the sync's ``merge_adapter``, native grouped expert LoRA through ``merge_lora=True`` in the expert
+the sync's out-of-place PEFT fold, native grouped expert LoRA through ``merge_lora=True`` in the expert
 gather.
 
 ``resume`` covers the invariant TRL's ``_last_loaded_step`` sentinel carries: a resumed run generates
@@ -398,8 +398,8 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
         log(f"  checkpoint policy: { {k: round(v, 4) for k, v in checkpoint_policy.items()} }")
     ctx.barrier()
 
-    # The base-weight witness belongs to the single-phase rows: here the merge/unmerge round-trip is
-    # judged by the resumed engine landing back on the checkpoint's policy.
+    # The base-weight witness belongs to the single-phase rows: here the fold is judged by the resumed
+    # engine landing back on the checkpoint's policy.
     _perturb_and_sync(ctx, trainer, spec, checks, check_base_untouched=False)
     ctx.barrier()
     if ctx.rank == 0:

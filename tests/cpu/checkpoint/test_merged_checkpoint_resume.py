@@ -483,7 +483,7 @@ def test_the_merged_save_undoes_its_merge_exactly():
     model, base = _bf16_lora_linear()
     original = base.detach().clone()
 
-    with merged_adapters(model):
+    with merged_adapters(model, restore_base=False):
         pass
     plain_unmerge_drifts = not torch.equal(base, original)
     with torch.no_grad():
@@ -531,7 +531,7 @@ def test_the_exact_unmerge_reaches_a_tied_base_weight():
     original = tied.detach().clone()
 
     for _ in range(20):
-        with merged_adapters(model):
+        with merged_adapters(model, restore_base=False):
             pass
     plain_unmerge_drifts = not torch.equal(tied, original)
     with torch.no_grad():

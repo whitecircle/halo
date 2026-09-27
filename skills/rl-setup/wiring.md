@@ -171,7 +171,7 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
    (default 1024). The first flush opens the update (`/pause?mode=keep` → `/start_weight_update`);
    each chunk is a `/update_weights` declaration alongside `packed_broadcast_producer`.
    `reset_prefix_cache()` sends the tail chunk, then `/finish_weight_update` → `/resume`. PEFT
-   adapters are merged first, names stripped of `base_model.model.`. `sync_model_weights()` is the
+   adapters are folded into each base weight as it is sent, names stripped of `base_model.model.`. `sync_model_weights()` is the
    single-call form of the same phases (`update_model_params`, the reconnect replay).
 
 The parallelism-aware gather is the shared `gather_and_send_weights`
@@ -184,7 +184,7 @@ DTensors). The hand-sliced non-DTensor TP shards — GptOss sinks — are skippe
 gathered by `iter_tp_sharded_non_dtensor_full`; shipping this rank's slice under the full-tensor
 name would corrupt the served weights. **All ranks must enter
 the gather; only the global-main tp_rank-0 process sends.** PEFT adapters are
-merged into the base and forwarded under base-model names. Multi-homed clusters:
+folded into each base weight out of place and forwarded under base-model names. Multi-homed clusters:
 pin the control-plane NIC via `VLLM_GROUP_HOST` (distinct from
 `NCCL_SOCKET_IFNAME`). A server on another EFA node: compose EFA overlay on the
 server, `make ... EFA=1` on the trainer, `scripts/profiling/weight_sync_transport.py

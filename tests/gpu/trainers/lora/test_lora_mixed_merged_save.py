@@ -19,10 +19,9 @@ Each check fails when a piece of that wiring breaks:
      no ``lora_`` tensor and no ``original_module`` duplicate. A leaked PEFT prefix is exactly what
      makes ``from_pretrained`` load nothing and leave those weights randomly initialised.
   4. Value correctness: the tensors on disk are the live model's MERGED weights, gathered through the
-     same seams the save uses. By distance, not bitwise — bf16 merge is not exactly reversible, and
-     the save merges a second time from an already-rounded base — so each written tensor must sit far
-     closer to the merged weight than to the frozen base, which an unmerged save lands exactly on.
-     The base is compared too, to prove the merge moved something and the check is not vacuous.
+     same seams the save uses, bit for bit: this test's merge and the save's both fold into the same
+     base, since each writes the base back exactly afterwards. The base is compared too, to prove the
+     merge moved something and the check is not vacuous.
   5. The save is non-destructive: every LoRA-wrapped base weight and every adapter is bit-identical
      afterwards, and the adapters are still trainable — so an intermediate merged checkpoint does not
      silently end the run's training (``merge_adapter`` is paired with ``unmerge_adapter``, unlike
@@ -88,11 +87,6 @@ _PEFT_KEY_ARTIFACTS = ("base_model.", ".base_layer", "lora_A", "lora_B", "origin
 
 # Below this the adapters did not move enough in MAX_STEPS for anything downstream to be meaningful.
 _MIN_ADAPTER_EFFECT = 1e-2
-# How much closer a written tensor must sit to the merged weight than to the frozen base. bf16 merge
-# is not exactly reversible, so the checkpoint lands a rounding step from `expected` rather than on
-# it; measured separation is 4x, and an UNMERGED save sits exactly on base (ratio 0), so anything
-# above 1 both tolerates the rounding and still fails the bug this samples for.
-MERGE_DISTANCE_MARGIN = 2.0
 
 
 def _probe_batch(tokenizer, device):
@@ -322,18 +316,11 @@ def run(ctx) -> dict:
     log("\n[5/5] Comparing the written tensors against the live MERGED weights...")
     written = _read_checkpoint_tensors(merged_dir, sample_keys)
 
-    # Compared by DISTANCE, not bitwise: `expected` comes from this test's own merge, which is then
-    # undone, and save_model merges a SECOND time from the already-rounded base — in bf16
-    # (w+d)-d+d != w+d, so the two agree to a rounding step. The frozen base is the discriminator:
-    # an unmerged save lands exactly ON it, a merged one sits a rounding step from `expected` and a
-    # whole LoRA delta away from base (measured: 4x). A key absent from the checkpoint counts as a
-    # mismatch, not a KeyError — "the save dropped it" is one of the failures this catches.
+    # Bitwise: `expected` comes from this test's own merge, which writes the base back exactly, so
+    # save_model merges from the same base. A key absent from the checkpoint counts as a mismatch, not
+    # a KeyError — "the save dropped it" is one of the failures this catches.
     def _is_the_merged_weight(key: str) -> bool:
-        if key not in written:
-            return False
-        to_merged = (written[key].float() - expected[key].float().cpu()).abs().max()
-        to_base = (written[key].float() - unmerged[key].float().cpu()).abs().max()
-        return bool(to_merged * MERGE_DISTANCE_MARGIN < to_base)
+        return key in written and torch.equal(written[key], expected[key])
 
     mismatched = sorted(k for k in sample_keys if not _is_the_merged_weight(k))
     checks["written_tensors_are_the_merged_weights"] = bool(sample_keys) and not mismatched

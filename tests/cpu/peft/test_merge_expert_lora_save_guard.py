@@ -202,12 +202,12 @@ def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
     assert not torch.equal(ep_calls[0]["written_weight"], unmerged), (
         "the base weight handed to the gather is the frozen one — the attention delta was not folded"
     )
-    # Unmerged again afterwards, so the re-save the merge guard recommends is repeatable mid-run.
-    # By state and by value, to a rounding step: (w+d)-d != w exactly, which is why merge_adapter is
-    # paired with unmerge_adapter rather than merge_and_unload dissolving the PeftModel.
+    # Unmerged again afterwards, the base written back exactly, so the re-save the merge guard
+    # recommends is repeatable mid-run: merge_adapter is paired with unmerge_adapter rather than
+    # merge_and_unload dissolving the PeftModel.
     wrapped = model.base_model.model.q_proj
     assert not wrapped.merged
-    assert torch.allclose(wrapped.base_layer.weight, unmerged, atol=1e-6)
+    assert torch.equal(wrapped.base_layer.weight, unmerged)
 
 
 def test_adapter_only_save_of_a_mixed_run_goes_to_the_peft_saver(tmp_path):

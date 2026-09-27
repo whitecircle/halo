@@ -1,15 +1,15 @@
 """Shared body of the LoRA weight-sync exactness suites: the syncs leave the frozen base bit-identical.
 
-Every rollout-engine sync (online GRPO, async GRPO with environments, SDPG; vLLM or SGLang) folds the
-PEFT adapters into their bf16 base weights in place, gathers and forwards the merged policy, and
-unfolds. The unfold alone, ``(w + d) - d``, misses ``w`` by a rounding step wherever the two roundings
-do not cancel, and the sync repeats every few steps for the whole run, so the sync writes the base
-back after it. ``test_lora_weight_sync_exact.py`` runs a representative dense and MoE family per mode;
-``test_lora_weight_sync_exact_families.py`` sweeps every other family the sync serves.
+Every rollout-engine sync (online GRPO, async GRPO with environments, SDPG; vLLM or SGLang) pushes the
+policy with the PEFT adapters folded into their bf16 base weights, one tensor at a time and out of
+place. Folding in place and unfolding with PEFT's unmerge would not give the base back: ``(w + d) - d``
+misses ``w`` by a rounding step wherever the two roundings do not cancel, and the sync repeats every
+few steps for the whole run. ``test_lora_weight_sync_exact.py`` runs a representative dense and MoE
+family per mode; ``test_lora_weight_sync_exact_families.py`` sweeps every other family the sync serves.
 
 A row is one tiny random-init family (``--family``) under one sharding (``--mode``: ``fsdp`` for a
 dense model; ``ep1`` with FSDP-sharded DTensor experts, ``ep2`` with plain experts, or pure ETP
-``etp2`` for a MoE) with stock PEFT on the attention projections (every linear layer on a dense
+``etp2`` for a MoE) with stock PEFT on the token mixers' projections (every linear layer on a dense
 model), alone or mixed with native expert LoRA (``--adapters``). Syncs run through the trainers' own
 entry (``sync_trainer_weights``, no server), and the row must:
 
@@ -28,17 +28,26 @@ entry (``sync_trainer_weights``, no server), and the row must:
      row's experts with their delta folded, off the base experts, and a PEFT-only row's as their base.
      Expected tensors are spelled by the sync's own forwarder, so export renames and hub-namespace
      reverts name them as a push does.
-  4. Negative control: ``CONTROL_STEPS`` further step syncs with the write-back dropped move the base
-     (per-sync counts and the largest drift are reported as metrics), so checks 2 and 3 cannot pass
-     vacuously on this row.
+  4. Negative control: ``CONTROL_STEPS`` further step syncs inside an in-place PEFT merge/unmerge
+     (``folded_in_place``) move the base (per-sync counts and the largest drift are reported as
+     metrics), so checks 2 and 3 cannot pass vacuously on this row.
+  5. Memory: the peak a step sync requests over what was requested before it stays within
+     ``FOLD_PEAK_BOUND`` largest-folded-tensor sizes of the in-place syncs' peak, which fold nothing
+     themselves (the first step sync is left out: it pays one-time allocations). Per fold, recorded on
+     the last step sync: every folded tensor is recorded, each fold's own peak stays within the same
+     allowance, and the bytes held as each fold starts do not grow along the walk by more than one
+     tensor, so nothing a fold makes outlives its tensor. The row must be one where a copy of the whole LoRA'd shard
+     would exceed the bound.
 
 TP is no mode: every LoRA shape is refused at trainer construction under TP.
 """
 
 import argparse
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -71,12 +80,14 @@ from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 from trl import SFTConfig
 
+import src.trainers.grpo.rollout.weight_sync as weight_sync
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes, has_ep_lora
+from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-from src.models.structure import unwrap_framework_wrappers
+from src.models.structure import lora_fold_targets, unwrap_framework_wrappers
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.sft import DistributedSFTTrainer
@@ -97,26 +108,31 @@ from tests.common.models import (
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
-from tests.common.peft_helpers import attention_linear_leaves, load_peft_model
-from tests.common.utils import log
+from tests.common.peft_helpers import load_peft_model, mixer_linear_leaves
+from tests.common.utils import log, log_all
 from tests.common.weight_sync import (
     RecordingSender,
     as_pushed,
+    folded_in_place,
     local_parameters,
     lora_bases_and_merges,
     moved_parameters,
-    without_the_base_write_back,
 )
 
 SEED = 42
 WORLD_SIZE = 2
 # Optimizer steps followed by one sync each, as shipped; then, at the next step, PUSHES syncs of the
-# adapters that step left; then CONTROL_STEPS step syncs with the base write-back dropped.
-STEP_SYNCS = 2
+# adapters that step left; then CONTROL_STEPS step syncs inside an in-place merge/unmerge.
+STEP_SYNCS = 3
 PUSHES = 4
 CONTROL_STEPS = 3
 # Large enough that each step moves lora_B by far more than a bf16 rounding step of the base.
 LEARNING_RATE = 5e-3
+# The out-of-place fold's allowance, in full sizes of the largest folded tensor: its shard copy and a
+# full delta. Measured on every row: a sync peaks exactly as an in-place one does, each fold at 1.5
+# sizes, and the bytes held as each fold starts never move; a fold keeping every folded tensor adds the
+# whole LoRA'd shard, 1.1-1.5 MiB here, and grows the fold starts by as much.
+FOLD_PEAK_BOUND = 2
 PROBE_TOKENS = 32
 MODES = {
     "fsdp": {},
@@ -240,13 +256,13 @@ def _is_adapter(name: str) -> bool:
 
 
 def _build_tiny_checkpoint(family: str, target_dir: str, tokenizer) -> list[str]:
-    """Rank 0: the family's seeded tiny model and the tokenizer, saved; returns its attention leaves,
-    the PEFT targets (MLA, fused QKV and gated attention spell them differently)."""
+    """Rank 0: the family's seeded tiny model and the tokenizer, saved; returns its token-mixer leaves,
+    the PEFT targets (MLA, fused QKV, gated and linear attention spell them differently)."""
     torch.manual_seed(SEED)
     model = FAMILIES[family].build(tokenizer).to(torch.bfloat16)
     model.save_pretrained(target_dir)
     tokenizer.save_pretrained(target_dir)
-    return attention_linear_leaves(model)
+    return mixer_linear_leaves(model)
 
 
 def _expert_bases_and_merges(peft_model) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -260,6 +276,47 @@ def _expert_bases_and_merges(peft_model) -> tuple[dict[str, torch.Tensor], dict[
     return bases, merges
 
 
+def _requested_bytes(stat: str) -> int:
+    return torch.cuda.memory_stats()[f"requested_bytes.all.{stat}"]
+
+
+def _sync_peak(model, sync: Callable[[], None]) -> int:
+    """Bytes ``sync`` requests at its peak over what was requested before it, on this rank.
+
+    Requested rather than allocated bytes: the caching allocator may serve a large request from a
+    cached block up to 1 MiB bigger and count the whole block, which would swamp a tiny row's fold.
+    Resharded first, so every measurement starts from the same registration rather than from whatever
+    unsharded params the step left behind, which the sync's own reshard would free inside the window.
+    """
+    reshard_fsdp2_modules(model)
+    torch.cuda.synchronize()
+    before = _requested_bytes("current")
+    torch.cuda.reset_peak_memory_stats()
+    sync()
+    torch.cuda.synchronize()
+    return _requested_bytes("peak") - before
+
+
+@contextmanager
+def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
+    """Record every tensor the sync folds: the bytes requested as its fold starts and the fold's own
+    peak over that. A fold that kept anything past its tensor would show as a start that grows along
+    the walk."""
+    fold = weight_sync.lora_folded
+
+    def recorded(param, layers):
+        torch.cuda.synchronize()
+        start = _requested_bytes("current")
+        torch.cuda.reset_peak_memory_stats()
+        folded = fold(param, layers)
+        torch.cuda.synchronize()
+        record.append((start, _requested_bytes("peak") - start))
+        return folded
+
+    with patch.object(weight_sync, "lora_folded", recorded):
+        yield
+
+
 def _probe_batch(tokenizer, device) -> dict[str, torch.Tensor]:
     """A fixed, rank-identical batch, so an EP forward keeps its dispatch collectives aligned."""
     ids = tokenizer("The capital of France is Paris. " * 8, return_tensors="pt").input_ids[:, :PROBE_TOKENS]
@@ -268,10 +325,11 @@ def _probe_batch(tokenizer, device) -> dict[str, torch.Tensor]:
 
 class _SyncEachStep(TrainerCallback):
     """The online trainers' cadence, a sync after every optimizer step while the adapters train, in
-    the three phases of checks 2-4. The fixed-adapter pushes replace a step's sync rather than follow
-    it: a bf16 fold/unfold of unchanged adapters mostly lands back where the previous one left the
-    base, so pushes that followed a sync of the same adapters would barely move it even without the
-    write-back. Every rank runs callbacks, so the sync's gathers stay collective."""
+    the three phases of checks 2-4, each step sync's allocation peak measured for check 5. The
+    fixed-adapter pushes replace a step's sync rather than follow it: a bf16 fold/unfold of unchanged
+    adapters mostly lands back where the previous one left the base, so after an in-place sync of the
+    same adapters the next could barely move it. Every rank runs callbacks, so the sync's gathers stay
+    collective."""
 
     def __init__(self, state: dict):
         self.state = state
@@ -285,15 +343,25 @@ class _SyncEachStep(TrainerCallback):
 
     def on_step_end(self, args, state, control, **kwargs):
         trainer = self.state["trainer"]
-        if state.global_step <= STEP_SYNCS:
-            sync_trainer_weights(trainer, None)
+        if state.global_step < STEP_SYNCS:
+            self.state["peaks"]["out_of_place"].append(
+                _sync_peak(self.state["unwrapped"], lambda: sync_trainer_weights(trainer, None))
+            )
+        elif state.global_step == STEP_SYNCS:
+            with _recording_folds(self.state["folds"]):
+                sync_trainer_weights(trainer, None)
         elif state.global_step == STEP_SYNCS + 1:
             self._fixed_adapter_pushes(trainer)
         else:
-            with without_the_base_write_back():
-                sync_trainer_weights(trainer, None)
+            self.state["peaks"]["in_place"].append(
+                _sync_peak(self.state["unwrapped"], lambda: self._in_place_sync(trainer))
+            )
             self._count_drift()
         return control
+
+    def _in_place_sync(self, trainer) -> None:
+        with folded_in_place(self.state["peft_model"]):
+            sync_trainer_weights(trainer, None)
 
     def _fixed_adapter_pushes(self, trainer) -> None:
         """``PUSHES`` syncs, each after a no-grad forward; what the forwarding rank handed its client,
@@ -320,7 +388,7 @@ class _SyncEachStep(TrainerCallback):
         self.state["after_pushes"] = self._parameters()
 
     def _count_drift(self) -> None:
-        """LoRA'd base elements an unrestored sync has moved since the pushes, summed over ranks."""
+        """LoRA'd base elements the in-place syncs have moved since the pushes, summed over ranks."""
         reference, now = self.state["after_pushes"], self._parameters()
         drift = [now[name].float() - reference[name].float() for name in reference if ".base_layer." in name]
         drifted = torch.tensor(float(sum(int(d.count_nonzero()) for d in drift)), device=drift[0].device)
@@ -453,8 +521,8 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     checks.update({name: _all_ranks(ok, ctx.device) for name, ok in layout.items()})
 
     log(
-        f"\n  {STEP_SYNCS} step syncs, {PUSHES} fixed-adapter pushes, {CONTROL_STEPS} step syncs without "
-        f"the base write-back..."
+        f"\n  {STEP_SYNCS} step syncs, {PUSHES} fixed-adapter pushes, {CONTROL_STEPS} step syncs inside an "
+        f"in-place merge/unmerge..."
     )
     state = {
         "trainer": trainer,
@@ -464,6 +532,8 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
         "batch": _probe_batch(tokenizer, ctx.device),
         "drifted": [],
         "max_abs_drift": 0.0,
+        "peaks": {"out_of_place": [], "in_place": []},
+        "folds": [],
     }
     trainer.add_callback(_SyncEachStep(state))
     trainer.train()
@@ -484,15 +554,47 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     lora_bases = [name for name in state["start"] if ".base_layer." in name]
     total = torch.tensor(float(sum(state["start"][name].numel() for name in lora_bases)), device=ctx.device)
     dist.all_reduce(total)
+    params = dict(unwrapped.named_parameters())
+    largest_fold = max(params[name].numel() * params[name].element_size() for name in lora_bases)
+    out_of_place = max(state["peaks"]["out_of_place"][1:])
+    lora_local = sum(state["start"][name].numel() * state["start"][name].element_size() for name in lora_bases)
+    starts = [start for start, _ in state["folds"]]
+    checks["folds_recorded"] = _all_ranks(len(state["folds"]) == len(lora_fold_targets(unwrapped)), ctx.device)
+    checks["each_fold_within_bound"] = _all_ranks(
+        all(peak <= FOLD_PEAK_BOUND * largest_fold for _, peak in state["folds"]), ctx.device
+    )
+    checks["folds_keep_nothing_across_tensors"] = _all_ranks(
+        bool(starts) and max(starts) - min(starts) <= largest_fold, ctx.device
+    )
+    # Premise: a copy of the whole LoRA'd shard would exceed the bound on this row.
+    checks["memory_bound_discriminates"] = _all_ranks(lora_local > FOLD_PEAK_BOUND * largest_fold, ctx.device)
+    log_all(f"  step-sync peaks: out of place {state['peaks']['out_of_place']}, in place {state['peaks']['in_place']}")
+    extra = torch.tensor(float(out_of_place - max(state["peaks"]["in_place"])), device=ctx.device)
+    dist.all_reduce(extra, op=dist.ReduceOp.MAX)
+    checks["sync_peak_within_bound_of_in_place"] = extra.item() <= FOLD_PEAK_BOUND * largest_fold
+    mib = 2**20
     metrics = {
         "lora_base_elements_summed_over_ranks": int(total.item()),
-        **{f"unrestored_drifted_after_step_sync_{i + 1}": n for i, n in enumerate(state["drifted"])},
-        "unrestored_max_abs_drift_rank0": state["max_abs_drift"],
+        **{f"in_place_drifted_after_step_sync_{i + 1}": n for i, n in enumerate(state["drifted"])},
+        "in_place_max_abs_drift_rank0": state["max_abs_drift"],
         "lora_base_mean_abs_rank0": float(
             torch.cat([state["start"][name].float().abs().flatten() for name in lora_bases]).mean()
         ),
+        "sync_peak_out_of_place_mib_rank0": out_of_place / mib,
+        "sync_peak_in_place_mib_rank0": max(state["peaks"]["in_place"]) / mib,
+        "sync_peak_extra_mib_worst_rank": extra.item() / mib,
+        "largest_folded_tensor_mib": largest_fold / mib,
+        "lora_base_local_mib_rank0": lora_local / mib,
+        "fold_start_spread_kib_rank0": (max(starts) - min(starts)) / 1024 if starts else -1.0,
+        "fold_peak_over_largest_max_rank0": max((peak for _, peak in state["folds"]), default=-1) / largest_fold,
     }
-    log(f"  unrestored step syncs moved {state['drifted']} of {int(total.item())} LoRA'd base elements")
+    log(f"  in-place step syncs moved {state['drifted']} of {int(total.item())} LoRA'd base elements")
+    log(
+        f"  step-sync peak over allocated: out of place {metrics['sync_peak_out_of_place_mib_rank0']:.3f} MiB, "
+        f"in place {metrics['sync_peak_in_place_mib_rank0']:.3f} MiB (bound {FOLD_PEAK_BOUND} x "
+        f"{metrics['largest_folded_tensor_mib']:.3f} MiB; the LoRA'd base shard is "
+        f"{metrics['lora_base_local_mib_rank0']:.3f} MiB)"
+    )
 
     # Rank-local reads only from here: the pushes are on rank 0.
     local = _push_checks(state, adapters) if ctx.rank == 0 else {}

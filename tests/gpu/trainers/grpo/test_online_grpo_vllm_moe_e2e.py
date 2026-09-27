@@ -9,7 +9,7 @@ served policy frozen for a whole RL run while the training loss moves normally.
 Rows (``--trainer {online,sdpg} --mode M [--resume]``):
 
     full_ep2         full fine-tune at ``ep_size=2`` — the EP expert gather into the engine
-    lora_ep2         attention PEFT under EP — the sync's merge → strip → unmerge
+    lora_ep2         attention PEFT under EP — the sync's fold → strip
     expert_lora_ep2  native grouped expert LoRA — the ``merge_lora=True`` fold in the expert gather,
                      the only route an expert adapter has into the engine
     lora_etp2        attention PEFT at ``ep_size=1, expert_tp_size=2``, plus the config-time refusal

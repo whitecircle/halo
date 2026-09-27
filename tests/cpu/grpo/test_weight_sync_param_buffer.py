@@ -10,7 +10,7 @@ PCIe before the NCCL broadcast, and those two copies cap the push well below the
 pinned here:
 
 * the buffered weight is a **snapshot** on the sync device, not an alias — a later in-place mutation
-  (PEFT unmerge, the next optimizer step) must not rewrite a weight that has not gone out yet;
+  (the next optimizer step) must not rewrite a weight that has not gone out yet;
 * the multi-server fan-out stages ONE snapshot per param, shared read-only by every client, and
   releases it once every server has sent the chunk holding it;
 * **peak** staged residency stays at one chunk (plus the tensor that crossed the budget), for the
@@ -88,7 +88,7 @@ def test_update_named_param_buffers_a_snapshot():
     assert stored.device == weights.device, "before init_communicator the snapshot stays on the source's device"
     assert stored.data_ptr() != weights.data_ptr(), "buffered by reference — must be a snapshot"
 
-    weights.add_(1.0)  # simulate PEFT unmerge / optimizer step before the flush
+    weights.add_(1.0)  # simulate an optimizer step before the flush
     assert torch.equal(stored, original), "buffered weight mutated by a later in-place update"
 
 
@@ -228,14 +228,14 @@ def test_manager_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
 
 
 def test_manager_shared_snapshot_is_immutable_copy():
-    """The shared snapshot must still be a copy: a post-buffer in-place mutation (PEFT unmerge,
-    optimizer step) must not revert any client's buffered weight."""
+    """The shared snapshot must still be a copy: a post-buffer in-place mutation (the next optimizer
+    step) must not revert any client's buffered weight."""
     manager, clients = _bare_manager(2)
     weights = torch.randn(4, 4)  # contiguous, so an aliasing .contiguous() would return it as-is
     original = weights.clone()
 
     manager.update_named_param("w", weights)
-    weights.add_(1.0)  # simulate PEFT unmerge before the flush
+    weights.add_(1.0)  # simulate an optimizer step before the flush
 
     for client in clients:
         _, stored = client._param_buffer[0]

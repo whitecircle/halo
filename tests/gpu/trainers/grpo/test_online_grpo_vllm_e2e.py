@@ -131,8 +131,8 @@ def create_grpo_dataset(num_samples: int, seed: int = SEED) -> Dataset:
 
 
 def lora_base_weights(trainer) -> dict[str, torch.Tensor]:
-    """Copies of the PEFT-wrapped base weights. Frozen, so the fold each step's sync performs must
-    give them back bit-identical: a bf16 unmerge alone misses by a rounding step."""
+    """Copies of the PEFT-wrapped base weights. Frozen, so each step's sync must leave them
+    bit-identical."""
     params = local_parameters(trainer.accelerator.unwrap_model(trainer.model))
     return {name: value for name, value in params.items() if ".base_layer." in name}
 
@@ -482,7 +482,7 @@ def test_online_grpo_lora_e2e():
     the merged weights under plain (non-PEFT) names. Forwarding ``base_model.*`` / ``lora_*`` names
     instead makes the vendored client reject unknown params (and vLLM then generates from the
     un-adapted base — broken on-policy RL). A clean multi-step run with finite loss,
-    on a confirmed PeftModel, exercises the merge→strip→unmerge sync path end-to-end, and the frozen
+    on a confirmed PeftModel, exercises the fold→strip sync path end-to-end, and the frozen
     base must come out of it bit-identical.
     """
     output_dir = tempfile.mkdtemp(prefix="test_grpo_lora_vllm_e2e_")

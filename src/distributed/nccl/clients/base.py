@@ -227,8 +227,8 @@ def resolve_sync_device(device: torch.device | str | int) -> torch.device:
 def snapshot_param(weights: torch.Tensor, device: torch.device | None) -> torch.Tensor:
     """A contiguous copy of ``weights`` on ``device`` (the source's own when ``None``), never an alias.
 
-    A snapshot: an in-place mutation of the source after buffering (a PEFT unmerge, the next
-    optimizer step) cannot revert a staged weight before it is sent. One copy even from a strided
+    A snapshot: an in-place mutation of the source after buffering (the next optimizer step)
+    cannot revert a staged weight before it is sent. One copy even from a strided
     source, since ``copy_`` reads any layout. It is async on the caller's stream; the flush
     completes it before a producer reads the tensor.
     """

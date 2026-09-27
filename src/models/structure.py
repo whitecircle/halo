@@ -4,7 +4,8 @@ normalization / fp32-pin classification.
 
 Holds the rules that map a wrapped, sharded tree back to plain hub spellings, shared by the
 FSDP2/TP/PP wraps, the attention patches and every checkpoint writer. Rank-local, except
-:func:`merged_adapters`, whose in-place LoRA merge is a DTensor collective every rank must enter.
+:func:`merged_adapters` and :func:`lora_folded`, whose LoRA deltas are DTensor collectives every rank
+must enter.
 """
 
 import re
@@ -13,6 +14,15 @@ from contextlib import contextmanager
 
 import torch
 from accelerate.utils import extract_model_from_parallel, is_peft_model
+from peft.tuners.lora.layer import Conv1d, Conv2d, Conv3d, Embedding, Linear, LoraLayer, ParamWrapper
+from peft.tuners.lora.variants import (
+    DoraConv1dVariant,
+    DoraConv2dVariant,
+    DoraConv3dVariant,
+    DoraEmbeddingVariant,
+    DoraLinearVariant,
+)
+from peft.tuners.tuners_utils import BaseTunerLayer
 from transformers.core_model_loading import build_glob_alternation
 from transformers.modeling_utils import PreTrainedModel
 
@@ -55,6 +65,13 @@ _CP_WRAPPER_MODULE_LEVEL = "model."
 # The model-level flags a quantized load sets: bitsandbytes sets the 8/4-bit pair, torchao/quanto only
 # ``is_quantized``.
 _KBIT_QUANTIZED_FLAGS = ("is_loaded_in_8bit", "is_loaded_in_4bit", "is_quantized")
+
+# The PEFT layers whose merge rewrites one base tensor by ``+= get_delta_weight`` (or DoRA's
+# ``merge_safe``), plus a ``lora_bias`` fold, which :func:`lora_folded` reproduces out of place. Exact
+# types: a subclass (torchao, Intel Neural Compressor) overrides the merge.
+_FOLDABLE_LORA_LAYERS = (Linear, Embedding, Conv1d, Conv2d, Conv3d, ParamWrapper)
+_CONV_LORA_LAYERS = (Conv1d, Conv2d, Conv3d)
+_FOLDABLE_VARIANTS = (DoraLinearVariant, DoraEmbeddingVariant, DoraConv1dVariant, DoraConv2dVariant, DoraConv3dVariant)
 
 
 def unwrap_framework_wrappers(model: torch.nn.Module) -> torch.nn.Module:
@@ -155,9 +172,8 @@ def normalize_peft_param_name(name: str, peft_prefix: str) -> str | None:
     """Map a ``PeftModel`` param name to its plain base-model name, or ``None`` to drop it.
 
     Shared by the vLLM weight sync and the merged EP save. Adapter params are dropped rather than
-    renamed because both consumers run inside :func:`merged_adapters`: the delta is already folded
-    into the base weight, so emitting ``lora_A``/``lora_B`` too would apply it a second time on any
-    PEFT-aware reload.
+    renamed because both consumers send base weights with the delta already folded in, so emitting
+    ``lora_A``/``lora_B`` too would apply it a second time on any PEFT-aware reload.
     """
     if peft_prefix in name or "original_module" in name:
         return None
@@ -179,7 +195,7 @@ def strip_peft_adapter_segment(name: str) -> str:
 
 
 @contextmanager
-def merged_adapters(model: torch.nn.Module | None, *, restore_base: bool = False) -> Iterator[bool]:
+def merged_adapters(model: torch.nn.Module | None, *, restore_base: bool = True) -> Iterator[bool]:
     """Fold LoRA into the base weights for the body, then unfold. Yields whether ``model`` is PEFT.
 
     ``merge_adapter`` is an in-place DTensor collective under FSDP2, so every rank must enter. The
@@ -193,6 +209,7 @@ def merged_adapters(model: torch.nn.Module | None, *, restore_base: bool = False
     rewrites (PEFT's ``.base_layer.`` params) are copied first and written back after the unmerge:
     one extra copy of their local shards, no collective. Duplicates are walked so a tied weight
     (a LoRA'd ``lm_head`` sharing ``embed_tokens``) is found under its ``.base_layer.`` name too.
+    ``restore_base=False`` leaves the unmerge's rounding in the base, as PEFT's own pair does.
     """
     peft = model is not None and is_peft_model(model)
     originals = {}
@@ -212,6 +229,94 @@ def merged_adapters(model: torch.nn.Module | None, *, restore_base: bool = False
             with torch.no_grad():
                 for param, original in originals.values():
                     param.data.copy_(original)
+
+
+def _lora_weight(layer: LoraLayer) -> torch.nn.Parameter:
+    """The base tensor ``layer``'s merge adds its delta to."""
+    return layer.get_param() if isinstance(layer, ParamWrapper) else layer.get_base_layer().weight
+
+
+def _adapters_to_fold(layer: LoraLayer) -> list[str]:
+    """The adapters a merge of ``layer`` folds: active ones not merged already (PEFT's
+    ``check_adapters_to_merge``), that this layer carries."""
+    merged = set(layer.merged_adapters)
+    return [
+        adapter
+        for adapter in layer.active_adapters
+        if adapter not in merged and (adapter in layer.lora_A or adapter in layer.lora_embedding_A)
+    ]
+
+
+def _unfoldable(layer: BaseTunerLayer) -> str | None:
+    """What makes ``layer``'s merge one :func:`lora_folded` cannot reproduce, or None."""
+    if type(layer) not in _FOLDABLE_LORA_LAYERS:
+        return f"tuner layer {type(layer).__name__}"
+    if isinstance(layer, _CONV_LORA_LAYERS) and layer.get_base_layer().groups > 1:
+        return f"grouped {type(layer).__name__}"
+    variants = [layer.lora_variant[adapter] for adapter in _adapters_to_fold(layer) if adapter in layer.lora_variant]
+    unknown = [variant for variant in variants if not isinstance(variant, _FOLDABLE_VARIANTS)]
+    return f"{type(unknown[0]).__name__} adapter" if unknown else None
+
+
+def lora_fold_targets(model: torch.nn.Module) -> dict[int, list[LoraLayer]]:
+    """``id`` of every base tensor PEFT's ``merge_adapter`` would rewrite → the LoRA layers folding
+    into it, in merge order.
+
+    Keyed by identity, so a tied weight that ``named_parameters()`` lists under its other name (a
+    LoRA'd ``lm_head`` sharing ``embed_tokens``) still gets its delta. Raises on a tuner layer whose
+    merge :func:`lora_folded` cannot reproduce (``nn.MultiheadAttention`` LoRA, trainable tokens,
+    quantized LoRA, a variant other than DoRA, a grouped conv PEFT cannot merge either), rather than
+    send it unfolded.
+    """
+    targets: dict[int, list[LoraLayer]] = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, BaseTunerLayer):
+            continue
+        unfoldable = _unfoldable(module)
+        if unfoldable:
+            raise NotImplementedError(
+                f"{name}: {unfoldable} cannot be folded out of place, which is implemented for plain and DoRA "
+                f"adapters on {[cls.__name__ for cls in _FOLDABLE_LORA_LAYERS]} only, so its delta would not reach "
+                f"the merged weights. Target plain linear, embedding or ungrouped conv modules."
+            )
+        adapters = _adapters_to_fold(module)
+        if not adapters:
+            continue
+        targets.setdefault(id(_lora_weight(module)), []).append(module)
+        bias = getattr(module.get_base_layer(), "bias", None)
+        if bias is not None and any(module.lora_bias.get(adapter) for adapter in adapters):
+            targets.setdefault(id(bias), []).append(module)
+    return targets
+
+
+@torch.no_grad()
+def lora_folded(param: torch.nn.Parameter, layers: list[LoraLayer]) -> torch.Tensor:
+    """A new tensor holding what PEFT's merge of ``layers`` would write into ``param``; ``param`` itself
+    is not touched.
+
+    The same arithmetic as the in-place merge (``+= get_delta_weight``, a variant's ``merge_safe``,
+    ``lora_B.bias * scaling`` into a folded bias), on ``param``'s own placement: a DTensor folds shard
+    by shard, the delta's redistribution a collective every rank must enter. Costs one copy of
+    ``param``'s local shard plus the delta.
+    """
+    folded = param.detach().clone()
+    for layer in layers:
+        folds_weight = param is _lora_weight(layer)
+        for adapter in _adapters_to_fold(layer):
+            if not folds_weight:
+                if layer.lora_bias.get(adapter):
+                    folded += layer.lora_B[adapter].bias * layer.scaling[adapter]
+            elif adapter in layer.lora_variant:
+                # A variant caches what its unmerge needs; there is no unmerge here.
+                cached = set(layer._caches)
+                folded = layer.lora_variant[adapter].merge_safe(layer, adapter, folded)
+                for key in set(layer._caches) - cached:
+                    layer._cache_pop(key)
+            else:
+                delta = layer.get_delta_weight(adapter)
+                # Linear adds the delta in its own dtype; the other layers cast it first, as their merges do.
+                folded += delta if isinstance(layer, Linear) else delta.to(folded.dtype)
+    return folded
 
 
 def decoder_layers(module: torch.nn.Module) -> torch.nn.ModuleList | None:

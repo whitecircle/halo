@@ -63,7 +63,7 @@ RESUME_SAVE_STEP = 2
 RESUME_MAX_STEPS = RESUME_SAVE_STEP + 1
 
 # Full fine-tuning moves the weights themselves; an adapter run moves the zero-init half of the
-# adapter, whose only route into the engine is the sync's merge. Additive there because a freshly
+# adapter, whose only route into the engine is the sync's fold. Additive there because a freshly
 # trained lora_B can still be small enough that a scale factor moves nothing.
 WEIGHT_PERTURBATION = 1.05
 ADAPTER_PERTURBATION = 0.05
@@ -314,9 +314,9 @@ def frozen_base_snapshot(model) -> list[tuple[str, torch.nn.Parameter, torch.Ten
     the rest of layer 0 (expert banks included). Resharded first, so the handles are the sharded
     params every unshard leaves in place.
 
-    No served-policy probe can see a merge that never unmerged, since the engine is meant to receive
-    base+adapter, nor an unmerge that missed by a bf16 rounding step, so the only witness is the
-    trainer's own weights before and after the syncs.
+    No served-policy probe can see a fold that wrote into the base, since the engine is meant to
+    receive base+adapter, so the only witness is the trainer's own weights before and after the
+    syncs.
     """
     reshard_fsdp2_modules(unwrap(model))
     return [

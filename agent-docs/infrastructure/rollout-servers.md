@@ -57,10 +57,10 @@ and the whole world raises together at the end of the sync, naming the failing r
 
 The gather **reshards the FSDP2 modules first**. A forward leaves their transient unsharded params
 registered while the optimizer steps the shards. Reading the registered params would ship a policy
-one optimizer step behind and fold a PEFT merge into a copy the next unshard discards.
+one optimizer step behind.
 
-A LoRA run's sync folds the adapters into the base for the dense half and writes the frozen base back
-bit for bit afterwards, at the cost of one copy of the LoRA'd base shards
+A LoRA run's sync folds each adapter into its base weight out of place as it sends it, so the frozen
+base is never written and the fold holds one tensor's temporaries at a time
 ([PEFT](../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
 ### Group rendezvous

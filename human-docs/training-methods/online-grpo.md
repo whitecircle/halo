@@ -138,7 +138,7 @@ repacks the expert weights the sync writes and the policy stops matching ([Rollo
 
 Add `use_peft: true` and the `lora_*` fields. LoRA runs under data parallelism and expert parallelism; adapters on
 the expert projections are rejected once `expert_tensor_parallel_size > 1`, and any adapter under tensor parallelism.
-The weight sync merges the adapter into the base before broadcasting, so the server serves plain weights.
+The weight sync folds the adapter into each base weight as it sends it, so the server serves plain weights.
 
 ## What to watch
 

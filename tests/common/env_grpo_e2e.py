@@ -19,7 +19,7 @@ engine loader, and only the served policy distinguishes them.
 
 ``peft`` puts the run on the adapter path (``"lora"`` attention PEFT, ``"expert_lora"`` native
 grouped expert adapters), where an adapter reaches the engine only through the fold the sync performs
-(``merge_adapter`` for attention, ``merge_lora=True`` in the expert gather).
+(the out-of-place PEFT fold for attention, ``merge_lora=True`` in the expert gather).
 
 ``resume`` covers the train-begin force sync. Phase 1 trains to ``RESUME_MAX_STEPS`` with a
 checkpoint at ``RESUME_SAVE_STEP``, and the perturbation round then moves the engine off that policy.

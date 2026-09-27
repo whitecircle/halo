@@ -327,20 +327,23 @@ Online and Async GRPO with Environments generate rollouts from a separate rollou
 ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which serves the **plain base
 model** with no adapter.
 
-Before each NCCL weight sync the trainer merges the adapter into the base, forwards the merged weights under
-base-model param names (PEFT prefixes stripped, `lora_*` params skipped), then unmerges to keep training.
-Without the merge, the server would generate from the un-adapted base.
+Each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
+(PEFT prefixes stripped, `lora_*` params skipped). Without the fold, the server would generate from the
+un-adapted base.
 
-The unmerge alone does not give the frozen base back: in bf16 `(w + d) - d` misses `w` by a rounding step
-wherever the two roundings do not cancel, and the misses compound over a run's syncs. So the sync copies
-the LoRA'd base weights before the merge and writes them back after the unmerge
-(`merged_adapters(restore_base=True)`, as the merged save does). The copy is this rank's shard of them
-(the whole LoRA'd base in a single-process run), held while the dense params are sent; the experts go
-first, outside it. On Qwen3-8B at FSDP2 dp2 it adds 1.4 GiB per rank for attention LoRA (18% of the
-rank's weight shard) and 6.5 GiB with every linear layer adapted.
+The fold is out of place, one tensor at a time as the sync sends it (`lora_folded` in
+`src/models/structure.py`): the value PEFT's `merge_adapter` would write, bit for bit, on Linear,
+Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA (an FSDP2-sharded DoRA
+embedding reduces its norm across shards, one bf16 rounding step off). The frozen base is never
+written: PEFT's in-place merge followed by its unmerge would not give it back, since in bf16 `(w + d) - d`
+misses `w` by a rounding step wherever the two roundings do not cancel. The fold holds one tensor's
+temporaries at a time, so it adds nothing to the sync's peak: on Qwen3-8B at FSDP2 dp2 a sync peaks
+1.16 GiB over what is allocated, as an in-place merge does, whether attention or every linear layer is
+adapted. A PEFT layer the fold does not cover (LoRA on `nn.MultiheadAttention`, trainable tokens, a
+variant other than DoRA, a grouped conv) is refused when the trainer is built.
 
 Both trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_sync.py`),
-which also folds in the EP / FSDP2 / TP gathers; the merge is a collective on all ranks under FSDP2.
+which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all ranks under FSDP2.
 
 ## Embedding models
 
@@ -371,7 +374,7 @@ dequantize and compute every 4-bit matmul in fp32.
 QLoRA is SFT/offline territory: the online and async GRPO trainers reject a quantized base at
 construction (`validate_weight_sync_support`). The NCCL weight sync forwards raw parameter storage under
 base-weight names, so a bnb-packed 4-bit base would ship non-floating-point tensors that corrupt the served
-policy, and a per-sync merge/unmerge round-trip through 4-bit weights is lossy. Plain LoRA is the supported
+policy. Plain LoRA is the supported
 RL adapter path — see [Online GRPO](../training-methods/grpo/online-grpo.md#lora).
 
 Under `torchrun` data parallelism the 4-bit base cannot be FSDP2-sharded (`fully_shard` rejects the non-float

@@ -3,9 +3,8 @@
 
 A dense-model QLoRA RL run constructs cleanly (the loader's rejection covers only MoE + EP/TP/
 grouped-GEMM), and ``_send_dense_weights`` then ships the bnb ``Params4bit`` packed uint8 storage
-under base-weight names — the server fails opaquely after full startup, and each sync's LoRA
-merge/unmerge round-trip through 4-bit weights is lossy. ``validate_weight_sync_support`` is the
-construction gate; both the online and environmental GRPO trainers must wire it.
+under base-weight names — the server fails opaquely after full startup. ``validate_weight_sync_support``
+is the construction gate; both the online and environmental GRPO trainers must wire it.
 
 Run: ``python tests/cpu/grpo/test_grpo_weight_sync_qlora_gate.py`` (or ``pytest -m cpu``).
 """

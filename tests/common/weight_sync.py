@@ -13,12 +13,12 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
-import src.trainers.grpo.rollout.weight_sync as weight_sync
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.runtime import DeferredRankFailure, materialize_dtensor, to_local
 from src.models.structure import merged_adapters
+from src.trainers.grpo.rollout.weight_sync import _HubForwarder
 from src.trainers.mixins.ep_introspection import named_ep_layers
 
 
@@ -163,7 +163,7 @@ def as_pushed(model: nn.Module, tensors: dict[str, torch.Tensor]) -> dict[str, t
     recorder = RecordingSender(keep_values=True)
     guard = DeferredRankFailure("expected push")
     prefix = model.prefix if is_peft_model(model) else None
-    forwarder = weight_sync._HubForwarder(recorder, model, named_ep_layers(model), prefix, guard)
+    forwarder = _HubForwarder(recorder, model, named_ep_layers(model), prefix, guard)
     for name, tensor in tensors.items():
         forwarder.send(name, tensor)
     forwarder.flush()
@@ -173,8 +173,14 @@ def as_pushed(model: nn.Module, tensors: dict[str, torch.Tensor]) -> dict[str, t
 
 
 @contextmanager
-def without_the_base_write_back() -> Iterator[None]:
-    """The sync with the fold's exact restore dropped, so only the bf16 unmerge reverses it: the
-    negative control for a suite asserting that pushes leave the frozen base untouched."""
-    with patch.object(weight_sync, "merged_adapters", lambda peft_model, **_: merged_adapters(peft_model)):
+def folded_in_place(peft_model: nn.Module) -> Iterator[None]:
+    """PEFT's in-place merge for the body and its bf16 unmerge after, with nothing written back.
+
+    A sync run inside it pushes the same weights (it folds no adapter a merge already carries), while
+    the frozen base keeps the unmerge's rounding misses: the negative control for the suites asserting
+    that pushes leave the base untouched, and the in-place baseline their memory is measured against.
+    Resharded first, as the sync itself is, so the merge lands on the shards the sync reads.
+    """
+    reshard_fsdp2_modules(peft_model)
+    with merged_adapters(peft_model, restore_base=False):
         yield

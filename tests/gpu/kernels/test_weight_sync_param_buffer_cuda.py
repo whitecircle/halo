@@ -4,8 +4,8 @@
 The rest of the buffering contract is CPU-only and lives in
 ``tests/cpu/grpo/test_weight_sync_param_buffer.py``; this case needs a real GPU. A snapshot that
 transits pinned host memory is copied out and back over PCIe before the NCCL broadcast, and those two
-copies cap the push well below the fabric; one that aliases the source is rewritten by the PEFT
-unmerge or the optimizer step before it goes out.
+copies cap the push well below the fabric; one that aliases the source is rewritten by the next
+optimizer step before it goes out.
 
 What it pins (the fixture is the CPU suite's own ``_bare_client``, imported so both tiers exercise
 the same client construction):

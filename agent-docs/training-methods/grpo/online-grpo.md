@@ -158,7 +158,7 @@ Set `expert_parallel_size` to the training-GPU count so the trainer ranks form *
 
 Add `use_peft: true` and the `lora_*` fields. LoRA runs under FSDP2 DP, EP and pure ETP; any adapter on the TP-sharded backbone is **rejected under TP and EP+TP** (`_validate_lora_tp_compatibility`, `src/trainers/mixins/validation.py`), because PEFT keeps `lora_A`/`lora_B` as plain tensors outside the TP graph. Native expert adapters too.
 
-The weight sync merges the adapter into the base before broadcasting, so vLLM serves the plain base; under EP the gather folds native expert-LoRA in too ([PEFT](../../optimization/peft.md#hyperparameters)).
+The weight sync folds the adapter into each base weight as it sends it, so vLLM serves the plain base; under EP the gather folds native expert-LoRA in too ([PEFT](../../optimization/peft.md#hyperparameters)).
 
 ## Data flow and batch construction
 
