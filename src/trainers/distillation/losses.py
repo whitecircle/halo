@@ -79,9 +79,11 @@ def softened_log_probs(logits: torch.Tensor, temperature: float) -> torch.Tensor
     fp32 because a bf16 log-sum-exp over a 100k+ vocab plus a bf16 log-prob difference biases the
     distillation gradient. Folding the upcast into ``log_softmax``'s ``dtype`` would not save the fp32
     copy: torch casts a bf16 input to fp32 first (only fp16 has a fused path). ``-inf`` logits are
-    floored in place on that copy (:data:`_MASKED_LOGIT_FLOOR`), a no-op on finite ones.
+    floored (:data:`_MASKED_LOGIT_FLOOR`) through a boolean mask, all the backward keeps of that step;
+    a clamp would keep a second fp32 ``[tokens, vocab]`` copy for its own backward.
     """
-    return log_softmax((logits.float() / temperature).clamp_min_(_MASKED_LOGIT_FLOOR), dim=-1)
+    scaled = logits.float() / temperature
+    return log_softmax(scaled.masked_fill(torch.isneginf(scaled), _MASKED_LOGIT_FLOOR), dim=-1)
 
 
 def reverse_kl_opd_loss(

@@ -11,7 +11,9 @@ applies Hinton's ``T**2``. Pinned against independent spellings of each loss:
 - at a temperature bf16 cannot divide exactly, a bf16 input scores exactly like its fp32 copy: the
   divide runs once, after the upcast, never on the bf16 logits;
 - a ``-inf`` logit (padded vocabulary, a top-k-truncated teacher) is a zero-probability entry that adds
-  exactly 0, not NaN, to the value and the gradient.
+  exactly 0, not NaN, to the value and the gradient;
+- the student's backward keeps one fp32 ``[..., V]`` plane (``log_softmax``'s output): flooring the
+  ``-inf`` logits keeps a boolean mask, not a second fp32 copy of the logits.
 
     python tests/cpu/trainers/test_distillation_softened_log_probs.py
 """
@@ -20,7 +22,12 @@ import pytest
 import torch
 from torch.nn.functional import kl_div, log_softmax, softmax
 
-from src.trainers.distillation.losses import forward_kl_opd_loss, reverse_kl_opd_loss, unnormalized_kl_loss
+from src.trainers.distillation.losses import (
+    forward_kl_opd_loss,
+    reverse_kl_opd_loss,
+    softened_log_probs,
+    unnormalized_kl_loss,
+)
 from src.trainers.distillation.teacher_losses import call_distillation_loss, get_distillation_loss_fn
 
 BATCH, SEQ, VOCAB = 2, 5, 257
@@ -195,6 +202,18 @@ def test_teacher_losses_score_a_top_k_truncated_teacher(name, temperature):
     reference, reference_grad = _value_and_grad(SPELLINGS[name], student, teacher, temperature)
     torch.testing.assert_close(value.sum(-1), reference.sum(-1), rtol=FP32_RTOL, atol=FP32_ATOL)
     torch.testing.assert_close(grad, reference_grad, rtol=FP32_RTOL, atol=FP32_ATOL)
+
+
+def test_student_backward_keeps_one_fp32_vocabulary_plane():
+    """At ``[tokens, vocab]`` scale every extra fp32 plane the graph keeps is gigabytes of peak memory."""
+    student = _padded(_logits(torch.bfloat16)[0]).to(torch.bfloat16).requires_grad_(True)
+    saved: list[torch.Tensor] = []
+    with torch.autograd.graph.saved_tensors_hooks(
+        lambda tensor: saved.append(tensor) or tensor, lambda tensor: tensor
+    ):
+        softened_log_probs(student, INEXACT_TEMPERATURE)
+    fp32_planes = [tensor for tensor in saved if tensor.dtype == torch.float32 and tensor.shape == student.shape]
+    assert len(fp32_planes) == 1, f"the backward keeps {len(fp32_planes)} fp32 [..., V] planes, expected 1"
 
 
 if __name__ == "__main__":
