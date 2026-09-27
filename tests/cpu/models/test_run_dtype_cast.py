@@ -5,10 +5,12 @@ transformers keeps a family's ``_keep_in_fp32_modules_strict`` parameters in fp3
 and hyper-connections, GLM-5 Next KDA state, Inkling short convolutions). The EP loaders cast them to
 the run dtype; a loader that does not leaves a mixed-dtype model that FSDP2 refuses to shard and whose
 fp32 DeepSeek-V4 norms feed fp32 activations into bf16 projections. These tests pin (1) the helper's
-contract, fp8 and fp32-master handling included, (2) that the unsharded loaders a CPU run reaches hand
-back a uniform run-dtype model for every pinned family, and (3) that every eager load in ``src/`` and
-``scripts/training/`` casts and finalizes, so a new loader that forgets either fails here rather than
-on its first GPU step.
+contract, fp8, quantized storage and fp32-master handling included, (2) that the unsharded loaders a
+CPU run reaches hand back a uniform run-dtype model for every pinned family, (3) that under fp32
+masters every loader, the lazy ones on either meta shell included, keeps exactly the stored pins and
+widens nothing else, while without the flag it loads all bf16, and (4) that every model build in
+``src/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
+new loader that forgets either fails here rather than on its first GPU step.
 
 Run: python tests/cpu/models/test_run_dtype_cast.py  (or pytest)
 """
@@ -58,9 +60,24 @@ PartialState()
 CASTS = frozenset({"cast_parameters_to_run_dtype", "cast_loaded_parameters"})
 FINALIZE = "finalize_loaded_model"
 
-# The calls that materialize weights through ``from_pretrained``, and so inherit the fp32 pins: the two
-# toolkit entry points, and a SentenceTransformer built from a checkpoint path.
+# The calls that build a model, and so inherit the fp32 pins: the two toolkit entry points, a
+# SentenceTransformer built from a checkpoint path, and a raw factory on anything but the receivers below.
 EAGER_LOAD_CALLS = frozenset({"from_pretrained_verified", "auto_load_model", "SentenceTransformer"})
+MODEL_FACTORIES = frozenset({"from_pretrained", "from_config", "_from_config"})
+# Factory receivers that build no model: tokenizers, processors and configs, and the toolkit's own
+# config-built callback and reward terms (``super()`` inside a term's ``from_config``).
+NON_MODEL_RECEIVERS = frozenset(
+    {
+        "AutoTokenizer",
+        "AutoProcessor",
+        "AutoConfig",
+        "GenerationConfig",
+        "PeftConfig",
+        "GenerateExamplesCallback",
+        "term_type",
+        "super",
+    }
+)
 
 # Where a training or scoring load lives. ``src/models/loading/`` defines the entry points and is left
 # out: conversion tools load through it too and must keep the pins, so the cast belongs to each
@@ -82,9 +99,20 @@ EAGER_LOADERS = frozenset(
     }
 )
 
-# The dense TP load materializes straight into DTensors, which the cast refuses. No dense family pins a
-# parameter, and a mixed load there would fail FSDP2's wrap loudly.
+# The dense TP load materializes straight into DTensors, which the cast cannot re-dtype (it skips one
+# already at the run dtype and raises on any other). No dense family pins a parameter, and a mixed load
+# there would fail FSDP2's wrap loudly.
 UNCAST_LOADERS = frozenset({("src/distributed/loading/model_loading.py", "_load_tp_model")})
+
+# Model builds that are no training or scoring load: the PEFT merge folds an adapter into the base a
+# conversion tool loaded (conversions keep the pins), and the head-transform probe builds an fp32 meta
+# shell that holds no weights.
+NON_TRAINING_BUILDS = frozenset(
+    {
+        ("src/checkpoint/adapters.py", "merge_adapter_into_base"),
+        ("src/models/head_transform.py", "_probe_logits"),
+    }
+)
 
 
 class _Mixed(nn.Module):
@@ -174,7 +202,8 @@ def test_an_unresolved_dtype_name_is_refused():
 
 
 def test_a_sharded_parameter_refuses_the_cast():
-    """A DTensor's ``.data`` rebind keeps its local shard in the old dtype, so a cast there must raise."""
+    """A DTensor's ``.data`` rebind keeps its local shard in the old dtype, so a cast of one off the run
+    dtype must raise."""
     with fake_process_group_mesh(rank=0, world_size=1) as mesh:
         model = nn.Linear(4, 4)
         model.weight = nn.Parameter(distribute_tensor(model.weight.detach(), mesh, [Shard(0)], src_data_rank=None))
@@ -448,6 +477,27 @@ def _calls(function: ast.FunctionDef) -> set[str]:
     return names
 
 
+def _receiver(target: ast.Attribute) -> str:
+    """The name a method call is made on: ``X`` in ``X.f()``, ``super`` in ``super().f()``."""
+    value = target.value.func if isinstance(target.value, ast.Call) else target.value
+    return value.id if isinstance(value, ast.Name) else getattr(value, "attr", "")
+
+
+def _builds_a_model(function: ast.FunctionDef) -> bool:
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if isinstance(target, ast.Name) and target.id in EAGER_LOAD_CALLS:
+            return True
+        if isinstance(target, ast.Attribute) and (
+            target.attr in EAGER_LOAD_CALLS
+            or (target.attr in MODEL_FACTORIES and _receiver(target) not in NON_MODEL_RECEIVERS)
+        ):
+            return True
+    return False
+
+
 @functools.cache
 def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
     found = {}
@@ -457,13 +507,13 @@ def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
             if rel.startswith(LOAD_CORE):
                 continue
             for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.FunctionDef) and (calls := _calls(node)) & EAGER_LOAD_CALLS:
-                    found[(rel, node.name)] = frozenset(calls)
+                if isinstance(node, ast.FunctionDef) and _builds_a_model(node):
+                    found[(rel, node.name)] = frozenset(_calls(node))
     return found
 
 
 def test_the_eager_load_surface_is_pinned():
-    assert set(_eager_loaders()) == EAGER_LOADERS | UNCAST_LOADERS
+    assert set(_eager_loaders()) == EAGER_LOADERS | UNCAST_LOADERS | NON_TRAINING_BUILDS
 
 
 @pytest.mark.parametrize("loader", sorted(EAGER_LOADERS), ids=lambda loader: loader[1])
