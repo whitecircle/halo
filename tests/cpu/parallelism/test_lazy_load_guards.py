@@ -2,9 +2,10 @@
 """CPU tests for the lazy loaders' load-time guards.
 
 The lazy path bypasses ``from_pretrained`` entirely: it reads safetensors slices and REPLACES the
-meta-device parameter with whatever came off disk. Four things ``from_pretrained`` does for free
+meta-device parameter with whatever came off disk. Five things ``from_pretrained`` does for free
 therefore have to be done here, and each is silent corruption when it is not:
 
+* an fp8 disk tensor is refused rather than cast without the block scales stored beside it;
 * the disk tensor's shape is checked against the live one (else the checkpoint's shape wins over the
   config's, silently);
 * a per-expert fusion covers this rank's WHOLE expert range (else a missing global index shifts
@@ -168,6 +169,19 @@ def test_a_correctly_shaped_expert_slice_still_loads(tmp_path):
     assert torch.equal(model.layers[0].mlp.experts.gate_up_proj.detach(), full[4:8])
 
 
+def test_an_fp8_disk_tensor_is_refused(tmp_path):
+    """An fp8 checkpoint whose config lost its ``quantization_config`` passes the lazy gate; its weights
+    must not be cast to bf16 without the block scales that sit beside them in the checkpoint."""
+    model = nn.Linear(H, 3, bias=False)
+    plan = WeightPlan(WeightAction.REPLICATE, "model.safetensors", "weight", "weight")
+    save_file({"weight": torch.randn(3, H).to(torch.float8_e4m3fn)}, str(tmp_path / "model.safetensors"))
+    loader = SafetensorsWeightLoader(str(tmp_path), ["model.safetensors"], device="cpu")
+
+    with pytest.raises(ValueError, match=r"'weight'.*convert_\*_bf16\.py"):
+        loader.load_into_model(model, [plan], dtype=torch.bfloat16)
+    assert model.weight.dtype == torch.float32
+
+
 def test_the_planner_records_the_configs_expert_count_on_every_shard_plan():
     """The count has to travel with the plan, or the check above is unreachable in production."""
     ep_config = SimpleNamespace(expert_start_idx=4, expert_end_idx=8, num_experts=E_GLOBAL)
@@ -183,24 +197,26 @@ def test_the_planner_records_the_configs_expert_count_on_every_shard_plan():
 # --------------------------------------------------------------------------------------------
 
 
-def _per_expert_checkpoint(tmp_path, experts: list[int], intermediate: int = M) -> dict[str, str]:
+def _per_expert_checkpoint(
+    tmp_path, experts: list[int], intermediate: int = M, dtype: torch.dtype = torch.float32
+) -> dict[str, str]:
     """A per-expert (Qwen3/Bailing-style) checkpoint for one layer. Returns its weight map."""
     tensors: dict[str, torch.Tensor] = {}
     for idx in experts:
         prefix = f"layers.0.mlp.experts.{idx}"
-        tensors[f"{prefix}.gate_proj.weight"] = torch.randn(intermediate, H)
-        tensors[f"{prefix}.up_proj.weight"] = torch.randn(intermediate, H)
-        tensors[f"{prefix}.down_proj.weight"] = torch.randn(H, intermediate)
+        tensors[f"{prefix}.gate_proj.weight"] = torch.randn(intermediate, H).to(dtype)
+        tensors[f"{prefix}.up_proj.weight"] = torch.randn(intermediate, H).to(dtype)
+        tensors[f"{prefix}.down_proj.weight"] = torch.randn(H, intermediate).to(dtype)
     save_file(tensors, str(tmp_path / "model.safetensors"))
     return dict.fromkeys(tensors, "model.safetensors")
 
 
-def _fuse(tmp_path, model: nn.Module, weight_map: dict[str, str], ep_start: int, ep_end: int) -> set[str]:
+def _fuse(tmp_path, model: nn.Module, weight_map: dict[str, str], ep_start: int, ep_end: int, dtype=None) -> set[str]:
     fuser = ExpertFuser(ep_start, ep_end)
     model_keys = set(model.state_dict())
     tasks = fuser.detect_tasks(weight_map, {key: key for key in weight_map}, model_keys)
     assert tasks, "fixture built no fusion task — the harness, not the guard, is broken"
-    return fuser.execute(tasks, model, str(tmp_path), dtype=None, device="cpu")
+    return fuser.execute(tasks, model, str(tmp_path), dtype=dtype, device="cpu")
 
 
 def test_a_fusion_missing_a_global_expert_index_is_refused(tmp_path):
@@ -219,6 +235,14 @@ def test_a_fused_tensor_of_the_wrong_shape_is_refused(tmp_path):
 
     with pytest.raises(RuntimeError, match="gate_up_proj"):
         _fuse(tmp_path, _MoEModel(), weight_map, ep_start=0, ep_end=4)
+
+
+def test_an_fp8_per_expert_fusion_is_refused(tmp_path):
+    """Per-expert fp8 weights reach the fuser rather than the loader, and are refused there too."""
+    weight_map = _per_expert_checkpoint(tmp_path, experts=list(range(E_GLOBAL)), dtype=torch.float8_e4m3fn)
+
+    with pytest.raises(ValueError, match=r"gate_up_proj.*convert_\*_bf16\.py"):
+        _fuse(tmp_path, _MoEModel(), weight_map, ep_start=4, ep_end=8, dtype=torch.bfloat16)
 
 
 def test_a_complete_in_range_fusion_still_loads(tmp_path):

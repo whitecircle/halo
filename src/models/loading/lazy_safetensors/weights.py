@@ -23,6 +23,7 @@ from safetensors import safe_open
 from src.checkpoint.format import has_whole_model_weight_file, resolve_checkpoint_weights
 from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.checkpoint_coverage import verify_checkpoint_coverage
+from src.models.loading.dtype import reject_fp8_tensor
 from src.models.loading.lazy_safetensors.conversion import Concat, Convert, Rename, convert_disk_keys
 
 logger = logging.getLogger(__name__)
@@ -239,12 +240,10 @@ class SafetensorsWeightLoader:
                 # Every float parameter, overriding the class's _keep_in_fp32_modules[_strict]:
                 # FSDP2 rejects mixed dtypes in one shard group, and the eager loaders cast to match.
                 # Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases).
-                if (
-                    dtype is not None
-                    and tensor.is_floating_point()
-                    and isinstance(_target_tensor(model, plan.model_key), nn.Parameter)
-                ):
-                    tensor = tensor.to(torch.float32 if plan.model_key in keep_fp32 else dtype)
+                if tensor.is_floating_point() and isinstance(_target_tensor(model, plan.model_key), nn.Parameter):
+                    reject_fp8_tensor(plan.model_key, tensor, dtype)
+                    if dtype is not None:
+                        tensor = tensor.to(torch.float32 if plan.model_key in keep_fp32 else dtype)
 
                 assign_tensor_to_model(model, plan.model_key, tensor)
                 loaded += 1

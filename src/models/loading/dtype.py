@@ -71,6 +71,17 @@ def resolve_training_dtype(config) -> torch.dtype:
     return torch.float32
 
 
+def reject_fp8_tensor(name: str, tensor: torch.Tensor, dtype: torch.dtype | None) -> None:
+    """Raise when ``tensor`` is a 1-byte float (fp8): a quantized checkpoint's weight, whose block scales
+    live in a separate tensor that a plain cast to ``dtype`` would drop, leaving unscaled values."""
+    if tensor.is_floating_point() and tensor.element_size() == 1:
+        raise ValueError(
+            f"{name!r} is stored in {tensor.dtype}: this is a quantized fp8 checkpoint, and casting it "
+            f"to {dtype} would drop its block scales. Convert it to bf16 once "
+            f"(scripts/before_training/convert_*_bf16.py where the family has one) and train from that."
+        )
+
+
 def cast_parameters_to_run_dtype(
     model: nn.Module, dtype: torch.dtype | str | None, *, keep_fp32: bool = False
 ) -> None:
@@ -90,8 +101,8 @@ def cast_parameters_to_run_dtype(
     balancing biases). A ``dtype`` that is not a ``torch.dtype`` ("auto", None) leaves the model as
     loaded.
 
-    Raises on a 1-byte float (fp8) parameter, whose block scales live beside it and would be dropped by
-    a plain cast, and on a tensor-subclass parameter: rebinding a DTensor's ``.data`` leaves its local
+    Raises on a 1-byte float (fp8) parameter (:func:`reject_fp8_tensor`), and on a tensor-subclass
+    parameter: rebinding a DTensor's ``.data`` leaves its local
     shard in the old dtype, which is why the dense TP loader, loading straight into DTensors, does not
     call this (no dense family pins a parameter).
     """
@@ -100,12 +111,7 @@ def cast_parameters_to_run_dtype(
     for name, param in model.named_parameters():
         if not param.is_floating_point() or param.dtype == dtype or (keep_fp32 and param.dtype == torch.float32):
             continue
-        if param.element_size() == 1:
-            raise ValueError(
-                f"{name!r} is stored in {param.dtype}: this is a quantized fp8 checkpoint, and casting it "
-                f"to {dtype} would drop its block scales. Convert it to bf16 once "
-                f"(scripts/before_training/convert_*_bf16.py where the family has one) and train from that."
-            )
+        reject_fp8_tensor(name, param, dtype)
         if type(param.data) is not torch.Tensor:
             raise TypeError(
                 f"Cannot cast {name!r}, a {type(param.data).__name__} ({param.dtype}), to the run dtype "

@@ -51,6 +51,7 @@ from src.distributed.filesystem import fs_aware_main_first
 from src.distributed.runtime import DeferredRankFailure, get_local_rank
 from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import text_config
+from src.models.loading.dtype import reject_fp8_tensor
 from src.models.loading.lazy_safetensors.conversion import Concat
 from src.models.loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.models.loading.lazy_safetensors.weights import (
@@ -468,6 +469,7 @@ class ExpertFuser:
                     shard_dim=0,
                     shard_len=self.ep_end - self.ep_start,
                 )
+                reject_fp8_tensor(model_key, tensor, dtype)
                 if dtype is not None and tensor.is_floating_point():
                     tensor = tensor.to(dtype)
 
