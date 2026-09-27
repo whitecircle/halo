@@ -13,8 +13,8 @@ test_size: 0.01
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8
-moe_balancing: bias_update            # sign-updates land in the gate's native expert_bias (noaux_tc),
-                                      #   which exports with the checkpoint; the gate trains unfrozen
+moe_balancing: bias_update            # sign-updates land in the gate's native expert_bias (a selection-only
+                                      #   score bias), which exports with the checkpoint; the gate trains unfrozen
 fp32_router: true
 fp32_experts: true
 fp32_non_ep_params: true
