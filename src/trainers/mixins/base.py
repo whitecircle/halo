@@ -1523,7 +1523,8 @@ class DistributedTrainerMixin(
             f"at the first step. Use AdamWBF16 (bf16=true, the production default, or "
             f"bf16_optimizer=true — its per-parameter path is DTensor-aware), or "
             f"fp32_non_ep_params=true for fp32 masters on the non-expert params only (experts stay "
-            f"bf16). Full fp32 master weights are supported on dense (non-MoE) models."
+            f"bf16). The stock AdamW runs on dense (non-MoE) models, over the parameters as loaded: "
+            f"bf16 masters under bf16=true, fp32 under bf16=false."
         )
 
     def evaluation_loop(self, *args, **kwargs):

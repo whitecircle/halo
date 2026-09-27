@@ -149,7 +149,8 @@ def main() -> int:
     parser.add_argument(
         "--fp32_optimizer",
         action="store_true",
-        help="Full fp32 master weights (disable AdamWBF16 — standard fp32-state AdamW, 12 B/param).",
+        help="Disable AdamWBF16 (bf16_optimizer=False): the stock AdamW over the parameters as loaded — "
+        "bf16 masters and moments under the default bf16 load, fp32 (12 B/param) with --fp32.",
     )
     parser.add_argument(
         "--fp32",
@@ -338,7 +339,7 @@ def main() -> int:
         if args.fp32:
             precision = "fp32-compute (no autocast)"
         elif args.fp32_optimizer:
-            precision = "fp32-master"
+            precision = "bf16-master(stock AdamW)"
         elif args.fp32_non_ep_params and args.fp32_experts:
             precision = "full-fp32-master(AdamWBF16)"
         elif args.fp32_non_ep_params or args.fp32_experts:
@@ -499,7 +500,7 @@ def main() -> int:
             "processing_class": tokenizer,
             "parallelism_config": parallelism_config,
             "callbacks": callbacks,
-            # False forces standard fp32-state AdamW (full fp32 master); None keeps the bf16=True auto-AdamWBF16 default
+            # False forces the stock AdamW over the params as loaded; None keeps the bf16=True auto-AdamWBF16 default
             "bf16_optimizer": False if args.fp32_optimizer else None,
         }
         if args.pp > 1:
