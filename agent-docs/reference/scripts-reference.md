@@ -285,7 +285,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 
 | Script | Description |
 |--------|-------------|
-| `scripts/before_training/prepare_dataset.py` | Pre-process SFT or raw-text datasets: tokenization, packing, sharding. `--mode chat` (default) applies the chat template; `--mode text` tokenizes `--text-field` directly and appends EOS per document — the (continued) pre-training path |
+| `scripts/before_training/prepare_dataset.py` | Pre-process SFT or raw-text datasets: tokenization, packing, sharding. `--mode chat` (default) applies the chat template; `--mode text` tokenizes `--text-field` directly and appends EOS per document — the (continued) pre-training path. The output holds `train` and `test` (an input with no `test` bakes its `validation` split as `test`); any other input split is left out with a warning |
 | `scripts/before_training/s3_datasets.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`). `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
 | `scripts/before_training/patch_vocab.py` | Patch vocabulary with new tokens, reset attention sinks |
 | `scripts/before_training/convert_deepseek_v4_bf16.py` | Dequantize a FineGrained-FP8 DeepSeek-V4 checkpoint to uniform bf16 for training; `--max_shard_size` sizes the output shards (default `5GB`; see [DeepSeek-V4](../models/deepseek-v4.md)) |

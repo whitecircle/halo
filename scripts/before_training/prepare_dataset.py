@@ -35,7 +35,7 @@ from src.data.pipeline.preprocessing import preprocess_dataset
 from src.data.pipeline.processing import resolve_map_num_proc
 from src.data.pipeline.tokenizer_backend import TOKENIZER_BACKENDS
 from src.data.sources.loading import load_dataset_from_source
-from src.data.sources.paths import METADATA_FILE, parse_dataset_destination, parse_s3_uri
+from src.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
 from src.data.sources.s3_client import S3Client
 from src.log import configure_cli_logging
 from src.models.loading.tokenizer_setup import load_chat_template
@@ -401,11 +401,11 @@ def load_input_dataset(args) -> DatasetDict:
     elif args.test_size:
         # A local file, a save_to_disk dir or a split-less Hub id loads as a DatasetDict, the most
         # common input form. Splitting only the bare-Dataset case would drop --test-size.
-        if set(dataset) & {"test", "validation"}:
+        held_out = [name for name in EVAL_SPLIT_NAMES if name in dataset]
+        if held_out:
             raise ValueError(
-                f"--test-size was given but {args.input} already carries an eval split "
-                f"({sorted(set(dataset) & {'test', 'validation'})}). Drop the flag, or point --input "
-                "at the train split alone."
+                f"--test-size was given but {args.input} already carries an eval split ({held_out}). "
+                "Drop the flag, or point --input at the train split alone."
             )
         logger.info(f"Creating train/test split with test_size={args.test_size}")
         dataset = DatasetDict({**dataset, **dataset["train"].train_test_split(args.test_size, seed=_SPLIT_SEED)})

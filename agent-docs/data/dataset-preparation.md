@@ -89,10 +89,10 @@ e.g. `HuggingFaceH4/ultrachat_200k@train_sft`), or a local path. `--output` acce
 `hf://` prefix uploads to the Hub — unlike `--input`, a bare `org/name` output is a **local**
 directory, so a relative path such as `preprocessed/my_dataset` is never published.
 
-The output holds two splits, `train` and `test`. A multi-split input must carry `train`; a lone
-`validation` split (no `test`) is baked as `test`, and any other split — `validation` next to
-`test` included — is refused by name. To drop the other splits, point `--input` at the train split
-alone (an `@split` suffix) and cut `test` with `--test-size`.
+The output holds two splits, `train` and `test`. A multi-split input must carry `train`; with no
+`test` split its `validation` split is baked as `test`. Any other split (`validation` next to
+`test`, an `unsupervised` split) is left out, with a warning that names it. To prepare one of those,
+point `--input` at it with an `@split` suffix.
 
 **VLM mode** (`--vlm`, e.g. Qwen2.5-VL / Qwen3-VL; packing not supported) stores `input_ids` with
 vision placeholders expanded, `attention_mask`, `labels` (image tokens masked to -100),
@@ -147,7 +147,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--num-shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |
 | `--num-proc` | `HALO_DATASET_NUM_PROC` | Processes for dataset map. Unset, it resolves per host to `max(1, min(cpu_count // 4, 4))`; set `HALO_DATASET_NUM_PROC` to pin one value across nodes, since HF keys its map cache on `num_proc` |
 | `--tokenizer-backend` | `hf` | `hf` = the model's tokenizer; `gigatoken` = Rust bulk encoder (see above) |
-| `--test-size` | `None` | Test split fraction (e.g. `0.01`), cut from `train`. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or lone `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num-shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
+| `--test-size` | `None` | Test split fraction (e.g. `0.01`), cut from `train`. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num-shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
 | `--pad-token` / `--eos-token` / `--bos-token` | `None` | Override pad / EOS / BOS token. Recorded in `metadata.json` and re-checked at training time |
 | `--chat-template` | `None` | Override chat template (Jinja2 string, or a path to a `.jinja`/`.jinja2`/`.j2` file). The resolved text is recorded and re-checked |
 | `--overwrite` | `False` | Replace an existing output. Only the local writer keeps the previous dataset intact through a failed publish (see below) |

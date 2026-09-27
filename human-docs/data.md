@@ -77,8 +77,9 @@ to the Hub or S3. Five flags decide whether the output is usable:
 - `--test-size`. Without it a single-split input is written train-only: it then
   trains with a placeholder test split warned in from the first 100 train rows,
   and `--num-shards` above 1 is refused, since a sharded dataset needs a real
-  test split. The output keeps only `train` and `test`: a lone `validation`
-  split becomes `test`, and any other input split is refused by name.
+  test split. The output keeps only `train` and `test`: with no `test` split
+  the input's `validation` split becomes `test`, and any other input split is
+  left out with a warning that names it.
 
 `--tokenizer-backend gigatoken` swaps the HF tokenizer for a Rust bulk encoder,
 roughly 6× faster on UltraChat 200K with the Qwen3-0.6B tokenizer. It verifies

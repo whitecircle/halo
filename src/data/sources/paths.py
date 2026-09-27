@@ -1,5 +1,5 @@
 """Dataset path classification: which of S3 / HuggingFace Hub / local a source or destination
-spells, and the on-disk names that verdict depends on.
+spells, the on-disk names that verdict depends on, and which split of a source holds its held-out rows.
 
 Pure string rules, no boto3/s3fs, so the loader, the preprocessing pipeline and the standalone
 scripts can classify a path without pulling in an S3 stack they never call.
@@ -20,6 +20,15 @@ DATA_FILE_BUILDERS = {
 # delete-first/upload-last so a torn upload cannot present as a valid preprocessed dataset, and a
 # second spelling would break that ordering.
 METADATA_FILE = "metadata.json"
+
+# A source's held-out split, in lookup order: one that ships no ``test`` split evaluates on (and
+# bakes as ``test``) its ``validation`` split.
+EVAL_SPLIT_NAMES = ("test", "validation")
+
+
+def eval_split_name(splits) -> str | None:
+    """The split of ``splits`` that holds the source's held-out rows, first in :data:`EVAL_SPLIT_NAMES`."""
+    return next((name for name in EVAL_SPLIT_NAMES if name in splits), None)
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:

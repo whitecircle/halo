@@ -1,12 +1,13 @@
-"""A prepared dataset carries every input split it was handed, or refuses the input by name.
+"""A prepared dataset bakes the input's held-out split, and names every split it leaves out.
 
 The artifact holds only ``train`` and ``test``, and training evaluates on a placeholder cut from train
 when ``test`` is absent. A ``{train, validation}`` input would otherwise lose its held-out rows and
-evaluate on training data with only a warning; any other extra split would vanish the same way.
+evaluate on training data with only a warning. A split next to the baked pair (GLUE's ``validation``
+beside ``test``, imdb's ``unsupervised``) is left out with a warning that names it, not refused.
 """
 
+import logging
 import os
-import re
 
 import pytest
 from accelerate import PartialState
@@ -20,6 +21,8 @@ from tests.common.tokenizers import load_cached_tokenizer
 
 _TRAIN = Dataset.from_dict({"text": [f"Training document number {i}." for i in range(12)]})
 _HELD_OUT = Dataset.from_dict({"text": [f"Held-out document number {i}." for i in range(3)]})
+_EXTRA = Dataset.from_dict({"text": [f"Extra document number {i}." for i in range(2)]})
+_PREPROCESSING_LOGGER = "src.data.pipeline.preprocessing"
 
 PartialState()  # the loaders log through accelerate's rank-aware logger
 
@@ -47,17 +50,31 @@ def test_a_lone_validation_split_is_baked_as_the_test_split(tmp_path, num_shards
     assert not os.path.exists(tmp_path / "validation")
 
 
+def _unbaked_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "not baked" in r.getMessage()]
+
+
 @pytest.mark.parametrize(
     ("splits", "unbaked"),
     [
-        ({"train": _TRAIN, "test": _HELD_OUT, "validation": _HELD_OUT}, "['validation']"),
-        ({"train": _TRAIN, "extra": _HELD_OUT}, "['extra']"),
+        ({"train": _TRAIN, "test": _HELD_OUT, "validation": _EXTRA}, "['validation']"),
+        ({"train": _TRAIN, "test": _HELD_OUT, "unsupervised": _EXTRA}, "['unsupervised']"),
+        ({"train": _TRAIN, "validation": _HELD_OUT, "unsupervised": _EXTRA}, "['unsupervised']"),
     ],
 )
-def test_a_split_the_artifact_would_drop_is_refused_by_name(tmp_path, splits, unbaked):
-    with pytest.raises(ValueError, match=re.escape(f"carries split(s) {unbaked}")):
+def test_a_split_outside_the_baked_pair_is_named_in_a_warning(tmp_path, caplog, splits, unbaked):
+    with caplog.at_level(logging.WARNING, logger=_PREPROCESSING_LOGGER):
         _prepare(tmp_path, splits)
-    assert not os.path.exists(tmp_path / "train"), "the refusal must land before anything is written"
+    warned = _unbaked_warnings(caplog)
+    assert len(warned) == 1 and unbaked in warned[0], warned
+    assert _decoded_test_rows(tmp_path) == sorted(_HELD_OUT["text"]), "the extra split must not be baked as test"
+
+
+@pytest.mark.parametrize("held_out", ["test", "validation"])
+def test_no_warning_when_every_split_is_baked(tmp_path, caplog, held_out):
+    with caplog.at_level(logging.WARNING, logger=_PREPROCESSING_LOGGER):
+        _prepare(tmp_path, {"train": _TRAIN, held_out: _HELD_OUT})
+    assert _unbaked_warnings(caplog) == []
 
 
 def test_a_train_and_test_input_is_baked_as_given(tmp_path):
