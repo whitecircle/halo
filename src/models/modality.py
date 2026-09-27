@@ -53,7 +53,7 @@ def _probe_checkpoint_config(model_name_or_path: str, revision: str | None, trus
     """
     try:
         return AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
-    except Exception as exc:  # unreachable or missing config: fall back to the name heuristic
+    except Exception as exc:  # unreachable or missing config: fall back to the name heuristic below
         if any(frame.name == _REMOTE_CODE_GATE for frame in traceback.extract_tb(exc.__traceback__)):
             raise ValueError(
                 f"'{model_name_or_path}' defines its architecture in remote code, which this run does not "

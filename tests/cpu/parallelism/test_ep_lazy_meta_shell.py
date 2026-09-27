@@ -219,5 +219,30 @@ def test_an_architecture_refusal_names_the_attention_label_not_lazy_loading(tmp_
     assert "ep_lazy_loading" not in str(raised.value)
 
 
+class _MissingKernelLlama(LlamaForCausalLM):
+    """Fails the attention check with an environment error, as a flash build absent from the image does."""
+
+    def _check_and_adjust_attn_implementation(self, *args, **kwargs):
+        raise ImportError("simulated: the flash kernel is not installed")
+
+
+def test_a_missing_kernel_is_not_reported_as_an_architecture_refusal(tmp_path):
+    """Only the class flags' ValueError is a verdict on the architecture; an ImportError under the same
+    check is the environment's, so it keeps the lazy-build error that names it."""
+    config = LlamaConfig(
+        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, vocab_size=64
+    )
+    with pytest.raises(RuntimeError, match="ImportError: simulated: the flash kernel is not installed"):
+        instantiate_on_meta(
+            str(tmp_path),
+            _MissingKernelLlama,
+            config,
+            dtype=torch.bfloat16,
+            trust_remote_code=False,
+            config_only=True,
+            attn_implementation="flash_attention_2",
+        )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -24,7 +24,7 @@ def resolve_head_dim(cfg) -> int:
 
 
 def declares_attention_heads(cfg) -> bool:
-    """Whether the config declares any attention-head geometry; an attention-free family (Mamba) does not."""
+    """Whether the config declares a head width or an attention-head count; Mamba declares neither."""
     return any(get_config_field(cfg, field, per_layer_reduce=max) for field in ("head_dim", "num_attention_heads"))
 
 
