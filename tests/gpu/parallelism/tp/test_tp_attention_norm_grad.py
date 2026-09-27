@@ -26,7 +26,6 @@ Run:
         tests/gpu/parallelism/tp/test_tp_attention_norm_grad.py
 """
 
-import math
 from pathlib import Path
 
 import torch
@@ -39,7 +38,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.harness import gpu_test_main
-from tests.common.utils import cleanup_memory, log, log_all
+from tests.common.utils import cleanup_memory, log, log_all, max_or_nan
 
 # num_attention_heads must stay divisible by tp_size (2 and 4 both run here).
 TINY_CONFIG_KWARGS = {
@@ -168,14 +167,14 @@ def run(ctx):
     _StepSync(model, tp_group, pc)._sync_tp_replicated_grads(list(model.parameters()))
 
     live = dict(model.named_parameters())
-    worst = 0.0
+    rels = []
     for name in names:
         grad = live[name].grad
         local = grad.to_local() if hasattr(grad, "to_local") else grad
         rel = (local.detach().float() - ref[name]).norm().item() / max(ref[name].norm().item(), 1e-12)
-        # max() keeps its first argument over a NaN, so a non-finite error is made the worst outright.
-        worst = max(worst, rel) if math.isfinite(rel) else math.inf
+        rels.append(rel)
         log_all(f"  {name}: rel_err={rel:.4e}")
+    worst = max_or_nan(rels, default=0.0)
     metrics["worst_norm_grad_rel_err"] = worst
     checks["norm_grads_match_reference"] = worst < NORM_GRAD_TOL
 

@@ -43,7 +43,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, max_or_nan, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 NUM_TRAIN_SAMPLES = 32
@@ -86,15 +86,16 @@ def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
         named = [(n, p) for n, p in trainer._top_level_model().named_parameters() if id(p) in expert_ids]
         before = [(n, p, p.grad.detach().clone()) for n, p in named if p.grad is not None]
         original()
-        worst, scale = 0.0, 0.0
+        diffs, scale = [], 0.0
         for name, param, pre in before:
             expected = pre.float()
             if ep_config.expert_replica_group is not None:
                 dist.all_reduce(expected, op=dist.ReduceOp.SUM, group=ep_config.expert_replica_group)
             expected /= divisor
             actual = param.grad.float()
-            worst = max(worst, (actual - expected).abs().max().item())
+            diffs.append((actual - expected).abs().max().item())
             scale = max(scale, expected.abs().max().item())
+        worst = max_or_nan(diffs, default=0.0)
         # Anti-vacuity: a zero pre-image would make any divisor look right.
         verdict["sweep_pre_image_nonzero"] = scale > 0.0
         verdict["sweep_divisor"] = scale > 0.0 and worst <= SWEEP_DIVISOR_REL_TOL * scale
@@ -133,7 +134,7 @@ def _check_replica_consistency(model, ep_config) -> bool:
     local = weight.detach().contiguous()
     gathered = [torch.empty_like(local) for _ in range(dist.get_world_size(replica_group))]
     dist.all_gather(gathered, local, group=replica_group)
-    max_diff = max((g - gathered[0]).abs().max().item() for g in gathered)
+    max_diff = max_or_nan((g - gathered[0]).abs().max().item() for g in gathered)
     ok = max_diff == 0.0
     log(f"  Replica consistency: {'PASS' if ok else 'FAIL'} (max|Δ| across replicas = {max_diff:.2e})")
     return ok

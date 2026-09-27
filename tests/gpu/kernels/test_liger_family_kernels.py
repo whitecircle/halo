@@ -38,7 +38,7 @@ from src.kernels.liger.orchestrator import resolve_liger_applier
 from tests.common.ep_reference import compare_grad, ep_layers
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN35_MOE_CONFIG
-from tests.common.utils import cos_sim, log, max_abs_rel_err
+from tests.common.utils import cos_sim, log, max_abs_rel_err, max_or_nan
 
 SEED = 42
 BATCH, SEQ, HIDDEN, INTERMEDIATE, HEAD_DIM = 2, 64, 256, 512, 128
@@ -199,7 +199,7 @@ def _compare_gated_norm(name, original, patched, shape, weight_dtype, device) ->
         key: errors[key] / max(max_abs_rel_err(eager[i], oracle[i]), GATED_ORACLE_ERROR_FLOOR)
         for i, key in enumerate(keys)
     }
-    agreement = max(max_abs_rel_err(fused[i], eager[i]) for i in range(len(keys)))
+    agreement = max_or_nan(max_abs_rel_err(fused[i], eager[i]) for i in range(len(keys)))
     log(
         f"  {name} {tuple(shape)} w={weight_dtype}: "
         + " ".join(f"{key}={errors[key]:.1e}/{ratios[key]:.2f}x" for key in keys)

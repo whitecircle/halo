@@ -38,7 +38,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, max_or_nan, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 10
@@ -84,7 +84,7 @@ def _check_replica_consistency(p) -> tuple[bool, float]:
     local = p.to_local().detach().contiguous()
     gathered = [torch.empty_like(local) for _ in range(replicate_size)]
     dist.all_gather(gathered, local, group=replicate_group)
-    max_diff = max((g - gathered[0]).abs().max().item() for g in gathered)
+    max_diff = max_or_nan((g - gathered[0]).abs().max().item() for g in gathered)
     return max_diff == 0.0, max_diff
 
 

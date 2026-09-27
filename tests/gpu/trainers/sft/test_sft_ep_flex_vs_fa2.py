@@ -35,7 +35,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, max_or_nan, step_losses
 
 # Configuration
 
@@ -210,7 +210,7 @@ def run(ctx):
     log("\n--- Sink state AFTER training ---")
     sinks_after = _capture_sinks(model)
     sinks_updated = 0
-    max_delta = 0.0
+    deltas = []
 
     for layer_idx in sorted(sinks_before):
         if sinks_before[layer_idx] is None or sinks_after[layer_idx] is None:
@@ -218,17 +218,17 @@ def run(ctx):
         before_t = sinks_before[layer_idx]["tensor"]
         after_t = sinks_after[layer_idx]["tensor"]
         delta = (after_t - before_t).abs().max().item()
+        deltas.append(delta)
 
         if delta > 0:
             sinks_updated += 1
-            max_delta = max(max_delta, delta)
             if layer_idx < 5:
                 log(f"  Layer {layer_idx}: UPDATED (delta={delta:.6e})")
         elif layer_idx < 3:
             log(f"  Layer {layer_idx}: unchanged (delta=0)")
 
     log(f"  Sinks updated: {sinks_updated}/{total_sink_layers}")
-    log(f"  Max sink delta: {max_delta:.6e}")
+    log(f"  Max sink delta: {max_or_nan(deltas, default=0.0):.6e}")
 
     if sinks_updated > 0:
         log(f"  -> Sinks ARE being updated by {attn_impl}")
