@@ -212,8 +212,8 @@ class ShardedDatasetLoader:
                 f"Sharded dataset '{split}' has {index.num_shards} shards but "
                 f"data_parallel_size={self.world_size}: ranks >= {index.num_shards} would "
                 f"receive zero examples. Re-preprocess with --num-shards >= {self.world_size} "
-                f"(the data-parallel degree), or at the default --num-shards 1 for an unsharded "
-                f"dataset that every rank loads whole.",
+                f"(the data-parallel degree), or leave --num-shards at its default of 1 for an "
+                f"unsharded dataset that every rank loads whole.",
             )
 
         assigned_shards = self.get_assigned_shards(split)
