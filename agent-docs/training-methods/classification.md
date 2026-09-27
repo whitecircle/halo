@@ -12,9 +12,9 @@ Rows are chat-templated and **truncated** to `max_length` — a label describes 
 
 The label set comes from the training split: stringified, sorted for deterministic ids, and unioned across ranks on a pre-sharded dataset so every rank builds an identically shaped head. `num_labels`, `label2id` and `id2label` follow from it, never from YAML; single- vs multi-label follows whether `label` is a list. Labels seen only in validation or test are added with a warning.
 
-`ds["test"]` is the eval split — a `validation` split contributes labels only.
+`ds["test"]` is the eval split; a source with no `test` split evaluates on its `validation` split, and next to a `test` split `validation` contributes labels only.
 
-`-1` marks an unlabeled row. A multi-label row treats it as absence and it is dropped from the label set; a single-label dataset carrying it is refused before the model load, since the row has no class and the loss would read `-1` as an out-of-range index. Filter those rows out.
+`-1` marks an unlabeled row. A multi-label row treats it as absence and it is dropped from the label set. A single-label split carrying it is refused before the model load when the run reads that split (train always; the eval split when the run evaluates: `eval_strategy` other than `no`, or `eval_on_start`), since the row has no class and the loss would read `-1` as an out-of-range index. A split the run does not read is not tokenized. Filter unlabeled rows out of train; for an unlabeled eval split (a GLUE-style `test`), set `dataset: <id>@train` and cut the eval split with `test_size`, or set `eval_strategy: no`.
 
 ## Configuration
 

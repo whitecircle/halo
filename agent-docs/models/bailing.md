@@ -63,7 +63,7 @@ attn_implementation: sdpa       # an auto-detected flash label (FA4 / FA3) is re
 context_parallel_size: 2        # ≤ 4 on Ling-mini-2.0 — cp_size must divide the 4 KV heads
 ```
 
-A flash label — pinned, or auto-selected for an unset one — raises `BailingMoeV2ForCausalLM does not support Flash Attention <N> yet` at model build, on every load path; `<N>` is the requested version (4 auto-selected on Blackwell, 3 on Hopper).
+A flash label — pinned, or auto-selected for an unset one — raises `BailingMoeV2ForCausalLM does not support Flash Attention <N> yet` at model build, on every load path; `<N>` is the requested version (4 auto-selected on Blackwell, 3 on Hopper). On the EP lazy-loading path it arrives as a `ValueError` that names `attn_implementation` and includes that transformers message.
 
 `Ring-mini-linear-2.0` is **rejected**, not wrapped: its file reuses Ling 2.0's full-attention class names, so validation matches `BailingMoeV2LinearAttention` by name to avoid wrapping the few full-attention layers while the Lightning-Attention-2 recurrence scans each rank's shard in isolation. (`finalize_loaded_model()` recomputes its slope buffers on every load path.) Ling 3.0 is likewise unavailable — its KDA layers are a linear recurrence and its MLA layers carry no wrapper.
 

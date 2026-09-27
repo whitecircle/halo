@@ -77,8 +77,10 @@ Labels that appear only in validation or test are added with a warning.
 
 Rows are truncated to `max_length` rather than dropped here, because a label describes a whole
 document and a shortened document still carries it. A `-1` label marks an unlabeled row: multi-label
-rows read it as absence, and a single-label dataset carrying one is refused before the model loads,
-so filter those rows out.
+rows read it as absence. A single-label split carrying one is refused before the model loads when the
+run reads it (train, and the eval split when evaluating); a split the run does not read is not
+tokenized. Filter those rows out of train. For an unlabeled eval split (GLUE-style `test`), use
+`dataset: <id>@train` with `test_size`, or `eval_strategy: no`.
 
 ### Config
 
