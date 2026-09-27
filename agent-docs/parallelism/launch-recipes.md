@@ -137,6 +137,7 @@ python scripts/before_training/prepare_dataset.py \
     --output "s3://my-bucket/preprocessed/my_sft_data" \
     --model-name "Qwen/Qwen3-8B" \
     --max-length 8192 \
+    --test-size 0.01 \
     --num-shards 64 \
     --pack-sequences \
     --conversation-field conversation \

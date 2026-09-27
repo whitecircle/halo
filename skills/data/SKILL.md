@@ -39,11 +39,13 @@ unknown-key error.
 
 Tokenize → optional pack → optional shard, written to `s3://` / `hf://org/name` / local. Worth it for
 large SFT corpora (pay tokenization+packing once; multi-node ranks load disjoint shards). The output
-carries `metadata.json` (`preprocessed: true`); a training config sets `dataset:` to that path —
-**no flag needed**, `load_datasets_auto()` auto-detects and skips tokenization. Sharded output also
+carries `metadata.json` (`preprocessed: true`); a training config sets `dataset:` to that S3 or local
+path — **no flag needed**, `load_datasets_auto()` auto-detects and skips tokenization. A Hub-published
+output is refused as `dataset:`; download it and point at the directory. Sharded output also
 carries `shard_index.json`; the trainer computes `dataset_presharded` so the DataLoader does **not**
 re-shard. Key flags (read the argparse for the rest): `--mode {chat,text}`, `--pack-sequences`
-`--packing-strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM), `--num-shards N` (**must be ≥ data_parallel_size**),
+`--packing-strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM), `--num-shards N` (above 1:
+**must be ≥ data_parallel_size**, and needs a `test` split — `--test-size`),
 `--vlm`. Non-SFT methods are not supported by this script. Full flag list + the two distinct mechanisms
 (preprocessed vs presharded) in `reference.md`.
 

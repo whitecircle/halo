@@ -297,8 +297,8 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 ```bash
 python scripts/before_training/prepare_dataset.py \
     --input "s3://bucket/raw/dataset" --output "s3://bucket/preprocessed/dataset" \
-    --model-name "Qwen/Qwen3-8B" --max-length 8192 --num-shards 64 --pack-sequences \
-    --assistant-message-template $'<|im_start|>assistant\n'
+    --model-name "Qwen/Qwen3-8B" --max-length 8192 --test-size 0.01 --num-shards 64 \
+    --pack-sequences --assistant-message-template $'<|im_start|>assistant\n'
 
 python scripts/before_training/patch_vocab.py \
     --model_id Zyphra/ZAYA1-8B --output_dir /mnt/models/ZAYA1-8B-patched \
