@@ -29,7 +29,7 @@ from src.distributed.expert_parallel.patching import create_ep_buffers, patch_mo
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
-from tests.common.utils import cleanup_memory, log, log_all
+from tests.common.utils import cleanup_memory, log, log_all, max_or_nan
 
 SEED = 42
 BATCH, SEQ = 2, 64
@@ -138,7 +138,7 @@ def run(ctx):
             checks[f"l{layer_idx}_idle_sync_microbatch_grad_divided"] = (
                 ok and GRAD_NORM_RATIO[0] < ratio < GRAD_NORM_RATIO[1]
             )
-        metrics["max_norm_ratio"] = max(ratios)
+        metrics["max_norm_ratio"] = max_or_nan(ratios)
         log(f"  idle-rank grad norm ratios (bug = ~{ctx.world_size}.0): {[f'{r:.3f}' for r in ratios]}")
 
     del model

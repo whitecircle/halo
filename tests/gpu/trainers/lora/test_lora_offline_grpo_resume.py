@@ -71,6 +71,7 @@ from tests.common.utils import (
     cleanup_memory,
     local_optimizer_state,
     log,
+    max_or_nan,
     optimizer_state_matches,
     step_losses,
 )
@@ -493,13 +494,13 @@ def run(ctx) -> dict:
         phase1_tail, resumed_tail = phase1_losses[SAVE_AT_STEP:], resumed_losses[SAVE_AT_STEP:]
         deltas = [abs(a - b) for a, b in zip(phase1_tail, resumed_tail, strict=True)]
         metrics["restored_step_loss_delta"] = deltas[0]
-        metrics["resume_loss_max_delta"] = max(deltas)
+        metrics["resume_loss_max_delta"] = max_or_nan(deltas)
         log(
             f"steps {SAVE_AT_STEP + 1}-{TOTAL_STEPS}: phase1={[f'{loss:.5f}' for loss in phase1_tail]} "
             f"resumed={[f'{loss:.5f}' for loss in resumed_tail]} |deltas|={[f'{d:.5f}' for d in deltas]}"
         )
         checks["restored_weights_reproduce_the_loss"] = deltas[0] < RESTORED_STEP_LOSS_TOL
-        checks["resumed_loss_tracks_phase1"] = max(deltas) < LOSS_TOL
+        checks["resumed_loss_tracks_phase1"] = max_or_nan(deltas) < LOSS_TOL
 
     restored = live.get("restored")
     checks["resume_capture_fired"] = restored is not None

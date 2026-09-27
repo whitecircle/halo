@@ -60,7 +60,7 @@ from src.env import env_int, env_str
 from src.trainers.grpo.rollout.weight_sync import sync_weights_to_client, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.utils import log, max_or_nan
 
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
 CHECKPOINT = env_str("HALO_TEST_STEP3P7_MODEL")
@@ -210,18 +210,18 @@ def _trainer_logprobs(model, prompt_ids: list[int]) -> torch.Tensor:
 
 
 def _gap(server: dict[int, float], trainer: torch.Tensor) -> float:
-    return max(abs(value - trainer[token].item()) for token, value in server.items())
+    return max_or_nan(abs(value - trainer[token].item()) for token, value in server.items())
 
 
 def _shift(before: dict[int, float], after: dict[int, float]) -> float:
     """How far the server's distribution moved, over the tokens both probes reported."""
     common = set(before) & set(after)
-    return max(abs(before[t] - after[t]) for t in common) if common else float("inf")
+    return max_or_nan((abs(before[t] - after[t]) for t in common), default=float("inf"))
 
 
 def _trainer_shift(before: torch.Tensor, after: torch.Tensor, tokens) -> float:
     """How far the trainer's own distribution moved, over the tokens the server probe reports."""
-    return max(abs(before[t].item() - after[t].item()) for t in tokens)
+    return max_or_nan(abs(before[t].item() - after[t].item()) for t in tokens)
 
 
 @torch.no_grad()

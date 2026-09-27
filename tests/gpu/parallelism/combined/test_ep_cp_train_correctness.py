@@ -51,7 +51,7 @@ from tests.common.distributed import ensure_model_downloaded, world_mean
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, step_losses
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, max_or_nan, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -172,8 +172,8 @@ def test_loss_equivalence(device):
     all_finite = all(math.isfinite(l) for l in ep_losses + cp_losses)
     passed = all_match and all_finite
 
-    max_abs = max(r[2] for r in sample_results)
-    max_rel = max(r[3] for r in sample_results)
+    max_abs = max_or_nan(r[2] for r in sample_results)
+    max_rel = max_or_nan(r[3] for r in sample_results)
     log(f"      Max abs diff: {max_abs:.6f} (tol: {LOSS_ABS_TOL})")
     log(f"      Max rel diff: {max_rel:.4%} (tol: {LOSS_REL_TOL:.0%})")
     log(f"      Phase 1: {'PASS' if passed else 'FAIL'}")
@@ -409,7 +409,7 @@ def test_ep_cp_training(ctx):
         f"{'PASS' if checks['loss_decreased'] else 'FAIL'}"
     )
 
-    max_step = max(losses[1:])
+    max_step = max_or_nan(losses[1:])
     checks["no_loss_explosion"] = max_step < losses[0] * 2.0
     log(
         f"  No loss explosion (max={max_step:.4f} < 2x first={losses[0] * 2:.4f}): "

@@ -38,7 +38,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.peft_helpers import snapshot_adapters
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.utils import cleanup_memory, log, max_or_nan, step_losses
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -97,7 +97,7 @@ def _analyze_convergence(losses: list[float], window_size: int = WINDOW_SIZE) ->
     no_divergence = all(w <= divergence_threshold for w in windows)
     checks["no_divergence"] = no_divergence
     if not no_divergence:
-        worst = max(windows)
+        worst = max_or_nan(windows)
         log(f"  No divergence: FAIL (worst window={worst:.4f}, threshold={divergence_threshold:.4f})")
     else:
         log(f"  No divergence: PASS (all windows < {divergence_threshold:.4f})")
