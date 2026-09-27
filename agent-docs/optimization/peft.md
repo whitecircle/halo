@@ -168,6 +168,9 @@ Weights PEFT can't LoRA are **full-trained** (a trainable copy, not a low-rank a
 `lora_modules_to_save`: `embed_tokens` (an `nn.Embedding`), `lm_head` (excluded by `all-linear`), and the
 MoE `router` / `gate`. An **expert-only** run builds no `PeftModel`, so `lora_modules_to_save` raises there
 rather than leaving those modules silently frozen — add an attention target, or drop the field.
+`unfreeze_layers_patterns` / `freeze_layers_patterns` are refused on any adapter run (attention LoRA or
+native expert LoRA): it freezes every base parameter and trains only the adapters, so a pattern would select
+nothing. Use `lora_modules_to_save` for a fully trained module.
 
 ### Router training under EP
 

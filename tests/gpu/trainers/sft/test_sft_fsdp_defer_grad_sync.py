@@ -69,10 +69,10 @@ MAX_SEQ_LENGTH = 256
 LEARNING_RATE = 1e-4
 # The arms sum the same bf16 gradients in a different order (microsteps then ranks), and runs are
 # otherwise bitwise reproducible (knob off twice: zero deviation). Measured across the modes: |dloss|
-# <= 3.4e-4 (DP and HSDP, both correct, differ by 1.2e-3), grad-norm rel dev <= 3.2e-4 (up to one
-# bf16 step, 0.8%, where the clip computes the norm in bf16), final weights <= 2.0% of their movement.
-# The bounds sit 2.5-6x above that, far under a dropped or doubled microstep (a quarter of the
-# window's gradient).
+# <= 4.1e-4 (DP and HSDP, both correct, differ by 1.2e-3), grad-norm rel dev <= 3.2e-4 (up to one
+# bf16 step, 0.8%, where the clip computes the norm in bf16), final weights within about 2% of their
+# movement. The bounds sit 2.5-5x above that, far under a dropped or doubled microstep (a quarter of
+# the window's gradient).
 LOSS_ABS_TOL = 2e-3
 GRAD_NORM_RTOL = 2e-2
 WEIGHT_REL_TOL = 0.1

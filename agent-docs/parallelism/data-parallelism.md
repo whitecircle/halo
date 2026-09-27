@@ -130,8 +130,8 @@ reshard): autograd accumulates the unsharded gradients locally and the window's 
 reduces them once. The sum is the same, taken in a different order (microsteps before ranks), so
 bf16 runs match the default to rounding: across the DP, HSDP, TP+DP, CP+DP and MoE (ep1, EP,
 multi-group EP) rows of `tests/gpu/trainers/sft/test_sft_fsdp_defer_grad_sync.py`, per-step loss
-stays within 3.4e-4 of the default and the final weights within 2% of their movement, under the
-1.2e-3 loss spread between DP and HSDP (both correct) on the same data.
+stays within about 4e-4 of the default and the final weights within about 2% of their movement,
+under the 1.2e-3 loss spread between DP and HSDP (both correct) on the same data.
 
 Measured with packed `sft.py` (4k tokens, batch 2, gradient checkpointing, B300; tok/s/GPU, mean
 of 3 runs unless noted):
@@ -152,11 +152,14 @@ removes the matching per-microstep all-gathers. The three-run spread stays withi
 (1.3% on one node).
 
 The cost is one unsharded gradient copy per GPU held across the window, at the reduce dtype: 2
-B/param, or 4 B/param under `fp32_grad_reduce` (FSDP2 upcasts the accumulator). An `ep_size==1`
-MoE pays it for every expert, since FSDP2 owns them; at `ep_size>1` the experts are FSDP-ignored and
-only the non-expert params pay it. It saves nothing at `gradient_accumulation_steps: 1`. Use it when
-the reduction is a visible share of the step (large DP width, slow inter-node fabric, small
-microbatches) and the memory is there.
+B/param, or 4 B/param when the reduce runs in fp32 (`fp32_grad_reduce`, `fp32_non_ep_params` or
+`bf16: false`; FSDP2 upcasts the accumulator). The default holds the sharded gradient anyway, so at
+equal dtypes the peak rises by (1 − 1/shard width) of that copy: the table's peaks grow by 7/8 of the
+bf16 gradient on 8 GPUs, 3/4 on 2 × 2, and 1/2 under `use_hsdp`, whose shard width is the 2-GPU node.
+An `ep_size==1` MoE pays it for every expert, since FSDP2 owns them; at `ep_size>1` the experts are
+FSDP-ignored and only the non-expert params pay it. It saves nothing at
+`gradient_accumulation_steps: 1`. Use it when the reduction is a visible share of the step (large DP
+width, slow inter-node fabric, small microbatches) and the memory is there.
 
 The in-backward EP expert and router hooks gate on the same `sync_gradients`, and the deferred EP
 sweep, the TP replicated-gradient sweep and the gradient clip run after the window's last backward,
