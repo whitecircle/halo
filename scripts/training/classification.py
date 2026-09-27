@@ -192,7 +192,13 @@ def build_label_list(split_labels: dict[str, set[str]]) -> list[str]:
 
 
 def get_label_list(raw_dataset, split="train") -> list[str]:
-    """Get the list of labels from a multi-label dataset"""
+    """The stringified labels of ``split``, flattened for a multi-label one.
+
+    Empty for an empty split: a pre-sharded eval split can leave a rank without rows, and that rank
+    must still reach the label-set gather its peers enter.
+    """
+    if len(raw_dataset[split]) == 0:
+        return []
     if isinstance(raw_dataset[split]["label"][0], list):
         label_list = [label for sample in raw_dataset[split]["label"] for label in sample]
         label_list = list(set(label_list))

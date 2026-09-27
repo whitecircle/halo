@@ -13,6 +13,7 @@ with evaluation off).
 Run: pytest tests/cpu/config/test_classification_input_columns.py
 """
 
+import contextlib
 import sys
 import types
 from unittest import mock
@@ -83,6 +84,14 @@ def test_an_eval_only_label_joins_the_classes(classification):
     assert classification.build_label_list({"train": {"a", "b"}, "test": {"c"}}) == ["a", "b", "c"]
 
 
+def test_an_empty_split_contributes_no_labels(classification):
+    """A pre-sharded eval split can leave a rank without rows; that rank must still reach the
+    label-set gather rather than raise before it while its peers wait."""
+    empty = Dataset.from_dict({"prompt": [], "label": []})
+    ds = DatasetDict({"train": Dataset.from_dict({"prompt": [_TURNS], "label": [0]}), "test": empty})
+    assert classification.get_label_list(ds, "test") == []
+
+
 def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labels: list) -> list[str]:
     """Run ``main()`` over a single-label dataset to its tokenization map; returns the splits it maps."""
     config = tmp_path / "config.yaml"
@@ -99,7 +108,6 @@ def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labe
         raise _ReachedTokenization(sorted(dataset))
 
     patches = [
-        mock.patch.object(classification, "run_training", lambda fn: fn),
         mock.patch.object(classification, "init_training_script", return_value=runtime),
         mock.patch.object(
             classification, "load_script_datasets", return_value=(DatasetDict({"train": train, "test": test}), False)
@@ -113,15 +121,13 @@ def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labe
         mock.patch("src.training.parser.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
-    for patch in patches:
-        patch.start()
-    try:
-        classification.main()
-    except _ReachedTokenization as reached:
-        return reached.args[0]
-    finally:
-        for patch in reversed(patches):
-            patch.stop()
+    with contextlib.ExitStack() as stack:
+        for patch in patches:
+            stack.enter_context(patch)
+        try:
+            classification.main()
+        except _ReachedTokenization as reached:
+            return reached.args[0]
     raise AssertionError("main() returned without reaching the tokenization map")
 
 
