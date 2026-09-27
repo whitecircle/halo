@@ -19,8 +19,9 @@ class EPBailingMoELayer(EPSeparateGluMoELayerBase):
     handles by testing the return for a tuple.
 
     Bias-update balancing uses the gate's own persistent ``expert_bias`` buffer, added to the sigmoid
-    scores for selection only (``topk_method: noaux_tc``), instead of the base's transient
-    side-buffer. That buffer is part of the checkpoint, so a gathered save exports the trained bias.
+    scores for selection only (``moe_router_enable_expert_bias``; Ling 3.0 also declares
+    ``topk_method: noaux_tc``), instead of the base's transient side-buffer. That buffer is part of
+    the checkpoint, so a gathered save exports the trained bias.
     """
 
     HF_MODULE_NAMES = ("BailingMoeV2SparseMoeBlock", "BailingMoeV3SparseMoeBlock")
