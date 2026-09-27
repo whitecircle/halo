@@ -427,8 +427,9 @@ def make_disable_adapter_fsdp2_safe(peft_model: nn.Module, fsdp_root: nn.Module)
     to, so its root group is included) is resharded before peft's exit, which lands the restore on the
     sharded params. A pass that enters on the unsharded params a policy forward left registered exits on
     the same ones and reshards nothing, so the backward that follows reuses them instead of re-gathering.
-    The trainable ``(module, name)`` slots are read once here: FSDP2 swaps the objects registered in a
-    slot, never the slot, and a walk of the whole module tree on every pass would cost several ms.
+    The trainable ``(module, name)`` slots are fixed once PEFT has injected the adapters, so they are read
+    once here: FSDP2 swaps the objects registered in a slot, never the slot, and a walk of the whole
+    module tree on every pass would cost several ms.
     Per-rank, and a no-op without FSDP2. Idempotent.
     """
     if getattr(peft_model, "_fsdp2_safe_disable_adapter", False):
