@@ -176,7 +176,9 @@ manifest.
   rot.
 
     `known_failures` maps a row that fails on an open bug to that bug. The row still runs, as a strict
-    `xfail`: once the bug is fixed it passes, which fails the tier until the entry is removed.
+    `xfail`: once the bug is fixed it passes, which fails the tier until the entry is removed. Only a
+    failure the script reports through its result line counts as the bug; a crash with no result line,
+    a timeout or a launch error still fails the row.
 
     A `bench*.py` that is in neither the manifest nor `_UNMANIFESTED_BENCHMARKS` fails the same way.
     World-size strictness is not a manifest field; the script declares it itself via

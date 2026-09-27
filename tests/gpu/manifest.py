@@ -79,7 +79,8 @@ class TestSpec:
         flaky: known-transient; the conftest applies scoped reruns.
         known_failures: rows of ``args_matrix`` that fail on an open bug, each mapped to that bug.
             The conftest marks them strict ``xfail``: they still run, and a row that starts passing
-            fails the tier until its entry is removed.
+            fails the tier until its entry is removed. Only a failure the script reports counts as
+            the bug; a crash with no result line, a timeout or a launch error still fails the row.
 
     World-size strictness is not declared here: each script owns it via
     ``gpu_test_main(exact_world_size=N)``, which is authoritative and more precise than a

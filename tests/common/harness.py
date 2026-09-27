@@ -211,7 +211,16 @@ def gpu_test_main(
                 traceback.print_exc()
             finally:
                 ctx._run_finalizers()
-                cleanup_memory()
+                try:
+                    cleanup_memory()
+                except Exception:
+                    # A body that faulted the device faults this too, and raising here would drop the
+                    # failed verdict, which the launcher then reads as an infra error. Only a pass must
+                    # not survive it.
+                    if status == "pass":
+                        raise
+                    log_all("cleanup_memory raised after the body failed")
+                    traceback.print_exc()
                 cleanup_dirs(output_dir, cache_dir)
                 # Clean path only. A rank whose body raised has abandoned a collective its peers are
                 # still inside, so both the barrier and the NCCL group teardown block until the
