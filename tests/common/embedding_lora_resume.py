@@ -60,11 +60,9 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from torch.distributed.tensor import DTensor
 from transformers import (
     AutoModel,
-    Gemma4TextConfig,
-    GptOssConfig,
     PreTrainedTokenizerFast,
+    Qwen3_5ForCausalLM,
     Qwen3_5TextConfig,
-    Qwen3Config,
     TrainerCallback,
 )
 from trl import ModelConfig, get_peft_config
@@ -88,26 +86,23 @@ from src.training.environment import resolve_resume_weights_source
 from src.training.script_runner import ScriptRuntime, apply_distributed_trainer_config
 from tests.common.models import (
     PARAPHRASE_MINILM,
-    TINY_GEMMA4_MOE_CONFIG,
-    TINY_GPTOSS_CONFIG,
-    TINY_QWEN3_CONFIG,
     TINY_QWEN35_CONFIG,
 )
 from tests.common.peft_helpers import injected_lora_merge
+from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, TinyFamily, shared_tiny_family_checkpoint
 from tests.common.utils import cleanup_memory, log, step_losses, tensors_equal_at_narrower_dtype
 
 
 @dataclass(frozen=True)
 class Family:
-    """One backbone family: a random-init tiny ``config_cls(**tiny)`` saved as a plain transformers
-    checkpoint, or (``config_cls`` None) the hub sentence-transformers checkpoint ``hub``. ``targets``
-    are its attention projections, ``embedding`` its input embedding."""
+    """One backbone family: the shared registry's random-init ``tiny`` model saved as a checkpoint, or
+    (``tiny`` None) the hub sentence-transformers checkpoint ``hub``. ``targets`` are its attention
+    projections, ``embedding`` its input embedding."""
 
     targets: tuple[str, ...]
     embedding: str
     pooling: str
-    config_cls: type | None = None
-    tiny: dict | None = None
+    tiny: TinyFamily | None = None
     hub: str | None = None
     attn_implementation: str | None = None
 
@@ -115,13 +110,19 @@ class Family:
 # The dense encoder ST ships, and the decoder families of the shipped examples/embedding/ recipes.
 FAMILIES = {
     "bert": Family(("query", "value"), "word_embeddings", "mean", hub=PARAPHRASE_MINILM),
-    "qwen3": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", Qwen3Config, TINY_QWEN3_CONFIG),
-    "qwen3_5": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", Qwen3_5TextConfig, TINY_QWEN35_CONFIG),
+    "qwen3": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", TINY_DENSE_FAMILY),
+    # The dense Qwen3.5 text model, which the MoE roster's registry does not carry.
+    "qwen3_5": Family(
+        ("q_proj", "v_proj"),
+        "embed_tokens",
+        "lasttoken",
+        TinyFamily(lambda overrides: Qwen3_5ForCausalLM(Qwen3_5TextConfig(**{**TINY_QWEN35_CONFIG, **overrides}))),
+    ),
     # FA4, the EP / TP loader's Blackwell default, does not compile the tiny config's head_dim of 8.
     "gemma4": Family(
-        ("q_proj", "v_proj"), "embed_tokens", "lasttoken", Gemma4TextConfig, TINY_GEMMA4_MOE_CONFIG, None, "sdpa"
+        ("q_proj", "v_proj"), "embed_tokens", "lasttoken", TINY_MOE_FAMILIES["gemma4_text"], attn_implementation="sdpa"
     ),
-    "gpt_oss": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", GptOssConfig, TINY_GPTOSS_CONFIG),
+    "gpt_oss": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", TINY_MOE_FAMILIES["gpt_oss"]),
 }
 # What ``--lora`` adapts, and how (``dora``); ``off`` is a full fine-tune.
 LORA_TARGETS = ("attention", "mixed", "embedding", "dora", "off")
@@ -225,25 +226,13 @@ def _word_tokenizer() -> PreTrainedTokenizerFast:
     return PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]", eos_token="[EOS]")
 
 
-def _base_source(ctx, family_name: str, shared_dir: str) -> str:
-    """The family's base checkpoint: the hub one, or a seeded tiny one rank 0 saves for every rank."""
+def _base_source(ctx, family_name: str) -> str:
+    """The family's base checkpoint: the hub one, or its seeded tiny one at the word tokenizer's vocab,
+    which rank 0 saves for every rank."""
     family = FAMILIES[family_name]
     if family.hub is not None:
         return family.hub
-    base_dir = os.path.join(shared_dir, f"tiny_{family_name}")
-    if ctx.rank == 0:
-        tokenizer = _word_tokenizer()
-        sizes = {"vocab_size": len(tokenizer)}
-        if "vocab_size_per_layer_input" in family.tiny:
-            sizes["vocab_size_per_layer_input"] = len(tokenizer)
-        config = family.config_cls(
-            **{**family.tiny, **sizes}, pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id
-        )
-        torch.manual_seed(SEED)
-        AutoModel.from_config(config).to(torch.bfloat16).save_pretrained(base_dir)
-        tokenizer.save_pretrained(base_dir)
-    ctx.barrier()
-    return base_dir
+    return shared_tiny_family_checkpoint(ctx, family.tiny, f"embedding_base_{family_name}", _word_tokenizer(), SEED)
 
 
 def _config(output_dir: str, family: Family, *, save: bool) -> EmbeddingConfig:
@@ -630,7 +619,7 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str = "att
     shared = [ctx.output_dir]
     if dist.is_initialized():
         dist.broadcast_object_list(shared, src=0)
-    base_source = _base_source(ctx, family_name, shared[0])
+    base_source = _base_source(ctx, family_name)
     if lora == "off":
         return _full_finetune_row(ctx, family, mode, base_source, shared[0])
     if mode in PARALLEL_MODES:
