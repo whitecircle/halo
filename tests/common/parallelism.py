@@ -28,6 +28,18 @@ def _mocked_rank(rank: int):
         yield
 
 
+@contextlib.contextmanager
+def simulated_world(world_size: int, gpus_per_node: int, rank: int = 0):
+    """Present a ``world_size``-rank job on ``gpus_per_node``-GPU nodes, as ``rank``, to a config that
+    resolves its topology from the dist primitives (``parallelism_config_from_args`` passes none)."""
+    with (
+        patch(f"{_MOD}.get_global_world_size", return_value=world_size),
+        patch(f"{_MOD}.get_local_world_size", return_value=gpus_per_node),
+        _mocked_rank(rank),
+    ):
+        yield
+
+
 def make_parallelism_config(
     *,
     world_size: int = 8,
