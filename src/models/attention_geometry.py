@@ -23,6 +23,11 @@ def resolve_head_dim(cfg) -> int:
     return decoder.hidden_size // decoder.num_attention_heads
 
 
+def declares_attention_heads(cfg) -> bool:
+    """Whether the config declares any attention-head geometry; an attention-free family (Mamba) does not."""
+    return any(get_config_field(cfg, field, per_layer_reduce=max) for field in ("head_dim", "num_attention_heads"))
+
+
 def resolve_num_key_value_heads(cfg) -> int:
     """The KV head count, falling back to ``num_attention_heads`` (MHA when GQA is undeclared).
 

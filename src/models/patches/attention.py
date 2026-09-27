@@ -27,6 +27,7 @@ from transformers.utils import is_flash_attn_2_available
 
 from src.hardware import is_blackwell_gpu, is_hopper_gpu
 from src.models.attention_geometry import (
+    declares_attention_heads,
     resolve_head_dim,
     resolve_num_key_value_heads,
 )
@@ -367,8 +368,11 @@ def model_has_sinks(model_config) -> bool:
 
 def head_dim_exceeds_flash(model_config) -> bool:
     """Whether the model's widest attention head is past :data:`FLASH_MAX_HEAD_DIM` (Gemma 4's 512-wide
-    global heads), where no FlashAttention kernel runs and SDPA needs its mem-efficient kernel."""
-    return resolve_head_dim(model_config) > FLASH_MAX_HEAD_DIM
+    global heads), where no FlashAttention kernel runs and SDPA needs its mem-efficient kernel.
+
+    ``False`` on an attention-free config (Mamba), which has no head for a kernel to reject.
+    """
+    return declares_attention_heads(model_config) and resolve_head_dim(model_config) > FLASH_MAX_HEAD_DIM
 
 
 def _model_is_deepseek_v4(model_config) -> bool:

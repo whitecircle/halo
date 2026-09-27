@@ -233,6 +233,16 @@ def test_heads_past_the_flash_cap_fall_back_to_sdpa(model_type, overrides, reque
         assert attention_mod.resolve_attn_implementation(config, requested, torch.bfloat16) == "sdpa"
 
 
+@pytest.mark.parametrize("requested", [None, "flash_attention_2", "sdpa"])
+def test_an_attention_free_config_resolves_without_a_head_geometry(requested):
+    """Mamba declares neither ``head_dim`` nor ``num_attention_heads``: the head-width gate must read
+    that as nothing to reject, not raise, and the validator then lands on the eager the config takes."""
+    config = CONFIG_MAPPING["mamba"]()
+    assert not attention_mod.head_dim_exceeds_flash(config)
+    with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
+        assert attention_mod.resolve_attn_implementation(config, requested, torch.bfloat16) == "eager"
+
+
 def test_a_head_at_the_flash_cap_keeps_flash():
     """The cap is inclusive: Qwen3-Next's 256-wide heads are within it (its FA4 demote is the NaN gate's)."""
     config = CONFIG_MAPPING["qwen3_next"]()
