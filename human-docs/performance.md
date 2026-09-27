@@ -18,7 +18,7 @@ GPU, so a number scales by the GPU count:
 | GPT-OSS 20B, 32k context | 8 GPUs, `ep8 + cp8`, checkpointing on | 6,000 |
 
 Two things to read out of that table. Expert parallelism costs throughput — at
-matched settings `ep1` runs about 2× `ep8` on the same model — because it trades
+batch 4 and 4k `ep1` runs about 2× `ep8` on the same model — because it trades
 local parameters for all-to-all traffic, so pick the *lowest* EP that fits rather
 than the largest your GPUs allow. And context parallelism is a way to afford a
 long sequence, not a way to go faster: it holds memory nearly flat from 16k to
@@ -34,12 +34,12 @@ latency-bound and the GPUs are waiting, not computing. Turn on
 
 | Lever | What it buys |
 | --- | --- |
-| Bigger `M` — raise `per_device_train_batch_size` or `max_length` | the single largest effect; batch 1 → 4 is 1.2–2.1× on MoE, least at high EP. Fill the global batch with `gradient_accumulation_steps`, not more parallelism |
+| Bigger `M` — raise `per_device_train_batch_size` or `max_length` | the single largest effect; batch 1 → 4 at 4k is 1.2–2.4× on MoE, least at high EP, and at 16k `ep8` loses throughput under batch (its dispatch grows with tokens per rank). Fill the global batch with `gradient_accumulation_steps`, not more parallelism |
 | `gradient_checkpointing: false` when activations fit | +29% on GPT-OSS `ep8` at 4k, at roughly double the peak memory |
 | `packing: true` | 9.2× on a corpus averaging a quarter of `max_length` (`padding_free: true`: 2.3×); nothing when rows already fill it |
 | `use_grouped_gemm: true` (default on SM90+) | 2.1–3.4× end-to-end at `ep2` — one batched expert matmul instead of a loop |
 | Flash Attention 4 (auto on Blackwell) | 1.1× at 4k rising to 2.3× at 32k on dense; ~+13% on MoE, where all-to-all dominates |
-| `use_liger_kernel: true` (default) | +40% and 19 GB at MoE `ep2`; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades a few percent of speed for tens of GB |
+| `use_liger_kernel: true` (default) | +40% and 19 GB at MoE `ep2`; add `liger_kernel_config: {fused_linear_cross_entropy: true}` past ~16k tokens, which trades 7–20% of speed for 14–30 GB on GPT-OSS `ep1` (the cost shrinks as the sequence grows) |
 | `AdamWBF16` (automatic with `bf16: true`) | weights and optimizer state in 6 bytes/param where fp32-state AdamW needs 12, and a 17% shorter step than `adamw_torch_fused` |
 | `fsdp_defer_grad_sync: true` and `fsdp_reshard_after_backward: false`, with `gradient_accumulation_steps > 1` | one gradient reduce and one parameter re-gather per optimizer step instead of per microstep: +3–7% on one 8-GPU node, +9–13% across two nodes over EFA. Each keeps an unsharded copy per GPU (Qwen3-8B: +13 GB for the gradients). [Details](../agent-docs/parallelism/data-parallelism.md) ↗ |
 
@@ -70,13 +70,11 @@ so the fix is a bigger `M`, not a faster kernel.
 Halo trains GPT-OSS 20B at 2.3–2.8× stock TRL across every short and mid-length
 config on the same 8 B300s, with the same kernels and the strongest stock options
 enabled on both sides. Most of the gap is structural rather than kernel-level:
-transformers' own expert-parallel path never moves tokens — every rank holds the
-whole batch, zeroes the scores of experts it does not own, and all-reduces the
-full MoE output — where Halo routes each token once to the rank owning its expert
-over DeepEP, putting `top_k/num_experts` of the batch on the wire per layer.
-Stock FSDP2 also re-gathers all 20.7B parameters every micro-step, a fixed cost a
-short step cannot hide, and keeps fp32 optimizer masters where `AdamWBF16` keeps
-6 bytes per parameter. The `ep8` shape trades some of that speed back for memory:
+the baseline runs no expert parallelism, and its FSDP2 `full_shard` re-gathers
+all 20.7B parameters every micro-step, a fixed cost a short step cannot hide,
+while its AdamW keeps 12 bytes per parameter of fp32 state where `AdamWBF16`
+keeps 6. At the same ZeRO-3 sharding and expert kernel, dense Halo still leads
+1.4–2.7×. The `ep8` shape trades some of that speed back for memory:
 1.3–2.1× TRL at about half its footprint. None of it costs convergence — TRL,
 dense Halo, `ep2` and `ep8` all land within ~1% of the same loss over 200 seeded
 steps.

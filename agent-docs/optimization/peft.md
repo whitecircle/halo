@@ -137,9 +137,9 @@ routes them to native grouped-LoRA built inside each EP layer (`_init_expert_lor
 Requests are **logical**; what gets built follows the family's storage. One adapter is created per stored
 3-D expert tensor that any requested projection touches.
 
-On a family that stores the fused `gate_up_proj` — every family except Qwen3 and Bailing — asking for
-`gate_proj` alone adapts the whole `[E, H, 2M]` tensor: gate and up share one rank-`r` subspace. On the two
-separate-storage families it adapts gate alone, with its own rank `r`.
+On a family that stores the fused `gate_up_proj` — every family except Qwen3, Bailing and grouped-GEMM
+GptOss (below) — asking for `gate_proj` alone adapts the whole `[E, H, 2M]` tensor: gate and up share one
+rank-`r` subspace. On the separate-storage layouts it adapts gate alone, with its own rank `r`.
 
 `lora_r` must be a multiple of 8. The grouped GEMM reads the adapter's rank dimension as a stride that
 spans a multiple of 16 bytes (`GROUPED_MM_STRIDE_ALIGNMENT_BYTES`), and the adapter GEMMs run at the
@@ -225,7 +225,7 @@ applies, and downcasting a deliberately-fp32 router or expert would negate `fp32
 | EP+CP | Yes | No | Attention + experts | Both active |
 | EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `has_ep_lora` arm |
 | ETP | Yes | No | Attention only | Expert adapters rejected at config time by `ParallelismConfig` (`expert_tp_size > 1` gives the replicated adapter half a partial, never-synced gradient) |
-| PP | **No** | No | — | Attention PEFT rejected at trainer construction (a stage cannot resolve full-tree module names); expert LoRA rejected earlier by `ParallelismConfig` (the adapter save/merge paths would record stage-local layer indices) |
+| PP | **No** | No | — | Attention PEFT rejected at trainer construction, expert LoRA earlier by `ParallelismConfig`: the adapter save, merge and resume paths are not stage-aware (they would record stage-local layer indices) |
 
 **EP.** The expert names [above](#moe-models--expert-targets-and-full-trained-modules) route to **native grouped
 LoRA** — grouped `[E_local, K, r]`/`[E_local, r, N]` adapters stored alongside each expert weight, applied in
@@ -274,10 +274,11 @@ fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchm
 | LoRA r=64, experts only (grouped) | 425M (3.60%) | 9,919 | 32.0 GB |
 | LoRA r=64, attn + experts | 457M (3.86%) | 7,586 | 32.0 GB |
 
-**LoRA under EP is far leaner than full fine-tuning at slightly lower throughput.** The frozen base carries
-no gradients or optimizer state, so attention-only and experts-only run at ~0.9× full-FT throughput (10,551
-tok/s/GPU) in ~40% of its 77.3 GB. Experts-only ties attention-only because the grouped expert adapters fold
-into the grouped-GEMM compute. Attn + experts is slower than either alone, ~0.7× full FT.
+**LoRA under EP is far leaner than full fine-tuning.** The frozen base carries no gradients or optimizer
+state, so every variant peaks at 28–32 GB against full fine-tuning's 77.3 GB at this shape (batch 1); its
+throughput comes from another run set, so compare it within that page. Experts-only ties attention-only
+because the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either
+alone.
 
 On `qwen3-30b-a3b` (128 experts) experts-only r=64 is 9.39% trainable at 5,034 tok/s/GPU and 46.8 GB. At
 batch 1 the step is communication-bound, so tok/s/GPU varies ±10% run-to-run.
