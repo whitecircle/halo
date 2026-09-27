@@ -29,8 +29,9 @@ from src.data.sources.loading import reject_image_columns
 from src.distributed.filesystem import fs_aware_main_first
 from src.distributed.loading.peft_setup import build_peft_config
 from src.distributed.runtime import barrier, is_global_main_process
-from src.models.loading.dtype import resolve_training_dtype
+from src.models.loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from src.models.loading.tokenizer_setup import resolve_length_to_context
+from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from src.trainers.embedding.sentence_transformers_compat import PreloadedTransformer
 from src.trainers.embedding.trainer import EmbeddingTrainer
@@ -117,10 +118,15 @@ def build_sentence_transformer(
                 trust_remote_code=model_config.trust_remote_code,
                 model_kwargs=model_kwargs,
             )
-        # ST loads the backbone itself, so the parallel loader's sinks policy is applied here too: a
-        # GptOss backbone would otherwise keep live sinks under an attention backend that drops them.
+        # ST loads the backbone itself, so the post-load steps of the parallel loader run here too: the
+        # run-dtype cast, the buffer repair, and the sinks policy (a GptOss backbone would otherwise keep
+        # live sinks under an attention backend that drops them).
         backbone = getattr(st_model[0], "auto_model", None)
         if backbone is not None:
+            cast_parameters_to_run_dtype(
+                backbone, model_kwargs["dtype"], keep_fp32=parallelism_config.fp32_non_ep_params
+            )
+            finalize_loaded_model(backbone)
             apply_sinks_policy(
                 backbone,
                 backbone.config,

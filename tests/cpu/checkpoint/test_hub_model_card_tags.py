@@ -472,7 +472,8 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     _tiny_qwen3().save_pretrained(base)
     _tiny_tokenizer().save_pretrained(base)
     runtime = SimpleNamespace(
-        parallelism_config=SimpleNamespace(is_ep_mode=False, is_tp_mode=False), model_source=str(base)
+        parallelism_config=SimpleNamespace(is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False),
+        model_source=str(base),
     )
     embedding_config = EmbeddingConfig(
         output_dir=str(tmp_path / "run"), bf16=False, pooling_mode="mean", normalize_embeddings=False, max_length=32

@@ -50,6 +50,7 @@ from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.models.structure import fp32_pinned_param_names
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
     MISTRAL3_119B_MOE,
@@ -78,10 +79,9 @@ VOCAB_PAD_MULTIPLE = 128
 TINY_SHARD_SIZE = "4MB"
 # Seed ``randomize_tid2eid`` fills the hash table from unless a test pins its own.
 DSV4_TID2EID_SEED = 1234
-
-# Small enough that a tokenizer-sized vocab spills into several shards, so a pinned-family checkpoint
-# carries the index :func:`tests.common.peft_helpers.attention_target_modules` reads projection names from.
-PINNED_SHARD_SIZE = "20MB"
+# The :data:`TINY_MOE_FAMILIES` whose transformers class pins parameters (not only buffers) in fp32
+# through ``_keep_in_fp32_modules_strict``.
+PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
 
 
 def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
@@ -251,63 +251,33 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
 
 
-def build_tiny_family_checkpoint(family: TinyFamily, target_dir: str, tokenizer, seed: int) -> None:
+def build_tiny_family_checkpoint(
+    family: TinyFamily, target_dir: str, tokenizer=None, seed: int = 0, *, fp32_pins: bool = False
+) -> None:
     """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab, with that tokenizer, as a checkpoint
     the production loaders read. Rank 0 only.
 
     Sharded, so the checkpoint carries the index a family's attention projection names are read from
-    (:func:`tests.common.peft_helpers.attention_target_modules`).
+    (:func:`tests.common.peft_helpers.attention_target_modules`). Without ``tokenizer`` the tiny config's
+    own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
+    at full fp32 precision, as a release does, rather than rounded through bf16.
     """
-    overrides = {
-        **family.text_overrides,
-        # Padded as a release vocab is, so a TP-sharded head divides it.
-        "vocab_size": -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE,
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-    torch.manual_seed(seed)
-    family.build(overrides).to(torch.bfloat16).save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
-    tokenizer.save_pretrained(target_dir)
-
-
-def _tiny_glm5_next(text: dict) -> PreTrainedModel:
-    # The family ships no text-only CausalLM; its special-token defaults index a 154k vocab.
-    config = Glm5NextConfig(
-        text_config={**TINY_GLM5_CONFIG, **text},
-        vision_config=dict(TINY_GLM5_VISION_CONFIG),
-        image_token_id=2000,
-        video_token_id=2001,
-        image_start_token_id=2002,
-        image_end_token_id=2003,
-        video_start_token_id=2004,
-        video_end_token_id=2005,
-    )
-    return Glm5NextForConditionalGeneration(config)
-
-
-def _tiny_inkling(text: dict) -> PreTrainedModel:
-    return InklingForCausalLM(InklingTextConfig(**{**TINY_INKLING_CONFIG, **text}))
-
-
-# The roster families whose transformers class pins parameters (not only buffers) in fp32 through
-# ``_keep_in_fp32_modules_strict``, keyed by the builder of their tiny model.
-PINNED_FP32_FAMILIES: dict[str, Callable[[dict], PreTrainedModel]] = {
-    "deepseek_v4": _tiny_deepseek_v4,
-    "glm5_next": _tiny_glm5_next,
-    "inkling": _tiny_inkling,
-}
-
-
-def build_tiny_pinned_checkpoint(family: str, out_dir: str, *, tokenizer=None, seed: int = 0) -> str:
-    """Save a seeded bf16 tiny model of a :data:`PINNED_FP32_FAMILIES` family to ``out_dir``; returns it.
-
-    With ``tokenizer`` the vocab and pad id follow it and it is saved beside the weights, so the
-    production loaders and trainers run end to end; without, the tiny config's own vocab is kept.
-    """
-    text = {} if tokenizer is None else {"vocab_size": len(tokenizer), "pad_token_id": tokenizer.pad_token_id}
-    torch.manual_seed(seed)
-    model = PINNED_FP32_FAMILIES[family](text).to(torch.bfloat16)
-    model.save_pretrained(out_dir, max_shard_size=PINNED_SHARD_SIZE)
+    overrides = dict(family.text_overrides)
     if tokenizer is not None:
-        tokenizer.save_pretrained(out_dir)
-    return out_dir
+        overrides |= {
+            # Padded as a release vocab is, so a TP-sharded head divides it.
+            "vocab_size": -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE,
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+        }
+    torch.manual_seed(seed)
+    model = family.build(overrides)
+    pinned = fp32_pinned_param_names(model) if fp32_pins else frozenset()
+    stored = {name: param.detach().clone() for name, param in model.named_parameters() if name in pinned}
+    model.to(torch.bfloat16)
+    for name, param in model.named_parameters():
+        if name in stored:
+            param.data = stored[name]
+    model.save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
+    if tokenizer is not None:
+        tokenizer.save_pretrained(target_dir)

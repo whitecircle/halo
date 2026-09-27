@@ -75,8 +75,8 @@ RESOLVED_THROUGH_TEXT_CONFIG = {
 # Norm classes that compute Liger's function on CPU yet must stay undeclared, with the reason: the
 # sweep below would otherwise report each as a coverage gap.
 UNDECLARABLE_NORMS = {
-    # `_keep_in_fp32_modules_strict` pins the weight to fp32, so the eager norm returns fp32 from a
-    # bf16 activation where Liger's kernel stores in the input dtype.
+    # No parity test covers the swap. The loaders cast the fp32-pinned weight to the run dtype, where
+    # the eager norm returns the input dtype as Liger's kernel does.
     "deepseek_v4": {"DeepseekV4RMSNorm"},
 }
 

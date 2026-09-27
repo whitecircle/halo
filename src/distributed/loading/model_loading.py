@@ -494,9 +494,13 @@ def _sequential_load_to_cuda(
     local_rank: int,
     max_concurrent: int,
     common_kwargs: dict,
+    *,
+    keep_fp32: bool,
 ) -> PreTrainedModel:
     """Load to CPU one rank at a time (low CPU peak), move to this rank's GPU, then
-    free CPU memory. Shared by the EP+TP sequential fallback and the TP-MoE loader."""
+    free CPU memory. Shared by the EP+TP sequential fallback and the TP-MoE loader.
+
+    ``keep_fp32`` is :func:`cast_parameters_to_run_dtype`'s."""
     with sequential_load_within_node(max_concurrent=max_concurrent):
         model = from_pretrained_verified(
             model_class,
@@ -504,7 +508,7 @@ def _sequential_load_to_cuda(
             device_map="cpu",
             **common_kwargs,
         )
-        cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"))
+        cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
         model = model.to(f"cuda:{local_rank}")
         gc.collect()
         torch.cuda.empty_cache()
@@ -518,10 +522,13 @@ def _from_pretrained_on_local_gpu(
     local_rank: int,
     max_concurrent: int,
     common_kwargs: dict,
+    *,
+    keep_fp32: bool,
 ) -> PreTrainedModel:
     """``from_pretrained`` straight onto this rank's GPU, one rank at a time per node.
 
     With ``_init_from_scratch`` in ``common_kwargs``, builds from config with random weights instead.
+    ``keep_fp32`` is :func:`cast_parameters_to_run_dtype`'s.
     """
     if common_kwargs.pop("_init_from_scratch", False):
         config = common_kwargs.get("config")
@@ -538,7 +545,8 @@ def _from_pretrained_on_local_gpu(
         with sequential_load_within_node(max_concurrent=max_concurrent):
             ddp_kwargs = {"device_map": {"": local_rank}, **common_kwargs}
             model = from_pretrained_verified(model_class, model_name_or_path, **ddp_kwargs)
-        cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"))
+    # Both branches: a remote-code class can declare parameters fp32 in __init__ (Ling 3.0's KDA state).
+    cast_parameters_to_run_dtype(model, common_kwargs.get("dtype"), keep_fp32=keep_fp32)
     finalize_loaded_model(model)
     return model
 
@@ -690,12 +698,10 @@ def _load_ep_tp_model(
     else:
         if pc.ep_lazy_loading:
             logger.info(f"[Rank {rank}] Lazy path unavailable, falling back to sequential loading")
+        # Rounds fp32 pins like the lazy path it stands in for: which path loads is a filesystem
+        # verdict, and it must not change the numbers.
         model = _sequential_load_to_cuda(
-            model_name_or_path,
-            model_class,
-            local_rank,
-            pc.max_concurrent_loading,
-            common_kwargs,
+            model_name_or_path, model_class, local_rank, pc.max_concurrent_loading, common_kwargs, keep_fp32=False
         )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
         model = _apply_ep_wrappers(model, ep_config)
@@ -796,6 +802,7 @@ def _load_tp_moe_model(
         local_rank,
         pc.max_concurrent_loading,
         common_kwargs,
+        keep_fp32=pc.fp32_non_ep_params,
     )
     _apply_attention_only_tp(model, rank, tp_size, dp_size)
 
@@ -863,6 +870,7 @@ def _load_cp_model(
         model_class=model_class,
         max_concurrent_loading=pc.max_concurrent_loading,
         ep_config=pc.create_ep_config() if needs_wrappers else None,
+        keep_fp32_params=pc.fp32_non_ep_params,
         **common_kwargs,
     )
     logger.info(f"Model loaded with CP (cp_size={pc.cp_size}, grouped_gemm_experts={needs_wrappers})")
@@ -890,6 +898,7 @@ def _load_undistributed_model(
         local_rank,
         pc.max_concurrent_loading,
         common_kwargs,
+        keep_fp32=pc.fp32_non_ep_params,
     )
     if ep_wrappers:
         model = _apply_ep_wrappers(model, pc.create_ep_config())
@@ -923,7 +932,10 @@ def load_model_from_pretrained(
         )
 
         model = auto_load_model(model, model_class=model_cls, **model_init_kwargs)
-        cast_parameters_to_run_dtype(model, model_init_kwargs.get("dtype"))
+        # An unset or "auto" dtype loads at the checkpoint's own dtype (recorded on the config), pins
+        # aside; the cast unifies the pins to it.
+        requested = model_init_kwargs.get("dtype")
+        cast_parameters_to_run_dtype(model, requested if isinstance(requested, torch.dtype) else model.config.dtype)
         finalize_loaded_model(model)
         if run_scoped_cache_off:
             set_config_field_run_scoped(model.config, "use_cache", False)

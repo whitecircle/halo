@@ -71,7 +71,9 @@ def resolve_training_dtype(config) -> torch.dtype:
     return torch.float32
 
 
-def cast_parameters_to_run_dtype(model: nn.Module, dtype: torch.dtype | str | None) -> None:
+def cast_parameters_to_run_dtype(
+    model: nn.Module, dtype: torch.dtype | str | None, *, keep_fp32: bool = False
+) -> None:
     """Cast every floating parameter of a freshly loaded ``model`` to the run's ``dtype`` (in place).
 
     ``from_pretrained`` keeps a family's ``_keep_in_fp32_modules[_strict]`` parameters in fp32
@@ -79,18 +81,30 @@ def cast_parameters_to_run_dtype(model: nn.Module, dtype: torch.dtype | str | No
     FSDP2 rejects mixed dtypes in one shard group, and DeepSeek-V4's fp32 norms promote activations
     into its run-dtype projections. The training and scoring loaders call this right after the load,
     before any parallel wrapper, so a family trains in one precision whatever the parallelism (the EP
-    lazy loader casts per tensor to the same effect); conversion tools keep the pins. The dense TP
-    loader is the exception: it loads straight into DTensors, and a tensor-subclass parameter raises
-    here, since rebinding a DTensor's ``.data`` leaves its local shard in the old dtype. No dense family
-    pins a parameter. Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases,
-    ``e_score_correction_bias``). A ``dtype`` that is not a ``torch.dtype`` ("auto", None) leaves the
-    model as loaded.
+    lazy loader casts per tensor to the same effect); conversion tools keep the pins.
+
+    ``keep_fp32`` leaves fp32 parameters as stored, for a run that upcasts to fp32 masters anyway
+    (``fp32_non_ep_params``): a round trip through the run dtype would discard the checkpoint's
+    precision before the upcast. The EP loaders, lazy one included, round them. Parameters only: a float buffer may be fp32 by design (Zaya's
+    balancing biases). A ``dtype`` that is not a ``torch.dtype`` ("auto", None) leaves the model as
+    loaded.
+
+    Raises on a 1-byte float (fp8) parameter, whose block scales live beside it and would be dropped by
+    a plain cast, and on a tensor-subclass parameter: rebinding a DTensor's ``.data`` leaves its local
+    shard in the old dtype, which is why the dense TP loader, loading straight into DTensors, does not
+    call this (no dense family pins a parameter).
     """
     if not isinstance(dtype, torch.dtype):
         return
     for name, param in model.named_parameters():
-        if not param.is_floating_point() or param.dtype == dtype:
+        if not param.is_floating_point() or param.dtype == dtype or (keep_fp32 and param.dtype == torch.float32):
             continue
+        if param.element_size() == 1:
+            raise ValueError(
+                f"{name!r} is stored in {param.dtype}: this is a quantized fp8 checkpoint, and casting it "
+                f"to {dtype} would drop its block scales. Convert it to bf16 once "
+                f"(scripts/before_training/convert_*_bf16.py where the family has one) and train from that."
+            )
         if type(param.data) is not torch.Tensor:
             raise TypeError(
                 f"Cannot cast {name!r}, a {type(param.data).__name__} ({param.dtype}), to the run dtype "

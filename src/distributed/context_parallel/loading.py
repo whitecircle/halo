@@ -36,6 +36,7 @@ def load_model_for_cp(
     model_class=None,
     max_concurrent_loading: int | None = None,
     ep_config=None,
+    keep_fp32_params: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """Load a model with Ulysses CP support only (no expert distribution).
@@ -54,6 +55,8 @@ def load_model_for_cp(
             the state-dict expert paths land on the inner HF model, not on the CP wrapper. Without
             it a MoE under pure CP pays the Liger swiglu/geglu force-off without the grouped-GEMM
             speedup it buys.
+        keep_fp32_params: the run keeps fp32 masters (``fp32_non_ep_params``), so fp32 parameters
+            keep their stored values (see :func:`cast_parameters_to_run_dtype`).
     """
     if model_class is None:
         model_class = AutoModelForCausalLM
@@ -74,7 +77,7 @@ def load_model_for_cp(
             device_map="cpu",
             **model_kwargs,
         )
-        cast_parameters_to_run_dtype(model, dtype)
+        cast_parameters_to_run_dtype(model, dtype, keep_fp32=keep_fp32_params)
         model = move_model_to_local_device(model)
 
     # Before the CP wrap, on the inner HF model: the wrapper carries no tie_weights.

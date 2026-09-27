@@ -327,6 +327,11 @@ def optimizer_state_matches(saved: dict, restored: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def params_off_dtype(model: torch.nn.Module, dtype: torch.dtype) -> list[str]:
+    """Names of the floating parameters of ``model`` not stored in ``dtype``."""
+    return [name for name, param in model.named_parameters() if param.is_floating_point() and param.dtype != dtype]
+
+
 def step_losses(trainer) -> list[float]:
     """Per-step training losses from a trainer's log history, eval entries and the run summary excluded."""
     return [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]

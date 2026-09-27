@@ -34,9 +34,9 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         causal_lm=("ZayaForCausalLM",),
         flce_default=True,
     ),
-    # DeepSeek-V4. No RMSNorm: `_keep_in_fp32_modules_strict` pins the `DeepseekV4RMSNorm` weights to
-    # fp32, so the eager norm returns fp32 from a bf16 activation where Liger's kernel stores in the
-    # input dtype. No GLU: the experts run a *clamped* SwiGLU (`swiglu_limit`). Rotary is interleaved
+    # DeepSeek-V4. No RMSNorm: no parity test covers the swap. The loaders cast the fp32-pinned
+    # `DeepseekV4RMSNorm` weights to the run dtype, where the eager norm returns the input dtype as
+    # Liger's kernel does. No GLU: the experts run a *clamped* SwiGLU (`swiglu_limit`). Rotary is interleaved
     # partial with per-rope-type buffers. The head adds the router aux loss after the projection.
     LigerFamilySpec(
         model_types=("deepseek_v4",),

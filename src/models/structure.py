@@ -330,9 +330,9 @@ def fp32_pinned_param_names(model: torch.nn.Module) -> frozenset[str]:
 
     transformers' own substring rule against both class attributes, read off every class in the tree,
     so a wrapper (pipeline stage, CP wrapper, PEFT model) derives the same set as the model itself.
-    The pin exists because the family's arithmetic breaks in bf16 (DeepSeek-V4's norms, Inkling's
-    short convolutions), so every checkpoint writer leaves these at their trained dtype; a reload
-    re-pinning the slot cannot recover precision an export already discarded.
+    The training loaders cast these to the run dtype unless the run keeps fp32 masters, and every
+    checkpoint writer leaves them at their trained dtype: a reload re-pinning the slot cannot recover
+    precision an export already discarded.
     """
     pins = {
         pin

@@ -37,6 +37,7 @@ def _capture_ep_config(*, needs_ep_wrappers: bool, model_config) -> object | Non
     pc = SimpleNamespace(
         cp_size=8,
         max_concurrent_loading=0,
+        fp32_non_ep_params=False,
         needs_ep_wrappers=needs_ep_wrappers,
         create_cp_config=lambda: SimpleNamespace(cp_size=8),
         create_ep_config=lambda: _SENTINEL_EP_CONFIG,

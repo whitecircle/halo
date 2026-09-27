@@ -191,11 +191,11 @@ def _apply_fsdp2(
 def _warn_fp32_pins_cast_by_policy(model: nn.Module, mp_policy: MixedPrecisionPolicy) -> None:
     """Warn (once, at wrap time) when the FSDP2 policy will compute fp32-pinned params in low precision.
 
-    ``MixedPrecisionPolicy`` casts per fully_shard group with no per-parameter dtype mechanism, so
-    fp32-pinned params run forward/backward at ``param_dtype`` under multi-GPU where a single-GPU run
-    keeps fp32 (storage and optimizer state stay fp32 either way). The pins come from the
-    transformers class attributes, so a family without them, or an EP load that materializes uniform
-    bf16, warns about nothing.
+    The training loaders cast fp32-pinned params to the run dtype, so they reach the wrap in fp32 only
+    under fp32 master weights (``fp32_non_ep_params``). ``MixedPrecisionPolicy`` casts per fully_shard
+    group with no per-parameter dtype mechanism, so they then run forward/backward at ``param_dtype``
+    where a single-GPU run keeps fp32 (storage and optimizer state stay fp32 either way). A family
+    without pins, or a run without fp32 masters, warns about nothing.
     """
     if mp_policy.param_dtype in (None, torch.float32):
         return
