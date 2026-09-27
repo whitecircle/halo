@@ -46,7 +46,7 @@ from src.training.environment import resolve_resume_weights_source
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import load_peft_model
-from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
+from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.utils import cleanup_memory, log
 
 # The two-rank layouts: plain FSDP2 DP (dp2, the dense model's), plain per-rank experts (ep2),
@@ -189,7 +189,9 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     metrics: dict[str, float] = {}
     label = f"{kind}_{family}_{mode}{'_lora' if peft else ''}{'_' + kto_loss if kind == 'kto' else ''}"
     shared = shared_scratch_dir(f"pref_precompute_resume_{label}")
-    tiny_dir = os.path.join(shared, "tiny_model")
+    tiny_dir = shared_tiny_family_checkpoint(
+        ctx, tiny, f"pref_precompute_resume_{label}_tiny_model", AutoTokenizer.from_pretrained(QWEN3_0_6B), SEED
+    )
     dataset_dirs = {name: os.path.join(shared, f"dataset_{name}") for name in ("train", *EVAL_SPLITS)}
     train_out = os.path.join(shared, "train_out")
     ckpt_dir = os.path.join(train_out, f"checkpoint-{SAVE_AT_STEP}")
@@ -198,8 +200,6 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
         # A standalone rerun gets the same MASTER_PORT-keyed dir; phase 4 copies into a fixed path.
         shutil.rmtree(shared, ignore_errors=True)
         ctx.on_teardown(lambda: shutil.rmtree(shared, ignore_errors=True))
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-        build_tiny_family_checkpoint(tiny, tiny_dir, tokenizer, SEED)
         # Built once for every rank and phase, so each phase tokenizes the same rows.
         Dataset.from_dict(_build_rows(kind, N_ROWS)).save_to_disk(dataset_dirs["train"])
         start = N_ROWS

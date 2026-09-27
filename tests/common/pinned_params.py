@@ -11,9 +11,6 @@ every rank: one FSDP2 leaves out of its shard groups with no other sync trains o
 drifts while each loss stays finite.
 """
 
-import shutil
-from pathlib import Path
-
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
@@ -25,10 +22,10 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.models.structure import fp32_pinned_param_names
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import ensure_model_downloaded, shared_scratch_dir, world_any
+from tests.common.distributed import world_any
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import assert_adapters_moved, load_peft_model, unwrap
-from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint
+from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.utils import log, log_all, params_off_dtype
 
 RUN_DTYPE = torch.bfloat16
@@ -42,18 +39,12 @@ LEARNING_RATE = 2e-3
 MODES = ("full", "expert_lora", "mixed")
 
 
-def tiny_family_checkpoint(ctx, family: str, *, fp32_pins: bool = False) -> tuple[str, object]:
-    """Rank 0 writes ``family``'s tiny checkpoint at the Qwen3 tokenizer's vocab; returns ``(dir, tokenizer)``."""
-    ensure_model_downloaded(QWEN3_0_6B, ctx.rank)  # tokenizer only
+def tiny_family_checkpoint(ctx, family: str, *, fp32_pins: bool = False) -> str:
+    """``family``'s tiny checkpoint at the Qwen3 tokenizer's vocab, built by rank 0 for every rank. Collective."""
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    scratch = shared_scratch_dir(f"tiny_{family}")
-    base_dir = Path(scratch) / "base"
-    if ctx.rank == 0:
-        shutil.rmtree(scratch, ignore_errors=True)
-        ctx.on_teardown(lambda: shutil.rmtree(scratch, ignore_errors=True))
-        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], str(base_dir), tokenizer, SEED, fp32_pins=fp32_pins)
-    ctx.barrier()
-    return str(base_dir), tokenizer
+    return shared_tiny_family_checkpoint(
+        ctx, TINY_MOE_FAMILIES[family], f"tiny_{family}", tokenizer, SEED, fp32_pins=fp32_pins
+    )
 
 
 def load_row_model(base_dir: str, mode: str, pc: ParallelismConfig):
@@ -180,7 +171,7 @@ def _pins_hold_stored_fp32(model: torch.nn.Module, family: str, base_dir: str) -
 def run_pinned_family_row(ctx, family: str, mode: str, pc: ParallelismConfig) -> dict:
     """Load ``family`` under ``pc``, check its parameter dtypes, and train ``NUM_STEPS`` in ``mode``."""
     torch.cuda.set_device(ctx.device)
-    base_dir, _ = tiny_family_checkpoint(ctx, family, fp32_pins=pc.fp32_non_ep_params)
+    base_dir = tiny_family_checkpoint(ctx, family, fp32_pins=pc.fp32_non_ep_params)
     model, tokenizer, peft_config = load_row_model(base_dir, mode, pc)
 
     checks: dict[str, bool] = {}

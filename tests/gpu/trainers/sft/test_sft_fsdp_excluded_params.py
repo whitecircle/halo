@@ -44,7 +44,7 @@ ROUTER_PATTERNS = ["*.mlp.gate"]
 
 
 def _router_only(ctx) -> dict:
-    base_dir, _ = tiny_family_checkpoint(ctx, "glm4_moe_lite")
+    base_dir = tiny_family_checkpoint(ctx, "glm4_moe_lite")
     pc = ParallelismConfig(ep_size=1, ep_fp32_router=True)
     model, tokenizer, _ = load_row_model(base_dir, "full", pc)
     unfreeze_modules_by_patterns(model, ROUTER_PATTERNS)
@@ -56,7 +56,7 @@ def _router_only(ctx) -> dict:
 
 
 def _glm5_next_mixed_uncast(ctx) -> dict:
-    base_dir, _ = tiny_family_checkpoint(ctx, "glm5_next")
+    base_dir = tiny_family_checkpoint(ctx, "glm5_next")
     pc = ParallelismConfig(ep_size=1)
     with mock.patch.object(model_loading, "cast_loaded_parameters", lambda *args, **kwargs: None):
         model, tokenizer, peft_config = load_row_model(base_dir, "mixed", pc)

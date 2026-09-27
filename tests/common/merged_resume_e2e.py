@@ -70,7 +70,7 @@ from src.training.environment import resolve_resume_weights_source
 from tests.common.datasets import create_sft_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import attention_target_modules, load_peft_model, mixed_targets
-from tests.common.tiny_models import TINY_MOE_FAMILIES, TinyFamily, build_tiny_family_checkpoint
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TinyFamily, shared_tiny_family_checkpoint
 from tests.common.utils import cleanup_memory, log, step_losses
 
 # The peft_helpers mode each adapter shape loads through.
@@ -270,15 +270,12 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
     metrics: dict[str, float] = {}
     shared = [ctx.output_dir]
     dist.broadcast_object_list(shared, src=0)
-    base_dir = os.path.join(shared[0], "tiny_base")
     train_out = os.path.join(shared[0], "train_out")
     checkpoint = os.path.join(train_out, f"checkpoint-{SAVE_AT_STEP}")
-    if ctx.rank == 0:
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        build_tiny_family_checkpoint(tiny, base_dir, tokenizer, SEED)
-    ctx.barrier()
+    tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    base_dir = shared_tiny_family_checkpoint(ctx, tiny, f"merged_resume_{family}_base", tokenizer, SEED)
     # Read once, off the base: a merged checkpoint's index spells its attention in the family's hub
     # namespace, which need not match the module names PEFT targets.
     targets = (

@@ -26,16 +26,13 @@ Run with 2 GPUs:
         tests/gpu/parallelism/ep/test_ep_expert_only_rank_uniform_graph.py --family zaya
 """
 
+import argparse
 import contextlib
 import copy
-import sys
 
 import torch
 import torch.distributed as dist
 from accelerate.state import GradientState
-from transformers import GptOssConfig, GptOssForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
-from transformers.models.zaya.configuration_zaya import ZayaConfig
-from transformers.models.zaya.modeling_zaya import ZayaForCausalLM
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import ExpertLoraSpec
@@ -47,12 +44,11 @@ from src.distributed.expert_parallel.patching import (
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_reference import ep_layers, score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
-from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG, TINY_ZAYA_CONFIG
 from tests.common.peft_helpers import freeze_base_keep_expert_adapters
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
 from tests.common.utils import log, log_all
 
-FAMILY = "qwen3_moe"
 EP_SIZE = 2
 BATCH, SEQ = 2, 48
 SEED = 1234
@@ -62,12 +58,6 @@ ADAPTER_STD = 0.05
 # The ep2 and ep1 forwards run the same bf16 math apart from DeepEP's combine; a wrong routing or a
 # dropped layer moves the mean token loss by far more.
 LOSS_ATOL = 2e-2
-
-_FAMILIES = {
-    "gpt_oss": (GptOssForCausalLM, GptOssConfig, TINY_GPTOSS_CONFIG),
-    "qwen3_moe": (Qwen3MoeForCausalLM, Qwen3MoeConfig, TINY_QWEN3_MOE_CONFIG),
-    "zaya": (ZayaForCausalLM, ZayaConfig, TINY_ZAYA_CONFIG),
-}
 
 _DEEPEP_NODES = ("DeepEPDispatchFunctionBackward", "DeepEPCombineFunctionBackward")
 _SEAM = EPMoELayerBase._dispatch_compute_combine
@@ -113,11 +103,10 @@ def graph_signature(loss: torch.Tensor) -> list[int]:
     return [int(loss.requires_grad), *counts.values()]
 
 
-def build_models(device):
+def build_models(family: str, device):
     """The ep2 model and its ep1 reference: same base weights, same adapter values, adapters alone trainable."""
-    model_class, config_class, config = _FAMILIES[FAMILY]
     torch.manual_seed(SEED)
-    base = model_class(config_class(**config)).to(torch.bfloat16)
+    base = tiny_family_model(TINY_MOE_FAMILIES[family]).to(torch.bfloat16)
     reference = copy.deepcopy(base)
     spec = ExpertLoraSpec(r=LORA_R, alpha=LORA_ALPHA)
     ep_pc, ref_pc = ParallelismConfig(ep_size=EP_SIZE), ParallelismConfig(ep_size=1)
@@ -187,11 +176,15 @@ def run_scenario(ctx, model, reference, batches, name: str, starved: set[int], c
     return signature.tolist()
 
 
+@gpu_test_main(exact_world_size=EP_SIZE, prefix="ep_expert_only_uniform_graph")
 def run(ctx):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
+    family = parser.parse_args().family
     checks, metrics = {}, {}
     torch.cuda.set_device(ctx.device)
     GradientState()._set_sync_gradients(True)
-    model, reference = build_models(ctx.device)
+    model, reference = build_models(family, ctx.device)
     layers = ep_layers(model)
     ep_config = layers[0].ep_config
     # The comparison assumes the in-backward hook regime: its /world divide makes the ep2 gradient the
@@ -217,13 +210,5 @@ def run(ctx):
     return {"checks": checks, "metrics": metrics}
 
 
-main = gpu_test_main(exact_world_size=EP_SIZE, prefix="ep_expert_only_uniform_graph")(run)
-
 if __name__ == "__main__":
-    if "--family" in sys.argv:
-        i = sys.argv.index("--family")
-        FAMILY = sys.argv[i + 1]
-        del sys.argv[i : i + 2]
-    if FAMILY not in _FAMILIES:
-        raise SystemExit(f"--family must be one of {sorted(_FAMILIES)}, got {FAMILY!r}")
-    main()
+    run()

@@ -26,15 +26,14 @@ import contextlib
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from transformers.models.zaya.configuration_zaya import ZayaConfig
-from transformers.models.zaya.modeling_zaya import ZayaForCausalLM, ZayaRouter
+from transformers.models.zaya.modeling_zaya import ZayaRouter
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
-from tests.common.models import TINY_ZAYA_CONFIG
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.utils import log, log_all
 
 EP_SIZE = 2
@@ -93,7 +92,7 @@ def spread_routing(model) -> None:
 
 def build_model(device, ep_size: int):
     torch.manual_seed(SEED)
-    model = ZayaForCausalLM(ZayaConfig(**TINY_ZAYA_CONFIG))
+    model = tiny_family_model(TINY_MOE_FAMILIES["zaya"])
     spread_routing(model)
     model = patch_moe_model_for_ep(
         model.to(device, torch.bfloat16), ParallelismConfig(ep_size=ep_size).create_ep_config()
@@ -102,6 +101,7 @@ def build_model(device, ep_size: int):
     return model
 
 
+@gpu_test_main(exact_world_size=EP_SIZE, prefix="zaya_ep_discard_dispatch")
 def run(ctx):
     checks, metrics = {}, {}
     torch.cuda.set_device(ctx.device)
@@ -143,7 +143,5 @@ def run(ctx):
     return {"checks": checks, "metrics": metrics}
 
 
-main = gpu_test_main(exact_world_size=EP_SIZE, prefix="zaya_ep_discard_dispatch")(run)
-
 if __name__ == "__main__":
-    main()
+    run()

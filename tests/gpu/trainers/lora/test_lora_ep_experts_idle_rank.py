@@ -17,15 +17,13 @@ Run with 2 GPUs:
     torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_ep_experts_idle_rank.py --idle all
 """
 
+import argparse
 import math
 import os
-import sys
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
-from transformers.models.zaya.configuration_zaya import ZayaConfig
-from transformers.models.zaya.modeling_zaya import ZayaForCausalLM, ZayaRouter
+from transformers.models.zaya.modeling_zaya import ZayaRouter
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
@@ -33,11 +31,11 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B, TINY_ZAYA_CONFIG
+from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import load_peft_model
+from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.utils import log, log_all, step_losses
 
-IDLE = "all"
 EP_SIZE = 2
 STEPS = 4
 MAX_LENGTH = 128
@@ -47,34 +45,24 @@ SEED = 42
 PIN_BIAS = 2.0
 
 
-def expert_per_layer(num_layers: int) -> list[int]:
-    """The expert every token routes to, per MoE layer, under ``IDLE``."""
-    if IDLE == "all":
+def expert_per_layer(idle: str, num_layers: int) -> list[int]:
+    """The expert every token routes to, per MoE layer, under ``--idle``."""
+    if idle == "all":
         return [0] * num_layers
     return [0] + [1] * (num_layers - 1)
 
 
-def build_checkpoint(path: str, tokenizer) -> list[int]:
-    """Save a seeded tiny Zaya whose gates pin every token to one expert per layer; returns the pins."""
-    torch.manual_seed(SEED)
-    config = ZayaConfig(
-        **{
-            **TINY_ZAYA_CONFIG,
-            "max_position_embeddings": MAX_LENGTH,
-            "vocab_size": len(tokenizer),
-            "pad_token_id": tokenizer.pad_token_id,
-        }
-    )
-    model = ZayaForCausalLM(config).to(torch.bfloat16)
-    routers = [module for module in model.modules() if isinstance(module, ZayaRouter)]
-    pins = expert_per_layer(len(routers))
-    for router, expert in zip(routers, pins, strict=True):
-        bias = torch.full_like(router.balancing_biases, -PIN_BIAS)
-        bias[expert] = PIN_BIAS
-        router.balancing_biases.copy_(bias)
-    model.save_pretrained(path)
-    tokenizer.save_pretrained(path)
-    return pins
+def pin_routing(idle: str):
+    """An ``edit`` for :func:`build_tiny_family_checkpoint`: every gate pins its tokens to one expert."""
+
+    def edit(model) -> None:
+        routers = [module for module in model.modules() if isinstance(module, ZayaRouter)]
+        for router, expert in zip(routers, expert_per_layer(idle, len(routers)), strict=True):
+            bias = torch.full_like(router.balancing_biases, -PIN_BIAS)
+            bias[expert] = PIN_BIAS
+            router.balancing_biases.copy_(bias)
+
+    return edit
 
 
 def adapter_snapshot(model) -> list[list[torch.Tensor]]:
@@ -90,25 +78,24 @@ def adapter_snapshot(model) -> list[list[torch.Tensor]]:
 
 @gpu_test_main(exact_world_size=EP_SIZE, prefix="lora_ep_experts_idle_rank")
 def run(ctx):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--idle", choices=("all", "first"), required=True)
+    idle = parser.parse_args().idle
     checks = {}
-    shared = [ctx.output_dir]
-    dist.broadcast_object_list(shared, src=0)
-    base = os.path.join(shared[0], "base")
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    pins = [None]
-    if ctx.rank == 0:
-        pins = [build_checkpoint(base, tokenizer)]
-    dist.broadcast_object_list(pins, src=0)
-    pins = pins[0]
-    log(f"  --idle {IDLE}: expert per MoE layer {pins}")
+    base = shared_tiny_family_checkpoint(
+        ctx, TINY_MOE_FAMILIES["zaya"], f"idle_rank_zaya_{idle}", tokenizer, SEED, edit=pin_routing(idle)
+    )
 
     pc = ParallelismConfig(ep_size=EP_SIZE)
     model, tokenizer, peft_config = load_peft_model(
         "expert_lora", pc, model_name=base, attn_implementation="eager", use_liger_kernel=False
     )
+    pins = expert_per_layer(idle, len(ep_layers(model)))
+    log(f"  --idle {idle}: expert per MoE layer {pins}")
     before = adapter_snapshot(model)
     args = SFTConfig(
-        output_dir=os.path.join(shared[0], "out"),
+        output_dir=os.path.join(ctx.output_dir, "out"),
         max_steps=STEPS,
         per_device_train_batch_size=2,
         learning_rate=2e-3,
@@ -150,10 +137,4 @@ def run(ctx):
 
 
 if __name__ == "__main__":
-    if "--idle" in sys.argv:
-        i = sys.argv.index("--idle")
-        IDLE = sys.argv[i + 1]
-        del sys.argv[i : i + 2]
-    if IDLE not in ("all", "first"):
-        raise SystemExit(f"--idle must be 'all' or 'first', got {IDLE!r}")
     run()

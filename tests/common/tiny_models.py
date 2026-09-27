@@ -51,6 +51,7 @@ from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from src.models.structure import fp32_pinned_param_names
+from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
     MISTRAL3_119B_MOE,
@@ -252,17 +253,9 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
 
 
-def build_tiny_family_checkpoint(
-    family: TinyFamily, target_dir: str, tokenizer=None, seed: int = 0, *, fp32_pins: bool = False
-) -> None:
-    """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab, with that tokenizer, as a checkpoint
-    the production loaders read. Rank 0 only.
-
-    Sharded, so the checkpoint carries the index a family's attention projection names are read from
-    (:func:`tests.common.peft_helpers.attention_target_modules`). Without ``tokenizer`` the tiny config's
-    own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
-    at full fp32 precision, as a release does, rather than rounded through bf16.
-    """
+def tiny_family_model(family: TinyFamily, tokenizer=None) -> PreTrainedModel:
+    """``family``'s random-init tiny model (fp32, seeded by the caller), at ``tokenizer``'s vocab when one
+    is given and at the tiny config's own otherwise."""
     overrides = dict(family.text_overrides)
     if tokenizer is not None:
         overrides |= {
@@ -271,8 +264,31 @@ def build_tiny_family_checkpoint(
             "pad_token_id": tokenizer.pad_token_id,
             "eos_token_id": tokenizer.eos_token_id,
         }
+    return family.build(overrides)
+
+
+def build_tiny_family_checkpoint(
+    family: TinyFamily,
+    target_dir: str,
+    tokenizer=None,
+    seed: int = 0,
+    *,
+    fp32_pins: bool = False,
+    edit: Callable[[PreTrainedModel], None] | None = None,
+) -> None:
+    """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab, with that tokenizer, as a checkpoint
+    the production loaders read. Rank 0 only.
+
+    Sharded, so the checkpoint carries the index a family's attention projection names are read from
+    (:func:`tests.common.peft_helpers.attention_target_modules`). Without ``tokenizer`` the tiny config's
+    own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
+    at full fp32 precision, as a release does, rather than rounded through bf16. ``edit`` changes the
+    random-init model before it is saved (a test pinning its routing, say).
+    """
     torch.manual_seed(seed)
-    model = family.build(overrides)
+    model = tiny_family_model(family, tokenizer)
+    if edit is not None:
+        edit(model)
     pinned = fp32_pinned_param_names(model) if fp32_pins else frozenset()
     stored = {name: param.detach().clone() for name, param in model.named_parameters() if name in pinned}
     model.to(torch.bfloat16)
@@ -282,3 +298,24 @@ def build_tiny_family_checkpoint(
     model.save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
     if tokenizer is not None:
         tokenizer.save_pretrained(target_dir)
+
+
+def shared_tiny_family_checkpoint(
+    ctx,
+    family: TinyFamily,
+    name: str,
+    tokenizer,
+    seed: int,
+    *,
+    fp32_pins: bool = False,
+    edit: Callable[[PreTrainedModel], None] | None = None,
+) -> str:
+    """:func:`build_tiny_family_checkpoint` into the rank-shared scratch dir ``name``, returned: rank 0
+    builds it (removing it at teardown) and every rank waits for it. Collective."""
+    path = shared_scratch_dir(name)
+    if ctx.rank == 0:
+        shutil.rmtree(path, ignore_errors=True)
+        ctx.on_teardown(lambda: shutil.rmtree(path, ignore_errors=True))
+        build_tiny_family_checkpoint(family, path, tokenizer, seed, fp32_pins=fp32_pins, edit=edit)
+    ctx.barrier()
+    return path
