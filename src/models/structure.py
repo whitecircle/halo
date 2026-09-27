@@ -8,11 +8,12 @@ FSDP2/TP/PP wraps, the attention patches and every checkpoint writer. Rank-local
 """
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
 import torch
 from accelerate.utils import extract_model_from_parallel, is_peft_model
+from transformers.core_model_loading import build_glob_alternation
 from transformers.modeling_utils import PreTrainedModel
 
 # HF per-model RMSNorm classes subclass none of these, so is_normalization_module falls back to name.
@@ -325,14 +326,26 @@ def norm_param_keys(model: torch.nn.Module) -> frozenset[str]:
     return frozenset(keys)
 
 
+def params_matching_fp32_pins(model: torch.nn.Module, pins: Iterable[str]) -> frozenset[str]:
+    """Names of ``model``'s parameters that ``_keep_in_fp32_modules[_strict]`` entries ``pins`` match.
+
+    transformers' loader rule, reused rather than restated: each entry is a glob searched anywhere in
+    the parameter name (its dtype plan's ``build_glob_alternation``).
+    """
+    pins = sorted(pins)
+    if not pins:
+        return frozenset()
+    pattern, _, _ = build_glob_alternation(pins)
+    return frozenset(name for name, _ in model.named_parameters() if pattern.search(name))
+
+
 def fp32_pinned_param_names(model: torch.nn.Module) -> frozenset[str]:
     """Parameter names the model's classes pin in fp32 via ``_keep_in_fp32_modules(_strict)``.
 
-    transformers' own substring rule against both class attributes, read off every class in the tree,
-    so a wrapper (pipeline stage, CP wrapper, PEFT model) derives the same set as the model itself.
-    The training loaders cast these to the run dtype unless the run keeps fp32 masters, and every
-    checkpoint writer leaves them at their trained dtype: a reload re-pinning the slot cannot recover
-    precision an export already discarded.
+    Both class attributes, read off every class in the tree, so a wrapper (pipeline stage, CP wrapper,
+    PEFT model) derives the same set as the model itself. The training loaders cast these to the run
+    dtype unless the run keeps fp32 masters, and every checkpoint writer leaves them at their trained
+    dtype: a reload re-pinning the slot cannot recover precision an export already discarded.
     """
     pins = {
         pin
@@ -340,7 +353,4 @@ def fp32_pinned_param_names(model: torch.nn.Module) -> frozenset[str]:
         for attr in ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
         for pin in (getattr(cls, attr, None) or [])
     }
-    if not pins:
-        return frozenset()
-    pin_regex = re.compile("|".join(re.escape(pin) for pin in sorted(pins)))
-    return frozenset(name for name, _ in model.named_parameters() if pin_regex.search(name))
+    return params_matching_fp32_pins(model, pins)

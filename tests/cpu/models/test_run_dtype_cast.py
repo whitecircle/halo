@@ -40,8 +40,8 @@ from src.distributed.expert_parallel.loading import cast_loaded_parameters
 from src.distributed.expert_parallel.patching import ep_claimed_blocks
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_model_from_pretrained
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
+from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner, load_pp_stage_model
+from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, resolve_layer_root
 from src.models.loading.dtype import cast_parameters_to_run_dtype
 from src.models.loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.models.loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
@@ -61,23 +61,11 @@ CASTS = frozenset({"cast_parameters_to_run_dtype", "cast_loaded_parameters"})
 FINALIZE = "finalize_loaded_model"
 
 # The calls that build a model, and so inherit the fp32 pins: the two toolkit entry points, a
-# SentenceTransformer built from a checkpoint path, and a raw factory on anything but the receivers below.
+# SentenceTransformer built from a checkpoint path, and a raw factory on anything but the classes below.
 EAGER_LOAD_CALLS = frozenset({"from_pretrained_verified", "auto_load_model", "SentenceTransformer"})
 MODEL_FACTORIES = frozenset({"from_pretrained", "from_config", "_from_config"})
-# Factory receivers that build no model: tokenizers, processors and configs, and the toolkit's own
-# config-built callback and reward terms (``super()`` inside a term's ``from_config``).
-NON_MODEL_RECEIVERS = frozenset(
-    {
-        "AutoTokenizer",
-        "AutoProcessor",
-        "AutoConfig",
-        "GenerationConfig",
-        "PeftConfig",
-        "GenerateExamplesCallback",
-        "term_type",
-        "super",
-    }
-)
+# transformers' and PEFT's classes whose factory builds a tokenizer, processor or config, never a model.
+NON_MODEL_CLASSES = frozenset({"AutoTokenizer", "AutoProcessor", "AutoConfig", "GenerationConfig", "PeftConfig"})
 
 # Where a training or scoring load lives. ``src/models/loading/`` defines the entry points and is left
 # out: conversion tools load through it too and must keep the pins, so the cast belongs to each
@@ -113,6 +101,22 @@ NON_TRAINING_BUILDS = frozenset(
         ("src/models/head_transform.py", "_probe_logits"),
     }
 )
+
+# Functions whose ``from_config`` builds the toolkit's own config-driven objects (the example-generation
+# callback, the reward terms), not a model.
+NON_MODEL_BUILDERS = frozenset(
+    {
+        ("scripts/training/offline_grpo.py", "main"),
+        ("scripts/training/sft.py", "main"),
+        ("src/rewards/spec.py", "from_config"),
+        ("src/rewards/spec.py", "parse_reward_terms"),
+        ("src/training/script_runner.py", "prepare_script_preference_data"),
+    }
+)
+
+# The fp32-masters loader cases. A lazy loader plans against ``from_pretrained``'s meta shell, or the
+# config-built one for a ``config_shell`` case; the PP cases load the single stage of a one-stage split.
+FP32_MASTER_LOADERS = ("path_string", "ep_lazy", "ep_lazy_config_shell", "pp_stage", "pp_stage_config_shell")
 
 
 class _Mixed(nn.Module):
@@ -195,6 +199,20 @@ def test_a_quantized_parameter_keeps_its_float_storage(run_dtype):
     assert model.pinned.weight.dtype == run_dtype
 
 
+class _TaggedParameter(nn.Parameter):
+    """A ``Parameter`` subclass that is not bnb's 4-bit storage."""
+
+
+def test_any_other_parameter_subclass_refuses_the_cast():
+    """Only bnb's 4-bit storage is known to hold packed codes; another subclass off the run dtype raises
+    rather than being cast or silently left mixed."""
+    model = _Mixed()
+    model.pinned.weight = _TaggedParameter(model.pinned.weight.detach())
+
+    with pytest.raises(TypeError, match=r"'pinned\.weight', a _TaggedParameter"):
+        cast_parameters_to_run_dtype(model, torch.bfloat16)
+
+
 def test_an_unresolved_dtype_name_is_refused():
     """A name reaching the cast unresolved would otherwise leave the pins mixed in silently."""
     with pytest.raises(TypeError, match="'bfloat16'"):
@@ -252,7 +270,7 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
     and the pins are unified to it."""
     args = types.SimpleNamespace(model_init_kwargs=dict(model_init_kwargs), gradient_checkpointing=False)
 
-    model, _ = load_model_from_pretrained(pinned_checkpoints["deepseek_v4"], args)
+    model, _ = load_model_from_pretrained(pinned_checkpoints["deepseek_v4"], args, keep_fp32=False)
 
     assert params_off_dtype(model, torch.bfloat16) == []
 
@@ -340,19 +358,18 @@ def _config_built_shell(*args, **kwargs):
     return instantiate_on_meta(*args, **{**kwargs, "config_only": True})
 
 
-def _load_with(loader: str, family: str, path: str, keep_fp32: bool, monkeypatch) -> nn.Module:
+def _load_with(
+    loader: str, family: str, path: str, keep_fp32: bool, monkeypatch, *, pp_rank: int = 0, pp_size: int = 1
+) -> nn.Module:
     """``family`` loaded at bf16 through ``loader``, with ``fp32_non_ep_params`` as ``keep_fp32``.
 
     The lazy loaders run with EP patching stubbed (it needs DeepEP and process groups) under an ep1
-    config, and the PP loader as its single stage; a ``config_shell`` loader plans against the
-    config-built meta shell instead of ``from_pretrained``'s.
+    config, the PP loader as stage ``pp_rank`` of ``pp_size``.
     """
     tiny = TINY_MOE_FAMILIES[family]
     if loader == "path_string":
         args = types.SimpleNamespace(model_init_kwargs={"dtype": torch.bfloat16}, gradient_checkpointing=False)
-        model, _ = load_model_from_pretrained(
-            path, args, tiny.load_class, parallelism_config=ParallelismConfig(fp32_non_ep_params=keep_fp32)
-        )
+        model, _ = load_model_from_pretrained(path, args, tiny.load_class, keep_fp32=keep_fp32)
         return model
     for module in (ep_lazy_loader, pp_lazy_loader):
         monkeypatch.setattr(module, "patch_moe_model_for_ep", lambda model, *args, **kwargs: model)
@@ -369,31 +386,58 @@ def _load_with(loader: str, family: str, path: str, keep_fp32: bool, monkeypatch
     }
     if loader.startswith("ep_lazy"):
         return load_ep_model_lazy(path, ep_config, config, **common)
-    return load_pp_stage_model(path, 0, 1, config=config, ep_config=ep_config, **common)
+    return load_pp_stage_model(path, pp_rank, pp_size, config=config, ep_config=ep_config, **common)
 
 
-FP32_MASTER_LOADERS = ("path_string", "ep_lazy", "ep_lazy_config_shell", "pp_stage", "pp_stage_config_shell")
+def _stored_pins(family: str, path: str) -> tuple[set[str], dict[str, torch.Tensor]]:
+    """The parameters a bf16 ``from_pretrained`` of ``path`` leaves fp32, and every stored fp32 value."""
+    load_class = TINY_MOE_FAMILIES[family].load_class
+    pinned = set(params_off_dtype(load_class.from_pretrained(path, dtype=torch.bfloat16), torch.bfloat16))
+    stored = dict(load_class.from_pretrained(path, dtype=torch.float32).named_parameters())
+    assert pinned and any(not torch.equal(stored[name], stored[name].bfloat16().float()) for name in pinned)
+    return pinned, stored
+
+
+def _assert_keeps_exactly(model: nn.Module, pinned: dict[str, str], stored: dict, keep_fp32: bool) -> None:
+    """``pinned`` maps each pin's name in ``model`` to its checkpoint name."""
+    fp32 = {name: param for name, param in model.named_parameters() if param.dtype == torch.float32}
+    assert set(params_off_dtype(model, torch.bfloat16)) == set(fp32)
+    assert set(fp32) == (set(pinned) if keep_fp32 else set())
+    assert all(torch.equal(param.detach(), stored[pinned[name]]) for name, param in fp32.items())
 
 
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
 @pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, family, loader, keep_fp32, monkeypatch):
-    """Without ``fp32_non_ep_params`` every parameter loads bf16, as the flag-less loaders always did.
-    With it exactly the parameters ``from_pretrained`` pins load fp32, bitwise the checkpoint's stored
-    values, which a bf16 round trip would change; nothing else is widened."""
-    tiny = TINY_MOE_FAMILIES[family]
+    """Without ``fp32_non_ep_params`` every parameter loads bf16. With it exactly the parameters
+    ``from_pretrained`` pins load fp32, bitwise the checkpoint's stored values, which a bf16 round trip
+    would change; nothing else is widened."""
     path = stored_fp32_checkpoints[family]
-    pinned = set(params_off_dtype(tiny.load_class.from_pretrained(path, dtype=torch.bfloat16), torch.bfloat16))
-    stored = dict(tiny.load_class.from_pretrained(path, dtype=torch.float32).named_parameters())
-    assert pinned and any(not torch.equal(stored[name], stored[name].bfloat16().float()) for name in pinned)
+    pinned, stored = _stored_pins(family, path)
 
     model = _load_with(loader, family, path, keep_fp32, monkeypatch)
 
-    fp32 = {name: param for name, param in model.named_parameters() if param.dtype == torch.float32}
-    assert set(params_off_dtype(model, torch.bfloat16)) == set(fp32)
-    assert set(fp32) == (pinned if keep_fp32 else set())
-    assert all(torch.equal(param.detach(), stored[name]) for name, param in fp32.items())
+    _assert_keeps_exactly(model, {name: name for name in pinned}, stored, keep_fp32)
+
+
+@pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
+def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoints, keep_fp32, monkeypatch):
+    """The second of two stages re-bases its layers to 0, so its kept keys must be taken in the stage's
+    numbering, after the slice. DeepSeek-V4's layer types pin different parameters (only a compressed
+    layer pins its compressor's norm), so a keep set in the checkpoint's numbering names other layers'
+    parameters (the premise, checked below)."""
+    path = stored_fp32_checkpoints["deepseek_v4"]
+    pinned, stored = _stored_pins("deepseek_v4", path)
+
+    model = _load_with("pp_stage", "deepseek_v4", path, keep_fp32, monkeypatch, pp_rank=1, pp_size=2)
+
+    lo, hi = getattr(model, PP_STAGE_PARTITION_ATTR)[1]
+    planner = PPWeightPlanner(lo, hi, resolve_layer_root(model))
+    stage_pins = {planner.stage_key(name): name for name in pinned if planner.owns(name)}
+    stage_names = {name for name, _ in model.named_parameters()}
+    assert lo > 0 and set(stage_pins) != pinned & stage_names
+    _assert_keeps_exactly(model, stage_pins, stored, keep_fp32)
 
 
 @pytest.mark.parametrize("ep_wrapped", [True, False])
@@ -468,7 +512,7 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
     finalize.assert_called_once_with(backbone)
 
 
-def _calls(function: ast.FunctionDef) -> set[str]:
+def _calls(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     names = set()
     for node in ast.walk(function):
         if isinstance(node, ast.Call):
@@ -483,7 +527,7 @@ def _receiver(target: ast.Attribute) -> str:
     return value.id if isinstance(value, ast.Name) else getattr(value, "attr", "")
 
 
-def _builds_a_model(function: ast.FunctionDef) -> bool:
+def _builds_a_model(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     for node in ast.walk(function):
         if not isinstance(node, ast.Call):
             continue
@@ -492,7 +536,7 @@ def _builds_a_model(function: ast.FunctionDef) -> bool:
             return True
         if isinstance(target, ast.Attribute) and (
             target.attr in EAGER_LOAD_CALLS
-            or (target.attr in MODEL_FACTORIES and _receiver(target) not in NON_MODEL_RECEIVERS)
+            or (target.attr in MODEL_FACTORIES and _receiver(target) not in NON_MODEL_CLASSES)
         ):
             return True
     return False
@@ -507,13 +551,13 @@ def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
             if rel.startswith(LOAD_CORE):
                 continue
             for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.FunctionDef) and _builds_a_model(node):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _builds_a_model(node):
                     found[(rel, node.name)] = frozenset(_calls(node))
     return found
 
 
 def test_the_eager_load_surface_is_pinned():
-    assert set(_eager_loaders()) == EAGER_LOADERS | UNCAST_LOADERS | NON_TRAINING_BUILDS
+    assert set(_eager_loaders()) == EAGER_LOADERS | UNCAST_LOADERS | NON_TRAINING_BUILDS | NON_MODEL_BUILDERS
 
 
 @pytest.mark.parametrize("loader", sorted(EAGER_LOADERS), ids=lambda loader: loader[1])

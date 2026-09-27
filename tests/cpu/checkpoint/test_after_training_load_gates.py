@@ -263,7 +263,9 @@ def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights
         patch.object(model_preparation, REMOTE_CODE_SHIMS, lambda: order.append("shims")),
         patch.object(model_preparation, "from_pretrained_verified", recording_verified),
     ):
-        model_loading.load_model_from_pretrained(causal_lm_checkpoint, args, model_cls=Qwen3ForCausalLM)
+        model_loading.load_model_from_pretrained(
+            causal_lm_checkpoint, args, model_cls=Qwen3ForCausalLM, keep_fp32=False
+        )
 
     assert order == ["shims", "load"], order
 

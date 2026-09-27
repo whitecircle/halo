@@ -925,13 +925,13 @@ def load_model_from_pretrained(
     args=None,
     model_cls=None,
     *,
-    parallelism_config: ParallelismConfig | None = None,
+    keep_fp32: bool,
 ):
     """Load a model from a pretrained path string, resolving its dtype; returns ``(model, model_id)``.
 
     An already-instantiated model must have ``model_init_kwargs`` unset. ``model_cls`` None → resolved
-    via `resolve_auto_model_class()`. Under ``parallelism_config.fp32_non_ep_params`` the stored fp32
-    parameters are kept for the trainer's fp32 upcast; no EP wrapper follows this load.
+    via `resolve_auto_model_class()`. ``keep_fp32`` (the run keeps fp32 masters, ``fp32_non_ep_params``)
+    keeps the stored fp32 parameters for the trainer's fp32 upcast; no EP wrapper follows this load.
     """
     if isinstance(model, str):
         model_id = model
@@ -954,7 +954,7 @@ def load_model_from_pretrained(
         cast_parameters_to_run_dtype(
             model,
             requested if isinstance(requested, torch.dtype) else model.config.dtype,
-            keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params,
+            keep_fp32=keep_fp32,
         )
         finalize_loaded_model(model)
         if run_scoped_cache_off:

@@ -15,10 +15,10 @@ import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
 from transformers import GenerationConfig, PreTrainedModel
-from transformers.core_model_loading import build_glob_alternation
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from src.models.loading.lazy_safetensors.weights import resolve_run_dtype
+from src.models.structure import params_matching_fp32_pins
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +70,15 @@ def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
     ``from_pretrained`` keeps the ``_keep_in_fp32_modules[_strict]`` parameters in fp32 through its
     dtype plan, which ``from_config`` never applies. The lazy loaders read which parameters load fp32
     off the shell (a run keeping fp32 masters keeps those as stored), so a config-built shell without
-    the pins would round them through ``dtype``. Matched with transformers' own glob rule, on meta
-    parameters: nothing is allocated. A module that is not a transformers model declares no pins.
+    the pins would round them through ``dtype``. The plan only ever keeps entries in fp32; matched with
+    transformers' own rule, on meta parameters, so nothing is allocated. A module that is not a
+    transformers model declares no pins.
     """
     if not isinstance(model, PreTrainedModel):
         return
-    plan = model._get_dtype_plan(dtype)
-    if not plan:
-        return
-    pattern, group_to_glob, _ = build_glob_alternation(list(plan))
-    for name, param in model.named_parameters():
-        match = pattern.search(name)
-        if match is not None:
-            param.data = param.data.to(plan[group_to_glob[match.lastgroup]])
+    for name in params_matching_fp32_pins(model, model._get_dtype_plan(dtype)):
+        param = model.get_parameter(name)
+        param.data = param.data.to(torch.float32)
 
 
 def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code: bool, **model_kwargs) -> nn.Module:

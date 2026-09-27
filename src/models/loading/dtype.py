@@ -28,6 +28,9 @@ DTYPE_BY_NAME: dict[str, torch.dtype] = {
 
 _VALID_FP32_MATMUL_PRECISION = ("highest", "high", "medium")
 
+# The attribute bnb's ``Params4bit`` carries (``None`` until quantized), read without importing bnb.
+_BNB_4BIT_STATE_ATTR = "quant_state"
+
 
 def resolve_model_dtype(model_init_kwargs: dict) -> dict:
     """Normalize the dtype in model_init_kwargs to transformers' ``dtype`` key, resolved (in place).
@@ -78,7 +81,7 @@ def reject_fp8_tensor(name: str, tensor: torch.Tensor, dtype: torch.dtype | None
         raise ValueError(
             f"{name!r} is stored in {tensor.dtype}: this is a quantized fp8 checkpoint, and casting it "
             f"to {dtype} would drop its block scales. Dequantize it to bf16 once and train from that "
-            f"(scripts/before_training/ has converters for DeepSeek-V4, GLM-5 and Mistral 4)."
+            f"(scripts/before_training/convert_*_bf16.py, for the families that ship a converter)."
         )
 
 
@@ -99,30 +102,31 @@ def cast_parameters_to_run_dtype(
     precision before the upcast. The training loaders apply it outside the MoE blocks EP wraps
     (``cast_loaded_parameters``), and the EP and PP lazy loaders materialize the same keys in fp32.
     Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases). "auto" and None
-    leave the model as loaded. A ``Parameter`` subclass is left alone: that is a quantizer's storage
-    (bnb's ``Params4bit``, whose ``bnb_4bit_quant_storage`` may be a float dtype), and a cast would
-    re-encode its packed bytes as values.
+    leave the model as loaded. bnb's 4-bit storage is left alone: a ``Params4bit`` holds packed codes
+    in a tensor that reports ``bnb_4bit_quant_storage``, which may be a float dtype, and a cast would
+    re-encode the codes as values.
 
     Raises on any other ``dtype`` (a name the caller should have resolved), on a 1-byte float (fp8)
-    parameter (:func:`reject_fp8_tensor`), and on a tensor-subclass parameter off the run dtype:
-    rebinding a DTensor's ``.data`` leaves its local shard in the old dtype, which is why the dense TP
-    loader, loading straight into DTensors, does not call this (no dense family pins a parameter).
+    parameter (:func:`reject_fp8_tensor`), and on any other ``Parameter`` subclass or tensor-subclass
+    parameter off the run dtype: its storage is not plain values, and rebinding a DTensor's ``.data``
+    leaves its local shard in the old dtype, which is why the dense TP loader, loading straight into
+    DTensors, does not call this (no dense family pins a parameter).
     """
     if dtype in ("auto", None):
         return
     if not isinstance(dtype, torch.dtype):
         raise TypeError(f"cast_parameters_to_run_dtype takes a torch.dtype, 'auto' or None, not {dtype!r}.")
     for name, param in model.named_parameters():
-        if type(param) is not nn.Parameter and issubclass(type(param), nn.Parameter):
+        if hasattr(param, _BNB_4BIT_STATE_ATTR):
             continue
         if not param.is_floating_point() or param.dtype == dtype or (keep_fp32 and param.dtype == torch.float32):
             continue
         reject_fp8_tensor(name, param, dtype)
-        if type(param.data) is not torch.Tensor:
+        if type(param) is not nn.Parameter or type(param.data) is not torch.Tensor:
             raise TypeError(
-                f"Cannot cast {name!r}, a {type(param.data).__name__} ({param.dtype}), to the run dtype "
-                f"{dtype}: cast_parameters_to_run_dtype runs on the freshly loaded model, before any "
-                f"parallel wrap."
+                f"Cannot cast {name!r}, a {type(param).__name__} ({param.dtype}), to the run dtype {dtype}: "
+                f"cast_parameters_to_run_dtype casts plain parameters of the freshly loaded model, before "
+                f"any parallel wrap."
             )
         param.data = param.data.to(dtype)
 
