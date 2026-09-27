@@ -603,8 +603,9 @@ def _resolve_baked_splits(dataset: Dataset | DatasetDict) -> tuple[Dataset | Non
         raise ValueError(
             f"The input carries split(s) {unbaked} that the prepared dataset would not hold: it bakes "
             f"only 'train' and 'test' (a lone '{_EVAL_SPLIT_ALIAS}' split is baked as 'test'). Remove "
-            f"them from the input, or point --input at the train split alone (an '@train' suffix on a "
-            f"Hub ID, or the split's own directory of a saved DatasetDict) and cut 'test' with --test-size."
+            f"them from the input (a Hub or S3 dataset: load it, drop them, save_to_disk, and pass that "
+            f"directory), or point --input at the train split alone (an '@train' suffix on a Hub ID) "
+            f"and cut 'test' from it with --test-size."
         )
     if test_source == _EVAL_SPLIT_ALIAS:
         logger.info(f"Baking the input's '{_EVAL_SPLIT_ALIAS}' split as the prepared dataset's 'test' split")

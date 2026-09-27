@@ -339,7 +339,7 @@ def main() -> int:
         if args.fp32:
             precision = "fp32-compute (no autocast)"
         elif args.fp32_optimizer:
-            precision = "bf16-master(stock AdamW)"
+            precision = "stock-AdamW(run dtype)"
         elif args.fp32_non_ep_params and args.fp32_experts:
             precision = "full-fp32-master(AdamWBF16)"
         elif args.fp32_non_ep_params or args.fp32_experts:

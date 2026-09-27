@@ -53,8 +53,8 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--split",
         default=None,
-        help=f"Dataset split (default: {DEFAULT_SPLIT}). A code-contest adapter for a single-split benchmark "
-        "(livecodebench, hlce) reads that split and refuses another.",
+        help=f"Dataset split (default: {DEFAULT_SPLIT}). A source that ships a single split of its own reads "
+        "that split and refuses another.",
     )
     add_openai_endpoint_args(parser, model_help="Served/model name.")
     parser.add_argument(
