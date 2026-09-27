@@ -14,9 +14,9 @@ class EPZayaMoELayer(EPMoELayerBase):
     The wrapper replaces the whole block, keeps the gate's forward unchanged (it holds the
     cross-layer EDA state threaded through ``prev_router_hidden_states``; its params sync like any
     adopted router: FSDP only in the ``experts_fsdp_managed`` regime, the router hook or deferred
-    sweep otherwise), and routes experts through DeepEP. The gate masks its learned "discard" slot
-    internally and returns already-flattened ``[T, top_k]`` probabilities/indices, so DeepEP only
-    sees real expert ids.
+    sweep otherwise), and routes experts through DeepEP. The gate returns already-flattened
+    ``[T, top_k]`` probabilities/indices with its learned "discard" slot masked to expert 0 at weight
+    0; under EP those picks are dispatched as ``-1`` (no expert), so they never reach expert 0's rank.
 
     Bias-update balancing uses the gate's persistent ``balancing_biases`` buffer, which the gate adds
     to the softmax scores for selection only and which is part of the checkpoint. The gate is the
@@ -59,9 +59,16 @@ class EPZayaMoELayer(EPMoELayerBase):
         batch_size, seq_length, emb_dim = hidden_states.shape
         hidden_states_flat = hidden_states.reshape(batch_size * seq_length, emb_dim)
 
+        experts = router_indices.long()
+        if self.ep_size > 1:
+            # A masked discard would otherwise ride the all-to-all to expert 0's rank in every layer,
+            # loading it with rows that contribute nothing. Zero weight is the same test the gate's
+            # load recording uses. At ep1 nothing is dispatched and the grouped path takes only real
+            # local ids, so the upstream spelling stays.
+            experts = experts.masked_fill(router_probs == 0, -1)
         expert_output = self._dispatch_compute_combine(
             hidden_states_flat,
-            router_indices.long(),
+            experts,
             router_probs.float(),
             hidden_states.dtype,
         )

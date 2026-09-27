@@ -26,7 +26,7 @@ Hub `Zyphra/ZAYA1-8B` `main` is the native format: 40 layers, fused `model.layer
 
     That state is the only gradient path from layer N+1's routing loss to layer N's `router.down_proj` and `router_states_scale`, so detaching it silently trains the EP path on a different router objective than plain FSDP2. A severed edge moves those gradients by ~1e-2 relative, against the ~1e-7 floor the fp32 dispatch boundary leaves. Pinned in `tests/cpu/parallelism/test_zaya_ep_eda_gradient.py`.
 
-- **Discard slot**: the router emits `num_experts + 1` logits, the extra one a learned "send to nowhere" bucket. `ZayaRouter.forward` masks tokens routed to it (weight → 0, index → 0) before returning, so DeepEP only ever sees the real 16 experts.
+- **Discard slot**: the router emits `num_experts + 1` logits, the extra one a learned "send to nowhere" bucket. `ZayaRouter.forward` masks tokens routed to it (weight → 0, index → 0) before returning. Under EP (`ep_size > 1`) the wrapper dispatches those zero-weight picks as `-1`, DeepEP's "no expert", so they never ride the all-to-all to expert 0's rank; at ep1 nothing is dispatched and the upstream masking stands.
 - Topology: top-1 only, enforced by the config.
 - Storage: fused `gate_up_proj [E, H, 2M]` and `down_proj [E, M, H]` in matmul convention (the checkpoint is `[E, 2M, H]` / `[E, H, M]`, transposed on load). SwiGLU, Grouped GEMM compute.
 - Loading and saving both use the base fused path: lazy safetensors loading is supported (each rank reads only its expert slice), and the gathered save emits the two native fused tensors per layer, which `from_pretrained` reads back. A legacy per-expert checkpoint is still declined by the loader's structural probe.

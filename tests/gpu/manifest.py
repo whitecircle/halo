@@ -449,6 +449,9 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_zaya_ep_save_roundtrip.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "zaya"), timeout=1500
     ),
+    "parallelism/ep/test_zaya_ep_discard_dispatch.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "zaya"), timeout=600
+    ),
     "parallelism/test_fsdp_tied_embeddings.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
