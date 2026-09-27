@@ -113,6 +113,12 @@ def _mode_targets(mode: str, model_name: str, revision: str | None) -> list[str]
     return attention_target_modules(model_name, revision)
 
 
+def mixed_targets(attention: list[str]) -> list[str]:
+    """``mixed`` mode's targets over ``attention`` named explicitly, for a family whose checkpoint index
+    does not spell its attention projections as the module tree does."""
+    return [*attention, *_EXPERT_TARGETS]
+
+
 def model_name_for(mode: str, parallelism_config) -> str:
     """The model a mode trains: MoE (GptOss-20B) for expert-bearing modes or any EP run, else dense."""
     return MOE_MODEL if (mode in _MOE_MODES or parallelism_config.is_ep_mode) else DENSE_MODEL

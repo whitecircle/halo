@@ -506,8 +506,15 @@ output is the same run's weights (`convert_to_bf16`, `merge_ep_shards`, `unfuse_
 `reset_sinks`, `quantize_to_lowp`, `reattach_vision_tower`) keeps them, and a tool whose output is a
 new base drops them with every other resume sidecar (`merge_models`, `patch_vocab.py`, and
 `merge_adapter_into_base`, the shared fold behind `merge_peft_adapters.py` and `convert_to_bf16
---merge_adapter`). `tests/gpu/trainers/lora/test_lora_merged_save_resume.py` pins the resume against an uninterrupted
-run: adapters bit-equal after the restore, first resumed loss identical.
+--merge_adapter`).
+
+The merged-resume GPU body (`tests/common/merged_resume_e2e.py`) pins the resume against an
+uninterrupted run whose stochastic-rounding stream restarts at the same step: adapters bit-equal
+after the restore, every resumed step's loss identical. It also pins the refusal of the same
+checkpoint without its resume adapter, on every EP family's tiny model, expert-only and mixed, at
+ep2, ep1's DTensor experts and EP+CP (a family Ulysses cannot run is refused at load instead).
+`tests/gpu/trainers/lora/test_lora_merged_save_resume.py` holds the `core` rows,
+`test_lora_merged_save_resume_families.py` the rest.
 
 ## Accelerate / FSDP checkpoints
 

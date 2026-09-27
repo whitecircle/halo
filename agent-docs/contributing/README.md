@@ -171,8 +171,12 @@ manifest.
     instead of re-rolling one per file.
 
 - **GPU tests register in the manifest.** Drop the script under `tests/gpu/`, add one `TestSpec`
-  line to `tests/gpu/manifest.py` (`nproc`, `markers`, `args_matrix`, `timeout`, `flaky`). A script
-  missing from the manifest fails collection, so coverage cannot silently rot.
+  line to `tests/gpu/manifest.py` (`nproc`, `markers`, `args_matrix`, `timeout`, `flaky`,
+  `known_failures`). A script missing from the manifest fails collection, so coverage cannot silently
+  rot.
+
+    `known_failures` maps a row that fails on an open bug to that bug. The row still runs, as a strict
+    `xfail`: once the bug is fixed it passes, which fails the tier until the entry is removed.
 
     A `bench*.py` that is in neither the manifest nor `_UNMANIFESTED_BENCHMARKS` fails the same way.
     World-size strictness is not a manifest field; the script declares it itself via

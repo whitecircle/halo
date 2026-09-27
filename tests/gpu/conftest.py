@@ -344,7 +344,10 @@ def pytest_generate_tests(metafunc):
         marks = [getattr(pytest.mark, m) for m in spec.markers]
         for args in spec.args_matrix:
             node_id = rel if not args else f"{rel}[{args}]"
-            params.append(pytest.param(GPUCase(rel, spec, args), marks=marks, id=node_id))
+            row_marks = marks
+            if args in spec.known_failures:
+                row_marks = [*marks, pytest.mark.xfail(reason=spec.known_failures[args], strict=True)]
+            params.append(pytest.param(GPUCase(rel, spec, args), marks=row_marks, id=node_id))
     metafunc.parametrize("gpu_case", params)
 
 
