@@ -999,6 +999,29 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_glm5_next.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "glm5"), timeout=1200
     ),
+    # The families transformers pins parameters of in fp32, on every loader short of EP (which casts
+    # already, the ep2 controls) and every adapter shape that leaves pinned modules out of FSDP2.
+    "trainers/sft/test_sft_fp32_pinned_params.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "lora", "moe", "deepseek_v4", "glm5", "inkling"),
+        args_matrix=(
+            "--family deepseek_v4 --mode full --ep 1",
+            "--family glm5_next --mode full --ep 1",
+            "--family inkling --mode full --ep 1",
+            "--family inkling --mode full --ep 1 --no-grouped-gemm",
+            "--family deepseek_v4 --mode expert_lora --ep 1",
+            "--family glm5_next --mode mixed --ep 1",
+            "--family deepseek_v4 --mode full --ep 2",
+            "--family inkling --mode full --ep 2",
+        ),
+        timeout=900,
+    ),
+    "trainers/sft/test_sft_fp32_pinned_params_single_gpu.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu", "moe", "deepseek_v4"),
+        args_matrix=("--family deepseek_v4",),
+        timeout=600,
+    ),
     "trainers/sft/test_sft_step3p7.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "step3p7"), timeout=1200
     ),

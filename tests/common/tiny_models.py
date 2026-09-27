@@ -79,6 +79,10 @@ TINY_SHARD_SIZE = "4MB"
 # Seed ``randomize_tid2eid`` fills the hash table from unless a test pins its own.
 DSV4_TID2EID_SEED = 1234
 
+# Small enough that a tokenizer-sized vocab spills into several shards, so a pinned-family checkpoint
+# carries the index :func:`tests.common.peft_helpers.attention_target_modules` reads projection names from.
+PINNED_SHARD_SIZE = "20MB"
+
 
 def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
     """Fill every DeepSeek-V4 hash layer's ``tid2eid`` with DISTINCT experts per token id.
@@ -264,3 +268,46 @@ def build_tiny_family_checkpoint(family: TinyFamily, target_dir: str, tokenizer,
     torch.manual_seed(seed)
     family.build(overrides).to(torch.bfloat16).save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
     tokenizer.save_pretrained(target_dir)
+
+
+def _tiny_glm5_next(text: dict) -> PreTrainedModel:
+    # The family ships no text-only CausalLM; its special-token defaults index a 154k vocab.
+    config = Glm5NextConfig(
+        text_config={**TINY_GLM5_CONFIG, **text},
+        vision_config=dict(TINY_GLM5_VISION_CONFIG),
+        image_token_id=2000,
+        video_token_id=2001,
+        image_start_token_id=2002,
+        image_end_token_id=2003,
+        video_start_token_id=2004,
+        video_end_token_id=2005,
+    )
+    return Glm5NextForConditionalGeneration(config)
+
+
+def _tiny_inkling(text: dict) -> PreTrainedModel:
+    return InklingForCausalLM(InklingTextConfig(**{**TINY_INKLING_CONFIG, **text}))
+
+
+# The roster families whose transformers class pins parameters (not only buffers) in fp32 through
+# ``_keep_in_fp32_modules_strict``, keyed by the builder of their tiny model.
+PINNED_FP32_FAMILIES: dict[str, Callable[[dict], PreTrainedModel]] = {
+    "deepseek_v4": _tiny_deepseek_v4,
+    "glm5_next": _tiny_glm5_next,
+    "inkling": _tiny_inkling,
+}
+
+
+def build_tiny_pinned_checkpoint(family: str, out_dir: str, *, tokenizer=None, seed: int = 0) -> str:
+    """Save a seeded bf16 tiny model of a :data:`PINNED_FP32_FAMILIES` family to ``out_dir``; returns it.
+
+    With ``tokenizer`` the vocab and pad id follow it and it is saved beside the weights, so the
+    production loaders and trainers run end to end; without, the tiny config's own vocab is kept.
+    """
+    text = {} if tokenizer is None else {"vocab_size": len(tokenizer), "pad_token_id": tokenizer.pad_token_id}
+    torch.manual_seed(seed)
+    model = PINNED_FP32_FAMILIES[family](text).to(torch.bfloat16)
+    model.save_pretrained(out_dir, max_shard_size=PINNED_SHARD_SIZE)
+    if tokenizer is not None:
+        tokenizer.save_pretrained(out_dir)
+    return out_dir
