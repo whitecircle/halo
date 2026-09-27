@@ -213,10 +213,9 @@ def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpo
 @pytest.fixture(scope="module")
 def roster_checkpoints(tmp_path_factory) -> dict[str, str]:
     root = tmp_path_factory.mktemp("roster")
-    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     checkpoints = {family: str(root / family) for family in TINY_MOE_FAMILIES}
     for family, path in checkpoints.items():
-        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path, tokenizer)
+        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path)
     return checkpoints
 
 
