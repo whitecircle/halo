@@ -1,0 +1,17 @@
+framework	run	config	tokens_per_second	peak_alloc_gib	loss_step1	loss_last	valid
+automodel	automodel_noac_r1	automodel_noac	7417	119.1	6.8502	1.3608	yes
+automodel	automodel_noac_r2	automodel_noac	7432	119.1	6.8502	1.3608	yes
+axolotl	axolotl_nogc_r1_e1	axolotl_nogc	9630	137.6	6.8932	1.3633	yes
+axolotl	axolotl_nogc_r1_e2	axolotl_nogc	9604	137.6	6.8932	1.3594	yes
+axolotl	axolotl_nogc_r2_e1	axolotl_nogc	8709	137.6	6.8932	1.3711	yes
+axolotl	axolotl_nogc_r2_e2	axolotl_nogc	8313	137.6	6.8932	1.3555	yes
+halo	halo_nogc_r1	halo_nogc	14906	101.8	6.9101	1.2183	yes
+halo	halo_nogc_r2	halo_nogc	15053	101.8	6.9101	1.2209	yes
+megatron_bridge	megatron_norecompute_r1	megatron_norecompute	5450	255.6	6.9055	1.2243	yes
+megatron_bridge	megatron_norecompute_r2	megatron_norecompute	5475	255.6	6.9055	1.2243	yes
+ms_swift	ms_swift_noac_r1	ms_swift_noac	5343	195.1	6.9066	1.2266	yes
+ms_swift	ms_swift_noac_r2	ms_swift_noac	5342	195.1	6.9066	1.2422	yes
+unsloth	unsloth_nogc_r1_e1	unsloth_nogc	6070	238.6	8.7233	1.618	no: step-1 loss
+unsloth	unsloth_nogc_r1_e2	unsloth_nogc	6082	238.6	8.6859	1.6134	no: step-1 loss
+unsloth	unsloth_nogc_r2_e1	unsloth_nogc	6093	238.6	6.8992	1.3609	yes
+unsloth	unsloth_nogc_r2_e2	unsloth_nogc	6106	238.6	6.8618	1.3627	yes
