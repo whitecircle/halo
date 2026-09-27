@@ -590,6 +590,12 @@ def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool =
     return any(os.path.isfile(os.path.join(checkpoint_dir, name)) for name in names)
 
 
+def has_adapter_weight_file(directory: str) -> bool:
+    """Whether a directory holds a PEFT adapter weight file, either spelling in
+    :data:`ADAPTER_WEIGHT_NAMES`; stat-only, like :func:`has_whole_model_weight_file`."""
+    return any(os.path.isfile(os.path.join(directory, name)) for name in ADAPTER_WEIGHT_NAMES)
+
+
 def write_resume_adapter_marker(checkpoint_dir: str) -> None:
     """Mark ``checkpoint_dir`` as resuming from its :data:`RESUME_ADAPTER_DIR`, not its weights.
 

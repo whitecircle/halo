@@ -22,8 +22,8 @@ from transformers.trainer import TRAINER_STATE_NAME
 from transformers.trainer_utils import get_last_checkpoint
 
 from src.checkpoint.format import (
-    ADAPTER_WEIGHT_NAMES,
     RESUME_ADAPTER_MARKER_FILE,
+    has_adapter_weight_file,
     has_whole_model_weight_file,
     is_sharded_checkpoint,
     resume_adapter_dir,
@@ -261,10 +261,6 @@ def _checkpoint_has_full_model_weights(checkpoint: str) -> bool:
     return has_whole_model_weight_file(checkpoint) and not is_sharded_checkpoint(checkpoint)
 
 
-def _has_adapter_file(directory: str) -> bool:
-    return any(os.path.isfile(os.path.join(directory, name)) for name in ADAPTER_WEIGHT_NAMES)
-
-
 def _classify_resume_checkpoint(checkpoint: str) -> str:
     """Classify a resume checkpoint as ``"merged_adapter"`` (a ``merge_expert_lora_on_save``
     checkpoint, resumed from its resume adapter), ``"merged_adapter_missing"`` (marked, but that
@@ -274,14 +270,14 @@ def _classify_resume_checkpoint(checkpoint: str) -> str:
 
     The merged class is read off the marker its save writes last, never inferred from the files
     beside it: its weights are as loadable as a full fine-tune's. Both adapter spellings count
-    (``ADAPTER_WEIGHT_NAMES``): ``PeftAdapterSaver`` falls back to ``adapter_model.bin``, and the
-    loader restores either."""
+    (:func:`~src.checkpoint.format.has_adapter_weight_file`): ``PeftAdapterSaver`` falls back to
+    ``adapter_model.bin``, and the loader restores either."""
     merged_adapter_dir = resume_adapter_dir(checkpoint)
     if merged_adapter_dir is not None:
-        return "merged_adapter" if _has_adapter_file(merged_adapter_dir) else "merged_adapter_missing"
+        return "merged_adapter" if has_adapter_weight_file(merged_adapter_dir) else "merged_adapter_missing"
     if _checkpoint_has_full_model_weights(checkpoint):
         return "full"
-    if _has_adapter_file(checkpoint):
+    if has_adapter_weight_file(checkpoint):
         return "adapter"
     return "invalid"
 
