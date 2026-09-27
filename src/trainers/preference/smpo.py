@@ -298,7 +298,9 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             )
         self._reject_pp_explicit_options(parallelism_config, peft_config)
 
-        model, _ = load_model_from_pretrained(model, args, keep_fp32=parallelism_config.fp32_non_ep_params)
+        model, _ = load_model_from_pretrained(
+            model, args, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
+        )
 
         # After the load: the ctor accepts a model id, and the config is where a family that closes
         # turns with a role marker (GLM-4, Gemma) declares it — resolving earlier would degrade to

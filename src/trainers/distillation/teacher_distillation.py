@@ -92,7 +92,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
         student_model, _ = load_model_from_pretrained(
-            student_model, args, keep_fp32=parallelism_config.fp32_non_ep_params
+            student_model, args, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
         )
         dist_kwargs = self._init_distributed_config(
             kwargs,
