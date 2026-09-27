@@ -187,9 +187,17 @@ def tokenize_dataset(
     tokenizer: PreTrainedTokenizer,
     config: PreprocessingConfig,
     split_name: str = "train",
+    *,
+    eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
-    """Tokenize a dataset (raw-text or chat mode), returning input_ids/attention_mask/labels."""
+    """Tokenize a dataset (raw-text or chat mode), returning input_ids/attention_mask/labels.
+
+    ``eos_token_ids`` is the completion mask's terminator set, resolved once per corpus by
+    :func:`preprocess_dataset`; unset, it is resolved here, before the tokenization pass.
+    """
     tokenizer = resolve_tokenizer_backend(tokenizer, config.tokenizer_backend)
+    if config.train_on_completions_only and eos_token_ids is None:
+        eos_token_ids = _resolve_config_eos_token_ids(config, tokenizer)
 
     if config.mode == "text":
         # No truncation when packing: the packing strategy decides what happens past max_length.
@@ -243,7 +251,6 @@ def tokenize_dataset(
     # Labels are baked here; the preprocessed dataset's collators only pad, never re-mask.
     if config.train_on_completions_only:
         marker = config.assistant_message_template
-        eos_token_ids = _resolve_config_eos_token_ids(config, tokenizer)
         response_token_ids = tokenize_response_template(marker, tokenizer)
         # The policy follows the artifact, matching the collator that would have masked these rows
         # at runtime: a packed artifact is collated by the packing collator, which ends a
@@ -297,11 +304,13 @@ def tokenize_vlm_dataset(
     processor: Any,
     config: PreprocessingConfig,
     split_name: str = "train",
+    *,
+    eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
     """Full VLM tokenization, including vision tokens.
 
     Produces input_ids (vision placeholders expanded), attention_mask, labels, pixel_values (float16
-    bytes), and image_grid_thw (Qwen-VL specific).
+    bytes), and image_grid_thw (Qwen-VL specific). ``eos_token_ids`` as in :func:`tokenize_dataset`.
     """
     if config.tools_field or config.interleaved_thinking:
         raise NotImplementedError(
@@ -314,7 +323,8 @@ def tokenize_vlm_dataset(
     processor = resolve_processor_backend(processor, config.tokenizer_backend)
     tokenizer = resolve_tokenizer(processor)
 
-    eos_token_ids = _resolve_config_eos_token_ids(config, tokenizer) if config.train_on_completions_only else None
+    if config.train_on_completions_only and eos_token_ids is None:
+        eos_token_ids = _resolve_config_eos_token_ids(config, tokenizer)
     response_token_ids = (
         tokenize_response_template(config.assistant_message_template, tokenizer)
         if config.train_on_completions_only
@@ -647,11 +657,15 @@ def preprocess_dataset(
         tokenize_fn = tokenize_dataset
         tokenizer = tokenizer_or_processor
 
+    # Once per corpus and before any tokenization pass: the set reads the model config, and an
+    # unreadable one would otherwise surface only after the whole train split was tokenized.
+    eos_token_ids = _resolve_config_eos_token_ids(config, tokenizer) if config.train_on_completions_only else None
+
     for split, split_data in (("train", train_data), ("test", test_data)):
         if split_data is None:
             continue
 
-        tokenized = tokenize_fn(split_data, tokenizer_or_processor, config, split)
+        tokenized = tokenize_fn(split_data, tokenizer_or_processor, config, split, eos_token_ids=eos_token_ids)
 
         if config.pack_sequences:
             tokenized = pack_dataset_coordinated(
