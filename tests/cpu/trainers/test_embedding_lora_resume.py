@@ -29,6 +29,10 @@ bit-reproducible):
   alone, DoRA): the checkpoint serves PEFT's own merge, carries every trainable tensor in its resume
   adapter, and the run resumes exactly; an adapter the save cannot fold (``nn.MultiheadAttention``
   LoRA) is refused at construction;
+* the resume-state rules every checkpoint follows: a save over a marked directory leaves no stale
+  marker (a full fine-tune's checkpoint is full, a torn LoRA save unmarked); a marked checkpoint
+  without its adapter is refused before the policy loads; a bf16 conversion keeps the resume state and
+  resumes like its source, while a vocabulary patch, an adapter merge and an N-way merge carry none;
 * a full fine-tune: the weight loader the trainer resumes through covers the names its saves write.
 
     python tests/cpu/trainers/test_embedding_lora_resume.py
@@ -37,19 +41,21 @@ bit-reproducible):
 import datetime
 import os
 import shutil
+import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 from accelerate import PartialState
 from datasets import Dataset
-from peft import LoraConfig, inject_adapter_in_model
+from peft import LoraConfig, get_peft_model, inject_adapter_in_model
 from safetensors.torch import load_file
 from sentence_transformers import SentenceTransformer
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import (
     AutoModel,
     BertConfig,
+    BertLMHeadModel,
     BertModel,
     PreTrainedTokenizerFast,
     TrainerCallback,
@@ -59,6 +65,9 @@ from trl import ModelConfig
 
 import src.trainers.embedding.trainer as embedding_module
 import src.trainers.mixins.checkpointing as checkpointing_mod
+from scripts.after_training.convert_to_bf16 import convert_to_bf16
+from scripts.after_training.merge_models import merge_models
+from scripts.after_training.merge_peft_adapters import merge_peft_adapter
 from scripts.training.embedding import inject_lora
 from src.args.distributed_args import DistributedArguments
 from src.checkpoint.format import (
@@ -79,7 +88,7 @@ from src.training.environment import _classify_resume_checkpoint, resolve_resume
 from tests.common.embedding_lora_resume import backbone_prefix
 from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import injected_lora_merge
-from tests.common.utils import step_losses
+from tests.common.utils import load_script_module, step_losses
 
 WORDS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", *(f"w{i}" for i in range(60))]
 TARGET_MODULES = ("query", "value")
@@ -92,6 +101,7 @@ SCALING = LORA_ALPHA / LORA_R
 TOTAL_STEPS = 4
 SAVE_AT_STEP = 2
 # One rank per "node": every rank is its node's local main, hence a checkpoint writer.
+patch_vocab = load_script_module("scripts/before_training/patch_vocab.py")
 TWO_NODE_ENV = {"LOCAL_RANK": "0", "LOCAL_WORLD_SIZE": "1", "DIST_OUTPUT_SHARED_FILESYSTEM": "0"}
 PG_TIMEOUT = datetime.timedelta(seconds=120)
 
@@ -636,6 +646,102 @@ def test_an_adapter_the_save_cannot_fold_is_refused_at_construction():
 
     with pytest.raises(NotImplementedError, match="cannot be folded out of place"):
         EmbeddingTrainer._validate_injected_lora_foldable(host)
+
+
+# --- the resume-state rules every checkpoint follows ---------------------------------------------
+
+
+def test_a_save_over_a_marked_directory_leaves_no_stale_marker(run, tmp_path, monkeypatch):
+    """A run resumed from an earlier checkpoint rewrites ``checkpoint-N`` in place. A marker the old save
+    left there would vouch for the old adapter beside the new weights, so every save removes it first:
+    a full fine-tune writes an unmarked, full checkpoint, and an injected-LoRA save torn before its own
+    adapter write leaves none."""
+    checkpoint = tmp_path / "out" / f"checkpoint-{SAVE_AT_STEP}"
+    _copy(run.checkpoint, checkpoint)
+    _trainer(SentenceTransformer(run.base, device="cpu"), tmp_path / "out", max_steps=SAVE_AT_STEP).train()
+    assert resume_adapter_dir(str(checkpoint)) is None
+    assert _classify_resume_checkpoint(str(checkpoint)) == "full"
+
+    torn = tmp_path / "torn" / f"checkpoint-{SAVE_AT_STEP}"
+    _copy(run.checkpoint, torn)
+
+    def full_disk(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(embedding_module, "save_file", full_disk)
+    with pytest.raises(OSError, match="No space left"):
+        _trainer(_lora_model(run.base, seed=1), tmp_path / "torn", max_steps=SAVE_AT_STEP).train()
+    assert resume_adapter_dir(str(torn)) is None
+
+
+def test_a_marked_checkpoint_without_its_adapter_is_refused_before_the_policy_loads(run, tmp_path):
+    checkpoint = _copy(run.checkpoint, tmp_path / "checkpoint-2")
+    os.remove(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
+
+    with pytest.raises(ValueError, match="holds no adapter file"):
+        resolve_resume_weights_source(checkpoint, SimpleNamespace(model_name_or_path=run.base), ParallelismConfig())
+
+
+def _resume_state(directory) -> list[str]:
+    return [
+        name
+        for name in (RESUME_ADAPTER_MARKER_FILE, RESUME_ADAPTER_DIR)
+        if os.path.exists(os.path.join(directory, name))
+    ]
+
+
+def test_a_bf16_conversion_keeps_the_resume_state_and_resumes_like_its_source(run, tmp_path):
+    out = str(tmp_path / "bf16")
+
+    convert_to_bf16(run.checkpoint, out, "base")
+
+    assert _classify_resume_checkpoint(out) == "merged_adapter"
+    source_adapter = os.path.join(run.checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE)
+    with (
+        open(source_adapter, "rb") as source,
+        open(os.path.join(out, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE), "rb") as copy_,
+    ):
+        assert source.read() == copy_.read(), "the resume adapter changed in the conversion"
+    assert os.path.isfile(os.path.join(out, "modules.json")), "the ST pipeline config was dropped"
+    model = _lora_model(run.base, seed=2)
+    _trainer(model, tmp_path / "resumed")._load_from_checkpoint(out)
+    assert all(torch.equal(value, run.at_save[key]) for key, value in _trainable(model).items())
+
+
+def test_a_new_base_built_from_the_checkpoint_carries_none_of_its_resume_state(run, tmp_path, monkeypatch):
+    """A vocabulary patch, an adapter merged into it and an N-way merge are new models: resumed, the
+    marker would rebuild them from the original base plus this run's adapter, dropping their weights."""
+    patched = tmp_path / "patched"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["patch_vocab.py", "--model_id", run.checkpoint, "--output_dir", str(patched), "--patterns", '["w1 w2"]'],
+    )
+    patch_vocab.main()
+
+    adapter = tmp_path / "adapter"
+    # The tool loads the widest class, the LM head over the encoder, so the adapter addresses that.
+    peft_model = get_peft_model(
+        BertLMHeadModel.from_pretrained(run.checkpoint), LoraConfig(r=2, target_modules=["query"])
+    )
+    peft_model.peft_config["default"].base_model_name_or_path = run.checkpoint
+    peft_model.save_pretrained(adapter)
+    merged_adapter = tmp_path / "merged_adapter"
+    merge_peft_adapter(adapter_dir=str(adapter), output_dir=str(merged_adapter), dtype=torch.float32, verbose=False)
+
+    merged = tmp_path / "merged_models"
+    merge_models(
+        model_specs=[run.checkpoint, run.base],
+        output_dir=str(merged),
+        method="linear",
+        dtype="float32",
+        tokenizer_source=run.checkpoint,
+        verbose=False,
+    )
+
+    for out in (patched, merged_adapter, merged):
+        assert _resume_state(out) == [], f"{out.name} carries its source run's resume state"
+        assert _classify_resume_checkpoint(str(out)) == "full"
 
 
 # --- full fine-tune -------------------------------------------------------------------------

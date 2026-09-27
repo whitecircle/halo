@@ -539,8 +539,10 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         optimizer moments to belong to. Each training checkpoint therefore also carries the run's
         trainable tensors unfolded, at their live dtype and under the top-level model's parameter
         names, in :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR`; each save rank writes the marker
-        the resume classifies on once its own copy is complete, so a failed write leaves the
-        checkpoint unmarked. The final ``save_model`` export carries neither. Collective.
+        the resume classifies on once its own copy is complete. With any older marker removed before
+        the save began (:func:`~src.distributed.checkpoint.save.remove_stale_resume_marker`), a failed
+        write leaves the checkpoint unmarked. The final ``save_model`` export carries neither.
+        Collective.
         """
         if not self._has_injected_lora():
             super()._save_merged_checkpoint_resume_adapter(checkpoint_dir)
