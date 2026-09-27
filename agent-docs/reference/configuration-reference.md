@@ -19,7 +19,7 @@ Three knob names carry the length settings. They mean the same thing everywhere;
 |---|---|
 | `max_length` | Total tokenized sequence budget (prompt + completion). `null` or any non-positive value resolves to the **model's context window** at launch (`resolve_length_to_context`, which reads `max_position_embeddings` / `max_seq_length` / `n_positions` off the **text** sub-config so composite VLM configs resolve too, then falls back to `tokenizer.model_max_length`). Also becomes `tokenizer.model_max_length` for the run. |
 | `max_prompt_length` | Prompt share of the budget. |
-| `max_completion_length` | Completion share of the budget, or — under RL — the number of tokens the policy may generate. Async GRPO with Environments' entry script overwrites it with `rollout_max_tokens` (the rollout budget is the generation cap there). |
+| `max_completion_length` | Completion share of the budget, or — under RL — the number of tokens the policy may generate. Async GRPO with Environments' entry script pins it to `rollout_max_tokens`, the generation cap there, and raises on any other explicit value. |
 
 *Omitting* a field falls back to the dataclass default in the tables below. Writing `max_length: null` opts into the model's context window; `null` on `max_prompt_length` / `max_completion_length` means whatever the per-trainer row below says (no cap, no prompt filtering, or a derived share of `max_length`) — never the context window.
 
@@ -37,7 +37,7 @@ Three knob names carry the length settings. They mean the same thing everywhere;
 | Embedding (`EmbeddingConfig`) | installed as SentenceTransformers' `max_seq_length` (truncates) | — | — |
 | Offline GRPO (`OfflineGRPOConfig`) | pipeline-parallel fixed shape only (`null` → the two shares' sum; **rejected** outside PP) | **left**-truncate (keep the tokens nearest the completion) | truncate the stored completion (EOS only within the budget); also the `dr_grpo` loss normalizer |
 | Online GRPO — RLVR (`GRPOConfig` + script args) | — | dataset **filter**: over-length prompts are dropped, never truncated | **generation budget** (TRL `max_new_tokens` / vLLM `SamplingParams`) |
-| Async GRPO (`AsyncTrainingConfig` + script args) | — | dataset **filter** (as above) | not a knob — the script overwrites it with `rollout_max_tokens` (a YAML value is discarded), leaving it only as TRL's `dr_grpo` normalizer |
+| Async GRPO (`AsyncTrainingConfig` + script args) | — | dataset **filter** (as above) | not a knob — the script pins it to `rollout_max_tokens` and raises on any other explicit value; TRL reads it only as the `dr_grpo` normalizer |
 
 Two knobs are *not* a plain cap:
 
@@ -134,7 +134,7 @@ Read from the environment (not the YAML); set in the launch command / `.env`. To
 | `HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS` | `DIST_STORE_TIMEOUT_HOURS × 3600` | How long a rank waits for the peer downloading the same S3 cache entry. It derives from the store budget because that is what bounds the waiting peers — a lower value turns a legitimately slow multi-GB fetch into a rank-local timeout. |
 | `HALO_DATASET_NUM_PROC` | `max(1, min(cpu_count // 4, 4))` | Cluster-wide pin for the HF `dataset.map` `num_proc`. HF keys its map cache on `num_proc`, so a heterogeneous cluster where nodes compute different CPU-based values misses the writer rank's cache and re-runs the whole map — pin it. Must be `>= 1` (below 1 fails loud); `1` disables map multiprocessing. A config `dataset_num_proc` overrides it; resolved once at import. |
 | `HALO_TP_CONSISTENCY_CHECK` | off | Makes an added `assert_consistent` raise instead of warn. **Manual instrumentation** — the toolkit ships no call sites, so the flag alone produces nothing. See [Debugging](debugging.md). |
-| `HALO_EP_PERF_PROFILE` | off | Benchmark switch: routes the EP dispatch/expert-compute/combine spans onto CUDA-event timers in `get_performance_monitor().stats`, which only `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` reads (it sets the variable itself). A training run with it on pays two syncs per phase and reports nothing; `enable_torch_profiler` shows the same `ep.*` spans at no cost. |
+| `HALO_EP_PERF_PROFILE` | off | Benchmark switch that times the EP dispatch/expert-compute/combine phases for `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile`; a training run with it on pays two syncs per phase and reports nothing ([Debugging](debugging.md#2-finding-throughput-bottlenecks)). |
 | `HALO_EP_SHARED_OVERLAP` | off | `1` runs the shared-expert FFN on a side stream concurrent with the routed dispatch all-to-all (shared-expert families only). See [DeepEP](../infrastructure/deepep.md). |
 | `HALO_EP_CAPACITY_DEDUP` | `1` | `0` restores the per-MoE-layer DeepEP buffer-capacity all-reduce instead of reusing the first layer's capacity for the whole forward. One capacity per forward is also what lets every MoE layer share one `ElasticBuffer`, so `0` additionally gives each layer its own arena — multiplying it by the MoE layer count ([DeepEP](../infrastructure/deepep.md)). |
 | `HALO_GRAD_BUCKET_MB` / `HALO_GRAD_BUCKET_MAX_INFLIGHT` | `256` / `2` | Flat-buffer size and concurrency of the bucketed gradient reduction — the deferred cross-replica EP sweep, the TP replicated / per-head-norm sweep, and the QLoRA sweep. (The per-parameter EP grad hooks reduce one tensor at a time and ignore both.) `HALO_GRAD_BUCKET_MB` sets the chunk boundaries every rank must agree on, so it belongs to the rank-uniform set verified in distributed setup ([DeepEP](../infrastructure/deepep.md)); `MAX_INFLIGHT` is rank-local and sets how many bucket collectives run at once, so each one's latency covers the next bucket's flatten. Peak transient is that many flat buffers, and under `fp32_grad_reduce` each also holds an fp32 copy — ~3× the bucket size from bf16. |
@@ -321,7 +321,7 @@ Besides these, `num_nodes`, `num_nvlink_domains`, `ep_group_size`, `data_paralle
 
 Two more carry no `DistributedArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`src/training/parallelism_args.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
 
-A trainer whose config declares no `max_length` field stamps neither and leaves the ceiling to the dispatcher's runtime backstop; `max_length: null` still stamps the rows, and the gate resolves the length against the model's context window.
+A trainer whose config declares no `max_length` field stamps neither and leaves the ceiling to the dispatcher's runtime backstop. `max_length: null` still stamps the rows; the gate then takes `max_prompt_length + max_completion_length` where both are bounded (offline GRPO), else the model's context window.
 
 Five knobs are implemented inside the mixin's own FSDP2 wrap and are therefore **ignored under `accelerate launch`** (accelerate owns the wrap): `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fsdp_defer_grad_sync`, `fp32_grad_reduce`. Setting any of them on an accelerate launch logs one warning — use `torchrun`. Accelerate's own `no_sync` already skips the gradient reduce on a window's non-final microsteps, so `fsdp_defer_grad_sync` has nothing to add there.
 
@@ -340,7 +340,7 @@ So standard DDP and EP-only give `world_size`; TP/CP/ETP and EP+TP/EP+CP divide 
 ```bash
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-    --expert_parallel_size=8 --context_parallel_size=8 --ep_scope=node
+    --expert_parallel_size=8 --context_parallel_size=8 --ep_scope=node --packing=false
 ```
 
 ---
