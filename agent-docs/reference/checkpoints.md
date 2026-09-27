@@ -479,11 +479,13 @@ to the adapters. So `_save_checkpoint` adds the unmerged adapter to every traini
 `save_ep_lora_adapters` for expert-only). The root marker `resume_adapter.json` follows once every
 save rank's copy is complete. Every checkpoint save, whatever the run, first removes a marker
 already in its step's directory (a resumed run saving a step it saved before), so a save that stops
-before its own adapter lands is unmarked rather than vouching for the abandoned run's adapter. A subdirectory, because an
-`adapter_config.json` at the root makes `from_pretrained` load that adapter on top of the merged
-weights, which already hold its delta. vLLM, SGLang and `from_pretrained` read only the root, so none
-of them loads `resume_adapter/`, the marker or the `.pt` sidecars from a checkpoint that has its root
-weights. The final `save_model()` export carries neither: nothing resumes from it.
+before its own adapter lands is unmarked rather than vouching for the abandoned run's adapter.
+
+The adapter sits in a subdirectory because an `adapter_config.json` at the root makes
+`from_pretrained` load that adapter on top of the merged weights, which already hold its delta. vLLM,
+SGLang and `from_pretrained` read only the root, so none of them loads `resume_adapter/`, the marker
+or the `.pt` sidecars from a checkpoint that has its root weights. The final `save_model()` export
+carries neither: nothing resumes from it.
 
 The save leaves the run bit-identical. A bf16 `(w + d) - d` is not always `w`, so the attention merge
 is undone by writing back the base weights it rewrote (`merged_adapters(restore_base=True)`) rather
@@ -508,15 +510,7 @@ new base drops them with every other resume sidecar (`merge_models`, `patch_voca
 `merge_adapter_into_base`, the shared fold behind `merge_peft_adapters.py` and `convert_to_bf16
 --merge_adapter`).
 
-The merged-resume GPU body (`tests/common/merged_resume_e2e.py`) pins the resume against an
-uninterrupted run whose stochastic-rounding stream restarts at the same step, with DeepEP's
-dispatch in deterministic mode (its default claims receive slots with atomics, so the expert
-gradients' summation order varies run to run): adapters bit-equal after the restore, every resumed
-step's loss and the final adapters identical. It also pins the refusal of the same
-checkpoint without its resume adapter, on every EP family's tiny model, expert-only and mixed, at
-ep2, ep1's DTensor experts and EP+CP (a family Ulysses cannot run is refused at load instead).
-`tests/gpu/trainers/lora/test_lora_merged_save_resume.py` holds the `core` rows,
-`test_lora_merged_save_resume_families.py` the rest.
+Covering test: `tests/common/merged_resume_e2e.py` (exact resume against an uninterrupted run).
 
 ## Accelerate / FSDP checkpoints
 
