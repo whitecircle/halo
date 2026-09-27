@@ -29,6 +29,10 @@ from tests.common.tolerances import TOL
 # resolve against the wrong tree.
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+# Where a trained causal-LM loss lands: the floor catches a collapsed or masked-away objective, the ceiling
+# an untrained or garbage forward. Finiteness alone passes both.
+LM_TRAINING_LOSS_BAND = (0.05, 20.0)
+
 
 def load_script_module(relative_path: str, name: str | None = None, *, register: bool = False) -> ModuleType:
     """Import a ``scripts/`` entry point by path, since ``scripts/`` is not a package.
@@ -326,6 +330,36 @@ def optimizer_state_matches(saved: dict, restored: dict) -> tuple[bool, str]:
 def step_losses(trainer) -> list[float]:
     """Per-step training losses from a trainer's log history, eval entries and the run summary excluded."""
     return [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
+
+
+def training_run_checks(
+    train_result, trainer, max_steps: int, *, loss_band: tuple[float, float] | None = None
+) -> dict[str, bool]:
+    """The finished-run checks the SFT and LoRA mode suites share, each logged with its verdict.
+
+    ``loss_finite`` (the reported training loss), ``all_steps_finite`` (every logged step loss),
+    ``steps_completed`` (``max_steps`` optimizer steps ran) and, given ``loss_band``,
+    ``loss_reasonable``: the reported training loss strictly inside it.
+    """
+    training_loss = train_result.training_loss
+    losses = step_losses(trainer)
+    checks = {
+        "loss_finite": math.isfinite(training_loss),
+        "all_steps_finite": all(math.isfinite(loss) for loss in losses),
+        "steps_completed": train_result.global_step == max_steps,
+    }
+    log(f"  Loss is finite: {'PASS' if checks['loss_finite'] else 'FAIL'} ({training_loss:.6f})")
+    log(f"  All step losses finite: {'PASS' if checks['all_steps_finite'] else 'FAIL'}")
+    log(f"  Per-step losses: {[f'{loss:.4f}' for loss in losses]}")
+    log(
+        f"  Steps completed: {'PASS' if checks['steps_completed'] else 'FAIL'} "
+        f"({train_result.global_step}/{max_steps})"
+    )
+    if loss_band is not None:
+        low, high = loss_band
+        checks["loss_reasonable"] = low < training_loss < high
+        log(f"  Loss in band ({low}, {high}): {'PASS' if checks['loss_reasonable'] else 'FAIL'} ({training_loss:.4f})")
+    return checks
 
 
 def tensors_equal_at_narrower_dtype(a: torch.Tensor, b: torch.Tensor) -> bool:

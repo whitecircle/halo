@@ -33,7 +33,6 @@ Requirements:
 """
 
 import argparse
-import math
 import os
 
 import torch
@@ -46,9 +45,10 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.utils import gpu_mem_gb, log, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -76,34 +76,6 @@ def _to_full_cpu(tensor):
     if hasattr(tensor, "full_tensor"):
         tensor = tensor.full_tensor()
     return tensor.detach().cpu()
-
-
-def _validate_training(train_result, trainer, max_steps):
-    """Validate common training results. Returns checks dict."""
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    step_losses = [entry["loss"] for entry in log_history if "loss" in entry and "eval_loss" not in entry]
-
-    checks = {}
-
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
-
-    all_finite = all(math.isfinite(l) for l in step_losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
-
-    steps_ok = train_result.global_step == max_steps
-    checks["steps_completed"] = steps_ok
-    log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{max_steps})")
-
-    ep_active = trainer.is_ep_mode
-    checks["ep_mode"] = ep_active
-    log(f"  EP mode active: {'PASS' if ep_active else 'FAIL'}")
-
-    return checks
 
 
 def _validate_lora(model, lora_before):
@@ -184,7 +156,8 @@ def run_full_ft(parallelism_config, tokenizer, train_dataset, eval_dataset, outp
     train_result = trainer.train()
 
     log("\n  --- Validation (full FT) ---")
-    checks = _validate_training(train_result, trainer, MAX_STEPS)
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
+    checks["ep_layers_wrapped"] = bool(ep_layers(model))
 
     trainer.cleanup_ep()
     return checks, train_result.training_loss
@@ -256,7 +229,8 @@ def run_lora(parallelism_config, tokenizer, train_dataset, eval_dataset, output_
     train_result = trainer.train()
 
     log("\n  --- Validation (LoRA) ---")
-    checks = _validate_training(train_result, trainer, MAX_STEPS)
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
+    checks["ep_layers_wrapped"] = bool(ep_layers(model))
     lora_checks = _validate_lora(model, lora_before)
     checks.update(lora_checks)
 

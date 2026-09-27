@@ -19,7 +19,6 @@ Run with 2 GPUs:
         tests/gpu/trainers/lora/test_sft_oss20b_ep_lora.py
 """
 
-import math
 import os
 import traceback
 
@@ -42,7 +41,7 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     verify_adapter_reload,
 )
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -57,29 +56,6 @@ SEED = 42
 LORA_TARGET_MODULES = ["q_proj", "v_proj"]
 LORA_R = 8
 LORA_ALPHA = 16
-
-
-def _validate_training(train_result, trainer, max_steps):
-    """Validate common training results. Returns (checks_dict, step_losses)."""
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    step_losses = [entry["loss"] for entry in log_history if "loss" in entry and "eval_loss" not in entry]
-
-    checks = {}
-
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
-
-    all_finite = all(math.isfinite(l) for l in step_losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    steps_ok = train_result.global_step == max_steps
-    checks["steps_completed"] = steps_ok
-    log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{max_steps})")
-
-    return checks, step_losses
 
 
 def _validate_lora_updated(lora_before: dict, lora_after: dict) -> dict[str, bool]:
@@ -168,8 +144,7 @@ def run_lora_ep(
         barrier()
 
         log("\n  --- Training Validation (LoRA+EP) ---")
-        checks, step_losses = _validate_training(train_result, trainer, MAX_STEPS)
-        log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+        checks = training_run_checks(train_result, trainer, MAX_STEPS)
 
         lora_after = snapshot_adapters(model, expert_lora=False)
         checks.update(_validate_lora_updated(lora_before, lora_after))

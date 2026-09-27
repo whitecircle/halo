@@ -18,7 +18,6 @@ Run with 2 GPUs:
         tests/gpu/trainers/lora/test_lora_cp_dense.py
 """
 
-import math
 import os
 import traceback
 
@@ -45,7 +44,7 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     verify_adapter_reload,
 )
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.utils import LM_TRAINING_LOSS_BAND, cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 # Configuration
 
@@ -75,36 +74,6 @@ def _verify_lora_updated(before: dict, after: dict) -> dict[str, bool]:
     lora_ok, detail = assert_adapters_moved(before, after)
     log(f"  LoRA weights updated: {'PASS' if lora_ok else 'FAIL'} ({detail})")
     return {"lora_updated": lora_ok}
-
-
-def _validate_training(train_result, trainer, max_steps) -> tuple[dict[str, bool], list]:
-    training_loss = train_result.training_loss
-    step_losses = [
-        entry["loss"] for entry in trainer.state.log_history if "loss" in entry and "eval_loss" not in entry
-    ]
-
-    checks = {}
-
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
-
-    all_finite = all(math.isfinite(l) for l in step_losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    steps_ok = train_result.global_step == max_steps
-    checks["steps_completed"] = steps_ok
-    log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{max_steps})")
-
-    # A band, not `< 100`: no finite LM loss on this model reaches 100, so that bound was strictly
-    # weaker than the finiteness check beside it and could not fail. The floor catches a collapsed
-    # or masked-away objective, the ceiling an untrained/garbage forward.
-    loss_reasonable = 0.05 < training_loss < 20.0
-    checks["loss_reasonable"] = loss_reasonable
-    log(f"  Loss in band (0.05, 20): {'PASS' if loss_reasonable else 'FAIL'} ({training_loss:.4f})")
-
-    return checks, step_losses
 
 
 # Test runners
@@ -185,8 +154,7 @@ def run_lora_cp(
 
         # Validate
         log("\n  --- Validation (LoRA+CP) ---")
-        checks, step_losses = _validate_training(train_result, trainer, MAX_STEPS)
-        log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+        checks = training_run_checks(train_result, trainer, MAX_STEPS, loss_band=LM_TRAINING_LOSS_BAND)
 
         lora_after = snapshot_adapters(model, expert_lora=False)
         checks.update(_verify_lora_updated(lora_before, lora_after))
@@ -313,8 +281,7 @@ def run_qlora_cp(
 
         # Validate
         log("\n  --- Validation (QLoRA+CP) ---")
-        checks, step_losses = _validate_training(train_result, trainer, MAX_STEPS)
-        log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+        checks = training_run_checks(train_result, trainer, MAX_STEPS, loss_band=LM_TRAINING_LOSS_BAND)
 
         lora_after = snapshot_adapters(model, expert_lora=False)
         checks.update(_verify_lora_updated(lora_before, lora_after))

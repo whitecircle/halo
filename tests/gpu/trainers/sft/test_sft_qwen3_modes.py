@@ -18,7 +18,6 @@ Run single-GPU (skips TP/CP):
     torchrun --nproc_per_node=1 tests/gpu/trainers/sft/test_sft_qwen3_modes.py
 """
 
-import math
 import os
 import traceback
 from types import SimpleNamespace
@@ -37,7 +36,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.utils import LM_TRAINING_LOSS_BAND, cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 # Configuration
 
@@ -69,36 +68,6 @@ PEFT_ARGS = SimpleNamespace(
 
 
 # Helpers
-
-
-def _validate_training(train_result, trainer, max_steps):
-    """Validate common training results. Returns (checks_dict, step_losses)."""
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    step_losses = [entry["loss"] for entry in log_history if "loss" in entry and "eval_loss" not in entry]
-
-    checks = {}
-
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
-
-    all_finite = all(math.isfinite(l) for l in step_losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    steps_ok = train_result.global_step == max_steps
-    checks["steps_completed"] = steps_ok
-    log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{max_steps})")
-
-    # A band, not `< 100`: no finite LM loss on this model reaches 100, so that bound was strictly
-    # weaker than the finiteness check beside it and could not fail. The floor catches a collapsed
-    # or masked-away objective, the ceiling an untrained/garbage forward.
-    loss_reasonable = 0.05 < training_loss < 20.0
-    checks["loss_reasonable"] = loss_reasonable
-    log(f"  Loss in band (0.05, 20): {'PASS' if loss_reasonable else 'FAIL'} ({training_loss:.4f})")
-
-    return checks, step_losses
 
 
 def _verify_checkpoint(save_dir: str, mode: str, rank: int) -> dict[str, bool]:
@@ -219,8 +188,7 @@ def run_mode(
 
         # --- Validate ---
         log(f"\n  --- Validation ({mode_name}) ---")
-        checks, step_losses = _validate_training(train_result, trainer, MAX_STEPS)
-        log(f"  Per-step losses: {[f'{l:.4f}' for l in step_losses]}")
+        checks = training_run_checks(train_result, trainer, MAX_STEPS, loss_band=LM_TRAINING_LOSS_BAND)
 
         ckpt_checks = _verify_checkpoint(save_dir, mode_name, rank)
         checks.update(ckpt_checks)
