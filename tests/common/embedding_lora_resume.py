@@ -15,9 +15,9 @@ embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
      merge of the live adapters at the save writes, bit for bit, and move every target's base; the
      resume adapter holds those live tensors bit for bit; the root holds no adapter file or config.
   3. Resume through the production resolver: the policy source is the base; after the restore
-     (``on_train_begin``) every trainable tensor is BIT-EQUAL to the saved one; the first resumed loss
-     equals the uninterrupted one within ``FIRST_LOSS_TOL`` (its forward reads only restored state),
-     later ones within ``LOSS_TOL`` and the final adapters within ``FINAL_ADAPTER_RTOL``.
+     (``on_train_begin``) every trainable tensor is BIT-EQUAL to the saved one; with the
+     stochastic-rounding stream restarted at the step after the save in both runs, the first resumed
+     loss, the later ones and the final adapters all equal the uninterrupted run's exactly.
   4. The resumed run's final ``save_model`` export loads and encodes and carries no resume state.
 
 ``--lora off`` is a full fine-tune of the same backbone, whose saves write the backbone's names:
@@ -28,7 +28,7 @@ embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
   3. Resume through the production resolver. The data-parallel shapes run ``use_grouped_gemm: false``,
      where the resolver keeps the base, so the loader must read the checkpoint into a model that does
      not hold it; TP and EP build from the checkpoint. Every parameter is BIT-EQUAL to the saved one
-     after the restore, and the losses and final weights track as above.
+     after the restore, and the losses and final weights match as above, within a bound under EP.
   4. The best-model load (``_load_best_model`` onto the resumed run, trained past the checkpoint)
      brings the checkpoint's weights back bit for bit. A model wrapped for expert compute (EP, or a
      MoE under TP at the default grouped GEMM) loads its base weights only at construction, and TP
@@ -126,6 +126,8 @@ FAMILIES = {
 # What ``--lora`` adapts, and how (``dora``); ``off`` is a full fine-tune.
 LORA_TARGETS = ("attention", "mixed", "embedding", "dora", "off")
 TRAIN_MODES = ("single", "fsdp", "ddp", "presharded")
+# The shapes whose save folds FSDP2-sharded LoRA factors.
+SHARDED_MODES = ("fsdp", "presharded")
 # Refused under LoRA, trained under a full fine-tune. ``tpdp`` is TP over FSDP2 (four ranks: tp 2, dp 2).
 PARALLEL_MODES = {"tp": {"tp_size": 2}, "tpdp": {"tp_size": 2}, "ep": {"ep_size": 2}}
 MODES = TRAIN_MODES + tuple(PARALLEL_MODES)
@@ -133,25 +135,22 @@ MODES = TRAIN_MODES + tuple(PARALLEL_MODES)
 LORA_R = 8
 LORA_ALPHA = 16
 SEED = 42
+SR_SEED = 0xB165EED
 TOTAL_STEPS = 6
 SAVE_AT_STEP = 3
 BATCH_SIZE = 8
 LEARNING_RATE = 1e-3
-# The bit-equal restores, the first resumed loss and the final adapters separate an exact resume from
-# fresh adapters over the fold; the later losses and the full fine-tune's final weights only catch a
-# gross divergence, since a bf16 MNRL loss near 2 moves in 7.8e-3 steps and fresh adapters over the
-# fold forward almost like the trained ones.
-# The first resumed forward reads only restored state: measured 0.0 on every row (fresh: 0 to 7.8e-3).
-FIRST_LOSS_TOL = 1e-4
-# Later steps carry AdamWBF16's stochastic-rounding stream, which restarts on resume: measured up to
-# 4.7e-2, and 0.20 on Gemma 4 with its input embedding adapted, whose embed_scale multiplies that
-# noise in the adapter (fresh adapters: 7.8e-3 to 0.34).
-LOSS_TOL = 0.25
-# Measured <=1.49e-2 (the same SR noise; 0.0 under DDP's plain AdamW), against 1.38-1.44 for fresh
-# adapters.
-FINAL_ADAPTER_RTOL = 2e-2
-# Measured <=1.24e-2 (0.0 under DDP), against 1.0e-2 to 5.3e-2 of movement over the three resumed steps.
-FINAL_WEIGHT_RTOL = 2e-2
+# Both runs restart the stochastic-rounding stream at the step after the save (``_restart_sr_stream``),
+# so a resume is exact: every loss and final tensor measured 0.0 off on every row but EP's, whose
+# DeepEP combine sums in no fixed order. There: one bf16 step of an MNRL loss in [2, 4), and final
+# weights measured 1.1e-4 to 1.2e-3 off, against 9.7e-3 to 5.3e-2 of full fine-tune movement over the
+# three resumed steps (fresh adapters sit 1.38-1.44 off).
+EP_LOSS_TOL = 2**-6
+EP_FINAL_WEIGHT_RTOL = 5e-3
+# A sharded fold measured off PEFT's single-device merge on 9.6-9.9% of the elements the delta moves in
+# BERT's 30522-row embedding (none elsewhere), by up to 1.9e-3 of its largest value.
+SHARDED_FOLD_MAX_OFF_FRACTION = 0.25
+SHARDED_FOLD_MAX_STEP = 2**-7
 # MNRL near zero would let the loss comparisons pass for any adapters.
 MIN_INFORMATIVE_LOSS = 0.5
 # What ``accelerate launch`` with a MULTI_GPU config exports; the trainer reads it to leave DDP to
@@ -284,9 +283,15 @@ def _build(ctx, model_config: ModelConfig, config: EmbeddingConfig, parallelism_
     return model
 
 
+def _restart_sr_stream() -> None:
+    """Restart the bf16 optimizer's stochastic-rounding stream, as a fresh process does. A resume
+    restarts it, and the uninterrupted run would otherwise have advanced it past the save, so both
+    restart it at the step after the save and the comparison is of the restored state alone."""
+    adamw_bf16_mod._SR_RNG = random.Random(SR_SEED)
+
+
 def _make_trainer(ctx, family: Family, mode: str, lora: str, source: str, output_dir: str, *, save: bool):
-    # Both phases start from the same stochastic-rounding stream.
-    adamw_bf16_mod._SR_RNG = random.Random(0xB165EED)
+    _restart_sr_stream()
     config = _config(output_dir, family, save=save)
     parallelism_config = _parallelism_config(mode, lora)
     return EmbeddingTrainer(
@@ -324,6 +329,7 @@ class _SaveCapture(TrainerCallback):
     def on_save(self, args, state, control, model=None, **kwargs):
         if state.global_step == SAVE_AT_STEP:
             self.tensors = _trainable_snapshot(model)
+            _restart_sr_stream()
 
 
 class _RestoreCapture(TrainerCallback):
@@ -332,6 +338,8 @@ class _RestoreCapture(TrainerCallback):
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         self.tensors = _trainable_snapshot(model)
+        # After the optimizer restore, whose state materialization steps the optimizer at zero LR.
+        _restart_sr_stream()
 
 
 def _mode_checks(ctx, mode: str, lora: str, trainer: EmbeddingTrainer) -> dict[str, bool]:
@@ -399,16 +407,38 @@ def _loads_and_encodes(directory: str, device) -> dict[str, bool]:
     return checks
 
 
+def _serves(served: torch.Tensor, expected: torch.Tensor, base: torch.Tensor, sharded: bool) -> bool:
+    """Whether ``served`` is the fold PEFT's single-device merge gives, ``expected``: bit for bit, or on
+    FSDP2 shards off by rounding on a minority of the elements either fold moves off ``base``.
+
+    For a large delta DTensor contracts the sharded rank dim of ``B @ A`` shard-locally and sums the
+    bf16 partials, whose rounding differs from one full contraction wherever they cancel, so a
+    per-element ulp bound does not hold, and a delta near half a step of the base moves it in one fold
+    only. A missing, partial or misscaled delta instead changes nearly every moved element."""
+    if torch.equal(served, expected):
+        return True
+    if not sharded or served.shape != expected.shape:
+        return False
+    served, expected, base = served.float(), expected.float(), base.float()
+    moved = (expected != base) | (served != base)
+    return bool(
+        (served != expected)[moved].float().mean() <= SHARDED_FOLD_MAX_OFF_FRACTION
+        and (served - expected).abs().max() <= SHARDED_FOLD_MAX_STEP * expected.abs().max()
+    )
+
+
 def _serving_checks(
     checkpoint: str,
     model_config: ModelConfig,
     at_save: dict[str, torch.Tensor],
     prefix: str,
     embedding: str | None,
+    sharded: bool,
     device,
 ) -> dict[str, bool]:
     """The checkpoint as a server loads it, and the resume state beside it; ``embedding`` names the
-    input embedding when it is a target. Rank-local reads only."""
+    input embedding when it is a target, ``sharded`` that the fold ran on FSDP2 shards. Rank-local
+    reads only."""
     checks = {"checkpoint_is_marked_for_adapter_resume": resume_adapter_dir(checkpoint) is not None}
     adapter_file = os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE)
     saved = load_file(adapter_file) if os.path.isfile(adapter_file) else {}
@@ -426,7 +456,9 @@ def _serving_checks(
     expected = _expected_fold(model_config, at_save, prefix, device)
     served = AutoModel.from_pretrained(checkpoint, dtype=torch.bfloat16).state_dict()
     unfolded = sorted(
-        key for key, value in expected.items() if key not in served or not torch.equal(served[key], value)
+        key
+        for key, value in expected.items()
+        if key not in served or not _serves(served[key], value, base[key], sharded)
     )
     unmoved = sorted(key for key, value in expected.items() if torch.equal(value, base[key]))
     embedding_folds = [key for key in expected if key.endswith(f".{embedding}.weight") or key == f"{embedding}.weight"]
@@ -472,7 +504,9 @@ def _refusal_row(ctx, family: Family, mode: str, lora: str, source: str, shared_
     return {"checks": {f"{mode}_refuses_injected_lora_at_construction": error is not None and "LoRA" in error}}
 
 
-def _loss_checks(uninterrupted: list[float], resumed: list[float], checks: dict, metrics: dict) -> None:
+def _loss_checks(uninterrupted: list[float], resumed: list[float], tol: float, checks: dict, metrics: dict) -> None:
+    """The first resumed loss reads only restored state, so it matches exactly; the later ones within
+    ``tol``."""
     tail, reference = resumed[-(TOTAL_STEPS - SAVE_AT_STEP) :], uninterrupted[SAVE_AT_STEP:]
     checks["resumed_ran_remaining_steps"] = len(tail) == len(reference) == TOTAL_STEPS - SAVE_AT_STEP
     if not checks["resumed_ran_remaining_steps"]:
@@ -482,8 +516,8 @@ def _loss_checks(uninterrupted: list[float], resumed: list[float], checks: dict,
     ]
     metrics["first_resumed_loss_delta"] = deltas[0]
     metrics["resumed_loss_max_delta"] = max(deltas)
-    checks["first_resumed_loss_matches"] = deltas[0] < FIRST_LOSS_TOL
-    checks["resumed_losses_track_uninterrupted"] = max(deltas) < LOSS_TOL
+    checks["first_resumed_loss_matches"] = deltas[0] == 0.0
+    checks["resumed_losses_track_uninterrupted"] = max(deltas) <= tol
     log(
         f"  uninterrupted {[f'{x:.6f}' for x in reference]}  resumed {[f'{x:.6f}' for x in tail]}  "
         f"deltas {[f'{d:.2e}' for d in deltas]}"
@@ -552,11 +586,13 @@ def _full_finetune_row(ctx, family: Family, mode: str, base_source: str, shared_
     trainer.add_callback(restored)
     trainer.train(resume_from_checkpoint=checkpoint)
     checks["weights_bit_equal_after_restore"] = _bit_equal(run.at_save, restored.tensors, "restored vs at save")
-    _loss_checks(run.losses, step_losses(trainer), checks, metrics)
+    ep = mode == "ep"
+    _loss_checks(run.losses, step_losses(trainer), EP_LOSS_TOL if ep else 0.0, checks, metrics)
     drift = _relative_l2(run.final, _trainable_snapshot(trainer.model))
+    tol = EP_FINAL_WEIGHT_RTOL if ep else 0.0
     metrics["final_weight_relative_l2"] = drift
-    checks["final_weights_match_uninterrupted"] = drift < FINAL_WEIGHT_RTOL
-    log(f"  final weights, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {FINAL_WEIGHT_RTOL})")
+    checks["final_weights_match_uninterrupted"] = drift <= tol
+    log(f"  final weights, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {tol})")
 
     log(f"\n[4/4] Best-model load of {checkpoint} onto the resumed run...")
     trainer.state.best_model_checkpoint = checkpoint
@@ -614,6 +650,7 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str = "att
             run.at_save,
             run.prefix,
             family.embedding if family.embedding in _lora_targets(family, lora) else None,
+            mode in SHARDED_MODES,
             ctx.device,
         )
         if ctx.rank == 0
@@ -632,11 +669,12 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str = "att
     trainer.add_callback(restored)
     trainer.train(resume_from_checkpoint=checkpoint)
     checks["adapters_bit_equal_after_restore"] = _bit_equal(run.at_save, restored.tensors, "restored vs at save")
-    _loss_checks(run.losses, step_losses(trainer), checks, metrics)
+    # LoRA is refused under EP, so every LoRA row resumes exactly.
+    _loss_checks(run.losses, step_losses(trainer), 0.0, checks, metrics)
     drift = _relative_l2(run.final, _trainable_snapshot(trainer.model))
     metrics["final_adapter_relative_l2"] = drift
-    checks["final_adapters_match_uninterrupted"] = drift < FINAL_ADAPTER_RTOL
-    log(f"  final adapters, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {FINAL_ADAPTER_RTOL})")
+    checks["final_adapters_match_uninterrupted"] = drift == 0.0
+    log(f"  final adapters, resumed vs uninterrupted: relative L2 {drift:.3e}")
 
     log("\n[4/4] The final export...")
     final_dir = os.path.join(shared[0], "final")
