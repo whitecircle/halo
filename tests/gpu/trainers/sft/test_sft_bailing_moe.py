@@ -203,9 +203,11 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
     log(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
     log(f"GPU memory after load: {gpu_mem_gb():.1f}GB")
 
-    if parallelism_config.is_ep_mode or parallelism_config.needs_ep_wrappers:
+    checks: dict[str, bool] = {}
+    if parallelism_config.needs_ep_wrappers:
         ep_layers = sum(1 for m in model.modules() if hasattr(m, "ep_config"))
         log(f"EP MoE layers detected: {ep_layers}")
+        checks["ep_layers_wrapped"] = ep_layers > 0
 
     # Create SFT config
     sft_kwargs = {
@@ -245,8 +247,6 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
         parallelism_config=parallelism_config,
     )
     log("Trainer created successfully")
-
-    checks = {"trainer_ep_mode_matches_config": trainer.is_ep_mode == parallelism_config.is_ep_mode}
 
     # Run initial evaluation
     log("\n--- Running initial evaluation ---")

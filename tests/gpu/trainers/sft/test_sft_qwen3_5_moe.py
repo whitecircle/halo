@@ -32,11 +32,13 @@ import argparse
 import os
 
 import torch
+from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
 from src.distributed.loading.model_loading import load_distributed_model
+from src.distributed.mesh import has_tp_dim
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.sft import DistributedSFTTrainer
@@ -140,10 +142,15 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
     log(f"Model loaded: {model.config.model_type}")
     log(f"GPU memory after load: {gpu_mem_gb():.1f}GB")
 
-    # Log mode-specific info
-    if parallelism_config.is_ep_mode or parallelism_config.needs_ep_wrappers:
+    checks: dict[str, bool] = {}
+    if parallelism_config.needs_ep_wrappers:
         ep_layers = sum(1 for m in model.modules() if hasattr(m, "ep_config"))
         log(f"EP MoE layers detected: {ep_layers}")
+        checks["ep_layers_wrapped"] = ep_layers > 0
+    if parallelism_config.is_tp_mode:
+        checks["tp_sharded_params"] = any(
+            isinstance(p.data, DTensor) and has_tp_dim(p.data.device_mesh) for p in model.parameters()
+        )
 
     # Create SFT config
     sft_kwargs = {
@@ -183,13 +190,6 @@ def run_mode(ctx, tokenizer, mode_key: str) -> dict[str, bool]:
         parallelism_config=parallelism_config,
     )
     log("Trainer created successfully")
-
-    # Mode-specific checks
-    checks: dict[str, bool] = {}
-    if parallelism_config.is_ep_mode:
-        checks["trainer_is_ep_mode"] = trainer.is_ep_mode
-    if parallelism_config.is_tp_mode:
-        checks["trainer_is_tp_mode"] = trainer.is_tp_mode
 
     # Run initial evaluation
     log("\n--- Running initial evaluation ---")
