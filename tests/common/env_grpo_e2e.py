@@ -24,9 +24,9 @@ grouped expert adapters), where an adapter reaches the engine only through the f
 ``resume`` covers the train-begin force sync. Phase 1 trains to ``RESUME_MAX_STEPS`` with a
 checkpoint at ``RESUME_SAVE_STEP``, and the perturbation round then moves the engine off that policy.
 Phase 2 is a fresh model and trainer resuming with one step left, so the train-begin push is the only
-thing that can reach the engine before the resumed rollout. Where the resumed policy lands is exact
-for a full fine-tune and a nearer-of-the-two verdict for an adapter row, whose two pushes merge into
-bases one bf16 merge round-trip apart.
+thing that can reach the engine before the resumed rollout. The resumed policy must land exactly on
+the checkpoint's: a full fine-tune's checkpoint restores the weights, an adapter row's restores its
+adapters bit-equal over a freshly loaded base, which phase 1's syncs left as loaded.
 """
 
 import math
@@ -466,20 +466,8 @@ def run_env_grpo_e2e(
         # idle and the probe is greedy), so this half is exact on every row.
         checks["resume_left_the_stale_engine_state"] = after_resume != moved_off
         to_checkpoint = served_policy_delta(after_resume, pre_perturb)
-        if peft is None:
-            # A full fine-tune's checkpoint restores the weights themselves: both pushes send the
-            # same tensors, so the two probes must agree exactly.
-            checks["resumed_rollouts_served_the_checkpoint_policy"] = after_resume == pre_perturb
-        else:
-            # An adapter run's two pushes merge into different bases: PEFT's
-            # merge_adapter/unmerge_adapter round-trip is not bf16-reversible, so phase 1 pushed from
-            # a base that had round-tripped and phase 2 from a freshly loaded one. The verdict is
-            # therefore which state the engine is nearer, since a push that never happened sits at
-            # zero from the stale one. What the push carried is pinned by
-            # resume_adapters_match_the_checkpoint_file below.
-            checks["resumed_rollouts_served_the_checkpoint_policy"] = to_checkpoint < served_policy_delta(
-                after_resume, moved_off
-            )
+        # Both pushes send the same tensors, so the two probes must agree exactly on every row.
+        checks["resumed_rollouts_served_the_checkpoint_policy"] = after_resume == pre_perturb
         if not checks["resumed_rollouts_served_the_checkpoint_policy"]:
             log("  the resumed run's engine is NOT on the checkpoint's policy: the train-begin sync did not land")
         log(

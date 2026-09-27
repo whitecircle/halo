@@ -72,10 +72,6 @@ ADAPTER_PERTURBATION = 0.05
 SINK_PERTURBATION = 1.0
 # Tokens in the throwaway forward that puts the FSDP2 modules back in their end-of-step state.
 UNSHARD_FORWARD_TOKENS = 8
-# Ceiling on how far the sync's merge/unmerge round-trip may leave a base weight from where it found
-# it, relative to that tensor's own scale. bf16 rounds twice across the round-trip (~2^-8 each); an
-# adapter that stayed merged writes the whole perturbed delta in, orders of magnitude above this.
-BASE_MERGE_DRIFT = 0.01
 
 _QA_PAIRS = (
     ("What is 2 + 2?", "4"),
@@ -312,34 +308,29 @@ def _unshard_with_a_forward(model, device: torch.device) -> None:
         model(input_ids=torch.ones(1, UNSHARD_FORWARD_TOKENS, dtype=torch.long, device=device))
 
 
-def _frozen_base_handles(model) -> list[tuple[str, torch.nn.Parameter]]:
-    """The layer-0 base weights the sync's adapter fold must give back untouched.
+def frozen_base_snapshot(model) -> list[tuple[str, torch.nn.Parameter, torch.Tensor]]:
+    """The frozen weights an adapter fold must give back bit-identical, each with this rank's copy:
+    every PEFT-wrapped base weight (what the fold rewrites, in whichever layers the targets hit) and
+    the rest of layer 0 (expert banks included). Resharded first, so the handles are the sharded
+    params every unshard leaves in place.
 
     No served-policy probe can see a merge that never unmerged, since the engine is meant to receive
-    base+adapter, so the only witness is the trainer's own weights before and after the push.
+    base+adapter, nor an unmerge that missed by a bf16 rounding step, so the only witness is the
+    trainer's own weights before and after the syncs.
     """
+    reshard_fsdp2_modules(unwrap(model))
     return [
-        (name, param)
+        (name, param, local_view(param.data))
         for name, param in model.named_parameters()
-        if "layers.0." in name and "lora_" not in name and param.dtype.is_floating_point
+        if ("layers.0." in name or ".base_layer." in name)
+        and not param.requires_grad
+        and param.dtype.is_floating_point
     ]
 
 
-def _worst_relative_drift(handles: list[tuple[str, torch.nn.Parameter]], before: list[torch.Tensor]) -> float:
-    """Largest change in ``handles`` since ``before``, relative to each tensor's own scale; NaN when any
-    change is NaN, so the drift bound fails on it.
-
-    Rank-local, so a parameter narrower in dim 0 than the DP mesh (Qwen3.5-MoE's ``[1, hidden]``
-    ``shared_expert_gate``) leaves the trailing ranks an empty shard with nothing to witness; the
-    ranks holding its rows still grade it.
-    """
-    drifts = []
-    for (_, param), reference in zip(handles, before, strict=True):
-        if reference.numel() == 0:
-            continue
-        moved = (local_view(param.data) - reference).abs().max()
-        drifts.append(float((moved / reference.abs().max().clamp(min=1e-6)).item()))
-    return max_or_nan(drifts, default=0.0)
+def moved_frozen_weights(snapshot: list[tuple[str, torch.nn.Parameter, torch.Tensor]]) -> list[str]:
+    """The weights of ``snapshot`` whose local storage is no longer bit-identical. Rank-local."""
+    return [name for name, param, before in snapshot if not torch.equal(local_view(param.data), before)]
 
 
 def perturbation_round(
@@ -362,12 +353,11 @@ def perturbation_round(
 
     ``expert_stream`` says this policy's sync must carry expert tensors, which is where the
     non-vacuity count goes; a dense policy has none and counts the tensors it does move.
-    ``check_base_untouched`` adds the adapter fold's other half (:func:`_base_weight_witnesses`).
+    ``check_base_untouched`` adds the adapter fold's other half (:func:`frozen_base_snapshot`).
     """
     reshard_fsdp2_modules(unwrap(model))
     what, targets, stream_count = _perturbation_targets(model, adapter)
-    base_handles = _frozen_base_handles(model) if adapter is not None and check_base_untouched else []
-    base_before = [local_view(param.data) for _, param in base_handles]
+    base = frozen_base_snapshot(model) if adapter is not None and check_base_untouched else []
     _unshard_with_a_forward(model, ctx.device)
     _apply_perturbation(targets, adapter)
     # Guard on the number that can go missing: a full fine-tune of a MoE policy has to move expert
@@ -380,10 +370,10 @@ def perturbation_round(
 
     push()
 
-    if base_handles:
-        drift = _worst_relative_drift(base_handles, base_before)
-        checks["sync_left_the_base_weights_alone"] = drift <= BASE_MERGE_DRIFT
-        log(f"  base-weight drift across the merge/unmerge round-trip: {drift:.2e} (max {BASE_MERGE_DRIFT})")
+    if base:
+        moved = moved_frozen_weights(base)
+        checks["sync_left_the_base_weights_alone"] = not moved
+        log(f"  frozen layer-0 weights the push moved: {len(moved)}/{len(base)} {moved[:3]}")
     return what
 
 

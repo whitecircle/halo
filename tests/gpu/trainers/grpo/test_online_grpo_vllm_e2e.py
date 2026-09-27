@@ -65,6 +65,7 @@ from tests.common.models import QWEN3_0_6B
 from tests.common.on_policy_e2e import probe_top_logprobs
 from tests.common.ports import free_port
 from tests.common.utils import cleanup_memory, log
+from tests.common.weight_sync import local_parameters, moved_parameters
 
 MODEL_NAME = QWEN3_0_6B
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
@@ -127,6 +128,19 @@ def create_grpo_dataset(num_samples: int, seed: int = SEED) -> Dataset:
             }
         )
     return Dataset.from_list(data)
+
+
+def lora_base_weights(trainer) -> dict[str, torch.Tensor]:
+    """Copies of the PEFT-wrapped base weights. Frozen, so the fold each step's sync performs must
+    give them back bit-identical: a bf16 unmerge alone misses by a rounding step."""
+    params = local_parameters(trainer.accelerator.unwrap_model(trainer.model))
+    return {name: value for name, value in params.items() if ".base_layer." in name}
+
+
+def assert_syncs_left_the_base_alone(trainer, before: dict[str, torch.Tensor]) -> None:
+    moved = moved_parameters(before, lora_base_weights(trainer))
+    assert before and not moved, f"the weight syncs moved {len(moved)}/{len(before)} frozen base weights: {moved[:3]}"
+    log(f"  {len(before)} frozen base weights bit-identical across the training syncs")
 
 
 def test_vllm_server_reachable():
@@ -468,7 +482,8 @@ def test_online_grpo_lora_e2e():
     the merged weights under plain (non-PEFT) names. Forwarding ``base_model.*`` / ``lora_*`` names
     instead makes the vendored client reject unknown params (and vLLM then generates from the
     un-adapted base — broken on-policy RL). A clean multi-step run with finite loss,
-    on a confirmed PeftModel, exercises the merge→strip→unmerge sync path end-to-end.
+    on a confirmed PeftModel, exercises the merge→strip→unmerge sync path end-to-end, and the frozen
+    base must come out of it bit-identical.
     """
     output_dir = tempfile.mkdtemp(prefix="test_grpo_lora_vllm_e2e_")
     try:
@@ -515,8 +530,10 @@ def test_online_grpo_lora_e2e():
             "peft_config did not produce a PeftModel"
         )
         log("  Trainer created (PeftModel). Training + syncing merged LoRA weights to vLLM...")
+        base_before = lora_base_weights(trainer)
         trainer.train()
         log("  Online GRPO+LoRA training completed (PEFT weight sync OK)!")
+        assert_syncs_left_the_base_alone(trainer, base_before)
 
         last = next((h["loss"] for h in reversed(trainer.state.log_history) if "loss" in h), None)
         if last is not None:
@@ -589,8 +606,10 @@ def test_environmental_grpo_lora_e2e():
             "peft_config did not produce a PeftModel"
         )
         log("  Trainer created (PeftModel). Training + syncing merged LoRA weights to vLLM...")
+        base_before = lora_base_weights(trainer)
         trainer.train()
         log("  Environmental GRPO+LoRA training completed (PEFT weight sync OK)!")
+        assert_syncs_left_the_base_alone(trainer, base_before)
     finally:
         cleanup_memory()
         shutil.rmtree(output_dir, ignore_errors=True)
