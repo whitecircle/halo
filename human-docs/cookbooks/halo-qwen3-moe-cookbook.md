@@ -188,7 +188,8 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 
 Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to
 `qwen3-moe-grpo.yaml`, set `model_name_or_path` to the gathered SFT checkpoint's `/data`
-path and the environment and reward fields for your task, and add:
+path and the environment and reward fields for your task, and set the keys below, editing
+the template's own line where it already has the key (a repeated key fails to parse):
 
 ```yaml
 rollout_backend: vllm

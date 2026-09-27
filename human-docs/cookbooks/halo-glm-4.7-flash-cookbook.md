@@ -216,21 +216,35 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 
 Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `glm47-grpo.yaml`,
 set `model_name_or_path` to the SFT checkpoint's `/data` path and the environment and
-reward fields for your task, and add:
+reward fields for your task, and set the keys below, editing the template's own line where
+it already has the key (a repeated key fails to parse):
 
 ```yaml
 rollout_server_url: http://localhost:8000
 train_on_sampled_tokens: true
 routing_replay: rollout
+chat_template: jinja-templates/glm/glm-native.jinja
+force_chat_template: true
 beta: 0.0
 output_dir: /data/checkpoints/glm-4.7-flash-grpo
 ```
 
+The SFT's `glm-chat.jinja` renders no tools, so GRPO switches to `glm-native.jinja`, the
+upstream template with its tool-call and observation turns
+([chat templates](../../agent-docs/models/glm4.md#chat-templates) ↗). The server must serve
+the same file. On the host ([server setup](README.md#serve-from-the-host)), copy it onto the
+scratch volume:
+
+```bash
+cp jinja-templates/glm/glm-native.jinja "$HALO_SCRATCH/"
+```
+
 Rollouts run on vLLM (`rollout_backend: vllm`, the config default). Start the server on
-the host ([server setup](README.md#serve-from-the-host)), on GPUs the trainer will not use:
+GPUs the trainer will not use:
 
 ```bash
 VLLM_MODEL=/data/checkpoints/glm-4.7-flash-ultrachat-ep8 \
+VLLM_CHAT_TEMPLATE=/data/glm-native.jinja \
 VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
 VLLM_TOOL_PARSER=glm47 VLLM_ATTENTION_BACKEND=CUTLASS_MLA \
   docker compose -f docker-compose.vllm.yml up vllm-server
@@ -246,6 +260,7 @@ SGLang 0.5.17 also serves and weight-syncs this family. For it, set
 
 ```bash
 SGLANG_MODEL="$HALO_SCRATCH/checkpoints/glm-4.7-flash-ultrachat-ep8" \
+SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/glm-native.jinja" \
 SGLANG_CUDA_DEVICES=0,1,2,3 SGLANG_TP=4 SGLANG_ENABLE_R3=1 \
 SGLANG_ATTENTION_BACKEND=triton \
   docker compose -f docker-compose.sglang.yml up sglang-server
@@ -258,8 +273,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo glm47-grpo.yaml -n 4
 ```
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
-Size `expert_parallel_size` to the trainer's GPU count, not the node's: the SFT value
-assumes the whole node.
+The template leaves expert parallelism off; to shard the experts, add
+`expert_parallel_size` matching the trainer's GPU count (4 here).
 
 ## Sources
 

@@ -99,7 +99,9 @@ Three decisions matter more than the rest.
   `rollout_thinking_budget_scope: episode` and `carry_reasoning` are vLLM-only, and on SGLang a level's
   `thinking_tokens` caps nothing. The model sees the level only through a chat template that renders it; templates,
   budget scope and length pricing are in
-  [Reasoning budget](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-budget) ↗.
+  [Reasoning budget](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#reasoning-budget) ↗. Pin such a
+  template with `chat_template:` plus `force_chat_template: true` and serve the same file
+  ([Chat template](../../agent-docs/training-methods/grpo/async-grpo/rollouts.md#chat-template) ↗).
 - **Tool budgets.** An environment pays `tool_success_reward` per successful call, charges `tool_error_penalty` per
   failure, and caps what successful calls earn across the episode — not the episode reward — at `tool_reward_cap`
   (default `tool_success_reward × max_turns`). Keep them small beside the objective, or tool-calling beats finishing.
@@ -120,6 +122,7 @@ paying for generation and training one after the other.
 
 ```bash
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_TP=4 VLLM_REASONING_PARSER=qwen3 \
+VLLM_TOOL_CALLING_FLAGS= \
     docker compose -f docker-compose.vllm.yml up -d vllm-server
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 halo launch environmental-grpo \
     examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml -n 4
@@ -127,7 +130,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 halo launch environmen
 
 A native-tool environment needs the server started with the tool-call parser for the model family: without one vLLM
 rejects every rollout, and with the wrong one the calls come back as text and every episode scores zero. ReAct
-environments need no parser. Before a long run, put the config through a
+environments read their actions from the text and serve without one (`VLLM_TOOL_CALLING_FLAGS=`, as above). Before a
+long run, put the config through a
 few rows with `halo run run-env --training_config <config>.yaml --dataset <hub-id-or-path> --split train
 --answer_field <column> --num_examples 20 --base_url http://localhost:8000/v1 --model <served-id>`: that exercises the
 parser, the template and the sandbox or judge backend in a minute. `--training_config` carries the environment and

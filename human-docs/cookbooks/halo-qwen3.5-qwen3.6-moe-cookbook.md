@@ -235,9 +235,27 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
 ```
 
 SGLang 0.5.17 also serves and weight-syncs this family, from the ep1 configs under
-`examples/grpo/environmental/qwen3_5/sglang/` (ports 30000 and 30001). Serve them with
-`SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/qwen3.6-reasoning-effort.jinja"` and
-`SGLANG_REASONING_PARSER=qwen3`.
+`examples/grpo/environmental/qwen3_5/sglang/`. For the full fine-tune, copy
+`qwen3.6-35b-a3b-code-contests-full-ep1.yaml` to `qwen3.6-grpo-sglang.yaml` with the same
+edits; it expects two TP=1 servers on ports 30000 and 30001, serving the template file
+copied above, and a six-GPU trainer:
+
+```bash
+export SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3.6-35b-a3b-ultrachat-ep8"
+export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/qwen3.6-reasoning-effort.jinja"
+export SGLANG_REASONING_PARSER=qwen3
+
+SGLANG_CUDA_DEVICES=6 SGLANG_PORT=30000 \
+  docker compose -p qwen36-sglang-0 -f docker-compose.sglang.yml up -d sglang-server
+SGLANG_CUDA_DEVICES=7 SGLANG_PORT=30001 \
+  docker compose -p qwen36-sglang-1 -f docker-compose.sglang.yml up -d sglang-server
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
+  halo launch environmental-grpo qwen3.6-grpo-sglang.yaml -n 6
+```
+
 `rollout_max_thinking_tokens`, `rollout_thinking_budget_scope: episode` and
 `carry_reasoning` are vLLM-only ([Supported Matrix](../supported-matrix.md#rollout-engines)).
 Full setup:

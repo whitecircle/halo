@@ -19,8 +19,7 @@ H100 or H200, use the Hopper image. The training config does not change.
 ## Start the training container
 
 Start the [cookbook container](README.md#start-the-training-container) and run the commands
-below inside it, except the server commands marked for the host. Downloading the Gemma
-checkpoint requires accepting Google's license on Hugging Face.
+below inside it, except the server commands marked for the host.
 
 ## Train all weights with EP8
 
@@ -194,6 +193,7 @@ host ([server setup](README.md#serve-from-the-host)). The trainer will use GPUs 
 export SGLANG_MODEL=google/gemma-4-26B-A4B-it
 cp jinja-templates/gemma4/gemma4-reasoning-effort.jinja "$HALO_SCRATCH/"
 export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/gemma4-reasoning-effort.jinja"
+export SGLANG_REASONING_PARSER=gemma4
 
 SGLANG_CUDA_DEVICES=4,5 SGLANG_TP=2 SGLANG_PORT=30000 \
   docker compose -p gemma4-rollout-0 -f docker-compose.sglang.yml up -d sglang-server

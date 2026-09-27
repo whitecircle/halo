@@ -41,9 +41,10 @@ curl -s localhost:8000/health
 | `VLLM_CHAT_TEMPLATE` | unset | The same `.jinja` file the trainer's `chat_template:` names, visible in this container |
 
 Tool parsers are per model family, and a wrong one is silent: the calls come back as ordinary text, no tool ever runs,
-and every episode scores zero. Qwen3.5/3.6 need `qwen3_xml` (hermes does not parse their XML calls); GPT-OSS needs the
-bundled `gpt_oss_text` parser, loaded with `VLLM_TOOL_PARSER_PLUGIN`; Gemma 4 needs `gemma4`; most others take the
-default `hermes`. ReAct environments send no tool schema at all and want **no** parser. The
+and every episode scores zero. Qwen3.5/3.6 and Qwen3-Coder need `qwen3_xml` (hermes does not parse their XML calls);
+GPT-OSS needs the bundled `gpt_oss_text` parser, loaded with `VLLM_TOOL_PARSER_PLUGIN`; Gemma 4 needs `gemma4`,
+GLM-4.7 `glm47`, LFM-2 `lfm2` and Laguna `poolside_v1`; most others, Qwen3 included, take the default `hermes`. ReAct
+environments send no tool schema at all and want **no** parser (`VLLM_TOOL_CALLING_FLAGS=`). The
 reasoning-parser and attention-backend variables a few families need are on
 [Rollout Servers](../agent-docs/infrastructure/rollout-servers.md) ↗.
 

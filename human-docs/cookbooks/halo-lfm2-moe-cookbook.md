@@ -234,7 +234,8 @@ Keep EP enabled if the base model needs expert sharding. Keep TP disabled for Lo
 
 Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `lfm2-grpo.yaml`,
 set `model_name_or_path` to the SFT checkpoint's `/data` path and the environment and
-reward fields for your task, and add:
+reward fields for your task, and set the keys below, editing the template's own line where
+it already has the key (a repeated key fails to parse):
 
 ```yaml
 rollout_server_url: http://localhost:8000
@@ -251,9 +252,13 @@ on GPUs the trainer will not use:
 
 ```bash
 VLLM_MODEL=/data/checkpoints/lfm2.5-8b-a1b-ultrachat-ep2 \
-VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 VLLM_TOOL_PARSER=lfm2 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
+
+`VLLM_TOOL_PARSER=lfm2` reads LFM2's `<|tool_call_start|>[…]<|tool_call_end|>` calls; the
+compose default `hermes` leaves them as text, so a native-tool environment scores every
+episode zero without erroring.
 
 Then launch the trainer in the training container.
 
@@ -262,8 +267,8 @@ CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo lfm2-grpo.yaml -n 2
 ```
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
-Size `expert_parallel_size` to the trainer's GPU count, not the node's: the SFT value
-assumes the whole node.
+The template leaves expert parallelism off; to shard the experts, add
+`expert_parallel_size` matching the trainer's GPU count (2 here).
 
 ## Sources
 

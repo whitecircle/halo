@@ -198,7 +198,8 @@ Keep TP disabled for LoRA.
 
 Copy `examples/grpo/environmental/environmental-grpo-template.yaml` to `laguna-grpo.yaml`,
 set `model_name_or_path` to the gathered checkpoint's `/data` path and the environment and
-reward fields for your task, and add:
+reward fields for your task, and set the keys below, editing the template's own line where
+it already has the key (a repeated key fails to parse):
 
 ```yaml
 trust_remote_code: true
@@ -218,17 +219,21 @@ GPUs the trainer will not use:
 
 ```bash
 VLLM_MODEL=/data/checkpoints/laguna-s-2.1-ultrachat-ep4 \
-VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 VLLM_TOOL_PARSER=poolside_v1 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
+
+`VLLM_TOOL_PARSER=poolside_v1` reads Laguna's `<tool_call>name<arg_key>…` calls; the compose
+default `hermes` leaves them as text, so a native-tool environment scores every episode
+zero without erroring.
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo laguna-grpo.yaml -n 2
 ```
 
 `CUDA_VISIBLE_DEVICES` fences the trainer off the server — they cannot share a GPU.
-Size `expert_parallel_size` to the trainer's GPU count, not the node's: the SFT value
-assumes the whole node. Full setup:
+The template leaves expert parallelism off; to shard the experts, add
+`expert_parallel_size` matching the trainer's GPU count (2 here). Full setup:
 [Async GRPO with Environments](../../agent-docs/training-methods/grpo/async-grpo/README.md) ↗.
 
 ## Sources

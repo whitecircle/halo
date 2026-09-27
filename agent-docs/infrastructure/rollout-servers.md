@@ -461,11 +461,14 @@ Native-tool parsers per family:
 
 | Family | `--tool-call-parser` |
 |---|---|
-| Qwen3 / Qwen3.5 / 3.6 | `qwen3_xml` (hermes does NOT parse their XML calls) |
+| Qwen3, the 2507 releases included | `hermes` (JSON inside `<tool_call>` tags) |
+| Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does NOT parse their XML `<function=…>` calls) |
 | GPT-OSS | bundled plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4 | `glm45` / `glm47` |
 | Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text, so no tool ever runs); with a thinking budget (`rollout_max_thinking_tokens`, or an env's per-effort `thinking_tokens` profile) also `VLLM_REASONING_PARSER=gemma4` and `VLLM_USE_V2_MODEL_RUNNER=0`, else every request 400s |
-| most others | `hermes` (`<tool_call>` XML) |
+| LFM-2 | `lfm2` (pythonic calls between `<\|tool_call_start\|>` and `<\|tool_call_end\|>`) |
+| Laguna | `poolside_v1` (`<tool_call>` with `<arg_key>`/`<arg_value>` pairs) |
+| most others | `hermes` (JSON inside `<tool_call>` tags) |
 
 `docker-compose.vllm.yml` defaults **both** containers to the no-fabric recipe (`NCCL_IB_DISABLE=1`
 and `NCCL_NET=Socket` on each, `NCCL_P2P_LEVEL=NVL` on the server). On a host without a fabric the
