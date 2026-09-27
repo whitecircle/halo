@@ -13,8 +13,7 @@ It then classifies:
 * ERROR  — non-zero exit with no structured result line: infra, hang or import crash.
 * FAIL   — a ``__HALO_TEST_RESULT__`` line with ``status="fail"``/``"error"`` (an assertion
            failure), or a non-zero exit whose result line says ``pass``; only rank 0 emits it, so
-           that combination means a non-zero rank failed. Raised as :class:`ReportedFailure`, the
-           only outcome a ``known_failures`` row's strict ``xfail`` accepts.
+           that combination means a non-zero rank failed.
 * SKIP   — fewer GPUs than ``nproc`` available, or an OOM on the 8-GPU ``full`` tier (an OOM on a
            2-GPU ``core`` smoke is an ERROR, since that config must fit). Zero GPUs is never a
            skip: it would report the whole tier green, so it is a usage error.
@@ -206,14 +205,6 @@ def _socket_safe_tmpdir(tmp_path: Path) -> Path:
     return short
 
 
-class ReportedFailure(pytest.fail.Exception):
-    """The FAIL verdict: the script ran and its result line reported a failure.
-
-    A ``known_failures`` row expects exactly this, so an ERROR on that row (a crash with no result line,
-    a timeout, a launch or usage error) still fails it rather than passing as the known bug.
-    """
-
-
 class GPUCase:
     """One launchable manifest node: a script + a single args variant."""
 
@@ -318,7 +309,7 @@ class GPUCase:
             if result is not None and result.get("status") in ("fail", "error"):
                 failed = [k for k, v in result.get("checks", {}).items() if not v]
                 err = result.get("error")
-                raise ReportedFailure(
+                pytest.fail(
                     f"FAIL: {self.rel} [{self.args}] status={result['status']} "
                     f"failed_checks={failed}" + (f" error={err}" if err else ""),
                     pytrace=False,
@@ -326,7 +317,7 @@ class GPUCase:
             if result is not None:
                 # Only rank 0 emits the result line, so pass plus a non-zero exit means a non-zero
                 # rank failed: a correctness failure rather than an infra error.
-                raise ReportedFailure(
+                pytest.fail(
                     f"FAIL: {self.rel} [{self.args}] — rank 0 reported "
                     f"status={result['status']} but the launch exited {code}: a non-zero rank failed "
                     "(see the '[Rank N] FAILED CHECKS' / FATAL lines above)",
@@ -353,11 +344,7 @@ def pytest_generate_tests(metafunc):
         marks = [getattr(pytest.mark, m) for m in spec.markers]
         for args in spec.args_matrix:
             node_id = rel if not args else f"{rel}[{args}]"
-            row_marks = marks
-            if args in spec.known_failures:
-                known_bug = pytest.mark.xfail(reason=spec.known_failures[args], strict=True, raises=ReportedFailure)
-                row_marks = [*marks, known_bug]
-            params.append(pytest.param(GPUCase(rel, spec, args), marks=row_marks, id=node_id))
+            params.append(pytest.param(GPUCase(rel, spec, args), marks=marks, id=node_id))
     metafunc.parametrize("gpu_case", params)
 
 

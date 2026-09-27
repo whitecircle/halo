@@ -53,8 +53,7 @@ Markers (selection):
                                  step3p7.
 """
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 _GPU_DIR = Path(__file__).parent
@@ -77,10 +76,6 @@ class TestSpec:
         timeout: seconds before the launcher kills the process group (a hard kill, since
             NCCL / FA hangs do not return).
         flaky: known-transient; the conftest applies scoped reruns.
-        known_failures: rows of ``args_matrix`` that fail on an open bug, each mapped to that bug.
-            The conftest marks them strict ``xfail``: they still run, and a row that starts passing
-            fails the tier until its entry is removed. Only a failure the script reports counts as
-            the bug; a crash with no result line, a timeout or a launch error still fails the row.
 
     World-size strictness is not declared here: each script owns it via
     ``gpu_test_main(exact_world_size=N)``, which is authoritative and more precise than a
@@ -95,12 +90,6 @@ class TestSpec:
     args_matrix: tuple = ("",)
     timeout: int = 1200
     flaky: bool = False
-    known_failures: Mapping[str, str] = field(default_factory=dict)
-
-    def __post_init__(self):
-        stale = sorted(set(self.known_failures) - set(self.args_matrix))
-        if stale:
-            raise ValueError(f"known_failures names rows args_matrix does not run: {stale}")
 
 
 # One per EP MoE family, the ``--family`` names of tests/common/tiny_models.py's TINY_MOE_FAMILIES;
@@ -138,28 +127,6 @@ _MERGED_RESUME_FAMILY_ROWS = tuple(
     for layout in ("", " --ep-size 1", " --cp-size 2")
     if (row := f"--family {family} --adapters {adapters}{layout}") not in _MERGED_RESUME_CORE_ROWS
 )
-# Open bug: the ep1 loader leaves the parameters transformers pins to fp32 (``_keep_in_fp32_modules_strict``)
-# in fp32, which a DeepSeek-V4 forward and FSDP2's uniform-dtype wrap of a full fine-tune both refuse.
-_EP1_KEPT_FP32 = "ep1 loader leaves _keep_in_fp32_modules_strict parameters in fp32"
-_MERGED_RESUME_KNOWN_FAILURES = {
-    "--family deepseek_v4 --adapters expert --ep-size 1": _EP1_KEPT_FP32,
-    "--family deepseek_v4 --adapters mixed --ep-size 1": _EP1_KEPT_FP32,
-    "--family glm5_next --adapters mixed --ep-size 1": (
-        "ep1: the LoRA adapters on the KDA forget gate (f_a_proj/f_b_proj) stay rank-local plain tensors "
-        "outside FSDP2, so their gradients are never reduced and the DP ranks diverge"
-    ),
-    # The tiny Zaya router sends nearly every token to the first rank's expert.
-    "--family zaya --adapters expert": (
-        "expert-only LoRA at ep2: before any gradient has accumulated, a rank whose experts receive no "
-        "tokens gets no grad edge from them, so its first step raises 'does not require grad' or leaves "
-        "its peer in a DeepEP barrier timeout"
-    ),
-}
-_PRECOMPUTE_KNOWN_FAILURES = {
-    "--trainer dpo --family deepseek_v4 --mode ep1": _EP1_KEPT_FP32,
-    "--trainer dpo --family glm5_next --mode ep1": _EP1_KEPT_FP32,
-    "--trainer dpo --family inkling_text --mode ep1": _EP1_KEPT_FP32,
-}
 _PRECOMPUTE_CORE_ROWS = (
     "--trainer dpo --family qwen3_moe",
     "--trainer kto --family qwen3_moe",
@@ -753,7 +720,6 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "ep", "cp", "moe"),
         args_matrix=_MERGED_RESUME_FAMILY_ROWS,
-        known_failures=_MERGED_RESUME_KNOWN_FAILURES,
         timeout=1200,
     ),
     "trainers/lora/test_lora_ep_convergence.py": TestSpec(
@@ -867,7 +833,6 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "moe"),
         args_matrix=_PRECOMPUTE_FAMILY_ROWS,
-        known_failures=_PRECOMPUTE_KNOWN_FAILURES,
         timeout=900,
     ),
     "trainers/preference/test_pref_ep_expert_lora_reference.py": TestSpec(
