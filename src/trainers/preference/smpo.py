@@ -663,27 +663,21 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         return losses, chosen_rewards, rejected_rewards
 
-    def _aggregate_logps_with_cp(
-        self,
-        logp_sums: torch.Tensor,
-        token_counts: torch.Tensor,
-        cp_config,
-    ) -> torch.Tensor:
-        """Average per-sequence log probs, all-reducing partial sums/counts across the CP group.
+    @staticmethod
+    def _cp_global_mean(sums: torch.Tensor, counts: torch.Tensor, cp_config) -> torch.Tensor:
+        """``sums / counts`` over whole sequences: under CP each rank holds one chunk's partial sums
+        and counts, both summed over the group first, so every rank gets the unsplit value.
 
-        Each CP rank holds only its chunk's partial sums and counts. The logp-sum reduce must be
-        autograd-aware (its backward sums the gradient over the group): an in-place
-        ``dist.all_reduce`` reaches autograd only through the deprecated c10d fallback, as the identity.
+        The ``sums`` reduce must be autograd-aware (its backward sums the gradient over the group): an
+        in-place ``dist.all_reduce`` reaches autograd only through the deprecated c10d fallback, as the
+        identity.
         """
-        if cp_config is None or cp_config.cp_size <= 1:
-            return logp_sums / token_counts.clamp(min=1)
-
-        # fp32 collectives: a bf16 all-reduce(SUM) of per-sequence logp sums is lossy.
-        global_logp_sums = dist_nn.all_reduce(logp_sums.float(), group=cp_config.process_group)
-        global_token_counts = token_counts.clone().float()
-        dist.all_reduce(global_token_counts, op=dist.ReduceOp.SUM, group=cp_config.process_group)
-
-        return global_logp_sums / global_token_counts.clamp(min=1)
+        if cp_config is not None and cp_config.cp_size > 1:
+            # fp32 collectives: a bf16 all-reduce(SUM) of partial sums is lossy.
+            sums = dist_nn.all_reduce(sums.float(), group=cp_config.process_group)
+            counts = counts.to(torch.float32, copy=True)
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=cp_config.process_group)
+        return sums / counts.clamp(min=1)
 
     def concatenated_forward(
         self,
@@ -769,9 +763,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         # fp32 sum: a bf16 accumulation of hundreds of per-token logps rounds enough to flip near-ties.
         logp_sums = per_token_logps.sum(dim=-1, dtype=torch.float32)
-        token_counts = loss_mask.sum(dim=-1)
-
-        seq_logps = self._aggregate_logps_with_cp(logp_sums, token_counts, cp_config)
+        seq_logps = self._cp_global_mean(logp_sums, loss_mask.sum(dim=-1), cp_config)
 
         chosen_logps = seq_logps[:num_chosen]
         rejected_logps = seq_logps[num_chosen:]
@@ -783,10 +775,13 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         mean_chosen_logits = self._masked_logit_mean(shift_logits[:num_chosen], chosen_loss_mask, cp_config)
         mean_rejected_logits = self._masked_logit_mean(shift_logits[num_chosen:], rejected_loss_mask, cp_config)
 
-        # Shift here: under CP a deferred shift pairs local-chunk logits with full-length labels.
-        chosen_sft_loss = self._compute_cp_aggregated_sft_loss(per_token_nll[:num_chosen], chosen_loss_mask, cp_config)
-        rejected_sft_loss = self._compute_cp_aggregated_sft_loss(
-            per_token_nll[num_chosen:], rejected_loss_mask, cp_config
+        # Token-mean NLL per side. The count comes from the mask, never the NLL's nonzero support: a
+        # saturated token's NLL is legitimately 0 and still counts.
+        chosen_sft_loss = self._cp_global_mean(
+            per_token_nll[:num_chosen].sum(dtype=torch.float32), chosen_loss_mask.sum(), cp_config
+        )
+        rejected_sft_loss = self._cp_global_mean(
+            per_token_nll[num_chosen:].sum(dtype=torch.float32), rejected_loss_mask.sum(), cp_config
         )
 
         return {
@@ -814,25 +809,6 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
                 dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=cp_config.process_group)
             total, tokens = stats.unbind()
             return total / (tokens * logits.size(-1)).clamp(min=1)
-
-    def _compute_cp_aggregated_sft_loss(
-        self, per_token_nll: torch.Tensor, loss_mask: torch.Tensor, cp_config
-    ) -> torch.Tensor:
-        """Mean NLL over unmasked shifted tokens, aggregated across the CP group.
-
-        ``per_token_nll`` is ``-per_token_logps`` pre-clip, already zeroed at masked positions — the
-        per-token cross-entropy without a second full-vocab pass over the logits. The count comes from
-        ``loss_mask`` (never from the NLL's nonzero support: a saturated token's NLL is legitimately
-        exactly 0 and must still count). Summing loss and token count and all-reducing both reproduces
-        the non-CP ``reduction="mean"`` value regardless of how the sequence was split.
-        """
-        # fp32 sum + fp32 all-reduce — same bf16-accumulation hazard as the logp sums.
-        total_loss = per_token_nll.sum(dtype=torch.float32)
-        total_count = loss_mask.sum().float()
-        if cp_config is not None and cp_config.cp_size > 1:
-            total_loss = dist_nn.all_reduce(total_loss, group=cp_config.process_group)
-            dist.all_reduce(total_count, op=dist.ReduceOp.SUM, group=cp_config.process_group)
-        return total_loss / total_count.clamp(min=1)
 
     def _forward_padding_free(
         self,
