@@ -93,31 +93,85 @@ def test_boxed_extraction_is_linear_in_completion_length():
     assert time.monotonic() - start < 5.0
 
 
-# numeric_match — first-number extraction is a known false-negative source
+# numeric_match — a prediction matches only when it states one value
 
 
-def test_numeric_match_leading_distractor_is_false_negative():
-    """_NUMBER_RE.search picks the FIRST number in the prediction. When a distractor
-    number precedes the real answer, the match FAILS even though the answer is correct.
-
-    This pins the CURRENT (documented limitation) behavior so a change to last-number
-    or boxed-answer extraction is a deliberate, test-visible decision. The prediction
-    does not start with an answer-prefix, so normalize_text leaves "42" first.
+def test_numeric_match_leading_distractor_names_two_values():
+    """Every number in the prediction must equal the expected one. A distractor before the real
+    answer names a second value, so the prediction commits to neither and grades as wrong even though
+    its last number is right. It does not start with an answer prefix, so normalize_text keeps both.
     """
     assert numeric_match("I tried 42 but the answer is 7", "7") is False
 
 
-def test_numeric_match_clean_answer_passes():
-    """When the only number is the answer, numeric_match succeeds (and is not fooled
-    by substring containment — "110" is matched as a number, not as containing "11")."""
-    assert numeric_match("The answer is 110", "110") is True
-    assert numeric_match("110", "11") is False  # not substring/containment
+@pytest.mark.parametrize(
+    ("predicted", "expected"),
+    [
+        ("3,500", "3500"),  # thousands grouping reads as one number, on either side
+        ("3500", "3,500"),
+        ("1,000", "1000"),
+        ("$1,000,000", "1000000"),
+        ("The answer is 110", "110"),
+        ("x = 5", "5"),
+        ("5 apples", "5"),
+        ("50%", "0.5"),
+        ("0.5", "50%"),
+        ("50% (0.5)", "0.5"),  # one value, restated
+        ("3.000001", "3.0"),  # within rtol
+        ("1e3", "1000"),
+        ("5.", "5"),
+        ("9.8 m/s^2", "9.8"),  # a ^n after a letter is a unit exponent
+        ("5 cm^2", "5"),
+        (r"\boxed{42}", "42"),
+        ("+5", "5"),
+    ],
+)
+def test_numeric_match_accepts_one_stated_value(predicted, expected):
+    assert numeric_match(predicted, expected) is True
 
 
-def test_numeric_match_percentage_and_tolerance():
-    assert numeric_match("50%", "0.5") is True
-    assert numeric_match("3.000001", "3.0") is True  # within rtol
-    assert numeric_match("3.5", "3.0") is False
+@pytest.mark.parametrize(
+    ("predicted", "expected"),
+    [
+        ("1/2", "1"),  # the leading number of an expression is not its value
+        (r"\boxed{\frac{1}{2}}", "1"),
+        (r"\frac{3}{4}", "3"),
+        ("3,500", "3"),
+        ("$1,000,000", "1"),
+        ("2x+1", "2"),
+        ("10^3", "10"),
+        ("2024-01-01", "2024"),
+        ("3-4", "3"),
+        ("2+2", "2"),  # operands, even when each one equals the expected value
+        (r"2 \times 2", "2"),
+        (r"\sqrt{2}", "2"),
+        ("√2", "2"),
+        (r"2\pi", "2"),
+        ("e^2", "2"),  # a letter's exponent is no value, and nothing else is left
+        ("-5", "5"),
+        ("7 or 8", "7"),  # a hedge names two values
+        ("between 3 and 4", "3"),
+        ("1,2,3", "1"),
+        ("7, since 3 + 4 = 7", "7"),  # a response must commit to one value, working included
+        ("110", "11"),  # a number, not a substring
+        ("3.5", "3.0"),
+        ("3.5", "3,500"),
+        ("no numbers here", "42"),
+    ],
+)
+def test_numeric_match_rejects_expressions_and_hedges(predicted, expected):
+    assert numeric_match(predicted, expected) is False
+
+
+def test_numeric_match_is_linear_in_completion_length():
+    """Degenerate rollouts emit long digit runs, and overlapping quantifiers over one backtrack
+    polynomially and stall the grader. The budget is ~100x the linear cost and a third of one quadratic
+    scan of a 100k-digit run, so it separates the two without turning a loaded CI box into a failure."""
+    start = time.monotonic()
+    assert numeric_match("9" * 100000, "5") is False
+    assert numeric_match("0." + "3" * 100000, "0.333") is True
+    assert numeric_match("1 " * 25000, "1") is True
+    assert time.monotonic() - start < 5.0
 
 
 # multiple_choice_match — structured extraction, no startswith fallback

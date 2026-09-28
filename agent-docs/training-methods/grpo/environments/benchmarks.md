@@ -40,10 +40,14 @@ run reaching it would teach the policy that invented evidence works.
 ## Reward
 
 Grading is all-or-nothing, through `src/rewards/matching.py`: `exact_match` (case-insensitive
-after normalization), then `numeric_match` — the response's first number against the whole expected
-value, at `rtol=0.01` / `atol=1e-6`, percentages divided by 100. A match grades 1, anything else 0,
-and the reward's `environment` term prices the grade ([Reward Terms](../rewards.md#environment-arm)).
-There is no fuzzy or substring matcher — "7" must not match "17".
+after normalization), then `numeric_match` — every number in the response against the whole expected
+value, at `rtol=0.01` / `atol=1e-6`, percentages divided by 100 and `3,500` read as one number. None
+may be an operand of arithmetic or of a symbolic expression (`1/2`, `2024-01-01`, `\sqrt{2}`, `2\pi`);
+a `^2` after a letter is a unit exponent (`9.8 m/s^2`). The response must commit to one value: a hedge
+(`7 or 8`) grades 0, and so does a correct answer that restates working with other numbers
+(`7, since 3 + 4 = 7`). A match grades 1, anything else 0, and the reward's `environment` term prices
+the grade ([Reward Terms](../rewards.md#environment-arm)). There is no fuzzy or substring matcher —
+"7" must not match "17".
 
 Online GRPO's `accuracy` term uses a different grader — a strict boxed exact match that splits
 `####` and strips `,`/`$` ([Online GRPO → Rewards](../online-grpo.md#rewards)). The two score the

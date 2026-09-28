@@ -25,9 +25,26 @@ _BOXED_TOKEN = "\\boxed{"
 
 _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 
-_NUMBER_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+# ``,`` groups thousands only in the strict ``1,234,567`` form, so ``1,2,3`` and ``3,5`` stay separate numbers.
+_NUMBER_RE = re.compile(
+    r"(?P<sign>[-+]?)(?P<value>(?:\d{1,3}(?:,\d{3})+(?!,?\d)(?:\.\d*)?|\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)(?P<percent>\s*%)?"
+)
 
-_PERCENT_RE = re.compile(r"([-+]?\d*\.?\d+)\s*%")
+# Formatting-only LaTeX reads as a space (``\%``/``\$`` keep their symbol; ``\circ`` marks degrees). Braces
+# only group, so dropping them reads ``1{,}000`` as one number and ``m^{2}`` as a unit exponent.
+_LATEX_FORMATTING_RE = re.compile(
+    r"\\(?:(?:text|textbf|textrm|mathrm|mathbf|mbox|left|right|quad|qquad|circ)(?![a-z])|[,;:! ]|(?=[%$]))"
+)
+_PREDICTION_CHAR_MAP = str.maketrans({"{": None, "}": None, "\N{MINUS SIGN}": "-"})
+
+# A ``^n`` right after a letter is a unit exponent (``m/s^2``), not a value.
+_UNIT_EXPONENT_RE = re.compile(r"(?<=[^\W\d_])\^[-+]?\d+")
+
+# Any LaTeX command left after formatting, a root, constant or function: the prediction is an expression.
+_SYMBOLIC_RE = re.compile(r"\\[a-z]|[√π∞±∓]|(?<![a-z])(?:sqrt|pi|log|ln|exp|sin|cos|tan)(?![a-z])")
+
+# Two numbers with only operators, spaces and brackets between them are operands: ``2+2``, ``2024-01-01``.
+_OPERATOR_GAP_RE = re.compile(r"[\s()\[\]]*[-+*/^×÷·\N{EN DASH}][-+*/^×÷·\N{EN DASH}\s()\[\]]*")
 
 
 def extract_last_boxed(text: str) -> str | None:
@@ -104,35 +121,53 @@ def exact_match(predicted: str, expected: str) -> bool:
     return normalize_text(predicted) == normalize_text(expected)
 
 
+def _number_value(match: re.Match[str]) -> float:
+    """The value a ``_NUMBER_RE`` match spells: grouping commas dropped, a ``%`` value divided by 100."""
+    value = float(match["sign"] + match["value"].replace(",", ""))
+    return value / 100.0 if match["percent"] else value
+
+
+def _stated_values(text: str) -> list[float]:
+    """Every number a normalized prediction states, or none when one is an operand of an expression."""
+    text = _LATEX_FORMATTING_RE.sub(" ", text).translate(_PREDICTION_CHAR_MAP)
+    text = _UNIT_EXPONENT_RE.sub(" ", text)
+    if _SYMBOLIC_RE.search(text):
+        return []
+
+    values: list[float] = []
+    previous_end = None
+    for match in _NUMBER_RE.finditer(text):
+        # The gap runs up to the digits, so a sign right after an operand reads as the operator it is.
+        if previous_end is not None and _OPERATOR_GAP_RE.fullmatch(text, previous_end, match.start("value")):
+            return []
+        values.append(_number_value(match))
+        previous_end = match.end()
+    return values
+
+
 def numeric_match(
     predicted: str,
     expected: str,
     rtol: float = 0.01,
     atol: float = 1e-6,
 ) -> bool:
-    """Compare extracted numbers with tolerance. Handles ints, floats, negatives,
-    scientific notation, and percentages (a ``%`` value is divided by 100 before comparison)."""
-    pred_text = normalize_text(predicted)
-    exp_text = normalize_text(expected)
+    """True when the prediction states one value and it equals the expected number within tolerance.
 
-    try:
-        pct_match = _PERCENT_RE.search(pred_text)
-        if pct_match:
-            pred_num = float(pct_match.group(1)) / 100.0
-        else:
-            pred_match = _NUMBER_RE.search(pred_text)
-            if not pred_match:
-                return False
-            pred_num = float(pred_match.group())
-
-        pct_match_exp = _PERCENT_RE.search(exp_text)
-        exp_num = float(pct_match_exp.group(1)) / 100.0 if pct_match_exp else float(exp_text)
-
-        if abs(pred_num - exp_num) <= atol:
-            return True
-        return exp_num != 0 and abs(pred_num - exp_num) / abs(exp_num) <= rtol
-    except (ValueError, TypeError, AttributeError):
+    Every number in the prediction must match, so a hedge (``7 or 8``) and working restated with other
+    numbers (``7, since 3 + 4 = 7``) grade as wrong, and so does a number that is an operand of arithmetic
+    or of a symbolic expression (``1/2``, ``2024-01-01``, ``\\sqrt{2}``, ``2\\pi``). ``,`` thousands
+    grouping reads as one number, a ``%`` value is divided by 100, and a ``^n`` after a letter is a unit
+    exponent (``9.8 m/s^2``). The expected answer must be one number as a whole.
+    """
+    expected_number = _NUMBER_RE.fullmatch(normalize_text(expected))
+    if expected_number is None:
         return False
+    target = _number_value(expected_number)
+
+    values = _stated_values(normalize_text(predicted))
+    return bool(values) and all(
+        abs(value - target) <= atol or (target != 0 and abs(value - target) / abs(target) <= rtol) for value in values
+    )
 
 
 # Substring containment is deliberately not a method here: it inflates rewards ("7" matches "17").
