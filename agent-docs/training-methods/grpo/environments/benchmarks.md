@@ -40,18 +40,27 @@ run reaching it would teach the policy that invented evidence works.
 ## Reward
 
 Grading is all-or-nothing, through `src/rewards/matching.py`: `exact_match` (case-insensitive
-after normalization), then `numeric_match` — the response's first number against the whole expected
-value, at `rtol=0.01` / `atol=1e-6`, percentages divided by 100. A match grades 1, anything else 0,
-and the reward's `environment` term prices the grade ([Reward Terms](../rewards.md#environment-arm)).
-There is no fuzzy or substring matcher — "7" must not match "17".
+after normalization), then `numeric_match` — every number in the response against the one value the
+expected answer states (read the same way, so `$18` and `18 dollars` expect 18), at `rtol=0.01` /
+`atol=1e-6`, percentages divided by 100 and `3,500` or `10\,000` read as one number. The response must
+commit to one value: a hedge (`7 or 8`) grades 0, and so does a correct answer that restates working
+with other numbers (`7, since 3 + 4 = 7`). A number that is an operand of arithmetic between numbers
+(`1/2`, `2024-01-01`), of a power (`10^3`, `10²`), root (`\sqrt{2}`), constant (`2\pi`) or function
+(`log 2`) grades 0 too, as does a stated bound (`x < 3`, `x \le 3`). A power after a letter is a unit
+exponent (`9.8 m/s^2`, `5 m²`), and a number glued to a letter is part of a token (`H2O`). A number joined
+to a one-letter variable by an operator is an operand too (`1/x`, `n+1`), but one glued to a letter
+reads as a number plus a unit, so `2x` is not caught, nor are word forms (`square root of 2`, `at least 3`). A match grades 1, anything else 0, and the reward's `environment`
+term prices the grade ([Reward Terms](../rewards.md#environment-arm)). There is no fuzzy or substring
+matcher — "7" must not match "17".
 
 Online GRPO's `accuracy` term uses a different grader — a strict boxed exact match that splits
 `####` and strips `,`/`$` ([Online GRPO → Rewards](../online-grpo.md#rewards)). The two score the
 same row differently; a recipe picks one.
 
-Normalization reads `\boxed{42}`, `**42**` and leading "The answer is" / "Therefore" phrasings. It
-takes the `\boxed{...}` whose opening brace is rightmost and matches braces by depth, so
-`\boxed{\frac{1}{2}}` survives. It does not split a GSM8K-style `#### N` suffix: reduce such an
+Normalization reads `\boxed{42}`, a lone `**42**` and leading "The answer is" / "Therefore"
+phrasings; several bold spans (`**7** or **8**`) stay in the text as the hedge they are. It takes the
+`\boxed{...}` whose opening brace is rightmost and matches braces by depth, so `\boxed{\frac{1}{2}}`
+survives. It does not split a GSM8K-style `#### N` suffix: reduce such an
 `answer` column to the final value before training.
 
 A row with `choices` switches `exam_qa` to letter grading: the response's choice letter (A–J) is

@@ -20,14 +20,63 @@ _ANSWER_PREFIXES = [
     "final answer:",
     "result:",
 ]
+# A bold span holding only one of these is a label (``**Answer:** 5``), not the answer.
+_ANSWER_LABELS = frozenset(prefix.rstrip(":") for prefix in _ANSWER_PREFIXES)
 
 _BOXED_TOKEN = "\\boxed{"
 
 _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 
-_NUMBER_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+# ``,`` groups thousands only in the strict ``1,234,567`` form, so ``1,2,3`` and ``3,5`` stay separate numbers.
+# A chain never restarts at one of its own groups and a digit run splits one way, so the scan stays linear.
+# A number glued to a letter or digit is part of a token (``h2o``, ``v2``), not a value.
+_NUMBER_RE = re.compile(
+    r"(?<![a-z\d_])(?P<sign>[-+]?)"
+    r"(?P<value>(?:(?<!\d,)\d{1,3}(?:,\d{3})+(?!,?\d)(?:\.\d*)?|\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?)"
+    r"(?P<percent>\s*%)?"
+)
 
-_PERCENT_RE = re.compile(r"([-+]?\d*\.?\d+)\s*%")
+# Formatting-only LaTeX reads as a space, as does ``\approx``, which states the value (``\%``/``\$`` keep
+# their symbol; ``\circ`` marks degrees).
+_LATEX_FORMATTING_RE = re.compile(
+    r"\\(?:(?:text|textbf|textit|textrm|textsf|texttt|mathrm|mathbf|mathit|mathsf|mbox|num|displaystyle"
+    r"|left|right|quad|qquad|circ|approx)(?![a-z])|[,;:! ]|(?=[%$]))"
+)
+# Thin-space grouping (``10\,000``) reads as ``,`` grouping, under the same strict form.
+_LATEX_GROUPING_RE = re.compile(r"(?<=\d)\\,(?=\d)")
+# Braces only group, so dropping them reads ``1{,}000`` as one number and ``m^{2}`` as a unit exponent.
+# Dash-like characters are the minus a model means (``−5``, ``–5``), so ``5–7`` reads as ``5-7``.
+_DASHES = (
+    "\N{HYPHEN}\N{NON-BREAKING HYPHEN}\N{FIGURE DASH}\N{EN DASH}\N{MINUS SIGN}"
+    "\N{SMALL HYPHEN-MINUS}\N{FULLWIDTH HYPHEN-MINUS}"
+)
+_CHAR_MAP = str.maketrans({"{": None, "}": None} | dict.fromkeys(_DASHES, "-"))
+
+_SUPERSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+
+# A power right after a letter is a unit exponent (``m/s^2``, ``m^(2)``, ``m**2``, ``m²``), not a value.
+_UNIT_EXPONENT_RE = re.compile(rf"(?<=[^\W\d_])(?:(?:\^|\*\*)(?:[-+]?\d+|\([-+]?\d+\))|[⁺⁻]?[{_SUPERSCRIPT_DIGITS}]+)")
+
+# The text is an expression or a bound, not a value: a LaTeX command left after formatting, a root,
+# constant, ``±``/``∞``, a power left after unit exponents (``10²``), a function applied to an argument,
+# or a comparison outside an arrow (``->``, ``=>``, ``<-``).
+_EXPRESSION_OR_BOUND_RE = re.compile(
+    rf"\\[a-z]|[√∛∜π∞±∓{_SUPERSCRIPT_DIGITS}≤≥≠]|(?<![-=])>|<(?!-)|!="
+    r"|(?<![a-z])(?:(?:sqrt|log|ln|exp|sin|cos|tan)\s*[\d(_]|(?:pi|squared|cubed)(?![a-z]))"
+)
+
+# Two numbers with only operators, spaces, brackets and ``$`` between them are operands: ``2+2``,
+# ``2024-01-01``, ``$5 + $5``.
+_NON_MINUS_OPERATORS = "+*/^×÷·\N{DOT OPERATOR}\N{ASTERISK OPERATOR}"
+_OPERATORS = re.escape("-" + _NON_MINUS_OPERATORS)
+_OPERATOR_GAP_RE = re.compile(rf"[\s()\[\]$]*[{_OPERATORS}][{_OPERATORS}\s()\[\]$]*")
+# A number joined by an operator to a one-letter variable is an operand as well (``1/x``, ``2^n``,
+# ``n+1``). Longer words stay units or names (``$5/hour``), and ``-`` is left out, since ``5 - a``
+# reads as prose.
+_VARIABLE_OPERAND_RE = re.compile(
+    rf"\d\s*[{re.escape(_NON_MINUS_OPERATORS)}]\s*[a-z](?![a-z])"
+    rf"|(?<![a-z])[a-z]\s*[{re.escape(_NON_MINUS_OPERATORS)}]\s*[-+]?\.?\d"
+)
 
 
 def extract_last_boxed(text: str) -> str | None:
@@ -72,17 +121,21 @@ def extract_last_boxed(text: str) -> str | None:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text for answer comparison: lowercase, strip, extract from ``\\boxed{}`` /
-    ``**bold**``, drop leading answer prefixes ("the answer is", …) and trailing period."""
+    """Normalize text for answer comparison: lowercase, strip, extract from ``\\boxed{}`` / a lone
+    ``**bold**`` span, drop leading answer prefixes ("the answer is", …) and trailing period."""
     text = str(text).strip()
 
     boxed = extract_last_boxed(text)
     if boxed:
         text = boxed.strip()
 
-    bold = _BOLD_RE.search(text)
-    if bold:
-        text = bold.group(1).strip()
+    # Several bold spans (``**7** or **8**``) hedge between them, and a lone label names none, so in
+    # both cases the whole text stays.
+    bold_spans = _BOLD_RE.findall(text)
+    if len(bold_spans) == 1 and bold_spans[0].strip().lower().rstrip(":") not in _ANSWER_LABELS:
+        text = bold_spans[0].strip()
+    elif bold_spans:
+        text = text.replace("**", "")
 
     text = text.lower().strip()
 
@@ -104,35 +157,56 @@ def exact_match(predicted: str, expected: str) -> bool:
     return normalize_text(predicted) == normalize_text(expected)
 
 
+def _number_value(match: re.Match[str]) -> float:
+    """The value a ``_NUMBER_RE`` match spells: grouping commas dropped, a ``%`` value divided by 100."""
+    value = float(match["sign"] + match["value"].replace(",", ""))
+    return value / 100.0 if match["percent"] else value
+
+
+def _stated_values(text: str) -> list[float]:
+    """Every number a normalized answer states, or none when it is an expression or a bound."""
+    text = _LATEX_GROUPING_RE.sub(",", text)
+    text = _LATEX_FORMATTING_RE.sub(" ", text).translate(_CHAR_MAP)
+    text = _UNIT_EXPONENT_RE.sub(" ", text)
+    if _EXPRESSION_OR_BOUND_RE.search(text) or _VARIABLE_OPERAND_RE.search(text):
+        return []
+
+    values: list[float] = []
+    previous_end = None
+    for match in _NUMBER_RE.finditer(text):
+        # The gap runs up to the digits, so a sign right after an operand reads as the operator it is.
+        if previous_end is not None and _OPERATOR_GAP_RE.fullmatch(text, previous_end, match.start("value")):
+            return []
+        values.append(_number_value(match))
+        previous_end = match.end()
+    return values
+
+
 def numeric_match(
     predicted: str,
     expected: str,
     rtol: float = 0.01,
     atol: float = 1e-6,
 ) -> bool:
-    """Compare extracted numbers with tolerance. Handles ints, floats, negatives,
-    scientific notation, and percentages (a ``%`` value is divided by 100 before comparison)."""
-    pred_text = normalize_text(predicted)
-    exp_text = normalize_text(expected)
+    """True when the prediction states one value and it equals the expected number within tolerance.
 
-    try:
-        pct_match = _PERCENT_RE.search(pred_text)
-        if pct_match:
-            pred_num = float(pct_match.group(1)) / 100.0
-        else:
-            pred_match = _NUMBER_RE.search(pred_text)
-            if not pred_match:
-                return False
-            pred_num = float(pred_match.group())
-
-        pct_match_exp = _PERCENT_RE.search(exp_text)
-        exp_num = float(pct_match_exp.group(1)) / 100.0 if pct_match_exp else float(exp_text)
-
-        if abs(pred_num - exp_num) <= atol:
-            return True
-        return exp_num != 0 and abs(pred_num - exp_num) / abs(exp_num) <= rtol
-    except ValueError:  # an expected answer that is not a number
+    Every number in the prediction must match, so a hedge (``7 or 8``) and working restated with other
+    numbers (``7, since 3 + 4 = 7``) grade as wrong, and so do an operand of arithmetic, a power, root,
+    constant or function (``1/2``, ``2024-01-01``, ``10²``, ``\\sqrt{2}``, ``2\\pi``, ``log 2``) and a
+    stated bound (``x < 3``). ``,`` thousands grouping reads as one number, a ``%`` value is divided by
+    100, a power after a letter is a unit exponent (``9.8 m/s^2``), and a number glued to a letter is part
+    of a token (``h2o``). The expected answer is read the same way and must state exactly one value
+    (``18``, ``$18``, ``18 dollars``); an expression or a hedge there gets no numeric match.
+    """
+    expected_values = _stated_values(normalize_text(expected))
+    if len(expected_values) != 1:
         return False
+    target = expected_values[0]
+
+    values = _stated_values(normalize_text(predicted))
+    return bool(values) and all(
+        abs(value - target) <= atol or (target != 0 and abs(value - target) / abs(target) <= rtol) for value in values
+    )
 
 
 # Substring containment is deliberately not a method here: it inflates rewards ("7" matches "17").
