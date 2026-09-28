@@ -124,7 +124,7 @@ def _resolve_merge_transform(
         raise ValueError(
             f"merge_ep_shards cannot resolve model_type '{model_type}' to an EP layer class, so it has "
             f"no HF-layout transform; merging would produce an unloadable checkpoint. Supported: "
-            f"{', '.join(supported_ep_merge_model_types())}. Save with save_sharded_ep=False (gathered, "
+            f"{', '.join(supported_ep_merge_model_types())}. Save with save_sharded_ep: false (gathered, "
             "the default) — that writes a directly loadable checkpoint via each layer's "
             "gather_expert_state_dict()."
         )
@@ -164,7 +164,7 @@ def merge_ep_shards(
         raise ValueError(
             f"{input_dir} is not a per-rank EP-sharded checkpoint: no index there declares the "
             f"EP save's format marker and ep_size (index metadata {metadata!r}). Only a directory "
-            f"written by save_ep_model(sharded=True) can be merged — a gathered EP save, a "
+            f"written by a run with save_sharded_ep: true can be merged — a gathered EP save, a "
             f"pipeline-stage save, or an already-merged checkpoint is loadable as it stands, and "
             f"merging it would rewrite its expert weights into an unloadable layout."
         )
@@ -216,7 +216,7 @@ def merge_ep_shards(
                     f"are present in "
                     f"'{input_dir}'. On a non-shared multi-node filesystem the shards are scattered "
                     f"across nodes' local disks and must be gathered into one directory first — or "
-                    f"save gathered (save_sharded_ep=False) instead."
+                    f"save gathered (save_sharded_ep: false) instead."
                 )
 
         # Logical output tensors in the reference order: passthrough keys first, concatenated shard
