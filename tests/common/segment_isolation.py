@@ -1,29 +1,21 @@
 """Per-document isolation oracle for SMPO's padding-free row, shared by its CPU and GPU tests.
 
 The flattened row keeps its documents apart when each one's mean completion log-prob equals the same
-document run alone. Holds the tiny per-family models, the preference batch and that lone-document
-reference.
+document run alone. Holds the families under test (registry tiny models, at a wider init), the
+preference batch and that lone-document reference.
 """
 
-# The device-aware kernel-dispatch shim must land before the modeling modules below bind
-# transformers' hub-kernel fallback factory at import: after them, a CPU forward reaches the
-# CUDA-only kernels and a CUDA forward can capture the torch fallback instead of the fla kernel.
+# The device-aware kernel-dispatch shim must land before the modeling modules the registry below
+# imports bind transformers' hub-kernel fallback factory at import: after them, a CPU forward reaches
+# the CUDA-only kernels and a CUDA forward can capture the torch fallback instead of the fla kernel.
 import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
 
 import torch
 import torch.nn.functional as F
-from transformers import (
-    Lfm2MoeConfig,
-    Lfm2MoeForCausalLM,
-    Qwen3_5ForCausalLM,
-    Qwen3_5TextConfig,
-    Qwen3Config,
-    Qwen3ForCausalLM,
-)
 
 from src.data.collators.smpo import DataCollatorForSMPO
 from src.models.segment_markers import SegmentMarkers
-from tests.common.models import TINY_LFM2_MOE_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
 
 PAD_ID = 0
 SEED = 1234
@@ -38,9 +30,9 @@ PAIRS = (
     ([25, 38, 14, 60], [13, 27], [9, 45, 31]),
 )
 FAMILIES = {
-    "lfm2": (Lfm2MoeForCausalLM, Lfm2MoeConfig, TINY_LFM2_MOE_CONFIG),
-    "qwen3_5": (Qwen3_5ForCausalLM, Qwen3_5TextConfig, TINY_QWEN35_CONFIG),
-    "qwen3": (Qwen3ForCausalLM, Qwen3Config, TINY_QWEN3_CONFIG),
+    "lfm2": TINY_MOE_FAMILIES["lfm2_moe"],
+    "qwen3_5": TINY_DENSE_FAMILIES["qwen3_5"],
+    "qwen3": TINY_DENSE_FAMILIES["qwen3"],
 }
 # Marker subsets under which a family's row must leak, proving the isolation is the markers' doing.
 # GatedDeltaNet's conv-only subset leaves the delta rule crossing, so a kernel that ignored
@@ -54,9 +46,8 @@ LEAK_CONTROLS = {
 
 def tiny_model(family: str, attn_implementation: str, *, dtype=torch.float32, device="cpu"):
     """A seeded random-init model of ``family`` on ``attn_implementation``."""
-    model_cls, config_cls, config = FAMILIES[family]
     torch.manual_seed(SEED)
-    model = model_cls(config_cls(**{**config, "initializer_range": INIT_RANGE}))
+    model = tiny_family_model(FAMILIES[family], overrides={"initializer_range": INIT_RANGE})
     model = model.to(device=device, dtype=dtype).eval()
     model.config._attn_implementation = attn_implementation
     return model

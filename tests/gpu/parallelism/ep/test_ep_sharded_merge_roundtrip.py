@@ -21,24 +21,9 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
-from transformers import (
-    Cohere2MoeConfig,
-    Cohere2MoeForCausalLM,
-    DeepseekV4Config,
-    DeepseekV4ForCausalLM,
-    Glm5NextConfig,
-    Glm5NextForConditionalGeneration,
-    GptOssConfig,
-    GptOssForCausalLM,
-    Qwen3_5MoeForCausalLM,
-    Qwen3_5MoeTextConfig,
-    Qwen3MoeConfig,
-    Qwen3MoeForCausalLM,
-)
 
 from scripts.after_training.merge_ep_shards import merge_ep_shards
 from src.distributed.expert_parallel.config import EPConfig
@@ -47,70 +32,22 @@ from src.distributed.expert_parallel.saving import save_ep_model
 from src.models.loading.model_preparation import auto_load_model
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
-from tests.common.models import (
-    TINY_COHERE2_MOE_CONFIG,
-    TINY_DSV4_CONFIG,
-    TINY_GLM5_CONFIG,
-    TINY_GLM5_VISION_CONFIG,
-    TINY_GPTOSS_CONFIG,
-    TINY_QWEN3_MOE_CONFIG,
-)
-from tests.common.tiny_models import randomize_tid2eid
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.utils import log, safetensors_state_dict
 
 EP_SIZE = 2
 
-
-def _tiny_deepseek_v4() -> DeepseekV4ForCausalLM:
-    """Random init leaves the hash router's tid2eid all-zero, which the EP wrapper refuses."""
-    model = DeepseekV4ForCausalLM(DeepseekV4Config(**TINY_DSV4_CONFIG))
-    randomize_tid2eid(model)
-    return model
-
-
-# A MoE text tower in the Qwen3.5 family: fused hub layout, linear-attention interleave.
-_TINY_QWEN35_MOE_TEXT = {
-    "hidden_size": 256,
-    "intermediate_size": 256,
-    "num_hidden_layers": 4,
-    "full_attention_interval": 4,
-    "num_attention_heads": 4,
-    "num_key_value_heads": 2,
-    "head_dim": 64,
-    "linear_num_key_heads": 2,
-    "linear_num_value_heads": 4,
-    "linear_key_head_dim": 64,
-    "linear_value_head_dim": 64,
-    "linear_conv_kernel_dim": 2,
-    "num_experts": 8,
-    "num_experts_per_tok": 2,
-    "moe_intermediate_size": 128,
-    "shared_expert_intermediate_size": 128,
-    "vocab_size": 1024,
-    "max_position_embeddings": 512,
-    "tie_word_embeddings": False,
-}
-
-# One builder per expert layout the merge has to invert: interleaved fused (GptOss, stored
+# One family per expert layout the merge has to invert: interleaved fused (GptOss, stored
 # de-interleaved under grouped GEMM), per-expert (Qwen3), fused (Qwen3.5), fused behind a read-side
 # hub-conversion bridge (DeepSeek-V4), fused with tied embeddings (Cohere2), and a fused text tower
 # inside a composite VLM wrapper (GLM-5 Next). Every family here is one the sharded save admits.
-_FAMILIES: dict[str, Callable[[], torch.nn.Module]] = {
-    "gpt_oss": lambda: GptOssForCausalLM(GptOssConfig(**TINY_GPTOSS_CONFIG, pad_token_id=0, eos_token_id=1)),
-    "qwen3_moe": lambda: Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)),
-    "qwen3_5_moe": lambda: Qwen3_5MoeForCausalLM(Qwen3_5MoeTextConfig(**_TINY_QWEN35_MOE_TEXT)),
-    "deepseek_v4": _tiny_deepseek_v4,
-    "cohere2_moe": lambda: Cohere2MoeForCausalLM(Cohere2MoeConfig(**TINY_COHERE2_MOE_CONFIG)),
-    "glm5_next": lambda: Glm5NextForConditionalGeneration(
-        Glm5NextConfig(text_config=dict(TINY_GLM5_CONFIG), vision_config=dict(TINY_GLM5_VISION_CONFIG))
-    ),
-}
+_FAMILIES = ("gpt_oss", "qwen3_moe", "qwen3_5_moe_text", "deepseek_v4", "cohere2_moe", "glm5_next")
 
 
 def _ep_patched(family: str, device: torch.device) -> torch.nn.Module:
     """The family's tiny model, identically initialized on every rank, EP-patched at ``EP_SIZE``."""
     torch.manual_seed(0)
-    model = _FAMILIES[family]().to(device=device, dtype=torch.bfloat16)
+    model = tiny_family_model(TINY_MOE_FAMILIES[family]).to(device=device, dtype=torch.bfloat16)
     config = EPConfig(ep_size=EP_SIZE, world_size=EP_SIZE, gpus_per_node=EP_SIZE)
     return patch_moe_model_for_ep(model, config)
 

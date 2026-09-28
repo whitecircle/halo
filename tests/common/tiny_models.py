@@ -260,10 +260,10 @@ TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausa
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
 
 
-def tiny_family_model(family: TinyFamily, tokenizer=None) -> PreTrainedModel:
+def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:
     """``family``'s random-init tiny model (fp32, seeded by the caller), at ``tokenizer``'s vocab when one
-    is given and at the tiny config's own otherwise."""
-    overrides = dict(family.text_overrides)
+    is given and at the tiny config's own otherwise. ``overrides`` sets further text-config fields."""
+    overrides = {**family.text_overrides, **(overrides or {})}
     if tokenizer is not None:
         overrides |= {
             # Padded as a release vocab is, so a TP-sharded head divides it.
