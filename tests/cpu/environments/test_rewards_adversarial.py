@@ -124,6 +124,8 @@ def test_numeric_match_leading_distractor_names_two_values():
         ("5 cm^2", "5"),
         (r"\boxed{42}", "42"),
         ("+5", "5"),
+        (r"x \approx 3.14", "3.14"),  # a relation that states the value
+        (r"90^\circ", "90"),
     ],
 )
 def test_numeric_match_accepts_one_stated_value(predicted, expected):
@@ -148,6 +150,7 @@ def test_numeric_match_accepts_one_stated_value(predicted, expected):
         ("√2", "2"),
         (r"2\pi", "2"),
         ("e^2", "2"),  # a letter's exponent is no value, and nothing else is left
+        (r"x \le 3", "3"),  # a bound, not the value
         ("-5", "5"),
         ("7 or 8", "7"),  # a hedge names two values
         ("between 3 and 4", "3"),

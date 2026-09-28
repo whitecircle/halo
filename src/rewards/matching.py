@@ -30,10 +30,11 @@ _NUMBER_RE = re.compile(
     r"(?P<sign>[-+]?)(?P<value>(?:\d{1,3}(?:,\d{3})+(?!,?\d)(?:\.\d*)?|\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)(?P<percent>\s*%)?"
 )
 
-# Formatting-only LaTeX reads as a space (``\%``/``\$`` keep their symbol; ``\circ`` marks degrees). Braces
-# only group, so dropping them reads ``1{,}000`` as one number and ``m^{2}`` as a unit exponent.
+# Formatting-only LaTeX reads as a space, as does ``\approx``, which states the value (``\%``/``\$`` keep
+# their symbol; ``\circ`` marks degrees). Braces only group, so dropping them reads ``1{,}000`` as one
+# number and ``m^{2}`` as a unit exponent.
 _LATEX_FORMATTING_RE = re.compile(
-    r"\\(?:(?:text|textbf|textrm|mathrm|mathbf|mbox|left|right|quad|qquad|circ)(?![a-z])|[,;:! ]|(?=[%$]))"
+    r"\\(?:(?:text|textbf|textrm|mathrm|mathbf|mbox|left|right|quad|qquad|circ|approx)(?![a-z])|[,;:! ]|(?=[%$]))"
 )
 _PREDICTION_CHAR_MAP = str.maketrans({"{": None, "}": None, "\N{MINUS SIGN}": "-"})
 
