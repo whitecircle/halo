@@ -180,10 +180,11 @@ def numeric_match(
     """True when the prediction states one value and it equals the expected number within tolerance.
 
     Every number in the prediction must match, so a hedge (``7 or 8``) and working restated with other
-    numbers (``7, since 3 + 4 = 7``) grade as wrong, and so does a number that is an operand of arithmetic
-    or of a symbolic expression (``1/2``, ``2024-01-01``, ``\\sqrt{2}``, ``2\\pi``). ``,`` thousands
-    grouping reads as one number, a ``%`` value is divided by 100, and a ``^n`` after a letter is a unit
-    exponent (``9.8 m/s^2``). The expected answer is read the same way and must state exactly one value
+    numbers (``7, since 3 + 4 = 7``) grade as wrong, and so do an operand of arithmetic, a power, root,
+    constant or function (``1/2``, ``2024-01-01``, ``10²``, ``\\sqrt{2}``, ``2\\pi``, ``log 2``) and a
+    stated bound (``x < 3``). ``,`` thousands grouping reads as one number, a ``%`` value is divided by
+    100, a power after a letter is a unit exponent (``9.8 m/s^2``), and a number glued to a letter is part
+    of a token (``h2o``). The expected answer is read the same way and must state exactly one value
     (``18``, ``$18``, ``18 dollars``); an expression or a hedge there gets no numeric match.
     """
     expected_values = _stated_values(normalize_text(expected))
