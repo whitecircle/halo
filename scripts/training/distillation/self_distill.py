@@ -33,6 +33,7 @@ from src.args.self_distill_args import SelfDistillationArguments
 from src.data.collators.self_distill import SelfDistillTextCollator, audit_self_distill_row
 from src.data.collators.vlm import SelfDistillVLMDataCollator
 from src.data.pipeline.processing import coordinated_map, require_render_column, resolve_map_num_proc
+from src.data.pipeline.row_processors import text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.peft_setup import setup_peft_model
@@ -87,7 +88,6 @@ def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_conf
     collator = SelfDistillTextCollator(
         tokenizer=tokenizer,
         max_length=max_length,
-        conversation_field=args.conversation_field,
         hint_template=args.sdpg_hint_template,
         answer_field=args.sdpg_answer_field,
         solution_field=args.privileged_solution_field,
@@ -95,11 +95,8 @@ def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_conf
         confidence_power=args.confidence_power,
         response_prompt_template=args.assistant_message_template if args.train_on_completions_only else None,
         train_on_completions_only=args.train_on_completions_only,
-        system_prompt=args.system_prompt,
-        model_supports_system_role=args.model_supports_system_role,
-        tools_field=args.tools_field,
-        interleaved_thinking=args.interleaved_thinking,
         model_config=model_config,
+        **text_render_kwargs(args),
     )
     # Enforce the collator's length contract now, where the raise is world-uniform: at collate time
     # only the rank drawing the over-length row raises, and its peers block in the step's collectives
