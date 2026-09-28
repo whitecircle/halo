@@ -18,20 +18,18 @@ chunk mean would differ from the sequence's.
 """
 
 import copy
-import os
 import warnings
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 
 from src.distributed.context_parallel.config import split_sequence_for_cp
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 CP_WORLD_SIZE = 2
 VOCAB = 16
@@ -106,61 +104,49 @@ def _loss_and_grad(trainer: SmoothMarginPOTrainer, model: _TokenTableLM, batch: 
     return outputs, loss.detach(), model.table.grad.clone(), metrics, [str(w.message) for w in caught]
 
 
-def _worker(rank: int, out_path: str, port: int) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank), WORLD_SIZE=str(CP_WORLD_SIZE))
-    dist.init_process_group("gloo", rank=rank, world_size=CP_WORLD_SIZE)
-    try:
-        batch = _batch()
-        reference_model = _TokenTableLM()
-        cp_model = copy.deepcopy(reference_model)
+def _worker(rank: int) -> None:
+    batch = _batch()
+    reference_model = _TokenTableLM()
+    cp_model = copy.deepcopy(reference_model)
 
-        reference = _trainer(ParallelismConfig(world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE), None)
-        ref_outputs, ref_loss, ref_grad, ref_metrics, _ = _loss_and_grad(reference, reference_model, batch)
+    reference = _trainer(ParallelismConfig(world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE), None)
+    ref_outputs, ref_loss, ref_grad, ref_metrics, _ = _loss_and_grad(reference, reference_model, batch)
 
-        parallelism_config = ParallelismConfig(
-            cp_size=CP_WORLD_SIZE, world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE
-        )
-        cp_config = parallelism_config.create_cp_config()
-        cp_model.cp_config = cp_config
-        cp_outputs, cp_loss, cp_grad, cp_metrics, cp_warnings = _loss_and_grad(
-            _trainer(parallelism_config, cp_config), cp_model, batch
-        )
-        # FSDP2 averages every gradient over the whole world, CP ranks included (DP=1 here).
-        dist.all_reduce(cp_grad, op=dist.ReduceOp.SUM)
-        cp_grad /= CP_WORLD_SIZE
+    parallelism_config = ParallelismConfig(
+        cp_size=CP_WORLD_SIZE, world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE
+    )
+    cp_config = parallelism_config.create_cp_config()
+    cp_model.cp_config = cp_config
+    cp_outputs, cp_loss, cp_grad, cp_metrics, cp_warnings = _loss_and_grad(
+        _trainer(parallelism_config, cp_config), cp_model, batch
+    )
+    # FSDP2 averages every gradient over the whole world, CP ranks included (DP=1 here).
+    dist.all_reduce(cp_grad, op=dist.ReduceOp.SUM)
+    cp_grad /= CP_WORLD_SIZE
 
-        compared = {key: (cp_outputs[key], ref_outputs[key]) for key in PER_SEQUENCE_KEYS}
-        compared["loss"] = (cp_loss, ref_loss)
-        compared["FSDP-averaged gradient"] = (cp_grad, ref_grad)
-        assert cp_metrics.keys() == ref_metrics.keys()
-        compared.update({f"metric {key}": (cp_metrics[key], ref_metrics[key]) for key in ref_metrics})
-        failures = []
-        for name, (cp_value, ref_value) in compared.items():
-            # Absolute where the reference is exactly zero (this batch's reward accuracy).
-            scale = ref_value.double().norm().item() or 1.0
-            rel_err = (cp_value.double() - ref_value.double()).norm().item() / scale
-            if not rel_err < REL_TOL:
-                ratio = cp_value.double().norm().item() / scale
-                failures.append(f"{name}: rel_err={rel_err:.3e} vs the unsplit sequence (||cp||/||ref||={ratio:.4f})")
-        fallback = [message for message in cp_warnings if AUTOGRAD_FALLBACK_WARNING in message]
-        if fallback:
-            failures.append(f"backward went through the c10d autograd fallback: {fallback[0]}")
-
-        # Every rank writes its own verdict: each backpropagates a different chunk.
-        with open(f"{out_path}.{rank}", "w") as fh:
-            fh.write("PASS" if not failures else "FAIL: " + "; ".join(failures))
-    finally:
-        dist.destroy_process_group()
+    compared = {key: (cp_outputs[key], ref_outputs[key]) for key in PER_SEQUENCE_KEYS}
+    compared["loss"] = (cp_loss, ref_loss)
+    compared["FSDP-averaged gradient"] = (cp_grad, ref_grad)
+    assert cp_metrics.keys() == ref_metrics.keys()
+    compared.update({f"metric {key}": (cp_metrics[key], ref_metrics[key]) for key in ref_metrics})
+    failures = []
+    for name, (cp_value, ref_value) in compared.items():
+        # Absolute where the reference is exactly zero (this batch's reward accuracy).
+        scale = ref_value.double().norm().item() or 1.0
+        rel_err = (cp_value.double() - ref_value.double()).norm().item() / scale
+        if not rel_err < REL_TOL:
+            ratio = cp_value.double().norm().item() / scale
+            failures.append(f"{name}: rel_err={rel_err:.3e} vs the unsplit sequence (||cp||/||ref||={ratio:.4f})")
+    fallback = [message for message in cp_warnings if AUTOGRAD_FALLBACK_WARNING in message]
+    if fallback:
+        failures.append(f"backward went through the c10d autograd fallback: {fallback[0]}")
+    # Past the last collective, so a failing rank cannot strand its peer; each rank backpropagates a
+    # different chunk and so judges its own.
+    assert not failures, f"rank {rank}: " + "; ".join(failures)
 
 
-def test_cp_loss_and_gradient_match_the_unsplit_sequence(tmp_path):
-    out = str(tmp_path / "result.txt")
-    mp.start_processes(_worker, args=(out, free_port()), nprocs=CP_WORLD_SIZE, join=True, start_method="spawn")
-    results = {}
-    for rank in range(CP_WORLD_SIZE):
-        with open(f"{out}.{rank}") as fh:
-            results[rank] = fh.read()
-    assert set(results.values()) == {"PASS"}, results
+def test_cp_loss_and_gradient_match_the_unsplit_sequence():
+    run_gloo_ranks(_worker, CP_WORLD_SIZE)
 
 
 if __name__ == "__main__":

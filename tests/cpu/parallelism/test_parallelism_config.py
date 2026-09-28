@@ -7,7 +7,6 @@ Run: python tests/cpu/parallelism/test_parallelism_config.py
 
 import datetime
 import os
-from unittest.mock import patch
 
 import pytest
 import torch.distributed as dist
@@ -19,11 +18,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.gloo import run_gloo_ranks
-from tests.common.parallelism import create_config, make_parallelism_config
-
-# Module path prefix for mocking the src.distributed.runtime imports in parallelism_config
-_MOD = "src.distributed.parallelism_config"
-
+from tests.common.parallelism import create_config, make_parallelism_config, simulated_world
 
 # Computed fields
 
@@ -734,12 +729,7 @@ def _DistArgs() -> DistributedArguments:
 
 def test_parallelism_config_from_args_basic():
     """parallelism_config_from_args wires DistributedArguments into a ParallelismConfig."""
-    with (
-        patch(f"{_MOD}.get_global_world_size", return_value=8),
-        patch(f"{_MOD}.get_local_world_size", return_value=8),
-        patch(f"{_MOD}.get_global_rank", return_value=0),
-        patch(f"{_MOD}.is_global_main_process", return_value=True),
-    ):
+    with simulated_world(world_size=8, gpus_per_node=8):
         # Non-default values on the knobs most prone to silent drift, so the asserts below fail if
         # the builder drops them back to ParallelismConfig defaults instead of forwarding.
         args = _DistArgs()
@@ -771,12 +761,7 @@ def test_parallelism_config_from_args_rejects_lowp_when_disallowed():
     """A non-bf16 lowp_precision is rejected when allow_low_precision=False (non-SFT trainers)."""
     args = _DistArgs()
     args.lowp_precision = "fp8"
-    with (
-        patch(f"{_MOD}.get_global_world_size", return_value=8),
-        patch(f"{_MOD}.get_local_world_size", return_value=8),
-        patch(f"{_MOD}.get_global_rank", return_value=0),
-        patch(f"{_MOD}.is_global_main_process", return_value=True),
-    ):
+    with simulated_world(world_size=8, gpus_per_node=8):
         try:
             parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=False)
             raise AssertionError("Should have raised ValueError")
@@ -788,12 +773,7 @@ def test_parallelism_config_from_args_lowp_allowed_for_sft():
     """allow_low_precision=True forwards the lowp_* knobs (SFT path)."""
     args = _DistArgs()
     args.lowp_precision = "fp8"
-    with (
-        patch(f"{_MOD}.get_global_world_size", return_value=8),
-        patch(f"{_MOD}.get_local_world_size", return_value=8),
-        patch(f"{_MOD}.get_global_rank", return_value=0),
-        patch(f"{_MOD}.is_global_main_process", return_value=True),
-    ):
+    with simulated_world(world_size=8, gpus_per_node=8):
         cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=True)
         assert cfg.lowp_precision == "fp8"
 
@@ -1220,12 +1200,7 @@ def test_expert_lora_reaches_validation_through_the_builder():
     (expert-only LoRA leaves no attention ``PeftModel`` to find). Nothing errors, at any point.
     """
     spec = ExpertLoraSpec(r=8, alpha=16.0)
-    with (
-        patch(f"{_MOD}.get_global_world_size", return_value=8),
-        patch(f"{_MOD}.get_local_world_size", return_value=8),
-        patch(f"{_MOD}.get_global_rank", return_value=0),
-        patch(f"{_MOD}.is_global_main_process", return_value=True),
-    ):
+    with simulated_world(world_size=8, gpus_per_node=8):
         args = _DistArgs()
         cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, expert_lora=spec)
         assert cfg.expert_lora is spec, "the builder must forward expert_lora into the constructor"

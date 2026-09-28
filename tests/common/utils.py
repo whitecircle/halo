@@ -339,13 +339,15 @@ def training_run_checks(
     *,
     loss_band: tuple[float, float] | None = None,
     grad_norms: bool = False,
+    loss_decreased: bool = False,
 ) -> dict[str, bool]:
     """The finished-run checks the SFT and LoRA suites share, each logged with its verdict.
 
     ``loss_finite`` (the reported training loss), ``all_steps_finite`` (every logged step loss),
     ``steps_completed`` (``max_steps`` optimizer steps ran), given ``loss_band`` ``loss_reasonable``
-    (the reported training loss strictly inside it), and with ``grad_norms`` ``grad_norms_finite``
-    (every logged gradient norm).
+    (the reported training loss strictly inside it), with ``grad_norms`` ``grad_norms_finite`` (at
+    least one gradient norm logged, every one finite), and with ``loss_decreased`` ``loss_decreased`` (the last logged step loss
+    below the first, which fails on fewer than two logged steps).
     """
     training_loss = train_result.training_loss
     losses = step_losses(trainer)
@@ -367,11 +369,15 @@ def training_run_checks(
         log(f"  Loss in band ({low}, {high}): {'PASS' if checks['loss_reasonable'] else 'FAIL'} ({training_loss:.4f})")
     if grad_norms:
         norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
-        checks["grad_norms_finite"] = all(math.isfinite(norm) for norm in norms)
+        checks["grad_norms_finite"] = bool(norms) and all(math.isfinite(norm) for norm in norms)
         log(
             f"  All grad norms finite: {'PASS' if checks['grad_norms_finite'] else 'FAIL'} "
             f"({[f'{norm:.2f}' for norm in norms]})"
         )
+    if loss_decreased:
+        checks["loss_decreased"] = len(losses) >= 2 and losses[-1] < losses[0]
+        trend = f"{losses[0]:.4f} -> {losses[-1]:.4f}" if losses else "no step logged"
+        log(f"  Loss decreased: {'PASS' if checks['loss_decreased'] else 'FAIL'} ({trend})")
     return checks
 
 

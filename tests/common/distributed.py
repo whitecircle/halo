@@ -1,7 +1,8 @@
 """Distributed setup/teardown for torchrun-based tests.
 
 Covers process-group init, scratch/cache dir allocation under the launcher's ``TMPDIR``,
-rank-0-then-barrier model download, world-wide scalar reductions and teardown.
+rank-0-then-barrier model download, world-wide scalar reductions, the cross-rank tensor-identity probe
+and teardown.
 """
 
 import contextlib
@@ -21,7 +22,7 @@ from transformers import AutoConfig, AutoTokenizer
 from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
 from src.distributed.runtime import barrier
 from src.models.patches.attention import ensure_fa4_kernel_cache_env
-from tests.gpu.manifest import SCRATCH_DIR_TAG
+from tests.common.scratch import SCRATCH_DIR_TAG
 
 
 class FakeStore:
@@ -219,6 +220,19 @@ def world_spread(value: float, device=None) -> float:
     if not torch.isfinite(values).all():
         return math.inf
     return float(values.max() - values.min())
+
+
+def group_max_abs_diff(tensor: torch.Tensor, group: dist.ProcessGroup | None = None) -> float:
+    """Largest elementwise ``|Δ|`` of ``tensor`` between any rank of ``group`` and its first rank.
+
+    ``0.0`` means bit-identical across the group, the replica-identity verdict. A NaN on any rank
+    returns NaN, which fails every bound: the reduction stays in torch, whose ``max`` propagates NaN
+    where Python's drops it. Collective over ``group`` (default: the world).
+    """
+    local = tensor.detach().contiguous()
+    gathered = [torch.empty_like(local) for _ in range(dist.get_world_size(group))]
+    dist.all_gather(gathered, local, group=group)
+    return torch.stack([(g - gathered[0]).abs().max() for g in gathered]).max().item()
 
 
 def snapshot_full_weights(model) -> dict[str, torch.Tensor]:

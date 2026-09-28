@@ -37,6 +37,7 @@ it is handled here via ``ctx``.
 """
 
 import functools
+import os
 import sys
 import traceback
 from collections.abc import Callable
@@ -148,6 +149,17 @@ def record_check(checks: dict[str, bool], name: str, fn: Callable[[], None]) -> 
     else:
         checks[name] = True
         log(f"  PASS: {name}")
+
+
+def skip_unless_local_checkpoint(path: str, env_var: str) -> None:
+    """Decline to run, before the harness starts, when a suite's local checkpoint directory is absent.
+
+    The launcher reads an exit-0 run that printed a ``SKIP:`` line and no result line as a skip.
+    ``env_var`` is the knob that points the suite at a checkpoint that is present.
+    """
+    if not os.path.isdir(path):
+        log(f"SKIP: local model path missing: {path} (set {env_var} to a present checkpoint)")
+        sys.exit(0)
 
 
 def gpu_test_main(

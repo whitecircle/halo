@@ -16,6 +16,8 @@ from tests.common.models import MISTRAL3_119B_MOE, TINY_MISTRAL4_CONFIG
 
 # Seed ``randomize_tid2eid`` fills the hash table from unless a test pins its own.
 DSV4_TID2EID_SEED = 1234
+# The files a synthetic checkpoint copies from its release so ``AutoTokenizer`` loads it offline.
+TOKENIZER_FILE_PREFIXES = ("tokenizer", "special_tokens", "chat_template")
 
 
 def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
@@ -33,8 +35,13 @@ def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
             table.copy_(perm[:, : table.shape[1]])
 
 
-# The files a synthetic checkpoint copies from its release so ``AutoTokenizer`` loads it offline.
-TOKENIZER_FILE_PREFIXES = ("tokenizer", "special_tokens", "chat_template")
+def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
+    """Copy ``repo_id``'s tokenizer files into ``out_dir``, downloading only those, not the weights."""
+    tokenizer_dir = Path(snapshot_download(repo_id, allow_patterns=[f"{p}*" for p in TOKENIZER_FILE_PREFIXES]))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for src in tokenizer_dir.iterdir():
+        if src.is_file() and src.name.startswith(TOKENIZER_FILE_PREFIXES):
+            shutil.copy2(src, out_dir / src.name)
 
 
 def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
@@ -44,14 +51,7 @@ def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
     tokenizer files, so the lazy loader and ``load_distributed_model`` run end to end without the
     119B download.
     """
-    tokenizer_dir = Path(
-        snapshot_download(MISTRAL3_119B_MOE, allow_patterns=[f"{p}*" for p in TOKENIZER_FILE_PREFIXES])
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for src in tokenizer_dir.iterdir():
-        if src.is_file() and src.name.startswith(TOKENIZER_FILE_PREFIXES):
-            shutil.copy2(src, out_dir / src.name)
-
+    copy_release_tokenizer(MISTRAL3_119B_MOE, out_dir)
     torch.manual_seed(seed)
     model = Mistral4ForCausalLM(Mistral4Config(**TINY_MISTRAL4_CONFIG)).to(torch.bfloat16)
     model.save_pretrained(out_dir, safe_serialization=True)

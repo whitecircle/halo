@@ -9,18 +9,15 @@ peers in the next collective.
     python tests/cpu/grpo/test_offline_grpo_empty_prompt.py
 """
 
-import contextlib
 import datetime
 import os
 
 import pytest
-import torch.distributed as dist
-import torch.multiprocessing as mp
 from datasets import Dataset
 
 from src.data.pipeline.processing import coordinated_map
 from src.trainers.grpo.offline import tokenize_offline_grpo_rows
-from tests.common.ports import free_port
+from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 # Far below a real barrier wait: a rank left hanging fails the test instead of stalling the suite.
@@ -75,12 +72,7 @@ def test_non_empty_prompts_still_tokenize():
     assert out["prompt_input_ids"] == [[100, 101, 102]] * 2
 
 
-def _worker(rank: int, tmp_dir: str, port: str) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=port, RANK=str(rank), WORLD_SIZE=str(WORLD_SIZE))
-    os.environ["HF_DATASETS_CACHE"] = os.path.join(tmp_dir, "hf_datasets")
-    dist.init_process_group(
-        "gloo", rank=rank, world_size=WORLD_SIZE, timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
-    )
+def _worker(rank: int, tmp_dir: str) -> None:
     try:
         coordinated_map(
             Dataset.from_dict(_rows()),
@@ -97,13 +89,15 @@ def _worker(rank: int, tmp_dir: str, port: str) -> None:
         outcome = f"{type(e).__name__}: {e}"
     with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
         fh.write(outcome)
-    with contextlib.suppress(Exception):
-        dist.destroy_process_group()
 
 
 def test_every_rank_raises_the_refusal_during_the_coordinated_map(tmp_path):
-    mp.start_processes(
-        _worker, args=(str(tmp_path), str(free_port())), nprocs=WORLD_SIZE, join=True, start_method="spawn"
+    run_gloo_ranks(
+        _worker,
+        WORLD_SIZE,
+        str(tmp_path),
+        pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC),
+        env={"HF_DATASETS_CACHE": str(tmp_path / "hf_datasets")},
     )
     for rank in range(WORLD_SIZE):
         result = (tmp_path / f"result_{rank}.txt").read_text()

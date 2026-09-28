@@ -1,15 +1,20 @@
 """Synthetic dataset generators shared across test files.
 
-One generator per task shape (SFT, preference, offline GRPO, VLM preference, benchmark filler). A
-generator only one test needs, because its dataset shape is the subject of that test, stays inline in
-that file.
+One generator per task shape (SFT, preference, offline GRPO, VLM preference, benchmark filler), plus
+the writer of a text-mode ``prepare_dataset`` artifact. A generator only one test needs, because its
+dataset shape is the subject of that test, stays inline in that file.
 """
 
 import random
 
-from datasets import Dataset, Sequence
+from datasets import Dataset, DatasetDict, Sequence
 from datasets import Image as HFImage
 from PIL import Image, ImageDraw
+
+from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
+from src.data.pipeline.preprocessing import preprocess_dataset
+from tests.common.models import QWEN3_0_6B
+from tests.common.tokenizers import load_cached_tokenizer
 
 # Math Templates (shared across SFT and preference datasets)
 
@@ -401,3 +406,17 @@ def create_vlm_preference_dataset(n: int) -> Dataset:
             }
         )
     return Dataset.from_list(rows).cast_column("images", Sequence(HFImage()))
+
+
+# Prepared dataset (the ``prepare_dataset`` artifact)
+
+
+def write_prepared_text_dataset(output_dir, data: Dataset | DatasetDict, *, num_shards: int = 1) -> None:
+    """Write ``data`` (a ``text`` column) to ``output_dir`` as a text-mode ``prepare_dataset`` artifact.
+
+    Tokenizes with the cached Qwen3-0.6B tokenizer, so the calling test skips where it is not cached.
+    """
+    config = PreprocessingConfig(
+        model_name_or_path=QWEN3_0_6B, mode="text", max_length=64, num_shards=num_shards, num_proc=1
+    )
+    preprocess_dataset(data, load_cached_tokenizer(QWEN3_0_6B), config, output_dir=str(output_dir))

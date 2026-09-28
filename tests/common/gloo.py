@@ -50,7 +50,6 @@ def run_gloo_ranks(
     worker: Callable[..., object],
     nprocs: int,
     *args,
-    timeout: float = GLOO_JOIN_TIMEOUT_S,
     pg_timeout: datetime.timedelta | None = None,
     env: Mapping[str, str] | None = None,
 ) -> None:
@@ -66,8 +65,8 @@ def run_gloo_ranks(
     ``worker`` must be a module-level function, since spawn pickles it by reference. A rank that
     raises or dies fails this call once its peers are stopped (``ProcessRaisedException`` /
     ``ProcessExitedException``), so a worker may assert directly; a test whose subject is a rank that
-    raises records each rank's outcome in a file instead. Ranks still running ``timeout`` seconds
-    after the spawn are killed and ``TimeoutError`` names them.
+    raises records each rank's outcome in a file instead. Ranks still running
+    :data:`GLOO_JOIN_TIMEOUT_S` after the spawn are killed and ``TimeoutError`` names them.
     """
     context = mp.start_processes(
         _gloo_rank,
@@ -76,7 +75,7 @@ def run_gloo_ranks(
         join=False,
         start_method="spawn",
     )
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + GLOO_JOIN_TIMEOUT_S
     while not context.join(timeout=max(0.0, deadline - time.monotonic())):
         if time.monotonic() >= deadline:
             stuck = [rank for rank, process in enumerate(context.processes) if process.is_alive()]
@@ -85,6 +84,6 @@ def run_gloo_ranks(
                     process.kill()
                 process.join()
             raise TimeoutError(
-                f"{worker.__qualname__}: rank(s) {stuck} of {nprocs} still running {timeout}s after the spawn "
-                f"— stuck in a collective or a store wait; killed"
+                f"{worker.__qualname__}: rank(s) {stuck} of {nprocs} still running {GLOO_JOIN_TIMEOUT_S}s after "
+                f"the spawn — stuck in a collective or a store wait; killed"
             )
