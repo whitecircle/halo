@@ -105,7 +105,8 @@ torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_vs_fsdp_<name>.py
 Required before the family counts as supported: an EP-vs-FSDP equivalence test (template
 `tests/gpu/parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`), a trainer test that saves through the
 gathered EP path and reloads the checkpoint as a plain HF model
-(`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`), both registered in
+(`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`, a thin subclass of `EPSftRoundTrip` in
+`tests/common/ep_sft_roundtrip.py` — copy it and override only the family hooks), both registered in
 `tests/gpu/manifest.py`, a CPU support test (`tests/cpu/models/test_deepseek_v4_support.py`), and —
 where you wired `bias_update` — `tests/gpu/parallelism/ep/test_gptoss_bias_balancing.py`. Add the
 Liger numerics case to `tests/gpu/kernels/test_liger_family_kernels.py`.
