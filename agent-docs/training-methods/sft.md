@@ -50,7 +50,7 @@ Refused at startup:
 
 - `packing` together with `padding_free`, and `packing` without an explicit `max_length` (the pack size bounds memory).
 - `padding_free` on a non-varlen attention implementation, under CP, or under PP — the flattened width changes every step while the P2P buffers freeze on the first. Use `packing`, except under CP, which refuses both.
-- TRL's `completion_only_loss` / `assistant_only_loss`: they act inside the dataset prep and collator this script replaces.
+- TRL's `completion_only_loss` / `assistant_only_loss`, and a non-default `dataset_text_field` / `dataset_kwargs`: they act inside the dataset prep and collator this script replaces. The script renders `conversation_field` itself; tokenize a raw-text column offline with `prepare_dataset.py --mode text`.
 
 Per-family configs live under `examples/sft/`; full field list in [Configuration Reference](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
 

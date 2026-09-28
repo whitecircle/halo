@@ -55,7 +55,7 @@ With `reference_kl_coef <= 0`, a non-default `reference_model_name_or_path` or `
 
 Neither branch is ever truncated — the teacher is systematically longer, so right-truncation would cut response tokens the student keeps. On the text path a row over `max_length` raises, naming the branch, and a prep-time audit makes that raise world-uniform instead of hanging the peers of one rank. Size `max_length` with headroom for the hint.
 
-The dataset stays raw: the collator tokenizes the student and the hinted teacher branch at collation time. Inherited SFT knobs that cannot reach it are refused, not ignored — `packing`, `padding_free`, `completion_only_loss`, `assistant_only_loss`, `train_on_last_assistant_only`, `generate_eval_examples` and `num_eval_examples`.
+The dataset stays raw: the collator tokenizes the student and the hinted teacher branch at collation time. Inherited SFT knobs that cannot reach it are refused, not ignored — `packing`, `padding_free`, `eval_packing`, `completion_only_loss`, `assistant_only_loss`, `dataset_text_field`, `dataset_kwargs`, `train_on_last_assistant_only`, `generate_eval_examples` and `num_eval_examples`.
 
 ## Launch
 

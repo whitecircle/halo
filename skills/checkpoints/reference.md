@@ -109,8 +109,11 @@ Re-save a model in BF16, optionally merging a PEFT adapter in the same pass. Fla
 read a Hub-capable `--model_id`, so those default **off**).
 **Forces every normalization leaf (torch norm bases, or a class named `*Norm*`) back to fp32** (BF16
 body + fp32 norms) — the only tool that does: `merge_peft_adapters.py` leaves norms at the `--dtype`
-it loads the base at, and `merge_ep_shards.py` keeps them at their trained dtype. Applies
-`apply_training_sidecars` to the loaded model (see below).
+it loads the base at, except modules a family pins through transformers'
+`_keep_in_fp32_modules_strict` (e.g. DeepSeek-V4's norms and HC modules), which load fp32 under a
+bf16 or fp16 `--dtype`. GPT-OSS declares its norms in the non-strict `_keep_in_fp32_modules`, which
+transformers keeps fp32 only under `--dtype float16`. `merge_ep_shards.py` keeps norms at their
+trained dtype. Applies `apply_training_sidecars` to the loaded model (see below).
 
 ### `quantize_to_lowp.py`
 Post-training quantize bf16/fp32 → block-scaled **mxfp8 / mxfp4 / nvfp4** (compressed-tensors triples +
