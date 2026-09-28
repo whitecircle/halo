@@ -657,9 +657,10 @@ def unmarked_merged_checkpoint_reason(checkpoint_dir: str) -> str:
     return (
         f"{checkpoint_dir} holds merged weights without its resume adapter (no {RESUME_ADAPTER_MARKER_FILE}: "
         f"a torn save, or one written without it), and this run trains adapters. Resuming would restart "
-        f"them from initialization on weights that already hold their trained delta. Resume from a "
-        f"checkpoint that carries its resume adapter, or start a new run from its merged weights "
-        f"(model_name_or_path: {checkpoint_dir}, without resume_from_checkpoint)."
+        f"them from initialization under their restored optimizer state, on weights that may already "
+        f"hold their trained delta. Resume from a checkpoint that carries its resume adapter, or start a "
+        f"new run from its merged weights (model_name_or_path: {checkpoint_dir}, without "
+        f"resume_from_checkpoint)."
     )
 
 

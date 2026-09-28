@@ -263,8 +263,8 @@ def lora_fold_targets(model: torch.nn.Module) -> LoraFolds:
             raise ValueError(
                 f"{name}: {unfoldable} cannot be folded out of place, which is implemented for plain and DoRA "
                 f"adapters on {[cls.__name__ for cls in _FOLDABLE_LORA_LAYERS]} only, so its delta would not reach "
-                f"the merged weights. List only plain linear, embedding or ungrouped conv modules in "
-                f"lora_target_modules."
+                f"the merged weights. Use a plain LoraConfig (use_dora allowed) on unquantized linear, "
+                f"embedding or ungrouped conv modules in lora_target_modules."
             )
         adapters = _adapters_to_fold(module)
         if not adapters:

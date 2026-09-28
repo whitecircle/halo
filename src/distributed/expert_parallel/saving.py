@@ -137,7 +137,8 @@ def save_ep_model(
     (required for EP+CP). ``merge_lora=True`` folds native grouped-LoRA deltas into the gathered base.
 
     ``lora_folds`` (:func:`~src.models.structure.lora_fold_targets` of the PeftModel) folds the PEFT
-    adapters' deltas into the base tensors as they are written, out of place.
+    adapters' deltas into the non-EP base tensors as they are written, out of place; no LoRA layer
+    sits inside an EP layer (the trainer's ``_validate_lora_ep_compatibility`` refuses one).
     """
     model = unwrap_model(model)
     peft_prefix = None

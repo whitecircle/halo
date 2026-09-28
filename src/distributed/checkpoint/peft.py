@@ -24,7 +24,6 @@ from torch.distributed.tensor import DTensor
 from src.checkpoint.adapters import (
     EXPERT_LORA_CONFIG_KEY,
     MIXED_EXPERT_LORA_PEFT_TYPE,
-    adapter_weight_paths,
     cast_adapter_state_to_save_dtype,
     is_expert_lora_key,
     lora_scaling_mismatch,
@@ -36,6 +35,7 @@ from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     PROVENANCE_GPT_OSS_SINKS,
     TRAINING_PROVENANCE_FILE,
+    adapter_weight_paths,
 )
 from src.checkpoint.model_card import tag_model_card
 from src.distributed.checkpoint.context import CheckpointContext
