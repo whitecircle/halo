@@ -26,6 +26,7 @@ from src.models.moe_balancing import (
     mark_router_logits_forced_off,
 )
 from src.models.patches.gpt_oss_sinks import has_live_attention_sinks
+from src.models.structure import tuner_adapter_param_ids
 
 logger = get_logger(__name__)
 
@@ -127,19 +128,6 @@ def disable_trl_liger(training_args, reason: str | None = None) -> bool:
 def evaluation_runs(training_args) -> bool:
     """Whether the HF loop evaluates at all: an eval strategy, or ``eval_on_start`` under ``"no"``."""
     return training_args.eval_strategy not in ("no", None) or bool(training_args.eval_on_start)
-
-
-def has_non_expert_lora(model) -> bool:
-    """Whether ``model`` carries LoRA weights outside the EP expert layers.
-
-    Structural, not ``isinstance(model, PeftModel)``: adapters injected in place with
-    ``peft.inject_adapter_in_model`` (the embedding path, since ``SentenceTransformer`` cannot be
-    PEFT-wrapped) leave the model an ordinary ``nn.Module`` while carrying real adapters. EP's native
-    grouped expert adapters are excluded: they live on FSDP-ignored expert weights, not on the
-    TP-sharded backbone.
-    """
-    ep_param_ids = {id(p) for _name, m in find_ep_layers(model) for p in m.parameters()}
-    return any("lora_" in name and id(param) not in ep_param_ids for name, param in model.named_parameters())
 
 
 def active_router_aux_loss_coef(model) -> float:
@@ -448,10 +436,11 @@ class ParallelismValidationMixin:
         sync. CP and pure ETP leave attention unsharded, so LoRA there is fine.
 
         Adapters count whether PEFT wrapped the model or injected them in place (the embedding path
-        does the latter, so an ``isinstance`` check alone would miss it). EP's native grouped expert
-        adapters are counted separately: they are excluded by param identity from both the
-        attention-adapter test and the TP replicated-grad sweep, so expert-only LoRA under EP+TP
-        would otherwise reach no gate.
+        does the latter, so an ``isinstance`` check alone would miss it), read off the tuner layers
+        (:func:`~src.models.structure.tuner_adapter_param_ids`) so a backbone's own ``lora_*``
+        parameters stay base weights. EP's native grouped expert adapters are counted separately:
+        they are no tuner layer and the TP replicated-grad sweep excludes them by param identity, so
+        expert-only LoRA under EP+TP would otherwise reach no gate.
         """
         model = self._top_level_model()
         if has_ep_lora(model):
@@ -466,7 +455,7 @@ class ParallelismValidationMixin:
                 "  - expert LoRA under EP without TP (validated: save, resume and merge-on-save)\n"
                 "  - full fine-tuning under EP+TP (no adapters)"
             )
-        if not isinstance(model, PeftModel) and not has_non_expert_lora(model):
+        if not isinstance(model, PeftModel) and not tuner_adapter_param_ids(model):
             return
         raise ValueError(
             "LoRA/PEFT adapters are not supported with Tensor Parallelism (tp_size > 1).\n"
