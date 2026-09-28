@@ -2,10 +2,11 @@
 
 The shard cap, the Hub-capable source block, the dtype and device-map pair and the remote-code
 switch are defined once so the tools chained over a single artifact (``after_training/``,
-``before_training/``, ``inference/reward_model/``) accept the same spelling and defaults. The
-OpenAI-compatible endpoint block is defined once for the same reason across the generation, eval
-and playground CLIs (``inference/``, ``environments/``), which all drive one served model. Flags
-only; the drivers they feed live in ``src/``.
+``before_training/``) accept the same spelling and defaults; the reward-model scorers
+(``inference/reward_model/``) take the remote-code switch as is and the dtype flag under their
+``--rm_dtype`` name. The OpenAI-compatible endpoint block is defined once for the same reason across
+the generation, eval and playground CLIs (``inference/``, ``environments/``), which all drive one
+served model. Flags only; the drivers they feed live in ``src/``.
 """
 
 import argparse
@@ -84,15 +85,15 @@ def add_trust_remote_code_arg(parser: argparse.ArgumentParser, *, default: bool 
     return parser
 
 
-def add_dtype_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the ``--dtype`` flag for a tool that writes a checkpoint, as :data:`DTYPE_BY_NAME` names it."""
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        default="bfloat16",
-        choices=list(DTYPE_BY_NAME),
-        help="Dtype of the output checkpoint (default: %(default)s).",
-    )
+def add_dtype_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    flag: str = "--dtype",
+    help: str = "Dtype of the output checkpoint (default: %(default)s).",
+) -> argparse.ArgumentParser:
+    """Add a dtype flag, as :data:`DTYPE_BY_NAME` names it: ``--dtype`` for a tool that writes a
+    checkpoint, or ``flag``/``help`` for one whose dtype is another model's compute dtype."""
+    parser.add_argument(flag, type=str, default="bfloat16", choices=list(DTYPE_BY_NAME), help=help)
     return parser
 
 

@@ -92,6 +92,12 @@ def add_s3_dataset_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
         default="datasets",
         help=f"S3 subfolder (default: datasets, use '{NO_SUBFOLDER_SENTINEL}' to skip)",
     )
+    return add_prompt_field_args(parser)
+
+
+def add_prompt_field_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Add the prompt-row fields every generation CLI reads: the row id, the prompt, and the per-row
+    and global system prompts that ``resolve_system_prompt`` / ``build_base_prompt`` combine."""
     parser.add_argument("--id_field", type=str, default="id", help="Field holding the row's unique id")
     parser.add_argument(
         "--prompt_field", type=str, default="prompt", help="Field with the prompt as a list of message dicts"
