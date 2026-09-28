@@ -403,16 +403,18 @@ def model_fa4_backward_nan_prone(model_config) -> bool:
     return model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES, "glm4_moe_lite")
 
 
-def patch_sdpa_for_gemma4_long_seq() -> None:
-    """Force PyTorch SDPA to the mem-efficient kernel for Gemma4 (idempotent).
+def patch_sdpa_for_wide_heads() -> None:
+    """Force PyTorch SDPA to the mem-efficient kernel for heads past :data:`FLASH_MAX_HEAD_DIM`
+    (idempotent).
 
-    Gemma4's head_dim=512 is rejected by FA2 and cuDNN SDPA, and the math kernel OOMs on the full
-    score matrix; only mem-efficient handles arbitrary head_dim. Forces ``use_gqa_in_sdpa`` to False
-    (it rejects ``enable_gqa=True`` at head_dim=512 but accepts it after a manual KV repeat).
+    Such a head (Gemma 4's 512-wide global heads) is rejected by FA2 and cuDNN SDPA, and the math
+    kernel OOMs on the full score matrix; only mem-efficient handles arbitrary head_dim. Forces
+    ``use_gqa_in_sdpa`` to False (it rejects ``enable_gqa=True`` at head_dim=512 but accepts it after
+    a manual KV repeat).
     """
     logger.warning(
-        "Gemma4 SDPA patch: forcing mem-efficient SDPA and use_gqa_in_sdpa=False PROCESS-GLOBALLY — "
-        "every other sdpa model in this process (e.g. a frozen teacher beside a non-Gemma4 policy) "
+        "Wide-head SDPA patch: forcing mem-efficient SDPA and use_gqa_in_sdpa=False PROCESS-GLOBALLY — "
+        "every other sdpa model in this process (e.g. a frozen teacher beside a narrower-headed policy) "
         "takes the manual-KV-repeat path too (numerics identical; perf/memory only)."
     )
     torch.backends.cuda.enable_flash_sdp(False)
@@ -420,15 +422,15 @@ def patch_sdpa_for_gemma4_long_seq() -> None:
     torch.backends.cuda.enable_math_sdp(False)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
 
-    if not getattr(_sdpa_mod.use_gqa_in_sdpa, "_gemma4_patched", False):
+    if not getattr(_sdpa_mod.use_gqa_in_sdpa, "_wide_head_patched", False):
 
         def _no_gqa_in_sdpa(attention_mask, key, value):
             return False
 
-        _no_gqa_in_sdpa._gemma4_patched = True
+        _no_gqa_in_sdpa._wide_head_patched = True
         _sdpa_mod.use_gqa_in_sdpa = _no_gqa_in_sdpa
     logger.info(
-        "Forced mem-efficient SDPA + manual KV repeat for Gemma4 "
+        f"Forced mem-efficient SDPA + manual KV repeat for heads wider than {FLASH_MAX_HEAD_DIM} "
         "(unlocks seq>20k by avoiding the math kernel's score matrix)"
     )
 
@@ -662,7 +664,7 @@ def resolve_attn_implementation(
     # Force eager before from_pretrained rejects the auto-detected FA default.
     if attn_implementation != "eager" and _model_is_deepseek_v4(model_config):
         logger.warning(
-            f"DeepSeek-V4 supports only eager attention (head_dim=512 exceeds FA's 256 cap; SDPA/flex "
+            f"DeepSeek-V4 supports only eager attention (head_dim=512 exceeds FA's {FLASH_MAX_HEAD_DIM} cap; SDPA/flex "
             f"cannot carry the sink column + compressor KV concat); overriding "
             f"attn_implementation='{attn_implementation}' to 'eager'."
         )
