@@ -3,9 +3,8 @@
 Offline GRPO checkpoint resume test with Tensor Parallelism (TP=2) or Expert Parallelism (EP=2).
 
 Validates that OfflineGRPOTrainer can train, save a mid-training checkpoint, resume from it, and
-restore the trained weights BY VALUE (|L_post - L_pre| < tol at on_train_begin), plus the mode's
-optimizer contract: TP exact-resumes the per-rank Adam shards; EP warm-restarts the optimizer (its
-shards reference the EP-fused experts) and restores only the LR scheduler.
+restore the trained weights BY VALUE (|L_post - L_pre| < tol at on_train_begin), the per-rank Adam
+shards and the LR scheduler, in either mode.
 
 Mode via HALO_TEST_OFFGRPO_PARALLEL: "tp" (default, Qwen3-0.6B dense, tp_plan="auto") or "ep" (gpt-oss-20b MoE).
 
@@ -41,12 +40,14 @@ from tests.common.checkpoint_io import (
     fixed_batch_loss,
     fixed_text_batch,
     resume_checkpoint_checks,
+    resume_continuity_checks,
 )
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
+from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.utils import cleanup_memory, log, step_losses, training_run_checks
 
 # Configuration
 
@@ -71,7 +72,8 @@ SEED = 42
 
 # By-value weight-restoration probes (catch a silent-base-weights / corrupted-gather resume)
 
-LOSS_TOL = TOL.resume_fixed_batch_loss_abs  # TP forward is deterministic, so restored weights reproduce L_pre.
+# The TP forward reproduces L_pre to bf16 round-trip noise; DeepEP's combine may reorder the expert sum.
+LOSS_TOL = TOL.resume_loss_abs if _IS_EP else TOL.resume_fixed_batch_loss_abs
 
 
 # Phase 1: Train + Save Checkpoint
@@ -138,7 +140,7 @@ def phase1_train_and_save(
             parallelism_config=parallelism_config,
         )
 
-        assert trainer._has_ep_layers if _IS_EP else trainer.is_tp_mode, f"expected {_MODE} mode active"
+        assert all(parallel_shape_checks(model, parallelism_config).values()), f"{_MODE} did not take effect"
 
         log(f"Training for {SAVE_AT_STEP} steps...")
         train_result = trainer.train()
@@ -194,9 +196,9 @@ def phase2_resume_and_train(
 ) -> tuple[bool, list[float]]:
     """Resume from checkpoint and train to TOTAL_STEPS, asserting the trained weights were restored.
 
-    TP exact-resumes: the by-value check (``|L_post - L_pre| < LOSS_TOL`` at on_train_begin) catches a
+    The by-value check (``|L_post - L_pre| < LOSS_TOL`` at on_train_begin) catches a
     silent-base-weights / corrupted-gather resume, and the Adam-2nd-moment + scheduler checks lock the
-    full-continuity contract.
+    full-continuity contract (:func:`~tests.common.checkpoint_io.resume_continuity_checks`).
     """
     log(f"\n{'=' * 60}")
     log(f"  Phase 2: Resume + Train to step {TOTAL_STEPS} (TP={TP_SIZE})")
@@ -254,7 +256,7 @@ def phase2_resume_and_train(
             parallelism_config=parallelism_config,
         )
 
-        assert trainer._has_ep_layers if _IS_EP else trainer.is_tp_mode, f"expected {_MODE} mode active"
+        assert all(parallel_shape_checks(model, parallelism_config).values()), f"{_MODE} did not take effect"
 
         # Capture restored state at on_train_begin (post-resume, pre-first-step).
         ids, labels = fixed_text_batch(tokenizer, torch.cuda.current_device(), TP_RESUME_PROBE_TEXT)
@@ -264,65 +266,14 @@ def phase2_resume_and_train(
         log(f"Resuming from: {checkpoint_path}")
         train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
 
-        training_loss = train_result.training_loss
         losses = step_losses(trainer)
-        log(f"Phase 2 loss: {training_loss:.6f}")
-        log(f"Phase 2 step losses: {[f'{l:.4f}' for l in losses]}")
-        log(f"Phase 2 global step: {trainer.state.global_step}")
-
-        loss_ok = math.isfinite(training_loss)
-        steps_ok = trainer.state.global_step == TOTAL_STEPS
-        all_finite = all(math.isfinite(l) for l in losses)
-
-        if not loss_ok:
-            log(f"ERROR: Phase 2 loss not finite: {training_loss}")
-        if not steps_ok:
-            log(f"ERROR: Expected {TOTAL_STEPS} steps, got {trainer.state.global_step}")
-        if not all_finite:
-            log("ERROR: NaN/Inf in step losses")
-
-        # ---- By-value resume continuity (post-resume, pre-step snapshot) ----
-        cap = resume_capture.capture
-        if cap is None:
-            log("ERROR: resume-capture callback did not fire (on_train_begin missed)")
-            del trainer, model
-            cleanup_memory()
-            barrier()
-            return False, losses
-
-        l_post = cap["l_post"]
-        loss_delta = abs(l_post - l_pre)
-        # Restored trained weights must reproduce L_pre; a base-weights/corrupted-gather resume shifts the
-        # fixed-batch loss by ~O(1). EP forward is non-deterministic (DeepEP all-to-all reordering) → looser
-        # band, still far below the not-restored gap; TP forward is deterministic → tight band.
-        weight_tol = 0.5 if _IS_EP else LOSS_TOL
-        weights_ok = math.isfinite(l_post) and loss_delta < weight_tol
-        log(f"  L_pre={l_pre:.6f}  L_post={l_post:.6f}  |delta|={loss_delta:.6f} (tol {weight_tol})")
-        if not weights_ok:
-            log(f"  ERROR: weights not restored — |L_post - L_pre|={loss_delta:.6f} >= {weight_tol}")
-
-        # TP = exact resume (Adam 2nd moment restored); EP = warm restart (optimizer reinitialized — its
-        # shards reference the EP-fused structure), so it must be RESET. Both restore the LR scheduler.
-        if _IS_EP:
-            optim_ok = not cap["moments_materialized"]
-        else:
-            optim_ok = cap["moments_materialized"] and cap["moments_nonzero"] and cap["moments_finite"]
-        sched_ok = cap["sched_last_epoch"] == SAVE_AT_STEP
-        log(
-            f"  optimizer exp_avg_sq materialized={cap['moments_materialized']} "
-            f"nonzero={cap['moments_nonzero']} finite={cap['moments_finite']}; "
-            f"scheduler last_epoch={cap['sched_last_epoch']} (expected {SAVE_AT_STEP})"
-        )
-        if not optim_ok:
-            log(f"  ERROR: optimizer state wrong for {_MODE} (TP wants full continuity; EP wants reset)")
-        if not sched_ok:
-            log(f"  ERROR: scheduler last_epoch={cap['sched_last_epoch']} != {SAVE_AT_STEP}")
+        checks = training_run_checks(train_result, trainer, TOTAL_STEPS)
+        checks |= resume_continuity_checks(resume_capture.capture, l_pre, save_step=SAVE_AT_STEP, loss_tol=LOSS_TOL)
 
         del trainer, model
         cleanup_memory()
         barrier()
-
-        return loss_ok and steps_ok and all_finite and weights_ok and optim_ok and sched_ok, losses
+        return all(checks.values()), losses
 
     except Exception as e:
         log(f"Phase 2 FAILED: {e}")
