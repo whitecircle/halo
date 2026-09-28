@@ -64,6 +64,7 @@ from src.kernels.liger.orchestrator import (
     trl_reapplication_config,
     warn_if_flce_unreachable,
 )
+from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
 from src.models.loading.dtype import resolve_training_dtype
 from src.models.moe_balancing import ep_wraps_experts
@@ -558,7 +559,8 @@ class DistributedTrainerMixin(
                 register_forward_generation_hook(self.model)
             # modules_to_save swaps in a router copy the ctor-time DP-sync hook never saw.
             self._reattach_ep_router_grad_sync_for_peft()
-            # Every EP run, wrapped or not: the parameters its EP modules sync themselves.
+            # Every EP-wrapper run, FSDP2-wrapped or not: only an EP module leaves a trainable
+            # parameter out of the shard groups (the dtype exclusions are frozen).
             self._reject_unsynced_trainable_params(self.model, self._fsdp_exclusions().params)
         self._validate_expert_lora_realized()
         # After the wrap and after TRL's dropout disabling, so they read what the run will actually use.
@@ -786,17 +788,17 @@ class DistributedTrainerMixin(
     def _reject_unsynced_trainable_params(self, model: nn.Module, candidates: Iterable[nn.Parameter]) -> None:
         """Raise on every rank if a trainable parameter in ``candidates`` has no gradient sync.
 
-        ``candidates`` sit outside FSDP2's shard groups: a wrap's exclusions, or the parameters of the EP
-        modules that sync their own gradients. Such a parameter keeps its local gradient unless its EP
-        layer's hooks (``synced_trainable_param_ids``: experts + LoRA, router, replicated submodules) or
-        the deferred post-backward sweep average it; without either it trains on this rank's batch only
-        and drifts across DP ranks while every loss stays finite. Collective: every rank must call it.
+        ``candidates`` is what every FSDP2 wrap leaves out (:meth:`_fsdp_exclusions`): frozen dtype
+        exclusions and the parameters of the EP modules that sync their own gradients. Such a parameter
+        keeps its local gradient unless its EP layer's hooks (``synced_trainable_param_ids``: experts +
+        LoRA, router, replicated submodules) or the deferred post-backward sweep average it; without
+        either it trains on this rank's batch only and drifts across DP ranks while every loss stays
+        finite. Collective: every rank must call it.
         """
         candidate_set = IdentityParamSet(candidates)
-        ep_config = getattr(self, "_ep_config", None)
         # The deferred sweep averages every trainable non-DTensor parameter, and a parameter outside the
         # shard groups is never a DTensor.
-        deferred = ep_config is not None and ep_config.defer_grad_sync
+        deferred = self._ep_config is not None and self._ep_config.defer_grad_sync
         covered: set[int] = set()
         for module in self._find_ep_modules():
             if not module.ep_config.experts_fsdp_managed:
@@ -808,8 +810,9 @@ class DistributedTrainerMixin(
         ]
         reason = None
         if unsynced:
-            shown = "\n".join(f"  - {name}" for name in unsynced[:10])
-            more = f"\n  ... and {len(unsynced) - 10} more" if len(unsynced) > 10 else ""
+            shown = "\n".join(f"  - {name}" for name in unsynced[:KEY_PREVIEW_COUNT])
+            hidden = len(unsynced) - KEY_PREVIEW_COUNT
+            more = f"\n  ... and {hidden} more" if hidden > 0 else ""
             if find_peft_model(model) is not None:
                 remedy = (
                     "EP experts are trained via native grouped-LoRA (list expert projections in "
@@ -848,7 +851,6 @@ class DistributedTrainerMixin(
         """
         config = self.parallelism_config
         excluded_params = list(excluded_params)
-        self._reject_unsynced_trainable_params(model, excluded_params)
         applied = setup_fsdp2_for_dp(
             model,
             dp_size,

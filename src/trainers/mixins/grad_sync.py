@@ -155,8 +155,8 @@ class GradientSyncMixin:
     def _setup_ep_gradient_sync(self) -> None:
         """FSDP2 for the EP (and EP+CP) gradient sync: experts FSDP-ignored, everything else sharded.
 
-        One module-tree walk feeds both the presence check and the wrap: ``_fsdp_exclusions``
-        inspects every parameter's dtype, so deriving it twice doubles that pass over the model.
+        One ``_fsdp_exclusions`` derivation (a walk over every parameter's dtype) feeds both the
+        EP-module presence check and the wrap.
         """
         config = self.parallelism_config
         # Rank-block width, not the global world (identical without PP).
@@ -199,14 +199,12 @@ class GradientSyncMixin:
                 "over; load the model through load_distributed_model."
             )
         mp_policy = create_mixed_precision_policy_v2(self.args, fp32_master_weights=config.fp32_non_ep_params)
-        excluded_params = self._fsdp_exclusions().params
-        self._reject_unsynced_trainable_params(self.model, excluded_params)
         apply_fsdp2_per_layer(
             self.model,
             device_mesh[MeshDim.DP],
             mp_policy,
             config.fsdp_reshard_after_forward,
-            IdentityParamSet(excluded_params),
+            IdentityParamSet(self._fsdp_exclusions().params),
         )
         self._fsdp_wrapped = True
         logger.info(
