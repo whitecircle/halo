@@ -18,8 +18,9 @@ Scenarios:
   first — layer 0 sends every token to rank 0's experts; later layers spread tokens over every expert.
   all   — every layer sends every token to rank 0's experts.
   gc    — ``all`` under reentrant gradient checkpointing, for a family that allows it. transformers turns
-          on input grads with checkpointing, so this dispatch never lacks a grad-requiring input: the
-          scenario guards the replay path and passes with or without the fix.
+          on input grads with checkpointing, so this dispatch always has a grad-requiring input and the
+          layer's grad-requiring leaf (``_rank_uniform_dispatch_input``) stays out of it: the scenario
+          guards the checkpoint replay path, not the leaf.
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \

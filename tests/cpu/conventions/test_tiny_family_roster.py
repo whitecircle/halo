@@ -2,11 +2,12 @@
 """Every EP MoE family has one tiny model, and the per-family sweeps run each of them.
 
 The merge-on-save, precompute-resume and LoRA sync-exactness GPU suites take their ``--family`` names
-from ``tests/common/tiny_models.py``'s ``TINY_MOE_FAMILIES`` and their rows from
-``tests/gpu/manifest.py``. A family registered in ``src/distributed/expert_parallel/layers`` with no
-tiny model, or one the rows skip for an adapter shape or a layout, would leave its path untested with
-nothing failing; the roster is therefore held to the EP registry, and the rows to the roster (for the
-sync-exactness suites, the part of it some rollout engine takes an online update for).
+from ``tests/common/tiny_models.py``'s ``TINY_MOE_FAMILIES`` (the sync-exactness suites their dense
+ones from ``TINY_DENSE_FAMILIES``) and their rows from ``tests/gpu/manifest.py``. A family registered
+in ``src/distributed/expert_parallel/layers`` with no tiny model, or one the rows skip for an adapter
+shape or a layout, would leave its path untested with nothing failing; the roster is therefore held to
+the EP registry, and the rows to the roster (for the sync-exactness suites, the part of it some
+rollout engine takes an online update for).
 
     python tests/cpu/conventions/test_tiny_family_roster.py
 """
@@ -17,16 +18,10 @@ import pytest
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from tests.common.lora_sync_exactness import (
-    DENSE_FAMILIES,
-    REPRESENTATIVE_FAMILIES,
-    parse_row,
-    row_families,
-    syncable_moe_families,
-)
+from tests.common.lora_sync_exactness import REPRESENTATIVE_FAMILIES, parse_row, row_families, syncable_moe_families
 from tests.common.merged_resume_e2e import ADAPTER_MODES, LAYOUTS, merged_resume_parser
 from tests.common.preference_precompute_e2e import DENSE, precompute_resume_parser
-from tests.common.tiny_models import TINY_MOE_FAMILIES
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES
 from tests.gpu.manifest import MANIFEST
 
 MERGED_RESUME_SUITES = (
@@ -91,14 +86,14 @@ def test_the_sync_exactness_rows_run_every_syncable_family_once_per_shape():
         SYNC_EXACTNESS_SUITE: REPRESENTATIVE_FAMILIES,
         SYNC_EXACTNESS_SWEEP: tuple(family for family in roster if family not in REPRESENTATIVE_FAMILIES),
     }
-    known = (*DENSE_FAMILIES, *TINY_MOE_FAMILIES)
+    known = (*TINY_DENSE_FAMILIES, *TINY_MOE_FAMILIES)
     rows = [(suite, parse_row(known, shlex.split(args))) for suite in suites for args in MANIFEST[suite].args_matrix]
     outside = sorted({row.family for _, row in rows} - set(roster))
     assert not outside, f"sync-exactness rows naming a family outside the syncable roster: {outside}"
     misplaced = sorted({(suite, row.family) for suite, row in rows if row.family not in suites[suite]})
     assert not misplaced, f"sync-exactness rows naming a family their script refuses: {misplaced}"
     covered = [(row.family, row.mode, row.adapters) for _, row in rows]
-    expected = {(family, "fsdp", "peft") for family in DENSE_FAMILIES} | {
+    expected = {(family, "fsdp", "peft") for family in TINY_DENSE_FAMILIES} | {
         (family, mode, adapters)
         for family in syncable_moe_families()
         for mode, adapters in SYNC_EXACTNESS_PER_MOE_FAMILY

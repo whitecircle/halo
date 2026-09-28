@@ -68,15 +68,14 @@ from src.models.structure import lora_fold_targets, unwrap_framework_wrappers
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import fixed_text_batch
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import world_all
+from tests.common.distributed import shared_output_dir, world_all
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import load_peft_model, mixer_linear_leaves
+from tests.common.peft_helpers import load_peft_model, mixed_targets, mixer_linear_leaves
 from tests.common.tiny_models import (
-    TINY_DENSE_FAMILY,
+    TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
-    TINY_QWEN35_DENSE_FAMILY,
-    TinyFamily,
     shared_tiny_family_checkpoint,
     tiny_family_model,
 )
@@ -104,7 +103,9 @@ LEARNING_RATE = 5e-3
 # sizes, and the bytes held as each fold starts never move; a fold keeping every folded tensor adds the
 # whole LoRA'd shard, 1.1-1.5 MiB here, and grows the fold starts by as much.
 FOLD_PEAK_BOUND = 2
-PROBE_TOKENS = 32
+# The pushes' forward input: the same sequence on every rank, so an EP forward's dispatch collectives
+# stay aligned.
+PROBE_TEXT = "The capital of France is Paris. " * 8
 MODES = {
     "fsdp": {},
     "ep1": {"ep_size": 1},
@@ -112,12 +113,6 @@ MODES = {
     "etp2": {"ep_size": 1, "expert_tp_size": 2},
 }
 DENSE_MODES = ("fsdp",)
-# Logical expert projections, resolved per family by split_expert_lora_targets; on a dense model the
-# same names are its MLP, which stock PEFT adapts.
-MLP_TARGETS = ["gate_proj", "up_proj", "down_proj"]
-# The dense rows' models, which run under ``fsdp`` alone; the MoE rows run the syncable part of
-# ``TINY_MOE_FAMILIES`` (:func:`syncable_moe_families`).
-DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
 # The core-tier rows: one dense and one MoE family; the full tier sweeps the rest.
 REPRESENTATIVE_FAMILIES = ("qwen3", "qwen3_moe")
 
@@ -143,8 +138,9 @@ def syncable_moe_families() -> tuple[str, ...]:
 
 
 def row_families() -> tuple[str, ...]:
-    """Every ``--family`` a row may name: the dense ones and the syncable MoE roster."""
-    return (*DENSE_FAMILIES, *syncable_moe_families())
+    """Every ``--family`` a row may name: the ``TINY_DENSE_FAMILIES``, which run under ``DENSE_MODES``
+    alone, and the syncable MoE roster."""
+    return (*TINY_DENSE_FAMILIES, *syncable_moe_families())
 
 
 def parse_row(families: Iterable[str], argv: list[str] | None = None) -> argparse.Namespace:
@@ -154,8 +150,8 @@ def parse_row(families: Iterable[str], argv: list[str] | None = None) -> argpars
     parser.add_argument("--family", choices=sorted(families), required=True)
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     parser.add_argument("--adapters", choices=("peft", "mixed"), default="peft")
-    args, _ = parser.parse_known_args(argv)
-    dense = args.family in DENSE_FAMILIES
+    args = parser.parse_args(argv)
+    dense = args.family in TINY_DENSE_FAMILIES
     if dense != (args.mode in DENSE_MODES):
         parser.error(f"--mode {args.mode} is not a {'dense' if dense else 'MoE'} sharding")
     if args.adapters == "mixed" and (dense or MODES[args.mode].get("expert_tp_size", 1) > 1):
@@ -218,12 +214,6 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
 
     with patch.object(structure, "lora_folded", recorded):
         yield
-
-
-def _probe_batch(tokenizer, device) -> dict[str, torch.Tensor]:
-    """A fixed, rank-identical batch, so an EP forward keeps its dispatch collectives aligned."""
-    ids = tokenizer("The capital of France is Paris. " * 8, return_tensors="pt").input_ids[:, :PROBE_TOKENS]
-    return {"input_ids": ids.to(device)}
 
 
 class _SyncEachStep(TrainerCallback):
@@ -308,7 +298,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
     experts = [
         param for layer in layers.values() for attr, param in layer.expert_named_params() if not _is_adapter(attr)
     ]
-    model_type = None if family in DENSE_FAMILIES else family
+    model_type = None if family in TINY_DENSE_FAMILIES else family
     admitted = []
     for backend in rollout_backends():
         try:
@@ -373,15 +363,16 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     """Drive one (family x mode x adapters) row; every rank runs it."""
     log(f"\n{'=' * 70}\n  LoRA weight sync leaves the base exact: {family}, {mode}, {adapters}\n{'=' * 70}")
     checks: dict[str, bool] = {}
-    output_dir = broadcast_from_rank0(ctx.output_dir)
+    output_dir = shared_output_dir(ctx)
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    dense = family in DENSE_FAMILIES
-    tiny = DENSE_FAMILIES[family] if dense else TINY_MOE_FAMILIES[family]
+    dense = family in TINY_DENSE_FAMILIES
+    tiny = TINY_DENSE_FAMILIES[family] if dense else TINY_MOE_FAMILIES[family]
     base_dir = shared_tiny_family_checkpoint(ctx, tiny, f"lora_sync_exactness_{family}", tokenizer, SEED)
     # The PEFT targets, off the module tree: MLA, fused QKV, gated and linear attention spell them
-    # differently.
+    # differently. The mixed targets' logical expert projections become native expert LoRA on a MoE;
+    # on a dense model the same names are its MLP, which stock PEFT adapts.
     leaves = broadcast_from_rank0(mixer_linear_leaves(tiny_family_model(tiny, tokenizer)) if ctx.rank == 0 else None)
-    targets = leaves + (MLP_TARGETS if dense or adapters == "mixed" else [])
+    targets = mixed_targets(leaves) if dense or adapters == "mixed" else leaves
 
     parallelism_config = ParallelismConfig(**MODES[mode])
     model, tokenizer, peft_config = load_peft_model(
@@ -433,7 +424,7 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
         "unwrapped": unwrapped,
         "peft_model": peft_model,
         "rank": ctx.rank,
-        "batch": _probe_batch(tokenizer, ctx.device),
+        "batch": {"input_ids": fixed_text_batch(tokenizer, ctx.device, PROBE_TEXT)[0]},
         "drifted": [],
         "max_abs_drift": 0.0,
         "peaks": {"out_of_place": [], "in_place": []},
