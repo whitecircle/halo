@@ -170,7 +170,7 @@ def test_validate_ep_tp_divisibility():
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         # The cross-domain members-per-domain guard fires first for this shape.
-        assert "must be a multiple of tp_size" in str(e) or "must divide the NVLink domain" in str(e)
+        assert "must be a multiple of tensor_parallel_size" in str(e) or "must divide the NVLink domain" in str(e)
 
 
 def test_validate_ep_node_scope_too_large():
@@ -230,7 +230,7 @@ def test_validate_expert_tp_divides_domain_global_scope():
         create_config(ep_size=2, expert_tp_size=3, world_size=48, gpus_per_node=8, ep_scope="global")
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
-        assert "expert_tp_size (3) must divide the NVLink domain (8)" in str(e), e
+        assert "expert_tensor_parallel_size (3) must divide the NVLink domain (8)" in str(e), e
         assert "Expert TP groups must stay on NVLink" in str(e), e
 
 
@@ -376,7 +376,7 @@ def test_validate_ep_tp_size_not_multiple_of_tp():
         create_config(ep_size=2, tp_size=4, world_size=8, gpus_per_node=8, ep_scope="node")
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
-        assert "multiple of tp_size" in str(e)
+        assert "multiple of tensor_parallel_size" in str(e)
 
 
 def test_validate_max_concurrent_loading_negative():

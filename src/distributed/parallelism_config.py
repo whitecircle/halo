@@ -716,24 +716,24 @@ class ParallelismConfig:
                 raise ValueError(f"TP size ({self.tp_size}) must divide world size ({self.stage_world_size})")
             if self.ep_size > 1 and self.ep_size % self.tp_size != 0:
                 raise ValueError(
-                    f"EP+TP requires ep_size ({self.ep_size}) to be a multiple of tp_size "
-                    f"({self.tp_size}) so each EP group spans whole TP groups."
+                    f"EP+TP requires expert_parallel_size ({self.ep_size}) to be a multiple of "
+                    f"tensor_parallel_size ({self.tp_size}) so each EP group spans whole TP groups."
                 )
             # TP groups are contiguous rank blocks and must stay inside one NVLink domain.
             if self.nvlink_domain_size % self.tp_size != 0:
                 raise ValueError(
-                    f"tp_size ({self.tp_size}) must divide the NVLink domain "
+                    f"tensor_parallel_size ({self.tp_size}) must divide the NVLink domain "
                     f"({self.nvlink_domain_size}): TP groups are contiguous rank blocks, so a "
-                    f"non-dividing tp_size makes some TP groups straddle a domain boundary and "
-                    f"every attention all-reduce crosses RDMA. Use tp_size that divides "
-                    f"{self.nvlink_domain_size}, with DP across domains."
+                    f"non-dividing tensor_parallel_size makes some TP groups straddle a domain boundary "
+                    f"and every attention all-reduce crosses RDMA. Use a tensor_parallel_size that "
+                    f"divides {self.nvlink_domain_size}, with DP across domains."
                 )
             # Multi-domain multi-group EP+TP: the deferred-DP sweep assumes FSDP shards over the EP
             # group, but EP+TP shards over the (dp, tp) mesh — the average would mix dp shards.
             if self._is_multi_domain_multi_group_ep:
                 raise ValueError(
-                    f"Multi-domain multi-group EP+TP is not supported: ep_size={self.ep_size} with "
-                    f"tp_size={self.tp_size} on {self.stage_world_size} ranks forms "
+                    f"Multi-domain multi-group EP+TP is not supported: expert_parallel_size={self.ep_size} "
+                    f"with tensor_parallel_size={self.tp_size} on {self.stage_world_size} ranks forms "
                     f"{self.stage_world_size // self.ep_group_size} EP groups across "
                     f"{self.num_nvlink_domains} NVLink domains, and the cross-replica gradient "
                     "average is incompatible with the EP+TP (dp, tp) FSDP mesh. Use a SINGLE EP "
@@ -751,8 +751,9 @@ class ParallelismConfig:
                 reject_expert_lora_with_expert_tp()
             if self.nvlink_domain_size % self.expert_tp_size != 0:
                 raise ValueError(
-                    f"expert_tp_size ({self.expert_tp_size}) must divide the NVLink domain ({self.nvlink_domain_size}). "
-                    f"Expert TP groups must stay on NVLink for efficient all-reduce."
+                    f"expert_tensor_parallel_size ({self.expert_tp_size}) must divide the NVLink domain "
+                    f"({self.nvlink_domain_size}). Expert TP groups must stay on NVLink for efficient "
+                    f"all-reduce."
                 )
             # Multi-domain multi-group EP+ETP: expert-TP keeps is_deferred_dp off, so the non-expert
             # FSDP2 reduce-scatter stays DP-wide while the combine spans one narrower dispatch group.
@@ -825,8 +826,8 @@ class ParallelismConfig:
     def racy_ep_topology_message(self) -> str:
         """Rejection message for the racy-EP topology, shared by the config gate and trainer guard."""
         return (
-            f"ep_size={self.ep_size} on a single {self.nvlink_domain_size}-GPU NVLink domain forms "
-            f"{self.nvlink_domain_size // self.ep_size} concurrent >2-rank DeepEP dispatch "
+            f"expert_parallel_size={self.ep_size} on a single {self.nvlink_domain_size}-GPU NVLink "
+            f"domain forms {self.nvlink_domain_size // self.ep_size} concurrent >2-rank DeepEP dispatch "
             f"groups (ep_group_size={self.ep_group_size}), whose combine barriers race FSDP2's "
             f"DP-wide collectives. Measured on an 8-GPU node: the legacy buffer deadlocks, the elastic "
             f"default faults with 'Invalid access of peer GPU memory over nvlink' — both with and "
@@ -933,21 +934,21 @@ class ParallelismConfig:
         if self.is_ep_mode:
             raise ValueError(
                 f"fsdp_reshard_after_forward=True (FULL_SHARD / ZeRO-3) is not supported where an "
-                f"expert-distribution group exists (ep_size={self.ep_size}, "
-                f"expert_tp_size={self.expert_tp_size}, ep_group_size={self.ep_group_size}): its "
-                f"backward-pass all-gather can race the DeepEP combine, and pure ETP shares that "
-                f"path. Full-shard is supported where ep_group_size==1 (pure DP, CP, and ep_size==1 "
-                f"MoE without expert TP). Otherwise reduce peak memory with activation "
-                f"checkpointing instead, or set fsdp_reshard_after_forward=False "
+                f"expert-distribution group exists (expert_parallel_size={self.ep_size}, "
+                f"expert_tensor_parallel_size={self.expert_tp_size}, ep_group_size={self.ep_group_size}): "
+                f"its backward-pass all-gather can race the DeepEP combine, and pure ETP shares that "
+                f"path. Full-shard is supported where ep_group_size==1 (pure DP, CP, and "
+                f"expert_parallel_size=1 MoE without expert TP). Otherwise reduce peak memory with "
+                f"activation checkpointing instead, or set fsdp_reshard_after_forward=False "
                 f"(SHARD_GRAD_OP / ZeRO-2)."
             )
         if self.is_tp_mode and self.data_parallel_size > 1:
             raise ValueError(
                 f"fsdp_reshard_after_forward=True (FULL_SHARD / ZeRO-3) is not supported with Tensor "
-                f"Parallelism + data parallelism (tp_size={self.tp_size}, data_parallel_size="
-                f"{self.data_parallel_size}): FSDP2's backward re-gather issues a plain c10d all-gather on "
-                f"the TP-sharded DTensor params, which has no registered DTensor sharding strategy "
-                f"(NotImplementedError mid-step). Use fsdp_reshard_after_forward=False (SHARD_GRAD_OP / "
+                f"Parallelism + data parallelism (tensor_parallel_size={self.tp_size}, "
+                f"data_parallel_size={self.data_parallel_size}): FSDP2's backward re-gather issues a plain "
+                f"c10d all-gather on the TP-sharded DTensor params, which has no registered DTensor sharding "
+                f"strategy (NotImplementedError mid-step). Use fsdp_reshard_after_forward=False (SHARD_GRAD_OP / "
                 f"ZeRO-2), which keeps params gathered between forward and backward, or use_hsdp for replica "
                 f"memory savings."
             )
