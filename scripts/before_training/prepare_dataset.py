@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import contextlib
+import dataclasses
 import os
 import shutil
 import sys
@@ -30,7 +31,7 @@ from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizer
 
 from scripts._common import add_trust_remote_code_arg
 from src.checkpoint.tool_io import DISPLACED_SUFFIX, clear_staging_path
-from src.data.pipeline.preprocessed_metadata import PACKING_STRATEGIES, PreprocessingConfig
+from src.data.pipeline.preprocessed_metadata import PACKING_STRATEGIES, PREPROCESSING_MODES, PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset
 from src.data.pipeline.processing import resolve_map_num_proc
 from src.data.pipeline.tokenizer_backend import TOKENIZER_BACKENDS
@@ -48,6 +49,9 @@ logger = get_logger(__name__, log_level="INFO")
 # Fixed so --test-size cuts the same split on every re-run: the assignment is baked into the
 # published artifact, and a re-preparation that reshuffled it would no longer match.
 _SPLIT_SEED = 42
+
+# A flag recorded one-to-one into a PreprocessingConfig field takes a set default from the field.
+_CONFIG_DEFAULTS = {field.name: field.default for field in dataclasses.fields(PreprocessingConfig)}
 
 
 def parse_args():
@@ -80,27 +84,27 @@ def parse_args():
     parser.add_argument(
         "--max-length",
         type=int,
-        default=8192,
+        default=_CONFIG_DEFAULTS["max_length"],
         help="Maximum tokenized sequence length; over-length conversations are dropped, not "
-        "truncated (default: 8192). Stamped into the dataset metadata and re-checked against the "
-        "training config's max_length at load. No model is loaded here, so it cannot resolve to a "
+        "truncated (default: %(default)s). Stamped into the dataset metadata and re-checked against "
+        "the training config's max_length at load. No model is loaded here, so it cannot resolve to a "
         "context window — pass it explicitly.",
     )
     add_trust_remote_code_arg(parser)
 
     parser.add_argument(
         "--mode",
-        default="chat",
-        choices=["chat", "text"],
+        default=_CONFIG_DEFAULTS["mode"],
+        choices=PREPROCESSING_MODES,
         help="Tokenization mode: 'chat' (apply chat template to the conversation "
         "field, for SFT) or 'text' (raw-text causal-LM for (continued) "
         "pretraining — tokenize --text-field directly, append EOS per document). "
-        "Default: chat.",
+        "Default: %(default)s.",
     )
     parser.add_argument(
         "--text-field",
-        default="text",
-        help="(mode=text) dataset column holding the raw text (default: text).",
+        default=_CONFIG_DEFAULTS["text_field"],
+        help="(mode=text) dataset column holding the raw text (default: %(default)s).",
     )
     parser.add_argument(
         "--no-append-eos",
@@ -110,9 +114,9 @@ def parse_args():
     )
     parser.add_argument(
         "--conversation-field",
-        default="prompt",
-        help="Name of conversation field in dataset (default: prompt — the documented SFT shape and "
-        "the training-side default; a value disagreeing with the training config is rejected at "
+        default=_CONFIG_DEFAULTS["conversation_field"],
+        help="Name of conversation field in dataset (default: %(default)s — the documented SFT shape "
+        "and the training-side default; a value disagreeing with the training config is rejected at "
         "training startup)",
     )
     parser.add_argument(
@@ -162,12 +166,12 @@ def parse_args():
     )
     parser.add_argument(
         "--packing-strategy",
-        default="bfd",
+        default=_CONFIG_DEFAULTS["packing_strategy"],
         choices=PACKING_STRATEGIES,
         help="TRL packing strategy: 'bfd' (best-fit-decreasing, keeps document boundaries but "
         "DISCARDS the overflow past --max-length), 'bfd_split' (same packing, overflow split into "
         "later examples — the lossless choice for pre-training), or 'wrapped' (concatenate-and-chunk "
-        "across boundaries). Default: bfd.",
+        "across boundaries). Default: %(default)s.",
     )
 
     parser.add_argument(
@@ -200,10 +204,10 @@ def parse_args():
     parser.add_argument(
         "--num-shards",
         type=int,
-        default=1,
-        help="Number of shards to create (default: 1 = unsharded: every rank loads the dataset whole and "
-        "the DataLoader splits it, at any data-parallel size). Above 1 each rank loads only its own shards, "
-        "which needs >= data_parallel_size shards and a test split",
+        default=_CONFIG_DEFAULTS["num_shards"],
+        help="Number of shards to create (default: %(default)s = unsharded: every rank loads the dataset whole "
+        "and the DataLoader splits it, at any data-parallel size). Above 1 each rank loads only its own "
+        "shards, which needs >= data_parallel_size shards and a test split",
     )
 
     parser.add_argument(
@@ -214,10 +218,10 @@ def parse_args():
     )
     parser.add_argument(
         "--tokenizer-backend",
-        default="hf",
+        default=_CONFIG_DEFAULTS["tokenizer_backend"],
         choices=list(TOKENIZER_BACKENDS),
-        help="Text→ids backend: 'hf' (default) or 'gigatoken' (optional extra; "
-        "token IDs verified identical at startup).",
+        help="Text→ids backend: 'hf' or 'gigatoken' (optional extra; token IDs verified identical at "
+        "startup). Default: %(default)s.",
     )
     parser.add_argument(
         "--test-size",
