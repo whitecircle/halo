@@ -45,6 +45,15 @@ trainable parameter left out of every group has no reduce-scatter, and only an E
 unless its hooks or the deferred sweep average it, trainer construction raises on every rank rather than
 let it drift across DP ranks (`_reject_unsynced_trainable_params`).
 
+FSDP2 asserts one original dtype per shard group at the first forward. A decoder layer whose trainable
+parameters mix dtypes (the fp32 router `fp32_router` keeps at `ep_group_size == 1` under
+`fsdp_shard_ep1_experts`, or its `modules_to_save` copy beside bf16 adapters) first shards the smallest
+submodule holding each set of the other dtype as a nested group. The layer's forward pre-hook unshards
+those groups too: the LFM2, DeepSeek-V4 and Inkling EP layers, and GPT-OSS under `bias_update`, read the
+router's weight without calling the router, and FSDP2's root post-backward callback then reduces its
+gradient. A module that itself owns trainable parameters of two dtypes cannot be split, and the wrap
+raises. A layer whose trainable parameters share one dtype gets no extra group.
+
 FSDP2 shards params, gradients, and optimizer states across the DP ranks, so per-rank optimizer-state
 memory is ~`dp_size` smaller than DDP's full per-rank replication. Setup lives in
 `src/distributed/fsdp.py`; `IdentityParamSet` backs `ignored_params` with `id()`-based

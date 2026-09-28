@@ -197,7 +197,7 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 
 | Flag | Scope | Effect |
 |---|---|---|
-| `fp32_router` | Router/gate weights | FP32 master weights, BF16 compute via autocast |
+| `fp32_router` | Router/gate weights | FP32 master. The routing matmul runs in FP32 while the EP layer syncs the router (`ep_group_size > 1`, or `fsdp_shard_ep1_experts: false`); at `ep_group_size == 1` under `fsdp_shard_ep1_experts` the router takes its own FSDP2 shard group and computes in BF16 under FSDP2's `param_dtype` |
 | `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — use `fp32_non_ep_params` there |
 | `fp32_non_ep_params` | Attention, embed, norm | FP32 master, BF16 compute |
 

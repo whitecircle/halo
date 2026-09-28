@@ -214,8 +214,10 @@ Environmental-GRPO version.
 **Adapter dtype under FSDP:** `get_peft_model` upcasts adapters (and `modules_to_save` copies) to fp32, but
 FSDP2 requires a uniform dtype per shard group. `_cast_peft_params_to_compute_dtype` casts trainable fp32
 PEFT params to the compute dtype before wrapping (to fp32 instead under `fp32_non_ep_params`). EP params are
-excluded by identity, before the dtype test: they are FSDP-ignored, so the one-dtype-per-group rule never
-applies, and downcasting a deliberately-fp32 router or expert would negate `fp32_router` / `fp32_experts`.
+excluded by identity, before the dtype test: downcasting a deliberately-fp32 router or expert would negate
+`fp32_router` / `fp32_experts`. They are FSDP-ignored unless FSDP2 manages the ep1 experts
+(`fsdp_shard_ep1_experts` at `ep_group_size == 1`); there an fp32 router copy takes a shard group of its
+own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 ## Parallelism compatibility
 
