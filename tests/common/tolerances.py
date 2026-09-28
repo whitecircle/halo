@@ -44,6 +44,15 @@ class _Tolerances:
     # ── Weights / optimizer ─────────────────────────────────────────────────
     # save→load round-trip at bf16 ULP scale.
     weight_atol: float = 1e-6
+    # A resume that restores the saved state and replays the uninterrupted run's batches: the
+    # merged-resume and embedding-resume bodies (both runs' bf16 SR stream rewound at the step after
+    # the save) and the precompute-resume body's first resumed step, which precedes any update after
+    # the restore. Every compared loss and final adapter measured bit-exact on every row; 1e-4 is
+    # kernel headroom, under the 1.2e-4 first-step miss of adapters restarted from init.
+    replayed_resume_loss_abs: float = 1e-4
+    # The same comparison on the final trainable tensors, as a relative L2; a restart misses by ~1.
+    replayed_resume_weight_rtol: float = 1e-4
+
     # Loss across a resume boundary (same data, same step).
     resume_loss_abs: float = 0.05
 

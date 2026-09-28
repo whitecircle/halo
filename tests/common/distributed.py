@@ -19,7 +19,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeSt
 from transformers import AutoConfig, AutoTokenizer
 
 from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
-from src.distributed.runtime import barrier
+from src.distributed.runtime import barrier, broadcast_from_rank0
 from src.models.patches.attention import ensure_fa4_kernel_cache_env
 from tests.gpu.manifest import SCRATCH_DIR_TAG
 
@@ -153,6 +153,15 @@ def shared_scratch_dir(name: str) -> str:
     path = os.path.join(tempfile.gettempdir(), f"{name}_{os.environ.get('MASTER_PORT', 'standalone')}")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def shared_output_dir(ctx) -> str:
+    """Rank 0's output dir, on every rank.
+
+    The EP/FSDP2 saver writes one directory; a per-rank ``mkdtemp`` would leave every peer with no
+    checkpoint to resume from, leaving the restore untested.
+    """
+    return broadcast_from_rank0(ctx.output_dir if ctx.rank == 0 else None)
 
 
 def cleanup_dirs(*dirs: str):

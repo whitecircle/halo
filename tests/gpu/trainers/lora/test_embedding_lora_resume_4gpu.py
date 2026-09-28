@@ -17,7 +17,7 @@ from tests.common.harness import gpu_test_main
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
-ARGS, _ = parser.parse_known_args()
+ARGS = parser.parse_args()
 
 
 @gpu_test_main(exact_world_size=4, prefix=f"embedding_lora_resume_{ARGS.family}_tpdp_off")

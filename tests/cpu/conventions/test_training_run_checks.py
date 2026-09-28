@@ -64,6 +64,11 @@ def test_the_grad_norm_check_fails_on_a_non_finite_norm(bad_norm):
     assert "grad_norms_finite" not in training_run_checks(result, trainer, MAX_STEPS), "the check is opt-in"
 
 
+def test_the_grad_norm_check_fails_when_no_norm_was_logged():
+    result, trainer = _run(STEP_LOSSES)
+    assert training_run_checks(result, trainer, MAX_STEPS, grad_norms=True)["grad_norms_finite"] is False
+
+
 def test_the_grad_norm_check_passes_on_finite_norms():
     result, trainer = _run(STEP_LOSSES, grad_norms=[1.5, 1.2, 0.9])
     assert training_run_checks(result, trainer, MAX_STEPS, grad_norms=True)["grad_norms_finite"] is True

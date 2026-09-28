@@ -25,7 +25,7 @@ parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
 parser.add_argument("--mode", choices=[mode for mode in MODES if mode not in ("single", "tpdp")], required=True)
 parser.add_argument("--lora", choices=LORA_TARGETS, default="attention")
 parser.add_argument("--head", action="store_true")
-ARGS, _ = parser.parse_known_args()
+ARGS = parser.parse_args()
 HEAD = "_head" if ARGS.head else ""
 
 

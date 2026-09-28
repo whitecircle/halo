@@ -34,7 +34,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM
 from trl import ModelConfig, get_quantization_config
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE, read_checkpoint_index
+from src.checkpoint.format import SAFETENSORS_INDEX_FILE, cast_to_save_dtype, read_checkpoint_index
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
 from src.distributed.loading.model_loading import load_distributed_model
@@ -507,3 +507,19 @@ def injected_lora_merge(
     if loaded.unexpected_keys:
         raise AssertionError(f"the oracle does not take every adapter tensor: {loaded.unexpected_keys[:3]}")
     return merged_lora_targets(model)
+
+
+def injected_lora_fold(
+    model: torch.nn.Module, lora_config, adapters: dict[str, torch.Tensor], prefix: str
+) -> dict[str, torch.Tensor]:
+    """What a save that folds ``adapters`` writes per LoRA target of the backbone ``model``: its
+    :func:`injected_lora_merge` on ``model``'s device, at the save dtype, on the host.
+
+    ``adapters`` are keyed by the SentenceTransformer's names, whose backbone sits under ``prefix``;
+    the result by the backbone's own.
+    """
+    device = next(model.parameters()).device
+    merged = injected_lora_merge(
+        model, lora_config, {key[len(prefix) :]: value.to(device) for key, value in adapters.items()}
+    )
+    return {key: cast_to_save_dtype(value.cpu()) for key, value in merged.items() if key.endswith(".weight")}

@@ -16,7 +16,7 @@ from tests.common.harness import gpu_test_main
 from tests.common.merged_resume_e2e import WORLD_SIZE, merged_resume_parser, run_merged_resume
 from tests.common.tiny_models import TINY_MOE_FAMILIES
 
-ARGS, _ = merged_resume_parser(TINY_MOE_FAMILIES).parse_known_args()
+ARGS = merged_resume_parser(TINY_MOE_FAMILIES).parse_args()
 
 
 @gpu_test_main(

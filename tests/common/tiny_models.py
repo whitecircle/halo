@@ -256,6 +256,8 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
 # The dense Qwen3.5 text model (gated DeltaNet and attention layers), which the MoE roster does not carry.
 TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
+# The dense roster, keyed as the dense rows name it (``--family``).
+TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None) -> PreTrainedModel:

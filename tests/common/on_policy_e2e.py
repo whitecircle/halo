@@ -4,10 +4,10 @@ Environmental GRPO (:mod:`tests.common.env_grpo_e2e`) and online GRPO / SDPG
 (:mod:`tests.common.online_grpo_e2e`) drive different trainers over different rollout paths but assert
 the same properties about the policy an inference engine serves. This module holds that
 trainer-agnostic half: the served-policy probe, the policy loader, the parallelism verdict, the
-perturbation round (move what the sync must carry, push it, then check an adapter fold gave the base
-weights back), the sink round the dense delta cannot cover, the restore-point snapshot a two-phase
-resume compares, and the constants those need. Each body keeps what differs: its trainer classes, its
-config, its rollout wiring and the refusals only it exercises.
+perturbation round (move what the sync must carry, push it, then check an adapter fold left the base
+weights untouched), the sink round the dense delta cannot cover, and the constants those need. Each
+body keeps what differs: its trainer classes, its config, its rollout wiring and the refusals only it
+exercises.
 
 Both phases of a resume row run in one process against one server on the same weight-transfer group
 port: a second ``init_communicator`` after ``close_communicator`` succeeds and its sync lands (on vLLM
@@ -27,13 +27,11 @@ import torch
 from datasets import Dataset
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
-from transformers.trainer_callback import TrainerCallback
 
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import broadcast_from_rank0
 from src.models.patches.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
 from tests.common.ep_reference import ep_layers
 from tests.common.peft_helpers import (
@@ -45,7 +43,7 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import local_optimizer_state, log, max_or_nan, optimizer_state_matches, step_losses
+from tests.common.utils import log, max_or_nan, optimizer_state_matches, step_losses
 from tests.common.weight_sync import local_parameters, moved_parameters
 
 # Greedy, one token, top-k: the assertion is "these numbers moved", so the probe must be the least
@@ -153,15 +151,6 @@ def record_served_baseline(server_url: str, model_name: str, checks: dict[str, b
         f"  {server_url} serves {served} (need {model_name}); baseline { {k: round(v, 4) for k, v in baseline.items()} }"
     )
     return baseline
-
-
-def shared_output_dir(ctx) -> str:
-    """Rank 0's output dir, on every rank.
-
-    The EP/FSDP2 saver writes one directory; a per-rank ``mkdtemp`` would leave every peer with no
-    checkpoint to resume from, leaving the restore untested.
-    """
-    return broadcast_from_rank0(ctx.output_dir if ctx.rank == 0 else None)
 
 
 def fresh_parallelism_config(ep_size: int, tp_size: int = 1, expert_tp_size: int = 1) -> ParallelismConfig:
@@ -319,9 +308,9 @@ def _unshard_with_a_forward(model, device: torch.device) -> None:
 
 
 def frozen_base_weights(model) -> dict[str, torch.Tensor]:
-    """This rank's copy of the frozen weights an adapter fold must give back bit-identical, compared
+    """This rank's copy of the frozen weights an adapter fold must leave bit-identical, compared
     across the syncs by :func:`~tests.common.weight_sync.moved_parameters`: every PEFT-wrapped base
-    weight (what the fold rewrites, in whichever layers the targets hit) and the rest of layer 0
+    weight (what the fold reads, in whichever layers the targets hit) and the rest of layer 0
     (expert banks included), rather than a second copy of a full-size policy.
 
     No served-policy probe can see a fold that wrote into the base, since the engine is meant to
@@ -376,7 +365,7 @@ def perturbation_round(
     if base:
         moved = moved_parameters(base, frozen_base_weights(model))
         checks["sync_left_the_base_weights_alone"] = not moved
-        log(f"  frozen layer-0 weights the push moved: {len(moved)}/{len(base)} {moved[:3]}")
+        log(f"  frozen base weights the push moved: {len(moved)}/{len(base)} {moved[:3]}")
     return what
 
 
@@ -506,61 +495,6 @@ def record_adapter_training(
     ok, detail = assert_adapters_moved(before, snapshot_adapters(model, expert_lora=expert_lora))
     checks["adapters_moved_when_the_run_had_a_gradient"] = ok or not trained
     log(f"  adapters: {detail} (run had a gradient: {trained}); optimizer owns {owned}/{len(live_adapters)}")
-
-
-class RestorePointSnapshot(TrainerCallback):
-    """Trainer/optimizer/scheduler state at one lifecycle point.
-
-    ``"save"`` fires when the checkpoint is written, ``"train_begin"`` after the resume restore and
-    before the first resumed step, so the two snapshots describe the same step and a warm-restarted
-    optimizer cannot hide behind the steps that follow.
-
-    The first occurrence wins: a run that stops on ``max_steps`` writes a final checkpoint too, and a
-    snapshot overwritten there would describe a step the resume never restores.
-
-    ``capture_optimizer`` is off for a full fine-tune of a large policy: ``local_optimizer_state``
-    offloads the whole state to host RAM, which is 6 B/param of AdamWBF16 moments. ``expert_lora``
-    is the adapter-gather flag (``None`` = do not capture adapters); the capture has to happen here
-    because a resumed run takes a step of its own before the body can look. A subclass adds its own
-    entries through :meth:`extra`.
-    """
-
-    def __init__(self, event: str, trainer, *, capture_optimizer: bool, expert_lora: bool | None = None):
-        self.event = event
-        self.trainer = trainer
-        self.capture_optimizer = capture_optimizer
-        self.expert_lora = expert_lora
-        self.captured: dict | None = None
-
-    def extra(self) -> dict:
-        """Extra entries for the snapshot, taken at the same point. Empty here."""
-        return {}
-
-    def _capture(self, state) -> None:
-        if self.captured is not None:
-            return
-        # Every reader below goes by parameter identity, and a hook can fire while the FSDP2 modules
-        # still hold the transient unsharded params an eval-only forward left registered.
-        reshard_fsdp2_modules(unwrap(self.trainer.model))
-        self.captured = {
-            "global_step": state.global_step,
-            "sched_last_epoch": self.trainer.lr_scheduler.last_epoch,
-            "optimizer": local_optimizer_state(self.trainer.model, self.trainer.optimizer)
-            if self.capture_optimizer
-            else None,
-            "adapters": snapshot_adapters(unwrap(self.trainer.model), expert_lora=self.expert_lora)
-            if self.expert_lora is not None
-            else None,
-            **self.extra(),
-        }
-
-    def on_save(self, args, state, control, **kwargs):
-        if self.event == "save":
-            self._capture(state)
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        if self.event == "train_begin":
-            self._capture(state)
 
 
 def logged_lrs(trainer) -> dict[int, float]:

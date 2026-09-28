@@ -10,22 +10,23 @@ or mixed with attention PEFT, on two ranks at ``ep_size`` 2 (plain per-rank expe
 or 1 (experts FSDP-sharded as DTensors, DP=2), with ``cp_size`` 2 under EP+CP:
 
   1. Uninterrupted run: ``TOTAL_STEPS`` steps, merged checkpoint at ``SAVE_AT_STEP``. The save
-     leaves every parameter bit-identical (the attention merge is undone exactly, not by a bf16
-     subtraction), and the live adapters are gathered right after it (``on_save``).
+     leaves every parameter bit-identical (it folds each delta into the tensor it writes, out of
+     place), and the live adapters are gathered right after it (``on_save``).
   2. The checkpoint serves: stock ``from_pretrained`` loads it with no missing, unexpected or
      mis-shaped keys and no adapter, its expert (and attention) weights moved off the base (it is the
      merge, not the base), and it carries the resume adapter and its marker with no root
      ``adapter_config.json``.
   3. Resume from it through the production resolver: the policy source is the BASE; after the
      restore (``on_train_begin``) every adapter is BIT-EQUAL to the one the uninterrupted run held at
-     the save; every resumed step's loss matches the uninterrupted run's within ``LOSS_TOL`` and the
-     final adapters sit within ``FINAL_ADAPTER_RTOL`` of its. A resumed process restarts the
-     stochastic-rounding stream of the bf16 optimizer (``_SR_RNG``), which the uninterrupted run
-     would otherwise have advanced past the save, so both restart it at the step after the save: the
-     comparison is then of the restored state alone. DeepEP's default dispatch hands out receive slots
-     with atomics, so the order an expert's tokens arrive in, and with it the rounding of each expert
-     adapter gradient summed over them, changes from run to run; the body builds every DeepEP buffer in
-     deterministic mode, or two identical runs could part by that rounding alone.
+     the save; every resumed step's loss matches the uninterrupted run's within
+     ``TOL.replayed_resume_loss_abs`` and the final adapters sit within
+     ``TOL.replayed_resume_weight_rtol`` of its. Both runs rewind the bf16 optimizer's
+     stochastic-rounding stream at their restore point
+     (:class:`~tests.common.checkpoint_io.ReplayRestorePoint`), so the comparison is of the restored
+     state alone. DeepEP's default dispatch hands out receive slots with atomics, so the order an
+     expert's tokens arrive in, and with it the rounding of each expert adapter gradient summed over
+     them, changes from run to run; the body builds every DeepEP buffer in deterministic mode, or two
+     identical runs could part by that rounding alone.
   4. A kill between the base save and the resume adapter leaves the merged weights without their
      marker. Resumed through the production resolver, that checkpoint builds the policy from its own
      merged weights, and the resume must refuse on every rank rather than restart the adapters from
@@ -37,21 +38,15 @@ on every rank.
 
 import argparse
 import functools
-import math
 import os
-import random
 import shutil
 from collections.abc import Iterable
 from types import SimpleNamespace
 
 import torch
-import torch.distributed as dist
-from accelerate.utils import extract_model_from_parallel
-from torch.distributed.tensor import DTensor
-from transformers import AutoTokenizer, TrainerCallback
+from transformers import AutoTokenizer
 from trl import SFTConfig
 
-import src.optimizers.adamw_bf16 as adamw_bf16_mod
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
@@ -60,18 +55,33 @@ from src.checkpoint.format import (
     resume_adapter_dir,
 )
 from src.distributed.context_parallel.validation import UlyssesConfigError
-from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
 from src.distributed.expert_parallel.extension import deep_ep
-from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.structure import unwrap_model
+from src.optimizers.adamw_bf16 import reset_sr_stream
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import resolve_resume_weights_source
+from tests.common.checkpoint_io import ReplayRestorePoint, loading_problems
 from tests.common.datasets import create_sft_dataset
+from tests.common.distributed import shared_output_dir, world_all
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import attention_target_modules, load_peft_model, mixed_targets
+from tests.common.peft_helpers import (
+    attention_target_modules,
+    load_peft_model,
+    mixed_targets,
+    snapshot_adapters,
+    unwrap,
+)
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TinyFamily, shared_tiny_family_checkpoint
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.tolerances import TOL
+from tests.common.utils import (
+    finish_phase,
+    log,
+    relative_l2,
+    resumed_loss_deltas,
+    snapshot_trainable,
+    step_losses,
+)
+from tests.common.weight_sync import local_parameters, moved_parameters
 
 # The peft_helpers mode each adapter shape loads through.
 ADAPTER_MODES = {"expert": "expert_lora", "mixed": "mixed"}
@@ -86,14 +96,6 @@ MAX_SEQ_LENGTH = 256
 # High enough that the adapters carry most of the run's movement within a few steps, as a LoRA
 # learning rate does.
 LEARNING_RATE = 2e-3
-# Seed both runs restart the bf16 optimizer's stochastic-rounding stream from.
-SR_SEED = 0xB165EED
-# Measured on B300 over the 66 training rows (every family, adapter shape and layout): every resumed
-# step's loss equals the uninterrupted run's exactly (|delta| 0.0), and so do the final adapters
-# (relative L2 0.0). Adapters resumed fresh over the merged weights, the failure this pins, miss the
-# first step by >=1.2e-4, later steps by >=5e-2 and the adapters by ~1.0.
-LOSS_TOL = 1e-4
-FINAL_ADAPTER_RTOL = 1e-4
 
 
 def merged_resume_parser(families: Iterable[str]) -> argparse.ArgumentParser:
@@ -106,34 +108,18 @@ def merged_resume_parser(families: Iterable[str]) -> argparse.ArgumentParser:
     return parser
 
 
-def _materialize(tensor: torch.Tensor) -> torch.Tensor:
-    return (tensor.full_tensor() if isinstance(tensor, DTensor) else tensor).detach().cpu().clone()
-
-
 def _adapter_snapshot(model) -> dict[str, torch.Tensor]:
     """Every adapter tensor, whole and on the host: the grouped expert adapters gathered across the EP
     group, and the attention PEFT adapters (``.lora_`` params) un-sharded from FSDP2. Collective."""
-    unwrapped = extract_model_from_parallel(model, recursive=True)
-    snapshot = {key: value.clone() for key, value in gather_ep_lora_adapters(unwrap_model(unwrapped)).items()}
-    for name, param in unwrapped.named_parameters():
-        if ".lora_" in name:
-            snapshot[name] = _materialize(param.data)
-    return snapshot
+    unwrapped = unwrap(model)
+    peft_adapters = {name: value for name, value in snapshot_trainable(unwrapped).items() if ".lora_" in name}
+    return {**snapshot_adapters(unwrapped, expert_lora=True), **peft_adapters}
 
 
-def _local_parameters(model) -> dict[str, torch.Tensor]:
-    """This rank's copy of every parameter, adapters and frozen base alike. Rank-local: a DTensor
-    contributes its local shard, resharded first as the save itself does."""
-    reshard_fsdp2_modules(model)
-    return {
-        name: (param.data.to_local() if isinstance(param.data, DTensor) else param.data).detach().clone()
-        for name, param in extract_model_from_parallel(model, recursive=True).named_parameters()
-    }
-
-
-def _restart_sr_stream() -> None:
-    """Restart the bf16 optimizer's stochastic-rounding stream, as a fresh process does."""
-    adamw_bf16_mod._SR_RNG = random.Random(SR_SEED)
+def _parallelism_config(ep_size: int, cp_size: int) -> ParallelismConfig:
+    """A fresh config per phase: ``create_ep_config`` caches the ``EPConfig`` it builds on the config,
+    so a phase reusing another's would build its model against that phase's expert groups."""
+    return ParallelismConfig(ep_size=ep_size, cp_size=cp_size, merge_expert_lora_on_save=True)
 
 
 def _pin_deterministic_dispatch() -> None:
@@ -143,39 +129,25 @@ def _pin_deterministic_dispatch() -> None:
     buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
 
 
-class _SaveCapture(TrainerCallback):
-    """Around the checkpoint save at ``SAVE_AT_STEP``: every local parameter just before it
-    (``on_step_end``) and just after it (``on_save``), plus the full adapters after it. Every rank
-    runs the callback, so the adapter gathers stay collective."""
+class _RestorePoint(ReplayRestorePoint):
+    """The replay restore point with every adapter whole (:func:`_adapter_snapshot`) and, at the save,
+    this rank's parameters just after it (``parameters``) and just before it (:attr:`before_save`, the
+    last ``on_step_end`` ahead of the first save). Every rank runs callbacks, so the gathers stay
+    collective."""
 
-    def __init__(self, trainer_ref: dict):
-        self.trainer_ref = trainer_ref
+    def __init__(self, event: str, trainer):
+        super().__init__(event, trainer, capture_optimizer=False)
+        self.before_save: dict[str, torch.Tensor] = {}
+
+    def extra(self) -> dict:
+        extra = {"adapters": _adapter_snapshot(self.trainer.model)}
+        if self.event == "save":
+            extra["parameters"] = local_parameters(unwrap(self.trainer.model))
+        return extra
 
     def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step == SAVE_AT_STEP:
-            self.trainer_ref["before_save"] = _local_parameters(self.trainer_ref["trainer"].model)
-        return control
-
-    def on_save(self, args, state, control, **kwargs):
-        if state.global_step == SAVE_AT_STEP:
-            model = self.trainer_ref["trainer"].model
-            self.trainer_ref["after_save"] = _local_parameters(model)
-            self.trainer_ref["adapters"] = _adapter_snapshot(model)
-            _restart_sr_stream()
-        return control
-
-
-class _RestoreCapture(TrainerCallback):
-    """The adapters a resume restored, before its first step (``on_train_begin``). Collective."""
-
-    def __init__(self, trainer_ref: dict):
-        self.trainer_ref = trainer_ref
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self.trainer_ref["adapters"] = _adapter_snapshot(self.trainer_ref["trainer"].model)
-        # After the optimizer-state load, whose zero-LR materialization step draws from the stream.
-        _restart_sr_stream()
-        return control
+        if self.event == "save" and self.captured is None:
+            self.before_save = local_parameters(unwrap(self.trainer.model))
 
 
 def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
@@ -201,21 +173,13 @@ def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
     )
 
 
-def _all_ranks_true(local: bool, device) -> bool:
-    flag = torch.tensor([1 if local else 0], device=device)
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-    return bool(flag.item())
-
-
 def _serving_checks(family: TinyFamily, checkpoint: str, base_dir: str, attention_targets: set[str]) -> dict:
     """The merged checkpoint as a serving engine sees it: stock ``from_pretrained``, full coverage, no
     adapter, the MERGED weights, and the resume state kept out of the root. Rank-local reads only."""
     checks = {}
     load = {"dtype": torch.bfloat16, "trust_remote_code": family.trust_remote_code}
     model, info = family.load_class.from_pretrained(checkpoint, output_loading_info=True, **load)
-    problems = {
-        kind: info.get(kind) for kind in ("missing_keys", "unexpected_keys", "mismatched_keys") if info.get(kind)
-    }
+    problems = loading_problems(info)
     if problems:
         log(f"  from_pretrained loading info: {problems}")
     checks["merged_checkpoint_loads_with_stock_from_pretrained"] = not problems
@@ -251,12 +215,6 @@ def _attention_lora_b_moved(adapters: dict[str, torch.Tensor], attention_targets
     )
 
 
-def _relative_l2(a: dict[str, torch.Tensor], b: dict[str, torch.Tensor]) -> float:
-    num = sum(float((a[k].float() - b[k].float()).pow(2).sum()) for k in a)
-    den = sum(float(a[k].float().pow(2).sum()) for k in a)
-    return math.sqrt(num / den) if den else math.inf
-
-
 def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size: int) -> dict:
     """The four phases above for one family, adapter shape and layout; returns the harness result."""
     tiny = TINY_MOE_FAMILIES[family]
@@ -268,13 +226,10 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
     )
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
-    shared = [ctx.output_dir]
-    dist.broadcast_object_list(shared, src=0)
-    train_out = os.path.join(shared[0], "train_out")
+    output_dir = shared_output_dir(ctx)
+    train_out = os.path.join(output_dir, "train_out")
     checkpoint = os.path.join(train_out, f"checkpoint-{SAVE_AT_STEP}")
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
     base_dir = shared_tiny_family_checkpoint(ctx, tiny, f"merged_resume_{family}_base", tokenizer, SEED)
     # Read once, off the base: a merged checkpoint's index spells its attention in the family's hub
     # namespace, which need not match the module names PEFT targets.
@@ -284,13 +239,14 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
         else None
     )
 
-    def make_trainer(model_source: str, output_dir: str, *, save: bool):
+    def make_trainer(model_source: str, phase_dir: str, *, save: bool):
         """The production load (``split_expert_lora_targets`` → ``load_distributed_model`` →
-        ``setup_peft_model``) and trainer, with the stochastic-rounding stream restarted so every phase
-        starts from the same one. Ulysses CP runs flash attention (auto-selected, or through its own
-        probe under the family's ``cp_attn_implementation``); the rest stay on eager."""
-        _restart_sr_stream()
-        parallelism_config = ParallelismConfig(ep_size=ep_size, cp_size=cp_size, merge_expert_lora_on_save=True)
+        ``setup_peft_model``) and trainer, with the stochastic-rounding stream rewound so every phase
+        starts from the same one, and the attention modules PEFT adapts. Ulysses CP runs flash
+        attention (auto-selected, or through its own probe under the family's
+        ``cp_attn_implementation``); the rest stay on eager."""
+        reset_sr_stream()
+        parallelism_config = _parallelism_config(ep_size, cp_size)
         model, tokenizer, peft_config = load_peft_model(
             ADAPTER_MODES[adapters],
             parallelism_config,
@@ -301,14 +257,14 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
         )
         trainer = DistributedSFTTrainer(
             model=model,
-            args=_sft_config(output_dir, save=save),
+            args=_sft_config(phase_dir, save=save),
             train_dataset=create_sft_dataset(64, tokenizer, seed=SEED),
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
             peft_config=peft_config,
         )
         ctx.on_teardown(trainer.cleanup_ep)
-        return trainer, parallelism_config, set(peft_config.target_modules) if peft_config else set()
+        return trainer, set(peft_config.target_modules) if peft_config else set()
 
     if cp_size > 1 and not tiny.ulysses_cp:
         log("\n[1/1] Ulysses CP cannot run this family: the load must refuse it...")
@@ -318,54 +274,50 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
         except UlyssesConfigError as exc:
             refusal = str(exc)
         log(f"  refusal: {(refusal or 'none')[:160]}")
-        checks["ulysses_cp_refuses_the_family_on_every_rank"] = _all_ranks_true(refusal is not None, ctx.device)
+        checks["ulysses_cp_refuses_the_family_on_every_rank"] = world_all(refusal is not None, ctx.device)
         return {"checks": checks, "metrics": metrics}
 
     log(f"\n[1/4] Uninterrupted {TOTAL_STEPS}-step run, merged checkpoint at step {SAVE_AT_STEP}...")
-    trainer, _, attention_targets = make_trainer(base_dir, train_out, save=True)
-    at_save: dict = {"trainer": trainer}
-    trainer.add_callback(_SaveCapture(at_save))
+    trainer, attention_targets = make_trainer(base_dir, train_out, save=True)
+    at_save = _RestorePoint("save", trainer)
+    trainer.add_callback(at_save)
     trainer.train()
     uninterrupted = step_losses(trainer)
     final_uninterrupted = _adapter_snapshot(trainer.model)
+    saved = at_save.captured or {}
     checks["uninterrupted_ran_all_steps"] = len(uninterrupted) == TOTAL_STEPS
     if attention_targets:
         # A target with a dead gradient never leaves lora_B = 0, so its merge has nothing to carry.
-        checks["attention_adapters_trained"] = _all_ranks_true(
-            _attention_lora_b_moved(at_save.get("adapters", {}), attention_targets), ctx.device
+        checks["attention_adapters_trained"] = world_all(
+            _attention_lora_b_moved(saved.get("adapters", {}), attention_targets), ctx.device
         )
-    before, after = at_save.get("before_save", {}), at_save.get("after_save", {})
-    moved = sorted(name for name in before if name not in after or not torch.equal(before[name], after[name]))
+    before = at_save.before_save
+    moved = sorted(moved_parameters(before, saved.get("parameters", {})))
     # The run a checkpoint is resumed from must be the run that wrote it: a save that nudges the
     # frozen base (a bf16 merge -> unmerge that does not reverse) leaves every resume off by that step.
-    checks["save_left_every_parameter_bit_identical"] = _all_ranks_true(bool(before) and not moved, ctx.device)
+    checks["save_left_every_parameter_bit_identical"] = world_all(bool(before) and not moved, ctx.device)
     log(f"  {len(before) - len(moved)}/{len(before)} local parameters bit-identical across the save {moved[:2]}")
-    del trainer
-    cleanup_memory()
-    ctx.barrier()
+    finish_phase(trainer)
 
     log("\n[2/4] The merged checkpoint as a server loads it...")
     serving = _serving_checks(tiny, checkpoint, base_dir, attention_targets)
-    checks.update({name: _all_ranks_true(ok, ctx.device) for name, ok in serving.items()})
+    checks.update({name: world_all(ok, ctx.device) for name, ok in serving.items()})
     ctx.barrier()
 
     log(f"\n[3/4] Resuming from {checkpoint}...")
-    parallelism_config = ParallelismConfig(ep_size=ep_size, cp_size=cp_size, merge_expert_lora_on_save=True)
-    source = resolve_resume_weights_source(
-        checkpoint, SimpleNamespace(model_name_or_path=base_dir), parallelism_config
-    )
+    base_source = SimpleNamespace(model_name_or_path=base_dir)
+    source = resolve_resume_weights_source(checkpoint, base_source, _parallelism_config(ep_size, cp_size))
     checks["policy_source_is_the_base"] = source == base_dir
     log(f"  policy weights source: {source}")
-    trainer, _, _ = make_trainer(source, train_out, save=False)
-    restored: dict = {"trainer": trainer}
-    trainer.add_callback(_RestoreCapture(restored))
+    trainer, _ = make_trainer(source, train_out, save=False)
+    restored = _RestorePoint("train_begin", trainer)
+    trainer.add_callback(restored)
     trainer.train(resume_from_checkpoint=checkpoint)
     resumed = step_losses(trainer)
     final_resumed = _adapter_snapshot(trainer.model)
-    del trainer
-    cleanup_memory()
+    finish_phase(trainer)
 
-    saved_adapters, restored_adapters = at_save.get("adapters", {}), restored.get("adapters", {})
+    saved_adapters, restored_adapters = saved.get("adapters", {}), (restored.captured or {}).get("adapters", {})
     unequal = sorted(
         key
         for key in saved_adapters
@@ -374,44 +326,35 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
     checks["adapters_bit_equal_after_restore"] = bool(saved_adapters) and not unequal
     log(f"  {len(saved_adapters) - len(unequal)}/{len(saved_adapters)} adapters bit-equal after restore {unequal[:2]}")
 
-    tail, reference = resumed[-(TOTAL_STEPS - SAVE_AT_STEP) :], uninterrupted[SAVE_AT_STEP:]
-    checks["resumed_ran_remaining_steps"] = len(tail) == len(reference) == TOTAL_STEPS - SAVE_AT_STEP
-    if checks["resumed_ran_remaining_steps"]:
-        deltas = [
-            abs(a - b) if math.isfinite(a) and math.isfinite(b) else math.inf
-            for a, b in zip(tail, reference, strict=True)
-        ]
+    deltas = resumed_loss_deltas(uninterrupted, resumed, save_step=SAVE_AT_STEP, total_steps=TOTAL_STEPS)
+    checks["resumed_ran_remaining_steps"] = deltas is not None
+    if deltas is not None:
         metrics["first_resumed_loss_delta"] = deltas[0]
         metrics["resumed_loss_max_delta"] = max(deltas)
-        checks["resumed_losses_match_uninterrupted"] = max(deltas) < LOSS_TOL
-        log(
-            f"  uninterrupted {[f'{x:.5f}' for x in reference]}  resumed {[f'{x:.5f}' for x in tail]}  "
-            f"deltas {[f'{d:.2e}' for d in deltas]}"
-        )
-    drift = _relative_l2(final_uninterrupted, final_resumed) if final_uninterrupted else math.inf
+        checks["resumed_losses_match_uninterrupted"] = max(deltas) < TOL.replayed_resume_loss_abs
+    drift = relative_l2(final_resumed, final_uninterrupted)
     metrics["final_adapter_relative_l2"] = drift
-    checks["final_adapters_match_uninterrupted"] = drift < FINAL_ADAPTER_RTOL
-    log(f"  final adapters, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {FINAL_ADAPTER_RTOL})")
+    checks["final_adapters_match_uninterrupted"] = drift < TOL.replayed_resume_weight_rtol
+    log(f"  final adapters, resumed vs uninterrupted: relative L2 {drift:.3e} (tol {TOL.replayed_resume_weight_rtol})")
 
     log("\n[4/4] Resuming from the same checkpoint without its resume adapter (a kill before it)...")
-    torn = os.path.join(shared[0], f"torn-checkpoint-{SAVE_AT_STEP}")
+    torn = os.path.join(output_dir, f"torn-checkpoint-{SAVE_AT_STEP}")
     if ctx.rank == 0:
         shutil.copytree(
             checkpoint, torn, ignore=shutil.ignore_patterns(RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
         )
     ctx.barrier()
-    source = resolve_resume_weights_source(torn, SimpleNamespace(model_name_or_path=base_dir), parallelism_config)
+    source = resolve_resume_weights_source(torn, base_source, _parallelism_config(ep_size, cp_size))
     checks["torn_checkpoint_builds_from_its_merged_weights"] = source == torn
-    trainer, _, _ = make_trainer(source, os.path.join(shared[0], "torn_out"), save=False)
+    trainer, _ = make_trainer(source, os.path.join(output_dir, "torn_out"), save=False)
     try:
         trainer.train(resume_from_checkpoint=torn)
         refusal = None
     except ValueError as exc:
         refusal = str(exc)
     log(f"  resume refusal: {(refusal or 'none')[:160]}")
-    checks["torn_checkpoint_refuses_on_every_rank"] = _all_ranks_true(
+    checks["torn_checkpoint_refuses_on_every_rank"] = world_all(
         refusal is not None and "without its resume adapter" in refusal, ctx.device
     )
-    del trainer
-    cleanup_memory()
+    finish_phase(trainer)
     return {"checks": checks, "metrics": metrics}

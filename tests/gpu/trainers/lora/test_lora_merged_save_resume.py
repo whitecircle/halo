@@ -15,7 +15,7 @@ Usage:
 from tests.common.harness import gpu_test_main
 from tests.common.merged_resume_e2e import WORLD_SIZE, merged_resume_parser, run_merged_resume
 
-ARGS, _ = merged_resume_parser(("gpt_oss", "qwen3_moe")).parse_known_args()
+ARGS = merged_resume_parser(("gpt_oss", "qwen3_moe")).parse_args()
 
 
 @gpu_test_main(

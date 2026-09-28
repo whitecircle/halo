@@ -42,12 +42,12 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
-from tests.common.distributed import ensure_model_downloaded
+from tests.common.checkpoint_io import RestorePointSnapshot
+from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import ep_layers
 from tests.common.on_policy_e2e import (
     RESUME_MAX_STEPS,
     RESUME_SAVE_STEP,
-    RestorePointSnapshot,
     adapter_file_agreement,
     expert_lora_under_etp_refusal,
     fresh_parallelism_config,
@@ -66,7 +66,6 @@ from tests.common.on_policy_e2e import (
     record_served_baseline,
     record_step_losses,
     served_policy_moved,
-    shared_output_dir,
     sink_round,
 )
 from tests.common.peft_helpers import assert_only_adapters_trainable, snapshot_adapters, unwrap
@@ -570,10 +569,10 @@ def run_online_grpo_e2e(
 
     if spec.adapter:
         record_adapter_training(trainer, checks, before=adapters_before, expert_lora=spec.expert_lora, trained=trained)
-        # Every step's sync folded the adapters in and out; the frozen base must come out as loaded.
+        # Every step's sync folded the adapters into copies it pushed; the frozen base must come out as loaded.
         moved = moved_parameters(base_before, frozen_base_weights(unwrap(trainer.model)))
         checks["training_syncs_left_the_base_weights_alone"] = bool(base_before) and not moved
-        log(f"  frozen layer-0 weights the training syncs moved: {len(moved)}/{len(base_before)} {moved[:3]}")
+        log(f"  frozen base weights the training syncs moved: {len(moved)}/{len(base_before)} {moved[:3]}")
 
     ctx.barrier()
     before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}

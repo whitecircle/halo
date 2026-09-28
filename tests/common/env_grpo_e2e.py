@@ -43,12 +43,12 @@ from src.distributed.fsdp import reshard_fsdp2_modules
 from src.env import env_int, env_str
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
-from tests.common.distributed import ensure_model_downloaded
+from tests.common.checkpoint_io import RestorePointSnapshot
+from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.models import QWEN3_30B_A3B
 from tests.common.on_policy_e2e import (
     RESUME_MAX_STEPS,
     RESUME_SAVE_STEP,
-    RestorePointSnapshot,
     adapter_file_agreement,
     expert_lora_under_etp_refusal,
     expert_round,
@@ -67,7 +67,6 @@ from tests.common.on_policy_e2e import (
     record_step_losses,
     served_policy_delta,
     served_policy_moved,
-    shared_output_dir,
     sink_round,
 )
 from tests.common.peft_helpers import assert_only_adapters_trainable, snapshot_adapters, unwrap

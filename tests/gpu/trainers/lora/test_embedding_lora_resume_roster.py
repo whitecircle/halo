@@ -22,7 +22,7 @@ parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
 # One process and TP over FSDP2 take their own world sizes (the _1gpu and _4gpu scripts).
 parser.add_argument("--mode", choices=[mode for mode in MODES if mode not in ("single", "tpdp")], required=True)
 parser.add_argument("--lora", choices=LORA_TARGETS, default="attention")
-ARGS, _ = parser.parse_known_args()
+ARGS = parser.parse_args()
 
 
 @gpu_test_main(exact_world_size=2, prefix=f"embedding_lora_resume_roster_{ARGS.family}_{ARGS.mode}_{ARGS.lora}")

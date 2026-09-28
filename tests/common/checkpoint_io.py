@@ -3,7 +3,12 @@ compare them by.
 
 Key-set assertions go through the production reader (``load_full_state_dict``): it accepts both
 layouts the writers pick between by size (index+shards vs a bare ``model.safetensors``) and refuses a
-per-rank EP/TP index, which a test-local reader would accept as a whole checkpoint.
+per-rank EP/TP index, which a test-local reader would accept as a whole checkpoint. A stock
+``from_pretrained`` load of a checkpoint is clean when :func:`loading_problems` reports nothing.
+
+A two-phase resume compares the state at the save with the state the resume restored
+(:class:`RestorePointSnapshot`; :class:`ReplayRestorePoint` for a resume replayed against the
+uninterrupted run).
 
 A save→reload or save→resume test proves the weights survived by value: the same fixed batch's forward
 loss before the save and after the reload (:func:`fixed_batch_loss`). A resume test also reads the
@@ -17,8 +22,13 @@ import torch
 from transformers import TrainerCallback
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, load_full_state_dict
+from src.distributed.fsdp import reshard_fsdp2_modules
+from src.optimizers.adamw_bf16 import reset_sr_stream
+from tests.common.peft_helpers import snapshot_adapters, unwrap
 from tests.common.utils import local_optimizer_state
 
+# The key lists ``from_pretrained``'s loading info reports; a clean load leaves every one empty.
+LOADING_INFO_KINDS = ("missing_keys", "unexpected_keys", "mismatched_keys")
 # Truncation bound for a :func:`fixed_text_batch` sequence; the short probe texts stay under it.
 FIXED_TEXT_BATCH_MAX_TOKENS = 64
 # The fixed-batch probe of the TP resume suites, scored before the save and after the resume.
@@ -33,6 +43,13 @@ def written_keys(output_dir: str) -> set[str]:
     state = load_full_state_dict(output_dir)
     assert state is not None, f"no checkpoint at {output_dir}"
     return set(state)
+
+
+def loading_problems(info: dict) -> dict[str, list]:
+    """The non-empty key lists of a ``from_pretrained(..., output_loading_info=True)`` load: missing,
+    unexpected and mismatched. Indexed rather than ``get``, so a kind transformers stops reporting
+    raises instead of reading as clean."""
+    return {kind: info[kind] for kind in LOADING_INFO_KINDS if info[kind]}
 
 
 def weight_files(output_dir: str, *, include_index: bool = False) -> list[str]:
@@ -98,6 +115,77 @@ def optimizer_moments_stats(optimizer) -> tuple[bool, bool, bool]:
         if not torch.isfinite(local).all().item():
             all_finite = False
     return materialized, any_nonzero, all_finite
+
+
+class RestorePointSnapshot(TrainerCallback):
+    """Trainer/optimizer/scheduler state at one lifecycle point.
+
+    ``"save"`` fires when the checkpoint is written, ``"train_begin"`` after the resume restore and
+    before the first resumed step, so the two snapshots describe the same step and a warm-restarted
+    optimizer cannot hide behind the steps that follow.
+
+    The first occurrence wins: a run that stops on ``max_steps`` writes a final checkpoint too, and a
+    snapshot overwritten there would describe a step the resume never restores.
+
+    ``capture_optimizer`` is off for a full fine-tune of a large policy: ``local_optimizer_state``
+    offloads the whole state to host RAM, which is 6 B/param of AdamWBF16 moments. ``expert_lora``
+    is the adapter-gather flag (``None`` = do not capture adapters); the capture has to happen here
+    because a resumed run takes a step of its own before the body can look. A subclass adds its own
+    entries through :meth:`extra`.
+    """
+
+    def __init__(self, event: str, trainer, *, capture_optimizer: bool, expert_lora: bool | None = None):
+        self.event = event
+        self.trainer = trainer
+        self.capture_optimizer = capture_optimizer
+        self.expert_lora = expert_lora
+        self.captured: dict | None = None
+
+    def extra(self) -> dict:
+        """Extra entries for the snapshot, taken at the same point. Empty here."""
+        return {}
+
+    def _capture(self, state) -> None:
+        if self.captured is not None:
+            return
+        # Every reader below goes by parameter identity, and a hook can fire while the FSDP2 modules
+        # still hold the transient unsharded params an eval-only forward left registered.
+        reshard_fsdp2_modules(unwrap(self.trainer.model))
+        self.captured = {
+            "global_step": state.global_step,
+            "sched_last_epoch": self.trainer.lr_scheduler.last_epoch,
+            "optimizer": local_optimizer_state(self.trainer.model, self.trainer.optimizer)
+            if self.capture_optimizer
+            else None,
+            "adapters": snapshot_adapters(unwrap(self.trainer.model), expert_lora=self.expert_lora)
+            if self.expert_lora is not None
+            else None,
+            **self.extra(),
+        }
+
+    def on_save(self, args, state, control, **kwargs):
+        if self.event == "save":
+            self._capture(state)
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if self.event == "train_begin":
+            self._capture(state)
+
+
+class ReplayRestorePoint(RestorePointSnapshot):
+    """A :class:`RestorePointSnapshot` after which the bf16 optimizer's stochastic-rounding stream is
+    rewound (:func:`~src.optimizers.adamw_bf16.reset_sr_stream`).
+
+    A resumed process starts the stream where a fresh import does, while the uninterrupted run has
+    advanced it past the save; rewinding both runs at their restore point leaves the comparison of the
+    restored state alone. At ``train_begin`` the rewind follows the optimizer-state load, whose
+    zero-LR materialization step draws from the stream.
+    """
+
+    def _capture(self, state) -> None:
+        if self.captured is None:
+            super()._capture(state)
+            reset_sr_stream()
 
 
 class ResumeCapture(TrainerCallback):
