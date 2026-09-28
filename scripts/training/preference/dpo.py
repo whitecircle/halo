@@ -25,7 +25,6 @@ from trl import DPOConfig, ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.dpo_args import DPOScriptArguments
 from src.data.sources.loading import alias_images_column
-from src.data.vlm import is_vlm_script_run
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
@@ -45,8 +44,8 @@ from src.training.script_runner import (
     load_script_datasets,
     padded_workload_attn_implementation,
     prepare_script_preference_data,
-    reject_images_under_text_only_model,
     reject_unsupported_args,
+    resolve_vlm_run,
     run_trainer,
 )
 
@@ -69,7 +68,6 @@ def main():
     parallelism_config = runtime.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
     # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
@@ -79,7 +77,7 @@ def main():
     # vision path. There the rows pass through untouched: TRL tokenizes them, auto-selects
     # DataCollatorForVisionPreference and applies no hub-shape normalization of its own. Decided
     # before the model load, which requires the checkpoint's processor for a vision run.
-    is_vlm_data = is_vlm_script_run(args, model_config, ds)
+    is_vlm_data = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
     if is_vlm_data:
         # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
         # tools column would survive the signature filter and render toolless.

@@ -27,7 +27,6 @@ from trl import ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.smpo_args import SMPOScriptArguments
 from src.configs.smpo_config import SmoothMarginPOConfig
-from src.data.vlm import is_vlm_script_run
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier
@@ -46,8 +45,8 @@ from src.training.script_runner import (
     load_script_datasets,
     padded_workload_attn_implementation,
     prepare_script_preference_data,
-    reject_images_under_text_only_model,
     reject_unsupported_args,
+    resolve_vlm_run,
     run_trainer,
 )
 
@@ -62,15 +61,12 @@ def main():
     parallelism_config = runtime.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the verdict below, which reads the checkpoint's config: under text_only_model that
-    # config still says multimodal while the loaded class has no vision path.
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
 
     # The run's data path, not the checkpoint's modality: a multimodal checkpoint carrying text-only
     # pairs is a text run, and CP / padding_free stay legal for it. Decided here so the VLM
     # guards (the trainer enforces the same ones) raise before the model load, which also requires
     # the checkpoint's processor for a VLM run.
-    is_vlm = is_vlm_script_run(args, model_config, ds)
+    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
     if dist_args.context_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Context Parallelism — drop --context_parallel_size.")
     if is_vlm:

@@ -21,7 +21,7 @@ from src.callbacks.wiring import build_perf_callbacks, reorder_integration_callb
 from src.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
 from src.data.pipeline.processing import log_dataset_examples, resolve_map_num_proc
 from src.data.sources.loading import is_presharded_dataset_load, load_datasets, reject_image_columns
-from src.data.vlm import dataset_declares_images
+from src.data.vlm import dataset_declares_images, is_vlm_run
 from src.distributed.expert_parallel.dispatcher import verify_rank_uniform_env
 from src.distributed.filesystem import verify_output_filesystem_sharing
 from src.distributed.loading.peft_setup import split_expert_lora_targets
@@ -184,6 +184,29 @@ def reject_images_under_text_only_model(args, datasets, *, text_only_model: bool
             f"loads the text-only CausalLM class, which has no vision path. Drop text_only_model to "
             f"train the multimodal wrapper, or drop the image parts for a text-only run."
         )
+
+
+def resolve_vlm_run(
+    args, model_config, datasets, *, text_only_model: bool, vlm_checkpoint: bool | None = None
+) -> bool:
+    """Whether the run takes the VLM data path (:func:`~src.data.vlm.is_vlm_run`), after refusing
+    image data a text-only load cannot take (:func:`reject_images_under_text_only_model`).
+
+    Called once the dataset is in hand and before the model load, which requires the checkpoint's
+    processor for an image run. The probe reads ``model_config``'s checkpoint at its
+    ``model_revision`` under its ``trust_remote_code``, as the load does, since hub ``main`` can name
+    a different modality than the pinned commit; ``vlm_checkpoint`` is a verdict the script already
+    probed, so the checkpoint config is not read twice.
+    """
+    reject_images_under_text_only_model(args, datasets, text_only_model=text_only_model)
+    return is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        datasets,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+        vlm_checkpoint=vlm_checkpoint,
+    )
 
 
 def load_script_datasets(
@@ -409,6 +432,23 @@ def reject_unsupported_args(context: str, **unsupported) -> None:
     field is not a request.
     """
     _reject_ignored_fields(context, sorted(name for name, value in unsupported.items() if value))
+
+
+def reject_trl_dataset_prep_args(context: str, sft_config, *unread_fields: str) -> None:
+    """Refuse the ``SFTConfig`` knobs only TRL's own dataset prep and default collator read.
+
+    A script that renders and masks its rows itself replaces both (:func:`disable_trl_dataset_prep`
+    overwrites ``dataset_kwargs``), so each knob would parse and do nothing; its completion masking is
+    ``train_on_completions_only`` + ``assistant_message_template``. ``unread_fields`` names further
+    defaulted fields the caller's path leaves unread.
+    """
+    reject_unsupported_args(
+        context,
+        # Tri-state: an explicit False ("train on the full sequence") is ignored the same as True.
+        completion_only_loss=sft_config.completion_only_loss is not None,
+        assistant_only_loss=sft_config.assistant_only_loss,
+    )
+    reject_non_default_args(context, sft_config, "dataset_text_field", "dataset_kwargs", *unread_fields)
 
 
 def reject_non_default_args(context: str, args, *field_names: str) -> None:

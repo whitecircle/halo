@@ -317,20 +317,6 @@ def is_vlm_run(
     return agree_probe_across_ranks(local, model_name_or_path, "is_vlm_run")
 
 
-def is_vlm_script_run(args, model_config, dataset, *, vlm_checkpoint: bool | None = None) -> bool:
-    """:func:`is_vlm_run` for a training script, off its ``ModelConfig``: the probe reads the
-    checkpoint at the run's ``model_revision`` under its ``trust_remote_code``, as the model load does,
-    since hub ``main`` can name a different modality than the pinned commit."""
-    return is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        dataset,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-        vlm_checkpoint=vlm_checkpoint,
-    )
-
-
 def process_vlm_conversation(
     conversation: list[dict[str, Any]],
     system_prompt: str | None = None,

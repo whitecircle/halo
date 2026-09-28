@@ -49,10 +49,9 @@ from src.data.vlm import (
     dataset_declares_images,
     dataset_image_evidence,
     is_vlm_run,
-    is_vlm_script_run,
     process_vlm_conversation,
 )
-from src.training.script_runner import enforce_text_path_padding_side
+from src.training.script_runner import enforce_text_path_padding_side, resolve_vlm_run
 from tests.common.utils import load_script_module
 
 # Real configs, not stand-ins: the verdict must follow what transformers says about the architecture.
@@ -167,7 +166,7 @@ def test_the_script_seam_probes_the_checkpoint_the_run_loads(monkeypatch):
     monkeypatch.setattr(vlm_module, "is_vlm_model", lambda name, **kwargs: seen.append((name, kwargs)) or True)
     model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision="abc123", trust_remote_code=True)
 
-    assert is_vlm_script_run(_args(images_field="images"), model_config, None)
+    assert resolve_vlm_run(_args(images_field="images"), model_config, None, text_only_model=False)
     assert seen == [("org/ckpt", {"config": None, "revision": "abc123", "trust_remote_code": True})]
 
 
@@ -176,7 +175,9 @@ def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm
     monkeypatch.setattr(vlm_module, "is_vlm_model", lambda *a, **k: pytest.fail("the checkpoint was probed again"))
     model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
 
-    verdict = is_vlm_script_run(_args(images_field="images"), model_config, None, vlm_checkpoint=vlm_checkpoint)
+    verdict = resolve_vlm_run(
+        _args(images_field="images"), model_config, None, text_only_model=False, vlm_checkpoint=vlm_checkpoint
+    )
     assert verdict is vlm_checkpoint
 
 

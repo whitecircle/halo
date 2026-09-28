@@ -101,7 +101,7 @@ def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> No
         is_vlm_model=lambda *args, **kwargs: False,
         init_training_script=lambda *args, **kwargs: SimpleNamespace(parallelism_config=None),
         load_script_datasets=lambda *args, **kwargs: ((None, preprocessed), False),
-        reject_images_under_text_only_model=_stop,
+        resolve_vlm_run=_stop,
     )
 
 

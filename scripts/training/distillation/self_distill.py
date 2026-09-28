@@ -34,7 +34,6 @@ from src.data.collators.self_distill import SelfDistillTextCollator, audit_self_
 from src.data.collators.vlm import SelfDistillVLMDataCollator
 from src.data.pipeline.processing import coordinated_map, require_render_column, resolve_map_num_proc
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.data.vlm import is_vlm_script_run
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
@@ -55,9 +54,9 @@ from src.training.script_runner import (
     install_resolved_tokenizer,
     load_script_datasets,
     log_script_dataset_examples,
-    reject_images_under_text_only_model,
     reject_non_default_args,
-    reject_unsupported_args,
+    reject_trl_dataset_prep_args,
+    resolve_vlm_run,
     run_trainer,
 )
 
@@ -217,17 +216,8 @@ def main():
             "collators tokenize the student and teacher branches at collation time and always "
             "right-pad, so both are forced off below. Remove them from the YAML."
         )
-    # TRL applies these inside its own dataset prep + default collator, both replaced here (the
-    # SelfDistill collators mask through train_on_completions_only), so they would parse and mask nothing.
-    reject_unsupported_args(
-        "Self-distillation",
-        # Tri-state: an explicit False ("train on the full sequence") is ignored the same as True.
-        completion_only_loss=sft_config.completion_only_loss is not None,
-        assistant_only_loss=sft_config.assistant_only_loss,
-    )
-    # Read by that same prep alone (disable_trl_dataset_prep overwrites dataset_kwargs); eval_packing has
-    # nothing to narrow with packing refused above.
-    reject_non_default_args("Self-distillation", sft_config, "dataset_text_field", "dataset_kwargs", "eval_packing")
+    # eval_packing has nothing to narrow with packing refused above.
+    reject_trl_dataset_prep_args("Self-distillation", sft_config, "eval_packing")
 
     # The SelfDistill collator tokenizes the raw branches at collation time, so the raw conversation
     # and privileged columns have to survive HF's remove_unused_columns=True, which would strip them.
@@ -249,8 +239,7 @@ def main():
     # The data path follows the run, not the checkpoint class: a natively-multimodal student
     # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
     # which requires the checkpoint's processor for an image run.
-    reject_images_under_text_only_model(args, ds, text_only_model=distributed_args.text_only_model)
-    is_vlm = is_vlm_script_run(args, model_config, ds)
+    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=distributed_args.text_only_model)
 
     model, processing_class, tokenizer, is_vlm_checkpoint = load_model_for_training(
         model_config,
