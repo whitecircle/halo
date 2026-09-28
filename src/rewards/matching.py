@@ -27,16 +27,21 @@ _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 
 # ``,`` groups thousands only in the strict ``1,234,567`` form, so ``1,2,3`` and ``3,5`` stay separate numbers.
 # A chain never restarts at one of its own groups and a digit run splits one way, so the scan stays linear.
+# A number glued to a letter or digit is part of a token (``h2o``, ``v2``), not a value.
 _NUMBER_RE = re.compile(
-    r"(?P<sign>[-+]?)(?P<value>(?:(?<!\d,)\d{1,3}(?:,\d{3})+(?!,?\d)(?:\.\d*)?|\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?)"
+    r"(?<![a-z\d_])(?P<sign>[-+]?)"
+    r"(?P<value>(?:(?<!\d,)\d{1,3}(?:,\d{3})+(?!,?\d)(?:\.\d*)?|\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?)"
     r"(?P<percent>\s*%)?"
 )
 
 # Formatting-only LaTeX reads as a space, as does ``\approx``, which states the value (``\%``/``\$`` keep
 # their symbol; ``\circ`` marks degrees).
 _LATEX_FORMATTING_RE = re.compile(
-    r"\\(?:(?:text|textbf|textrm|mathrm|mathbf|mbox|left|right|quad|qquad|circ|approx)(?![a-z])|[,;:! ]|(?=[%$]))"
+    r"\\(?:(?:text|textbf|textit|textrm|textsf|texttt|mathrm|mathbf|mathit|mathsf|mbox|num|displaystyle"
+    r"|left|right|quad|qquad|circ|approx)(?![a-z])|[,;:! ]|(?=[%$]))"
 )
+# Thin-space grouping (``10\,000``) reads as ``,`` grouping, under the same strict form.
+_LATEX_GROUPING_RE = re.compile(r"(?<=\d)\\,(?=\d)")
 # Braces only group, so dropping them reads ``1{,}000`` as one number and ``m^{2}`` as a unit exponent.
 # Dash-like characters are the minus a model means (``−5``, ``–5``), so ``5–7`` reads as ``5-7``.
 _DASHES = (
@@ -45,14 +50,23 @@ _DASHES = (
 )
 _CHAR_MAP = str.maketrans({"{": None, "}": None} | dict.fromkeys(_DASHES, "-"))
 
-# A ``^n`` right after a letter is a unit exponent (``m/s^2``), not a value.
-_UNIT_EXPONENT_RE = re.compile(r"(?<=[^\W\d_])\^[-+]?\d+")
+_SUPERSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
 
-# Any LaTeX command left after formatting, a root, constant or function: the prediction is an expression.
-_SYMBOLIC_RE = re.compile(r"\\[a-z]|[√π∞±∓]|(?<![a-z])(?:sqrt|pi|log|ln|exp|sin|cos|tan)(?![a-z])")
+# A power right after a letter is a unit exponent (``m/s^2``, ``m^(2)``, ``m**2``, ``m²``), not a value.
+_UNIT_EXPONENT_RE = re.compile(rf"(?<=[^\W\d_])(?:(?:\^|\*\*)(?:[-+]?\d+|\([-+]?\d+\))|[⁺⁻]?[{_SUPERSCRIPT_DIGITS}]+)")
 
-# Two numbers with only operators, spaces and brackets between them are operands: ``2+2``, ``2024-01-01``.
-_OPERATOR_GAP_RE = re.compile(r"[\s()\[\]]*[-+*/^×÷·][-+*/^×÷·\s()\[\]]*")
+# The text is an expression or a bound, not a value: a LaTeX command left after formatting, a root,
+# constant, ``±``/``∞``, a power left after unit exponents (``10²``), a function applied to an argument,
+# or a comparison outside an arrow (``->``, ``=>``, ``<-``).
+_EXPRESSION_OR_BOUND_RE = re.compile(
+    rf"\\[a-z]|[√∛∜π∞±∓{_SUPERSCRIPT_DIGITS}≤≥≠]|(?<![-=])>|<(?!-)|!="
+    r"|(?<![a-z])(?:(?:sqrt|log|ln|exp|sin|cos|tan)\s*[\d(_]|(?:pi|squared|cubed)(?![a-z]))"
+)
+
+# Two numbers with only operators, spaces, brackets and ``$`` between them are operands: ``2+2``,
+# ``2024-01-01``, ``$5 + $5``.
+_OPERATORS = re.escape("-+*/^×÷·\N{DOT OPERATOR}\N{ASTERISK OPERATOR}")
+_OPERATOR_GAP_RE = re.compile(rf"[\s()\[\]$]*[{_OPERATORS}][{_OPERATORS}\s()\[\]$]*")
 
 
 def extract_last_boxed(text: str) -> str | None:
@@ -139,10 +153,11 @@ def _number_value(match: re.Match[str]) -> float:
 
 
 def _stated_values(text: str) -> list[float]:
-    """Every number a normalized answer states, or none when one is an operand of an expression."""
+    """Every number a normalized answer states, or none when it is an expression or a bound."""
+    text = _LATEX_GROUPING_RE.sub(",", text)
     text = _LATEX_FORMATTING_RE.sub(" ", text).translate(_CHAR_MAP)
     text = _UNIT_EXPONENT_RE.sub(" ", text)
-    if _SYMBOLIC_RE.search(text):
+    if _EXPRESSION_OR_BOUND_RE.search(text):
         return []
 
     values: list[float] = []

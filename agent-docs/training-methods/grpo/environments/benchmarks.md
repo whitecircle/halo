@@ -42,13 +42,16 @@ run reaching it would teach the policy that invented evidence works.
 Grading is all-or-nothing, through `src/rewards/matching.py`: `exact_match` (case-insensitive
 after normalization), then `numeric_match` — every number in the response against the one value the
 expected answer states (read the same way, so `$18` and `18 dollars` expect 18), at `rtol=0.01` /
-`atol=1e-6`, percentages divided by 100 and `3,500` read as one number. None may be an operand of
-arithmetic or of a symbolic expression (`1/2`, `2024-01-01`, `\sqrt{2}`, `2\pi`); a `^2` after a
-letter is a unit exponent (`9.8 m/s^2`). The response must commit to one value: a hedge (`7 or 8`)
-grades 0, and so does a correct answer that restates working with other numbers
-(`7, since 3 + 4 = 7`). A match grades 1, anything else 0, and the reward's `environment` term prices
-the grade ([Reward Terms](../rewards.md#environment-arm)). There is no fuzzy or substring matcher —
-"7" must not match "17".
+`atol=1e-6`, percentages divided by 100 and `3,500` or `10\,000` read as one number. The response must
+commit to one value: a hedge (`7 or 8`) grades 0, and so does a correct answer that restates working
+with other numbers (`7, since 3 + 4 = 7`). A number that is an operand of arithmetic between numbers
+(`1/2`, `2024-01-01`), of a power (`10^3`, `10²`), root (`\sqrt{2}`), constant (`2\pi`) or function
+(`log 2`) grades 0 too, as does a stated bound (`x < 3`, `x \le 3`). A power after a letter is a unit
+exponent (`9.8 m/s^2`, `5 m²`), and a number glued to a letter is part of a token (`H2O`). A number next
+to a variable reads as a number plus a unit, so `2x` and `n+1` are not caught, nor are word forms
+(`square root of 2`, `at least 3`). A match grades 1, anything else 0, and the reward's `environment`
+term prices the grade ([Reward Terms](../rewards.md#environment-arm)). There is no fuzzy or substring
+matcher — "7" must not match "17".
 
 Online GRPO's `accuracy` term uses a different grader — a strict boxed exact match that splits
 `####` and strips `,`/`$` ([Online GRPO → Rewards](../online-grpo.md#rewards)). The two score the

@@ -112,6 +112,8 @@ def test_numeric_match_leading_distractor_names_two_values():
         ("3500", "3,500"),
         ("1,000", "1000"),
         ("$1,000,000", "1000000"),
+        ("1{,}000", "1000"),  # braces only group
+        (r"10\,000", "10000"),  # LaTeX thin-space grouping
         ("The answer is 110", "110"),
         ("x = 5", "5"),
         ("5 apples", "5"),
@@ -123,6 +125,25 @@ def test_numeric_match_leading_distractor_names_two_values():
         ("5.", "5"),
         ("9.8 m/s^2", "9.8"),  # a ^n after a letter is a unit exponent
         ("5 cm^2", "5"),
+        ("5 m^{2}", "5"),
+        ("5 m^(2)", "5"),
+        ("5 m**2", "5"),
+        ("5 m²", "5"),
+        ("5 cm³", "5"),
+        ("9.8 m s⁻²", "9.8"),
+        ("5 m2", "5"),  # a number glued to a letter or digit is part of a token
+        ("5 cm3", "5"),
+        ("5 mol of H2O", "5"),
+        ("5 mol of C12H22O11", "5"),
+        ("x_1 = 5", "5"),
+        ("答案是42", "42"),  # only a Latin letter glues, so CJK text needs no space
+        ("x = -5", "-5"),
+        ("-5", "-5"),
+        ("answer -> 7", "7"),  # an arrow is no bound
+        ("x => 7", "7"),
+        ("5 log entries", "5"),  # a function name without an argument is a word
+        ("The tan box weighs 5 kg", "5"),
+        ("sin embargo, 5", "5"),
         (r"\boxed{42}", "42"),
         ("+5", "5"),
         ("\N{MINUS SIGN}5", "-5"),  # a dash-like sign is a minus
@@ -130,6 +151,13 @@ def test_numeric_match_leading_distractor_names_two_values():
         ("\N{FULLWIDTH HYPHEN-MINUS}5", "-5"),
         (r"x \approx 3.14", "3.14"),  # a relation that states the value
         (r"90^\circ", "90"),
+        (r"\displaystyle 5", "5"),  # formatting-only LaTeX
+        (r"\textit{5}", "5"),
+        (r"\textsf{5}", "5"),
+        (r"\texttt{5}", "5"),
+        (r"\mathit{5}", "5"),
+        (r"\mathsf{5}", "5"),
+        (r"\num{10000}", "10000"),
     ],
 )
 def test_numeric_match_accepts_one_stated_value(predicted, expected):
@@ -144,17 +172,47 @@ def test_numeric_match_accepts_one_stated_value(predicted, expected):
         (r"\frac{3}{4}", "3"),
         ("3,500", "3"),
         ("$1,000,000", "1"),
+        ("1,2345", "12345"),  # grouping only in the strict form
+        ("1,2345", "1234"),
+        (r"1\,2345", "12345"),
         ("2x+1", "2"),
         ("10^3", "10"),
         ("2024-01-01", "2024"),
         ("3-4", "3"),
         ("2+2", "2"),  # operands, even when each one equals the expected value
+        ("2 +2", "2"),  # a sign right after an operand is the operator
         (r"2 \times 2", "2"),
+        ("2×2", "2"),
+        ("2\N{DOT OPERATOR}2", "2"),
+        ("2\N{ASTERISK OPERATOR}2", "2"),
+        ("$5 + $5", "5"),
+        ("10²", "10"),  # a power after a digit
+        ("2³", "2"),
+        ("10⁻³", "10"),
         (r"\sqrt{2}", "2"),
         ("√2", "2"),
+        ("∛8", "8"),
+        ("∜16", "16"),
+        ("sqrt(2)", "2"),
+        ("log 2", "2"),
+        ("log_2 8", "8"),
+        ("5 squared", "5"),
+        ("2 cubed", "2"),
         (r"2\pi", "2"),
+        ("±5", "5"),
+        ("∓5", "5"),
+        ("(5, ∞)", "5"),
         ("e^2", "2"),  # a letter's exponent is no value, and nothing else is left
         (r"x \le 3", "3"),  # a bound, not the value
+        ("x < 3", "3"),
+        ("x > 3", "3"),
+        ("x <= 3", "3"),
+        ("x >= 3", "3"),
+        ("x != 3", "3"),
+        ("x ≤ 3", "3"),
+        ("≥ 3", "3"),
+        ("x ≠ 3", "3"),
+        ("v2", "2"),  # part of a token
         ("-5", "5"),
         ("\N{EN DASH}5", "5"),
         ("5\N{EN DASH}7", "5"),  # a range
