@@ -125,6 +125,9 @@ def test_numeric_match_leading_distractor_names_two_values():
         ("5 cm^2", "5"),
         (r"\boxed{42}", "42"),
         ("+5", "5"),
+        ("\N{MINUS SIGN}5", "-5"),  # a dash-like sign is a minus
+        ("\N{EN DASH}5", "-5"),
+        ("\N{FULLWIDTH HYPHEN-MINUS}5", "-5"),
         (r"x \approx 3.14", "3.14"),  # a relation that states the value
         (r"90^\circ", "90"),
     ],
@@ -153,6 +156,8 @@ def test_numeric_match_accepts_one_stated_value(predicted, expected):
         ("e^2", "2"),  # a letter's exponent is no value, and nothing else is left
         (r"x \le 3", "3"),  # a bound, not the value
         ("-5", "5"),
+        ("\N{EN DASH}5", "5"),
+        ("5\N{EN DASH}7", "5"),  # a range
         ("7 or 8", "7"),  # a hedge names two values
         ("**7** or **8**", "7"),  # several bold spans hedge too
         ("The answer is **7**, or possibly **8**.", "7"),
@@ -167,6 +172,21 @@ def test_numeric_match_accepts_one_stated_value(predicted, expected):
 )
 def test_numeric_match_rejects_expressions_and_hedges(predicted, expected):
     assert numeric_match(predicted, expected) is False
+
+
+@pytest.mark.parametrize(
+    ("predicted", "expected", "verdict"),
+    [
+        ("18", "$18", True),  # the expected answer is read like a prediction
+        ("18", "18 dollars", True),
+        ("5", "5 apples", True),
+        ("-5", "\N{MINUS SIGN}5", True),
+        ("2", "1+1", False),  # an expected expression or hedge states no one value
+        ("7", "7 or 8", False),
+    ],
+)
+def test_numeric_match_reads_the_expected_answer_like_a_prediction(predicted, expected, verdict):
+    assert numeric_match(predicted, expected) is verdict
 
 
 @pytest.mark.parametrize(

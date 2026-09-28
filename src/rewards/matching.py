@@ -33,12 +33,17 @@ _NUMBER_RE = re.compile(
 )
 
 # Formatting-only LaTeX reads as a space, as does ``\approx``, which states the value (``\%``/``\$`` keep
-# their symbol; ``\circ`` marks degrees). Braces only group, so dropping them reads ``1{,}000`` as one
-# number and ``m^{2}`` as a unit exponent.
+# their symbol; ``\circ`` marks degrees).
 _LATEX_FORMATTING_RE = re.compile(
     r"\\(?:(?:text|textbf|textrm|mathrm|mathbf|mbox|left|right|quad|qquad|circ|approx)(?![a-z])|[,;:! ]|(?=[%$]))"
 )
-_PREDICTION_CHAR_MAP = str.maketrans({"{": None, "}": None, "\N{MINUS SIGN}": "-"})
+# Braces only group, so dropping them reads ``1{,}000`` as one number and ``m^{2}`` as a unit exponent.
+# Dash-like characters are the minus a model means (``−5``, ``–5``), so ``5–7`` reads as ``5-7``.
+_DASHES = (
+    "\N{HYPHEN}\N{NON-BREAKING HYPHEN}\N{FIGURE DASH}\N{EN DASH}\N{MINUS SIGN}"
+    "\N{SMALL HYPHEN-MINUS}\N{FULLWIDTH HYPHEN-MINUS}"
+)
+_CHAR_MAP = str.maketrans({"{": None, "}": None} | dict.fromkeys(_DASHES, "-"))
 
 # A ``^n`` right after a letter is a unit exponent (``m/s^2``), not a value.
 _UNIT_EXPONENT_RE = re.compile(r"(?<=[^\W\d_])\^[-+]?\d+")
@@ -47,7 +52,7 @@ _UNIT_EXPONENT_RE = re.compile(r"(?<=[^\W\d_])\^[-+]?\d+")
 _SYMBOLIC_RE = re.compile(r"\\[a-z]|[√π∞±∓]|(?<![a-z])(?:sqrt|pi|log|ln|exp|sin|cos|tan)(?![a-z])")
 
 # Two numbers with only operators, spaces and brackets between them are operands: ``2+2``, ``2024-01-01``.
-_OPERATOR_GAP_RE = re.compile(r"[\s()\[\]]*[-+*/^×÷·\N{EN DASH}][-+*/^×÷·\N{EN DASH}\s()\[\]]*")
+_OPERATOR_GAP_RE = re.compile(r"[\s()\[\]]*[-+*/^×÷·][-+*/^×÷·\s()\[\]]*")
 
 
 def extract_last_boxed(text: str) -> str | None:
@@ -134,8 +139,8 @@ def _number_value(match: re.Match[str]) -> float:
 
 
 def _stated_values(text: str) -> list[float]:
-    """Every number a normalized prediction states, or none when one is an operand of an expression."""
-    text = _LATEX_FORMATTING_RE.sub(" ", text).translate(_PREDICTION_CHAR_MAP)
+    """Every number a normalized answer states, or none when one is an operand of an expression."""
+    text = _LATEX_FORMATTING_RE.sub(" ", text).translate(_CHAR_MAP)
     text = _UNIT_EXPONENT_RE.sub(" ", text)
     if _SYMBOLIC_RE.search(text):
         return []
@@ -163,12 +168,13 @@ def numeric_match(
     numbers (``7, since 3 + 4 = 7``) grade as wrong, and so does a number that is an operand of arithmetic
     or of a symbolic expression (``1/2``, ``2024-01-01``, ``\\sqrt{2}``, ``2\\pi``). ``,`` thousands
     grouping reads as one number, a ``%`` value is divided by 100, and a ``^n`` after a letter is a unit
-    exponent (``9.8 m/s^2``). The expected answer must be one number as a whole.
+    exponent (``9.8 m/s^2``). The expected answer is read the same way and must state exactly one value
+    (``18``, ``$18``, ``18 dollars``); an expression or a hedge there gets no numeric match.
     """
-    expected_number = _NUMBER_RE.fullmatch(normalize_text(expected))
-    if expected_number is None:
+    expected_values = _stated_values(normalize_text(expected))
+    if len(expected_values) != 1:
         return False
-    target = _number_value(expected_number)
+    target = expected_values[0]
 
     values = _stated_values(normalize_text(predicted))
     return bool(values) and all(
