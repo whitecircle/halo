@@ -150,7 +150,7 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/training/environment.py` (output-dir validation, HF cache wiring, seed, tracking vars, resume detection) | `agent-docs/getting-started/configuration.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/checkpoints.md` |
-| `src/training/script_runner.py` (the `scripts/training/**` backbone: window pins, tokenizer/attention resolution, callback assembly, `reject_*` guards) | `agent-docs/reference/scripts-reference.md`, `agent-docs/getting-started/configuration.md` |
+| `src/training/script_runner.py` (the `scripts/training/**` backbone: window pins, tokenizer/attention resolution, the modality verdict (`resolve_vlm_run`), callback assembly, `reject_*` guards incl. the TRL dataset-prep refusal (`reject_trl_dataset_prep_args`)) | `agent-docs/reference/scripts-reference.md`, `agent-docs/getting-started/configuration.md` |
 | `src/training/parallelism_args.py` (`DistributedArguments` → `ParallelismConfig`, the per-script CP/PP/lowp gates) | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
 | `src/training/run_logging.py` (per-rank transformers verbosity, the `run.log` console tee) | `agent-docs/reference/debugging.md` |
 | `src/inference/openai_client.py` (OpenAI-compatible endpoint defaults, async client, parallel-request helpers), `src/inference/response.py` (`OpenAIResponse`, the finish-reason contract), `src/inference/resume_store.py` (resumable request checkpoints) | `agent-docs/reference/scripts-reference.md` |

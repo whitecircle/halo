@@ -125,7 +125,7 @@ With harmony disabled, five settings are load-bearing.
 - **`rollout_stop_tokens: ["<|call|>"]`** — with harmony disabled `<|call|>` is not an eos, so the model keeps generating past its tool call and hallucinates the result for ~90% of the turn. A server-side `--override-generation-config` eos does not fix it ([Async GRPO with Environments](../training-methods/grpo/async-grpo/rollouts.md#tool-calls)).
 - **Full padded vocab.** GPT-OSS ships 201088 embedding rows against `len(tokenizer)` 200019; rows 200019–201087 are unassigned padding. Every harmony special sits below that line — `<|return|>`/EOS at 200002, `<|call|>` at 200012, highest added id 200018 — so a resize to `len(tokenizer)` keeps them all.
 
-    The trap is `tokenizer.vocab_size`, which is **199998**: shrink to that and the checkpoint loses EOS and emits garbage. `scripts/before_training/patch_vocab.py` only **grows** the embedding, so a patched checkpoint is safe. Serve the full-vocab base or a grow-only-patched checkpoint.
+    The trap is `tokenizer.vocab_size`, which is **199998**: shrink to that and the checkpoint loses EOS and emits garbage. `scripts/before_training/patch_vocab.py` only **grows** the embedding, so a patched checkpoint keeps every special and serves like the base — unless it was patched with `--reset_sinks`, which leaves it sinks-off, and the pretrained model served sinks-off degenerates (below).
 
 Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer matches by freezing the same sinks, so recompute equals vLLM to ~0 nats (`is_ratio ~1`).
 

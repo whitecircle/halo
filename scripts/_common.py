@@ -1,14 +1,16 @@
 """Argparse flags shared across the ``scripts/`` subtrees.
 
 The shard cap, the Hub-capable source block, the dtype and device-map pair and the remote-code
-switch are defined once so the checkpoint tools chained over a single artifact (``after_training/``,
-``before_training/``) accept the same spelling and defaults. The reward-model scorers
-(``inference/reward_model/``) take the remote-code switch and the dtype flag, the latter as
-``--rm_dtype`` (their device is their own ``--rm_device``), and ``dataset_deduplication.py`` the
-remote-code switch. The OpenAI-compatible endpoint block (``--base_url``, ``--api_key``) is defined
-once for the same reason across the generation, eval and playground CLIs (``inference/``,
-``environments/``), which all drive one served model; it adds a required ``--model`` for every CLI
-but the two playgrounds. Flags only; the drivers they feed live in ``src/``.
+switch are defined once so the checkpoint tools chained over a single artifact accept the same
+spelling and defaults; each ``before_training/`` and ``after_training/`` tool takes the ones it
+needs (``quantize_to_lowp.py`` none, ``prepare_dataset.py`` only the remote-code switch). The
+reward-model scorers (``rm_scoring.py``, ``rm_rejection_sampling.py``) take the remote-code switch
+and the dtype flag, the latter as ``--rm_dtype`` (their device is their own ``--rm_device``), and
+``dataset_deduplication.py`` the remote-code switch. The OpenAI-compatible endpoint block
+(``--base_url``, ``--api_key``) is defined once for the same reason across every CLI that drives a
+served model: ``openai_batched_generation.py``, the two reward-model scorers, ``run_env.py``,
+``run_code_contests.py`` and the two Gradio playgrounds. It adds a required ``--model`` for all but
+the playgrounds. Flags only; the drivers they feed live in ``src/``.
 """
 
 import argparse
