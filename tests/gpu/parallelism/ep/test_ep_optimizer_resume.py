@@ -32,9 +32,7 @@ Usage:
 
 import argparse
 import logging
-import math
 import os
-import random
 
 import torch
 import torch.distributed as dist
@@ -43,17 +41,24 @@ from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
 import src.distributed.checkpoint.optimizer as optimizer_store_mod
-import src.optimizers.adamw_bf16 as adamw_bf16_mod
 from src.checkpoint.format import load_full_state_dict
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.optimizers.adamw_bf16 import reset_sr_stream
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, local_optimizer_state, log, optimizer_state_matches, step_losses
+from tests.common.utils import (
+    cleanup_memory,
+    local_optimizer_state,
+    log,
+    max_or_nan,
+    optimizer_state_matches,
+    step_losses,
+)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["ep", "ep1", "cp"], default="ep")
@@ -141,7 +146,7 @@ def _make_trainer(model_path, pc, tokenizer, train_dataset, config):
     # Reset the rank-synchronized SR RNG so every phase consumes the same stochastic-rounding
     # stream from step 1 — the continuous and to-be-resumed runs then produce bit-comparable
     # optimizer states at the save step.
-    adamw_bf16_mod._SR_RNG = random.Random(0xB165EED)
+    reset_sr_stream()
     # CP rejects sdpa (Ulysses needs a Flash kernel), so let CP auto-detect (FA4 on Blackwell) and
     # keep the cheaper sdpa path for the EP mode, which does not constrain the kernel.
     model, _ = load_distributed_model(
@@ -344,10 +349,7 @@ def run(ctx):
     continuous_tail = continuous_losses[SAVE_AT_STEP:]
     checks["resumed_ran_remaining_steps"] = len(resumed_tail) == TOTAL_STEPS - SAVE_AT_STEP
     if checks["resumed_ran_remaining_steps"] and checks["continuous_ran_all_steps"]:
-        deltas = [abs(a - b) for a, b in zip(continuous_tail, resumed_tail, strict=True)]
-        # max() never lets a later NaN displace the running max, so a non-finite delta is made the worst
-        # outright.
-        max_delta = max(deltas) if all(math.isfinite(delta) for delta in deltas) else math.inf
+        max_delta = max_or_nan(abs(a - b) for a, b in zip(continuous_tail, resumed_tail, strict=True))
         metrics["resume_loss_max_delta"] = max_delta
         log(
             f"continuous tail: {[f'{loss:.4f}' for loss in continuous_tail]}  "

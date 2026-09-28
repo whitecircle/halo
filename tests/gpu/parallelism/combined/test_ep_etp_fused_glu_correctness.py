@@ -44,15 +44,13 @@ from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_MISTRAL4_CONFIG
 from tests.common.tiny_models import build_tiny_mistral4_checkpoint
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
 
 # bf16 ulp at ~1.0 is ~7.8e-3; ETP adds one all-reduce per layer (4 layers in the tiny config) and
 # bf16 grouped-mm reorders accumulation. 1e-2 sits above that noise and far below the shift of the
 # gate/up pairs the contiguous-halves split bug mismatches.
 LOSS_TOLERANCE = 1e-2
-# Both ETP partners end every layer on the same all-reduced sum of the same batch, so their losses
-# agree to reduction order.
-ETP_RANK_SPREAD_ABS = 1e-4
 
 
 def reference_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, device: str) -> float:
@@ -182,7 +180,8 @@ def run(ctx):
     # Every rank holds the broadcast reference, so each judges its own ETP loss against it.
     checks = {
         "losses_finite": math.isfinite(ref_loss) and math.isfinite(etp_loss),
-        "etp_ranks_agree": cross_rank_diff < ETP_RANK_SPREAD_ABS,
+        # Both ETP partners end every layer on the same all-reduced sum of the same batch.
+        "etp_ranks_agree": cross_rank_diff < TOL.all_reduced_rank_spread_abs,
         "etp_matches_reference": ref_vs_etp < LOSS_TOLERANCE,
     }
     if not checks["etp_ranks_agree"]:

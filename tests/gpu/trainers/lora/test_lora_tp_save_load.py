@@ -37,7 +37,6 @@ Usage:
 """
 
 import argparse
-import math
 import os
 import traceback
 
@@ -57,7 +56,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, step_losses
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 # Configuration
 
@@ -382,29 +381,12 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
         train_result = trainer.train()
 
         log("[C.7] Validating training...")
-        training_loss = train_result.training_loss
-        losses = step_losses(trainer)
-        log(f"  Training loss: {training_loss:.6f}")
-        log(f"  Per-step losses: {[f'{sl:.4f}' for sl in losses]}")
-
-        checks = {}
-
-        loss_finite = math.isfinite(training_loss)
-        checks["loss_finite"] = loss_finite
-        log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'}")
-
-        all_finite = all(math.isfinite(sl) for sl in losses)
-        checks["all_steps_finite"] = all_finite
-        log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
+        checks = training_run_checks(train_result, trainer, MAX_STEPS)
 
         lora_after = snapshot_lora_weights(model)
         lora_updated, lora_details = verify_lora_updated(lora_before, lora_after)
         checks["lora_updated"] = lora_updated
         log(f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} ({lora_details})")
-
-        steps_ok = train_result.global_step == MAX_STEPS
-        checks["steps_completed"] = steps_ok
-        log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{MAX_STEPS})")
 
         checks["ep_mode"] = trainer.is_ep_mode
         checks["no_tp_mode"] = not trainer.is_tp_mode
@@ -532,23 +514,12 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, base_output_dir: str) -
         train_result = trainer.train()
 
         log("[D.7] Validating training...")
-        training_loss = train_result.training_loss
-        log(f"  Training loss: {training_loss:.6f}")
-
-        checks = {}
-
-        loss_finite = math.isfinite(training_loss)
-        checks["loss_finite"] = loss_finite
-        log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'}")
+        checks = training_run_checks(train_result, trainer, MAX_STEPS)
 
         lora_after = snapshot_lora_weights(model)
         lora_updated, lora_details = verify_lora_updated(lora_before, lora_after)
         checks["lora_updated"] = lora_updated
         log(f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} ({lora_details})")
-
-        steps_ok = train_result.global_step == MAX_STEPS
-        checks["steps_completed"] = steps_ok
-        log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{MAX_STEPS})")
 
         checks["no_ep_mode"] = not trainer.is_ep_mode
         checks["no_tp_mode"] = not trainer.is_tp_mode

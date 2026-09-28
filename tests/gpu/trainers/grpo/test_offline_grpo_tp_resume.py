@@ -35,10 +35,17 @@ from src.distributed.runtime import barrier
 from src.env import env_str
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
-from tests.common.checkpoint_io import TP_RESUME_PROBE_TEXT, ResumeCapture, fixed_batch_loss, fixed_text_batch
+from tests.common.checkpoint_io import (
+    TP_RESUME_PROBE_TEXT,
+    ResumeCapture,
+    fixed_batch_loss,
+    fixed_text_batch,
+    resume_checkpoint_checks,
+)
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log, step_losses
 
 # Configuration
@@ -64,7 +71,7 @@ SEED = 42
 
 # By-value weight-restoration probes (catch a silent-base-weights / corrupted-gather resume)
 
-LOSS_TOL = 1e-2  # TP forward is deterministic, so restored weights must reproduce L_pre tightly.
+LOSS_TOL = TOL.resume_fixed_batch_loss_abs  # TP forward is deterministic, so restored weights reproduce L_pre.
 
 
 # Phase 1: Train + Save Checkpoint
@@ -146,18 +153,15 @@ def phase1_train_and_save(
         l_pre = fixed_batch_loss(trainer.model, ids, labels)
         log(f"Phase 1 L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
-        # Check checkpoint
+        # Rank 0 reads the checkpoint's files and every rank takes its verdict, so all of them leave
+        # together on a missing file instead of stranding the peers in the barrier below.
         expected_ckpt = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
         barrier()
-
-        if rank == 0:
-            if os.path.isdir(expected_ckpt):
-                files = os.listdir(expected_ckpt)
-                log(f"Checkpoint saved at: {expected_ckpt}")
-                log(f"Checkpoint files: {sorted(files)}")
-            else:
-                log(f"ERROR: Checkpoint not found at {expected_ckpt}")
-                return False, losses, l_pre
+        ckpt_ok = [all(resume_checkpoint_checks(expected_ckpt, world_size).values()) if rank == 0 else None]
+        dist.broadcast_object_list(ckpt_ok, src=0)
+        if not ckpt_ok[0]:
+            log(f"ERROR: checkpoint at {expected_ckpt} missing required files")
+            return False, losses, l_pre
 
         loss_ok = math.isfinite(training_loss)
         if not loss_ok:

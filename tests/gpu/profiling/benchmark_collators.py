@@ -46,8 +46,10 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import create_benchmark_parser, resolve_benchmark_attn
 from tests.common.datasets import create_variable_length_sft_dataset
 from tests.common.distributed import (
+    cleanup_dirs,
     ensure_model_downloaded,
     init_distributed,
+    setup_cache_dirs,
     teardown_distributed,
 )
 from tests.common.models import MODEL_CONFIGS
@@ -69,6 +71,7 @@ def run_collator_mode(
     tokenizer,
     dataset,
     rank: int,
+    output_dir: str,
 ) -> dict | None:
     """Run a single collator benchmark mode.
 
@@ -83,7 +86,6 @@ def run_collator_mode(
     model_name = args.model_path or model_cfg["hf_name"]
     ep_size = getattr(args, "ep", 1)
     use_liger = not args.no_liger
-    output_dir = f"/tmp/bench_collator_{mode}_{ep_size}_{args.seq}"
 
     # --- Load model ---
     if ep_size > 1:
@@ -300,60 +302,65 @@ def main():
         dist.destroy_process_group()
         return 1
 
-    # --- Ensure model is cached ---
-    ensure_model_downloaded(model_name, rank)
+    output_dir, cache_dir = setup_cache_dirs("bench_collator", rank)
+    try:
+        # --- Ensure model is cached ---
+        ensure_model_downloaded(model_name, rank)
 
-    # --- Load tokenizer ---
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        # --- Load tokenizer ---
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    # --- Create variable-length dataset ---
-    dataset = create_variable_length_sft_dataset(
-        tokenizer=tokenizer,
-        max_length=args.seq,
-        num_samples=args.num_samples,
-        avg_ratio=args.avg_ratio,
-    )
-
-    if rank == 0:
-        # Show actual token distribution
-        sample_lengths = []
-        for i in range(min(20, len(dataset))):
-            toks = len(tokenizer.encode(dataset[i]["text"]))
-            sample_lengths.append(toks)
-        actual_avg = sum(sample_lengths) / len(sample_lengths)
-        print(f"  Dataset: {len(dataset)} samples, actual avg ≈ {actual_avg:.0f} tokens")
-        print(
-            f"  Sample lengths (first 20): min={min(sample_lengths)}, max={max(sample_lengths)}, avg={actual_avg:.0f}"
+        # --- Create variable-length dataset ---
+        dataset = create_variable_length_sft_dataset(
+            tokenizer=tokenizer,
+            max_length=args.seq,
+            num_samples=args.num_samples,
+            avg_ratio=args.avg_ratio,
         )
 
-    # --- Determine modes to run ---
-    modes = [args.mode] if args.mode else ALL_MODES
-    if rank == 0:
-        print(f"\n  Modes to benchmark: {modes}")
+        if rank == 0:
+            # Show actual token distribution
+            sample_lengths = []
+            for i in range(min(20, len(dataset))):
+                toks = len(tokenizer.encode(dataset[i]["text"]))
+                sample_lengths.append(toks)
+            actual_avg = sum(sample_lengths) / len(sample_lengths)
+            print(f"  Dataset: {len(dataset)} samples, actual avg ≈ {actual_avg:.0f} tokens")
+            print(
+                f"  Sample lengths (first 20): min={min(sample_lengths)}, max={max(sample_lengths)}, "
+                f"avg={actual_avg:.0f}"
+            )
 
-    # --- Run benchmarks ---
-    all_results = []
-    failed = False
-    for mode in modes:
-        try:
-            result = run_collator_mode(mode, args, model_cfg, tokenizer, dataset, rank)
-            if result is not None:
-                all_results.append(result)
-        except Exception as e:
-            failed = True
-            if rank == 0:
-                print(f"\n  ERROR in mode '{mode}': {e}")
-                traceback.print_exc()
-            gc.collect()
-            torch.cuda.empty_cache()
-            barrier()
-            continue
+        # --- Determine modes to run ---
+        modes = [args.mode] if args.mode else ALL_MODES
+        if rank == 0:
+            print(f"\n  Modes to benchmark: {modes}")
 
-    # --- Print summary ---
-    if rank == 0 and all_results:
-        print_summary(all_results, args, model_cfg, avg_tokens)
+        # --- Run benchmarks ---
+        all_results = []
+        failed = False
+        for mode in modes:
+            try:
+                result = run_collator_mode(mode, args, model_cfg, tokenizer, dataset, rank, output_dir)
+                if result is not None:
+                    all_results.append(result)
+            except Exception as e:
+                failed = True
+                if rank == 0:
+                    print(f"\n  ERROR in mode '{mode}': {e}")
+                    traceback.print_exc()
+                gc.collect()
+                torch.cuda.empty_cache()
+                barrier()
+                continue
+
+        # --- Print summary ---
+        if rank == 0 and all_results:
+            print_summary(all_results, args, model_cfg, avg_tokens)
+    finally:
+        cleanup_dirs(output_dir, cache_dir)
 
     # On rank 0 the per-mode results gate success; on other ranks fall back to
     # whether any mode raised (results are only collected on rank 0).

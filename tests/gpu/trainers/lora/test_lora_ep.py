@@ -21,8 +21,6 @@ Requirements:
     - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
 """
 
-import math
-
 import torch
 from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer
@@ -37,7 +35,7 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.peft_helpers import assert_adapters_moved, snapshot_adapters
-from tests.common.utils import gpu_mem_gb, log, step_losses
+from tests.common.utils import gpu_mem_gb, log, training_run_checks
 
 # Configuration
 
@@ -182,41 +180,20 @@ def run(ctx) -> dict:
     barrier()
 
     train_result = trainer.train()
-
-    log(f"  Training loss: {train_result.training_loss:.6f}")
-    log(f"  Steps completed: {train_result.global_step}")
     log(f"  GPU memory after training: {gpu_mem_gb():.1f}GB")
 
     # --- Validate ---
     log("\n--- Validating results ---")
-    losses = step_losses(trainer)
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
 
-    checks = {}
-
-    # Check 1: Training loss is finite
-    loss_finite = math.isfinite(train_result.training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} ({train_result.training_loss:.6f})")
-
-    # Check 2: No NaN/Inf in step losses
-    all_finite = all(math.isfinite(l) for l in losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    # Check 3: Completed expected number of steps
-    steps_ok = train_result.global_step == MAX_STEPS
-    checks["steps_completed"] = steps_ok
-    log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{MAX_STEPS})")
-
-    # Check 4: LoRA weights were updated. A zero-init lora_B must move: ``lora_before`` is taken ahead
+    # LoRA weights were updated. A zero-init lora_B must move: ``lora_before`` is taken ahead
     # of the trainer's bf16 cast of the fp32 adapters, which alone changes every lora_A.
     lora_after = snapshot_adapters(model, expert_lora=False)
     lora_updated, detail = assert_adapters_moved(lora_before, lora_after)
     checks["lora_updated"] = lora_updated
     log(f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} ({detail})")
 
-    # Check 5: Only LoRA params have gradients (base frozen)
+    # Only LoRA params have gradients (base frozen)
     only_lora_grads = len(non_lora_trainable) == 0
     checks["only_lora_grads"] = only_lora_grads
     log(f"  Only LoRA params trainable: {'PASS' if only_lora_grads else 'FAIL'}")

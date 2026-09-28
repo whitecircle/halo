@@ -9,7 +9,7 @@ Runs DPO training end-to-end with:
 4. ParallelismConfig() (standard mode, no EP/CP/TP)
 
 Assertions:
-- Training completes without errors
+- Every configured step runs, logging at least two step losses
 - Final training loss and every logged step loss are finite (not NaN/Inf)
 
 It does not compare the DPO loss against a reference, so a wrong-but-finite objective passes.
@@ -30,7 +30,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses, training_run_checks
 
 # Configuration
 
@@ -218,26 +218,9 @@ def run(ctx) -> dict:
     train_result = trainer.train()
 
     # ── Checks ──────────────────────────────────────────────────
-    checks = {}
+    checks = training_run_checks(train_result, trainer, NUM_TRAIN_STEPS)
+    checks["enough_steps_logged"] = len(step_losses(trainer)) >= 2
 
-    # 1. Training loss must be finite
-    training_loss = train_result.training_loss
-    log(f"Training loss: {training_loss:.6f}")
-    checks["training_loss_finite"] = bool(torch.isfinite(torch.tensor(training_loss)))
-
-    # 2. Check log history for loss convergence
-    log_history = trainer.state.log_history
-    train_losses = [entry["loss"] for entry in log_history if "loss" in entry]
-    checks["enough_steps_logged"] = len(train_losses) >= 2
-    if len(train_losses) >= 2:
-        initial_loss = train_losses[0]
-        final_loss = train_losses[-1]
-        log(f"Loss trajectory: {initial_loss:.4f} -> {final_loss:.4f}")
-        checks["step_losses_finite"] = all(bool(torch.isfinite(torch.tensor(l))) for l in train_losses)
-    else:
-        log(f"Not enough training steps logged: {len(train_losses)}")
-
-    # 3. Memory usage
     peak_mem_gb = torch.cuda.max_memory_allocated(ctx.local_rank) / 1e9
     log(f"Peak GPU memory: {peak_mem_gb:.2f} GB")
 

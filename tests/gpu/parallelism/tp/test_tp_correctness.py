@@ -40,10 +40,11 @@ from src.distributed.runtime import barrier, materialize_dtensor
 from src.distributed.tensor_parallel.state_dict import get_tp_mesh
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import ensure_model_downloaded, world_mean, world_spread
+from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff, world_mean, world_spread
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, max_or_nan
 
 MODEL_NAME = QWEN3_0_6B
@@ -56,9 +57,6 @@ SEED = 42
 LOSS_ABS_TOL = 0.02
 LOSS_REL_TOL = 0.01
 GRAD_NORM_REL_TOL = 0.03
-# Every TP rank computes the loss from the same all-reduced activations and the grad norm from the same
-# all-reduced sum, so ranks agree to reduction-order noise; a norm taken off a shard misses by far more.
-TP_RANK_SPREAD_ABS = 1e-4
 
 # One representative parameter per TP *style*, because each is reduced by a different rule and a
 # wrong rule is invisible in the global norm when the tensor is small: colwise/rowwise are disjoint
@@ -280,7 +278,6 @@ def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
     pattern rank-uniform."""
     unwrapped = tp_model.module if hasattr(tp_model, "module") else tp_model
     tp_group = trainer._get_tp_process_group()
-    tp_world = dist.get_world_size(group=tp_group)
     checked, diffs = 0, []
     for _name, p in unwrapped.named_parameters():
         if p.grad is None:
@@ -288,10 +285,8 @@ def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
         if isinstance(p.data, DTensor) and MeshDim.TP in mesh_dim_names(p.data.device_mesh):
             continue  # plan-sharded: ranks legitimately hold different slices
         grad = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
-        gathered = [torch.empty_like(grad) for _ in range(tp_world)]
-        dist.all_gather(gathered, grad.contiguous(), group=tp_group)
         checked += 1
-        diffs.extend((g - gathered[0]).abs().max().item() for g in gathered)
+        diffs.append(group_max_abs_diff(grad, tp_group))
     max_diff = max_or_nan(diffs, default=0.0)
     log_all(f"  TP-synced grads: {checked} params checked, max cross-TP diff {max_diff:.3e}")
     return max_diff == 0.0 and checked > 0, checked
@@ -374,7 +369,8 @@ def run(ctx):
         checks["tp_losses_finite"] = tp_finite
         log(f"\n  TP losses finite (all ranks): {'PASS' if tp_finite else 'FAIL'}")
 
-        tp_consistent = tp_spread < TP_RANK_SPREAD_ABS
+        # Every TP rank computes the loss from the same all-reduced activations.
+        tp_consistent = tp_spread < TOL.all_reduced_rank_spread_abs
         checks["tp_rank_consistency"] = tp_consistent
         log(f"  TP rank consistency (spread={tp_spread:.8f}): {'PASS' if tp_consistent else 'FAIL'}")
 
@@ -399,7 +395,7 @@ def run(ctx):
         log(f"\n  TP grad norms finite (all ranks): {'PASS' if gn_finite else 'FAIL'}")
 
         # The TP-aware norm is a global all-reduced scalar, so every TP rank must agree.
-        gn_consistent = gn_spread < TP_RANK_SPREAD_ABS
+        gn_consistent = gn_spread < TOL.all_reduced_rank_spread_abs
         checks["tp_grad_norm_consistency"] = gn_consistent
         log(f"  TP grad norm consistency (spread={gn_spread:.8f}): {'PASS' if gn_consistent else 'FAIL'}")
 

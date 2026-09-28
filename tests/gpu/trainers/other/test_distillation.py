@@ -40,7 +40,7 @@ from tests.common.distributed import ensure_model_downloaded, snapshot_full_weig
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.tolerances import TOL
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 NUM_TRAIN_SAMPLES = 64
@@ -226,7 +226,7 @@ def run(ctx):
     trainer.compute_loss = spying_compute_loss
     trainer.train()
 
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
+    losses = step_losses(trainer)
     checks["ran_all_steps"] = trainer.state.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
     # Early return, not a bare check: without the capture every line below raises KeyError and the

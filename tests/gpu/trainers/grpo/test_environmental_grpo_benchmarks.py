@@ -61,7 +61,7 @@ from src.environments.tools.factories import create_native_math_tools, create_na
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory
+from tests.common.utils import cleanup_memory, step_losses
 from tests.common.utils import log as rank0_log
 
 # Same knob as docker-compose.vllm.yml: the trainer broadcasts its own weights into the served
@@ -230,14 +230,14 @@ def run_env_grpo_training(
 ) -> dict[str, Any]:
     """Run a single Environmental GRPO training session.
 
-    Returns dict with metrics and status.
+    Returns ``{"success": bool, "error": str | None}``: whether the run was healthy, and why not.
     """
     # Resolved here, not as a def-time default: ``--max-steps`` rebinds the module global in run(),
     # which a default bound at import time would never see.
     max_steps = MAX_STEPS if max_steps is None else max_steps
 
     output_dir = tempfile.mkdtemp(prefix=f"test_env_grpo_{env_name}_")
-    result = {"env": env_name, "success": False, "steps": 0, "error": None}
+    result = {"success": False, "error": None}
 
     try:
         log(f"  Loading model: {MODEL_NAME}")
@@ -330,19 +330,8 @@ def run_env_grpo_training(
         trainer.train()
         elapsed = time.time() - start_time
 
-        result["steps"] = max_steps
-        result["elapsed"] = elapsed
-
-        losses: list[float] = []
-        rewards: list[float] = []
-        if hasattr(trainer, "state") and trainer.state.log_history:
-            for entry in trainer.state.log_history:
-                if "loss" in entry:
-                    result["last_loss"] = entry["loss"]
-                    losses.append(float(entry["loss"]))
-                if "reward" in entry:
-                    result["last_reward"] = entry["reward"]
-                    rewards.append(float(entry["reward"]))
+        losses = step_losses(trainer)
+        rewards = [float(entry["reward"]) for entry in trainer.state.log_history if "reward" in entry]
 
         # Graded against what the SERVED model can deliver: react_math is solvable by the default
         # 0.6B so a stuck verifier (all-equal reward → zero advantage) must show as reward == 0,
@@ -351,7 +340,7 @@ def run_env_grpo_training(
         # zero generated tokens.
         gen_tokens = [
             float(entry["async/total_generation_tokens"])
-            for entry in (trainer.state.log_history if hasattr(trainer, "state") else [])
+            for entry in trainer.state.log_history
             if "async/total_generation_tokens" in entry
         ]
         ran_healthy = (
@@ -377,15 +366,14 @@ def run_env_grpo_training(
                 )
 
         log(f"  Training completed in {format_duration(elapsed)}")
-        if "last_loss" in result:
-            log(f"  Final loss: {result['last_loss']:.4f}")
-        if "last_reward" in result:
-            log(f"  Final reward: {result['last_reward']:.4f}")
+        if losses:
+            log(f"  Final loss: {losses[-1]:.4f}")
+        if rewards:
+            log(f"  Final reward: {rewards[-1]:.4f}")
 
         if torch.cuda.is_available():
             mem_allocated = torch.cuda.max_memory_allocated() / 1e9
             mem_reserved = torch.cuda.max_memory_reserved() / 1e9
-            result["peak_mem_gb"] = mem_allocated
             log(f"  Peak GPU memory: {mem_allocated:.1f}GB allocated, {mem_reserved:.1f}GB reserved")
 
     except Exception as e:

@@ -30,7 +30,7 @@ from src.trainers.distillation.self_distillation import DistributedSelfDistillat
 from tests.common.datasets import digit_image
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses, training_run_checks
 
 MODEL_NAME = QWEN3_VL_2B
 NUM_TRAIN_SAMPLES = 16
@@ -135,14 +135,9 @@ def run(ctx) -> dict:
     ctx.barrier()
     train_result = trainer.train()
 
-    checks: dict[str, bool] = {}
-    training_loss = train_result.training_loss
-    log(f"Training loss: {training_loss:.6f}")
-    checks["training_loss_finite"] = bool(torch.isfinite(torch.tensor(training_loss)))
-
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
+    checks = training_run_checks(train_result, trainer, NUM_TRAIN_STEPS)
+    losses = step_losses(trainer)
     checks["enough_steps_logged"] = len(losses) >= 2
-    checks["step_losses_finite"] = all(bool(torch.isfinite(torch.tensor(lv))) for lv in losses)
 
     # The OPD term must have actually run (teacher forward + reverse-KL), not just SFT.
     checks["opd_loss_recorded"] = any("opd_loss" in e for e in trainer.state.log_history) or (

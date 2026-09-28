@@ -22,8 +22,9 @@ Phase 2: Attention backend comparison
     kernel is identical, so the losses must match exactly.
 
 Phase 3: Full EP+CP training via DistributedSFTTrainer (15 steps)
-  - Validates: every step logged, loss decrease, mean_token_accuracy
-    increase, loss not exploding, finite losses and grad norms
+  - Validates: the model carries the EP expert split and the Ulysses attention
+    layers, every step logged, loss decrease, mean_token_accuracy increase,
+    loss not exploding, finite losses and grad norms
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -51,7 +52,8 @@ from tests.common.distributed import ensure_model_downloaded, world_mean
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, max_or_nan, step_losses
+from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, max_or_nan, step_losses, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -69,6 +71,10 @@ NUM_TRAIN_STEPS = 15
 MAX_SEQ_LENGTH = 4096
 BATCH_SIZE = 1
 LEARNING_RATE = 2e-5
+# Steps averaged at each end of the run for the loss and accuracy trends.
+TREND_WINDOW = 3
+# A later step loss this many times the first reads as divergence.
+LOSS_EXPLOSION_FACTOR = 2.0
 
 
 def _forward_losses(model, inputs):
@@ -303,8 +309,8 @@ def test_ep_cp_training(ctx):
     """
     Full EP+CP training test using DistributedSFTTrainer.
 
-    Verifies that training completes, losses decrease, and metrics are logged
-    and finite on every step.
+    Verifies that EP and CP took effect on the model, that training completes,
+    losses decrease, and metrics are logged and finite on every step.
 
     Returns this phase's checks.
     """
@@ -365,67 +371,47 @@ def test_ep_cp_training(ctx):
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
-    checks = {}
-
-    checks["ep_mode_active"] = trainer.is_ep_mode
-    checks["cp_mode_active"] = trainer.is_cp_mode
-    log(f"  EP mode: {'PASS' if checks['ep_mode_active'] else 'FAIL'}")
-    log(f"  CP mode: {'PASS' if checks['cp_mode_active'] else 'FAIL'}")
+    checks = parallel_shape_checks(model, parallelism_config)
 
     log(f"\n  Training ({NUM_TRAIN_STEPS} steps)...")
     train_result = trainer.train()
+    checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
 
-    training_loss = train_result.training_loss
     log_history = trainer.state.log_history
     losses = step_losses(trainer)
     grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
     token_accuracies = [e["mean_token_accuracy"] for e in log_history if "mean_token_accuracy" in e]
-
-    log("\n  --- Metrics ---")
-    log(f"  Final training loss: {training_loss:.6f}")
-    log(f"  Step losses: {[f'{l:.4f}' for l in losses]}")
-    log(f"  Grad norms: {[f'{g:.2f}' for g in grad_norms]}")
     log(f"  Token accuracies: {[f'{t:.4f}' for t in token_accuracies]}")
-
-    log("\n  --- Checks ---")
 
     # logging_steps=1, so a completed run logs loss, grad norm and accuracy on every step: a short
     # series fails here rather than skipping the trend checks below.
-    checks["training_completed"] = len(losses) == NUM_TRAIN_STEPS
-    checks["grad_norms_logged"] = len(grad_norms) == NUM_TRAIN_STEPS
-    checks["accuracy_logged"] = len(token_accuracies) == NUM_TRAIN_STEPS
-    log(f"  Training completed: {'PASS' if checks['training_completed'] else 'FAIL'}")
+    checks["every_step_logged"] = len(losses) == len(grad_norms) == len(token_accuracies) == NUM_TRAIN_STEPS
+    log(f"  Every step logged: {'PASS' if checks['every_step_logged'] else 'FAIL'}")
 
-    all_finite = all(math.isfinite(l) for l in losses + [training_loss])
-    checks["losses_finite"] = all_finite
-    log(f"  Losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    # First-3 vs last-3 average, so one noisy step cannot decide the trend.
-    first_avg = sum(losses[:3]) / 3
-    last_avg = sum(losses[-3:]) / 3
+    # Window averages, so one noisy step cannot decide the trend.
+    first_avg = sum(losses[:TREND_WINDOW]) / TREND_WINDOW
+    last_avg = sum(losses[-TREND_WINDOW:]) / TREND_WINDOW
     checks["loss_decreased"] = last_avg < first_avg
     log(
-        f"  Loss decreased (first3={first_avg:.4f} -> last3={last_avg:.4f}): "
+        f"  Loss decreased (first{TREND_WINDOW}={first_avg:.4f} -> last{TREND_WINDOW}={last_avg:.4f}): "
         f"{'PASS' if checks['loss_decreased'] else 'FAIL'}"
     )
 
     max_step = max_or_nan(losses[1:])
-    checks["no_loss_explosion"] = max_step < losses[0] * 2.0
+    explosion_ceiling = losses[0] * LOSS_EXPLOSION_FACTOR
+    checks["no_loss_explosion"] = max_step < explosion_ceiling
     log(
-        f"  No loss explosion (max={max_step:.4f} < 2x first={losses[0] * 2:.4f}): "
+        f"  No loss explosion (max={max_step:.4f} < {LOSS_EXPLOSION_FACTOR}x first={explosion_ceiling:.4f}): "
         f"{'PASS' if checks['no_loss_explosion'] else 'FAIL'}"
     )
 
-    first_acc = sum(token_accuracies[:3]) / 3
-    last_acc = sum(token_accuracies[-3:]) / 3
+    first_acc = sum(token_accuracies[:TREND_WINDOW]) / TREND_WINDOW
+    last_acc = sum(token_accuracies[-TREND_WINDOW:]) / TREND_WINDOW
     checks["accuracy_increased"] = last_acc > first_acc
     log(
-        f"  Accuracy increased (first3={first_acc:.4f} -> last3={last_acc:.4f}): "
+        f"  Accuracy increased (first{TREND_WINDOW}={first_acc:.4f} -> last{TREND_WINDOW}={last_acc:.4f}): "
         f"{'PASS' if checks['accuracy_increased'] else 'FAIL'}"
     )
-
-    checks["grad_finite"] = all(math.isfinite(g) for g in grad_norms)
-    log(f"  Grad norms finite: {'PASS' if checks['grad_finite'] else 'FAIL'}")
 
     log(f"\n  Phase 3: {'PASS' if all(checks.values()) else 'FAIL'}")
     return checks

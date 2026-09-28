@@ -20,9 +20,7 @@ Env:
 """
 
 import json
-import os
 import shutil
-import sys
 from pathlib import Path
 
 import torch
@@ -37,7 +35,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_str
 from tests.common.distributed import shared_scratch_dir
-from tests.common.harness import gpu_test_main
+from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.models import GPT_OSS_20B_PATCHED
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log
@@ -185,9 +183,5 @@ def run(ctx):
 
 
 if __name__ == "__main__":
-    # A local-checkpoint test declines to run before the harness starts: the launcher reports a
-    # ``SKIP:`` line with exit 0 and no result line as a skip.
-    if not os.path.isdir(MODEL):
-        log(f"SKIP: local model path missing: {MODEL} (set HALO_TEST_EP_CP_RT_MODEL to a present checkpoint)")
-        sys.exit(0)
+    skip_unless_local_checkpoint(MODEL, "HALO_TEST_EP_CP_RT_MODEL")
     run()

@@ -314,6 +314,7 @@ def main():
         "--backends",
         type=str,
         nargs="+",
+        choices=ALL_BACKENDS,
         default=None,
         help=f"Backends to test (default: {DEFAULT_BACKENDS})",
     )

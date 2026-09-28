@@ -36,9 +36,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.data.collators.packing import DataCollatorWithPacking
 from src.hardware import is_blackwell_gpu
 from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, log
 
-MODEL = "Qwen/Qwen3-0.6B"
+MODEL = QWEN3_0_6B
 # Rows of UNEQUAL length: collation pads row 0 and the flatten must drop that padding, so the seam
 # is row 0's last real token against row 1's first. Equal-length rows would sidestep that path.
 DOCS_ROW0 = ["The capital of France is Paris.", "Water boils at one hundred degrees."]

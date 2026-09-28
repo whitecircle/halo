@@ -55,8 +55,6 @@ NUM_TRAIN_STEPS = 5
 LEARNING_RATE = 1e-4
 
 # Tolerances — calibrated for bf16 + Ulysses all-to-all precision
-GRAD_COSINE_MIN = 0.99  # Per-parameter gradient cosine similarity
-GRAD_NORM_RTOL = 0.10  # Gradient norm ratio tolerance (10%)
 WEIGHT_COS_MIN = 0.9999  # Final weight cosine similarity after training
 
 
@@ -196,7 +194,7 @@ def test_loss_and_gradient_equivalence(device, cp_size):
             continue
         cos = cos_sim(bg, cg, label=name)
         cosine_sims.append(cos)
-        if cos < GRAD_COSINE_MIN:
+        if cos < TOL.cp_grad_cosine_min:
             low_cosine_params.append((name, f"cos={cos:.6f}"))
 
     avg_cosine = sum(cosine_sims) / len(cosine_sims) if cosine_sims else 0.0
@@ -204,13 +202,13 @@ def test_loss_and_gradient_equivalence(device, cp_size):
 
     # Gradient norm ratio
     norm_ratio = cp_grad_norm / base_grad_norm if base_grad_norm > 1e-12 else float("inf")
-    norm_close = abs(norm_ratio - 1.0) < GRAD_NORM_RTOL
+    norm_close = abs(norm_ratio - 1.0) < TOL.cp_grad_norm_rtol
 
     grad_passed = grad_keys_match and not low_cosine_params and norm_close
 
     log(f"      Avg cosine similarity:  {avg_cosine:.6f}")
-    log(f"      Min cosine similarity:  {min_cosine:.6f} (threshold: {GRAD_COSINE_MIN})")
-    log(f"      Grad norm ratio:        {norm_ratio:.6f} (target: 1.0 ± {GRAD_NORM_RTOL})")
+    log(f"      Min cosine similarity:  {min_cosine:.6f} (threshold: {TOL.cp_grad_cosine_min})")
+    log(f"      Grad norm ratio:        {norm_ratio:.6f} (target: 1.0 ± {TOL.cp_grad_norm_rtol})")
     log(f"      Low-cosine params:      {len(low_cosine_params)}")
     if low_cosine_params:
         for name, reason in low_cosine_params[:5]:

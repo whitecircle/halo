@@ -44,8 +44,10 @@ from src.distributed.runtime import barrier
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.benchmark_args import create_benchmark_parser
 from tests.common.distributed import (
+    cleanup_dirs,
     ensure_model_downloaded,
     init_distributed,
+    setup_cache_dirs,
 )
 from tests.common.models import MODEL_CONFIGS
 from tests.common.reporting import emit_benchmark, format_benchmark_report
@@ -217,6 +219,7 @@ def main() -> int:
     # --- Distributed Setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
+    output_dir, cache_dir = setup_cache_dirs("bench_offline_grpo_ep", rank)
 
     try:
         if rank == 0:
@@ -288,8 +291,6 @@ def main() -> int:
             )
 
         # --- Offline GRPO Config ---
-        output_dir = f"/tmp/offline_grpo_ep_benchmark_{args.ep}_{seq_len}"
-
         grpo_config = OfflineGRPOConfig(
             output_dir=output_dir,
             per_device_train_batch_size=1,
@@ -368,6 +369,7 @@ def main() -> int:
         del model
         gc.collect()
         torch.cuda.empty_cache()
+        cleanup_dirs(output_dir, cache_dir)
 
         if dist.is_initialized():
             dist.destroy_process_group()

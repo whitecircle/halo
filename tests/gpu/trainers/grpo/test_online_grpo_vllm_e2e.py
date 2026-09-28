@@ -64,7 +64,7 @@ from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.on_policy_e2e import probe_top_logprobs
 from tests.common.ports import free_port
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
@@ -244,9 +244,7 @@ def test_online_grpo_e2e():
 
         log("  Training completed successfully!")
 
-        # log_history[-1] is HF's end-of-run summary (train_loss, no 'loss' key) — scan for the
-        # per-step entries or every assertion below is unreachable.
-        losses = [float(e["loss"]) for e in trainer.state.log_history if "loss" in e]
+        losses = step_losses(trainer)
         log(f"  Per-step losses: {[f'{v:.4f}' for v in losses]}")
         assert losses, f"no per-step loss was logged in {MAX_STEPS} steps: {trainer.state.log_history}"
         assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
@@ -336,11 +334,10 @@ def test_online_sdpg_e2e():
             f"opd_beta={[h['opd_beta'] for h in opd_steps]}"
         )
 
-        last_loss = next((h["loss"] for h in reversed(trainer.state.log_history) if "loss" in h), None)
-        if last_loss is not None:
-            assert not torch.isnan(torch.tensor(float(last_loss))), "Loss is NaN"
-            assert not torch.isinf(torch.tensor(float(last_loss))), "Loss is Inf"
-            log(f"  Final loss: {float(last_loss):.4f}")
+        losses = step_losses(trainer)
+        assert losses, f"no per-step loss was logged: {trainer.state.log_history}"
+        assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
+        log(f"  Final loss: {losses[-1]:.4f}")
 
     finally:
         cleanup_memory()
@@ -431,7 +428,7 @@ def test_environmental_grpo_e2e():
 
         # Without these, "train() did not raise" is the whole assertion — a weight sync that never
         # landed (stale served policy, zero advantage) still produces a clean run.
-        losses = [float(e["loss"]) for e in trainer.state.log_history if "loss" in e]
+        losses = step_losses(trainer)
         log(f"  Per-step losses: {[f'{v:.4f}' for v in losses]}")
         assert losses, f"no per-step loss was logged: {trainer.state.log_history}"
         assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
@@ -518,10 +515,10 @@ def test_online_grpo_lora_e2e():
         trainer.train()
         log("  Online GRPO+LoRA training completed (PEFT weight sync OK)!")
 
-        last = next((h["loss"] for h in reversed(trainer.state.log_history) if "loss" in h), None)
-        if last is not None:
-            assert torch.isfinite(torch.tensor(float(last))), f"Non-finite loss {last}"
-            log(f"  Final loss: {float(last):.4f}")
+        losses = step_losses(trainer)
+        assert losses, f"no per-step loss was logged: {trainer.state.log_history}"
+        assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
+        log(f"  Final loss: {losses[-1]:.4f}")
     finally:
         cleanup_memory()
         shutil.rmtree(output_dir, ignore_errors=True)

@@ -23,8 +23,9 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from src.optimizers.muon import create_muon_optimizer
 from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_5_2B
 
-MODEL_NAME = "Qwen/Qwen3.5-2B"
+MODEL_NAME = QWEN3_5_2B
 BATCH = 2
 SEQ = 256
 MAX_STEPS = 10

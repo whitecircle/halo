@@ -29,11 +29,12 @@ from src.data.pipeline.processing import process_dataset_with_map_and_filter
 from src.data.pipeline.row_processors import create_llm_processor
 from src.distributed.runtime import barrier
 from tests.common.harness import gpu_test_main, record_check
+from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
 
 # Configuration
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = QWEN3_0_6B
 ALT_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 MAX_LENGTH = 256
 NUM_TRAIN = 50

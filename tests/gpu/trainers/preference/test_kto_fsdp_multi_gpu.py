@@ -47,7 +47,7 @@ from src.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.distributed import snapshot_full_weights, world_mean
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
-from tests.common.utils import fro_rel_err
+from tests.common.utils import fro_rel_err, step_losses
 
 N_ROWS = 32
 N_STEPS = 6
@@ -225,7 +225,7 @@ def run(ctx):
     ctx.on_teardown(trainer.cleanup_ep)
     trainer.train()
 
-    losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
+    losses = step_losses(trainer)
     checks["ran_all_steps"] = trainer.state.global_step == N_STEPS and len(losses) == N_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
     # The rows are synthetic and the two ranks hold opposite-desirability batches, so the objective

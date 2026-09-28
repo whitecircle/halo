@@ -34,11 +34,18 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from tests.common.checkpoint_io import TP_RESUME_PROBE_TEXT, ResumeCapture, fixed_batch_loss, fixed_text_batch
+from tests.common.checkpoint_io import (
+    TP_RESUME_PROBE_TEXT,
+    ResumeCapture,
+    fixed_batch_loss,
+    fixed_text_batch,
+    resume_checkpoint_checks,
+)
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, log, step_losses
 
 # Configuration
@@ -56,37 +63,12 @@ NUM_TRAIN_SAMPLES = 64
 NUM_EVAL_SAMPLES = 8
 SEED = 42
 
-# Weight round-trip tolerance: the TP DTensor gather→re-shard path is the point of this
-# test. A correct resume reloads the trained weights, so the pre-save and post-resume
-# forward loss on a FIXED batch must match to bf16 round-trip noise; a corrupted gather
-# (dropped/mis-sharded weights) shifts it by >>1.
-LOSS_TOL = 1e-2
+# The TP DTensor gather→re-shard is the point of this test: a correct resume reloads the trained
+# weights, so the fixed-batch loss before the save and after the resume match to bf16 round-trip noise.
+LOSS_TOL = TOL.resume_fixed_batch_loss_abs
 
 
 # Checkpoint file verification
-
-
-def verify_tp_checkpoint(checkpoint_dir: str) -> tuple[bool, str]:
-    """Per-file checkpoint asserts (vs a bare isdir): TP saves gathered HF weights + scheduler.pt +
-    per-rank optimizer shards (optimizer_meta.pt + optimizer_shard_*.pt — TP exact-resumes the
-    per-rank Adam shards, same contract as test_offline_grpo_tp_resume)."""
-    if not os.path.isdir(checkpoint_dir):
-        return False, f"  Checkpoint directory not found: {checkpoint_dir}"
-    files = set(os.listdir(checkpoint_dir))
-    checks = {
-        "model_weights(.safetensors)": any(f.endswith(".safetensors") for f in files),
-        "scheduler.pt": "scheduler.pt" in files,
-        "optimizer_meta.pt": "optimizer_meta.pt" in files,
-        "optimizer_shards(per-rank)": len([f for f in files if f.startswith("optimizer_shard_")]) == TP_SIZE,
-        "trainer_state.json": "trainer_state.json" in files,
-    }
-    lines = [f"  Checkpoint: {checkpoint_dir}", f"  Files: {sorted(files)}"]
-    for name, ok in checks.items():
-        lines.append(f"    {'OK' if ok else 'MISSING':7s}  {name}")
-    failed = [k for k, v in checks.items() if not v]
-    if failed:
-        lines.append(f"  MISSING: {failed}")
-    return all(checks.values()), "\n".join(lines)
 
 
 # Phase 1: Train + Save Checkpoint
@@ -176,8 +158,7 @@ def phase1_train_and_save(
 
         ckpt_ok = True
         if rank == 0:
-            ckpt_ok, ckpt_detail = verify_tp_checkpoint(expected_ckpt)
-            log(ckpt_detail)
+            ckpt_ok = all(resume_checkpoint_checks(expected_ckpt, world_size).values())
         result_t = torch.tensor([1 if ckpt_ok else 0], dtype=torch.int64, device=torch.cuda.current_device())
         dist.broadcast(result_t, src=0)
         if result_t.item() == 0:

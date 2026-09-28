@@ -78,10 +78,6 @@ BATCH, SEQ = 2, 64
 ATTN_ATOL = 3e-2
 ATTN_COSINE_MIN = 0.9995
 
-# Gradients (CP-rank average vs reference), matching tests/gpu/parallelism/cp/test_cp_train_correctness.py.
-GRAD_COSINE_MIN = 0.99
-GRAD_NORM_RTOL = 0.10
-
 
 def build_tiny_model(device: str) -> nn.Module:
     """Tiny Bailing V2 model, weight-identical on every rank.
@@ -299,7 +295,7 @@ def run(ctx):
     metrics["grad_min_cosine"] = min_cosine
     metrics["grad_norm_ratio"] = norm_ratio
     checks["cp_grads_match_reference"] = (
-        all_finite and min_cosine >= GRAD_COSINE_MIN and abs(norm_ratio - 1.0) <= GRAD_NORM_RTOL
+        all_finite and min_cosine >= TOL.cp_grad_cosine_min and abs(norm_ratio - 1.0) <= TOL.cp_grad_norm_rtol
     )
 
     del cp_model, model
