@@ -53,9 +53,10 @@ Online GRPO's `accuracy` term uses a different grader — a strict boxed exact m
 `####` and strips `,`/`$` ([Online GRPO → Rewards](../online-grpo.md#rewards)). The two score the
 same row differently; a recipe picks one.
 
-Normalization reads `\boxed{42}`, `**42**` and leading "The answer is" / "Therefore" phrasings. It
-takes the `\boxed{...}` whose opening brace is rightmost and matches braces by depth, so
-`\boxed{\frac{1}{2}}` survives. It does not split a GSM8K-style `#### N` suffix: reduce such an
+Normalization reads `\boxed{42}`, a lone `**42**` and leading "The answer is" / "Therefore"
+phrasings; several bold spans (`**7** or **8**`) stay in the text as the hedge they are. It takes the
+`\boxed{...}` whose opening brace is rightmost and matches braces by depth, so `\boxed{\frac{1}{2}}`
+survives. It does not split a GSM8K-style `#### N` suffix: reduce such an
 `answer` column to the final value before training.
 
 A row with `choices` switches `exam_qa` to letter grading: the response's choice letter (A–J) is

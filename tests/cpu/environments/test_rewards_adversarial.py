@@ -2,8 +2,8 @@
 """Adversarial / edge-case tests for rule-based rewards and RLRR advantage shaping.
 
 Covers three modules:
-  * src/rewards/matching.py — numeric matching against crafted distractor inputs, and the
-    empty-answer floor of the validation chain.
+  * src/rewards/matching.py — numeric and exact matching against crafted distractor inputs, and
+    the empty-answer floor of the validation chain.
   * src/environments/envs/tasks/qa.py — multiple-choice letter extraction, which lives with the
     only environment that grades by letter.
   * src/trainers/grpo/objective/relative_rewards.py — RLRR degenerate-group handling
@@ -26,6 +26,7 @@ from src.environments.envs.tasks.qa import (
     multiple_choice_match,
 )
 from src.rewards.matching import (
+    exact_match,
     extract_last_boxed,
     normalize_text,
     numeric_match,
@@ -153,6 +154,8 @@ def test_numeric_match_accepts_one_stated_value(predicted, expected):
         (r"x \le 3", "3"),  # a bound, not the value
         ("-5", "5"),
         ("7 or 8", "7"),  # a hedge names two values
+        ("**7** or **8**", "7"),  # several bold spans hedge too
+        ("The answer is **7**, or possibly **8**.", "7"),
         ("between 3 and 4", "3"),
         ("1,2,3", "1"),
         ("7, since 3 + 4 = 7", "7"),  # a response must commit to one value, working included
@@ -186,6 +189,17 @@ def test_numeric_match_parses_degenerate_input_within_budget(predicted, expected
     start = time.monotonic()
     assert numeric_match(predicted, expected) is verdict
     assert time.monotonic() - start < 1.0
+
+
+@pytest.mark.parametrize(
+    ("predicted", "verdict"),
+    [
+        ("The capital is **Paris**.", True),  # a lone bold span is the answer
+        ("**Paris** or **London**", False),  # several are a hedge
+    ],
+)
+def test_exact_match_reads_only_a_lone_bold_span_as_the_answer(predicted, verdict):
+    assert exact_match(predicted, "Paris") is verdict
 
 
 # multiple_choice_match — structured extraction, no startswith fallback

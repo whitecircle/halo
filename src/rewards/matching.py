@@ -92,17 +92,20 @@ def extract_last_boxed(text: str) -> str | None:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text for answer comparison: lowercase, strip, extract from ``\\boxed{}`` /
-    ``**bold**``, drop leading answer prefixes ("the answer is", …) and trailing period."""
+    """Normalize text for answer comparison: lowercase, strip, extract from ``\\boxed{}`` / a lone
+    ``**bold**`` span, drop leading answer prefixes ("the answer is", …) and trailing period."""
     text = str(text).strip()
 
     boxed = extract_last_boxed(text)
     if boxed:
         text = boxed.strip()
 
-    bold = _BOLD_RE.search(text)
-    if bold:
-        text = bold.group(1).strip()
+    # Several bold spans (``**7** or **8**``) hedge between them, so the whole text stays.
+    bold_spans = _BOLD_RE.findall(text)
+    if len(bold_spans) == 1:
+        text = bold_spans[0].strip()
+    elif bold_spans:
+        text = text.replace("**", "")
 
     text = text.lower().strip()
 
