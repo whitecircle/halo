@@ -1,32 +1,42 @@
-"""Shared GPU row bodies for the precision and gradient-sync suites over tiny MoE checkpoints.
+"""Shared GPU row bodies for the precision and gradient-sync suites over tiny MoE checkpoints, and the
+stored-fp32 pin oracle they share with the CPU loader tests.
 
 transformers pins some DeepSeek-V4, GLM-5 Next and Inkling parameters in fp32
 (``_keep_in_fp32_modules_strict``), and every training loader casts them to the run dtype, or keeps the
-stored fp32 values when the run holds fp32 masters. :func:`run_pinned_family_row` loads a tiny checkpoint
-of one family through the production path, checks the resulting parameter dtypes, and trains a few SFT
-steps. The helpers below it (:func:`tiny_family_checkpoint`, :func:`load_row_model`, :func:`train_row`)
-are shared with the FSDP2-exclusion suite, whose rows set up their own trainable set. Every row that
-trains a strict subset of the model checks the trainable parameters moved and ended bitwise identical on
-every rank: one FSDP2 leaves out of its shard groups with no other sync trains on its own rank's batch and
-drifts while each loss stays finite.
+stored fp32 values when the run holds fp32 masters (:func:`stored_fp32_pins`, :func:`pins_off_stored`).
+:func:`run_pinned_family_row` loads a tiny checkpoint of one family through the production path, checks
+the resulting parameter dtypes, and trains a few SFT steps. The helpers below it
+(:func:`tiny_family_checkpoint`, :func:`load_row_model`, :func:`train_row`) are shared with the
+FSDP2-exclusion suite, whose rows set up their own trainable set. Every row that trains a strict subset of
+the model checks the trainable parameters moved and ended bitwise identical on every rank, bar the expert
+shards EP distributes: one FSDP2 leaves out of its shard groups with no other sync trains on its own
+rank's batch and drifts while each loss stays finite.
 """
+
+from collections.abc import Mapping
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
+from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.structure import fp32_pinned_param_names
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import world_any
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import assert_adapters_moved, load_peft_model, unwrap
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
-from tests.common.utils import log, log_all, params_off_dtype
+from tests.common.utils import (
+    log,
+    log_all,
+    params_off_dtype,
+    snapshot_trainable,
+    step_losses,
+    training_run_checks,
+)
 
 RUN_DTYPE = torch.bfloat16
 SEED = 42
@@ -66,14 +76,46 @@ def base_params_off_run_dtype(model: torch.nn.Module) -> list[str]:
     return [name for name in params_off_dtype(model, RUN_DTYPE) if "lora_" not in name]
 
 
-def _snapshot_trainable(model: torch.nn.Module) -> dict[str, torch.Tensor]:
-    """Full CPU copies of every trainable parameter. Collective when any is a DTensor."""
-    snapshot = {}
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            full = param.full_tensor() if isinstance(param, DTensor) else param
-            snapshot[name] = full.detach().float().cpu()
-    return snapshot
+def stored_fp32_pins(family: str, path: str) -> tuple[frozenset[str], dict[str, torch.Tensor]]:
+    """The parameters a run-dtype ``from_pretrained`` of ``family``'s checkpoint at ``path`` leaves fp32 (the
+    pins as transformers applies them), and every parameter's stored value, read at fp32.
+
+    Raises unless a run-dtype round trip changes some pin's stored value (no pin at all included): a
+    comparison against values the run dtype holds exactly passes a loader that round-trips them.
+    """
+    load_class = TINY_MOE_FAMILIES[family].load_class
+    pinned = frozenset(params_off_dtype(load_class.from_pretrained(path, dtype=RUN_DTYPE), RUN_DTYPE))
+    stored = dict(load_class.from_pretrained(path, dtype=torch.float32).named_parameters())
+    if all(torch.equal(stored[name], stored[name].to(RUN_DTYPE).float()) for name in pinned):
+        raise AssertionError(
+            f"premise: none of {family}'s {len(pinned)} pins at {path} loses its stored value to a {RUN_DTYPE} "
+            f"round trip, so a check against them passes a loader that round-trips them"
+        )
+    return pinned, stored
+
+
+def pins_off_stored(model: torch.nn.Module, stored: Mapping[str, torch.Tensor], pins: Mapping[str, str]) -> list[str]:
+    """The ``pins`` (``model`` name -> checkpoint name) ``model`` does not hold at fp32, bitwise ``stored``."""
+    params = dict(model.named_parameters())
+    return sorted(
+        name
+        for name, key in pins.items()
+        if name not in params
+        or params[name].dtype != torch.float32
+        or not torch.equal(params[name].detach().cpu(), stored[key])
+    )
+
+
+def _rank_local_param_names(model: torch.nn.Module) -> frozenset[str]:
+    """The parameters each rank holds its own slice of, which legitimately differ across ranks: the expert
+    weights and expert adapters of every EP layer whose experts are distributed (``ep_group_size > 1``)."""
+    local = {
+        id(param)
+        for _, layer in find_ep_layers(model)
+        if layer.ep_config.ep_group_size > 1
+        for _, param in layer.expert_named_params()
+    }
+    return frozenset(name for name, param in model.named_parameters() if id(param) in local)
 
 
 def _differing_from_rank0(tensors: dict[str, torch.Tensor], device: torch.device) -> list[str]:
@@ -91,10 +133,9 @@ def _differing_from_rank0(tensors: dict[str, torch.Tensor], device: torch.device
 def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, check_sync: bool) -> dict:
     """Train ``NUM_STEPS`` SFT steps and return ``{"checks", "metrics"}``.
 
-    ``check_sync`` adds the moved and cross-rank-identical checks over every trainable parameter.
+    ``check_sync`` adds the moved check over every trainable parameter, and the cross-rank-identical one
+    over every trainable parameter but the rank-local expert shards, where any remain.
     """
-    checks: dict[str, bool] = {}
-    metrics: dict[str, float] = {}
     args = SFTConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_STEPS,
@@ -122,17 +163,15 @@ def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, chec
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
-    before = _snapshot_trainable(unwrap(trainer.model)) if check_sync else {}
+    before = snapshot_trainable(trainer.model) if check_sync else {}
     result = trainer.train()
-    losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
-    log(f"losses: {losses}")
-    metrics["final_train_loss"] = result.training_loss
-    checks["trained_all_steps"] = result.global_step == NUM_STEPS
-    checks["losses_finite"] = bool(losses) and bool(torch.isfinite(torch.tensor(losses)).all())
+    checks = training_run_checks(result, trainer, NUM_STEPS)
+    checks["logged_every_step"] = len(step_losses(trainer)) == NUM_STEPS
+    metrics = {"final_train_loss": result.training_loss}
     if not check_sync:
         return {"checks": checks, "metrics": metrics}
 
-    after = _snapshot_trainable(unwrap(trainer.model))
+    after = snapshot_trainable(trainer.model)
     moved = [name for name in before if not torch.equal(before[name], after[name])]
     log(f"{len(moved)}/{len(before)} trainable params moved")
     checks["trainable_params_moved"] = bool(moved) and all(torch.isfinite(t).all() for t in after.values())
@@ -143,29 +182,16 @@ def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, chec
         )
         log(f"adapters: {detail}")
         checks["adapters_moved"] = adapters_moved
-    differing = _differing_from_rank0(after, ctx.device)
-    if differing:
-        log_all(f"{len(differing)} trainable params differ from rank 0: {differing[:6]}")
-    metrics["trainable_params_differing_from_rank0"] = len(differing)
-    checks["trainable_params_identical_across_ranks"] = not world_any(bool(differing))
+    rank_local = _rank_local_param_names(unwrap(trainer.model))
+    replicated = {name: tensor for name, tensor in after.items() if name not in rank_local}
+    log(f"{len(replicated)} trainable params compared across ranks, {len(after) - len(replicated)} rank-local")
+    if replicated:
+        differing = _differing_from_rank0(replicated, ctx.device)
+        if differing:
+            log_all(f"{len(differing)} trainable params differ from rank 0: {differing[:6]}")
+        metrics["trainable_params_differing_from_rank0"] = len(differing)
+        checks["trainable_params_identical_across_ranks"] = not world_any(bool(differing))
     return {"checks": checks, "metrics": metrics}
-
-
-def _pins_hold_stored_fp32(model: torch.nn.Module, family: str, base_dir: str) -> tuple[bool, str]:
-    """Every pinned parameter is fp32 and bitwise the checkpoint's stored value, which a bf16 round trip
-    would change (the premise, checked too)."""
-    load_class = TINY_MOE_FAMILIES[family].load_class
-    reference = dict(load_class.from_pretrained(base_dir, dtype=torch.float32).named_parameters())
-    pinned = sorted(fp32_pinned_param_names(model))
-    lossy = [name for name in pinned if not torch.equal(reference[name], reference[name].bfloat16().float())]
-    if not lossy:
-        return False, "no pinned value is lost to a bf16 round trip; the check would be vacuous"
-    wrong = [
-        name
-        for name, param in model.named_parameters()
-        if name in pinned and (param.dtype != torch.float32 or not torch.equal(param.detach().cpu(), reference[name]))
-    ]
-    return not wrong, f"{len(pinned)} pins, {len(lossy)} bf16-lossy, off the stored fp32 value: {wrong[:6]}"
 
 
 def run_pinned_family_row(ctx, family: str, mode: str, pc: ParallelismConfig) -> dict:
@@ -177,8 +203,10 @@ def run_pinned_family_row(ctx, family: str, mode: str, pc: ParallelismConfig) ->
     checks: dict[str, bool] = {}
     if pc.fp32_non_ep_params:
         # Other fp32 parameters are the run's own (fp32_non_ep_params forces an fp32 router).
-        checks["pins_hold_stored_fp32"], detail = _pins_hold_stored_fp32(model, family, base_dir)
-        log(f"{family} {mode} ep{pc.ep_size} fp32 masters: {detail}")
+        pinned, stored = stored_fp32_pins(family, base_dir)
+        off = pins_off_stored(model, stored, {name: name for name in pinned})
+        log(f"{family} {mode} ep{pc.ep_size} fp32 masters: {len(pinned)} pins, off the stored fp32 value: {off[:6]}")
+        checks["pins_hold_stored_fp32"] = not off
     else:
         off = base_params_off_run_dtype(model)
         log(f"{family} {mode} ep{pc.ep_size}: {len(off)} base params off {RUN_DTYPE} after load {off[:6]}")

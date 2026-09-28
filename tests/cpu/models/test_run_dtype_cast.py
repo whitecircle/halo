@@ -15,7 +15,6 @@ new loader that forgets either fails here rather than on its first GPU step.
 Run: python tests/cpu/models/test_run_dtype_cast.py  (or pytest)
 """
 
-import ast
 import functools
 import types
 from unittest import mock
@@ -49,27 +48,22 @@ from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.structure import fp32_pinned_param_names
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
+from tests.common.pinned_params import pins_off_stored, stored_fp32_pins
+from tests.common.source_sweep import builds_a_model, functions_calling
 from tests.common.tiny_models import PINNED_FP32_FAMILIES, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 from tests.common.tokenizers import load_cached_tokenizer
-from tests.common.utils import REPO_ROOT, params_off_dtype
+from tests.common.utils import params_off_dtype
 
 # The loaders log through accelerate's logger, which requires an initialized state.
 PartialState()
 
 # The run-dtype cast, directly or through its EP-aware wrapper.
-CASTS = frozenset({"cast_parameters_to_run_dtype", "cast_loaded_parameters"})
-FINALIZE = "finalize_loaded_model"
+CASTS = frozenset({cast_parameters_to_run_dtype.__name__, cast_loaded_parameters.__name__})
+FINALIZE = finalize_loaded_model.__name__
 
-# The calls that build a model, and so inherit the fp32 pins: the two toolkit entry points, a
-# SentenceTransformer built from a checkpoint path, and a raw factory on anything but the classes below.
-EAGER_LOAD_CALLS = frozenset({"from_pretrained_verified", "auto_load_model", "SentenceTransformer"})
-MODEL_FACTORIES = frozenset({"from_pretrained", "from_config", "_from_config"})
-# transformers' and PEFT's classes whose factory builds a tokenizer, processor or config, never a model.
-NON_MODEL_CLASSES = frozenset({"AutoTokenizer", "AutoProcessor", "AutoConfig", "GenerationConfig", "PeftConfig"})
-
-# Where a training or scoring load lives. ``src/models/loading/`` defines the entry points and is left
-# out: conversion tools load through it too and must keep the pins, so the cast belongs to each
-# training loader rather than to the shared core.
+# Where a training or scoring load lives; every model build there inherits the fp32 pins.
+# ``src/models/loading/`` defines the entry points and is left out: conversion tools load through it
+# too and must keep the pins, so the cast belongs to each training loader rather than to the shared core.
 SWEPT_ROOTS = ("src", "scripts/training")
 LOAD_CORE = "src/models/loading/"
 
@@ -240,13 +234,23 @@ def test_a_request_that_is_not_a_dtype_leaves_the_model_as_loaded(dtype):
     assert model.run.weight.dtype == torch.bfloat16
 
 
-@pytest.fixture(scope="module")
-def pinned_checkpoints(tmp_path_factory) -> dict[str, str]:
-    root = tmp_path_factory.mktemp("pinned")
-    checkpoints = {family: str(root / family) for family in PINNED_FP32_FAMILIES}
+def _tiny_checkpoints(tmp_path_factory, name: str, families, *, fp32_pins: bool = False) -> dict[str, str]:
+    """``families``' tiny checkpoints under a fresh ``name`` directory, keyed by family."""
+    root = tmp_path_factory.mktemp(name)
+    checkpoints = {family: str(root / family) for family in families}
     for family, path in checkpoints.items():
-        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path)
+        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path, fp32_pins=fp32_pins)
     return checkpoints
+
+
+@pytest.fixture(scope="module")
+def roster_checkpoints(tmp_path_factory) -> dict[str, str]:
+    return _tiny_checkpoints(tmp_path_factory, "roster", TINY_MOE_FAMILIES)
+
+
+@pytest.fixture(scope="module")
+def pinned_checkpoints(roster_checkpoints) -> dict[str, str]:
+    return {family: roster_checkpoints[family] for family in PINNED_FP32_FAMILIES}
 
 
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
@@ -295,15 +299,6 @@ def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpo
     assert kept and all(torch.equal(param.detach(), stored[name]) for name, param in kept.items())
 
 
-@pytest.fixture(scope="module")
-def roster_checkpoints(tmp_path_factory) -> dict[str, str]:
-    root = tmp_path_factory.mktemp("roster")
-    checkpoints = {family: str(root / family) for family in TINY_MOE_FAMILIES}
-    for family, path in checkpoints.items():
-        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path)
-    return checkpoints
-
-
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
 def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, family):
     """Holds ``PINNED_FP32_FAMILIES`` to the roster: a family whose class starts pinning parameters, or
@@ -347,11 +342,7 @@ def test_a_config_built_shell_carries_the_pins_from_pretrained_loads(roster_chec
 @pytest.fixture(scope="module")
 def stored_fp32_checkpoints(tmp_path_factory) -> dict[str, str]:
     """The pinned families saved as a release stores them: the pins at full fp32, the rest bf16."""
-    root = tmp_path_factory.mktemp("stored_fp32")
-    checkpoints = {family: str(root / family) for family in PINNED_FP32_FAMILIES}
-    for family, path in checkpoints.items():
-        build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], path, fp32_pins=True)
-    return checkpoints
+    return _tiny_checkpoints(tmp_path_factory, "stored_fp32", PINNED_FP32_FAMILIES, fp32_pins=True)
 
 
 def _config_built_shell(*args, **kwargs):
@@ -389,21 +380,13 @@ def _load_with(
     return load_pp_stage_model(path, pp_rank, pp_size, config=config, ep_config=ep_config, **common)
 
 
-def _stored_pins(family: str, path: str) -> tuple[set[str], dict[str, torch.Tensor]]:
-    """The parameters a bf16 ``from_pretrained`` of ``path`` leaves fp32, and every stored fp32 value."""
-    load_class = TINY_MOE_FAMILIES[family].load_class
-    pinned = set(params_off_dtype(load_class.from_pretrained(path, dtype=torch.bfloat16), torch.bfloat16))
-    stored = dict(load_class.from_pretrained(path, dtype=torch.float32).named_parameters())
-    assert pinned and any(not torch.equal(stored[name], stored[name].bfloat16().float()) for name in pinned)
-    return pinned, stored
-
-
 def _assert_keeps_exactly(model: nn.Module, pinned: dict[str, str], stored: dict, keep_fp32: bool) -> None:
     """``pinned`` maps each pin's name in ``model`` to its checkpoint name."""
-    fp32 = {name: param for name, param in model.named_parameters() if param.dtype == torch.float32}
-    assert set(params_off_dtype(model, torch.bfloat16)) == set(fp32)
-    assert set(fp32) == (set(pinned) if keep_fp32 else set())
-    assert all(torch.equal(param.detach(), stored[pinned[name]]) for name, param in fp32.items())
+    fp32 = {name for name, param in model.named_parameters() if param.dtype == torch.float32}
+    assert set(params_off_dtype(model, torch.bfloat16)) == fp32
+    assert fp32 == (set(pinned) if keep_fp32 else set())
+    off = pins_off_stored(model, stored, pinned) if keep_fp32 else []
+    assert not off, f"pins off their stored fp32 value: {off}"
 
 
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
@@ -414,7 +397,7 @@ def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, fami
     ``from_pretrained`` pins load fp32, bitwise the checkpoint's stored values, which a bf16 round trip
     would change; nothing else is widened."""
     path = stored_fp32_checkpoints[family]
-    pinned, stored = _stored_pins(family, path)
+    pinned, stored = stored_fp32_pins(family, path)
 
     model = _load_with(loader, family, path, keep_fp32, monkeypatch)
 
@@ -428,7 +411,7 @@ def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoin
     layer pins its compressor's norm), so a keep set in the checkpoint's numbering names other layers'
     parameters (the premise, checked below)."""
     path = stored_fp32_checkpoints["deepseek_v4"]
-    pinned, stored = _stored_pins("deepseek_v4", path)
+    pinned, stored = stored_fp32_pins("deepseek_v4", path)
 
     model = _load_with("pp_stage", "deepseek_v4", path, keep_fp32, monkeypatch, pp_rank=1, pp_size=2)
 
@@ -512,59 +495,28 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
     finalize.assert_called_once_with(backbone)
 
 
-def _calls(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    names = set()
-    for node in ast.walk(function):
-        if isinstance(node, ast.Call):
-            target = node.func
-            names.add(target.id if isinstance(target, ast.Name) else getattr(target, "attr", ""))
-    return names
-
-
-def _receiver(target: ast.Attribute) -> str:
-    """The name a method call is made on: ``X`` in ``X.f()``, ``super`` in ``super().f()``."""
-    value = target.value.func if isinstance(target.value, ast.Call) else target.value
-    return value.id if isinstance(value, ast.Name) else getattr(value, "attr", "")
-
-
-def _builds_a_model(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    for node in ast.walk(function):
-        if not isinstance(node, ast.Call):
-            continue
-        target = node.func
-        if isinstance(target, ast.Name) and target.id in EAGER_LOAD_CALLS:
-            return True
-        if isinstance(target, ast.Attribute) and (
-            target.attr in EAGER_LOAD_CALLS
-            or (target.attr in MODEL_FACTORIES and _receiver(target) not in NON_MODEL_CLASSES)
-        ):
-            return True
-    return False
-
-
 @functools.cache
 def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
-    found = {}
-    for root in SWEPT_ROOTS:
-        for path in sorted((REPO_ROOT / root).rglob("*.py")):
-            rel = str(path.relative_to(REPO_ROOT))
-            if rel.startswith(LOAD_CORE):
-                continue
-            for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _builds_a_model(node):
-                    found[(rel, node.name)] = frozenset(_calls(node))
-    return found
+    """(file, function) -> the names it calls, for every function under :data:`SWEPT_ROOTS` that builds a
+    model."""
+    return {
+        loader: calls
+        for loader, calls in functions_calling(SWEPT_ROOTS, builds_a_model).items()
+        if not loader[0].startswith(LOAD_CORE)
+    }
 
 
 def test_the_eager_load_surface_is_pinned():
-    assert set(_eager_loaders()) == EAGER_LOADERS | UNCAST_LOADERS | NON_TRAINING_BUILDS | NON_MODEL_BUILDERS
+    pinned = EAGER_LOADERS | UNCAST_LOADERS | NON_TRAINING_BUILDS | NON_MODEL_BUILDERS
+    discovered = set(_eager_loaders())
+    assert discovered == pinned, f"the model-build surface changed: {sorted(discovered ^ pinned)}; classify each"
 
 
 @pytest.mark.parametrize("loader", sorted(EAGER_LOADERS), ids=lambda loader: loader[1])
 def test_every_eager_loader_casts_and_finalizes(loader):
     calls = _eager_loaders()[loader]
-    assert calls & CASTS
-    assert FINALIZE in calls
+    assert calls & CASTS, f"{loader} builds a model without calling any of {sorted(CASTS)}"
+    assert FINALIZE in calls, f"{loader} builds a model without calling {FINALIZE}"
 
 
 if __name__ == "__main__":

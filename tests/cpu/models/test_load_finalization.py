@@ -19,9 +19,7 @@ that hands its model to a forward must finalize it and the save-only ones are pi
 Run: python tests/cpu/models/test_load_finalization.py  (or pytest)
 """
 
-import ast
 import functools
-import pathlib
 import types
 
 import pytest
@@ -32,10 +30,17 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.trainers.mixins.base import DistributedTrainerMixin
+from tests.common.source_sweep import (
+    TOOLKIT_LOAD_CALLS,
+    builds_a_model,
+    call_name,
+    called_names,
+    functions_calling,
+    functions_in,
+)
+from tests.common.utils import REPO_ROOT
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-
-SEAM = "finalize_loaded_model"
+SEAM = finalize_loaded_model.__name__
 
 DISPATCHER = "src/distributed/loading/model_loading.py"
 
@@ -70,9 +75,6 @@ TERMINAL_LOADERS = (
     ("src/distributed/context_parallel/loading.py", "load_model_for_cp"),
 )
 
-# The two eager load entry points a ``scripts/`` tool materializes a model through.
-TOOL_LOAD_CALLS = frozenset({"from_pretrained_verified", "auto_load_model"})
-
 # Tool loaders whose model is handed to a FORWARD — reward scores, dedup embeddings, the
 # ``--check_inference`` generation. An uninitialized buffer here becomes numbers the operator acts
 # on, with no other symptom, so each must call the seam directly.
@@ -93,9 +95,6 @@ CONVERSION_TOOL_LOADERS = (
 
 # How a file betrays that it runs the model it loaded, for the save-only half of the split above.
 _FORWARD_MARKERS = (".generate(", ".logits", "last_hidden_state")
-
-# Classes whose ``from_pretrained`` builds no model, so a trainer may call it (a fallback tokenizer).
-_NON_MODEL_PRETRAINED = frozenset({"AutoTokenizer", "AutoProcessor", "AutoConfig"})
 
 
 def _rotary_with_reference(theta: float = 1_000_000.0) -> tuple[Qwen3RotaryEmbedding, torch.Tensor]:
@@ -185,27 +184,16 @@ def _graph_modules() -> list[str]:
 
 
 @functools.cache
-def _call_graph() -> dict[tuple[str, str], set[str]]:
+def _call_graph() -> dict[tuple[str, str], frozenset[str]]:
     """(module, name) -> names it calls, over every top-level function of the graph's modules.
 
     Keyed by module too: two modules defining the same function name are different functions, and
     merging their callees lets one module's finalizing twin vouch for the other's forgetful one.
     """
-    graph: dict[tuple[str, str], set[str]] = {}
-    for rel in _graph_modules():
-        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
-        for node in tree.body:
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            graph[(rel, node.name)] = {
-                sub.func.id if isinstance(sub.func, ast.Name) else sub.func.attr
-                for sub in ast.walk(node)
-                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name | ast.Attribute)
-            }
-    return graph
+    return {(rel, node.name): called_names(node) for rel, node in functions_in(_graph_modules(), top_level=True)}
 
 
-def _reaches_seam(root: tuple[str, str], graph: dict[tuple[str, str], set[str]]) -> bool:
+def _reaches_seam(root: tuple[str, str], graph: dict[tuple[str, str], frozenset[str]]) -> bool:
     """Whether ``root`` calls the seam, directly or through a callee. A callee name resolves inside
     its own module first, then to any module defining it — the way an import does."""
     seen: set[tuple[str, str]] = set()
@@ -255,27 +243,15 @@ def test_every_terminal_loader_calls_the_seam_directly(rel, function):
 
 
 @functools.cache
-def _tool_loaders() -> dict[tuple[str, str], set[str]]:
+def _tool_loaders() -> dict[tuple[str, str], frozenset[str]]:
     """(script, function) -> the names it calls, for every ``scripts/`` function whose model comes
-    from :data:`TOOL_LOAD_CALLS`.
+    from a toolkit load entry point (:data:`~tests.common.source_sweep.TOOLKIT_LOAD_CALLS`).
 
     Walked over the whole tree rather than a file list, so a new tool is discovered by the load it
     makes. A tool whose model comes from a third-party loader instead (``SentenceTransformer``)
     reaches neither entry point and is outside this sweep.
     """
-    loaders: dict[tuple[str, str], set[str]] = {}
-    for path in sorted((REPO_ROOT / "scripts").rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            called = {
-                call.func.id
-                for call in ast.walk(node)
-                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-            }
-            if called & TOOL_LOAD_CALLS:
-                loaders[(path.relative_to(REPO_ROOT).as_posix(), node.name)] = called
-    return loaders
+    return functions_calling(("scripts",), lambda call: call_name(call) in TOOLKIT_LOAD_CALLS)
 
 
 def test_tool_load_surface_is_pinned():
@@ -316,29 +292,12 @@ def test_conversion_tools_still_run_no_forward():
     )
 
 
-def _loads_a_model(call: ast.Call) -> bool:
-    """Whether ``call`` materializes a model: an eager load entry point, or a ``from_pretrained`` on
-    anything but a tokenizer, processor or config class."""
-    func = call.func
-    if isinstance(func, ast.Name):
-        return func.id in TOOL_LOAD_CALLS
-    if isinstance(func, ast.Attribute) and func.attr == "from_pretrained":
-        return not (isinstance(func.value, ast.Name) and func.value.id in _NON_MODEL_PRETRAINED)
-    return False
-
-
 def test_no_trainer_loads_a_model_itself():
     """A trainer holds the models its caller loaded: the policy through the distributed loaders or
     ``load_model_from_pretrained``, a frozen reference or teacher through ``load_frozen_auxiliary_model``
     in its script. A load inside ``src/trainers`` skips the buffer repair, the sinks policy and the
     family attention patches those loaders own, and takes none of the run's load flags."""
-    offenders = sorted(
-        f"{path.relative_to(REPO_ROOT).as_posix()}:{node.name}"
-        for path in (REPO_ROOT / "src/trainers").rglob("*.py")
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-        and any(isinstance(call, ast.Call) and _loads_a_model(call) for call in ast.walk(node))
-    )
+    offenders = sorted(f"{rel}:{name}" for rel, name in functions_calling(("src/trainers",), builds_a_model))
     assert not offenders, (
         f"{offenders} load a model inside a trainer. Load it in the entry script through the loader "
         f"that owns its kind ({SEAM} runs there) and pass it to the trainer."

@@ -12,7 +12,8 @@ parameter in bf16 after the load, and trains two SFT steps (see ``tests/common/p
   * ``--mode expert_lora --ep 1``: native expert LoRA over a frozen base whose pins stay out of FSDP2.
   * ``--mode mixed --ep 1``: attention + expert adapters; the adapters must train identically on both
     ranks, which an adapter left out of FSDP2's shard groups does not.
-  * ``--ep 2``: the EP loaders, which already cast, as the control.
+  * ``--ep 2``: the EP loaders, which already cast, as the control. Under an adapter mode the
+    cross-rank check leaves out the expert adapters, each rank's own for its own experts.
   * ``--fp32-masters`` (``fp32_non_ep_params``): the pins keep the checkpoint's stored fp32 values
     instead of a bf16 round trip before the trainer's upcast, at ep1 and through the EP lazy loader.
 
