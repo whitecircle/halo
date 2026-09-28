@@ -534,7 +534,7 @@ def run_online_grpo_e2e(
     if spec.rejects_expert_lora:
         refusal = expert_lora_under_etp_refusal(spec.expert_tp_size)
         checks["expert_lora_under_etp_refused"] = bool(refusal)
-        checks["etp_refusal_names_expert_tp_size"] = "expert_tp_size > 1" in refusal
+        checks["etp_refusal_names_expert_tensor_parallel_size"] = "expert_tensor_parallel_size > 1" in refusal
 
     if ctx.rank == 0:
         record_served_baseline(server_url, model_name, checks)
