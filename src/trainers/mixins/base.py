@@ -559,9 +559,11 @@ class DistributedTrainerMixin(
                 register_forward_generation_hook(self.model)
             # modules_to_save swaps in a router copy the ctor-time DP-sync hook never saw.
             self._reattach_ep_router_grad_sync_for_peft()
-            # Every EP-wrapper run, FSDP2-wrapped or not: only an EP module leaves a trainable
-            # parameter out of the shard groups (the dtype exclusions are frozen).
-            self._reject_unsynced_trainable_params(self.model, self._fsdp_exclusions().params)
+        # Every run, wrapped or not, and never gated on the model: under PP a stage may hold no EP layer,
+        # and the check is collective. Only an EP module leaves a trainable parameter out of the shard
+        # groups (the dtype exclusions are frozen), and a model can carry EP layers its config does not
+        # declare.
+        self._reject_unsynced_trainable_params(self.model, self._fsdp_exclusions().params)
         self._validate_expert_lora_realized()
         # After the wrap and after TRL's dropout disabling, so they read what the run will actually use.
         self._validate_expert_lora_peft_config()

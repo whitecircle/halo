@@ -12,7 +12,9 @@ deferred post-backward sweep covers everything.
 Uses a stub trainer (only ``model`` + ``_find_ep_modules``) around a stub EP layer that exercises
 the REAL ``synced_trainable_param_ids`` logic on the in-backward hook path. The guard runs once, at
 construction after the mode's wrap: the per-mode test drives the real ``_setup_distributed_modes``
-through every axis set whose wrap leaves an EP layer out of FSDP2 and holds each one to the refusal.
+through every axis set whose wrap leaves an EP layer out of FSDP2 and holds each one to the refusal,
+refuses EP layers a hand-built config does not declare, and passes plain DP, CP and TP, whose frozen
+dtype exclusions and FSDP-managed ep1 experts leave no trainable parameter out.
 
 Run: ``python tests/cpu/parallelism/test_ep_unsynced_param_guard.py`` (or ``pytest -m cpu``).
 """
@@ -31,6 +33,8 @@ from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
 
 E, H, M = 2, 4, 8
+_FABRIC_PROBE = "src.distributed.parallelism_config.validate_nvlink_domain_against_fabric"
+_RANK_UNIFORM_ENV = "src.trainers.mixins.base.verify_rank_uniform_env"
 
 # Every axis set whose wrap leaves EP layers out of FSDP2, paired with the mode setup
 # _setup_distributed_modes dispatches it to: ep_group_size > 1, or plain DP with fsdp_shard_ep1_experts
@@ -52,6 +56,8 @@ _MODE_SETUPS = (
     "_setup_ep_only",
     "_setup_standard_data_parallel",
 )
+# Axis sets with no EP distribution; ep1 experts there are FSDP-managed (CP and TP refuse otherwise).
+_NON_EP_MODES = {"dp": {}, "cp": {"cp_size": 2}, "tp": {"tp_size": 2}}
 # Everything _setup_distributed_modes runs ahead of the guard that needs a live Trainer or process group.
 _PRE_GUARD_STEPS = (
     "_log_parallelism_config",
@@ -103,6 +109,19 @@ class _StubTrainer:
         DistributedTrainerMixin._reject_unsynced_trainable_params(self, self.model, candidates)
 
 
+class _PastGuard(Exception):
+    """Carries control out of the spine once the guard has passed."""
+
+
+class _FrozenFp32Block(nn.Module):
+    """A frozen fp32 parameter beside trainable bf16 ones: a dtype exclusion every FSDP2 wrap leaves out."""
+
+    def __init__(self):
+        super().__init__()
+        self.dt_bias = nn.Parameter(torch.zeros(H), requires_grad=False)
+        self.proj = nn.Linear(H, H, bias=False).to(torch.bfloat16)
+
+
 class _ModeHost(DistributedTrainerMixin):
     """The mixin's real mode dispatch and guard over a stub model; each mode's wrap only records itself."""
 
@@ -118,11 +137,19 @@ class _ModeHost(DistributedTrainerMixin):
         self._ep_config = None
         self.ran_setups: list[str] = []
 
+    def _validate_expert_lora_realized(self):
+        raise _PastGuard
+
 
 for _name in _PRE_GUARD_STEPS:
     setattr(_ModeHost, _name, lambda self: None)
 for _name in _MODE_SETUPS:
     setattr(_ModeHost, _name, lambda self, _setup=_name: self.ran_setups.append(_setup))
+
+
+def _config(**kwargs):
+    with patch(_FABRIC_PROBE):
+        return make_parallelism_config(world_size=8, gpus_per_node=8, **kwargs)
 
 
 def test_guard_raises_on_undeclared_trainable_param_without_peft():
@@ -159,15 +186,42 @@ def test_construction_refuses_an_unsynced_param_in_every_ep_wrapper_mode(mode):
     """The construction check is the only one over what the wraps leave out, so it must refuse the
     undeclared parameter in every mode that wraps around an EP layer."""
     kwargs, expected_setup = _EP_WRAPPER_MODES[mode]
-    with patch("src.distributed.parallelism_config.validate_nvlink_domain_against_fabric"):
-        config = make_parallelism_config(world_size=8, gpus_per_node=8, **kwargs)
+    config = _config(**kwargs)
     assert config.needs_ep_wrappers
     host = _ModeHost(config, [_StubEPLayer(rogue=True)])
 
-    with patch("src.trainers.mixins.base.verify_rank_uniform_env"), pytest.raises(RuntimeError, match="rogue_scale"):
+    with patch(_RANK_UNIFORM_ENV), pytest.raises(RuntimeError, match="rogue_scale"):
         DistributedTrainerMixin._setup_distributed_modes(host)
 
     assert host.ran_setups == [expected_setup]
+
+
+def test_construction_refuses_ep_layers_a_hand_built_config_does_not_declare():
+    """A model carrying EP layers under a config without EP wrappers: the plain-DP wrap leaves them out
+    of FSDP2 (fsdp_shard_ep1_experts off) and nothing else syncs the undeclared parameter."""
+    config = _config(use_grouped_gemm=False, fsdp_shard_ep1_experts=False)
+    assert not config.needs_ep_wrappers, "premise: the config declares no EP wrappers"
+    host = _ModeHost(config, [_StubEPLayer(rogue=True)])
+
+    with patch(_RANK_UNIFORM_ENV), pytest.raises(RuntimeError, match="rogue_scale"):
+        DistributedTrainerMixin._setup_distributed_modes(host)
+
+    assert host.ran_setups == ["_setup_standard_data_parallel"]
+
+
+@pytest.mark.parametrize("grouped_gemm", [False, True], ids=["plain", "grouped-gemm"])
+@pytest.mark.parametrize("mode", sorted(_NON_EP_MODES))
+def test_construction_passes_where_every_trainable_param_is_sharded(mode, grouped_gemm):
+    """No false refusal: the frozen fp32 exclusion is not trainable, and a grouped-GEMM ep1 layer's
+    parameters, the undeclared one included, are FSDP-managed."""
+    config = _config(use_grouped_gemm=grouped_gemm, **_NON_EP_MODES[mode])
+    ep_layers = [_StubEPLayer(rogue=True, managed=True).to(torch.bfloat16)] if grouped_gemm else []
+    layers = [_FrozenFp32Block(), *ep_layers]
+    host = _ModeHost(config, layers)
+    assert config.experts_fsdp_managed and host._dtype_excluded_params(), "premise: an exclusion, managed experts"
+
+    with patch(_RANK_UNIFORM_ENV), pytest.raises(_PastGuard):
+        DistributedTrainerMixin._setup_distributed_modes(host)
 
 
 if __name__ == "__main__":

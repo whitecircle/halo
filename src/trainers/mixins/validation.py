@@ -20,6 +20,7 @@ from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.parallelism_config import accelerate_launch_rejection
+from src.log import KEY_PREVIEW_COUNT
 from src.models.loading.config_levels import config_sources, set_config_field_run_scoped
 from src.models.moe_balancing import (
     config_has_experts,
@@ -254,8 +255,12 @@ class ParallelismValidationMixin:
                 f"have rank-specific inputs and break gradient sync.\n"
                 f"\n"
                 f"Offending parameters ({len(offending)}):\n"
-                + "\n".join(f"  - {p}" for p in offending[:10])
-                + (f"\n  ... and {len(offending) - 10} more" if len(offending) > 10 else "")
+                + "\n".join(f"  - {p}" for p in offending[:KEY_PREVIEW_COUNT])
+                + (
+                    f"\n  ... and {len(offending) - KEY_PREVIEW_COUNT} more"
+                    if len(offending) > KEY_PREVIEW_COUNT
+                    else ""
+                )
                 + "\n\n"
                 "To LoRA-tune experts under EP, list the expert projections (gate_proj/up_proj/"
                 "down_proj/gate_up_proj/experts) in lora_target_modules: split_expert_lora_targets "
