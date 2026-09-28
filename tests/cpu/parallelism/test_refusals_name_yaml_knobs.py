@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""Parallelism refusals name the knobs a user sets and link the docs for the trade-offs behind them.
+"""The parallelism refusals below name the knobs a user sets and print launch lines that run as
+written; the ep1 expert-sharding refusal links the docs for its trade-off.
 
 A run is configured through ``expert_parallel_size`` / ``tensor_parallel_size`` /
 ``expert_tensor_parallel_size`` / ``context_parallel_size``; ``ep_size`` / ``tp_size`` /
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.utils import REPO_ROOT, load_script_module
@@ -92,6 +94,16 @@ def test_stock_adamw_refusal_names_the_yaml_knobs():
     message = str(err.value)
     assert "expert_parallel_size=1" in message, message
     assert not INTERNAL_FIELD.search(message), message
+
+
+def test_accelerate_refusal_launch_lines_pass_the_config(monkeypatch):
+    """The entry scripts take the YAML config as their positional, so a printed torchrun line
+    without it fails before the run starts."""
+    monkeypatch.setenv("ACCELERATE_MIXED_PRECISION", "bf16")
+    message = accelerate_launch_rejection(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))
+    script_lines = [line for line in message.splitlines() if "scripts/training/" in line]
+    assert len(script_lines) == 3, message
+    assert all("<config>" in line for line in script_lines), message
 
 
 if __name__ == "__main__":
