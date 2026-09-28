@@ -7,8 +7,7 @@ per-rank EP/TP index, which a test-local reader would accept as a whole checkpoi
 ``from_pretrained`` load of a checkpoint is clean when :func:`loading_problems` reports nothing.
 
 A two-phase resume compares the state at the save with the state the resume restored
-(:class:`RestorePointSnapshot`; :class:`ReplayRestorePoint` for a resume replayed against the
-uninterrupted run).
+(:class:`RestorePointSnapshot`).
 
 A save→reload or save→resume test proves the weights survived by value: the same fixed batch's forward
 loss before the save and after the reload (:func:`fixed_batch_loss`). A resume test also reads the
@@ -27,7 +26,6 @@ from transformers.utils import CONFIG_NAME
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, has_whole_model_weight_file, load_full_state_dict
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.optimizers.adamw_bf16 import reset_sr_stream
 from tests.common.peft_helpers import snapshot_adapters, unwrap
 from tests.common.utils import local_optimizer_state, log, optimizer_state_matches
 
@@ -225,22 +223,6 @@ class RestorePointSnapshot(TrainerCallback):
     def on_train_begin(self, args, state, control, **kwargs):
         if self.event == "train_begin":
             self._capture(state)
-
-
-class ReplayRestorePoint(RestorePointSnapshot):
-    """A :class:`RestorePointSnapshot` after which the bf16 optimizer's stochastic-rounding stream is
-    rewound (:func:`~src.optimizers.adamw_bf16.reset_sr_stream`).
-
-    A resumed process starts the stream where a fresh import does, while the uninterrupted run has
-    advanced it past the save; rewinding both runs at their restore point leaves the comparison of the
-    restored state alone. At ``train_begin`` the rewind follows the optimizer-state load, whose
-    zero-LR materialization step draws from the stream.
-    """
-
-    def _capture(self, state) -> None:
-        if self.captured is None:
-            super()._capture(state)
-            reset_sr_stream()
 
 
 class ResumeCapture(TrainerCallback):

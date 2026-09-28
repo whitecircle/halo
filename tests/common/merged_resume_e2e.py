@@ -20,13 +20,12 @@ or 1 (experts FSDP-sharded as DTensors, DP=2), with ``cp_size`` 2 under EP+CP:
      restore (``on_train_begin``) every adapter is BIT-EQUAL to the one the uninterrupted run held at
      the save; every resumed step's loss matches the uninterrupted run's within
      ``TOL.replayed_resume_loss_abs`` and the final adapters sit within
-     ``TOL.replayed_resume_weight_rtol`` of its. Both runs rewind the bf16 optimizer's
-     stochastic-rounding stream at their restore point
-     (:class:`~tests.common.checkpoint_io.ReplayRestorePoint`), so the comparison is of the restored
-     state alone. DeepEP's default dispatch hands out receive slots with atomics, so the order an
-     expert's tokens arrive in, and with it the rounding of each expert adapter gradient summed over
-     them, changes from run to run; the body builds every DeepEP buffer in deterministic mode, or two
-     identical runs could part by that rounding alone.
+     ``TOL.replayed_resume_weight_rtol`` of its. Nothing is reset between the runs: the bf16
+     optimizer keys its stochastic rounding by step and parameter position, so the resumed steps
+     round as the uninterrupted ones did. DeepEP's default dispatch hands out receive slots with
+     atomics, so the order an expert's tokens arrive in, and with it the rounding of each expert
+     adapter gradient summed over them, changes from run to run; the body builds every DeepEP buffer
+     in deterministic mode, or two identical runs could part by that rounding alone.
   4. A kill between the base save and the resume adapter leaves the merged weights without their
      marker. Resumed through the production resolver, that checkpoint builds the policy from its own
      merged weights, and the resume must refuse on every rank rather than restart the adapters from
@@ -57,10 +56,9 @@ from src.checkpoint.format import (
 from src.distributed.context_parallel.validation import UlyssesConfigError
 from src.distributed.expert_parallel.extension import deep_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from src.optimizers.adamw_bf16 import reset_sr_stream
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import resolve_resume_weights_source
-from tests.common.checkpoint_io import ReplayRestorePoint, loading_problems
+from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.models import QWEN3_0_6B
@@ -129,8 +127,8 @@ def _pin_deterministic_dispatch() -> None:
     buffer_cls.__init__ = functools.partialmethod(buffer_cls.__init__, deterministic=True)
 
 
-class _RestorePoint(ReplayRestorePoint):
-    """The replay restore point with every adapter whole (:func:`_adapter_snapshot`) and, at the save,
+class _RestorePoint(RestorePointSnapshot):
+    """The restore-point snapshot with every adapter whole (:func:`_adapter_snapshot`) and, at the save,
     this rank's parameters just after it (``parameters``) and just before it (:attr:`before_save`, the
     last ``on_step_end`` ahead of the first save). Every rank runs callbacks, so the gathers stay
     collective."""
@@ -241,11 +239,9 @@ def run_merged_resume(ctx, *, family: str, adapters: str, ep_size: int, cp_size:
 
     def make_trainer(model_source: str, phase_dir: str, *, save: bool):
         """The production load (``split_expert_lora_targets`` → ``load_distributed_model`` →
-        ``setup_peft_model``) and trainer, with the stochastic-rounding stream rewound so every phase
-        starts from the same one, and the attention modules PEFT adapts. Ulysses CP runs flash
+        ``setup_peft_model``) and trainer, and the attention modules PEFT adapts. Ulysses CP runs flash
         attention (auto-selected, or through its own probe under the family's
         ``cp_attn_implementation``); the rest stay on eager."""
-        reset_sr_stream()
         parallelism_config = _parallelism_config(ep_size, cp_size)
         model, tokenizer, peft_config = load_peft_model(
             ADAPTER_MODES[adapters],

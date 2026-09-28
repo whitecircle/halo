@@ -57,8 +57,8 @@ def expert_replica_writer(model) -> tuple[int, frozenset[str]]:
 
     Under multi-group EP the EP groups are DP replicas: ranks sharing an ``ep_rank`` hold the same
     expert slice, their gradients are averaged across ``expert_replica_group``, and the optimizer is
-    deterministic (AdamWBF16 draws stochastic rounding from the rank-synchronized ``_SR_RNG``), so
-    their moments are bit-identical. Those params are FSDP-ignored — the whole EP module, router
+    deterministic (AdamWBF16 keys its stochastic rounding by step and parameter position), so their
+    moments are bit-identical. Those params are FSDP-ignored — the whole EP module, router
     included — so no reduce-scatter splits them and every rank would otherwise write the same bytes.
     The lowest rank of the replica group writes them; its peers strip them and read them back from
     that rank's shard.

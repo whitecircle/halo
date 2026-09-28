@@ -77,10 +77,10 @@ LEARNING_RATE = 2e-3
 # Measured on B300 over the 51 checkpoint-built rows (every family and layout, DPO and KTO): the
 # resume restores the reference columns bit for bit and its first-step loss equals the continuous
 # run's exactly (|delta| 0.0), held to ``TOL.replayed_resume_loss_abs``. That loss precedes any
-# post-restore optimizer update, so the stochastic-rounding stream needs no rewind. The control,
-# which sweeps the trained policy instead, misses the first-step loss by 3.1e-3 (KTO on the smallest
-# families) to 0.62, held above ``TOL.control_min_loss_shift`` of the resume bound, and the reference
-# columns by 1 nat (Cohere2 MoE, Inkling) to 30, held above this floor.
+# post-restore optimizer update. The control, which sweeps the trained policy instead, misses the
+# first-step loss by 3.1e-3 (KTO on the smallest families) to 0.62, held above
+# ``TOL.control_min_loss_shift`` of the resume bound, and the reference columns by 1 nat (Cohere2 MoE,
+# Inkling) to 30, held above this floor.
 CONTROL_MIN_LOGP_DELTA = 0.5
 
 

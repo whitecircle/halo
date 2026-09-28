@@ -48,7 +48,6 @@ from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.optimizers.adamw_bf16 import reset_sr_stream
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir
@@ -186,8 +185,6 @@ def _global_sq_sum(value: float, device) -> float:
 
 def run_arm(defer: bool, model_dir: str, tokenizer, train_dataset, output_dir: str) -> dict:
     log(f"\n--- {ARGS.mode}: fsdp_defer_grad_sync={defer} ---")
-    # Same stochastic-rounding stream in both arms, so AdamWBF16 draws identical noise.
-    reset_sr_stream()
     pc = _parallelism_config(ARGS.mode, dist.get_world_size(), defer)
     model, _ = load_distributed_model(
         model_name_or_path=model_dir,

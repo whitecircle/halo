@@ -736,7 +736,7 @@ and restores them with `set_optimizer_state_dict` gated on the `optimizer_meta.p
 **Multi-group EP deduplicates the replicated half.** The EP groups are DP replicas. The
 FSDP-ignored params (the whole EP module — experts, router, shared expert) hold identical bytes on
 every rank of an `expert_replica_group`, and so do their moments: the gradients are averaged over
-that group and `AdamWBF16` draws its stochastic rounding from a rank-synchronized RNG.
+that group and `AdamWBF16` keys its stochastic rounding by step and parameter position.
 
 Only the group's **lowest rank** keeps them in its shard; its peers strip them and read them back
 from that rank's shard on resume. At Qwen3.5-397B-A17B on 512 GPUs at `ep64` that is 8 copies

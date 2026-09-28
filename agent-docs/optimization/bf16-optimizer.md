@@ -25,7 +25,7 @@ The two moments round differently:
 
 The kernel computes both EMAs and the weight update in fp32, truncating only on store-back, so the update always sees the exact fp32 second moment.
 
-SR seeds come from a dedicated, rank-synchronized RNG (`_SR_RNG`, one per optimizer module) kept separate from the global `random` module, so nothing in the data path can desync the noise across ranks. Replicas that hold the same parameter and receive the same averaged gradient — HSDP `dp_replicate` groups, DDP — round it identically and stay bit-for-bit in sync.
+SR seeds are drawn from no generator: `sr_seed_pair` hashes the parameter's optimizer step (`state["step"]`) and its position across the param groups (the optimizer state dict's index space) under a per-optimizer key. Replicas that hold the same parameter and receive the same averaged gradient — HSDP `dp_replicate` groups, DDP, EP replica groups — round it identically and stay bit-for-bit in sync. A resumed run restores `step` with the optimizer state, so it rounds exactly as the uninterrupted run would have; there is no generator state to checkpoint, and the zero-LR step torch runs to materialize state before a restore consumes nothing. An element's noise is keyed by its offset in the rank's local shard, so it reproduces for one sharding layout (the one an optimizer-shard resume must keep), not across layouts.
 
 ## Benchmarks
 
@@ -63,7 +63,7 @@ ones; fp32 masters come from `fp32_non_ep_params` (dense params) or `bf16: false
 
 Combining `bf16_optimizer: true` with `optim: muon` or `optim: flash_adamw` **raises**: both select an optimizer and the bf16 path would silently win, so pick one.
 
-Direct use: `AdamWBF16(model.parameters(), lr=1e-4, betas=(0.9, 0.999), eps=1e-8)`, with the standard HF decay / no-decay param groups. Pass `use_triton=False` for the eager PyTorch fallback (functionally equivalent, slower — multiple memory passes instead of the one fused kernel; it also engages automatically without CUDA). The eager path seeds its SR noise from the same rank-synchronized `_SR_RNG`, so replica bit-identity holds there too.
+Direct use: `AdamWBF16(model.parameters(), lr=1e-4, betas=(0.9, 0.999), eps=1e-8)`, with the standard HF decay / no-decay param groups. Pass `use_triton=False` for the eager PyTorch fallback (functionally equivalent, slower — multiple memory passes instead of the one fused kernel; it also engages automatically without CUDA). The eager path seeds its SR noise from the same `sr_seed_pair`, so replica bit-identity and exact resume hold there too.
 
 ## Master-weight and grad-reduce options
 
@@ -100,7 +100,7 @@ Default `false`. `fp32_non_ep_params` implies it only for the FSDP2 reduce dtype
 
 Every distributed trainer supports `bf16_optimizer`; resolution lives in `DistributedTrainerMixin._configure_mixed_precision`, which all of them run. It auto-enables under FSDP, EP, TP, CP and their combinations (rank-local experts and per-rank DTensor shards alike).
 
-The one exception is accelerate-managed replicated DDP, where the auto-enable is skipped as a conservative default outside the validated FSDP/EP/TP/HSDP matrix, not a correctness limit. SR is replica-safe (the rank-synchronized RNG rounds shared params identically), so `bf16_optimizer: true` opts in.
+The one exception is accelerate-managed replicated DDP, where the auto-enable is skipped as a conservative default outside the validated FSDP/EP/TP/HSDP matrix, not a correctness limit. SR is replica-safe (the step-and-position seed rounds shared params identically), so `bf16_optimizer: true` opts in.
 
 Checkpoints use standard PyTorch `state_dict()` / `load_state_dict()`, round-tripping all state in bf16.
 
@@ -118,7 +118,7 @@ torchrun --nproc_per_node=8 \
 CUDA_VISIBLE_DEVICES=0 python tests/gpu/optimizers/bench_adamw_bf16.py
 ```
 
-`test_adamw_bf16.py` covers the single-GPU claims: SR statistics (weight and `exp_avg_sq`, both paths), mixed dtypes, decay groups, state-dict round-trip, and that every shipped optimizer advances `param._version` across a step (the low-precision weight cache keys on it).
+`test_adamw_bf16.py` covers the single-GPU claims: SR statistics (weight and `exp_avg_sq`, both paths), mixed dtypes, decay groups, state-dict round-trip, a restored AdamWBF16 and Muon rounding bit-identically to the uninterrupted run, and that every shipped optimizer advances `param._version` across a step (the low-precision weight cache keys on it).
 
 `test_bf16_optimizer_ep.py` runs full + LoRA training under EP=8 and asserts the two distributed SR claims: `exp_avg_sq` on a local expert shard tracks an fp32 reference (de-bias), and the SR-rounded weight is bit-identical across the EP replicate group.
 

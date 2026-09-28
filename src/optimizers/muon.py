@@ -6,7 +6,6 @@ for the momentum and weight-decay updates (one launch per param).
 
 import contextlib
 import logging
-import random
 from collections.abc import Collection, Sequence
 from dataclasses import MISSING, fields
 from typing import Any
@@ -20,22 +19,18 @@ from gram_newton_schulz.muon.muon_utils.muon_matrix_split_utils import (
     reconstruct_update_from_newton_schulz_outputs,
     scale_newton_schulz_outputs_with_adjusted_lr,
 )
-from gram_newton_schulz.muon.muon_utils.muon_opt_utils import (
-    adjust_lr_rms_norm,
-    get_or_initialize_muon_state,
-)
+from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
 from src.distributed.runtime import is_global_main_process, rank_consensus, to_local
 from src.models.structure import EMBEDDING_HEAD_MARKERS
-from src.optimizers.adamw_bf16 import BLOCK_SIZE, AdamWBF16
+from src.optimizers.adamw_bf16 import BLOCK_SIZE, AdamWBF16, sr_seed_pair
 from src.optimizers.param_groups import decay_groups
 
 logger = logging.getLogger(__name__)
 
-# Rank-synchronized SR-seed stream, kept off global ``random`` (the data path advances that
-# per-rank). It uses its own generator rather than the internal AdamWBF16's, so neither optimizer's
-# noise depends on how many params the other routed.
-_SR_RNG = random.Random(0xC0FFEE)
+# Key of the matrix step's rounding noise, apart from the internal AdamWBF16's, so neither
+# optimizer's noise depends on how many params the other routed.
+_SR_KEY = 0xC0FFEE
 
 # Muon's recipe wants a shorter second-moment horizon than HF's adam_beta2 default (0.999).
 DEFAULT_SCALAR_BETAS: tuple[float, float] = (0.9, 0.95)
@@ -182,19 +177,24 @@ def _fused_momentum_nesterov(grads, momentums, momentum_val, nesterov):
     return ns_inputs
 
 
-def _collect_params_with_sr_seeds(params) -> tuple[list, list[int]]:
-    """Split ``params`` into those with grads, drawing one SR seed per param unconditionally.
+def _collect_params_with_sr_seeds(state: dict, params: list, first_index: int) -> tuple[list, list[int]]:
+    """Count a step for every param in ``params`` and return those with grads, each with its SR seed.
 
-    Every param consumes its ``_SR_RNG`` draw in deterministic order, including when it is skipped
-    for a missing grad, so rank-nonuniform grad presence cannot shift the seed stream and drift
-    replicas apart.
+    A param with no grad counts the step too, so replicas whose grad presence differs agree on the
+    step a param's seed is keyed by (:func:`~src.optimizers.adamw_bf16.sr_seed_pair`).
+    ``first_index`` is the group's offset in the optimizer's flat param order, the seed's other key.
+    The momentum buffer is allocated on a param's first grad, as upstream does.
     """
     with_grad, seeds = [], []
-    for p in params:
-        seed = _SR_RNG.randint(0, 2**30)
-        if p.grad is not None:
-            with_grad.append(p)
-            seeds.append(seed)
+    for index, p in enumerate(params, start=first_index):
+        param_state = state[p]
+        param_state["step"] = param_state.get("step", 0) + 1
+        if p.grad is None:
+            continue
+        if "momentum" not in param_state:
+            param_state["momentum"] = torch.zeros_like(p)
+        with_grad.append(p)
+        seeds.append(sr_seed_pair(_SR_KEY, param_state["step"], index)[0])
     return with_grad, seeds
 
 
@@ -237,8 +237,10 @@ class Muon(UpstreamMuon):
         GNS batching stacks same-shape params (tens of GB on large MoE models), so it runs in
         ``_GNS_CHUNK_SIZE`` chunks whose entries are freed as they are consumed.
         """
+        first_index = 0
         for group in param_groups:
-            group_params, sr_seeds = _collect_params_with_sr_seeds(group["params"])
+            group_params, sr_seeds = _collect_params_with_sr_seeds(self.state, group["params"], first_index)
+            first_index += len(group["params"])
             if not group_params:
                 continue
 
@@ -264,8 +266,7 @@ class Muon(UpstreamMuon):
                 )
 
             grads = [p.grad for p in group_params]
-            states = [get_or_initialize_muon_state(self.state, p) for p in group_params]
-            momentums = [s["momentum"] for s in states]
+            momentums = [self.state[p]["momentum"] for p in group_params]
 
             ns_inputs = _fused_momentum_nesterov(grads, momentums, momentum_val, nesterov)
 

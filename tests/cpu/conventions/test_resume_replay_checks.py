@@ -10,15 +10,12 @@ Run: python tests/cpu/conventions/test_resume_replay_checks.py
 """
 
 import math
-import random
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-import src.optimizers.adamw_bf16 as adamw_bf16
-from src.optimizers.adamw_bf16 import SR_SEED
-from tests.common.checkpoint_io import LOADING_INFO_KINDS, ReplayRestorePoint, loading_problems
+from tests.common.checkpoint_io import LOADING_INFO_KINDS, RestorePointSnapshot, loading_problems
 from tests.common.utils import relative_l2, resumed_loss_deltas, snapshot_trainable
 
 SAVE_STEP = 2
@@ -99,34 +96,21 @@ def test_snapshot_trainable_copies_the_trainable_parameters_only():
     assert not torch.equal(snapshot["weight"], model.weight), "a snapshot must not alias the live parameter"
 
 
-class _Probe(ReplayRestorePoint):
-    """Records where the SR stream stood when the snapshot's entries were taken."""
-
-    def extra(self) -> dict:
-        return {"sr_state": adamw_bf16._SR_RNG.getstate()}
-
-
 def _trainer() -> SimpleNamespace:
     return SimpleNamespace(model=torch.nn.Linear(2, 2), lr_scheduler=SimpleNamespace(last_epoch=SAVE_STEP))
 
 
-def test_the_replay_restore_point_rewinds_the_sr_stream_after_its_first_capture():
-    adamw_bf16._SR_RNG.random()  # a run has advanced the stream past a fresh process's start
-    advanced = adamw_bf16._SR_RNG.getstate()
-    probe = _Probe("save", _trainer(), capture_optimizer=False)
+def test_the_restore_point_keeps_its_first_capture():
+    """A max_steps run writes a final checkpoint too; the snapshot must still describe the save the
+    resume restores."""
+    probe = RestorePointSnapshot("save", _trainer(), capture_optimizer=False)
     probe.on_save(None, SimpleNamespace(global_step=SAVE_STEP), None)
-    assert probe.captured["sr_state"] == advanced, "the capture must read the state before the rewind"
-    fresh = random.Random(SR_SEED)
-    assert adamw_bf16._SR_RNG.getrandbits(64) == fresh.getrandbits(64), "not rewound to a fresh process's stream"
-
-    # A later save (the final checkpoint a max_steps run writes) neither re-captures nor rewinds again.
     probe.on_save(None, SimpleNamespace(global_step=TOTAL_STEPS), None)
-    assert adamw_bf16._SR_RNG.getrandbits(64) == fresh.getrandbits(64)
     assert probe.captured["global_step"] == SAVE_STEP
 
 
-def test_the_replay_restore_point_fires_on_its_own_event_only():
-    probe = _Probe("train_begin", _trainer(), capture_optimizer=False)
+def test_the_restore_point_fires_on_its_own_event_only():
+    probe = RestorePointSnapshot("train_begin", _trainer(), capture_optimizer=False)
     probe.on_save(None, SimpleNamespace(global_step=SAVE_STEP), None)
     assert probe.captured is None
     probe.on_train_begin(None, SimpleNamespace(global_step=SAVE_STEP), None)

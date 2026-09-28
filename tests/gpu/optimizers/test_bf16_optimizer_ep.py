@@ -337,9 +337,9 @@ def test_sr_under_ep() -> bool:
          test_sr_removes_second_moment_bias, now exercised on each rank's expert shard.
 
       B. REPLICA SEED IDENTITY: EP is orthogonal to DP, so under EP=8 on 8 GPUs all 8 ranks
-         form one data-parallel replicate group for replicated (non-expert) params. The SR RNG
-         (_SR_RNG) is seeded identically on every rank precisely so SR rounds identically across
-         replicas — otherwise replicas would silently drift apart. We run an identical
+         form one data-parallel replicate group for replicated (non-expert) params. The SR seed
+         is keyed by the param's step and optimizer position, identical on every rank, precisely so
+         SR rounds identically across replicas — otherwise replicas would silently drift apart. We run an identical
          AdamWBF16 step on identical inputs on every rank, all-gather the SR-rounded weight, and
          assert it is BIT-IDENTICAL across the whole replicate group. A negative control inside
          the run (weight differs from a nearest-rounded reference) proves SR actually fired.
@@ -431,7 +431,7 @@ def test_sr_under_ep() -> bool:
         if not torch.equal(g, gathered[0]):
             issues.append(
                 f"SR-rounded weight differs between rank 0 and rank {other_rank} — "
-                "per-rank _SR_RNG seeds diverged (replicas would drift)"
+                "per-rank SR seeds diverged (replicas would drift)"
             )
             break
 

@@ -16,10 +16,9 @@ embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
      contracted shard-locally, within a rounding allowance), and move every target's base; the
      resume adapter holds those live tensors bit for bit; the root holds no adapter file or config.
   3. Resume through the production resolver: the policy source is the base; after the restore
-     (``on_train_begin``) every trainable tensor is BIT-EQUAL to the saved one; with both runs'
-     stochastic-rounding stream rewound at their restore point, the resumed losses and the final
-     adapters match the uninterrupted run's (``TOL.replayed_resume_loss_abs`` /
-     ``TOL.replayed_resume_weight_rtol``).
+     (``on_train_begin``) every trainable tensor is BIT-EQUAL to the saved one; with nothing reset
+     between the runs, the resumed losses and the final adapters match the uninterrupted run's
+     (``TOL.replayed_resume_loss_abs`` / ``TOL.replayed_resume_weight_rtol``).
   4. The resumed run's final ``save_model`` export loads and encodes and carries no resume state.
 
 ``--lora off`` is a full fine-tune of the same backbone, whose saves write the backbone's names:
@@ -78,11 +77,10 @@ from src.checkpoint.format import (
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
-from src.optimizers.adamw_bf16 import reset_sr_stream
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import resolve_resume_weights_source
 from src.training.script_runner import ScriptRuntime, apply_distributed_trainer_config
-from tests.common.checkpoint_io import ReplayRestorePoint, loading_problems
+from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.models import PARAPHRASE_MINILM
 from tests.common.peft_helpers import LORA_ALPHA, LORA_R, injected_lora_fold
@@ -277,7 +275,6 @@ def _build(ctx, model_config: ModelConfig, config: EmbeddingConfig, parallelism_
 
 
 def _make_trainer(ctx, family: Family, mode: str, lora: str, source: str, output_dir: str, *, save: bool):
-    reset_sr_stream()
     config = _config(output_dir, family, save=save)
     parallelism_config = _parallelism_config(mode, lora)
     return EmbeddingTrainer(
@@ -313,8 +310,8 @@ def _partial_fold_targets(model) -> set[str]:
     return partial
 
 
-class _RestorePoint(ReplayRestorePoint):
-    """The replay restore point with every trainable tensor whole (``tensors``) and, at the save, the
+class _RestorePoint(RestorePointSnapshot):
+    """The restore-point snapshot with every trainable tensor whole (``tensors``) and, at the save, the
     LoRA targets whose delta the save contracted shard-locally (``partial_folds``). This rank's
     optimizer state is captured under EP only, where the restore is held to it bit for bit."""
 
