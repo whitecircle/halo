@@ -38,14 +38,13 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForCausalLM
-from trl import DPOConfig, KTOConfig
 
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.harness import gpu_test_main, log
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
+from tests.common.preference_precompute import TRAINERS, column
+from tests.common.utils import step_losses, training_run_checks
 
 EP_SIZE = 2
 N_ROWS = 16
@@ -144,6 +143,7 @@ def build_args(kind: str, output_dir: str):
         "learning_rate": 1e-4,
         "lr_scheduler_type": "constant",
         "logging_steps": 1,
+        "logging_nan_inf_filter": False,
         "save_strategy": "no",
         "report_to": [],
         "seed": 42,
@@ -154,10 +154,8 @@ def build_args(kind: str, output_dir: str):
         "ddp_find_unused_parameters": True,  # EP leaves inactive experts gradient-free
         "fsdp": "",  # the mixin owns FSDP wrapping
     }
-    return (DPOConfig if kind == "dpo" else KTOConfig)(max_length=MAX_LENGTH, **common)
-
-
-TRAINERS = {"dpo": DistributedDPOTrainer, "kto": DistributedKTOTrainer}
+    _, config_cls = TRAINERS[kind]
+    return config_cls(max_length=MAX_LENGTH, **common)
 
 
 def all_ranks_agree(value, ctx) -> bool:
@@ -169,8 +167,9 @@ def all_ranks_agree(value, ctx) -> bool:
 @gpu_test_main(exact_world_size=2, prefix="ep_preference_precompute")
 def run(ctx):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trainer", choices=("dpo", "kto"), default="dpo")
+    parser.add_argument("--trainer", choices=sorted(TRAINERS), default="dpo")
     kind = parser.parse_args().trainer
+    trainer_cls, _ = TRAINERS[kind]
 
     checks, metrics = {}, {}
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
@@ -182,7 +181,7 @@ def run(ctx):
     patch_moe_model_for_ep(model, config.create_ep_config())
     create_ep_buffers(model)
 
-    trainer = TRAINERS[kind](
+    trainer = trainer_cls(
         model=model,
         args=build_args(kind, ctx.output_dir),
         train_dataset=rank_private_dataset(kind, ctx, "train"),
@@ -198,12 +197,10 @@ def run(ctx):
     prompt_ids = prepared["prompt_ids"]
 
     if kind == "dpo":
-        expected_columns = ("ref_chosen_logps", "ref_rejected_logps")
         completions = {"ref_chosen_logps": prepared["chosen_ids"], "ref_rejected_logps": prepared["rejected_ids"]}
         # Control: score each row's REJECTED completion against the CHOSEN column (and vice versa).
         controls = {"ref_chosen_logps": prepared["rejected_ids"], "ref_rejected_logps": prepared["chosen_ids"]}
     else:
-        expected_columns = ("ref_logps", "ref_KL_logps") if trainer.calculate_KL else ("ref_logps",)
         completions = {"ref_logps": prepared["completion_ids"]}
         # Control: the KL column comes from the MISMATCHED completions TRL cycles within a batch, so
         # scoring the true completions against it must miss.
@@ -211,44 +208,42 @@ def run(ctx):
         if trainer.calculate_KL:
             completions["ref_KL_logps"] = prepared["KL_completion_ids"]
             controls["ref_KL_logps"] = prepared["completion_ids"]
+    expected_columns = tuple(completions)
 
-    checks["ref_columns_present"] = all(column in columns for column in expected_columns)
+    checks["ref_columns_present"] = all(name in columns for name in expected_columns)
     if not checks["ref_columns_present"]:
         log(f"prepared columns: {columns}")
         return {"checks": checks, "metrics": metrics}
 
-    for column in expected_columns:
-        actual = torch.tensor(prepared[column], dtype=torch.float32)
-        reference = sequence_logprobs(reference_model, prompt_ids, completions[column], ctx.device)
+    for name in expected_columns:
+        actual = column(prepared, name)
+        reference = sequence_logprobs(reference_model, prompt_ids, completions[name], ctx.device)
         error = max_relative_error(actual, reference)
-        metrics[f"{column}_max_rel_err"] = error
-        checks[f"{column}_matches_dense_reference"] = error < LOGP_RTOL
+        metrics[f"{name}_max_rel_err"] = error
+        checks[f"{name}_matches_dense_reference"] = error < LOGP_RTOL
         # Anti-vacuity: real, non-degenerate values (an all-zero or constant column would match a
         # broken reference trivially).
-        checks[f"{column}_finite"] = bool(torch.isfinite(actual).all())
-        checks[f"{column}_nondegenerate"] = bool(actual.std() > 1.0 and actual.abs().min() > 1.0)
+        checks[f"{name}_finite"] = bool(torch.isfinite(actual).all())
+        checks[f"{name}_nondegenerate"] = bool(actual.std() > 1.0 and actual.abs().min() > 1.0)
         # Every rank must hold the same values byte-for-byte, each from its own gather.
-        checks[f"{column}_identical_across_ranks"] = all_ranks_agree(actual.tolist(), ctx)
-        if column in controls:
+        checks[f"{name}_identical_across_ranks"] = all_ranks_agree(actual.tolist(), ctx)
+        if name in controls:
             control_error = max_relative_error(
-                actual, sequence_logprobs(reference_model, prompt_ids, controls[column], ctx.device)
+                actual, sequence_logprobs(reference_model, prompt_ids, controls[name], ctx.device)
             )
-            metrics[f"{column}_control_rel_err"] = control_error
-            checks[f"{column}_control_misses"] = control_error > CONTROL_MIN_RTOL
+            metrics[f"{name}_control_rel_err"] = control_error
+            checks[f"{name}_control_misses"] = control_error > CONTROL_MIN_RTOL
 
     # ── No deadlock through the training loop either (the sweep leaves the EP buffers live).
-    trainer.train()
-    losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
-    checks["ran_all_steps"] = trainer.state.global_step == N_STEPS and len(losses) == N_STEPS
-    checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
-    grad_norms = [entry["grad_norm"] for entry in trainer.state.log_history if "grad_norm" in entry]
-    checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
+    checks.update(training_run_checks(trainer.train(), trainer, N_STEPS, grad_norms=True))
+    losses = step_losses(trainer)
+    checks["every_step_logged"] = len(losses) == N_STEPS
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
     # ── Pre-sharded data + one gathered set of log-probs would train every non-zero rank on rank 0's
     # log-probs; that must raise rather than silently mis-train.
     try:
-        TRAINERS[kind](
+        trainer_cls(
             model=model,
             args=build_args(kind, ctx.output_dir + "/presharded"),
             train_dataset=rank_private_dataset(kind, ctx, "presharded"),

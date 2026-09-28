@@ -18,7 +18,6 @@ Run with 2 GPUs:
 """
 
 import argparse
-import math
 import os
 
 import torch
@@ -34,7 +33,7 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import load_peft_model
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
-from tests.common.utils import log, log_all, step_losses
+from tests.common.utils import log, log_all, step_losses, training_run_checks
 
 EP_SIZE = 2
 STEPS = 4
@@ -107,6 +106,7 @@ def run(ctx):
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
     )
     trainer = DistributedSFTTrainer(
         model=model,
@@ -117,12 +117,10 @@ def run(ctx):
         peft_config=peft_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
-    trainer.train()
-
+    checks.update(training_run_checks(trainer.train(), trainer, STEPS))
     losses = step_losses(trainer)
-    checks["all_steps_ran"] = trainer.state.global_step == STEPS and len(losses) == STEPS
-    checks["losses_finite"] = all(math.isfinite(loss) for loss in losses)
-    log(f"  losses {losses}")
+    # Every step's loss must be logged for all_steps_finite to cover it.
+    checks["every_step_logged"] = len(losses) == STEPS
 
     after = adapter_snapshot(model)
     layers = ep_layers(model)
