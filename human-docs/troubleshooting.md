@@ -21,7 +21,7 @@ reference.
 | --- | --- |
 | CUDA out of memory | Activations dominate. In order: `gradient_checkpointing: true` (20–30% slower), then lower `per_device_train_batch_size` / `max_length`, then shard — TP for dense, EP or ETP for MoE, or LoRA/QLoRA. |
 | Config rejected at startup (`must divide`, `not supported`, …) | Working as intended: the validator refuses shapes that would hang or crash mid-run. The message names the rule; valid combinations are in [Parallelism](parallelism.md). |
-| `ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` | The rejected middle ground for single-node EP. Use `ep_size=2`, `ep_size` = the GPU count, or `ep4 + etp2` for a 4-way expert split on 8 GPUs. `ep4 + tp2` hits the same rejection. |
+| `expert_parallel_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` | The rejected middle ground for single-node EP. Use `ep_size=2`, `ep_size` = the GPU count, or `ep4 + etp2` for a 4-way expert split on 8 GPUs. `ep4 + tp2` hits the same rejection. |
 | Missing dataset column | Each method needs fixed columns ([Datasets](data.md)); combining sources keeps only columns common to all of them. |
 | CPU RAM spike or OOM while loading the model | Default loads half the node's ranks concurrently, capped at 4. Set `max_concurrent_loading: 1`. |
 | Loss degrades only past ~2048 tokens | TF32 rounding corrupting long-context RoPE. The image pins fp32 matmuls to full precision, so you only see this after setting `HALO_FP32_MATMUL_PRECISION=high` — unset it. |
