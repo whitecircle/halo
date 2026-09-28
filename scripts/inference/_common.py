@@ -2,10 +2,11 @@
 
 ``generation/openai_batched_generation.py`` reads a prompt dataset from S3, resumes against a
 partially written output dataset, merges the two and pushes the result back;
-``reward_model/rm_rejection_sampling.py`` runs the same hypothesis-and-score shape against local
-JSONL. The parts they share live here so the resume, merge and abort contracts stay identical: a
-mismatched resume re-generates or drops rows, a mismatched merge discards a batch's own columns, and
-a mismatched abort reports a total failure as a completed run.
+``reward_model/rm_scoring.py`` and ``reward_model/rm_rejection_sampling.py`` generate against the
+same endpoint from local JSONL and score with a reward model. The parts they share live here so the
+sampling, resume, merge and abort contracts stay identical: a mismatched resume re-generates or drops
+rows, a mismatched merge discards a batch's own columns, and a mismatched abort reports a total
+failure as a completed run.
 
 The Gradio apps under ``playground/`` share the address block they bind and launch on, since each
 drives a server-side client holding a live key.
@@ -16,7 +17,7 @@ import asyncio
 import logging
 import signal
 import sys
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING
 
 from datasets import Dataset
@@ -54,9 +55,9 @@ DEFAULT_GRADIO_HOST = "127.0.0.1"
 def add_generation_args(parser: argparse.ArgumentParser, *, temperature_default: float) -> argparse.ArgumentParser:
     """Add the sampling/concurrency block shared by the generation CLIs.
 
-    Only the temperature default is per-script (greedy for batched generation, sampled for the
-    rejection samplers, which need distinct hypotheses); the concurrency bound and the token cap are
-    shared, for the reason :data:`DEFAULT_N_PARALLEL` gives.
+    Only the temperature default is per-script (greedy for batched generation and reward-model
+    scoring, sampled for the rejection sampler, which needs distinct hypotheses); the concurrency bound
+    and the token cap are shared, for the reason :data:`DEFAULT_N_PARALLEL` gives.
     """
     parser.add_argument(
         "--n_parallel", type=int, default=DEFAULT_N_PARALLEL, help="Max parallel API requests (default: %(default)s)"
@@ -110,22 +111,6 @@ def add_prompt_field_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         type=str,
         default=None,
         help="System prompt applied to all rows (overridden by the per-row one)",
-    )
-    return parser
-
-
-def add_output_format_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the ``--output_format`` selector both rejection samplers dispatch their record builder on.
-
-    Declared once: the two formats are trainer contracts (``agent-docs/data/dataset-formats.md``), and
-    a per-script copy could accept a value its builders cannot emit.
-    """
-    parser.add_argument(
-        "--output_format",
-        type=str,
-        default="preference",
-        choices=["preference", "offline_grpo"],
-        help="Output format: preference (DPO/SMPO) or offline_grpo (default: preference)",
     )
     return parser
 
@@ -226,98 +211,6 @@ def save_results_to_s3(existing_results: list[dict], results: list[dict], *, out
     logger.info(f"Saving {len(all_results)} results to S3: {output_path}")
     push_dataset_to_s3_uri(Dataset.from_list(all_results), build_s3_uri(output_path, subfolder))
     logger.info("Done!")
-
-
-def degenerate_hypotheses_reason(scores: Sequence[float], output_format: str) -> str | None:
-    """Why a scored row cannot produce a useful record, or ``None`` if it can.
-
-    One rule for every rejection sampler feeding the same trainers: fewer than 2 hypotheses cannot
-    separate a best from a worst, and all-equal scores make argmax == argmin, giving a
-    chosen == rejected pair. ``offline_grpo`` keeps an all-equal reward vector, which the trainer's
-    degenerate-group handling covers.
-    """
-    if len(scores) < 2:
-        return f"insufficient hypotheses ({len(scores)} < 2)"
-    if output_format != "offline_grpo" and len({float(score) for score in scores}) < 2:
-        return f"all {len(scores)} hypotheses scored equally ({float(scores[0])})"
-    return None
-
-
-def best_worst_indices(scores: Sequence[float]) -> tuple[int, int]:
-    """``(argmax, argmin)`` over ``scores``, first index winning a tie.
-
-    One selection rule for both rejection samplers, reading a Python list and a numpy score vector
-    the same way. :func:`degenerate_hypotheses_reason` has already refused the all-equal row where
-    the two would name the same completion.
-    """
-    ranked = range(len(scores))
-    return max(ranked, key=scores.__getitem__), min(ranked, key=scores.__getitem__)
-
-
-def preference_record(
-    prompt: list[dict],
-    completions: Sequence[dict],
-    scores: Sequence[float],
-    *,
-    row: dict,
-    id_field: str,
-    gen_model: str,
-    correct_answer: str | None = None,
-) -> dict:
-    """The DPO/SMPO preference record: the best- and worst-scored completion of one prompt.
-
-    One writer for both rejection samplers, since the preference trainers read one contract
-    (``agent-docs/data/dataset-formats.md``): ``chosen``/``rejected`` are message lists and every score
-    a plain float (a ``numpy.float64`` does not survive ``json.dumps``). The whole scored set rides
-    along so a re-pairing needs no re-generation; the row id and ``correct_answer`` follow the same
-    terms as :func:`offline_grpo_record`. A sampler's own provenance columns are added by its
-    caller.
-    """
-    best, worst = best_worst_indices(scores)
-    record = {
-        "prompt": prompt,
-        "chosen": [completions[best]],
-        "chosen_score": float(scores[best]),
-        "rejected": [completions[worst]],
-        "rejected_score": float(scores[worst]),
-        "all_generations": list(completions),
-        "all_scores": [float(score) for score in scores],
-        "gen_model": gen_model,
-    }
-    if id_field in row:
-        record[id_field] = row[id_field]
-    if correct_answer is not None:
-        record["target_answer"] = correct_answer
-    return record
-
-
-def offline_grpo_record(
-    prompt: list[dict],
-    completions: Sequence[Sequence[dict]],
-    rewards: Sequence[float],
-    *,
-    row: dict,
-    id_field: str,
-    correct_answer: str | None = None,
-) -> dict:
-    """The offline-GRPO training record: ``{"prompt", "completions", "rewards"}`` (+ optional keys).
-
-    One writer for both rejection samplers, since the trainer reads one contract
-    (``agent-docs/data/dataset-formats.md``): ``completions`` is a list of message lists, ``rewards`` a
-    parallel list of plain floats. The row id rides along only when the source row carries it, so a
-    dataset without the column does not gain a null one, and ``correct_answer`` only where the CLI has
-    a ground-truth concept.
-    """
-    record = {
-        "prompt": prompt,
-        "completions": [list(completion) for completion in completions],
-        "rewards": [float(reward) for reward in rewards],
-    }
-    if id_field in row:
-        record[id_field] = row[id_field]
-    if correct_answer is not None:
-        record["target_answer"] = correct_answer
-    return record
 
 
 def assistant_message_from_response(response: OpenAIResponse) -> dict:
