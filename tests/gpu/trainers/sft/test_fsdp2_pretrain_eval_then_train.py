@@ -23,7 +23,7 @@ from trl import SFTConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import world_min
+from tests.common.distributed import world_all, world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.utils import log, step_losses
@@ -55,10 +55,6 @@ def _shards(model) -> dict[str, torch.Tensor]:
         name: (param.to_local() if isinstance(param, DTensor) else param).detach().clone()
         for name, param in model.named_parameters()
     }
-
-
-def _world_all(flag: bool) -> bool:
-    return world_min(float(flag)) > 0.0
 
 
 def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
@@ -105,7 +101,7 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
     )
     checks = {
         f"{name}_shards_moved": world_min(delta) > 0.0,
-        f"{name}_loss_decreased": _world_all(len(losses) == STEPS and losses[-1] < losses[0] - MIN_LOSS_DROP),
+        f"{name}_loss_decreased": world_all(len(losses) == STEPS and losses[-1] < losses[0] - MIN_LOSS_DROP),
     }
     metrics = {
         f"{name}_max_delta": world_min(delta),
@@ -113,7 +109,7 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
         f"{name}_last_loss": losses[-1],
     }
     if eval_first:
-        checks["pretrain_eval_leaves_model_gathered"] = _world_all(gathered_after_eval)
+        checks["pretrain_eval_leaves_model_gathered"] = world_all(gathered_after_eval)
     return checks, metrics
 
 

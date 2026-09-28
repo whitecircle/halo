@@ -38,7 +38,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import OPTIMIZER_META_FILE, OPTIMIZER_SHARD_FILE
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import shared_scratch_dir
+from tests.common.distributed import shared_scratch_dir, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG, TINY_QWEN35_MOE_CONFIG
 from tests.common.utils import cleanup_memory, log
@@ -72,12 +72,6 @@ def _build_tiny_checkpoint(mode: str, target_dir: str) -> None:
         model = Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, "vocab_size": len(tokenizer)}))
     model.to(torch.bfloat16).save_pretrained(target_dir)
     tokenizer.save_pretrained(target_dir)
-
-
-def _all_ranks_true(local: bool, device) -> bool:
-    t = torch.tensor([1 if local else 0], device=device)
-    dist.all_reduce(t, op=dist.ReduceOp.MIN)
-    return bool(t.item())
 
 
 def _shard_covers_optimizer(ckpt_dir: str, rank: int, optimizer) -> tuple[bool, str]:
@@ -153,18 +147,18 @@ def run(ctx):
     trainer.train()
 
     evaluated = any("eval_loss" in e for e in trainer.state.log_history)
-    checks["final_eval_ran_before_save"] = _all_ranks_true(evaluated, device)
+    checks["final_eval_ran_before_save"] = world_all(evaluated, device)
 
     ckpt_dir = os.path.join(train_out, f"checkpoint-{MAX_STEPS}")
     files = set(os.listdir(ckpt_dir)) if os.path.isdir(ckpt_dir) else set()
     shards_present = all(OPTIMIZER_SHARD_FILE.format(rank=r) in files for r in range(ctx.world_size))
-    checks["optimizer_shards_present"] = _all_ranks_true(shards_present and OPTIMIZER_META_FILE in files, device)
-    checks["no_stale_single_rank_optimizer"] = _all_ranks_true(OPTIMIZER_NAME not in files, device)
+    checks["optimizer_shards_present"] = world_all(shards_present and OPTIMIZER_META_FILE in files, device)
+    checks["no_stale_single_rank_optimizer"] = world_all(OPTIMIZER_NAME not in files, device)
 
     covered, detail = _shard_covers_optimizer(ckpt_dir, ctx.rank, trainer.optimizer)
     if not covered:
         log(f"[rank {ctx.rank}] shard coverage: {detail}")
-    checks["shard_covers_all_optimizer_params"] = _all_ranks_true(covered, device)
+    checks["shard_covers_all_optimizer_params"] = world_all(covered, device)
 
     del trainer
     cleanup_memory()
