@@ -118,7 +118,8 @@ def setup_fsdp2_for_dp(
 ) -> bool:
     """Apply per-layer FSDP v2 for data-parallel grad sync (in-place); returns whether it ran.
 
-    Params shard across DP ranks; ``ignored_params`` (EP modules) handle their own sync.
+    Params shard across DP ranks except ``ignored_params``: EP-module params, which sync their own
+    gradients, and frozen params in a dtype no trainable param shares.
     ``dp_replicate_size > 1`` builds a 2D HSDP mesh (shard within an NVLink domain, replicate
     across domains — one inter-domain grad all-reduce/step); 1 keeps the 1D full-shard mesh.
     """
@@ -174,7 +175,7 @@ def _apply_fsdp2(
         if not mp_policy.cast_forward_inputs:
             logger.info("    - cast_forward_inputs: False (model maintains an fp32 inter-layer residual)")
         if ignored_params:
-            logger.info(f"    - Ignored params: {len(ignored_params)} (EP modules)")
+            logger.info(f"    - Ignored params: {len(ignored_params)} (EP-module params and frozen dtype exclusions)")
 
     sharded = apply_fsdp2_per_layer(
         model,
@@ -239,9 +240,9 @@ def apply_fsdp2_per_layer(
 ) -> int:
     """Apply FSDP v2 per transformer layer, then to the model root. Returns the shard-group count.
 
-    EP module params pass as ``ignored_params``. Every branch below wraps at least the root, so the
-    count is for logging only; a decoder whose layer list this probe cannot reach is caught by
-    :func:`_reject_unreachable_decoder_layers`.
+    EP-module params and frozen dtype exclusions pass as ``ignored_params``. Every branch below wraps
+    at least the root, so the count is for logging only; a decoder whose layer list this probe cannot
+    reach is caught by :func:`_reject_unreachable_decoder_layers`.
     """
     _warn_fp32_pins_cast_by_policy(model, mp_policy)
     underlying_model = _get_underlying_model(model)
