@@ -19,7 +19,7 @@ Three knob names carry the length settings. They mean the same thing everywhere;
 |---|---|
 | `max_length` | Total tokenized sequence budget (prompt + completion). `null` or any non-positive value resolves to the **model's context window** at launch (`resolve_length_to_context`, which reads `max_position_embeddings` / `max_seq_length` / `n_positions` off the **text** sub-config so composite VLM configs resolve too, then falls back to `tokenizer.model_max_length`). Also becomes `tokenizer.model_max_length` for the run. |
 | `max_prompt_length` | Prompt share of the budget. |
-| `max_completion_length` | Completion share of the budget, or — under RL — the number of tokens the policy may generate. Async GRPO with Environments' entry script pins it to `rollout_max_tokens`, the generation cap there, and raises on any other explicit value. |
+| `max_completion_length` | Completion share of the budget, or — under RL — the number of tokens the policy may generate. Async GRPO with Environments' entry script pins it to `rollout_max_tokens`, the generation cap there, and raises on any value other than TRL's default (256) or `rollout_max_tokens`. |
 
 *Omitting* a field falls back to the dataclass default in the tables below. Writing `max_length: null` opts into the model's context window; `null` on `max_prompt_length` / `max_completion_length` means whatever the per-trainer row below says (no cap, no prompt filtering, or a derived share of `max_length`) — never the context window.
 
