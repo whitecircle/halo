@@ -117,6 +117,8 @@ def test_numeric_match_leading_distractor_names_two_values():
         ("The answer is 110", "110"),
         ("x = 5", "5"),
         ("5 apples", "5"),
+        ("$5/hour", "5"),  # a word after the operator is a unit, not a variable
+        ("9.8 m/s", "9.8"),
         ("50%", "0.5"),
         ("0.5", "50%"),
         ("50% (0.5)", "0.5"),  # one value, restated
@@ -176,6 +178,11 @@ def test_numeric_match_accepts_one_stated_value(predicted, expected):
         ("1,2345", "1234"),
         (r"1\,2345", "12345"),
         ("2x+1", "2"),
+        ("1/x", "1"),  # an operand of a one-letter variable
+        ("x/2", "2"),
+        ("2^n", "2"),
+        ("n+1", "1"),
+        ("2x+2", "2"),
         ("10^3", "10"),
         ("2024-01-01", "2024"),
         ("3-4", "3"),

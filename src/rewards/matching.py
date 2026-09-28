@@ -67,8 +67,16 @@ _EXPRESSION_OR_BOUND_RE = re.compile(
 
 # Two numbers with only operators, spaces, brackets and ``$`` between them are operands: ``2+2``,
 # ``2024-01-01``, ``$5 + $5``.
-_OPERATORS = re.escape("-+*/^×÷·\N{DOT OPERATOR}\N{ASTERISK OPERATOR}")
+_NON_MINUS_OPERATORS = "+*/^×÷·\N{DOT OPERATOR}\N{ASTERISK OPERATOR}"
+_OPERATORS = re.escape("-" + _NON_MINUS_OPERATORS)
 _OPERATOR_GAP_RE = re.compile(rf"[\s()\[\]$]*[{_OPERATORS}][{_OPERATORS}\s()\[\]$]*")
+# A number joined by an operator to a one-letter variable is an operand as well (``1/x``, ``2^n``,
+# ``n+1``). Longer words stay units or names (``$5/hour``), and ``-`` is left out, since ``5 - a``
+# reads as prose.
+_VARIABLE_OPERAND_RE = re.compile(
+    rf"\d\s*[{re.escape(_NON_MINUS_OPERATORS)}]\s*[a-z](?![a-z])"
+    rf"|(?<![a-z])[a-z]\s*[{re.escape(_NON_MINUS_OPERATORS)}]\s*[-+]?\.?\d"
+)
 
 
 def extract_last_boxed(text: str) -> str | None:
@@ -160,7 +168,7 @@ def _stated_values(text: str) -> list[float]:
     text = _LATEX_GROUPING_RE.sub(",", text)
     text = _LATEX_FORMATTING_RE.sub(" ", text).translate(_CHAR_MAP)
     text = _UNIT_EXPONENT_RE.sub(" ", text)
-    if _EXPRESSION_OR_BOUND_RE.search(text):
+    if _EXPRESSION_OR_BOUND_RE.search(text) or _VARIABLE_OPERAND_RE.search(text):
         return []
 
     values: list[float] = []
