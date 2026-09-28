@@ -23,6 +23,7 @@ import sys
 import pytest
 from transformers import PretrainedConfig
 
+import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
 from src.checkpoint.config_export import save_model_config
 
 
