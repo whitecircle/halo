@@ -200,6 +200,10 @@ manifest.
   (`init_distributed` → setup → body → teardown → `sys.exit`); the body is *load → train → assert*
   and returns `{"checks": {name: bool}, "metrics": {...}}`, exiting `0` pass / `1` fail / `2` bad
   launch.
+
+    It sets `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value: causal_conv1d's
+    default backward sums the conv weight gradient with atomics, so the gated-DeltaNet families miss
+    an exact resume replay now and then.
 - **Emit perf and memory.** Return `ctx.metrics(trainer)` so the result line carries tokens/s/GPU
   and peak memory; a `benchmark_*` script's `emit_benchmark(key, callback)` writes the line the
   committed throughput baselines are compared against.

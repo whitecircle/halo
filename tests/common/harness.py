@@ -1,6 +1,6 @@
 """``gpu_test_main``: the shared lifecycle for torchrun-native GPU tests.
 
-Covers the lifecycle every torchrun test needs: ``init_distributed`` →
+Covers the lifecycle every torchrun test needs: deterministic kernel env → ``init_distributed`` →
 ``PartialState`` → validate world size → ``setup_cache_dirs`` → ``try`` body →
 ``finally`` (``cleanup_ep`` → ``cleanup_memory`` → ``cleanup_dirs`` → ``barrier``
 → ``teardown_distributed``) → ``sys.exit``. Hand-rolled copies drift (a skipped
@@ -60,6 +60,10 @@ from tests.common.utils import cleanup_memory, log, log_all
 _EXIT_PASS = 0
 _EXIT_FAIL = 1
 _EXIT_BAD_LAUNCH = 2
+# causal_conv1d's default backward sums the conv weight gradient with atomics, so two identical steps
+# can round a weight differently and an exact replay (a resume against the uninterrupted run) diverges.
+# Set unless the caller exported its own value.
+_DETERMINISTIC_KERNEL_ENV = {"CAUSAL_CONV1D_DETERMINISTIC": "1"}
 
 
 def _efficiency_callback(trainer) -> EfficiencyCallback | None:
@@ -183,6 +187,8 @@ def gpu_test_main(
     def decorator(run: Callable[["Ctx"], dict]) -> Callable[[], int]:
         @functools.wraps(run)
         def wrapper() -> int:
+            for name, value in _DETERMINISTIC_KERNEL_ENV.items():
+                os.environ.setdefault(name, value)
             rank, world_size, local_rank = init_distributed()
 
             if partial_state:
