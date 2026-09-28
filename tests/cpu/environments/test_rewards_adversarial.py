@@ -274,10 +274,13 @@ def test_numeric_match_parses_degenerate_input_within_budget(predicted, expected
     [
         ("The capital is **Paris**.", True),  # a lone bold span is the answer
         ("**Paris** or **London**", False),  # several are a hedge
+        ("**Answer:** Paris", True),  # a lone label is not the answer
+        ("**Final answer**: Paris", True),
     ],
 )
 def test_exact_match_reads_only_a_lone_bold_span_as_the_answer(predicted, verdict):
     assert exact_match(predicted, "Paris") is verdict
+    assert numeric_match(predicted.replace("Paris", "5").replace("London", "6"), "5") is verdict
 
 
 # multiple_choice_match — structured extraction, no startswith fallback

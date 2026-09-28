@@ -20,6 +20,8 @@ _ANSWER_PREFIXES = [
     "final answer:",
     "result:",
 ]
+# A bold span holding only one of these is a label (``**Answer:** 5``), not the answer.
+_ANSWER_LABELS = frozenset(prefix.rstrip(":") for prefix in _ANSWER_PREFIXES)
 
 _BOXED_TOKEN = "\\boxed{"
 
@@ -119,9 +121,10 @@ def normalize_text(text: str) -> str:
     if boxed:
         text = boxed.strip()
 
-    # Several bold spans (``**7** or **8**``) hedge between them, so the whole text stays.
+    # Several bold spans (``**7** or **8**``) hedge between them, and a lone label names none, so in
+    # both cases the whole text stays.
     bold_spans = _BOLD_RE.findall(text)
-    if len(bold_spans) == 1:
+    if len(bold_spans) == 1 and bold_spans[0].strip().lower().rstrip(":") not in _ANSWER_LABELS:
         text = bold_spans[0].strip()
     elif bold_spans:
         text = text.replace("**", "")
