@@ -2,14 +2,18 @@
 """
 Test: DPO's adapter-disabled reference under EP with native expert-LoRA is the frozen base.
 
-A mixed run (stock PEFT on attention, native grouped LoRA on the EP experts) with ``ref_model=None``
-and no precomputed reference gets its reference log-probs from TRL, which scores the policy inside
+A mixed run (stock PEFT on attention, native grouped LoRA on the EP experts) with no precomputed
+reference gets its reference log-probs from TRL, which scores the policy inside
 ``use_adapter(accelerator.unwrap_model(model), None)`` -> ``PeftModel.disable_adapter()`` every step.
 PEFT's own context disables only the attention half: the expert adapters are not PEFT modules, and they
 drop out only because ``make_disable_adapter_ep_aware`` wraps that context on the trainer's PeftModel.
+The run is built as the dpo/kto scripts build it: the targets are peeled before the load, and the
+trainer's ``ref_model`` comes from ``load_reference_model_for_preference`` on that peeled config, whose
+gate must hand a mixed run ``None`` rather than refuse it for want of precomputed log-probs.
 Checks, each failing when a piece of that breaks:
 
-  1. The run is mixed and trains on the in-loop reference (precompute off): finite losses on every step.
+  1. The run is mixed, the loader's reference gate gives it no separate reference, and it trains on the
+     in-loop reference (precompute off): finite losses on every step.
   2. Both adapter halves move the policy's sequence log-probs past a floor: zeroing only the expert
      half, and only the attention half, each changes them. Without this, check 3 would also pass for an
      adapter that does nothing, and a frozen attention half would go unnoticed.
@@ -38,15 +42,17 @@ from trl import DPOConfig
 from trl.models.utils import disable_gradient_checkpointing
 from trl.trainer.utils import use_adapter
 
+from src.args.dpo_args import DPOScriptArguments
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.distributed import ensure_model_downloaded, world_any, world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import load_peft_model
+from tests.common.peft_helpers import load_peft_model_from_config, peft_model_config
 from tests.common.utils import log, step_losses
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
@@ -128,8 +134,9 @@ def _sequence_logps(trainer, batch, context) -> torch.Tensor:
 def run(ctx) -> dict:
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
-    model, tokenizer, peft_config = load_peft_model(
-        "mixed", parallelism_config, model_name=MODEL_NAME, attn_implementation=ATTN_IMPL, use_liger_kernel=False
+    model_config = peft_model_config("mixed", parallelism_config, model_name=MODEL_NAME)
+    model, tokenizer, peft_config = load_peft_model_from_config(
+        model_config, parallelism_config, attn_implementation=ATTN_IMPL, use_liger_kernel=False
     )
     config = DPOConfig(
         output_dir=ctx.output_dir,
@@ -152,8 +159,20 @@ def run(ctx) -> dict:
         dataloader_num_workers=0,
         fsdp="",
     )
+    # The seam the dpo/kto scripts build the reference through; its gate sees the peeled targets.
+    ref_model = load_reference_model_for_preference(
+        DPOScriptArguments(),
+        model_config,
+        config,
+        parallelism_config,
+        tokenizer,
+        is_vlm=False,
+        method="DPO",
+        attn_default=ATTN_IMPL,
+    )
     trainer = DistributedDPOTrainer(
         model=model,
+        ref_model=ref_model,
         args=config,
         train_dataset=_pairs(NUM_PAIRS),
         processing_class=tokenizer,
@@ -167,7 +186,8 @@ def run(ctx) -> dict:
     checks = {
         "run_is_mixed": isinstance(peft_model, PeftModel)
         and "ref" not in peft_model.peft_config
-        and has_ep_lora(peft_model)
+        and has_ep_lora(peft_model),
+        "loader_leaves_the_reference_to_the_policy": ref_model is None,
     }
 
     trainer.train()

@@ -180,6 +180,55 @@ def _build_model_config(
     )
 
 
+def peft_model_config(
+    mode: str,
+    parallelism_config,
+    *,
+    model_name: str | None = None,
+    revision: str | None = None,
+    lora_target_modules: list[str] | None = None,
+) -> ModelConfig:
+    """The ``ModelConfig`` a mode trains with, its expert targets peeled into ``parallelism_config``.
+
+    The peel runs before any load, as the training scripts' ``init_training_script`` runs it, and
+    leaves only the attention targets on the returned config. A test that hands the config to another
+    production seam (the preference loader's reference gate reads the peeled targets) builds it here
+    and loads through :func:`load_peft_model_from_config`; the other arguments are
+    :func:`load_peft_model`'s.
+    """
+    model_name = model_name or model_name_for(mode, parallelism_config)
+    model_config = _build_model_config(mode, model_name, revision, targets=lora_target_modules)
+    parallelism_config.expert_lora = split_expert_lora_targets(model_config)
+    return model_config
+
+
+def load_peft_model_from_config(
+    model_config: ModelConfig,
+    parallelism_config,
+    *,
+    attn_implementation: str | None = None,
+    use_liger_kernel: bool = True,
+    reset_sinks: bool = True,
+):
+    """:func:`load_peft_model` for a :func:`peft_model_config` the caller holds. Returns (model, tokenizer, peft_config)."""
+    model, tokenizer = load_distributed_model(
+        model_name_or_path=model_config.model_name_or_path,
+        parallelism_config=parallelism_config,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        revision=model_config.model_revision,
+        attn_implementation=attn_implementation,
+        use_liger_kernel=use_liger_kernel,
+        quantization_config=get_quantization_config(model_config),
+        reset_sinks=reset_sinks,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    peft_config = setup_peft_model(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
+    return model, tokenizer, peft_config
+
+
 def load_peft_model(
     mode: str,
     parallelism_config,
@@ -208,29 +257,16 @@ def load_peft_model(
     ``lora_target_modules`` replaces the mode's targets where the checkpoint's index cannot name them
     (a family whose projections do not end in ``_proj``).
     """
-    model_name = model_name or model_name_for(mode, parallelism_config)
-    model_config = _build_model_config(mode, model_name, revision, targets=lora_target_modules)
-
-    # Peel expert targets to native grouped-LoRA before the load (no-op for attention-only modes).
-    parallelism_config.expert_lora = split_expert_lora_targets(model_config)
-    quantization_config = get_quantization_config(model_config)
-
-    model, tokenizer = load_distributed_model(
-        model_name_or_path=model_name,
-        parallelism_config=parallelism_config,
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        revision=revision,
+    model_config = peft_model_config(
+        mode, parallelism_config, model_name=model_name, revision=revision, lora_target_modules=lora_target_modules
+    )
+    return load_peft_model_from_config(
+        model_config,
+        parallelism_config,
         attn_implementation=attn_implementation,
         use_liger_kernel=use_liger_kernel,
-        quantization_config=quantization_config,
         reset_sinks=reset_sinks,
     )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    peft_config = setup_peft_model(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
-    return model, tokenizer, peft_config
 
 
 def adapter_param_items(model) -> list[tuple[str, torch.Tensor]]:
