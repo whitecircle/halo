@@ -67,7 +67,7 @@ from src.kernels.liger.orchestrator import (
 from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
 from src.models.loading.dtype import resolve_training_dtype
 from src.models.moe_balancing import ep_wraps_experts
-from src.models.structure import model_has_quantized_params, unwrap_framework_wrappers
+from src.models.structure import lora_fold_targets, model_has_quantized_params, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
 from src.optimizers.registry import (
@@ -680,7 +680,7 @@ class DistributedTrainerMixin(
         """Fail fast where ``merge_expert_lora_on_save`` cannot produce the merged checkpoint.
 
         The flag folds both adapter halves into a gathered base checkpoint written by the EP
-        strategy. Two shapes cannot deliver that, both read off the live model rather than a mode
+        strategy. Three shapes cannot deliver that, all read off the live model rather than a mode
         list:
 
         - **No native expert adapters built** (dense models, MoE runs with no expert projection in
@@ -688,6 +688,10 @@ class DistributedTrainerMixin(
           attention-only run saves adapters via :class:`PeftAdapterSaver`, which never merges.
         - **Accelerate-managed FSDP v1.** Params are flat-param shards the base Trainer's save
           serializes, so the gather would write shard views.
+        - **A PEFT layer the out-of-place fold cannot reproduce** (trainable tokens, LoRA on
+          ``nn.MultiheadAttention``; :func:`~src.models.structure.lora_fold_targets`). The save
+          builds its fold map with the same call and would raise at the first checkpoint; the check
+          is structural, so every rank raises here before training.
         """
         if not self.parallelism_config.merge_expert_lora_on_save:
             return
@@ -707,6 +711,9 @@ class DistributedTrainerMixin(
                 "so the merged gather would write shard views. Launch with torchrun (mixin-managed "
                 "FSDP2), or drop merge_expert_lora_on_save and keep adapter checkpoints."
             )
+        peft_model = find_peft_model(self.model)
+        if peft_model is not None:
+            lora_fold_targets(peft_model)
 
     def _setup_ep_only(self):
         """Setup Expert Parallelism mode."""

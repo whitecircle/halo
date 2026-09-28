@@ -2,11 +2,12 @@
 """CPU tests for three PEFT seams on ``DistributedTrainerMixin``:
 
 * ``_validate_merge_expert_lora_save`` — the flag must be rejected exactly where it cannot deliver a
-  merged checkpoint, and nowhere else. Both gates read the LIVE model rather than a mode list, so
-  every parallelism/model combination is covered by construction: no native expert adapters means
-  there is nothing to fold, and accelerate-managed FSDP means the base Trainer owns the save. A mixed
-  attention+expert run is the flag's headline case and must pass — ``save_ep_checkpoint`` folds
-  both halves — so a blanket rejection of the mixed shape fails here.
+  merged checkpoint, and nowhere else. All three gates read the LIVE model rather than a mode list,
+  so every parallelism/model combination is covered by construction: no native expert adapters means
+  there is nothing to fold, accelerate-managed FSDP means the base Trainer owns the save, and a PEFT
+  layer the out-of-place fold cannot reproduce would otherwise raise only at the first checkpoint
+  save. A mixed attention+expert run is the flag's headline case and must pass —
+  ``save_ep_checkpoint`` folds both halves — so a blanket rejection of the mixed shape fails here.
 * ``save_model``'s routing — passing that guard is only half the promise. With the flag set, a mixed
   run must skip ``PeftAdapterSaver`` (which never merges) and reach the EP strategy's merged write
   with the attention delta already folded into the base weights being gathered. This is what makes
@@ -93,6 +94,36 @@ def test_merge_flag_under_accelerate_fsdp_raises():
     trainer._accelerate_manages_fsdp = True
     with patch.object(mixin_mod, "has_ep_lora", return_value=True):
         with pytest.raises(ValueError, match="accelerate-managed FSDP"):
+            trainer._validate_merge_expert_lora_save()
+
+
+class _UnfoldableLM(nn.Module):
+    """A foldable ``q_proj`` beside the two layer kinds whose merge the out-of-place fold has no formula for."""
+
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = nn.Embedding(16, 8)
+        self.mha = nn.MultiheadAttention(8, 2)
+        self.q_proj = nn.Linear(8, 8, bias=False)
+
+    def forward(self, x):  # pragma: no cover - never called
+        return self.q_proj(x)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"target_modules": ["q_proj"], "trainable_token_indices": {"embed_tokens": [0, 1]}},
+        {"target_modules": ["q_proj", "mha"]},
+    ],
+    ids=["trainable_tokens", "multihead_attention"],
+)
+def test_merge_flag_with_a_layer_the_fold_cannot_reproduce_raises(config):
+    """The merged save folds the attention half out of place and would raise on these at the first
+    checkpoint, after the run has trained; construction refuses them instead."""
+    trainer = _StubTrainer(get_peft_model(_UnfoldableLM(), LoraConfig(**config)), merge_expert_lora_on_save=True)
+    with patch.object(mixin_mod, "has_ep_lora", return_value=True):
+        with pytest.raises(ValueError, match="cannot be folded out of place"):
             trainer._validate_merge_expert_lora_save()
 
 
