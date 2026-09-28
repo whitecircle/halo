@@ -19,6 +19,7 @@ Run: python tests/cpu/optimizers/test_optimizer_sr.py  (or pytest)
 """
 
 import math
+import random
 
 import pytest
 import torch
@@ -26,8 +27,10 @@ import torch
 import src.optimizers.adamw_bf16 as adamw_mod
 import src.optimizers.muon as muon_mod
 from src.optimizers.adamw_bf16 import (
+    SR_SEED,
     AdamWBF16,
     _eager_adam_bf16_step,
+    reset_sr_stream,
     stochastic_round_to_bf16,
 )
 
@@ -180,7 +183,6 @@ def test_sr_removes_second_moment_bias():
     n_steps = 500
 
     # fp32 ground truth: no rounding of the state at all.
-    torch.manual_seed(0)
     size = 8192
     g = torch.full((size,), grad_val, dtype=torch.float32)
     easq_fp32 = torch.zeros(size, dtype=torch.float32)
@@ -191,8 +193,9 @@ def test_sr_removes_second_moment_bias():
 
     nearest_mean = _adam_easq_reference(grad_val, n_steps, beta2)
 
-    # AdamWBF16 eager path: step the real optimizer many times with a constant grad.
-    torch.manual_seed(7)
+    # AdamWBF16 eager path: step the real optimizer many times with a constant grad. Its SR noise comes
+    # from the process-wide seed stream, rewound so the draw does not depend on which tests ran first.
+    reset_sr_stream()
     p = torch.nn.Parameter(torch.zeros(size, dtype=torch.bfloat16))
     opt = AdamWBF16([p], lr=1e-3, betas=(0.9, beta2), weight_decay=0.0, use_triton=False)
     for _ in range(n_steps):
@@ -270,6 +273,26 @@ def test_adamw_all_grads_present_ranks_identical():
         return p.detach().clone()
 
     assert torch.equal(run_rank(), run_rank())
+
+
+def test_reset_sr_stream_replays_the_rounding_noise():
+    """Two runs in one process draw from the one module stream; ``reset_sr_stream`` rewinds it to the
+    stream a fresh import starts at, so the second run rounds exactly as the first did."""
+    torch.manual_seed(2)
+    p_init = (torch.randn(1024) * 0.02).to(torch.bfloat16)
+
+    def run():
+        reset_sr_stream()
+        p = torch.nn.Parameter(p_init.clone())
+        p.grad = torch.full_like(p, 2e-4)
+        AdamWBF16([p], lr=1e-3, use_triton=False).step()
+        return p.detach().clone()
+
+    first = run()
+    assert torch.equal(run(), first), "the second run drew different rounding noise"
+    reset_sr_stream()
+    fresh = random.Random(SR_SEED)
+    assert adamw_mod._SR_RNG.getrandbits(64) == fresh.getrandbits(64), "the rewound stream is not the import-time one"
 
 
 def test_muon_seed_draws_are_structural():
