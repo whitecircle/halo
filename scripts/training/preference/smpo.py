@@ -16,7 +16,7 @@ PP is declared but not yet available in this release.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \\
-        examples/preference/qwen3_5/smpo-qwen3.5-9b-tulu3-prefmix.yaml --expert_parallel_size=8
+        examples/preference/gptoss/smpo-gptoss-20b-tulu3-prefmix-ep.yaml
 
 Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the same plus an
 ``images``/``image`` column (single image or list), which is what declares the VLM run.

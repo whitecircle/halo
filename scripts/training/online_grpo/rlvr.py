@@ -8,8 +8,8 @@ Supported Parallelism Modes: EP, TP, ETP (CP is not supported by ``DistributedGR
 rollout server takes its own GPUs, so size the launch to the remaining ones).
 
 Usage:
-    torchrun --nproc_per_node=8 scripts/training/online_grpo/rlvr.py \\
-        examples/grpo/online/rlvr-online-grpo-template.yaml --expert_parallel_size=8
+    torchrun --nproc_per_node=<GPUs left after the server> scripts/training/online_grpo/rlvr.py \\
+        examples/grpo/online/rlvr-online-grpo-template.yaml
 """
 
 import asyncio

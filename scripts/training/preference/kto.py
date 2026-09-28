@@ -17,7 +17,7 @@ EP/TP use PEFT (``ref_model=None``) or ``precompute_ref_log_probs``.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/kto.py \\
-        examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml --expert_parallel_size=8
+        examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml
 """
 
 from trl import KTOConfig, ModelConfig

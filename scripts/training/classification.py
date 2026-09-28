@@ -12,7 +12,7 @@ CP is not supported — the trainer pools over the complete sequence, which no C
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/classification.py \\
-        examples/classification/qwen3_5/clf-qwen3.5-9b-mage.yaml --expert_parallel_size=8
+        examples/classification/gptoss/clf-gptoss-20b-mage-ep.yaml
 """
 
 import torch.distributed as dist
