@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 # SR-seed RNG kept off global ``random`` (the data path advances that per-rank) and seeded
 # identically everywhere, so replicated bf16 params (HSDP/DDP/EP) round the same way.
-_SR_RNG = random.Random(0xB165EED)
+SR_SEED = 0xB165EED
+_SR_RNG = random.Random(SR_SEED)
 
 # Launch tile shared by every SR kernel here and in Muon: all of them make the same elementwise pass
 # over a flattened parameter.
@@ -98,6 +99,15 @@ def _draw_sr_seeds(use_triton: bool) -> tuple[int, int]:
     if use_triton:
         return _SR_RNG.randint(0, 2**30), _SR_RNG.randint(0, 2**30)
     return _SR_RNG.randint(0, 2**31 - 1), _SR_RNG.randint(0, 2**31 - 1)
+
+
+def reset_sr_stream() -> None:
+    """Rewind the SR stream to :data:`SR_SEED`, where a fresh process starts it.
+
+    Every optimizer in a process draws from the one module-level stream, so two runs in one process
+    see the same rounding noise only when the stream is rewound between them.
+    """
+    _SR_RNG.seed(SR_SEED)
 
 
 def _triton_adam_bf16_step(
