@@ -42,7 +42,6 @@ from src.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_any, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.tolerances import TOL
 from tests.common.utils import log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
@@ -63,9 +62,12 @@ LEARNING_RATE = 2e-5
 SEED = 42
 PINNED_STEP = NUM_TRAIN_STEPS
 
-LOSS_REL_TOL = TOL.exact_objective_rel
+# The pin compares the bf16-logged loss with a rescoring of the same weights; they differ by about two
+# bf16 ULPs here (at most 2.2e-3 measured, losses 0.11-0.27). A bound near that, not the shared relative
+# one floored at 1.0, is what lets the pooling-at-pad control, which can move this loss by 1e-2, fail it.
+LOSS_ABS_TOL = 5e-3
 # A control's job is to show the pin would FAIL, so its threshold IS the pin's tolerance.
-CONTROL_MIN_GAP = LOSS_REL_TOL
+CONTROL_MIN_GAP = LOSS_ABS_TOL
 # The focal pin is RELATIVE: the shared absolute bound is ~1% of the focal value here but would be a
 # far weaker statement at a smaller one, and the modulator errors this leg exists to catch are
 # multiplicative. The floor is the bf16 quantization of the logged scalar (half a ULP, ~0.3% at this
@@ -280,7 +282,7 @@ def run(ctx):
     expected = world_mean(float(F.cross_entropy(logits, labels)), ctx.device)
     logged = losses[PINNED_STEP - 1]
     metrics["ce_logged"], metrics["ce_reference"] = logged, expected
-    checks["ce_loss_matches_reference"] = abs(logged - expected) < LOSS_REL_TOL * max(1.0, abs(expected))
+    checks["ce_loss_matches_reference"] = abs(logged - expected) < LOSS_ABS_TOL
     # A classifier that has learned nothing predicts uniformly and scores exactly ln(NUM_LABELS).
     # Requiring the pinned loss to sit clear of that is a derived reference point, not a magic floor
     # (and unlike "> 0" it can actually fail).
