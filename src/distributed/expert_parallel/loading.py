@@ -262,8 +262,8 @@ def _load_ep_model_sharded(checkpoint_dir: str) -> torch.nn.Module:
         f"        --output_dir /path/to/merged_checkpoint\n\n"
         f"Then load the merged checkpoint:\n\n"
         f"    model = load_ep_model('/path/to/merged_checkpoint', ep_config)\n\n"
-        f"Alternatively, use save_ep_model(sharded=False) to save in gathered format "
-        f"which can be loaded directly without merging."
+        f"Alternatively, train with save_sharded_ep: false to save in gathered format, "
+        f"which loads directly without merging."
     )
 
 
