@@ -237,7 +237,7 @@ def main():
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=None)
     reject_image_columns(ds, "Embedding training")
     train_dataset = ds["train"]
-    eval_dataset = ds.get("test") or ds.get("validation")
+    eval_dataset = ds.get("test")
 
     if is_global_main_process():
         logger.info(f"Train dataset: {len(train_dataset)} examples")

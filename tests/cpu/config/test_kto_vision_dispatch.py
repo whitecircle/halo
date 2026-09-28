@@ -221,5 +221,16 @@ def test_images_field_naming_a_missing_column_raises(tmp_path):
         _run_kto(tmp_path, _dataset(), yaml_body="images_field: pictures\n")
 
 
+def test_an_empty_eval_split_is_still_the_eval_split(tmp_path):
+    """A pre-sharded eval split can leave a rank no rows. Read by truthiness it turned into ``None``
+    on that rank alone, which then skipped the evaluation its peers entered."""
+    dataset = _dataset()
+    dataset["test"] = dataset["test"].select([])
+    logged: dict = {}
+    with pytest.raises(_TrainerHandoffReached):
+        _run_kto(tmp_path, dataset, vlm_checkpoint=False, logged=logged)
+    assert logged["test"] is not None and len(logged["test"]) == 0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

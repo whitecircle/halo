@@ -173,7 +173,7 @@ def main():
 
     _require_kto_columns(ds, args)
     train_dataset = _rename_kto_columns(ds["train"], args)
-    eval_dataset = _rename_kto_columns(ds["test"], args) if ds.get("test") else None
+    eval_dataset = _rename_kto_columns(ds["test"], args) if "test" in ds else None
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, kto_config)
 
