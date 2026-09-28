@@ -334,7 +334,7 @@ class ParallelismValidationMixin:
                 f"lora_dropout={configured} is configured but every LoRA dropout in the live model is 0: "
                 f"this trainer disables dropout after the adapter wrap (disable_dropout=True), which "
                 f"zeroes PEFT's lora_dropout along with the model's own. Set disable_dropout=False to keep "
-                f"it, or drop lora_dropout to stop expecting regularization that is not applied."
+                f"it, or set lora_dropout: 0.0 to stop expecting regularization that is not applied."
             )
 
     def _validate_expert_lora_realized(self):
