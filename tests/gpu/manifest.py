@@ -50,7 +50,7 @@ Markers (selection):
                                  (``make test-gpu-vllm`` then ``... SERVER_TIER=moe``).
     <model family>             — gptoss / qwen3 / glm4 / glm5 / gemma4 / mistral4 /
                                  bailing / lfm2 / zaya / deepseek_v4 / inkling / cohere2_moe /
-                                 step3p7.
+                                 step3p7 / laguna.
 """
 
 from dataclasses import dataclass
@@ -92,25 +92,34 @@ class TestSpec:
     flaky: bool = False
 
 
-# One per EP MoE family, the ``--family`` names of tests/common/tiny_models.py's TINY_MOE_FAMILIES;
-# tests/cpu/conventions/test_tiny_family_roster.py holds the list and the rows below to the registry.
-_TINY_MOE_FAMILIES = (
-    "bailing_moe",
-    "cohere2_moe",
-    "deepseek_v4",
-    "gemma4_text",
-    "glm4_moe_lite",
-    "glm5_next",
-    "gpt_oss",
-    "inkling_text",
-    "laguna",
-    "lfm2_moe",
-    "mistral4",
-    "qwen3_5_moe_text",
-    "qwen3_moe",
-    "step3p7",
-    "zaya",
-)
+# One per EP MoE family, the ``--family`` names of tests/common/tiny_models.py's TINY_MOE_FAMILIES,
+# each with the model-family marker its rows carry; tests/cpu/conventions/test_tiny_family_roster.py
+# holds the names and the rows below to the registry.
+_TINY_MOE_FAMILY_MARKERS = {
+    "bailing_moe": "bailing",
+    "cohere2_moe": "cohere2_moe",
+    "deepseek_v4": "deepseek_v4",
+    "gemma4_text": "gemma4",
+    "glm4_moe_lite": "glm4",
+    "glm5_next": "glm5",
+    "gpt_oss": "gptoss",
+    "inkling_text": "inkling",
+    "laguna": "laguna",
+    "lfm2_moe": "lfm2",
+    "mistral4": "mistral4",
+    "qwen3_5_moe_text": "qwen3",
+    "qwen3_moe": "qwen3",
+    "step3p7": "step3p7",
+    "zaya": "zaya",
+}
+_TINY_MOE_FAMILIES = tuple(_TINY_MOE_FAMILY_MARKERS)
+
+
+def _family_markers(families) -> tuple[str, ...]:
+    """The model-family markers of a sweep over ``families`` (``_TINY_MOE_FAMILIES`` names)."""
+    return tuple(sorted({_TINY_MOE_FAMILY_MARKERS[family] for family in families}))
+
+
 _MERGED_RESUME_CORE_ROWS = (
     "--family qwen3_moe --adapters expert",
     "--family qwen3_moe --adapters mixed",
@@ -140,11 +149,24 @@ _PRECOMPUTE_CORE_ROWS = (
     "--trainer dpo --family dense --mode dp2 --peft",
     "--trainer kto --family dense --mode dp2 --peft --kto-loss apo_zero_unpaired",
 )
+# The core rows cover Qwen3-MoE; the family sweep runs every other family.
+_PRECOMPUTE_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if family != "qwen3_moe")
 _PRECOMPUTE_FAMILY_ROWS = tuple(
     f"--trainer {trainer} --family {family}{mode}"
-    for family in _TINY_MOE_FAMILIES
-    if family != "qwen3_moe"
+    for family in _PRECOMPUTE_SWEEP_FAMILIES
     for trainer, mode in (("dpo", ""), ("dpo", " --mode ep1"), ("kto", ""))
+)
+# Every syncable MoE family beyond the representative Qwen3-MoE; the roster test holds this to the
+# families some rollout engine takes an online update for.
+_SYNC_EXACTNESS_SWEEP_FAMILIES = (
+    "bailing_moe",
+    "gemma4_text",
+    "glm4_moe_lite",
+    "gpt_oss",
+    "laguna",
+    "lfm2_moe",
+    "qwen3_5_moe_text",
+    "step3p7",
 )
 
 MANIFEST: dict[str, TestSpec] = {
@@ -426,8 +448,8 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=8,
         markers=("gpu", "full", "8gpu", "ep", "cp", "tp", "etp", "moe", "mistral4"),
         # One node per parallelism mode; --mode is required. EP+CP (ep8+cp2 is a valid single-node
-        # shape — EP is orthogonal to DP) has not been run for this model; the cohere2_moe matrix
-        # below carries the single-node ep_cp coverage.
+        # shape — EP is orthogonal to DP) is no row here: the tiny Mistral4 runs it at ep2+cp2 in the
+        # merged-resume family rows, and the cohere2_moe matrix below carries the 8-GPU ep_cp row.
         args_matrix=(
             "--mode ep --ep 8 --liger",
             "--mode cp --cp 8",
@@ -673,8 +695,8 @@ MANIFEST: dict[str, TestSpec] = {
         # 600s covers the cycles and the policy load, with room for a cold cache.
         timeout=600,
     ),
-    # Embedding resume, family x run shape x --lora (attention / mixed / embedding adapters, off = full
-    # fine-tune). Core: every data-parallel shape on the ST encoder, FSDP2 and the TP refusal on a
+    # Embedding resume, family x run shape x --lora (attention / mixed / embedding adapters, DoRA on the
+    # attention, off = full fine-tune). Core: every data-parallel shape on the ST encoder, FSDP2 and the TP refusal on a
     # decoder, the input-embedding targets and the full fine-tune's FSDP2 / pre-sharded / TP reloads,
     # and --head: a projection head after the pooling, refused under FSDP2 and TP, accepted under DDP;
     # the roster scripts carry the other families and the EP rows.
@@ -872,7 +894,7 @@ MANIFEST: dict[str, TestSpec] = {
     # The rest of family x adapter shape x layout; tiny models, but ~80 rows.
     "trainers/lora/test_lora_merged_save_resume_families.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "lora", "ep", "cp", "moe"),
+        markers=("gpu", "full", "2gpu", "lora", "ep", "cp", "moe", *_family_markers(_TINY_MOE_FAMILIES)),
         args_matrix=_MERGED_RESUME_FAMILY_ROWS,
         timeout=1200,
     ),
@@ -894,36 +916,13 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "trainers/lora/test_lora_weight_sync_exact_families.py": TestSpec(
         nproc=2,
-        markers=(
-            "gpu",
-            "full",
-            "2gpu",
-            "lora",
-            "ep",
-            "etp",
-            "moe",
-            "gptoss",
-            "qwen3",
-            "glm4",
-            "gemma4",
-            "bailing",
-            "lfm2",
-            "step3p7",
-        ),
+        # qwen3 also marks the dense Qwen3.5 row.
+        markers=("gpu", "full", "2gpu", "lora", "ep", "etp", "moe", *_family_markers(_SYNC_EXACTNESS_SWEEP_FAMILIES)),
         args_matrix=(
             "--family qwen3_5 --mode fsdp",
             *(
                 f"--family {family} --mode {shape}"
-                for family in (
-                    "bailing_moe",
-                    "gemma4_text",
-                    "glm4_moe_lite",
-                    "gpt_oss",
-                    "laguna",
-                    "lfm2_moe",
-                    "qwen3_5_moe_text",
-                    "step3p7",
-                )
+                for family in _SYNC_EXACTNESS_SWEEP_FAMILIES
                 for shape in (
                     "ep1 --adapters peft",
                     "ep1 --adapters mixed",
@@ -1044,7 +1043,7 @@ MANIFEST: dict[str, TestSpec] = {
     # Every other MoE family: DPO at ep2 and ep1, KTO at ep2.
     "trainers/preference/test_preference_precompute_resume_families.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "moe"),
+        markers=("gpu", "full", "2gpu", "ep", "moe", *_family_markers(_PRECOMPUTE_SWEEP_FAMILIES)),
         args_matrix=_PRECOMPUTE_FAMILY_ROWS,
         timeout=900,
     ),
@@ -1322,6 +1321,7 @@ ALL_MARKERS = (
     "mistral4",
     "bailing",
     "lfm2",
+    "laguna",
     "zaya",
     "deepseek_v4",
     "inkling",

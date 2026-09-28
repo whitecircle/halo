@@ -50,6 +50,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
+from tests.common.distributed import world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.tolerances import TOL
@@ -182,12 +183,6 @@ class _ResumeCapture(TrainerCallback):
         return control
 
 
-def _all_ranks_true(local: bool, device) -> bool:
-    t = torch.tensor([1 if local else 0], device=device)
-    dist.all_reduce(t, op=dist.ReduceOp.MIN)
-    return bool(t.item())
-
-
 def _verify_checkpoint_files(ckpt_dir: str, world_size: int, pc: ParallelismConfig, optimizer) -> tuple[bool, str]:
     """Rank 0: per-rank shards present, no stale optimizer.pt, meta fingerprint matches the run."""
     files = set(os.listdir(ckpt_dir))
@@ -318,8 +313,8 @@ def run(ctx):
         log(f"checkpoint weights: {weights_detail}")
     else:
         files_ok = weights_ok = True
-    checks["checkpoint_files_ok"] = _all_ranks_true(files_ok, device)
-    checks["checkpoint_weights_ok"] = _all_ranks_true(weights_ok, device)
+    checks["checkpoint_files_ok"] = world_all(files_ok, device)
+    checks["checkpoint_weights_ok"] = world_all(weights_ok, device)
     del trainer
     cleanup_memory()
     ctx.barrier()
@@ -338,7 +333,7 @@ def run(ctx):
         equal, why = optimizer_state_matches(snapshot_ref, capture["snapshot"])
         if not equal:
             log(f"OPTIMIZER STATE MISMATCH after restore: {why}")
-        checks["optimizer_state_restored_exactly"] = _all_ranks_true(equal, device)
+        checks["optimizer_state_restored_exactly"] = world_all(equal, device)
         checks["scheduler_restored"] = capture["sched_last_epoch"] == SAVE_AT_STEP
     resumed_tail = resumed_losses[-(TOTAL_STEPS - SAVE_AT_STEP) :]
     continuous_tail = continuous_losses[SAVE_AT_STEP:]
@@ -401,12 +396,12 @@ def run(ctx):
             )
             if (carried_moments or carried_steps) and ctx.rank == 0:
                 log(f"mismatch resume carried: moments={carried_moments[:5]} steps={carried_steps[:5]}")
-            checks["mismatch_warm_restarted"] = _all_ranks_true(not carried_moments and not carried_steps, device)
+            checks["mismatch_warm_restarted"] = world_all(not carried_moments and not carried_steps, device)
         mismatch_warned = any("fingerprint mismatch" in w and "ep_size" in w for w in warnings)
         if ctx.rank == 0 and not mismatch_warned:
             log(f"captured warnings: {warnings}")
         # The warning logs on the main process only; every rank must have taken the warm restart.
-        checks["mismatch_warning_fired"] = _all_ranks_true(mismatch_warned or ctx.rank != 0, device)
+        checks["mismatch_warning_fired"] = world_all(mismatch_warned or ctx.rank != 0, device)
         mismatch_losses = step_losses(trainer)
         checks["mismatch_run_proceeded"] = trainer.state.global_step == SAVE_AT_STEP + 1 and all(
             torch.isfinite(torch.tensor(mismatch_losses)).tolist()
