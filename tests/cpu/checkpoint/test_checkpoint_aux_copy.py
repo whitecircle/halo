@@ -28,13 +28,17 @@ training run (an N-way model merge).
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
+from transformers.trainer import SCHEDULER_NAME
 
 from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
+    REFERENCE_LOGPS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
+    ROUTER_BALANCING_BIASES_FILE,
     WEIGHT_FILE_IGNORE_PATTERNS,
     copy_checkpoint_aux_files,
+    write_resume_adapter_marker,
 )
 from src.checkpoint.model_card import CARD_STAGING_PREFIX, CARD_STAGING_SUFFIX
 
@@ -67,9 +71,9 @@ KEPT = (
 )
 SIDECARS = (
     "rng_state_0.pth",
-    "scheduler.pt",
-    "router_balancing_biases.pt",
-    "reference_logps.pt",
+    SCHEDULER_NAME,
+    ROUTER_BALANCING_BIASES_FILE,
+    REFERENCE_LOGPS_FILE,
 )
 # The SentenceTransformer module layout an embedding EP save produces: modules.json names these
 # directories, and 2_Dense carries its OWN weights that no merge rewrites.
@@ -123,9 +127,9 @@ def test_resume_sidecars_survive_merge_copy(checkpoint_dir, tmp_path):
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
-    assert (out / "scheduler.pt").exists(), "LR schedule must survive into the merged resume source"
-    assert (out / "router_balancing_biases.pt").exists(), "router biases must survive into the merged resume source"
-    assert (out / "reference_logps.pt").exists(), "a precompute run's reference log-probs must survive the merge"
+    assert (out / SCHEDULER_NAME).exists(), "LR schedule must survive into the merged resume source"
+    assert (out / ROUTER_BALANCING_BIASES_FILE).exists(), "router biases must survive into the merged resume source"
+    assert (out / REFERENCE_LOGPS_FILE).exists(), "a precompute run's reference log-probs must survive the merge"
     # Same suffix as the foreign exports below, opposite verdict: a per-rank RNG state is what a
     # bit-reproducible resume replays from.
     assert (out / "rng_state_0.pth").exists(), "per-rank RNG state must survive into the resume source"
@@ -156,7 +160,7 @@ def test_a_merged_checkpoint_resume_adapter_travels_with_the_sidecars(tmp_path, 
     save_file(
         {"a.experts.down_proj.lora_A": torch.ones(2, 2)}, str(src / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE)
     )
-    (src / RESUME_ADAPTER_MARKER_FILE).write_text("{}")
+    write_resume_adapter_marker(str(src))
     (src / "config.json").write_text("{}")
     out = tmp_path / "out"
     out.mkdir()

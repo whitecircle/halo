@@ -32,6 +32,7 @@ from torch.distributed.tensor import DTensor, init_device_mesh
 from src.distributed.nccl.clients.base import snapshot_param
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, sync_weights_to_client
 from tests.common.gloo import run_gloo_ranks
+from tests.common.peft_helpers import randomize_adapters
 from tests.common.weight_sync import (
     RecordingSender,
     as_pushed,
@@ -80,12 +81,7 @@ def _build_lora_model() -> nn.Module:
     base = _TinyModel()
     cfg = LoraConfig(r=4, lora_alpha=8, target_modules=["proj"], task_type=None)
     model = get_peft_model(base, cfg)
-    # PEFT zero-inits lora_B, which would make merged == base and hide the bug. Give the adapter a
-    # non-trivial delta so W + B@A differs from W.
-    for name, param in model.named_parameters():
-        if "lora_B" in name:
-            with torch.no_grad():
-                param.copy_(torch.randn_like(param))
+    randomize_adapters(model, lora_b_only=True)
     return model
 
 
@@ -152,10 +148,7 @@ def _bf16_lora_policy(use_dora: bool = False) -> nn.Module:
         _Policy().to(torch.bfloat16),
         LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "o_proj"], use_dora=use_dora),
     )
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if ".lora_B." in name:
-                param.normal_(std=0.05)
+    randomize_adapters(model, std=0.05, lora_b_only=True)
     return model
 
 

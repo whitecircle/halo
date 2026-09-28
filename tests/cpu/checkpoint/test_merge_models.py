@@ -27,6 +27,7 @@ from safetensors.torch import load_file, save_file
 from torch.profiler import ProfilerActivity, profile
 from transformers import CONFIG_MAPPING
 from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
+from transformers.trainer import SCHEDULER_NAME
 
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -34,6 +35,7 @@ from src.checkpoint.format import (
     REFERENCE_LOGPS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
+    ROUTER_BALANCING_BIASES_FILE,
     write_resume_adapter_marker,
 )
 from tests.common.utils import load_script_module
@@ -313,7 +315,7 @@ def test_end_to_end_linear_merge_qwen3_5():
         a, b, out = Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         _build_tiny_qwen35(a, seed=0)
         _build_tiny_qwen35(b, seed=1)
-        sidecars = ("scheduler.pt", "rng_state_0.pth", "router_balancing_biases.pt", REFERENCE_LOGPS_FILE)
+        sidecars = (SCHEDULER_NAME, "rng_state_0.pth", ROUTER_BALANCING_BIASES_FILE, REFERENCE_LOGPS_FILE)
         for sidecar in sidecars:
             (a / sidecar).write_bytes(b"x")
         (a / RESUME_ADAPTER_DIR).mkdir()

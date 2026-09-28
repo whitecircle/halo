@@ -46,10 +46,10 @@ from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
-    RESUME_ADAPTER_MARKER_FILE,
     SAFETENSORS_WEIGHTS_FILE,
     load_full_state_dict,
     resume_adapter_dir,
+    write_resume_adapter_marker,
 )
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader
@@ -60,6 +60,7 @@ from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
+from tests.common.peft_helpers import randomize_adapters
 
 # The resolver logs through the accelerate logger, which requires an initialized state.
 PartialState()
@@ -166,8 +167,7 @@ def _merged_checkpoint(path, *, marked: bool) -> str:
     os.makedirs(path, exist_ok=True)
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(path, SAFETENSORS_WEIGHTS_FILE))
     if marked:
-        with open(os.path.join(path, RESUME_ADAPTER_MARKER_FILE), "w") as fh:
-            json.dump({"adapter_dir": RESUME_ADAPTER_DIR}, fh)
+        write_resume_adapter_marker(str(path))
     return str(path)
 
 
@@ -323,11 +323,7 @@ def test_mixed_resume_adapter_round_trips_through_the_adapter_restore(tmp_path, 
     back bit-equal onto fresh adapters — the resume that merge-on-save checkpoints could not do."""
     monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     trained = _tiny_peft_model(seed=1)
-    with torch.no_grad():
-        for name, param in trained.named_parameters():
-            if ".lora_" in name:
-                # On the bf16 grid, so the cast the adapter file applies is exact.
-                param.copy_(torch.randn_like(param).to(torch.bfloat16).float())
+    randomize_adapters(trained, dtype=torch.bfloat16)  # on the bf16 grid, so the adapter file's cast is exact
     tokenizer = _TokenizerSpy()
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
 
@@ -504,10 +500,7 @@ def _trained_bf16_peft_model(**kwargs) -> PeftModel:
     """A bf16 tiny PEFT model whose adapters carry a delta large enough to move every adapted weight
     (PEFT zero-inits ``lora_B``, so an untouched adapter folds to nothing)."""
     model = _tiny_peft_model(seed=1, dtype=torch.bfloat16, lora_alpha=64, **kwargs)
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if ".lora_" in name:
-                param.normal_(std=0.5)
+    randomize_adapters(model, std=0.5)
     return model
 
 

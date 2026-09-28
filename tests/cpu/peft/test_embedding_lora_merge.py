@@ -19,7 +19,7 @@ import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 
 from src.trainers.embedding.trainer import _folded_backbone_items
-from tests.common.peft_helpers import merged_lora_targets
+from tests.common.peft_helpers import merged_lora_targets, randomize_adapters
 
 VOCAB = 11
 HIDDEN = 6
@@ -45,10 +45,7 @@ def _trained_adapters(**lora) -> nn.Module:
     torch.manual_seed(0)
     config = {"target_modules": ["embed", "proj", "conv"], **lora}
     model = inject_adapter_in_model(LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, **config), _Encoder())
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if "lora_" in name:
-                param.normal_()
+    randomize_adapters(model)
     return model
 
 

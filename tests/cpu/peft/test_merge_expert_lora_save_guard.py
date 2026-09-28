@@ -37,6 +37,7 @@ import src.trainers.mixins.checkpointing as checkpointing_mod
 import src.trainers.mixins.grad_sync as grad_sync_mod
 from src.models.structure import lora_folded_data
 from src.trainers.mixins.base import DistributedTrainerMixin
+from tests.common.peft_helpers import randomize_adapters
 
 
 class _TinyLM(nn.Module):
@@ -182,10 +183,7 @@ def _mixed_run_model():
     below could not tell a merged save from one that never merged.
     """
     peft_model = _attention_peft_model()
-    with torch.no_grad():
-        for name, param in peft_model.named_parameters():
-            if "lora_B" in name:
-                param.copy_(torch.randn_like(param))
+    randomize_adapters(peft_model, lora_b_only=True)
     return peft_model
 
 

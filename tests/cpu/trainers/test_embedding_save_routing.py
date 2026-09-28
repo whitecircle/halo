@@ -18,15 +18,24 @@ import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 
 from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.trainer import EmbeddingTrainer
+from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.peft_helpers import randomize_adapters
 
 
 class _Backbone(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear = nn.Linear(4, 4, bias=False)
+
+
+class _SharedExpertEPLayer(StubEPLayerBase):
+    """An EP layer holding the block's shared experts, which the EP layers adopt as a child."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared_experts = nn.Linear(4, 4, bias=False)
 
 
 class _SentenceTransformerLike(nn.Module):
@@ -41,8 +50,7 @@ def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: 
     backbone = _Backbone()
     if has_lora:
         inject_adapter_in_model(LoraConfig(r=2, lora_alpha=8, target_modules=["linear"]), backbone)
-        with torch.no_grad():
-            backbone.linear.lora_B["default"].weight.normal_()  # zero-init, which would fold to the base
+        randomize_adapters(backbone, lora_b_only=True)
     top = _SentenceTransformerLike(backbone)
 
     host = object.__new__(EmbeddingTrainer)
@@ -148,6 +156,7 @@ def test_gathered_lora_save_writes_the_fold_through_the_shared_writer(monkeypatc
     ctx = _context(host, monkeypatch)
     layer = backbone.linear
     expected = layer.base_layer.weight + layer.get_delta_weight("default")
+    assert not torch.equal(expected, layer.base_layer.weight), "premise: the adapter moves its base"
     written = {}
 
     def _write(model, state_dict, output_dir, max_shard_size=None):
@@ -170,12 +179,10 @@ def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():
     """An EP layer adopts the block's shared experts as children, so a target list that reaches only
     those puts every adapter inside it. The run still trains injected LoRA: it must be folded on save
     and refused under EP, which an EP-excluding scan would miss."""
-    layer = EPGemma4MoELayer.__new__(EPGemma4MoELayer)  # the class only; EP construction needs a mesh
-    nn.Module.__init__(layer)
-    layer.shared_expert = nn.Linear(4, 4, bias=False)
+    layer = _SharedExpertEPLayer()
     backbone = _Backbone()
     backbone.add_module("moe", layer)
-    inject_adapter_in_model(LoraConfig(r=2, lora_alpha=4, target_modules=["shared_expert"]), backbone)
+    inject_adapter_in_model(LoraConfig(r=2, lora_alpha=4, target_modules=["shared_experts"]), backbone)
     assert find_ep_layers(backbone) == [("moe", layer)], "premise: the adapters sit inside an EP layer"
 
     assert EmbeddingTrainer._has_injected_lora(None, backbone)

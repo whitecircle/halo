@@ -84,7 +84,6 @@ from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
-    cast_to_save_dtype,
     read_checkpoint_key_set,
     resume_adapter_dir,
 )
@@ -94,11 +93,12 @@ from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
+from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.embedding_lora_resume import backbone_prefix
 from tests.common.gloo import run_gloo_ranks
-from tests.common.peft_helpers import injected_lora_merge
-from tests.common.utils import load_script_module, step_losses
+from tests.common.peft_helpers import injected_lora_fold
+from tests.common.utils import load_script_module, snapshot_trainable, step_losses
 
 WORDS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", *(f"w{i}" for i in range(60))]
 TARGET_MODULES = ("query", "value")
@@ -107,7 +107,6 @@ NUM_LAYERS = 2
 LORA_R = 4
 # alpha != r, so a fold at a guessed scaling of 1.0 would not match.
 LORA_ALPHA = 8
-SCALING = LORA_ALPHA / LORA_R
 TOTAL_STEPS = 4
 SAVE_AT_STEP = 2
 # One rank per "node": every rank is its node's local main, hence a checkpoint writer.
@@ -210,10 +209,6 @@ def _host(model) -> EmbeddingTrainer:
     return host
 
 
-def _trainable(model) -> dict[str, torch.Tensor]:
-    return {name: param.detach().clone() for name, param in model.named_parameters() if param.requires_grad}
-
-
 def _frozen(model) -> dict[str, torch.Tensor]:
     return {name: param.detach().clone() for name, param in model.named_parameters() if not param.requires_grad}
 
@@ -229,11 +224,11 @@ class _Snapshot(TrainerCallback):
 
     def on_save(self, args, state, control, model=None, **kwargs):
         if self.event == "save" and state.global_step == SAVE_AT_STEP:
-            self.tensors = _trainable(model)
+            self.tensors = snapshot_trainable(model)
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         if self.event == "train_begin":
-            self.tensors = _trainable(model)
+            self.tensors = snapshot_trainable(model)
 
 
 @pytest.fixture(scope="module")
@@ -251,24 +246,13 @@ def run(tmp_path_factory):
         checkpoint=str(root / "out" / f"checkpoint-{SAVE_AT_STEP}"),
         at_save=at_save.tensors,
         losses=step_losses(trainer),
-        final=_trainable(trainer.model),
+        final=snapshot_trainable(trainer.model),
         trainer=trainer,
     )
 
 
 def _copy(checkpoint: str, destination) -> str:
     return shutil.copytree(checkpoint, str(destination))
-
-
-def _expected_fold(
-    base: str, adapters: dict[str, torch.Tensor], prefix: str, lora: LoraConfig
-) -> dict[str, torch.Tensor]:
-    """What PEFT's own in-place merge writes per LoRA target, from ``adapters`` keyed by the ST's names:
-    the base loaded, the same adapters injected and loaded, every LoRA layer merged."""
-    merged = injected_lora_merge(
-        BertModel.from_pretrained(base), lora, {key[len(prefix) :]: value for key, value in adapters.items()}
-    )
-    return {key: cast_to_save_dtype(value.clone()) for key, value in merged.items() if key.endswith(".weight")}
 
 
 def _lora_config(target_modules=TARGET_MODULES, **lora) -> LoraConfig:
@@ -285,11 +269,11 @@ def _assert_serves_the_fold(
     lora: LoraConfig | None = None,
 ) -> None:
     backbone, info = AutoModel.from_pretrained(directory, output_loading_info=True)
-    problems = {kind: info[kind] for kind in ("missing_keys", "unexpected_keys", "mismatched_keys") if info[kind]}
+    problems = loading_problems(info)
     assert not problems, f"stock from_pretrained does not load the folded weights cleanly: {problems}"
     served = backbone.state_dict()
     assert not [key for key in served if ".lora_" in key or ".base_layer." in key]
-    expected = _expected_fold(base, adapters, prefix, lora or _lora_config())
+    expected = injected_lora_fold(BertModel.from_pretrained(base), lora or _lora_config(), adapters, prefix)
     assert len(expected) == folds, f"premise: one fold per LoRA target, got {sorted(expected)}"
     for key, value in expected.items():
         assert torch.equal(served[key].to(value.dtype), value), f"{key} is not PEFT's merge of the adapters"
@@ -320,7 +304,7 @@ def test_a_training_checkpoint_carries_its_resume_adapter_beside_the_fold(run):
 def test_a_failed_adapter_write_leaves_the_checkpoint_unmarked(run, tmp_path, monkeypatch):
     """The marker is the resume's verdict, so it must never outrun its adapter: after a failed write
     the checkpoint stays unmarked, which an injected-LoRA resume refuses."""
-    checkpoint = str(tmp_path / "checkpoint-2")
+    checkpoint = str(tmp_path / f"checkpoint-{SAVE_AT_STEP}")
     os.makedirs(checkpoint)
 
     def full_disk(*args, **kwargs):
@@ -363,7 +347,7 @@ def test_resume_restores_the_adapters_bit_equal_and_reproduces_the_run(run, tmp_
         run.checkpoint, SimpleNamespace(model_name_or_path=run.base), ParallelismConfig()
     )
     model = _lora_model(source, seed=2)
-    fresh = _trainable(model)
+    fresh = snapshot_trainable(model)
     assert any(not torch.equal(fresh[key], run.at_save[key]) for key in fresh), "premise: fresh adapters differ"
     restored = _Snapshot("train_begin")
     trainer = _trainer(model, tmp_path / "resumed", callbacks=[restored])
@@ -378,7 +362,7 @@ def test_resume_restores_the_adapters_bit_equal_and_reproduces_the_run(run, tmp_
     assert not moved, f"the frozen base was overwritten on resume (the fold read back?): {moved[:3]}"
     resumed = step_losses(trainer)[-(TOTAL_STEPS - SAVE_AT_STEP) :]
     assert resumed == run.losses[SAVE_AT_STEP:], f"resumed {resumed} != uninterrupted {run.losses[SAVE_AT_STEP:]}"
-    final = _trainable(trainer.model)
+    final = snapshot_trainable(trainer.model)
     drifted = [key for key, value in run.final.items() if not torch.equal(final[key], value)]
     assert not drifted, f"final adapters differ from the uninterrupted run's: {drifted[:3]}"
 
@@ -403,7 +387,7 @@ def test_load_best_model_at_end_restores_the_best_checkpoints_adapters(run, tmp_
         f"premise: the best checkpoint must predate the last step, or the load has nothing to restore ({best})"
     )
     saved = load_file(os.path.join(best, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
-    live = _trainable(trainer.model)
+    live = snapshot_trainable(trainer.model)
     assert set(live) == set(saved)
     unequal = [key for key, value in saved.items() if not torch.equal(live[key], value)]
     assert not unequal, f"the live adapters are not the best checkpoint's: {unequal[:3]}"
@@ -416,7 +400,7 @@ def test_load_best_model_at_end_restores_the_best_checkpoints_adapters(run, tmp_
 
 
 def test_a_marked_checkpoint_without_its_adapter_file_raises(run, tmp_path):
-    checkpoint = _copy(run.checkpoint, tmp_path / "checkpoint-2")
+    checkpoint = _copy(run.checkpoint, tmp_path / f"checkpoint-{SAVE_AT_STEP}")
     os.remove(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
     trainer = _trainer(_lora_model(run.base, seed=2), tmp_path / "out")
 
@@ -430,7 +414,7 @@ def test_an_unmarked_folded_checkpoint_refuses_an_injected_lora_run(run, tmp_pat
     checkpoint and builds from the fold; fresh adapters on top of it under restored optimizer moments
     are the silent divergence, so the load raises. Built from the base too, where the adapter file the
     torn save left would otherwise restore with nothing else to refuse it."""
-    checkpoint = _copy(run.checkpoint, tmp_path / "checkpoint-2")
+    checkpoint = _copy(run.checkpoint, tmp_path / f"checkpoint-{SAVE_AT_STEP}")
     os.remove(os.path.join(checkpoint, RESUME_ADAPTER_MARKER_FILE))
     source = resolve_resume_weights_source(
         checkpoint, SimpleNamespace(model_name_or_path=run.base), ParallelismConfig()
@@ -447,11 +431,11 @@ def test_an_unmarked_folded_checkpoint_refuses_an_injected_lora_run(run, tmp_pat
 
 def test_a_model_built_from_the_folded_weights_is_refused(run, tmp_path):
     trainer = _trainer(_lora_model(run.checkpoint, seed=2), tmp_path / "out")
-    before = _trainable(trainer.model)
+    before = snapshot_trainable(trainer.model)
 
     with pytest.raises(ValueError, match="delta would apply twice"):
         trainer._load_from_checkpoint(run.checkpoint)
-    assert all(torch.equal(value, before[key]) for key, value in _trainable(trainer.model).items())
+    assert all(torch.equal(value, before[key]) for key, value in snapshot_trainable(trainer.model).items())
 
 
 def test_a_run_without_injected_lora_refuses_a_marked_checkpoint(run, tmp_path):
@@ -478,15 +462,15 @@ def test_a_resume_under_another_lora_scaling_is_refused(run, tmp_path, lora):
     """The adapters would restore by name and shape and every delta would be rescaled: the scaling the
     run saved with is recorded beside its resume adapter and held to the live one."""
     trainer = _trainer(_lora_model(run.base, seed=2, **lora), tmp_path / "out")
-    before = _trainable(trainer.model)
+    before = snapshot_trainable(trainer.model)
 
     with pytest.raises(ValueError, match="another LoRA scaling"):
         trainer._load_from_checkpoint(run.checkpoint)
-    assert all(torch.equal(value, before[key]) for key, value in _trainable(trainer.model).items())
+    assert all(torch.equal(value, before[key]) for key, value in snapshot_trainable(trainer.model).items())
 
 
 def test_a_resume_adapter_without_its_recorded_scaling_is_refused(run, tmp_path):
-    checkpoint = _copy(run.checkpoint, tmp_path / "checkpoint-2")
+    checkpoint = _copy(run.checkpoint, tmp_path / f"checkpoint-{SAVE_AT_STEP}")
     with open(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_CONFIG_FILE)) as fh:
         assert json.load(fh)["lora_alpha"] == LORA_ALPHA, "premise: the save records the run's scaling"
     os.remove(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_CONFIG_FILE))
@@ -528,7 +512,7 @@ def test_the_resume_adapter_is_on_disk_before_rotation(run, tmp_path, monkeypatc
 
 def _node_checkpoint(root: str, rank: int) -> str:
     """This node's own checkpoint directory: on a non-shared FS a node sees only its own disk."""
-    return os.path.join(root, f"node_{rank}", "checkpoint-2")
+    return os.path.join(root, f"node_{rank}", f"checkpoint-{SAVE_AT_STEP}")
 
 
 def _node_worker(rank: int, root: str, base: str) -> None:
@@ -548,7 +532,7 @@ def _node_worker(rank: int, root: str, base: str) -> None:
             for param in trained.parameters():
                 if param.requires_grad:
                     param.copy_(torch.randn(param.shape, generator=generator))
-        expected = _trainable(trained)
+        expected = snapshot_trainable(trained)
         EmbeddingTrainer._save_merged_checkpoint_resume_adapter(_host(trained), checkpoint)
 
         if resume_adapter_dir(checkpoint) is None:
@@ -561,7 +545,7 @@ def _node_worker(rank: int, root: str, base: str) -> None:
 
         fresh = _lora_model(base, seed=2)
         EmbeddingTrainer._load_from_checkpoint(_host(fresh), checkpoint)
-        if any(not torch.equal(value, expected[key]) for key, value in _trainable(fresh).items()):
+        if any(not torch.equal(value, expected[key]) for key, value in snapshot_trainable(fresh).items()):
             problems.append("the restore did not reproduce this node's own tensors")
 
         if rank == 1:
@@ -628,7 +612,7 @@ def variant_run(request, tmp_path_factory):
         checkpoint=str(root / "out" / f"checkpoint-{SAVE_AT_STEP}"),
         at_save=at_save.tensors,
         losses=step_losses(trainer),
-        final=_trainable(trainer.model),
+        final=snapshot_trainable(trainer.model),
         prefix=backbone_prefix(trainer.model),
     )
 
@@ -672,7 +656,7 @@ def test_every_target_resumes_bit_equal_and_reproduces_the_run(variant_run, tmp_
     assert not unequal, f"adapters not restored bit-equal: {unequal[:3]}"
     resumed = step_losses(trainer)[-(TOTAL_STEPS - SAVE_AT_STEP) :]
     assert resumed == variant_run.losses[SAVE_AT_STEP:]
-    final = _trainable(trainer.model)
+    final = snapshot_trainable(trainer.model)
     assert all(torch.equal(final[key], value) for key, value in variant_run.final.items())
 
 
@@ -835,7 +819,7 @@ def test_a_save_over_a_marked_directory_leaves_no_stale_marker(run, tmp_path, mo
 
 
 def test_a_marked_checkpoint_without_its_adapter_is_refused_before_the_policy_loads(run, tmp_path):
-    checkpoint = _copy(run.checkpoint, tmp_path / "checkpoint-2")
+    checkpoint = _copy(run.checkpoint, tmp_path / f"checkpoint-{SAVE_AT_STEP}")
     os.remove(os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
 
     with pytest.raises(ValueError, match="holds no adapter file"):
@@ -865,7 +849,7 @@ def test_a_bf16_conversion_keeps_the_resume_state_and_resumes_like_its_source(ru
     assert os.path.isfile(os.path.join(out, "modules.json")), "the ST pipeline config was dropped"
     model = _lora_model(run.base, seed=2)
     _trainer(model, tmp_path / "resumed")._load_from_checkpoint(out)
-    assert all(torch.equal(value, run.at_save[key]) for key, value in _trainable(model).items())
+    assert all(torch.equal(value, run.at_save[key]) for key, value in snapshot_trainable(model).items())
 
 
 def test_a_new_base_built_from_the_checkpoint_carries_none_of_its_resume_state(run, tmp_path, monkeypatch):

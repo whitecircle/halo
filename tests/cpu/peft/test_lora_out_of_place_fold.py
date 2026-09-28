@@ -25,6 +25,7 @@ from torch import nn
 from src.models.structure import lora_fold_targets, lora_folded
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, validate_weight_sync_support
 from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.peft_helpers import adapter_param_items, randomize_adapters
 from tests.common.weight_sync import RecordingSender, as_pushed, local_parameters, merged_by_peft, moved_parameters
 
 _DIM = 16
@@ -130,10 +131,9 @@ def _lora_model(case: str, dtypes: tuple[torch.dtype, torch.dtype]) -> nn.Module
     if case in _SECOND_ADAPTER:
         model.add_adapter("second", LoraConfig(r=2, lora_alpha=4, **config))
         model.base_model.set_adapter(["default", "second"])
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if "lora_" in name:
-                param.data = (torch.randn_like(param, dtype=torch.float32) * 0.1).to(adapter_dtype)
+    for _, param in adapter_param_items(model):
+        param.data = param.data.to(adapter_dtype)
+    randomize_adapters(model, std=0.1)
     return model
 
 

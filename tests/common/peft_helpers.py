@@ -249,6 +249,22 @@ def is_lora_b_key(key: str) -> bool:
     return key.endswith((".lora_B", "_lora_B")) or ".lora_B." in key
 
 
+def randomize_adapters(
+    model: torch.nn.Module, *, std: float = 1.0, lora_b_only: bool = False, dtype: torch.dtype | None = None
+) -> None:
+    """Redraw ``model``'s adapter tensors (its ``lora_B`` halves alone with ``lora_b_only``) from
+    ``N(0, std²)`` in place, as training would move them.
+
+    ``lora_B`` starts at zero, so an adapter left at its init folds to its base and a fold or merge
+    test could not tell the fold from a no-op. The draw lands on ``dtype``'s grid (default: each
+    tensor's own), for a test that compares the adapters across a cast to that dtype.
+    """
+    with torch.no_grad():
+        for name, param in adapter_param_items(model):
+            if not lora_b_only or is_lora_b_key(name):
+                param.copy_(torch.empty_like(param, dtype=dtype).normal_(std=std))
+
+
 def _is_trainable_adapter(name: str) -> bool:
     """A param that LoRA legitimately trains: a ``lora_*`` adapter, or a ``modules_to_save`` copy
     (e.g. the randomly-initialised SEQ_CLS ``score``/``classifier`` head, which must train)."""
