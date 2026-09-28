@@ -18,9 +18,7 @@ Requirements:
       (override via HALO_TEST_GEMMA4_MODEL env var)
 """
 
-import os
 import random
-import sys
 
 import torch
 from PIL import Image
@@ -31,7 +29,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from tests.common.distributed import ensure_model_downloaded
-from tests.common.harness import gpu_test_main
+from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.models import GEMMA4_26B_A4B_PATCHED
 from tests.common.utils import gpu_mem_gb, log
 
@@ -94,11 +92,7 @@ def run(ctx):
             "content": [{"type": "text", "text": "It's a synthetic test pattern of random colors."}],
         },
     ]
-    try:
-        templated = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    except Exception as e:
-        log(f"WARN: apply_chat_template failed ({e}); falling back to manual prompt")
-        templated = "<image>Describe this image in one sentence. It's a synthetic test pattern."
+    templated = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
 
     # Processor handles image tokenisation + insertion of <image> placeholders.
     inputs = processor(
@@ -163,9 +157,5 @@ def run(ctx):
 
 
 if __name__ == "__main__":
-    # A local-checkpoint test declines to run before the harness starts: the launcher reports a
-    # ``SKIP:`` line with exit 0 and no result line as a skip.
-    if not os.path.isdir(MODEL_NAME):
-        log(f"SKIP: local model path missing: {MODEL_NAME} (set HALO_TEST_GEMMA4_MODEL to a present checkpoint)")
-        sys.exit(0)
+    skip_unless_local_checkpoint(MODEL_NAME, "HALO_TEST_GEMMA4_MODEL")
     run()

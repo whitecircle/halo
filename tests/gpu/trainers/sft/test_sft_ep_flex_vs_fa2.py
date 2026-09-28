@@ -2,10 +2,11 @@
 """
 SFT EP=2 test comparing flex_attention vs flash_attention_2 on GptOss-20B.
 
-Smoke test, one attention implementation per launch: training with EP=2 completes every step with
-finite losses and grad norms, and the sink reset takes the shape the backend requires (dropped under
-FA2 with --reset_sinks, a live parameter otherwise) and keeps it through training. Whether the sinks
-moved is logged, not checked, and no loss is compared across the two modes or against a reference.
+Smoke test, one attention implementation per launch: the experts wrap and split EP-way, training with
+EP=2 completes every step with finite losses and grad norms, and the sink reset takes the shape the
+backend requires (dropped under FA2 with --reset_sinks, a live parameter otherwise) and keeps it
+through training. Whether the sinks moved is logged, not checked, and no loss is compared across the
+two modes or against a reference.
 
 Run each mode separately (DeepEP buffer cleanup requires separate processes):
 
@@ -22,7 +23,6 @@ Requirements:
 """
 
 import argparse
-import math
 
 import torch
 from transformers import AutoTokenizer
@@ -35,7 +35,8 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log, max_or_nan, step_losses
+from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.utils import log, max_or_nan, training_run_checks
 
 # Configuration
 
@@ -190,21 +191,11 @@ def run(ctx):
         parallelism_config=parallelism_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
+    checks = parallel_shape_checks(model, parallelism_config)
 
-    assert trainer.is_ep_mode, "Trainer should be in EP mode"
     log(f"\n--- Training ({NUM_TRAIN_STEPS} steps, {attn_impl}) ---")
     train_result = trainer.train()
-
-    # Collect metrics
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    losses = step_losses(trainer)
-    grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
-
-    log("\n--- Metrics ---")
-    log(f"Final loss: {training_loss:.6f}")
-    log(f"Step losses: {[f'{l:.4f}' for l in losses]}")
-    log(f"Grad norms: {[f'{g:.4f}' for g in grad_norms]}")
+    checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
 
     # Check sinks AFTER training
     log("\n--- Sink state AFTER training ---")
@@ -235,20 +226,6 @@ def run(ctx):
     else:
         log("  -> Sinks NOT updated (reset to dtype.min = inactive, gradient is zero)")
 
-    # Validation checks
-    log("\n--- Checks ---")
-    checks = {}
-
-    checks["training_completed"] = len(losses) == NUM_TRAIN_STEPS
-    log(f"Training completed: {'PASS' if checks['training_completed'] else 'FAIL'}")
-
-    loss_finite = all(math.isfinite(l) for l in losses + [training_loss])
-    checks["loss_finite"] = loss_finite
-    log(f"Loss finite: {'PASS' if loss_finite else 'FAIL'}")
-
-    checks["ep_mode"] = trainer.is_ep_mode
-    log(f"EP mode active: {'PASS' if checks['ep_mode'] else 'FAIL'}")
-
     # The sink reset is backend-specific: flash_attention_2 drops the tensor outright (its s_aux
     # path rejects one on Blackwell), every other backend keeps a dtype.min-filled parameter.
     # Pinning which shape arrived is what makes the delta comparison above mean anything.
@@ -263,15 +240,6 @@ def run(ctx):
         f"({dropped_sink_layers}/{total_sink_layers} dropped): "
         f"{'PASS' if checks['sink_reset_shape_matches_backend'] else 'FAIL'}"
     )
-
-    if grad_norms:
-        grad_finite = all(math.isfinite(g) for g in grad_norms)
-        checks["grad_finite"] = grad_finite
-        log(f"Grad norms finite: {'PASS' if grad_finite else 'FAIL'}")
-
-        grad_reasonable = all(g < 1e10 for g in grad_norms)
-        checks["grad_reasonable"] = grad_reasonable
-        log(f"Grad norms reasonable (<1e10): {'PASS' if grad_reasonable else 'FAIL'}")
 
     return {"checks": checks}
 

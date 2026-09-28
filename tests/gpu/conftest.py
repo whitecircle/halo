@@ -22,9 +22,10 @@ It then classifies:
 Preferred over ``torchrun -m pytest`` (N-rank double collection, racing JUnit, duplicated
 fixtures): one OS process owns the rank group, one node owns the verdict.
 
-Only the two launcher entry points are pytest modules. Every other ``test_*.py`` under
-``tests/gpu/`` is a torchrun script pytest must never import: a collection from the repo root
-(``pytest -m cpu``) walks this tree, and one script acting at import takes the whole session down.
+Only the launcher entry points (:data:`tests.gpu.manifest.LAUNCHER_ENTRYPOINTS`) are pytest
+modules. Every other ``test_*.py`` under ``tests/gpu/`` is a torchrun script pytest must never
+import: a collection from the repo root (``pytest -m cpu``) walks this tree, and one script acting at
+import takes the whole session down.
 """
 
 import contextlib
@@ -44,7 +45,15 @@ import pytest
 
 from tests.common.ports import free_port
 from tests.common.reporting import parse_result
-from tests.gpu.manifest import MANIFEST, TestSpec, script_path, stale_entries, unregistered_scripts
+from tests.gpu.manifest import (
+    GPU_DIR,
+    LAUNCHER_ENTRYPOINTS,
+    MANIFEST,
+    TestSpec,
+    script_path,
+    stale_entries,
+    unregistered_scripts,
+)
 
 _TRANSIENT = ("OSError", "Timeout", "HTTPError", "Connection", "NCCL", "ECONNRESET")
 _OOM = ("OutOfMemoryError", "CUDA out of memory", "CUDA error: out of memory")
@@ -89,15 +98,14 @@ _REQUIRE_SERVER_VAR = "HALO_TEST_REQUIRE_SERVER"
 _AF_UNIX_MAX = 108
 _SOCKET_SUFFIX_BUDGET = 40
 
-_GPU_DIR = Path(__file__).parent
-LAUNCHER_ENTRYPOINTS = frozenset({_GPU_DIR / "test_suite.py", _GPU_DIR / "test_launcher_contract.py"})
+_ENTRYPOINT_PATHS = frozenset(script_path(rel) for rel in LAUNCHER_ENTRYPOINTS)
 
 
 def pytest_ignore_collect(collection_path: Path, config) -> bool | None:
     """Keep pytest out of the torchrun scripts: only the launcher entry points are collected here."""
-    if collection_path.is_dir() and collection_path != _GPU_DIR:
+    if collection_path.is_dir() and collection_path != GPU_DIR:
         return True
-    if collection_path.suffix == ".py" and collection_path not in LAUNCHER_ENTRYPOINTS:
+    if collection_path.suffix == ".py" and collection_path not in _ENTRYPOINT_PATHS:
         return True
     return None
 

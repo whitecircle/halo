@@ -179,8 +179,8 @@ manifest.
     `gpu_test_main(exact_world_size=N)`.
 
 - **Run GPU tests through pytest**, not by hand: `make test-gpu-core`, or a narrower marker
-  expression over the two entrypoints (`pytest -m "gpu and ep" tests/gpu/test_suite.py
-  tests/gpu/test_launcher_contract.py`). Those two are the only modules pytest collects under
+  expression over the directory (`pytest -m "gpu and ep" tests/gpu`). The launcher entry points
+  (`LAUNCHER_ENTRYPOINTS` in `tests/gpu/manifest.py`) are the only modules pytest collects under
   `tests/gpu/`: `tests/gpu/conftest.py` ignores every manifest script, so no collection (a
   `pytest -m cpu` from the repo root included) imports a torchrun program.
 
@@ -277,17 +277,15 @@ entry and the script name them, and the non-obvious ones are:
 **Env knob or `args_matrix` row?** `nproc`, `markers`, `timeout` and the tier are per-`TestSpec`, not
 per-row, so every row of a matrix runs at the same size, under the same marker set, in the same tier.
 
-A leg that only changes *which phase runs* (same model, same axis, same cost) becomes a CLI flag
-with one row per leg, so each gets its own pytest node and verdict (`--mode` on
-`trainers/grpo/test_online_grpo_vllm_e2e.py`, `--mode` on `trainers/sft/test_sft_qwen3_dense.py`).
+A leg that keeps the model, the GPU count and the cost becomes a CLI flag with one row per leg, so
+each gets its own pytest node and verdict (`--mode` on `trainers/grpo/test_online_grpo_vllm_e2e.py`;
+one `--mode` per parallel shape on `trainers/sft/test_sft_qwen3_dense.py` and
+`trainers/sft/test_sft_gptoss_modes.py`). Such an entry's markers are the union over its rows, so
+`-m "gpu and cp"` also selects its non-CP rows.
 
-A leg that changes the model family, the parallelism axis, or the runtime stays an env override:
-registering it as a row would file an EP-on-20B run under the entry's `tp`/dense markers and its
+A leg that changes the model family, the GPU count or the runtime stays an env override:
+registering it as a row would file an EP-on-20B run under a dense entry's markers and its
 neighbor's timeout.
-
-That is also why the twelve `gpt-oss` SFT scripts under `trainers/sft/` (`test_sft_ep*`,
-`test_sft_oss20b_*`) stay separate entries rather than collapsing into one matrix: `-m "gpu and cp"`
-must select their two CP legs and nothing else.
 
 `core` is the pre-merge gate, and small-and-fast is its *intent*: ≤2 GPUs, tiny model. Size the host
 from the manifest, not from that intent. Over half of `tests/gpu/manifest.py` carries `core`.
@@ -300,9 +298,9 @@ run to tens of hours. This page owns tier composition; the manifest is the only 
 Where a big-checkpoint entry stays `core`, it is because it is a *correctness gate* — a comparison
 against an independent reference that catches a silently wrong result, like
 `parallelism/ep/test_ep_correctness.py` (gpt-oss ep2 vs the dense reference). Smoke runs on the same
-checkpoint are `full`: `trainers/sft/test_sft_ep.py`, `trainers/sft/test_sft_oss20b_*.py` and
-`trainers/lora/test_lora_mixed_merged_save.py` all assert only that training completed and stayed
-finite, which the gate already covers.
+checkpoint are `full`: `trainers/sft/test_sft_gptoss_modes.py`, `trainers/sft/test_sft_oss20b_default.py`
+and `trainers/lora/test_lora_mixed_merged_save.py` all assert only that training completed on the
+requested shape and stayed finite, which the gate already covers.
 
 Run `make test-gpu-core` deliberately, not as a quick check, and mark a new heavy or many-GPU test
 `full`. The tier measures about 4 h 15 m on 8×B300, and `gpu-tests.yml` budgets 6 h for the whole

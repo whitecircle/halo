@@ -36,7 +36,7 @@ from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_COHERE2_MOE_CONFIG
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, training_run_checks
 
 SEED = 42
 NUM_TRAIN_STEPS = 3
@@ -58,7 +58,6 @@ def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     device = ctx.device
-    torch.cuda.set_device(device)
 
     ensure_model_downloaded(QWEN3_0_6B, ctx.rank)  # tokenizer only
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
@@ -120,12 +119,10 @@ def run(ctx):
         processing_class=tokenizer,
         parallelism_config=pc,
     )
+    ctx.on_teardown(trainer.cleanup_ep)
     result = trainer.train()
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
-    log(f"train losses: {losses}")
     metrics["final_train_loss"] = result.training_loss
-    checks["trained_all_steps"] = result.global_step == NUM_TRAIN_STEPS
-    checks["train_losses_finite"] = all(torch.isfinite(torch.tensor(losses)).tolist()) and len(losses) > 0
+    checks |= training_run_checks(result, trainer, NUM_TRAIN_STEPS)
 
     ids, labels = random_token_batch(vocab_size, batch=2, seq=64, device=device, seed=SEED + 7)
     ep_loss = fixed_batch_loss(model, ids, labels)
@@ -154,11 +151,10 @@ def run(ctx):
 
     del reloaded
     cleanup_memory()
-    ctx.on_teardown(lambda: trainer.cleanup_ep() if hasattr(trainer, "cleanup_ep") else None)
     return {"checks": checks, "metrics": metrics}
 
 
-main = gpu_test_main(min_world_size=2, exact_world_size=2, prefix="sft_cohere2_moe")(run)
+main = gpu_test_main(exact_world_size=2, prefix="sft_cohere2_moe")(run)
 
 if __name__ == "__main__":
     main()

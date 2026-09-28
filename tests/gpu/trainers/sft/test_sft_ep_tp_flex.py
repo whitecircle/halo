@@ -8,7 +8,7 @@ logged, not checked, and no loss is compared against a reference.
 
 Checks:
 1. Attention sinks are sharded across TP ranks (64 -> 32 per rank) and not all zeros
-2. EP layers are present and the trainer is in EP and TP mode
+2. On the model: the experts wrapped and split EP-way, the attention parameters TP-sharded
 3. Training completes every step with finite losses and grad norms
 
 Model: unsloth/gpt-oss-20b-BF16 (MoE, 32 experts, 64 attention heads)
@@ -27,10 +27,10 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
-from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log, step_losses
+from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.utils import log, training_run_checks
 
 # Configuration
 
@@ -134,11 +134,6 @@ def run(ctx):
         checks["sinks_sharded"] = False
         checks["sinks_nonzero"] = False
 
-    # Verify EP layers exist
-    wrapped = ep_layers(model)
-    checks["ep_layers"] = len(wrapped) > 0
-    log(f"  EP layers found: {len(wrapped)} {'PASS' if wrapped else 'FAIL'}")
-
     # ── Training ───────────────────────────────────────────────────
     sft_config = SFTConfig(
         output_dir=ctx.output_dir,
@@ -170,46 +165,11 @@ def run(ctx):
         parallelism_config=parallelism_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
-
-    assert trainer.is_ep_mode, "Trainer should be in EP mode"
-    assert trainer.is_tp_mode, "Trainer should be in TP mode"
-    log("Confirmed: EP mode + TP mode active")
+    checks |= parallel_shape_checks(model, parallelism_config)
 
     log(f"\n--- Training ({NUM_TRAIN_STEPS} steps with FlexAttention) ---")
     train_result = trainer.train()
-
-    # ── Collect metrics ────────────────────────────────────────────
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    losses = step_losses(trainer)
-    grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
-
-    log("\n--- Metrics ---")
-    log(f"Final loss: {training_loss:.6f}")
-    log(f"Step losses: {[f'{l:.4f}' for l in losses]}")
-    if grad_norms:
-        log(f"Grad norms: {[f'{g:.2f}' for g in grad_norms]}")
-
-    # ── Validation ─────────────────────────────────────────────────
-    log("\n--- Checks ---")
-
-    checks["training_completed"] = len(losses) == NUM_TRAIN_STEPS
-    log(f"Training completed: {'PASS' if checks['training_completed'] else 'FAIL'}")
-
-    loss_finite = all(
-        not (torch.isnan(torch.tensor(l)) or torch.isinf(torch.tensor(l))) for l in losses + [training_loss]
-    )
-    checks["loss_finite"] = loss_finite
-    log(f"Loss finite: {'PASS' if loss_finite else 'FAIL'}")
-
-    checks["ep_mode"] = trainer.is_ep_mode
-    checks["tp_mode"] = trainer.is_tp_mode
-
-    if grad_norms:
-        grad_ok = all(not (torch.isnan(torch.tensor(g)) or torch.isinf(torch.tensor(g))) for g in grad_norms)
-        checks["grad_finite"] = grad_ok
-        log(f"Grad norms finite: {'PASS' if grad_ok else 'FAIL'}")
-
+    checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
     return {"checks": checks}
 
 

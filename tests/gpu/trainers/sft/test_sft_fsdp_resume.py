@@ -11,8 +11,9 @@ Test plan:
     • optimizer_meta.pt present with correct num_ranks
     • scheduler.pt, rng_state_*.pth, trainer_state.json, model weights present
   Phase 2 — Resume from checkpoint, continue to TOTAL_STEPS:
-    • global_step == TOTAL_STEPS after resume
-    • All resumed step losses are finite
+    • global_step == TOTAL_STEPS after resume, every resumed step loss finite
+    • at the first resumed step: the trained weights (fixed-batch loss), Adam's moments bit-exact
+      against the pre-save shard view, and the LR scheduler at the saved step
 
 Model: Qwen/Qwen3-0.6B  |  GPUs: 2  |  Mode: FSDP2 (standard data parallelism)
 
@@ -21,29 +22,28 @@ Run:
         tests/gpu/trainers/sft/test_sft_fsdp_resume.py
 """
 
-import math
 import os
 import shutil
 
 import torch
-import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
-from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss, fixed_text_batch
+from tests.common.checkpoint_io import (
+    ResumeCapture,
+    fixed_batch_loss,
+    fixed_text_batch,
+    resume_checkpoint_checks,
+    resume_continuity_checks,
+)
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import (
-    assert_optimizer_state_bit_exact,
-    cleanup_memory,
-    local_optimizer_state,
-    log,
-    step_losses,
-)
+from tests.common.tolerances import TOL
+from tests.common.utils import cleanup_memory, local_optimizer_state, log, step_losses, training_run_checks
 
 # Configuration
 
@@ -57,11 +57,6 @@ NUM_TRAIN_SAMPLES = 32
 NUM_EVAL_SAMPLES = 8
 SEED = 42
 
-# Weight round-trip tolerance: a correct resume reloads the trained weights, so the
-# pre-save and post-resume forward loss on a FIXED batch must match to bf16 round-trip
-# noise. A resume that leaves the model at fresh init (or corrupts the gather) shifts the
-# loss by >>1, so this is comfortably discriminating.
-LOSS_TOL = 1e-2
 # The sequence the fixed-batch loss is scored on before the save and after the resume.
 FIXED_TEXT = (
     "User: What is 17 plus 25?\nAssistant: The answer is 42. "
@@ -69,73 +64,31 @@ FIXED_TEXT = (
 )
 
 
-# Checkpoint file verification
-
-
-def verify_optimizer_checkpoint(checkpoint_dir: str, world_size: int) -> tuple[bool, str]:
-    """Verify optimizer state and supporting files exist in checkpoint_dir.
-
-    FSDP2 mode (world_size > 1): checks per-rank optimizer_shard_XXXXX.pt + optimizer_meta.pt.
-    Single GPU (world_size == 1): FSDP2 is skipped, checks standard optimizer.pt instead.
-    """
-    checks = {}
-    fsdp2_mode = world_size > 1
-    lines = [f"  Checkpoint: {checkpoint_dir}"]
-    lines.append(f"  Mode: {'FSDP2 sharded' if fsdp2_mode else 'single-GPU standard'}")
-
-    if not os.path.isdir(checkpoint_dir):
-        return False, f"  Checkpoint directory not found: {checkpoint_dir}"
-
-    files = set(os.listdir(checkpoint_dir))
-    lines.append(f"  Files: {sorted(files)}")
-
-    if fsdp2_mode:
-        # FSDP2: per-rank optimizer shards + meta
-        for rank_idx in range(world_size):
-            shard_name = f"optimizer_shard_{rank_idx:05d}.pt"
-            checks[shard_name] = shard_name in files
-
-        checks["optimizer_meta.pt"] = "optimizer_meta.pt" in files
-        if checks["optimizer_meta.pt"]:
-            meta = torch.load(
-                os.path.join(checkpoint_dir, "optimizer_meta.pt"),
-                map_location="cpu",
-                weights_only=False,
-            )
-            saved_ranks = meta.get("num_ranks", -1)
-            checks["meta_num_ranks_correct"] = saved_ranks == world_size
-            lines.append(f"  optimizer_meta.pt: num_ranks={saved_ranks} (expected {world_size})")
-
-        # rng states — one per rank (multi-GPU naming: rng_state_0.pth, rng_state_1.pth, ...)
-        for rank_idx in range(world_size):
-            rng_name = f"rng_state_{rank_idx}.pth"
-            checks[rng_name] = rng_name in files
-    else:
-        # Single GPU: standard optimizer.pt + rng_state.pth (no rank suffix)
-        checks["optimizer.pt"] = "optimizer.pt" in files
-        checks["rng_state.pth"] = "rng_state.pth" in files
-
-    # scheduler and trainer state — present in all modes
-    checks["scheduler.pt"] = "scheduler.pt" in files
-    checks["trainer_state.json"] = "trainer_state.json" in files
-
-    # model weights
-    has_safetensors = any(f.endswith(".safetensors") for f in files)
-    has_pytorch = "pytorch_model.bin" in files or any(
-        f.startswith("pytorch_model") and f.endswith(".bin") for f in files
+def _load_model():
+    return AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
     )
-    checks["model_weights"] = has_safetensors or has_pytorch
 
-    # log results
-    for name, ok in checks.items():
-        lines.append(f"    {'OK' if ok else 'MISSING':7s}  {name}")
 
-    failed = [k for k, v in checks.items() if not v]
-    passed = all(checks.values())
-    if failed:
-        lines.append(f"  MISSING files: {failed}")
-
-    return passed, "\n".join(lines)
+def _sft_config(output_dir: str, max_steps: int, **save_args) -> SFTConfig:
+    return SFTConfig(
+        output_dir=output_dir,
+        max_steps=max_steps,
+        per_device_train_batch_size=BATCH_SIZE,
+        learning_rate=LEARNING_RATE,
+        bf16=True,
+        gradient_checkpointing=True,
+        logging_steps=1,
+        report_to="none",
+        logging_nan_inf_filter=False,
+        max_length=MAX_SEQ_LENGTH,
+        dataloader_drop_last=True,
+        dataloader_num_workers=0,
+        **save_args,
+    )
 
 
 # Phase 1: Train + Save Checkpoint
@@ -148,7 +101,7 @@ def phase1_train_and_save(
     eval_dataset,
     output_dir: str,
 ) -> tuple[dict[str, bool], list[float], float, dict]:
-    """Train for SAVE_AT_STEP steps, verify checkpoint files on rank 0.
+    """Train for SAVE_AT_STEP steps and check the checkpoint's files (rank 0 reads, every rank agrees).
 
     Returns (checks, losses, L_pre, optimizer_state) where L_pre is the forward loss on
     a FIXED deterministic batch computed AFTER training but BEFORE save — the reference for
@@ -159,48 +112,18 @@ def phase1_train_and_save(
     log(f"  Phase 1: Train {SAVE_AT_STEP} steps + verify checkpoint (FSDP2)")
     log(f"{'=' * 60}")
 
-    log("  Loading model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation="sdpa",
-    )
-    log(f"  Model loaded. GPU mem: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-    config = SFTConfig(
-        output_dir=output_dir,
-        max_steps=SAVE_AT_STEP,
-        per_device_train_batch_size=BATCH_SIZE,
-        learning_rate=LEARNING_RATE,
-        bf16=True,
-        gradient_checkpointing=True,
-        logging_steps=1,
-        save_strategy="steps",
-        save_steps=SAVE_AT_STEP,
-        save_total_limit=1,
-        report_to="none",
-        logging_nan_inf_filter=False,
-        max_length=MAX_SEQ_LENGTH,
-        dataloader_drop_last=True,
-        dataloader_num_workers=0,
-    )
-
+    model = _load_model()
     trainer = DistributedSFTTrainer(
         model=model,
-        args=config,
+        args=_sft_config(output_dir, SAVE_AT_STEP, save_strategy="steps", save_steps=SAVE_AT_STEP, save_total_limit=1),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         parallelism_config=ParallelismConfig(),
     )
-
-    log(f"  Training for {SAVE_AT_STEP} steps...")
     train_result = trainer.train()
-    training_loss = train_result.training_loss
     losses = step_losses(trainer)
-    log(f"  Training loss: {training_loss:.6f}")
-    log(f"  Step losses:   {[f'{l:.4f}' for l in losses]}")
+    checks = training_run_checks(train_result, trainer, SAVE_AT_STEP)
 
     # Reference forward loss on a FIXED batch with the trained (== saved) weights.
     # The checkpoint was written during train() at step SAVE_AT_STEP, so these are
@@ -214,27 +137,10 @@ def phase1_train_and_save(
     optimizer_state = local_optimizer_state(trainer.model, trainer.optimizer)
     log(f"  Pre-save optimizer state: {len(optimizer_state['state'])} params with moments")
 
-    checks = {"train_loss_finite": math.isfinite(training_loss)}
-    if not checks["train_loss_finite"]:
-        log(f"  ERROR: Loss not finite: {training_loss}")
-    else:
-        checkpoint_dir = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-        ctx.barrier()
-
-        ckpt_ok = True
-        if ctx.rank == 0:
-            ckpt_ok, ckpt_detail = verify_optimizer_checkpoint(checkpoint_dir, ctx.world_size)
-            log("\n  Checkpoint verification:")
-            log(ckpt_detail)
-
-        # Broadcast verification result to all ranks
-        result_t = torch.tensor(
-            [1 if ckpt_ok else 0],
-            dtype=torch.int64,
-            device=torch.cuda.current_device(),
-        )
-        dist.broadcast(result_t, src=0)
-        checks["checkpoint_files_complete"] = result_t.item() == 1
+    ctx.barrier()
+    checkpoint_dir = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
+    file_checks = resume_checkpoint_checks(checkpoint_dir, ctx.world_size) if ctx.rank == 0 else {}
+    checks |= ctx.broadcast_checks(file_checks)
 
     del trainer, model
     cleanup_memory()
@@ -254,47 +160,17 @@ def phase2_resume_and_train(
     l_pre: float,
     optimizer_state_pre: dict,
 ) -> tuple[dict[str, bool], list[float]]:
-    """Resume from the checkpoint and train to TOTAL_STEPS.
-
-    Adds by-value continuity checks captured at on_train_begin (post-resume,
-    pre-step): weights restored (|L_post - L_pre| < LOSS_TOL), Adam 2nd moment
-    nonzero+finite (not reinitialised to zero), every moment bit-identical to the
-    pre-save snapshot, and the LR scheduler advanced to the saved step (not reset
-    to warmup-start)."""
+    """Resume from the checkpoint and train to TOTAL_STEPS, grading the state the resume restored at
+    its first step (:func:`~tests.common.checkpoint_io.resume_continuity_checks`)."""
     log(f"\n{'=' * 60}")
     log(f"  Phase 2: Resume from checkpoint-{SAVE_AT_STEP} -> step {TOTAL_STEPS}")
     log(f"{'=' * 60}")
 
     checkpoint_path = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-
-    log("  Loading fresh model for resume...")
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation="sdpa",
-    )
-    log(f"  Model loaded. GPU mem: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-    config = SFTConfig(
-        output_dir=output_dir,
-        max_steps=TOTAL_STEPS,
-        per_device_train_batch_size=BATCH_SIZE,
-        learning_rate=LEARNING_RATE,
-        bf16=True,
-        gradient_checkpointing=True,
-        logging_steps=1,
-        save_strategy="no",
-        report_to="none",
-        logging_nan_inf_filter=False,
-        max_length=MAX_SEQ_LENGTH,
-        dataloader_drop_last=True,
-        dataloader_num_workers=0,
-    )
-
+    model = _load_model()
     trainer = DistributedSFTTrainer(
         model=model,
-        args=config,
+        args=_sft_config(output_dir, TOTAL_STEPS, save_strategy="no"),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
@@ -308,76 +184,16 @@ def phase2_resume_and_train(
 
     log(f"  Resuming from: {checkpoint_path}")
     train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
-
-    training_loss = train_result.training_loss
     losses = step_losses(trainer)
-    global_step = trainer.state.global_step
 
-    log(f"  Training loss:  {training_loss:.6f}")
-    log(f"  Step losses:    {[f'{l:.4f}' for l in losses]}")
-    log(f"  Final step:     {global_step} (expected {TOTAL_STEPS})")
-
-    loss_ok = math.isfinite(training_loss)
-    steps_ok = global_step == TOTAL_STEPS
-    all_finite = all(math.isfinite(l) for l in losses) if losses else True
-
-    if not loss_ok:
-        log(f"  ERROR: Loss not finite: {training_loss}")
-    if not steps_ok:
-        log(f"  ERROR: Expected {TOTAL_STEPS} global steps, got {global_step}")
-    if not all_finite:
-        log(f"  ERROR: NaN/Inf in resumed step losses: {losses}")
-
-    checks = {
-        "resume_loss_finite": loss_ok,
-        "resume_reached_total_steps": steps_ok,
-        "resume_step_losses_finite": all_finite,
-    }
-
-    # ---- By-value resume continuity (post-resume, pre-step snapshot) ----
-    cap = resume_capture.capture
-    checks["resume_capture_fired"] = cap is not None
-    if cap is None:
-        log("  ERROR: resume-capture callback did not fire (on_train_begin missed)")
-    else:
-        l_post = cap["l_post"]
-        loss_delta = abs(l_post - l_pre)
-        # SAVE_AT_STEP scheduler steps occurred before the checkpoint; the LR scheduler
-        # is stepped once per optimizer step, so last_epoch must be == SAVE_AT_STEP, not 0.
-        sched_ok = cap["sched_last_epoch"] == SAVE_AT_STEP
-        weights_ok = math.isfinite(l_post) and loss_delta < LOSS_TOL
-        moments_ok = cap["moments_materialized"] and cap["moments_nonzero"] and cap["moments_finite"]
-
-        log(f"  L_pre={l_pre:.6f}  L_post={l_post:.6f}  |delta|={loss_delta:.6f} (tol {LOSS_TOL})")
-        log(
-            f"  optimizer exp_avg_sq materialized={cap['moments_materialized']} "
-            f"nonzero={cap['moments_nonzero']} finite={cap['moments_finite']}"
-        )
-        log(f"  lr_scheduler.last_epoch={cap['sched_last_epoch']} (expected {SAVE_AT_STEP})")
-
-        if not weights_ok:
-            log(f"  ERROR: weights not restored — |L_post - L_pre|={loss_delta:.6f} >= {LOSS_TOL}")
-        if not moments_ok:
-            log(
-                "  ERROR: optimizer 2nd moment (exp_avg_sq) absent/zero/non-finite after resume (Adam state not restored)"
-            )
-        if not sched_ok:
-            log(f"  ERROR: LR scheduler not restored — last_epoch={cap['sched_last_epoch']} (expected {SAVE_AT_STEP})")
-
-        # Nonzero+finite only says SOMETHING was restored; the shard must round-trip EXACTLY.
-        # A cast, a dropped param or a re-derived moment leaves the trajectory silently off.
-        try:
-            assert_optimizer_state_bit_exact(optimizer_state_pre, cap["optimizer_state"])
-            bit_exact = True
-        except AssertionError as e:
-            bit_exact = False
-            log(f"  ERROR: optimizer state not bit-exact after resume: {e}")
-        log(f"  optimizer state bit-exact vs pre-save shard view: {bit_exact}")
-
-        checks["resume_weights_restored"] = weights_ok
-        checks["resume_optimizer_moments_restored"] = moments_ok
-        checks["resume_optimizer_state_bit_exact"] = bit_exact
-        checks["resume_scheduler_restored"] = sched_ok
+    checks = {f"resume_{name}": ok for name, ok in training_run_checks(train_result, trainer, TOTAL_STEPS).items()}
+    checks |= resume_continuity_checks(
+        resume_capture.capture,
+        l_pre,
+        save_step=SAVE_AT_STEP,
+        loss_tol=TOL.resume_fixed_batch_loss_abs,
+        optimizer_state=optimizer_state_pre,
+    )
 
     del trainer, model
     cleanup_memory()
@@ -401,38 +217,25 @@ def run(ctx) -> dict:
     if ctx.rank == 0:
         ctx.on_teardown(lambda: shutil.rmtree(output_dir, ignore_errors=True))
 
-    log("\n[Setup] Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    log(f"  Tokenizer loaded: vocab_size={tokenizer.vocab_size}")
-
-    log("[Setup] Creating synthetic datasets...")
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1)
-    log(f"  Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
 
     checks, phase1_losses, l_pre, optimizer_state_pre = phase1_train_and_save(
-        ctx,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        output_dir,
+        ctx, tokenizer, train_dataset, eval_dataset, output_dir
     )
+    # Every phase-1 check is rank-uniform (the logged losses are world means, the file checks are
+    # rank 0's broadcast), so every rank takes the same branch.
     if not all(checks.values()):
         log("\n  Phase 1 FAILED — skipping Phase 2")
         return {"checks": checks}
 
     phase2_checks, phase2_losses = phase2_resume_and_train(
-        ctx,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        output_dir,
-        l_pre,
-        optimizer_state_pre,
+        ctx, tokenizer, train_dataset, eval_dataset, output_dir, l_pre, optimizer_state_pre
     )
-    checks.update(phase2_checks)
+    checks |= phase2_checks
 
     log(f"\n  Phase 1 losses: {[f'{l:.4f}' for l in phase1_losses]}")
     log(f"  Phase 2 losses: {[f'{l:.4f}' for l in phase2_losses]}")

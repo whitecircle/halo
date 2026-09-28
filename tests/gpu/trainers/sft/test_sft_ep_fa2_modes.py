@@ -48,6 +48,13 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
+from tests.common.peft_helpers import (
+    LORA_ALPHA,
+    LORA_R,
+    assert_adapters_moved,
+    assert_only_adapters_trainable,
+    snapshot_adapters,
+)
 from tests.common.utils import gpu_mem_gb, log, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
@@ -64,49 +71,6 @@ ATTN_IMPL = "flash_attention_2"
 
 # Expert projections are EP-sharded across ranks, so LoRA on them breaks grad sync.
 LORA_TARGET_MODULES = ["q_proj", "v_proj"]
-
-
-def _to_full_cpu(tensor):
-    """Materialize a (possibly FSDP2 DTensor-sharded) tensor to a plain CPU tensor.
-
-    LoRA params are snapshotted before FSDP2 wrapping (plain) but read back after training
-    (DTensor); ``torch.equal`` rejects a plain-vs-DTensor mix, so normalize both sides here.
-    ``full_tensor()`` is a collective — all ranks must call it.
-    """
-    if hasattr(tensor, "full_tensor"):
-        tensor = tensor.full_tensor()
-    return tensor.detach().cpu()
-
-
-def _validate_lora(model, lora_before):
-    """Validate LoRA-specific checks: weights updated, only LoRA trainable."""
-    checks = {}
-
-    non_lora_trainable = [
-        name for name, param in model.named_parameters() if param.requires_grad and "lora_" not in name
-    ]
-    only_lora = len(non_lora_trainable) == 0
-    checks["only_lora_trainable"] = only_lora
-    log(f"  Only LoRA params trainable: {'PASS' if only_lora else 'FAIL'}")
-    if non_lora_trainable:
-        log(f"    Non-LoRA trainable: {non_lora_trainable[:5]}")
-
-    lora_after = {
-        name: _to_full_cpu(param.data)
-        for name, param in model.named_parameters()
-        if "lora_" in name and param.requires_grad
-    }
-    updated_count = sum(
-        1 for name in lora_before if name in lora_after and not torch.equal(lora_before[name], lora_after[name])
-    )
-    lora_updated = updated_count > 0
-    checks["lora_updated"] = lora_updated
-    log(
-        f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} "
-        f"({updated_count}/{len(lora_before)} params changed)"
-    )
-
-    return checks
 
 
 def run_full_ft(parallelism_config, tokenizer, train_dataset, eval_dataset, output_dir):
@@ -176,10 +140,10 @@ def run_lora(parallelism_config, tokenizer, train_dataset, eval_dataset, output_
     )
     log(f"  GPU after load: {gpu_mem_gb():.1f}GB")
 
-    log(f"  Applying LoRA (r=8, alpha=16, targets={LORA_TARGET_MODULES})...")
+    log(f"  Applying LoRA (r={LORA_R}, alpha={LORA_ALPHA}, targets={LORA_TARGET_MODULES})...")
     lora_config = LoraConfig(
-        r=8,
-        lora_alpha=16,
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
         target_modules=LORA_TARGET_MODULES,
         task_type="CAUSAL_LM",
     )
@@ -189,11 +153,7 @@ def run_lora(parallelism_config, tokenizer, train_dataset, eval_dataset, output_
     total = sum(p.numel() for p in model.parameters())
     log(f"  Trainable: {trainable / 1e6:.2f}M ({100 * trainable / total:.2f}%)")
 
-    lora_before = {
-        name: _to_full_cpu(param.data)
-        for name, param in model.named_parameters()
-        if "lora_" in name and param.requires_grad
-    }
+    lora_before = snapshot_adapters(model, expert_lora=False)
 
     sft_config = SFTConfig(
         output_dir=os.path.join(output_dir, "lora_train"),
@@ -231,8 +191,12 @@ def run_lora(parallelism_config, tokenizer, train_dataset, eval_dataset, output_
     log("\n  --- Validation (LoRA) ---")
     checks = training_run_checks(train_result, trainer, MAX_STEPS)
     checks["ep_layers_wrapped"] = bool(ep_layers(model))
-    lora_checks = _validate_lora(model, lora_before)
-    checks.update(lora_checks)
+    for name, (ok, why) in {
+        "only_lora_trainable": assert_only_adapters_trainable(model),
+        "lora_updated": assert_adapters_moved(lora_before, snapshot_adapters(model, expert_lora=False)),
+    }.items():
+        checks[name] = ok
+        log(f"  {name}: {'PASS' if ok else 'FAIL'} ({why})")
 
     trainer.cleanup_ep()
     return checks, train_result.training_loss

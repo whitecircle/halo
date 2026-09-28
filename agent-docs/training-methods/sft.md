@@ -139,10 +139,10 @@ Smoke the config first: cut `max_length`, set `max_steps: 5`, launch on 2 GPUs. 
 
 ```bash
 pytest tests/cpu/config tests/cpu/data -m cpu    # config gates, collators, render knobs
-torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_ep.py
+torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_gptoss_modes.py --mode ep
 ```
 
-`tests/gpu/trainers/sft/` holds suites per mode (dense, EP, EP+CP, EP+TP, FSDP2 resume, VLM, sinks) and per model.
+`tests/gpu/trainers/sft/` holds suites per model with one `--mode` per parallel shape (dense, EP, EP+CP, EP+TP, ETP), plus FSDP2 resume, VLM and sinks; the MoE and dense mode suites share one body, `tests/common/sft_modes.py`.
 
 ## Related pages
 

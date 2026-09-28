@@ -109,15 +109,16 @@ seed-hf-cache: ## fetch the Hub configs and tokenizers the CPU tier reads into H
 	@test -n "$(strip $(HF_CACHE))" || { echo "HF_CACHE is empty: there is no cache to seed"; exit 1; }
 	$(DOCKER_RUN_CPU) bash -lc "HF_HUB_DISABLE_PROGRESS_BARS=1 python -m tests.common.hub_seed"
 
-# The two pytest modules under tests/gpu/: the manifest launcher (test_suite.py, one torchrun launch
-# per tests/gpu/manifest.py entry) and its contract tests.
-GPU_ENTRYPOINTS = tests/gpu/test_suite.py tests/gpu/test_launcher_contract.py
+# Passed whole: tests/gpu/conftest.py collects only the LAUNCHER_ENTRYPOINTS of tests/gpu/manifest.py,
+# the manifest launcher (test_suite.py, one torchrun launch per (script, args) row) and its contract
+# tests.
+GPU_TEST_DIR = tests/gpu
 
 test-gpu-core: ## pytest core GPU tier (pre-merge, GPU changes) via the manifest launcher
-	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and core' $(GPU_ENTRYPOINTS) $(PYTEST_ARGS)"
+	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and core' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
 test-gpu-full: ## pytest full GPU tier (heavy, many-GPU)
-	$(DOCKER_RUN) bash -lc "pytest -m gpu $(GPU_ENTRYPOINTS) $(PYTEST_ARGS)"
+	$(DOCKER_RUN) bash -lc "pytest -m gpu $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
 # GPUs the trainer may use — must exclude the server's (VLLM_CUDA_DEVICES in docker-compose.vllm.yml):
 # weight sync is an NCCL broadcast, and a rank cannot broadcast to itself.
@@ -138,7 +139,7 @@ test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAIN
 	  VLLM_USE_V2_MODEL_RUNNER=0 docker compose -f docker-compose.vllm.yml up -d vllm-server \
 	  (EFA=1: add -f docker-compose.vllm.efa.yml; both are required by the benchmarks: their per-effort \
 	  CoT budget draws a 400 without a reasoning parser, and another under Model Runner V2)"; exit 1; }
-	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_ENTRYPOINTS) $(PYTEST_ARGS)"
+	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
 test-gpu-sglang: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
@@ -147,7 +148,7 @@ test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside T
 	@curl -sf $(SGLANG_SERVER_URL)/health >/dev/null || { echo "No SGLang server at $(SGLANG_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d \
 	  (EFA=1: add -f docker-compose.sglang.efa.yml)"; exit 1; }
-	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and sglang_server and ($(SERVER_TIER))' $(GPU_ENTRYPOINTS) $(PYTEST_ARGS)"
+	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and sglang_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
 bench: ## run the EP/TP throughput benchmarks
 	$(DOCKER_RUN) bash -lc "./tests/gpu/profiling/run_ep_tp_benchmarks.sh --gpus=$(NPROC)"

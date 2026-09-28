@@ -56,7 +56,7 @@ from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, safetensors_state_dict
+from tests.common.utils import cleanup_memory, log, safetensors_state_dict, training_run_checks
 
 SEED = 42
 NUM_TRAIN_STEPS = 3
@@ -95,7 +95,6 @@ def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     device = ctx.device
-    torch.cuda.set_device(device)
 
     ensure_model_downloaded(QWEN3_0_6B, ctx.rank)  # tokenizer only
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
@@ -163,12 +162,10 @@ def run(ctx):
         parallelism_config=pc,
         callbacks=callbacks,
     )
+    ctx.on_teardown(trainer.cleanup_ep)
     result = trainer.train()
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
-    log(f"train losses: {losses}")
     metrics["final_train_loss"] = result.training_loss
-    checks["trained_all_steps"] = result.global_step == NUM_TRAIN_STEPS
-    checks["train_losses_finite"] = all(torch.isfinite(torch.tensor(losses)).tolist()) and len(losses) > 0
+    checks |= training_run_checks(result, trainer, NUM_TRAIN_STEPS)
 
     # ``auto`` resolves to ``bias_update`` on this family (no aux machinery, native exported slot),
     # so the wiring above must have adopted the slot on every EP layer and upcast it to fp32 — the
@@ -239,11 +236,10 @@ def run(ctx):
 
     del reloaded
     cleanup_memory()
-    ctx.on_teardown(lambda: trainer.cleanup_ep() if hasattr(trainer, "cleanup_ep") else None)
     return {"checks": checks, "metrics": metrics}
 
 
-main = gpu_test_main(min_world_size=2, exact_world_size=2, prefix="sft_step3p7")(run)
+main = gpu_test_main(exact_world_size=2, prefix="sft_step3p7")(run)
 
 if __name__ == "__main__":
     main()

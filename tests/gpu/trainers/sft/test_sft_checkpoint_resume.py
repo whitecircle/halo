@@ -13,12 +13,12 @@ in all supported parallelism modes on 2 GPUs:
 
 Test plan per mode:
   Phase 1 — Train for SAVE_AT_STEP steps with save_strategy="steps":
-    • Model weights saved (mode-appropriate gathering/remapping)
-    • trainer_state.json saved (global_step, epoch, etc.)
+    • every step finite, and the checkpoint holds the trainer state, the scheduler, the weights, one
+      optimizer shard and RNG state per rank and the fingerprint meta
   Phase 2 — Resume from checkpoint, continue to TOTAL_STEPS:
-    • global_step == TOTAL_STEPS after resume
-    • All resumed step losses are finite
-    • Training loss is finite
+    • global_step == TOTAL_STEPS after resume, every resumed step loss finite
+    • at the first resumed step: the trained weights (fixed-batch loss), Adam's moments and the LR
+      scheduler restored
 
 All sharded modes (fsdp/tp/cp/ep) persist per-rank optimizer shards
 (optimizer_shard_XXXXX.pt + optimizer_meta.pt) and restore full optimizer
@@ -28,17 +28,16 @@ load_distributed_model() (re-applying EP/CP transformations); their optimizer
 moments then restore from the shards keyed by param FQN.
 
 Run:
-    torchrun --nproc_per_node=2 \
+    torchrun --nproc_per_node=2 \\
         tests/gpu/trainers/sft/test_sft_checkpoint_resume.py --mode all
 """
 
 import argparse
-import math
 import os
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import torch
-import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
@@ -48,12 +47,18 @@ from src.distributed.runtime import barrier
 from src.env import env_flag, env_str
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import resolve_resume_weights_source
-from tests.common.checkpoint_io import ResumeCapture, fixed_batch_loss
+from tests.common.checkpoint_io import (
+    ResumeCapture,
+    fixed_batch_loss,
+    resume_checkpoint_checks,
+    resume_continuity_checks,
+)
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.tolerances import TOL
+from tests.common.utils import cleanup_memory, log, step_losses, training_run_checks
 
 # Overridable so the same harness can validate resume across model families.
 DEFAULT_MODEL = env_str("HALO_TEST_RESUME_MODEL", QWEN3_0_6B)
@@ -62,16 +67,32 @@ TOTAL_STEPS = 6
 SAVE_AT_STEP = 3
 BATCH_SIZE = 1
 LEARNING_RATE = 2e-5
-MAX_SEQ_LENGTH = 512
-MAX_SEQ_LENGTH_CP = 4096  # CP requires longer sequences (divisible by cp_size)
-MAX_SEQ_LENGTH_EP = 2048
 NUM_TRAIN_SAMPLES = 32
 NUM_EVAL_SAMPLES = 8
 SEED = 42
+# ZeRO-3 on the DP axis, default ZeRO-2. Only fsdp/cp honour it: ParallelismConfig rejects
+# TP+DP+FULL_SHARD (no DTensor all-gather strategy for the backward re-gather), and EP too.
+RESHARD = env_flag("HALO_TEST_RESUME_FSDP_RESHARD")
 
-# bf16 round-trip noise on a fixed-batch forward loss: a correct resume reloads the trained weights,
-# so pre-save and post-resume must match to this in every mode.
-LOSS_TOL = 1e-2
+
+@dataclass(frozen=True)
+class ResumeMode:
+    """One mode's ParallelismConfig kwargs, training sequence cap (CP needs one divisible by
+    cp_size), and bound on the fixed-batch loss across the resume, the resume noise of its forward."""
+
+    parallelism: dict
+    max_length: int
+    loss_tol: float
+    model: str = DEFAULT_MODEL
+
+
+MODES = {
+    "fsdp": ResumeMode({"fsdp_reshard_after_forward": RESHARD}, 512, TOL.resume_fixed_batch_loss_abs),
+    "cp": ResumeMode({"cp_size": 2, "fsdp_reshard_after_forward": RESHARD}, 4096, TOL.resume_fixed_batch_loss_abs),
+    "tp": ResumeMode({"tp_size": 2}, 512, TOL.resume_fixed_batch_loss_abs),
+    # DeepEP's combine reorders the expert sum, so the EP forward is not bitwise reproducible.
+    "ep": ResumeMode({"ep_size": 2}, 2048, TOL.resume_loss_abs, model=EP_MODEL),
+}
 
 
 def _fixed_batch(tokenizer, device, seq_len: int = 64):
@@ -97,359 +118,160 @@ def _fixed_batch(tokenizer, device, seq_len: int = 64):
     return ids, labels
 
 
-def model_for_mode(mode: str) -> str:
-    """Pick an appropriate model for the parallelism mode (EP needs MoE)."""
-    return EP_MODEL if mode == "ep" else DEFAULT_MODEL
+def load_model_for_mode(mode: str, parallelism_config: ParallelismConfig, model_path: str):
+    """Load the model for ``mode`` from ``model_path``.
 
-
-def max_seq_length_for_mode(mode: str) -> int:
-    if mode == "cp":
-        return MAX_SEQ_LENGTH_CP
-    if mode == "ep":
-        return MAX_SEQ_LENGTH_EP
-    return MAX_SEQ_LENGTH
-
-
-def verify_checkpoint(checkpoint_dir: str, mode: str, world_size: int) -> tuple[bool, str]:
-    """Verify checkpoint files exist."""
-    checks = {}
-    lines = [f"  Checkpoint: {checkpoint_dir}", f"  Mode: {mode}"]
-
-    if not os.path.isdir(checkpoint_dir):
-        return False, f"  Checkpoint directory not found: {checkpoint_dir}"
-
-    files = set(os.listdir(checkpoint_dir))
-    lines.append(f"  Files: {sorted(files)}")
-
-    checks["trainer_state.json"] = "trainer_state.json" in files
-
-    has_safetensors = any(f.endswith(".safetensors") for f in files)
-    has_pytorch = any(f.startswith("pytorch_model") and f.endswith(".bin") for f in files)
-    checks["model_weights"] = has_safetensors or has_pytorch
-
-    # Every sharded mode persists per-rank optimizer shards plus the fingerprint meta.
-    for rank_idx in range(world_size):
-        shard_name = f"optimizer_shard_{rank_idx:05d}.pt"
-        checks[shard_name] = shard_name in files
-    checks["optimizer_meta.pt"] = "optimizer_meta.pt" in files
-    checks["scheduler.pt"] = "scheduler.pt" in files
-
-    for name, ok in checks.items():
-        lines.append(f"    {'OK' if ok else 'MISSING':7s}  {name}")
-
-    failed = [k for k, v in checks.items() if not v]
-    if failed:
-        lines.append(f"  MISSING: {failed}")
-
-    return all(checks.values()), "\n".join(lines)
-
-
-def load_model_for_mode(mode: str, parallelism_config: ParallelismConfig, model_path: str | None = None):
-    """Load model appropriate for the parallelism mode.
-
-    ``model_path`` overrides the source weights. For EP/CP resume it must be the
-    checkpoint dir: the CheckpointLoader deliberately skips base-weight reload for
-    EP/CP (loader.py docstring — "saved HF-format weights are reloaded by
-    load_distributed_model, not here"), so the trained weights are restored ONLY by
-    loading the model from the checkpoint here. fsdp/tp instead reload weights via
-    the loader's set_model_state_dict path, so they load from base.
+    For EP/CP resume ``model_path`` must be the checkpoint dir: the CheckpointLoader deliberately skips
+    base-weight reload for EP/CP (loader.py docstring — "saved HF-format weights are reloaded by
+    load_distributed_model, not here"), so the trained weights are restored ONLY by loading the model
+    from the checkpoint here. fsdp/tp instead reload weights via the loader's set_model_state_dict
+    path, so they load from base.
     """
-    model_name = model_path or model_for_mode(mode)
     if mode == "fsdp":
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            attn_implementation="sdpa",
+        return AutoModelForCausalLM.from_pretrained(
+            model_path, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="sdpa"
         )
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        return model, tokenizer
-    else:
-        # CP/TP/EP need load_distributed_model to apply Ulysses, DTensor or DeepEP patching.
-        return load_distributed_model(
-            model_name_or_path=model_name,
-            parallelism_config=parallelism_config,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            use_liger_kernel=True,
-        )
+    # CP/TP/EP need load_distributed_model to apply Ulysses, DTensor or DeepEP patching.
+    model, _ = load_distributed_model(
+        model_name_or_path=model_path,
+        parallelism_config=parallelism_config,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        use_liger_kernel=True,
+    )
+    return model
+
+
+def _sft_config(output_dir: str, max_steps: int, max_length: int, **save_args) -> SFTConfig:
+    return SFTConfig(
+        output_dir=output_dir,
+        max_steps=max_steps,
+        per_device_train_batch_size=BATCH_SIZE,
+        learning_rate=LEARNING_RATE,
+        bf16=True,
+        gradient_checkpointing=True,
+        logging_steps=1,
+        report_to="none",
+        logging_nan_inf_filter=False,
+        max_length=max_length,
+        dataloader_drop_last=True,
+        dataloader_num_workers=0,
+        **save_args,
+    )
 
 
 def phase1_train_and_save(
-    rank: int,
-    world_size: int,
-    mode: str,
-    tokenizer,
-    train_dataset,
-    eval_dataset,
-    output_dir: str,
-    parallelism_config: ParallelismConfig,
-) -> tuple[bool, list[float], float]:
-    """Train for SAVE_AT_STEP steps, verify checkpoint on rank 0.
+    ctx, mode: str, tokenizer, datasets, output_dir: str, parallelism_config: ParallelismConfig
+) -> tuple[dict[str, bool], list[float], float]:
+    """Train for SAVE_AT_STEP steps and check the checkpoint's files (rank 0 reads, every rank agrees).
 
-    Returns (ok, losses, L_pre) — L_pre is the fixed-batch forward loss with the
+    Returns (checks, losses, L_pre) — L_pre is the fixed-batch forward loss with the
     trained (== saved) weights, the reference for the Phase 2 weight-continuity check.
     """
     log(f"\n  Phase 1: Train {SAVE_AT_STEP} steps + save checkpoint ({mode})")
-
-    model = None
-    trainer = None
-    try:
-        log("  Loading model...")
-        model, tok = load_model_for_mode(mode, parallelism_config)
-
-        max_len = max_seq_length_for_mode(mode)
-        config = SFTConfig(
-            output_dir=output_dir,
-            max_steps=SAVE_AT_STEP,
-            per_device_train_batch_size=BATCH_SIZE,
-            learning_rate=LEARNING_RATE,
-            bf16=True,
-            gradient_checkpointing=True,
-            logging_steps=1,
+    model = load_model_for_mode(mode, parallelism_config, MODES[mode].model)
+    trainer = DistributedSFTTrainer(
+        model=model,
+        args=_sft_config(
+            output_dir,
+            SAVE_AT_STEP,
+            MODES[mode].max_length,
             save_strategy="steps",
             save_steps=SAVE_AT_STEP,
             save_total_limit=1,
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_length=max_len,
-            dataloader_drop_last=True,
-            dataloader_num_workers=0,
-        )
+        ),
+        train_dataset=datasets[0],
+        eval_dataset=datasets[1],
+        processing_class=tokenizer,
+        parallelism_config=parallelism_config,
+    )
+    train_result = trainer.train()
+    losses = step_losses(trainer)
+    checks = training_run_checks(train_result, trainer, SAVE_AT_STEP)
 
-        trainer = DistributedSFTTrainer(
-            model=model,
-            args=config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
+    ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
+    l_pre = fixed_batch_loss(trainer.model, ids, labels)
+    log(f"  L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
 
-        log(f"  Training for {SAVE_AT_STEP} steps...")
-        train_result = trainer.train()
-        training_loss = train_result.training_loss
-        losses = step_losses(trainer)
-        log(f"  Training loss: {training_loss:.6f}")
-        log(f"  Step losses:   {[f'{l:.4f}' for l in losses]}")
+    barrier()
+    checkpoint_dir = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
+    checks |= ctx.broadcast_checks(resume_checkpoint_checks(checkpoint_dir, ctx.world_size) if ctx.rank == 0 else {})
 
-        ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-        l_pre = fixed_batch_loss(trainer.model, ids, labels)
-        log(f"  L_pre (fixed-batch forward loss, trained weights): {l_pre:.6f}")
-
-        if not math.isfinite(training_loss):
-            log(f"  ERROR: Loss not finite: {training_loss}")
-            return False, losses, l_pre
-
-        checkpoint_dir = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-        barrier()
-
-        if rank == 0:
-            ckpt_ok, ckpt_detail = verify_checkpoint(checkpoint_dir, mode, world_size)
-            log("\n  Checkpoint verification:")
-            log(ckpt_detail)
-        else:
-            ckpt_ok = True
-
-        result_t = torch.tensor(
-            [1 if ckpt_ok else 0],
-            dtype=torch.int64,
-            device=torch.cuda.current_device(),
-        )
-        dist.broadcast(result_t, src=0)
-        if result_t.item() == 0:
-            return False, losses, l_pre
-
-        return True, losses, l_pre
-
-    finally:
-        del trainer, model
-        cleanup_memory()
-        barrier()
+    del trainer, model
+    cleanup_memory()
+    barrier()
+    return checks, losses, l_pre
 
 
 def phase2_resume_and_train(
-    mode: str,
-    tokenizer,
-    train_dataset,
-    eval_dataset,
-    output_dir: str,
-    parallelism_config: ParallelismConfig,
-    l_pre: float,
-) -> tuple[bool, list[float]]:
-    """Resume from checkpoint and train to TOTAL_STEPS.
-
-    All modes: assert weights restored by value (|L_post - L_pre| < LOSS_TOL) at
-    on_train_begin (post-resume, pre-step), and assert the optimizer 2nd moment was
-    restored (materialized, nonzero, finite) — full optimizer continuity from the
-    per-rank shards, uniform across fsdp/tp/cp/ep.
-    """
+    mode: str, tokenizer, datasets, output_dir: str, parallelism_config: ParallelismConfig, l_pre: float
+) -> tuple[dict[str, bool], list[float]]:
+    """Resume from the checkpoint and train to TOTAL_STEPS, grading the state the resume restored at
+    its first step (:func:`~tests.common.checkpoint_io.resume_continuity_checks`)."""
     log(f"\n  Phase 2: Resume from checkpoint-{SAVE_AT_STEP} -> step {TOTAL_STEPS} ({mode})")
-
     checkpoint_path = os.path.join(output_dir, f"checkpoint-{SAVE_AT_STEP}")
-    model = None
-    trainer = None
-    try:
-        log("  Loading fresh model for resume...")
-        # Through the production helper, not a hardcoded path: EP/CP must get the checkpoint dir
-        # (the loader skips their base-weight reload), fsdp/tp base. Returning base for EP/CP loads
-        # untrained weights silently, which is what the by-value check below catches.
-        model_cfg = SimpleNamespace(model_name_or_path=model_for_mode(mode))
-        resume_model_path = resolve_resume_weights_source(checkpoint_path, model_cfg, parallelism_config)
-        model, tok = load_model_for_mode(mode, parallelism_config, model_path=resume_model_path)
+    # Through the production helper, not a hardcoded path: EP/CP must get the checkpoint dir (the
+    # loader skips their base-weight reload), fsdp/tp base. Returning base for EP/CP loads untrained
+    # weights silently, which is what the by-value check catches.
+    model_cfg = SimpleNamespace(model_name_or_path=MODES[mode].model)
+    resume_model_path = resolve_resume_weights_source(checkpoint_path, model_cfg, parallelism_config)
+    model = load_model_for_mode(mode, parallelism_config, resume_model_path)
+    trainer = DistributedSFTTrainer(
+        model=model,
+        args=_sft_config(output_dir, TOTAL_STEPS, MODES[mode].max_length, save_strategy="no"),
+        train_dataset=datasets[0],
+        eval_dataset=datasets[1],
+        processing_class=tokenizer,
+        parallelism_config=parallelism_config,
+    )
+    ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
+    resume_capture = ResumeCapture(trainer, ids, labels)
+    trainer.add_callback(resume_capture)
 
-        max_len = max_seq_length_for_mode(mode)
-        config = SFTConfig(
-            output_dir=output_dir,
-            max_steps=TOTAL_STEPS,
-            per_device_train_batch_size=BATCH_SIZE,
-            learning_rate=LEARNING_RATE,
-            bf16=True,
-            gradient_checkpointing=True,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_length=max_len,
-            dataloader_drop_last=True,
-            dataloader_num_workers=0,
-        )
+    log(f"  Resuming from: {checkpoint_path}")
+    train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
+    losses = step_losses(trainer)
+    checks = {f"resume_{name}": ok for name, ok in training_run_checks(train_result, trainer, TOTAL_STEPS).items()}
+    checks |= resume_continuity_checks(
+        resume_capture.capture, l_pre, save_step=SAVE_AT_STEP, loss_tol=MODES[mode].loss_tol
+    )
 
-        trainer = DistributedSFTTrainer(
-            model=model,
-            args=config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
-
-        ids, labels = _fixed_batch(tokenizer, torch.cuda.current_device())
-        resume_capture = ResumeCapture(trainer, ids, labels)
-        trainer.add_callback(resume_capture)
-
-        log(f"  Resuming from: {checkpoint_path}")
-        train_result = trainer.train(resume_from_checkpoint=checkpoint_path)
-
-        training_loss = train_result.training_loss
-        losses = step_losses(trainer)
-        global_step = trainer.state.global_step
-
-        log(f"  Training loss:  {training_loss:.6f}")
-        log(f"  Step losses:    {[f'{l:.4f}' for l in losses]}")
-        log(f"  Final step:     {global_step} (expected {TOTAL_STEPS})")
-
-        loss_ok = math.isfinite(training_loss)
-        steps_ok = global_step == TOTAL_STEPS
-        all_finite = all(math.isfinite(l) for l in losses) if losses else True
-
-        if not loss_ok:
-            log(f"  ERROR: Loss not finite: {training_loss}")
-        if not steps_ok:
-            log(f"  ERROR: Expected {TOTAL_STEPS} global steps, got {global_step}")
-        if not all_finite:
-            log(f"  ERROR: NaN/Inf in resumed step losses: {losses}")
-
-        cap = resume_capture.capture
-        if cap is None:
-            log("  ERROR: resume-capture callback did not fire (on_train_begin missed)")
-            return False, losses
-
-        l_post = cap["l_post"]
-        loss_delta = abs(l_post - l_pre)
-        # EP's forward is non-deterministic (DeepEP all-to-all reordering), so it gets the looser
-        # band — still far under the ~2+ gap an unrestored (untrained) weight set produces.
-        weight_tol = 0.5 if mode == "ep" else LOSS_TOL
-        weights_ok = math.isfinite(l_post) and loss_delta < weight_tol
-        log(f"  L_pre={l_pre:.6f}  L_post={l_post:.6f}  |delta|={loss_delta:.6f} (tol {weight_tol})")
-        if not weights_ok:
-            log(f"  ERROR: weights not restored — |L_post - L_pre|={loss_delta:.6f} >= {weight_tol}")
-
-        optim_ok = cap["moments_materialized"] and cap["moments_nonzero"] and cap["moments_finite"]
-        log(
-            f"  optimizer exp_avg_sq materialized={cap['moments_materialized']} "
-            f"nonzero={cap['moments_nonzero']} finite={cap['moments_finite']}"
-        )
-        if not optim_ok:
-            log(
-                "  ERROR: optimizer 2nd moment not restored (expected full continuity for "
-                f"{mode}); Adam state zero/non-finite/absent after resume"
-            )
-
-        ok = loss_ok and steps_ok and all_finite and weights_ok and optim_ok
-        return ok, losses
-
-    finally:
-        del trainer, model
-        cleanup_memory()
-        barrier()
+    del trainer, model
+    cleanup_memory()
+    barrier()
+    return checks, losses
 
 
-def run_mode(mode: str, rank: int, world_size: int) -> bool:
-    """Run checkpoint save + resume test for a single mode."""
+def run_mode(ctx, mode: str) -> dict[str, bool]:
+    """Checkpoint save + resume for one mode; its checks are keyed ``<mode>_<check>``."""
     log(f"\n{'=' * 60}")
     log(f"  Mode: {mode.upper()}")
     log(f"{'=' * 60}")
-
+    parallelism_config = ParallelismConfig(**MODES[mode].parallelism)
     # Rank 0 writes the checkpoint every rank reads back, so the dir must be identical world-wide.
     output_dir = shared_scratch_dir(f"sft_resume_{mode}")
-
-    # ZeRO-3 on the DP axis, default ZeRO-2. Only fsdp/cp honour it: ParallelismConfig rejects
-    # TP+DP+FULL_SHARD (no DTensor all-gather strategy for the backward re-gather), and EP too.
-    reshard = env_flag("HALO_TEST_RESUME_FSDP_RESHARD")
-    if mode == "fsdp":
-        parallelism_config = ParallelismConfig(fsdp_reshard_after_forward=reshard)
-    elif mode == "cp":
-        parallelism_config = ParallelismConfig(cp_size=2, fsdp_reshard_after_forward=reshard)
-    elif mode == "tp":
-        parallelism_config = ParallelismConfig(tp_size=2)  # TP+DP+FULL_SHARD config-rejected → ZeRO-2 only
-    elif mode == "ep":
-        parallelism_config = ParallelismConfig(ep_size=2)
-    else:
-        log(f"  Unknown mode: {mode}")
-        return False
-
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_for_mode(mode), trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(MODES[mode].model, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-
-        train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
-        eval_dataset = create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1)
-
-        phase1_ok, phase1_losses, l_pre = phase1_train_and_save(
-            rank,
-            world_size,
-            mode,
-            tokenizer,
-            train_dataset,
-            eval_dataset,
-            output_dir,
-            parallelism_config,
+        datasets = (
+            create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED),
+            create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1),
         )
-        if not phase1_ok:
-            log(f"  Phase 1 FAILED for {mode} — skipping Phase 2")
-            return False
-
-        phase2_ok, phase2_losses = phase2_resume_and_train(
-            mode,
-            tokenizer,
-            train_dataset,
-            eval_dataset,
-            output_dir,
-            parallelism_config,
-            l_pre,
+        checks, phase1_losses, l_pre = phase1_train_and_save(
+            ctx, mode, tokenizer, datasets, output_dir, parallelism_config
         )
-
-        if phase1_ok and phase2_ok:
-            log(f"  PASSED: {mode.upper()}")
+        # Rank-uniform: the logged losses are world means and the file checks rank 0's broadcast.
+        if all(checks.values()):
+            phase2_checks, phase2_losses = phase2_resume_and_train(
+                mode, tokenizer, datasets, output_dir, parallelism_config, l_pre
+            )
+            checks |= phase2_checks
             log(f"    Phase 1 losses: {[f'{l:.4f}' for l in phase1_losses]}")
             log(f"    Phase 2 losses: {[f'{l:.4f}' for l in phase2_losses]}")
         else:
-            log(f"  FAILED: {mode.upper()}")
-
-        return phase1_ok and phase2_ok
-
+            log(f"  Phase 1 FAILED for {mode} — skipping Phase 2")
+        return {f"{mode}_{name}": ok for name, ok in checks.items()}
     finally:
         cleanup_memory()
         cleanup_dirs(output_dir)
@@ -458,10 +280,9 @@ def run_mode(mode: str, rank: int, world_size: int) -> bool:
 
 def run(ctx) -> dict:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="all", choices=["fsdp", "cp", "tp", "ep", "all"])
-    args, _ = parser.parse_known_args()
-
-    modes = ["fsdp", "cp", "tp", "ep"] if args.mode == "all" else [args.mode]
+    parser.add_argument("--mode", default="all", choices=[*MODES, "all"])
+    mode = parser.parse_args().mode
+    modes = list(MODES) if mode == "all" else [mode]
 
     log(f"\n{'#' * 70}")
     log("  SFT Checkpoint Save + Resume Test")
@@ -471,17 +292,9 @@ def run(ctx) -> dict:
     log(f"  Plan: Train {SAVE_AT_STEP} steps -> Save -> Resume -> Train to {TOTAL_STEPS}")
     log(f"{'#' * 70}")
 
-    # One check per mode — exactly the per-mode verdict the script summarised.
     checks: dict[str, bool] = {}
     for mode in modes:
-        checks[mode] = run_mode(mode, ctx.rank, ctx.world_size)
-
-    log(f"\n{'#' * 70}")
-    log("  Results:")
-    for mode, passed in checks.items():
-        log(f"    {mode.upper():6s}: {'PASS' if passed else 'FAIL'}")
-    log(f"{'#' * 70}")
-
+        checks |= run_mode(ctx, mode)
     return {"checks": checks}
 
 

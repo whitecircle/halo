@@ -15,18 +15,15 @@ Designed for 2x B300 (288 GB HBM each). FSDP shards the ~17 GB of bf16
 weights ~2× → 8.4 GB / rank for params; with adamw fp32 master + state
 and bf16 activations the total stays well below 60 GB / rank.
 
-Run (2 GPUs):
+Run (2 GPUs; ``$D`` a large mounted volume for the HF cache):
     docker run --rm --gpus '"device=0,1"' --ipc=host --ulimit memlock=-1 \\
         --ulimit stack=67108864 \\
-        -v $(pwd):/workspace \\
-        -v /root/.cache/huggingface:/root/.cache/huggingface \\
-        -w /workspace -e HF_HOME=/root/.cache/huggingface \\
+        -v $(pwd):/workspace -v "$D:$D" \\
+        -w /workspace -e HF_HOME="$D/hf" \\
         halo:blackwell \\
         torchrun --nproc_per_node=2 \\
             tests/gpu/trainers/sft/test_zaya_fsdp.py
 """
-
-import math
 
 import torch
 from trl import SFTConfig
@@ -38,7 +35,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, training_run_checks
 
 MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_FSDP_STEPS", 4)
@@ -116,18 +113,8 @@ def run(ctx):
 
     log(f"\n[4/4] Training {MAX_STEPS} steps...")
     result = trainer.train()
-    losses = step_losses(trainer)
-    log(f"  ✓ Final loss: {result.training_loss:.4f}")
-    log(f"  ✓ Per-step losses: {[f'{l:.4f}' for l in losses]}")
     log(f"  ✓ HBM peak: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
-
-    return {
-        "checks": {
-            "train_loss_finite": math.isfinite(result.training_loss),
-            "step_losses_finite": all(math.isfinite(x) for x in losses),
-            "logged_every_step": len(losses) == MAX_STEPS,
-        }
-    }
+    return {"checks": training_run_checks(result, trainer, MAX_STEPS)}
 
 
 if __name__ == "__main__":

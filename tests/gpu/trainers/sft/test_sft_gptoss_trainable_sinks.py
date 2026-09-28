@@ -36,7 +36,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 MODE_CONFIGS = {"fsdp": {}, "tp": {"tp_size": 2}, "ep": {"ep_size": 2}}
@@ -140,11 +140,9 @@ def run(ctx) -> dict:
     probe = SinkGradProbe(trainer.model)
     trainer.add_callback(probe)
 
-    trainer.train()
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
-    grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
-    checks["loss_finite"] = bool(losses) and all(torch.isfinite(torch.tensor(losses)).tolist())
-    checks["grad_norm_finite"] = bool(grad_norms) and all(torch.isfinite(torch.tensor(grad_norms)).tolist())
+    train_result = trainer.train()
+    checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
+    losses = step_losses(trainer)
 
     # Every rank holds a slice of every layer's sinks (DTensor shard or TP head range): sum the
     # per-layer gradient mass over the world before judging, in one fixed name order.

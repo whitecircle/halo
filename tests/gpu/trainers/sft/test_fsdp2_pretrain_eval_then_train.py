@@ -15,10 +15,7 @@ Topology: 2 GPUs, plain FSDP2 (``ParallelismConfig()``), tiny Qwen3 over the Qwe
 Run: torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_fsdp2_pretrain_eval_then_train.py
 """
 
-import sys
-
 import torch
-import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 from trl import SFTConfig
@@ -26,29 +23,28 @@ from trl import SFTConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.harness import gpu_test_main, log
+from tests.common.distributed import world_min
+from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.utils import log, step_losses
 
 STEPS = 8
 LEARNING_RATE = 5e-3
 MIN_LOSS_DROP = 0.05
 
 
-def build_dense_model(tokenizer=None, *, vocab_size: int | None = None) -> Qwen3ForCausalLM:
-    """Tiny dense Qwen3, identical on every rank (fixed seed).
+def build_dense_model(tokenizer) -> Qwen3ForCausalLM:
+    """Tiny dense Qwen3 over ``tokenizer``'s checkpoint vocabulary, identical on every rank (fixed seed).
 
     pad/eos ids must live inside the model's vocab: TRL copies the tokenizer's ids into the model
-    config, and the saved config would otherwise fail ``from_pretrained``'s padding_idx assert. With
-    no ``tokenizer`` the tiny config's own 1024-token vocab and ids 0/1 are used; a suite that
-    tokenizes with a real tokenizer passes it together with that checkpoint's ``vocab_size``.
+    config, and the saved config would otherwise fail ``from_pretrained``'s padding_idx assert.
     """
     torch.manual_seed(1234)
-    config = TINY_QWEN3_CONFIG if vocab_size is None else {**TINY_QWEN3_CONFIG, "vocab_size": vocab_size}
     return Qwen3ForCausalLM(
         Qwen3Config(
-            **config,
-            pad_token_id=0 if tokenizer is None else tokenizer.pad_token_id,
-            eos_token_id=1 if tokenizer is None else tokenizer.eos_token_id,
+            **{**TINY_QWEN3_CONFIG, "vocab_size": AutoConfig.from_pretrained(QWEN3_0_6B).vocab_size},
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
         )
     )
 
@@ -61,14 +57,8 @@ def _shards(model) -> dict[str, torch.Tensor]:
     }
 
 
-def _world_min(value: float) -> float:
-    reduced = torch.tensor([value], device=torch.cuda.current_device())
-    dist.all_reduce(reduced, op=dist.ReduceOp.MIN)
-    return float(reduced)
-
-
 def _world_all(flag: bool) -> bool:
-    return _world_min(float(flag)) > 0.0
+    return world_min(float(flag)) > 0.0
 
 
 def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
@@ -93,7 +83,7 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
         seed=42,
     )
     trainer = DistributedSFTTrainer(
-        model=build_dense_model(tokenizer, vocab_size=AutoConfig.from_pretrained(QWEN3_0_6B).vocab_size),
+        model=build_dense_model(tokenizer),
         args=args,
         train_dataset=create_sft_dataset(64, tokenizer, seed=0),
         eval_dataset=create_sft_dataset(16, tokenizer, seed=1),
@@ -106,7 +96,7 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
         trainer.evaluate()
         gathered_after_eval = not any(isinstance(param, DTensor) for param in trainer.model.parameters())
     trainer.train()
-    losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
+    losses = step_losses(trainer)
     after = _shards(trainer.model)
     delta = max(float((after[name] - init).abs().max()) for name, init in before.items())
     log(
@@ -114,11 +104,11 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
         f"gathered_after_eval={gathered_after_eval}"
     )
     checks = {
-        f"{name}_shards_moved": _world_min(delta) > 0.0,
+        f"{name}_shards_moved": world_min(delta) > 0.0,
         f"{name}_loss_decreased": _world_all(len(losses) == STEPS and losses[-1] < losses[0] - MIN_LOSS_DROP),
     }
     metrics = {
-        f"{name}_max_delta": _world_min(delta),
+        f"{name}_max_delta": world_min(delta),
         f"{name}_first_loss": losses[0],
         f"{name}_last_loss": losses[-1],
     }
@@ -138,4 +128,4 @@ def run(ctx):
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    run()
