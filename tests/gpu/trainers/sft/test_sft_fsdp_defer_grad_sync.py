@@ -19,6 +19,8 @@ Modes (``--mode``, 4 GPUs):
   tp    dense, TP2 x DP2: FSDP2 over the mesh's dp dimension, plus the TP replicated-grad sweep
   cp    dense, CP2 x DP2
   ep1   MoE at ep_size=1: experts are FSDP2-sharded DTensors, deferred with everything else
+  ep1_fp32_router
+        ep1 with ``fp32_router``: each fp32 router is a nested FSDP2 group inside its bf16 layer
   ep    MoE, one EP group over the world: experts FSDP-ignored, synced by the in-backward hooks
   ep2   MoE, two EP groups over two simulated domains: non-expert params sharded over the EP group,
         experts and the cross-replica average synced by the post-backward sweep
@@ -56,10 +58,10 @@ from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
 from tests.common.utils import cleanup_memory, log, max_or_nan, step_losses
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--mode", choices=["dp", "hsdp", "tp", "cp", "ep1", "ep", "ep2"], default="dp")
+parser.add_argument("--mode", choices=["dp", "hsdp", "tp", "cp", "ep1", "ep1_fp32_router", "ep", "ep2"], default="dp")
 ARGS = parser.parse_args()
 
-MOE_MODES = ("ep1", "ep", "ep2")
+MOE_MODES = ("ep1", "ep1_fp32_router", "ep", "ep2")
 SEED = 42
 MAX_STEPS = 4
 GRAD_ACCUM = 4
@@ -96,18 +98,23 @@ def _parallelism_config(mode: str, world_size: int, defer: bool) -> ParallelismC
         "tp": {"tp_size": 2},
         "cp": {"cp_size": 2},
         "ep1": {"ep_size": 1},
+        "ep1_fp32_router": {"ep_size": 1, "ep_fp32_router": True},
         "ep": {"ep_size": world_size},
         "ep2": {"ep_size": half, "gpus_per_node": half, "ep_scope": "node"},
     }
     return ParallelismConfig(fsdp_defer_grad_sync=defer, **shapes[mode])
 
 
-def _exercises_mode(mode: str, pc: ParallelismConfig) -> bool:
-    """Whether the config resolved to the gradient-sync regime the mode names, so a pass covers it."""
+def _exercises_mode(mode: str, pc: ParallelismConfig, model) -> bool:
+    """Whether the run resolved to the gradient-sync regime the mode names, so a pass covers it."""
     if mode == "hsdp":
         return pc.is_hsdp
     if mode == "ep1":
         return pc.experts_fsdp_managed
+    if mode == "ep1_fp32_router":
+        return pc.experts_fsdp_managed and any(
+            isinstance(p, DTensor) and p.dtype == torch.float32 and p.requires_grad for p in model.parameters()
+        )
     if mode in ("ep", "ep2"):
         # ep: in-backward expert/router hooks; ep2: the post-backward sweep over EP-group shards.
         ep_config = pc.create_ep_config()
@@ -224,7 +231,7 @@ def run_arm(defer: bool, model_dir: str, tokenizer, train_dataset, output_dir: s
     trainer.train()
 
     result = {
-        "exercises_mode": _exercises_mode(ARGS.mode, pc),
+        "exercises_mode": _exercises_mode(ARGS.mode, pc, trainer.model),
         "losses": step_losses(trainer),
         "grad_norms": [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e],
         "probe": probe,

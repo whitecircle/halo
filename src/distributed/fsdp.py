@@ -231,6 +231,82 @@ def _tied_parameters(model: nn.Module) -> "IdentityParamSet":
     return IdentityParamSet(tied)
 
 
+def _uniform_dtype_split(layer: nn.Module, left_out: "IdentityParamSet") -> list[nn.Module]:
+    """Submodules of ``layer`` that take a ``fully_shard`` group of their own, innermost first, so every
+    group's trainable parameters share one dtype. Empty when the layer's already do.
+
+    FSDP2 asserts one original dtype per group at the first forward, and an fp32 router beside a bf16
+    layer (``fp32_router`` at ep1 under ``fsdp_shard_ep1_experts``) breaks it. A subtree whose trainable
+    parameters all hold a dtype other than its enclosing group's splits off at the smallest submodule
+    holding all of them; a subtree mixing dtypes is split further, a submodule that directly owns
+    parameters of another dtype heading a group of its own. The layer keeps the dtype needing the fewest
+    extra groups. ``left_out`` holds the parameters none of the layer's groups takes (ignored, or
+    reserved for the root). Raises where one module directly owns trainable parameters of two dtypes,
+    which no split separates.
+    """
+
+    def trainable(module: nn.Module, *, recurse: bool) -> list[nn.Parameter]:
+        return [p for p in module.parameters(recurse=recurse) if p.requires_grad and p not in left_out]
+
+    def own_dtype(module: nn.Module) -> torch.dtype | None:
+        dtypes = {p.dtype for p in trainable(module, recurse=False)}
+        if len(dtypes) > 1:
+            raise RuntimeError(
+                f"FSDP2 needs one dtype per shard group, but {type(module).__name__} (in "
+                f"{type(layer).__name__}) directly owns trainable parameters of dtypes "
+                f"{sorted(map(str, dtypes))}, which no split into submodule groups can separate. Store "
+                f"that module's trainable parameters in one dtype."
+            )
+        return next(iter(dtypes), None)
+
+    def smallest_holder(module: nn.Module) -> nn.Module:
+        while not trainable(module, recurse=False):
+            holders = [child for child in module.children() if trainable(child, recurse=True)]
+            if len(holders) != 1:
+                break
+            module = holders[0]
+        return module
+
+    def split_below(module: nn.Module, group_dtype: torch.dtype) -> list[nn.Module]:
+        split = []
+        for child in module.children():
+            dtypes = {p.dtype for p in trainable(child, recurse=True)}
+            if dtypes <= {group_dtype}:
+                continue
+            if len(dtypes) == 1:
+                split.append(smallest_holder(child))
+                continue
+            own = own_dtype(child)
+            if own is not None and own != group_dtype:
+                split += [*split_below(child, own), child]
+            else:
+                split += split_below(child, group_dtype)
+        return split
+
+    dtypes = {p.dtype for p in trainable(layer, recurse=True)}
+    if len(dtypes) < 2:
+        return []
+    own = own_dtype(layer)
+    candidates = [own] if own is not None else sorted(dtypes, key=str)
+    return min((split_below(layer, dtype) for dtype in candidates), key=len)
+
+
+def _unshard_with_layer(layer: nn.Module, split: list[nn.Module]) -> None:
+    """Unshard the ``split`` groups whenever ``layer`` runs forward.
+
+    FSDP2 unshards a group in its own module's forward pre-hook, but a family can read a submodule's
+    parameters without calling it (``F.linear(x, self.gate.weight)``), which would then meet the sharded
+    DTensor. The gradient still reaches the shards: FSDP2's root post-backward callback runs the
+    post-backward of every group whose own hook did not fire. A no-op for a group already unsharded.
+    """
+
+    def _pre_forward(_module: nn.Module, _args: tuple) -> None:
+        for module in split:
+            module.unshard()
+
+    layer.register_forward_pre_hook(_pre_forward)
+
+
 def apply_fsdp2_per_layer(
     model: nn.Module,
     dp_mesh: DeviceMesh,
@@ -240,9 +316,10 @@ def apply_fsdp2_per_layer(
 ) -> int:
     """Apply FSDP v2 per transformer layer, then to the model root. Returns the shard-group count.
 
-    EP-module params and frozen dtype exclusions pass as ``ignored_params``. Every branch below wraps
-    at least the root, so the count is for logging only; a decoder whose layer list this probe cannot
-    reach is caught by :func:`_reject_unreachable_decoder_layers`.
+    EP-module params and frozen dtype exclusions pass as ``ignored_params``. A layer whose trainable
+    parameters mix dtypes first gets nested groups (:func:`_uniform_dtype_split`). Every branch below
+    wraps at least the root, so the count is for logging only; a decoder whose layer list this probe
+    cannot reach is caught by :func:`_reject_unreachable_decoder_layers`.
     """
     _warn_fp32_pins_cast_by_policy(model, mp_policy)
     underlying_model = _get_underlying_model(model)
@@ -255,8 +332,11 @@ def apply_fsdp2_per_layer(
     # tie, leaving each half with half the gradient.
     root_reserved = _tied_parameters(model) if model is not embed_backbone else IdentityParamSet()
 
+    def _left_out(module: nn.Module, reserved: "IdentityParamSet") -> "IdentityParamSet":
+        return IdentityParamSet(p for p in module.parameters() if p in ignored_params or p in reserved)
+
     def _shard(module: nn.Module, *, reserved: "IdentityParamSet") -> None:
-        scoped = IdentityParamSet(p for p in module.parameters() if p in ignored_params or p in reserved)
+        scoped = _left_out(module, reserved)
         fully_shard(
             module,
             mesh=dp_mesh,
@@ -271,12 +351,24 @@ def apply_fsdp2_per_layer(
         _reject_unreachable_decoder_layers(model)
 
     sharded = 0
+    split_off: list[str] = []
     if layers is not None:
         for layer in layers:
+            split = _uniform_dtype_split(layer, _left_out(layer, root_reserved))
+            split_off += [type(module).__name__ for module in split]
+            for module in split:
+                _shard(module, reserved=root_reserved)
             _shard(layer, reserved=root_reserved)
-            sharded += 1
+            if split:
+                _unshard_with_layer(layer, split)
+            sharded += 1 + len(split)
         _shard(embed_backbone, reserved=root_reserved)
         sharded += 1
+        if split_off and is_global_main_process():
+            logger.info(
+                f"    - {len(split_off)} submodule(s) sharded as their own group for a uniform trainable "
+                f"dtype per group: {sorted(set(split_off))}"
+            )
 
     if model is not embed_backbone:
         _shard(model, reserved=IdentityParamSet())

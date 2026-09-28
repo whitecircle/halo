@@ -1148,7 +1148,16 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_fsdp_defer_grad_sync.py": TestSpec(
         nproc=4,
         markers=("gpu", "full", "4gpu", "hsdp", "tp", "cp", "ep", "moe", "qwen3"),
-        args_matrix=("--mode dp", "--mode hsdp", "--mode tp", "--mode cp", "--mode ep1", "--mode ep", "--mode ep2"),
+        args_matrix=(
+            "--mode dp",
+            "--mode hsdp",
+            "--mode tp",
+            "--mode cp",
+            "--mode ep1",
+            "--mode ep1_fp32_router",
+            "--mode ep",
+            "--mode ep2",
+        ),
         timeout=900,
     ),
     "trainers/other/test_self_distillation_vlm.py": TestSpec(
@@ -1210,6 +1219,21 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2,
         markers=("gpu", "core", "2gpu", "lora", "moe", "glm4", "glm5"),
         args_matrix=("--case router_only", "--case glm5_next_mixed_uncast"),
+        timeout=900,
+    ),
+    # fp32 routers at ep1 under fsdp_shard_ep1_experts, each in a nested shard group: a router the EP
+    # forward calls, one with a bias, one owning no parameter itself, one read without being called,
+    # and a modules_to_save copy beside bf16 adapters. Two tiny-model builds and a resume per row.
+    "trainers/sft/test_sft_fp32_router_ep1.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "lora", "moe", "qwen3", "gptoss", "zaya", "lfm2"),
+        args_matrix=(
+            "--family qwen3_moe",
+            "--family gpt_oss",
+            "--family zaya",
+            "--family lfm2_moe",
+            "--family qwen3_moe --lora",
+        ),
         timeout=900,
     ),
     "trainers/sft/test_sft_fp32_pinned_params_single_gpu.py": TestSpec(
