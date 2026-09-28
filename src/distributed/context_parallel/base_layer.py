@@ -176,9 +176,9 @@ class UlyssesAttentionBase(nn.Module, ABC):
         self.num_kv_heads = self._resolve_num_kv_heads(original_attention)
 
         if self.num_q_heads % cp_size != 0:
-            raise ValueError(f"Q heads ({self.num_q_heads}) must be divisible by CP size ({cp_size})")
+            raise ValueError(f"Q heads ({self.num_q_heads}) must be divisible by context_parallel_size ({cp_size})")
         if self.num_kv_heads % cp_size != 0:
-            raise ValueError(f"KV heads ({self.num_kv_heads}) must be divisible by CP size ({cp_size})")
+            raise ValueError(f"KV heads ({self.num_kv_heads}) must be divisible by context_parallel_size ({cp_size})")
 
         self.local_q_heads = self.num_q_heads // cp_size
         self.local_kv_heads = self.num_kv_heads // cp_size

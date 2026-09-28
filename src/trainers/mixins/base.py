@@ -785,11 +785,11 @@ class DistributedTrainerMixin(
         if self._device_mesh is not None:
             return
         raise RuntimeError(
-            f"Tensor parallelism is active (tp_size={self.parallelism_config.tp_size}) but no device "
-            "mesh reached the trainer: FSDP did not build one (pure TP) and the model carries no "
-            "`_device_mesh` from the loader. Without it the TP group is unknown, so replicated "
-            "gradients are never averaged and the TP gradient-norm bucket is never reduced. Load the "
-            "model through load_distributed_model, which attaches the mesh."
+            f"Tensor parallelism is active (tensor_parallel_size={self.parallelism_config.tp_size}) "
+            "but no device mesh reached the trainer: FSDP did not build one (pure TP) and the model "
+            "carries no `_device_mesh` from the loader. Without it the TP group is unknown, so "
+            "replicated gradients are never averaged and the TP gradient-norm bucket is never "
+            "reduced. Load the model through load_distributed_model, which attaches the mesh."
         )
 
     @staticmethod

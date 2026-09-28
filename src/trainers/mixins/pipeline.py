@@ -305,7 +305,8 @@ class PipelineTrainerMixin:
         n_microbatches = config.pp_microbatches or training_args.gradient_accumulation_steps
         if config.pp_schedule == "1f1b" and n_microbatches < config.pp_size:
             logger.warning(
-                "pipeline_microbatches=%d is below pp_size=%d (Schedule1F1B needs a full pipeline); raising to %d.",
+                "pipeline_microbatches=%d is below pipeline_parallel_size=%d (Schedule1F1B needs a full "
+                "pipeline); raising to %d.",
                 n_microbatches,
                 config.pp_size,
                 config.pp_size,
@@ -313,9 +314,9 @@ class PipelineTrainerMixin:
             n_microbatches = config.pp_size
         if n_microbatches < _BUBBLE_WARN_FACTOR * config.pp_size:
             logger.warning(
-                "pipeline_microbatches=%d gives a large pipeline bubble at pp_size=%d (idle fraction "
-                "(pp-1)/(m+pp-1): ~22%% of the step measured at m=2*pp on 2 stages). For a 10%% bubble "
-                "use at least %d microbatches (rule: %d*(pp_size-1)).",
+                "pipeline_microbatches=%d gives a large pipeline bubble at pipeline_parallel_size=%d (idle "
+                "fraction (pp-1)/(m+pp-1): ~22%% of the step measured at m=2*pp on 2 stages). For a 10%% "
+                "bubble use at least %d microbatches (rule: %d*(pipeline_parallel_size-1)).",
                 n_microbatches,
                 config.pp_size,
                 _BUBBLE_TARGET_FACTOR * (config.pp_size - 1),

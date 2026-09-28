@@ -383,8 +383,8 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         self.expert_tp_group = ep_config.expert_tp_group
         if self.expert_tp_size > 1 and self.expert_tp_group is None:
             raise RuntimeError(
-                f"expert_tp_size={self.expert_tp_size} requires expert_tp_group to be created "
-                f"in EPConfig process group setup. Got expert_tp_group=None."
+                f"expert_tensor_parallel_size={self.expert_tp_size} requires expert_tp_group to be created in "
+                f"EPConfig process group setup. Got expert_tp_group=None."
             )
 
         self.fp32_router = ep_config.fp32_router
@@ -1158,8 +1158,8 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         if intermediate % self.expert_tp_size != 0:
             raise ValueError(
                 f"Expert TP requires the expert intermediate size ({intermediate}) to be divisible by "
-                f"expert_tp_size ({self.expert_tp_size}); got remainder {intermediate % self.expert_tp_size}. "
-                f"Reduce expert_tp_size."
+                f"expert_tensor_parallel_size ({self.expert_tp_size}); got remainder "
+                f"{intermediate % self.expert_tp_size}. Reduce expert_tensor_parallel_size."
             )
         return intermediate // self.expert_tp_size
 

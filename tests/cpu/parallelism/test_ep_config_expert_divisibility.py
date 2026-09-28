@@ -44,7 +44,7 @@ def test_assignment_is_uniform_per_dispatch_rank():
 @pytest.mark.parametrize(("ep_size", "num_experts"), [(8, 100), (4, 6), (8, 12)])
 def test_non_dividing_num_experts_raises(ep_size: int, num_experts: int):
     cfg = _config(ep_size=ep_size)
-    with pytest.raises(ValueError, match="divisible by ep_size"):
+    with pytest.raises(ValueError, match="divisible by expert_parallel_size"):
         cfg.finalize_expert_assignment(num_experts)
     # Nothing was partially finalized.
     assert cfg.num_experts is None
@@ -56,7 +56,7 @@ def test_divisor_is_ep_size_not_ep_group_size_under_expert_tp():
     cfg = EPConfig(ep_size=2, expert_tp_size=2, world_size=4, gpus_per_node=4)
     cfg.finalize_expert_assignment(6)
     assert cfg.experts_per_rank == 3
-    with pytest.raises(ValueError, match="divisible by ep_size"):
+    with pytest.raises(ValueError, match="divisible by expert_parallel_size"):
         cfg.finalize_expert_assignment(7)
 
 

@@ -121,7 +121,7 @@ def reject_node_local_ep_group(
     domain and tile it evenly. Checked twice: ``ParallelismConfig`` at config time and ``EPConfig`` at
     group construction; each caller appends its own ``remedy``.
     """
-    shape = f"ep_group_size = ep_size({ep_size}) * expert_tp_size({expert_tp_size})."
+    shape = f"ep_group_size = expert_parallel_size({ep_size}) * expert_tensor_parallel_size({expert_tp_size})."
     if ep_group_size > domain_size:
         raise ValueError(
             f"Node-local EP group size ({ep_group_size}) cannot exceed the NVLink domain "
@@ -139,7 +139,7 @@ def reject_cross_node_ep_group(
     ``scope_desc``/``scope_size`` name the scope in the caller's terms: the world for a plain job,
     one pipeline stage's world when ``pp_size > 1``.
     """
-    shape = f"ep_group_size = ep_size({ep_size}) * expert_tp_size({expert_tp_size})."
+    shape = f"ep_group_size = expert_parallel_size({ep_size}) * expert_tensor_parallel_size({expert_tp_size})."
     if ep_group_size > scope_size:
         raise ValueError(f"EP group size ({ep_group_size}) cannot exceed {scope_desc} ({scope_size}). {shape}")
     if scope_size % ep_group_size != 0:
@@ -159,8 +159,9 @@ def reject_cross_node_etp_shape(
     if expert_tp_size != members_per_domain or ep_size != num_domains:
         raise ValueError(
             f"Cross-node EP+ETP supports one ETP group per NVLink domain only: requires "
-            f"expert_tp_size ({expert_tp_size}) == EP members per domain ({members_per_domain}) "
-            f"and ep_size ({ep_size}) == domains spanned ({num_domains}). {remedy}"
+            f"expert_tensor_parallel_size ({expert_tp_size}) == EP members per domain "
+            f"({members_per_domain}) and expert_parallel_size ({ep_size}) == domains "
+            f"spanned ({num_domains}). {remedy}"
         )
 
 

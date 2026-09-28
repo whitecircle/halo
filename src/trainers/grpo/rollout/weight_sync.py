@@ -155,12 +155,13 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
     if families and not named_ep_layers(model):
         raise ValueError(
             f"{', '.join(sorted({cls.__name__ for _where, cls in families}))} resolves for model_type "
-            f"{sorted(config_model_types(model))}, but the model carries no live EP wrapper (ep_size 1 with "
-            f"use_grouped_gemm: false): weight sync ships experts in the layout the family's "
-            f"gather_expert_state_dict emits, and without a wrapper it would forward the stock module tree's "
-            f"fused expert tensors under module names, which the engine's loader drops with no error — "
-            f"attention, norms and routers would sync while the experts keep serving launch weights. Set "
-            f"use_grouped_gemm: true (the torchrun default), which installs the EP wrappers at ep_size 1 too."
+            f"{sorted(config_model_types(model))}, but the model carries no live EP wrapper "
+            f"(expert_parallel_size 1 with use_grouped_gemm: false): weight sync ships experts in the layout "
+            f"the family's gather_expert_state_dict emits, and without a wrapper it would forward the stock "
+            f"module tree's fused expert tensors under module names, which the engine's loader drops with no "
+            f"error — attention, norms and routers would sync while the experts keep serving launch weights. "
+            f"Set use_grouped_gemm: true (the torchrun default), which installs the EP wrappers at "
+            f"expert_parallel_size 1 too."
         )
     # Enabled bias-update state, not the mode string: the shipped scripts downgrade the mode before any
     # state exists, so reaching here with an adopted slot or side-buffer means a hand-built driver

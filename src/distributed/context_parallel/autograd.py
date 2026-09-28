@@ -38,8 +38,8 @@ class UlyssesAllToAll(torch.autograd.Function):
         if input.shape[scatter_dim] % world_size != 0:
             raise ValueError(
                 f"Ulysses all-to-all: dim {scatter_dim} of size {input.shape[scatter_dim]} is not "
-                f"divisible by cp_size={world_size} — the ranged narrow below would silently drop "
-                f"the tail elements."
+                f"divisible by context_parallel_size={world_size} — the ranged narrow below would "
+                f"silently drop the tail elements."
             )
         chunk_size = input.shape[scatter_dim] // world_size
         input_list = [input.narrow(scatter_dim, i * chunk_size, chunk_size).contiguous() for i in range(world_size)]

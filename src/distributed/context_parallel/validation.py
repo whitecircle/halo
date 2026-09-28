@@ -182,13 +182,13 @@ def validate_model_for_ulysses(model: nn.Module, cp_size: int) -> None:
 
     if num_q_heads % cp_size != 0:
         raise UlyssesConfigError(
-            f"Q heads ({num_q_heads}) must be divisible by CP size ({cp_size}). "
-            f"Choose a CP size that divides {num_q_heads} evenly."
+            f"Q heads ({num_q_heads}) must be divisible by context_parallel_size ({cp_size}). Choose a "
+            f"context_parallel_size that divides {num_q_heads} evenly."
         )
     if num_kv_heads % cp_size != 0:
         raise UlyssesConfigError(
-            f"KV heads ({num_kv_heads}) must be divisible by CP size ({cp_size}). "
-            f"Choose a CP size that divides {num_kv_heads} evenly."
+            f"KV heads ({num_kv_heads}) must be divisible by context_parallel_size ({cp_size}). Choose a "
+            f"context_parallel_size that divides {num_kv_heads} evenly."
         )
 
     logger.info(

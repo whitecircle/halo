@@ -247,7 +247,7 @@ def test_validate_cp_exceeds_domain_rejected():
         create_config(cp_size=16, world_size=8, gpus_per_node=8)
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
-        assert "CP size (16) cannot exceed the NVLink domain (8)" in str(e), e
+        assert "context_parallel_size (16) cannot exceed the NVLink domain (8)" in str(e), e
 
 
 def test_validate_cp_domain_divisibility_rejected():
@@ -255,7 +255,7 @@ def test_validate_cp_domain_divisibility_rejected():
         create_config(cp_size=3, world_size=8, gpus_per_node=8)
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
-        assert "CP size (3) must divide the NVLink domain (8)" in str(e), e
+        assert "context_parallel_size (3) must divide the NVLink domain (8)" in str(e), e
 
 
 def test_validate_tp_exceeds_stage_world_rejected():
@@ -263,7 +263,7 @@ def test_validate_tp_exceeds_stage_world_rejected():
         create_config(tp_size=16, world_size=8, gpus_per_node=8)
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
-        assert "TP size (16) cannot exceed world size (8)" in str(e), e
+        assert "tensor_parallel_size (16) cannot exceed world size (8)" in str(e), e
 
 
 def test_validate_tp_stage_world_divisibility_rejected():
@@ -271,7 +271,7 @@ def test_validate_tp_stage_world_divisibility_rejected():
         create_config(tp_size=3, world_size=8, gpus_per_node=8)
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
-        assert "TP size (3) must divide world size (8)" in str(e), e
+        assert "tensor_parallel_size (3) must divide world size (8)" in str(e), e
 
 
 def test_validate_pure_tp_domain_divisibility_rejected():
@@ -402,8 +402,13 @@ def _expect_reject(substr=None, **kw):
 
 
 def test_guard_size_below_one():
-    for name in ("ep_size", "tp_size", "cp_size", "expert_tp_size"):
-        _expect_reject(name, **{name: 0, "world_size": 8, "gpus_per_node": 8})
+    for field_name, knob in (
+        ("ep_size", "expert_parallel_size"),
+        ("tp_size", "tensor_parallel_size"),
+        ("cp_size", "context_parallel_size"),
+        ("expert_tp_size", "expert_tensor_parallel_size"),
+    ):
+        _expect_reject(f"{knob} must be >= 1", **{field_name: 0, "world_size": 8, "gpus_per_node": 8})
 
 
 def test_guard_bad_ep_scope():
@@ -1244,7 +1249,9 @@ def test_expert_lora_reaches_validation_through_the_builder():
             parallelism_config_from_args(args_etp, trainer_cls=DistributedTrainerMixin, expert_lora=spec)
             raise AssertionError("expert LoRA under expert_tp_size > 1 must be rejected at config time")
         except ValueError as e:
-            assert "Expert LoRA is not supported with expert_tp_size" in str(e), f"wrong validator fired: {e}"
+            assert "Expert LoRA is not supported with expert_tensor_parallel_size" in str(e), (
+                f"wrong validator fired: {e}"
+            )
 
 
 def test_epconfig_second_timing_rejects_expert_lora_with_etp():
@@ -1262,7 +1269,7 @@ def test_epconfig_second_timing_rejects_expert_lora_with_etp():
         )
         raise AssertionError("hand-built EPConfig accepted expert LoRA under expert_tp_size > 1")
     except ValueError as e:
-        assert "Expert LoRA is not supported with expert_tp_size" in str(e)
+        assert "Expert LoRA is not supported with expert_tensor_parallel_size" in str(e)
 
 
 if __name__ == "__main__":

@@ -367,7 +367,8 @@ def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
         log(f"  refusal: {message.splitlines()[0]}")
         return {
             "lora_under_tp_refused": True,
-            "refusal_names_tensor_parallelism": "Tensor Parallelism" in message and "tp_size > 1" in message,
+            "refusal_names_tensor_parallelism": "Tensor Parallelism" in message
+            and "tensor_parallel_size > 1" in message,
         }
     log("  a TP + LoRA trainer CONSTRUCTED: the rank-inconsistent adapter would train unnoticed")
     return {"lora_under_tp_refused": False, "refusal_names_tensor_parallelism": False}

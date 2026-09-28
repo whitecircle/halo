@@ -152,9 +152,10 @@ def reject_oversized_dispatch(capacity: int, *, num_topk: int, padded_hidden: in
             f"DeepEP dispatch exceeds the 32-bit wire-index limit: num_max_tokens_per_rank={capacity} × "
             f"num_topk={num_topk} × padded_hidden={padded_hidden} = {index_extent:,} ≥ "
             f"{DEEPEP_INDEX_LIMIT:,}. The dispatch kernel would illegal-access. The buffer is per-rank, "
-            f"so EP size does not lower it — reduce the tokens in one MoE forward: per_device_train_batch_size=1, "
-            f"a shorter sequence (max_length), or in env-GRPO fewer generations / shorter trajectories "
-            f"(reasoning effort / max_turns / rollout length). At ~175k tokens/rank, far beyond training."
+            f"so expert_parallel_size does not lower it — reduce the tokens in one MoE forward: "
+            f"per_device_train_batch_size=1, a shorter sequence (max_length), or in env-GRPO fewer "
+            f"generations / shorter trajectories (reasoning effort / max_turns / rollout length). At "
+            f"~175k tokens/rank, far beyond training."
         )
     if is_inter_node:
         reject_oversized_gin_dispatch(capacity)
@@ -195,9 +196,10 @@ def reject_expert_lora_with_expert_tp() -> None:
     and again by :class:`EPConfig` at group construction for hand-built configs that bypass it.
     """
     raise ValueError(
-        "Expert LoRA is not supported with expert_tp_size > 1: the replicated adapter half "
-        "receives partial gradients under expert TP and drifts across ranks. Use EP without "
-        "expert TP for expert adapters, or remove expert projections from lora_target_modules."
+        "Expert LoRA is not supported with expert_tensor_parallel_size > 1: the replicated "
+        "adapter half receives partial gradients under expert TP and drifts across ranks. "
+        "Use EP without expert TP for expert adapters, or remove expert projections from "
+        "lora_target_modules."
     )
 
 
@@ -629,7 +631,7 @@ class EPConfig:
                     domains_spanned,
                     remedy=(
                         f"EP group {group_ranks}. Use ep_scope='node' for node-local EP+ETP, or set "
-                        f"expert_tp_size={members_per_domain}."
+                        f"expert_tensor_parallel_size={members_per_domain}."
                     ),
                 )
                 for c in range(ep_size):
@@ -688,9 +690,9 @@ class EPConfig:
         """
         if num_experts % self.ep_size != 0:
             raise ValueError(
-                f"num_experts ({num_experts}) must be divisible by ep_size ({self.ep_size}): DeepEP "
-                f"dispatch assumes a uniform expert→rank division, so an uneven assignment would "
-                f"route tokens to the wrong experts or silently drop them. Choose an ep_size that "
+                f"num_experts ({num_experts}) must be divisible by expert_parallel_size ({self.ep_size}): "
+                f"DeepEP dispatch assumes a uniform expert→rank division, so an uneven assignment would route "
+                f"tokens to the wrong experts or silently drop them. Choose an expert_parallel_size that "
                 f"divides {num_experts}."
             )
 

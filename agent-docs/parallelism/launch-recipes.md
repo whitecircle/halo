@@ -160,6 +160,6 @@ python scripts/profiling/nvlink_health.py --json      # raw report, for a wrappe
 
 **RDMA connection timeout** — verify the fabric first (`ibstat` on IB/RoCE, `fi_info -p efa` on EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)), then re-run with `NCCL_DEBUG=INFO` for the transport logs.
 
-**`CP size (16) cannot exceed the NVLink domain (8)`** — set `cp_size <= nvlink_domain_size` (= `gpus_per_node` on a standard cluster, the rack on NVL72). EP+CP also requires node-local EP (`ep_scope=node` with `ep_group_size == nvlink_domain_size`); `ParallelismConfig._validate_ep_cp` rejects cross-node EP (`ep_scope=global`) combined with CP. Cross-node EP combines with DP and TP (not CP) and requires InfiniBand/RDMA for its all-to-all.
+**`context_parallel_size (16) cannot exceed the NVLink domain (8)`** — set `cp_size <= nvlink_domain_size` (= `gpus_per_node` on a standard cluster, the rack on NVL72). EP+CP also requires node-local EP (`ep_scope=node` with `ep_group_size == nvlink_domain_size`); `ParallelismConfig._validate_ep_cp` rejects cross-node EP (`ep_scope=global`) combined with CP. Cross-node EP combines with DP and TP (not CP) and requires InfiniBand/RDMA for its all-to-all.
 
 **Rendezvous never completes / one node hangs at startup** — every node must pass the identical `--nnodes`, `--master_addr`, `--master_port` and a distinct `--node_rank`, and every rank must reach `init_distributed` in the same order. Symptom-to-cause table for the rest: [Troubleshooting](../reference/troubleshooting.md).

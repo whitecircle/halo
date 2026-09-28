@@ -235,7 +235,7 @@ runtime**: a custom data path that bypasses those would sum unrelated tokens wit
 - **"Cross-node EP+ETP supports one ETP group per NVLink domain only"** — set `expert_tensor_parallel_size`
   to the EP members per domain and `expert_parallel_size` to the domain count (both quoted in the
   message), or use `ep_scope=node`.
-- **"Sharded EP save (save_sharded_ep=True) is not supported with expert_tp_size=N"** — use the
+- **"Sharded EP save (save_sharded_ep=True) is not supported with expert_tensor_parallel_size=N"** — use the
   default gathered save.
 - **OOM** — raise `expert_tp_size`, or switch to EP+TP if attention is also a bottleneck (the two
   are mutually exclusive).

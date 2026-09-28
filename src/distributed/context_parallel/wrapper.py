@@ -159,7 +159,7 @@ class UlyssesCPModelWrapper(nn.Module):
         batch_size, seq_len = input_ids.shape
 
         if seq_len % self.cp_size != 0:
-            raise ValueError(f"Sequence length {seq_len} must be divisible by cp_size {self.cp_size}")
+            raise ValueError(f"Sequence length {seq_len} must be divisible by context_parallel_size {self.cp_size}")
 
         _reject_left_padding(attention_mask)
 
@@ -383,9 +383,9 @@ def patch_model_for_cp(model: nn.Module, cp_config: CPConfig) -> nn.Module:
     if isinstance(model, UlyssesCPModelWrapper):
         if model.cp_config is not cp_config:
             raise ValueError(
-                f"Model already CP-wrapped with cp_size={model.cp_size}; cannot re-wrap with a "
-                f"different CPConfig (cp_size={cp_config.cp_size}) — the patched layers' process "
-                f"groups cannot be retargeted."
+                f"Model already CP-wrapped at context_parallel_size={model.cp_size}; cannot re-wrap at "
+                f"context_parallel_size={cp_config.cp_size} — the patched layers' process groups cannot be "
+                f"retargeted."
             )
         return model
 

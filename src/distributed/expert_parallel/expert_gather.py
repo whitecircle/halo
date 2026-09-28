@@ -152,8 +152,9 @@ class EPExpertGatherMixin:
         if merge_lora and self.has_expert_lora and self.expert_tp_size > 1:
             raise NotImplementedError(
                 f"{type(self).__name__}: merge_lora is not implemented for the expert-TP gather "
-                f"(expert_tp_size={self.expert_tp_size}) — the export would carry the FROZEN base "
-                f"experts. Gather with expert_tp_size=1, or implement the fold for the sharded layout."
+                f"(expert_tensor_parallel_size={self.expert_tp_size}) — the export would carry "
+                f"the FROZEN base experts. Gather with expert_tensor_parallel_size=1, or "
+                f"implement the fold for the sharded layout."
             )
 
     def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
@@ -374,8 +375,8 @@ class EPExpertGatherMixin:
             raise RuntimeError(
                 f"Expert-LoRA resume mismatch in {type(self).__name__}: saved adapter keys "
                 f"{sorted(layer_state)} do not match this layer's rebuilt adapters {sorted(expected_keys)}. "
-                "Likely a use_grouped_gemm / expert_tp_size / GPU-arch change between checkpoint and "
-                "resume — resume with the same expert configuration."
+                "Likely a use_grouped_gemm / expert_tensor_parallel_size / GPU-arch change between "
+                "checkpoint and resume — resume with the same expert configuration."
             )
         # sorted(): the DTensor branch below is a collective, and frozenset order varies per process
         # (unpinned PYTHONHASHSEED), so an unsorted loop lets ranks scatter in different orders.

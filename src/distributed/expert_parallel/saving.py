@@ -370,7 +370,7 @@ def _check_ep_sharded_save_supported(
     if expert_tp_size > 1:
         raise ValueError(
             f"Sharded EP save (save_sharded_ep=True) is not supported with "
-            f"expert_tp_size={expert_tp_size}. Expert TP shards expert FFN weights "
+            f"expert_tensor_parallel_size={expert_tp_size}. Expert TP shards expert FFN weights "
             f"across ranks, which the merge script cannot reconstruct. "
             f"Use save_sharded_ep=False (default) for gathered save instead."
         )
