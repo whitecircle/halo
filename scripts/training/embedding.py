@@ -11,7 +11,7 @@ CP is not supported (pooling reads the complete sequence); use EP and/or TP.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/embedding.py \\
-        examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml --expert_parallel_size=8
+        examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml
 """
 
 from accelerate.logging import get_logger
@@ -282,7 +282,7 @@ def main():
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=None)
     reject_image_columns(ds, "Embedding training")
     train_dataset = ds["train"]
-    eval_dataset = ds.get("test") or ds.get("validation")
+    eval_dataset = ds.get("test")
 
     if is_global_main_process():
         logger.info(f"Train dataset: {len(train_dataset)} examples")

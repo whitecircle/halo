@@ -127,9 +127,12 @@ def test_training_script_index_is_nonempty():
 
 # Modality detection must read the SAME commit the weights load from
 
+# script_runner.py holds the scripts' ``resolve_vlm_run``, whose ``is_vlm_run`` call is where their
+# pin is threaded.
 _VLM_PROBE_CALL_SITES = [
     *_TRAINING_SCRIPTS,
     _REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py",
+    _REPO_ROOT / "src" / "training" / "script_runner.py",
 ]
 
 

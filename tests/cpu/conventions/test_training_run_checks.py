@@ -74,6 +74,26 @@ def test_the_grad_norm_check_passes_on_finite_norms():
     assert training_run_checks(result, trainer, MAX_STEPS, grad_norms=True)["grad_norms_finite"] is True
 
 
+def test_the_loss_decrease_check_passes_on_a_falling_run():
+    result, trainer = _run(STEP_LOSSES)
+    assert training_run_checks(result, trainer, MAX_STEPS, loss_decreased=True)["loss_decreased"] is True
+    assert "loss_decreased" not in training_run_checks(result, trainer, MAX_STEPS), "the check is opt-in"
+
+
+@pytest.mark.parametrize(
+    "step_losses",
+    [
+        [1.8, 2.1, 2.5],  # rose
+        [2.1, 2.5, 2.1],  # flat end to end
+        [2.5, 2.1, math.nan],  # a NaN last step is not a decrease
+        [2.5],  # one logged step has no trend
+    ],
+)
+def test_the_loss_decrease_check_fails_without_a_decrease(step_losses):
+    result, trainer = _run(step_losses)
+    assert training_run_checks(result, trainer, MAX_STEPS, loss_decreased=True)["loss_decreased"] is False
+
+
 def test_a_non_finite_eval_entry_is_not_a_step_loss():
     result, trainer = _run(STEP_LOSSES, extra_entries=[{"loss": math.nan, "eval_loss": math.nan}])
     assert training_run_checks(result, trainer, MAX_STEPS)["all_steps_finite"]

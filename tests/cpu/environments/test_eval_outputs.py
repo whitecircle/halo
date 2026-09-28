@@ -15,13 +15,14 @@ from src.configs.rollout_config import RolloutConfig
 
 
 def _write(output: str, results: list[dict]) -> None:
-    args = argparse.Namespace(output=output, model="m", dataset="d", config=None, split="test", training_config=None)
+    args = argparse.Namespace(output=output, model="m", dataset="d", config=None, training_config=None)
     write_eval_outputs(
         args,
         results,
         env=None,
         traj_path=None,
         env_type="qa_search",
+        split="test",
         max_turns=None,
         rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
         num_samples=1,

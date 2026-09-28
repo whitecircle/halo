@@ -30,7 +30,6 @@ Run with 4 GPUs:
 import argparse
 import math
 import os
-import random
 
 import torch
 import torch.distributed as dist
@@ -47,19 +46,19 @@ from transformers import (
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
-import src.optimizers.adamw_bf16 as adamw_bf16_mod
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.optimizers.adamw_bf16 import reset_sr_stream
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.utils import cleanup_memory, log, max_or_nan, step_losses
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["dp", "hsdp", "tp", "cp", "ep1", "ep", "ep2"], default="dp")
-ARGS, _ = parser.parse_known_args()
+ARGS = parser.parse_args()
 
 MOE_MODES = ("ep1", "ep", "ep2")
 SEED = 42
@@ -188,7 +187,7 @@ def _global_sq_sum(value: float, device) -> float:
 def run_arm(defer: bool, model_dir: str, tokenizer, train_dataset, output_dir: str) -> dict:
     log(f"\n--- {ARGS.mode}: fsdp_defer_grad_sync={defer} ---")
     # Same stochastic-rounding stream in both arms, so AdamWBF16 draws identical noise.
-    adamw_bf16_mod._SR_RNG = random.Random(0xB165EED)
+    reset_sr_stream()
     pc = _parallelism_config(ARGS.mode, dist.get_world_size(), defer)
     model, _ = load_distributed_model(
         model_name_or_path=model_dir,
@@ -212,6 +211,7 @@ def run_arm(defer: bool, model_dir: str, tokenizer, train_dataset, output_dir: s
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
@@ -226,17 +226,16 @@ def run_arm(defer: bool, model_dir: str, tokenizer, train_dataset, output_dir: s
     initial = _local_weights(trainer.model)
     trainer.train()
 
-    history = [e for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
     result = {
         "exercises_mode": _exercises_mode(ARGS.mode, pc),
         "losses": step_losses(trainer),
-        "grad_norms": [e.get("grad_norm") for e in history],
+        "grad_norms": [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e],
         "probe": probe,
         "initial": initial,
         "final": _local_weights(trainer.model),
     }
     log(f"  losses:     {[f'{x:.6f}' for x in result['losses']]}")
-    log(f"  grad_norms: {[('None' if g is None else f'{g:.6f}') for g in result['grad_norms']]}")
+    log(f"  grad_norms: {[f'{g:.6f}' for g in result['grad_norms']]}")
     log(f"  sharded params with grad mid-window: {probe.mid_window}")
     log(f"  sharded params with grad at step:    {probe.at_step} of {probe.n_sharded}")
     trainer.cleanup_ep()
@@ -268,7 +267,7 @@ def run(ctx):
     for label, arm in (("off", off), ("on", on)):
         checks[f"{label}_ran_all_steps"] = len(arm["losses"]) == MAX_STEPS and len(arm["probe"].at_step) == MAX_STEPS
         checks[f"{label}_grad_norm_finite_nonzero"] = len(arm["grad_norms"]) == MAX_STEPS and all(
-            g is not None and math.isfinite(g) and g > 0.0 for g in arm["grad_norms"]
+            math.isfinite(g) and g > 0.0 for g in arm["grad_norms"]
         )
     checks["exercises_mode"] = off["exercises_mode"] and on["exercises_mode"]
     checks["off_loss_decreased"] = off["losses"][-1] < off["losses"][0]
@@ -287,8 +286,8 @@ def run(ctx):
         count > 0 for count in on["probe"].at_step
     )
 
-    loss_dev = max(abs(a - b) for a, b in zip(off["losses"], on["losses"], strict=True))
-    norm_dev = max(abs(a - b) / a for a, b in zip(off["grad_norms"], on["grad_norms"], strict=True))
+    loss_dev = max_or_nan(abs(a - b) for a, b in zip(off["losses"], on["losses"], strict=True))
+    norm_dev = max_or_nan(abs(a - b) / a for a, b in zip(off["grad_norms"], on["grad_norms"], strict=True))
     diff_sq = sum(float((on["final"][n] - w).square().sum()) for n, w in off["final"].items())
     moved_sq = sum(float((w - off["initial"][n]).square().sum()) for n, w in off["final"].items())
     weight_dev = math.sqrt(_global_sq_sum(diff_sq, ctx.device) / _global_sq_sum(moved_sq, ctx.device))

@@ -16,19 +16,17 @@ Validates, on Qwen3-0.6B:
 2. Replicas stay in sync: EVERY 2D-mesh DTensor param's local shard is bit-identical across
    the dp_replicate group after training (proves init replication + cross-domain gradient
    all-reduce). Checked over all such params, not just the first.
-3. Training is healthy: loss is finite and decreases (exercises the 2D-mesh grad-norm path
-   in DistributedTrainerMixin._fsdp_shard_group).
+3. Training is healthy: losses and grad norms finite, the loss falling (exercises the 2D-mesh
+   grad-norm path in DistributedTrainerMixin._fsdp_shard_group).
 
 Run with 4 GPUs (simulates 2 domains of 2):
     torchrun --nproc_per_node=4 \
         tests/gpu/trainers/sft/test_sft_hsdp.py
 """
 
-import math
 import sys
 
 import torch
-import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from trl import SFTConfig
 
@@ -36,9 +34,10 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
+from tests.common.distributed import group_max_abs_diff
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, max_or_nan, step_losses
+from tests.common.utils import log, max_or_nan, training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 10
@@ -71,21 +70,6 @@ def _check_hsdp_placements(p) -> bool:
     ok = ok and isinstance(placements[0], Replicate) and isinstance(placements[1], Shard)
     log(f"  HSDP mesh dims={names}, placements={placements}: {'PASS' if ok else 'FAIL'}")
     return ok
-
-
-def _check_replica_consistency(p) -> tuple[bool, float]:
-    """Each rank's local shard must be identical across the dp_replicate group.
-
-    Returns ``(ok, max_diff)`` so the caller can aggregate over many params without
-    one log line per param.
-    """
-    replicate_group = p.device_mesh["dp_replicate"].get_group()
-    replicate_size = dist.get_world_size(replicate_group)
-    local = p.to_local().detach().contiguous()
-    gathered = [torch.empty_like(local) for _ in range(replicate_size)]
-    dist.all_gather(gathered, local, group=replicate_group)
-    max_diff = max_or_nan((g - gathered[0]).abs().max().item() for g in gathered)
-    return max_diff == 0.0, max_diff
 
 
 def run(ctx) -> dict:
@@ -160,15 +144,7 @@ def run(ctx) -> dict:
 
     log("\n[4/4] Training...")
     train_result = trainer.train()
-
-    training_loss = train_result.training_loss
-    losses = step_losses(trainer)
-
-    log("\n  --- Results ---")
-    log(f"  Final training loss: {training_loss:.6f}")
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
-
-    checks = {}
+    checks = training_run_checks(train_result, trainer, MAX_STEPS, grad_norms=True, loss_decreased=True)
 
     # HSDP structural checks
     hsdp_params = _hsdp_params(model)
@@ -182,33 +158,17 @@ def run(ctx) -> dict:
         # all 2D params); logging every one would be noise.
         checks["hsdp_placements"] = _check_hsdp_placements(hsdp_params[0][1])
 
-        # Replica consistency over EVERY 2D-mesh param (not just the first): each
-        # rank's local shard must be bit-identical across the dp_replicate group.
-        # All ranks iterate the same param set in the same order, so the per-param
-        # all_gather collectives stay in lockstep.
-        replica_ok = True
-        worst_name, worst_diff = None, 0.0
-        for name, p in hsdp_params:
-            ok, max_diff = _check_replica_consistency(p)
-            replica_ok = replica_ok and ok
-            if max_diff > worst_diff:
-                worst_name, worst_diff = name, max_diff
-        checks["replica_consistency"] = replica_ok
+        # Replica consistency over EVERY 2D-mesh param (not just the first): each rank's local shard
+        # must be bit-identical across the dp_replicate group. All ranks iterate the same param set in
+        # the same order, so the per-param all_gather collectives stay in lockstep.
+        worst = max_or_nan(
+            group_max_abs_diff(p.to_local(), p.device_mesh["dp_replicate"].get_group()) for _, p in hsdp_params
+        )
+        checks["replica_consistency"] = worst == 0.0
         log(
             f"  Replica consistency over all {len(hsdp_params)} params: "
-            f"{'PASS' if replica_ok else 'FAIL'} (worst: {worst_name} max|Δ|={worst_diff:.2e})"
+            f"{'PASS' if checks['replica_consistency'] else 'FAIL'} (worst max|Δ|={worst:.2e})"
         )
-
-    # Training health
-    checks["loss_finite"] = math.isfinite(training_loss)
-    checks["all_steps_finite"] = all(math.isfinite(l) for l in losses)
-    if len(losses) >= 2:
-        checks["loss_decreased"] = losses[-1] < losses[0]
-        log(
-            f"  Loss decreased: {'PASS' if checks['loss_decreased'] else 'FAIL'} ({losses[0]:.4f} -> {losses[-1]:.4f})"
-        )
-    else:
-        checks["loss_decreased"] = False
 
     return {"checks": checks}
 

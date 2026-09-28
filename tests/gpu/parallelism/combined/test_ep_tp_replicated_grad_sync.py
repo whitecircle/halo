@@ -36,7 +36,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import ensure_model_downloaded
+from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.utils import log
@@ -46,15 +46,6 @@ EP_SIZE = 2
 TP_SIZE = 2
 NUM_TRAIN_STEPS = 8
 SEED = 42
-
-
-def _max_diff_across_group(tensor, group) -> float:
-    """Max |Δ| of a tensor across the ranks of ``group`` (0.0 == bit-identical, NaN if any rank holds one)."""
-    local = tensor.detach().contiguous()
-    gathered = [torch.empty_like(local) for _ in range(dist.get_world_size(group))]
-    dist.all_gather(gathered, local, group=group)
-    # torch.max propagates NaN, where a Python max over the per-rank floats would drop it.
-    return torch.stack([(g - gathered[0]).abs().max() for g in gathered]).max().item()
 
 
 # DP=1 EP+TP keeps the replicated params as PLAIN tensors (no FSDP), which is where the missing
@@ -121,7 +112,7 @@ def run(ctx):
     # 1) Replicated non-expert plain params must be bit-identical across the TP axis. A NaN diff
     # counts as drifted (NaN != 0.0).
     replicated_diffs = [
-        _max_diff_across_group(p.data, tp_group)
+        group_max_abs_diff(p.data, tp_group)
         for p in model.parameters()
         if not isinstance(p.data, DTensor) and id(p) not in expert_ids
     ]
@@ -134,7 +125,7 @@ def run(ctx):
 
     # 2) EP-distributed experts must STILL differ across TP (not averaged/corrupted).
     expert_diffs = [
-        _max_diff_across_group(p.data, tp_group)
+        group_max_abs_diff(p.data, tp_group)
         for p in model.parameters()
         if id(p) in expert_ids and not isinstance(p.data, DTensor)
     ]

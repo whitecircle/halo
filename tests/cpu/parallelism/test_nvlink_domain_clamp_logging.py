@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
+import src.distributed.parallelism_config as parallelism_config_module
 from tests.common.parallelism import create_config
-from tests.cpu.parallelism.test_parallelism_config import _MOD
 
 
 def _messages(mock_logger) -> list[str]:
@@ -22,7 +22,7 @@ def _messages(mock_logger) -> list[str]:
 
 
 def test_single_node_clamp_is_logged():
-    with patch(f"{_MOD}.logger") as mock_logger:
+    with patch.object(parallelism_config_module, "logger") as mock_logger:
         cfg = create_config(nvlink_domain_size=72, world_size=8, gpus_per_node=8)
     assert cfg.nvlink_domain_size == 8, "clamp semantics must not change"
     clamp_lines = [m for m in _messages(mock_logger) if "clamp" in m.lower() and "72" in m and "8" in m]
@@ -30,7 +30,7 @@ def test_single_node_clamp_is_logged():
 
 
 def test_unclamped_domain_logs_nothing_about_clamping():
-    with patch(f"{_MOD}.logger") as mock_logger:
+    with patch.object(parallelism_config_module, "logger") as mock_logger:
         cfg = create_config(nvlink_domain_size=8, world_size=8, gpus_per_node=8)
     assert cfg.nvlink_domain_size == 8
     clamp_lines = [m for m in _messages(mock_logger) if "clamp" in m.lower()]

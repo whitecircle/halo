@@ -44,6 +44,14 @@ def test_rank0_refuses_a_sharded_checkpoint_with_the_merge_instructions(tmp_path
         reject_ep_sharded_checkpoint(_checkpoint(tmp_path, "ep_sharded"), "checkpoints/run")
 
 
+def test_the_refusal_names_the_gathered_save_knob(tmp_path):
+    """The gathered-save alternative is the YAML setting a user writes, not an internal call."""
+    with pytest.raises(NotImplementedError) as err:
+        reject_ep_sharded_checkpoint(_checkpoint(tmp_path, "ep_sharded"), "checkpoints/run")
+    assert "save_sharded_ep: false" in str(err.value), err.value
+    assert "save_ep_model(" not in str(err.value), err.value
+
+
 def test_a_plain_checkpoint_passes(tmp_path):
     assert reject_ep_sharded_checkpoint(_checkpoint(tmp_path, None), "checkpoints/run") is None
 

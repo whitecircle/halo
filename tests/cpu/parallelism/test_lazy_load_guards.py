@@ -93,7 +93,7 @@ def _load(tmp_path, model: nn.Module, tensors: dict[str, torch.Tensor], plans: l
 
 
 def test_a_replicated_tensor_of_the_wrong_shape_is_refused(tmp_path):
-    """A checkpoint↔config mismatch (a patch_vocab-shrunk checkpoint on the base config) must raise
+    """A checkpoint↔config mismatch (a patch_vocab-grown checkpoint on the base config) must raise
     the way ``from_pretrained`` does, not silently reshape the model to the checkpoint."""
     model = nn.Linear(H, 3, bias=False)
     plan = WeightPlan(WeightAction.REPLICATE, "model.safetensors", "weight", "weight")

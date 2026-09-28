@@ -68,9 +68,11 @@ class CPConfig:
                 "pass ParallelismConfig.nvlink_domain_size."
             )
         if cp_size > gpus_per_node:
-            raise ValueError(f"CP size ({cp_size}) cannot exceed the NVLink-domain size ({gpus_per_node})")
+            raise ValueError(
+                f"context_parallel_size ({cp_size}) cannot exceed the NVLink-domain size ({gpus_per_node})"
+            )
         if gpus_per_node % cp_size != 0:
-            raise ValueError(f"CP size ({cp_size}) must divide the NVLink-domain size ({gpus_per_node})")
+            raise ValueError(f"context_parallel_size ({cp_size}) must divide the NVLink-domain size ({gpus_per_node})")
         self._create_cp_groups(gpus_per_node)
 
         # Logged, not stored: ``ParallelismConfig`` computes data_parallel_size (its divisor also
@@ -90,9 +92,10 @@ class CPConfig:
             return False
         if self.cp_size > 1:
             raise RuntimeError(
-                f"CPConfig(cp_size={self.cp_size}) needs an initialized torch.distributed process "
-                f"group: without one Ulysses has no all-to-all, so this process would attend over "
-                f"sequence chunk 0 alone. Launch with torchrun, or set cp_size=1."
+                f"context_parallel_size={self.cp_size} needs an initialized torch.distributed "
+                f"process group: without one Ulysses has no all-to-all, so this process would "
+                f"attend over sequence chunk 0 alone. Launch with torchrun, or set "
+                f"context_parallel_size=1."
             )
         self.process_group = None
         self.cp_rank = 0
@@ -147,7 +150,7 @@ class CPConfig:
 def cp_chunk_bounds(seq_len: int, cp_rank: int, cp_size: int) -> tuple[int, int]:
     """``[start, end)`` of CP rank ``cp_rank``'s contiguous chunk of a ``seq_len``-token sequence."""
     if seq_len % cp_size != 0:
-        raise ValueError(f"Sequence length {seq_len} must be divisible by cp_size {cp_size}")
+        raise ValueError(f"Sequence length {seq_len} must be divisible by context_parallel_size {cp_size}")
     chunk_size = seq_len // cp_size
     return cp_rank * chunk_size, (cp_rank + 1) * chunk_size
 

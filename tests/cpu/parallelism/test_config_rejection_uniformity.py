@@ -69,13 +69,13 @@ def test_the_rejection_stays_a_ValueError_carrying_the_real_reason():
     """
     _, error, _, _ = _build(ep_size=0)
     assert isinstance(error, ValueError)
-    assert "ep_size must be >= 1" in str(error)
+    assert "expert_parallel_size must be >= 1" in str(error)
 
 
 def test_every_rule_is_still_enforced_through_the_seam():
     """A sample across the validators, so the try/except cannot silently swallow a rejection."""
     for kwargs, expected in (
-        ({"pp_schedule": "nonsense"}, "pp_schedule must be one of"),
+        ({"pp_schedule": "nonsense"}, "pipeline_schedule must be one of"),
         ({"ep_buffer_backend": "nonsense"}, "ep_buffer_backend must be one of"),
         ({"max_concurrent_loading": -1}, "max_concurrent_loading must be >= 0"),
         ({"ep_scope": "nonsense"}, "ep_scope must be one of"),

@@ -214,7 +214,7 @@ def run_env_grpo_e2e(
     if expert_tp_size > 1:
         refusal = expert_lora_under_etp_refusal(expert_tp_size)
         checks["expert_lora_under_expert_tp_refused"] = bool(refusal)
-        checks["expert_lora_etp_refusal_names_expert_tp"] = "expert_tp_size > 1" in refusal
+        checks["expert_lora_etp_refusal_names_expert_tp"] = "expert_tensor_parallel_size > 1" in refusal
         log(f"  expert-LoRA under expert_tp_size={expert_tp_size} refusal: {refusal or '<NOT RAISED>'}")
 
     # ── 1. the server is up, serving the checkpoint we are about to train, and reproducible ───
@@ -274,7 +274,7 @@ def run_env_grpo_e2e(
         checks["adapters_under_tp_refused"] = bool(refusal)
         # Matched by name rather than by exception type: every other construction-time refusal on
         # this path (weight sync, environment spec, batch shape) also raises ValueError.
-        checks["tp_refusal_names_tensor_parallelism"] = "Tensor Parallelism (tp_size > 1)" in refusal
+        checks["tp_refusal_names_tensor_parallelism"] = "Tensor Parallelism (tensor_parallel_size > 1)" in refusal
         log(f"  adapters under tp_size={tp_size} refusal: {refusal.splitlines()[0] if refusal else '<NOT RAISED>'}")
         return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 

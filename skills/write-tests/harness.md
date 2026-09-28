@@ -49,13 +49,32 @@ It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body i
 
 ```python
 return {
-    "checks":  {"loss_finite": True, "loss_decreased": True, "rank_loss_consistent": True},
+    "checks":  {"loss_finite": True, "all_steps_finite": True, "expert_bank_split_ep_way": True},
     "metrics": ctx.metrics(trainer),   # {} is allowed for pure-correctness tests
 }
 ```
 
 The decorator computes `all(checks.values())`. **Returning no checks is an error** — always
 return at least one. `metrics` is optional but should be present on any test that trains.
+
+Every check must be able to fail. A cross-rank spread of a logged loss cannot (HF logs the world
+mean), and neither can `trainer.is_ep_mode` / `is_tp_mode` / `is_cp_mode`, which return the
+`ParallelismConfig` the trainer was handed; read the axis off the model instead.
+
+### Shared checks and probes
+
+Build checks from these rather than re-deriving them per file:
+
+| Helper | Module | What it gives |
+|---|---|---|
+| `step_losses(trainer)` | `tests/common/utils.py` | the per-step training losses, eval entries and the run summary excluded |
+| `training_run_checks(result, trainer, max_steps, *, loss_band=, grad_norms=, loss_decreased=)` | `tests/common/utils.py` | `loss_finite`, `all_steps_finite`, `steps_completed`, and on request `loss_reasonable`, `grad_norms_finite`, `loss_decreased` |
+| `parallel_shape_checks(model, parallelism_config)` | `tests/common/parallel_shape.py` | one model-side probe per axis the config enables: EP wrappers, the expert bank split EP-way, ETP sharding, TP-sharded params, Ulysses attention layers |
+| `ep_layers(model)` | `tests/common/ep_reference.py` | every EP/ETP-wrapped MoE layer |
+| `group_max_abs_diff(tensor, group)` | `tests/common/distributed.py` | the replica-identity probe: the largest elementwise difference across a group, NaN-propagating (collective) |
+| `model_save_checks` / `resume_checkpoint_checks` / `resume_continuity_checks` | `tests/common/checkpoint_io.py` | the files a `save_model` or a mid-training checkpoint must hold, and what a resume restored at its first step |
+| `run_sft_suite(ctx, SFTSuite(...), {key: SFTMode(...)}, default_mode=)` | `tests/common/sft_modes.py` | the whole SFT smoke body: one `--mode` per manifest row, load → train → the checks above |
+| `skip_unless_local_checkpoint(path, env_var)` | `tests/common/harness.py` | the `SKIP:` exit for a suite whose local checkpoint is absent, called under `__main__` before `run()` |
 
 ## Minimal copy-pasteable skeleton
 
@@ -65,9 +84,11 @@ return at least one. `metrics` is optional but should be present on any test tha
 
 Run: torchrun --nproc_per_node=2 tests/gpu/<area>/test_<name>.py
 """
-import math
-
 from tests.common.harness import gpu_test_main
+from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.utils import training_run_checks
+
+MAX_STEPS = 5
 
 
 @gpu_test_main(min_world_size=2, prefix="test_sft_ep")
@@ -79,22 +100,18 @@ def run(ctx) -> dict:
 
     # 2. Train a few REAL steps (>= 2 so the decrease check has signal).
     #    The body builds its own ParallelismConfig — ctx carries the launch, not the mode.
-    pc = ParallelismConfig(ep_size=2, use_grouped_gemm=has_grouped_mm())
+    pc = ParallelismConfig(ep_size=2)
     trainer = DistributedSFTTrainer(model=model, ..., parallelism_config=pc)
     ctx.on_teardown(trainer.cleanup_ep)   # finalizer the decorator can't reach
-    trainer.train()
-    losses = [h["loss"] for h in trainer.state.log_history if "loss" in h]
+    checks = parallel_shape_checks(model, pc)   # the axis, read off the model
+    result = trainer.train()
 
     # 3. Assert BEHAVIOR (verdict computed on ALL ranks). A logged loss is already the world mean
     #    (HF all-gathers it at every log step), so a cross-rank spread of it cannot fail.
-    loss_finite = all(math.isfinite(x) for x in losses)
-    loss_decreased = len(losses) >= 2 and losses[-1] < losses[0]
+    checks |= training_run_checks(result, trainer, MAX_STEPS, grad_norms=True, loss_decreased=True)
 
     return {
-        "checks": {
-            "loss_finite": loss_finite,
-            "loss_decreased": loss_decreased,
-        },
+        "checks": checks,
         "metrics": ctx.metrics(trainer),   # headline tokens/s/GPU + peak mem + step time
     }
 
@@ -110,7 +127,8 @@ numerical equivalence with `TOL.kernel_atol` / `TOL.kernel_rtol`.
 verdicts in one launch without aborting at the first failure — the conventions test names it as the
 replacement for a printed pass/fail summary. Every raise inside an `fn` must be rank-symmetric or come
 after its last collective, or the ranks desynchronize. Cross-rank verdicts come from
-`tests/common/distributed.py` (`world_mean`, `world_any`, `world_min`, `world_spread`).
+`tests/common/distributed.py` (`world_mean`, `world_any`, `world_min`, `world_spread`,
+`group_max_abs_diff`).
 
 ## Register in the manifest (`tests/gpu/manifest.py`)
 
@@ -120,7 +138,7 @@ A GPU script is invisible until it has a `TestSpec`. Add one row (path relative 
 ```python
 MANIFEST: dict[str, TestSpec] = {
     ...
-    "trainers/sft/test_sft_ep.py": TestSpec(
+    "trainers/sft/test_sft_example.py": TestSpec(
         nproc=2,                                       # --nproc_per_node
         markers=('gpu', 'full', '2gpu', 'ep', 'moe', 'qwen3'),  # all from ALL_MARKERS
         timeout=1000,                                  # seconds; process group killed on expiry

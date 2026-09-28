@@ -15,7 +15,7 @@ from transformers import ProcessorMixin
 from transformers.data.data_collator import DataCollatorMixin
 from trl.trainer.utils import pad
 
-from src.data.pipeline.rendered import probe_tokenizer_specials
+from src.data.pipeline.rendered import lacks_emitted_bos
 from src.data.vlm import run_vlm_processor
 
 _TEXT_SIDES = ("prompt", "chosen", "rejected")
@@ -78,12 +78,6 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
 
     def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
         tokenizer = self.processor.tokenizer
-        # Same probe gate as the text path (``tokenize_preference_row``): run_vlm_processor
-        # tokenizes with add_special_tokens=False, so BOS is prepended only when the tokenizer's own
-        # post-processor emits one. Injecting a nominal bos_token it never emits (gpt-oss/Bailing
-        # shape) would train on a token the served policy never sees.
-        bos_token_id = tokenizer.bos_token_id if probe_tokenizer_specials(tokenizer).adds_leading_bos else None
-
         enriched_examples = []
         vision_features: dict[str, list[torch.Tensor]] = {}
         sequence_features: dict[str, list[torch.Tensor]] = {}
@@ -91,20 +85,20 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
             images = example.get("images") or []
             encoded = run_vlm_processor(self.processor, example["prompt_text"], images)
 
-            prompt_ids = encoded["input_ids"][0]
-            bos_prepended = bos_token_id is not None and (
-                prompt_ids.numel() == 0 or int(prompt_ids[0]) != bos_token_id
-            )
+            # run_vlm_processor tokenizes with add_special_tokens=False, so the BOS the tokenizer's
+            # own post-processor emits is restored here, as on the text path.
+            prompt_ids = encoded["input_ids"][0].tolist()
+            bos_prepended = lacks_emitted_bos(prompt_ids, tokenizer)
             if bos_prepended:
-                prompt_ids = torch.cat([prompt_ids.new_tensor([bos_token_id]), prompt_ids])
-            if self.max_prompt_length is not None and prompt_ids.numel() > self.max_prompt_length:
+                prompt_ids = [tokenizer.bos_token_id, *prompt_ids]
+            if self.max_prompt_length is not None and len(prompt_ids) > self.max_prompt_length:
                 raise ValueError(
-                    f"VLM prompt expands to {prompt_ids.numel()} tokens, over "
+                    f"VLM prompt expands to {len(prompt_ids)} tokens, over "
                     f"max_prompt_length={self.max_prompt_length}. VLM prompts cannot be truncated "
                     f"(cutting expanded image placeholder tokens desyncs them from pixel_values); "
                     f"raise max_prompt_length or pre-filter over-length rows."
                 )
-            enriched_examples.append({**example, "prompt_input_ids": prompt_ids.tolist()})
+            enriched_examples.append({**example, "prompt_input_ids": prompt_ids})
 
             for key, value in encoded.items():
                 if key in ("input_ids", "attention_mask"):

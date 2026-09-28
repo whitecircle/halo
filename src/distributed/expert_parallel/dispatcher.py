@@ -804,7 +804,7 @@ class DeepEPDispatcher:
                 self.ep_size,
                 is_cross_node=self.is_inter_node,
                 gpus_per_node=get_local_world_size(),
-                scope=f"ep_size={self.ep_size}, cross-node={self.is_inter_node}",
+                scope=f"expert_parallel_size={self.ep_size}, cross-node={self.is_inter_node}",
             )
         return _BACKENDS[choice](self)
 

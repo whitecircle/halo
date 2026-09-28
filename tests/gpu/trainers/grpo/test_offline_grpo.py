@@ -21,8 +21,6 @@ Run with 2 GPUs:
         tests/gpu/trainers/grpo/test_offline_grpo.py
 """
 
-import math
-
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -32,7 +30,7 @@ from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, training_run_checks
 
 # Configuration
 
@@ -154,41 +152,19 @@ def run(ctx) -> dict:
     train_result = trainer.train()
 
     # ── Collect metrics ─────────────────────────────────────────────
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    losses = step_losses(trainer)
-
     log("\n  --- Training Results ---")
-    log(f"  Final training loss: {training_loss:.6f}")
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
-
-    # Log GRPO-specific metrics if available
-    reward_metrics = [entry.get("rewards/mean", None) for entry in log_history if "rewards/mean" in entry]
+    log_history = trainer.state.log_history
+    reward_metrics = [entry["rewards/mean"] for entry in log_history if "rewards/mean" in entry]
     if reward_metrics:
-        log(f"  Mean rewards: {[f'{r:.4f}' for r in reward_metrics if r is not None]}")
+        log(f"  Mean rewards: {[f'{r:.4f}' for r in reward_metrics]}")
 
-    advantage_metrics = [entry.get("advantages/mean", None) for entry in log_history if "advantages/mean" in entry]
+    advantage_metrics = [entry["advantages/mean"] for entry in log_history if "advantages/mean" in entry]
     if advantage_metrics:
-        log(f"  Mean advantages: {[f'{a:.4f}' for a in advantage_metrics if a is not None]}")
+        log(f"  Mean advantages: {[f'{a:.4f}' for a in advantage_metrics]}")
 
     # ── Assertions ──────────────────────────────────────────────────
     log("\n  --- Assertions ---")
-    checks = {}
-
-    # Check 1: Training completed (loss is finite)
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} (loss={training_loss:.6f})")
-
-    # Check 2: All step losses are finite (no NaN/Inf)
-    all_finite = all(math.isfinite(l) for l in losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    checks["steps_completed"] = trainer.state.global_step == MAX_STEPS
-    log(f"  Steps completed: {trainer.state.global_step}/{MAX_STEPS}")
-
-    return {"checks": checks}
+    return {"checks": training_run_checks(train_result, trainer, MAX_STEPS)}
 
 
 main = gpu_test_main(min_world_size=2, prefix="offline_grpo")(run)

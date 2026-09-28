@@ -2,8 +2,8 @@
 """The embedding trainer refuses a batch sampler its toolkit loader would drop.
 
 TP/ETP runs and pre-sharded datasets batch through the mixin's DP-sharded loader, which builds plain
-batches and never reads ``batch_sampler``. ``no_duplicates`` there used to run with in-batch
-duplicates (false negatives for in-batch-negative losses) and no message; plain DP and pure EP keep
+batches and never reads ``batch_sampler``, so ``no_duplicates`` there would run with in-batch
+duplicates (false negatives for in-batch-negative losses) and no message. Plain DP and pure EP keep
 sentence-transformers' own loader, which applies it.
 
 Run: pytest tests/cpu/trainers/test_embedding_batch_sampler_gate.py

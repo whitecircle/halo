@@ -27,7 +27,7 @@ from src.models.loading.tokenizer_setup import load_chat_template
 
 logger = logging.getLogger(__name__)
 
-_PREPROCESSING_MODES = ("chat", "text")
+PREPROCESSING_MODES = ("chat", "text")
 # The strategies TRL's pack_dataset accepts.
 PACKING_STRATEGIES = ("bfd", "bfd_split", "wrapped")
 
@@ -106,15 +106,13 @@ class PreprocessingConfig:
     max_pixels: int | None = field(default=None, metadata=_NO_RENDER_CHECK)
 
     def __post_init__(self) -> None:
-        if self.mode not in _PREPROCESSING_MODES:
-            raise ValueError(
-                f"Invalid preprocessing mode '{self.mode}'. Expected one of {list(_PREPROCESSING_MODES)}."
-            )
+        if self.mode not in PREPROCESSING_MODES:
+            raise ValueError(f"Invalid preprocessing mode '{self.mode}'. Expected one of {list(PREPROCESSING_MODES)}.")
 
         inapplicable = sorted(
             f.name
             for f in dataclass_fields(self)
-            if self.mode not in f.metadata.get("modes", _PREPROCESSING_MODES) and getattr(self, f.name) != f.default
+            if self.mode not in f.metadata.get("modes", PREPROCESSING_MODES) and getattr(self, f.name) != f.default
         )
         if inapplicable:
             raise ValueError(

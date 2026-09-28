@@ -21,8 +21,6 @@ Run with 2 GPUs:
         tests/gpu/trainers/preference/test_smpo_fsdp.py
 """
 
-import math
-
 import torch
 
 from src.configs.smpo_config import SmoothMarginPOConfig
@@ -32,7 +30,7 @@ from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, training_run_checks
 
 # Configuration
 
@@ -136,37 +134,14 @@ def run(ctx):
     train_result = trainer.train()
 
     # ── Collect metrics ─────────────────────────────────────────────
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    losses = step_losses(trainer)
-
     log("\n  --- Training Results ---")
-    log(f"  Final training loss: {training_loss:.6f}")
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
-
-    # Log SMPO-specific metrics if available
-    margin_metrics = [entry.get("margin", None) for entry in log_history if "margin" in entry]
+    margin_metrics = [entry["margin"] for entry in trainer.state.log_history if "margin" in entry]
     if margin_metrics:
-        log(f"  Margins: {[f'{m:.4f}' for m in margin_metrics if m is not None]}")
+        log(f"  Margins: {[f'{m:.4f}' for m in margin_metrics]}")
 
     # ── Assertions ──────────────────────────────────────────────────
     log("\n  --- Assertions ---")
-    checks = {}
-
-    # Check 1: Training completed (loss is finite)
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} (loss={training_loss:.6f})")
-
-    # Check 2: All step losses are finite (no NaN/Inf)
-    all_finite = all(math.isfinite(l) for l in losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
-    checks["steps_completed"] = trainer.state.global_step == MAX_STEPS
-    log(f"  Steps completed: {trainer.state.global_step}/{MAX_STEPS}")
-
-    return {"checks": checks}
+    return {"checks": training_run_checks(train_result, trainer, MAX_STEPS)}
 
 
 main = gpu_test_main(min_world_size=2, prefix="smpo_fsdp")(run)

@@ -610,10 +610,11 @@ class GradientSyncMixin:
         ids = {id(param) for name, param in model.named_parameters() if name in names}
         if names and not ids:
             raise RuntimeError(
-                f"TP registered {len(names)} per-head attention norms for the step-time gradient SUM, "
-                f"but none of those names resolve against the trainer's model (e.g. {sorted(names)[:3]}). "
+                f"TP registered {len(names)} per-head attention norms for the step-time gradient SUM, but "
+                f"none of those names resolve against the trainer's model (e.g. {sorted(names)[:3]}). "
                 "Their gradients would stay divided across the TP group and the norms would train on a "
-                "1/tp_size gradient. The registry is keyed on the model apply_tp_to_attention_only saw."
+                "1/tensor_parallel_size gradient. The registry is keyed on the model "
+                "apply_tp_to_attention_only saw."
             )
         self._tp_per_head_norm_ids_cache = ids
         return ids

@@ -26,7 +26,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 # Below the insert it relies on.
-from tests.gpu.manifest import ALL_MARKERS, SCRATCH_DIR_TAG
+from tests.common.scratch import SCRATCH_DIR_TAG
+from tests.gpu.manifest import ALL_MARKERS
 
 # Extra markers beyond the GPU manifest's set.
 _EXTRA_MARKERS = {

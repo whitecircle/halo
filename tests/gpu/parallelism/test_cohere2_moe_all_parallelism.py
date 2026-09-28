@@ -30,7 +30,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from huggingface_hub import snapshot_download
 from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from transformers.models.cohere2_moe import Cohere2MoeConfig, Cohere2MoeForCausalLM
@@ -42,7 +41,7 @@ from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spr
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
 from tests.common.models import COMMAND_A_PLUS
-from tests.common.tiny_models import TOKENIZER_FILE_PREFIXES
+from tests.common.tiny_models import copy_release_tokenizer
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
@@ -78,14 +77,7 @@ def build_synthetic_checkpoint(out_dir: Path, seed: int = 0) -> Path:
     works without the 200B weights; the synthetic config bumps vocab_size to the real tokenizer's
     vocab so token ids stay in range.
     """
-    tokenizer_dir = Path(
-        snapshot_download(COMMAND_A_PLUS, allow_patterns=[f"{prefix}*" for prefix in TOKENIZER_FILE_PREFIXES])
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for src in tokenizer_dir.iterdir():
-        if src.is_file() and src.name.startswith(TOKENIZER_FILE_PREFIXES):
-            shutil.copy2(src, out_dir / src.name)
-
+    copy_release_tokenizer(COMMAND_A_PLUS, out_dir)
     torch.manual_seed(seed)
     vocab = len(AutoTokenizer.from_pretrained(out_dir))
     config = Cohere2MoeConfig(**{**TINY_CONFIG_KWARGS, "vocab_size": vocab})

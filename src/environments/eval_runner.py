@@ -87,7 +87,7 @@ def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
     if isinstance(ds, Dataset):
         return ds
     if split not in ds:
-        raise ValueError(f"split {split!r} is not in {path}, which holds {list(ds)}")
+        raise ValueError(f"--split {split!r} is not in {path}, which holds {list(ds)}")
     return ds[split]
 
 

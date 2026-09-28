@@ -31,7 +31,6 @@ PartialState()
 # --- top_entropy_quantile must never exclude structural tokens ---
 
 SPECIAL_IDS = [100, 101]  # <|channel|>, <|call|>: near-deterministic, so the lowest-entropy tokens
-NORMAL_IDS = [7, 8, 9]
 
 
 class _FakeTokenizer:

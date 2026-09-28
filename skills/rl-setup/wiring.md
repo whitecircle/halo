@@ -304,7 +304,7 @@ sync_weights_every_n_steps: 1
 num_rollout_workers: 4
 rollout_temperature: 0.7
 rollout_top_p: 0.95
-rollout_max_tokens: 512
+rollout_max_tokens: 512         # per-turn generation cap; the script pins max_completion_length to it
 enable_prefetch: true
 
 # GRPO hyperparameters (GRPOConfig)
@@ -313,5 +313,4 @@ beta: 0.01                      # 0.0 disables the ref model
 epsilon: 0.2
 scale_rewards: batch           # 'batch' (the recipes') | 'group' | 'none'
 max_prompt_length: 512
-max_completion_length: 512
 ```

@@ -19,6 +19,9 @@
   constructing the demo and launching it catches the break.
 * Endpoint flags: every generation, eval and playground CLI takes ``--base_url``/``--api_key`` from
   the one helper in ``scripts/_common.py``, so a command line carries from one to the next.
+* Shared flag blocks: every dtype flag under ``scripts/`` comes from ``add_dtype_arg`` and every
+  prompt-row field flag of the generation CLIs from ``add_prompt_field_args``, so a re-typed copy
+  cannot drift onto its own default or choices.
 * Environment-playground request plumbing: the app documents a keyless local vLLM, so a ``None``
   API key (which ``AsyncOpenAI`` refuses at construction), an empty ``"model"`` sent verbatim, and a
   scheme-less base URL each break exactly the invocation the docstring advertises.
@@ -42,8 +45,9 @@ import pytest
 import torch
 from openai import AsyncOpenAI
 
-from scripts._common import add_openai_endpoint_args
+from scripts._common import add_dtype_arg, add_openai_endpoint_args
 from scripts.inference import _common as inference_common
+from scripts.inference._common import add_prompt_field_args
 from scripts.inference.playground import gradio_environment_playground
 from scripts.inference.reward_model import _common as reward_model_common
 from scripts.inference.reward_model._common import build_generation_parser
@@ -411,6 +415,54 @@ def test_every_endpoint_flag_comes_from_the_shared_helper():
     assert not redeclared, (
         f"endpoint flags declared outside scripts/_common.py's add_openai_endpoint_args: {redeclared}"
     )
+
+
+def _declared_action(parser: argparse.ArgumentParser, flag: str) -> argparse.Action:
+    return next(action for action in parser._actions if flag in action.option_strings)
+
+
+def test_every_dtype_flag_comes_from_the_shared_helper():
+    """One default and one choice set for every dtype flag under ``scripts/``: the scorer's
+    ``--rm_dtype`` names a different model's dtype, not a different set of spellings or a different
+    default from the checkpoint tools that produced that model."""
+    scripts_root = _PROJECT_ROOT / "scripts"
+    redeclared = [
+        f"{script.relative_to(_PROJECT_ROOT)}: {flag}"
+        for script in sorted(scripts_root.rglob("*.py"))
+        if script != scripts_root / "_common.py"
+        for flag in _declared_flags(script.read_text(encoding="utf-8"))
+        if "dtype" in flag
+    ]
+    assert not redeclared, f"dtype flags declared outside scripts/_common.py's add_dtype_arg: {redeclared}"
+
+    scorer = _declared_action(build_generation_parser("test", temperature_default=0.0), "--rm_dtype")
+    shared = _declared_action(add_dtype_arg(argparse.ArgumentParser()), "--dtype")
+    assert (scorer.default, scorer.choices) == (shared.default, shared.choices)
+
+
+def test_the_prompt_row_fields_come_from_the_shared_helper():
+    """The S3 generation CLI and the reward-model scorers read the same row fields, so a prompt file
+    keyed for one is keyed for the other; one block declares them."""
+    shared = {
+        spelling
+        for action in add_prompt_field_args(argparse.ArgumentParser(add_help=False))._actions
+        for spelling in action.option_strings
+    }
+    scorer = {
+        spelling
+        for action in build_generation_parser("test", temperature_default=0.0)._actions
+        for spelling in action.option_strings
+    }
+    assert shared and shared <= scorer, f"the scorers do not carry the shared row fields {sorted(shared - scorer)}"
+
+    redeclared = [
+        f"{script.relative_to(_PROJECT_ROOT)}: {flag}"
+        for script in sorted(_INFERENCE_ROOT.rglob("*.py"))
+        if script != _INFERENCE_ROOT / "_common.py"
+        for flag in _declared_flags(script.read_text(encoding="utf-8"))
+        if flag in shared
+    ]
+    assert not redeclared, f"row-field flags declared outside add_prompt_field_args: {redeclared}"
 
 
 if __name__ == "__main__":

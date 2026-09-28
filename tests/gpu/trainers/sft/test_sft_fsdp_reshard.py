@@ -104,8 +104,7 @@ def run_sft(mode_name, parallelism_kwargs, reshard, tokenizer, output_dir):
     losses = step_losses(trainer)
     log(f"  losses: {[f'{x:.4f}' for x in losses]}")
 
-    if hasattr(trainer, "cleanup_ep"):
-        trainer.cleanup_ep()
+    trainer.cleanup_ep()
     del trainer, model
     cleanup_memory()
     return losses

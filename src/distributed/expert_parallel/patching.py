@@ -91,11 +91,12 @@ def patch_moe_model_for_ep(
             # Unwrapped experts stay replicated and un-synced while the run reports a DP size that
             # assumes they are sharded.
             raise ValueError(
-                f"Expert Parallelism requested (ep_size={ep_config.ep_size}, "
-                f"expert_tp_size={ep_config.expert_tp_size}) but NO MoE layer was patched — none of "
-                f"the model's modules match a registered EP wrapper. Supported HF MoE classes: "
-                f"{sorted(MOE_LAYER_MAP)}. Add an EP wrapper for this family (see "
-                f"agent-docs/models/adding-a-model.md) or run without expert parallelism."
+                f"Expert Parallelism requested (expert_parallel_size={ep_config.ep_size}, "
+                f"expert_tensor_parallel_size={ep_config.expert_tp_size}) but NO MoE layer was "
+                f"patched — none of the model's modules match a registered EP wrapper. "
+                f"Supported HF MoE classes: {sorted(MOE_LAYER_MAP)}. Add an EP wrapper for "
+                f"this family (see agent-docs/models/adding-a-model.md) or run without expert "
+                f"parallelism."
             )
         # ep_group_size == 1 wraps only for grouped GEMM; unwrapped keeps stock HF expert compute.
         logger.warning(f"No MoE layers found. Supported: {sorted(MOE_LAYER_MAP)}")

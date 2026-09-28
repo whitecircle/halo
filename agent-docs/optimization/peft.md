@@ -106,7 +106,8 @@ targets that did match. Read the excluded count — it is the tell.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
   `disable_dropout_in_model` after the adapter wrap (`disable_dropout` defaults to `True`), zeroing PEFT's
   `lora_dropout` along with the model's own for reference-vs-policy determinism. A warning fires when a
-  configured dropout was zeroed; `disable_dropout: false` keeps it.
+  configured dropout was zeroed; `disable_dropout: false` keeps it. Leaving `lora_dropout` out keeps TRL's
+  0.05 default, so `lora_dropout: 0.0` is the setting that states no dropout.
 
 | Trainer | Full-FT band | LoRA start |
 |---|---|---|

@@ -237,13 +237,6 @@ def main() -> int:
             model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
             finalize_liger_after_direct_load(sft_config, use_liger, model)
 
-        # FusedLinearCE: logits are None, need use_liger_kernel=True for TRL's
-        # entropy guard (skips logits access). The mixin defers the flag to
-        # prevent TRL from re-applying Liger to EP-wrapped modules.
-        if liger_kernel_config and liger_kernel_config.get("fused_linear_cross_entropy"):
-            sft_config.use_liger_kernel = True
-            sft_config.liger_kernel_config = liger_kernel_config
-
         # Under PP the Liger class patches are already applied (direct loading above); TRL's
         # instance re-application would run on the pipeline stage module, so defer the flag —
         # the same handling as the TP branch.

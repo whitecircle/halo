@@ -1,7 +1,9 @@
 """Launch specs for the GPU test suite.
 
-GPU tests are external ``torchrun`` scripts (each ends in its ``gpu_test_main`` entry, or a
-``sys.exit(main())``), so pytest cannot read ``nproc`` / markers / timeout from inside them. This manifest maps
+GPU tests are external ``torchrun`` scripts, each run through its ``gpu_test_main`` entry except the
+few whose lifecycle the harness cannot express, which keep their own (``_OWN_LIFECYCLE`` in
+``tests/cpu/conventions/test_gpu_harness_conventions.py`` names each with its reason). Pytest cannot
+read ``nproc`` / markers / timeout from inside them, so this manifest maps
 each script (path relative to ``tests/gpu/``) to its launch spec; ``tests/gpu/conftest.py``
 reads it and generates one pytest node per ``(script, args)`` with the right markers,
 process count and timeout. The launcher shells out ``torchrun --nproc_per_node=<nproc>``
@@ -10,7 +12,8 @@ and asserts the exit code, parsing the structured result line when the script us
 
 To add a test: drop the script under ``tests/gpu/`` and add one ``TestSpec`` line here.
 A script present on disk but missing from the manifest is reported by
-:func:`unregistered_scripts`, and the conftest fails collection on that drift.
+:func:`unregistered_scripts`, and the conftest fails collection on that drift. The
+:data:`LAUNCHER_ENTRYPOINTS` are the only modules there pytest collects itself.
 
 Markers (selection):
     gpu                        — every entry (the suite tier).
@@ -56,11 +59,10 @@ Markers (selection):
 from dataclasses import dataclass
 from pathlib import Path
 
-_GPU_DIR = Path(__file__).parent
-# Leading tag on every per-rank scratch dir a GPU script allocates (``setup_cache_dirs``). The root
-# conftest sweeps leaked dirs by this spelling alone, so it never matches another program's dirs in a
-# shared TMPDIR. Kept here, a torch-free module, because the launcher session must not import ``src``.
-SCRATCH_DIR_TAG = "halo-test-"
+GPU_DIR = Path(__file__).parent
+# The pytest modules under tests/gpu/, relative to it like the MANIFEST keys: the manifest launcher
+# and its contract tests. Pytest collects these directly; everything else there is a torchrun script.
+LAUNCHER_ENTRYPOINTS = frozenset({"test_suite.py", "test_launcher_contract.py"})
 
 
 @dataclass(frozen=True)
@@ -522,7 +524,7 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # --ep-size 1 gathers DTensor experts out of the FSDP2 shard, --ep-size 2 gathers FSDP-ignored
     # plain tensors; both must land in the engine's loader. The three bare rows are the per-family
-    # server arms (a family pass runs them with -k "not peft and not resume and not thinking"); the
+    # server arms (a family pass runs them with -k "not peft and not resume and not routing"); the
     # --peft / --resume rows are the Qwen3-30B pass. --thinking-budget is not a row: it is a gpt-oss
     # shape that needs that image's reasoning plugin (agent-docs/models/gpt-oss.md#serving-for-grpo-vllm).
     # The --routing-replay rows need the server on VLLM_ENABLE_R3=1; the flag is additive.
@@ -600,9 +602,9 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         # The --routing-replay rows need SGLANG_ENABLE_R3=1 with SGLANG_MOE_RUNNER_BACKEND=triton,
         # since the fused runners bypass the capture hook and return no ids; the flag is additive, so
-        # one server carrying it runs the whole entry. The last two are the R3 rows whose post-sync
-        # policy produces runaway completions, the zero-gradient batch the replay gate exempts. The
-        # resume row sets the budget: two model builds and a checkpoint round-trip.
+        # one server carrying it runs the whole entry. The --tp-size 2 and --resume R3 rows are the ones
+        # whose post-sync policy produces runaway completions, the zero-gradient batch the replay gate
+        # exempts. The resume rows set the budget: two model builds and a checkpoint round-trip.
         timeout=2400,
         flaky=True,
     ),
@@ -1109,17 +1111,6 @@ MANIFEST: dict[str, TestSpec] = {
         # shape, and every mode runs the same 6-step two-phase resume.
         timeout=2400,
     ),
-    "trainers/sft/test_sft_ep.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"), timeout=1000
-    ),
-    "trainers/sft/test_sft_ep_cp.py": TestSpec(
-        nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "cp", "moe", "gptoss"),
-        timeout=1000,
-    ),
-    "trainers/sft/test_sft_ep_etp.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "ep", "etp", "moe", "gptoss"), timeout=1000
-    ),
     "trainers/sft/test_sft_ep_fa2_modes.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"),
@@ -1134,12 +1125,7 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--mode flex", "--mode fa2 --reset_sinks"),
         timeout=1000,
     ),
-    # EP+TP only (EP+TP+ETP is not a supported axis set, so these carry no `etp` marker).
-    "trainers/sft/test_sft_ep_tp.py": TestSpec(
-        nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "gptoss"),
-        timeout=1000,
-    ),
+    # EP+TP only (EP+TP+ETP is not a supported axis set, so this carries no `etp` marker).
     "trainers/sft/test_sft_ep_tp_flex.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "gptoss"),
@@ -1240,26 +1226,32 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--mode fsdp", "--mode ep"),
         timeout=1500,
     ),
-    # `full` rather than `core`: a plain SFT smoke on the 20B checkpoint, like every other `oss20b_*`
-    # entry. The core tier keeps the gpt-oss correctness gates
-    # (`parallelism/ep/test_ep_correctness.py`), not smokes.
+    # `full` rather than `core`: plain SFT smokes on the 20B checkpoint. The core tier keeps the
+    # gpt-oss correctness gates (`parallelism/ep/test_ep_correctness.py`), not smokes.
     "trainers/sft/test_sft_oss20b_default.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "gptoss"), timeout=1500
     ),
-    "trainers/sft/test_sft_oss20b_tp.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "tp", "moe", "gptoss"), timeout=1500
-    ),
-    "trainers/sft/test_sft_oss20b_fsdp.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "moe", "gptoss"), timeout=1500
+    # One row per parallel shape. The markers are the union over the rows, so `-m "gpu and etp"` selects
+    # the other shapes too.
+    "trainers/sft/test_sft_gptoss_modes.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "cp", "tp", "etp", "moe", "gptoss"),
+        args_matrix=(
+            "--mode fsdp",
+            "--mode ep",
+            "--mode cp",
+            "--mode tp",
+            "--mode ep_cp",
+            "--mode ep_tp",
+            "--mode ep_etp",
+        ),
+        timeout=1500,
     ),
     "trainers/sft/test_sft_gptoss_trainable_sinks.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "moe", "gptoss"),
         args_matrix=("--mode fsdp", "--mode tp", "--mode ep"),
         timeout=1500,
-    ),
-    "trainers/sft/test_sft_oss20b_cp.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "cp", "moe", "gptoss"), timeout=1500
     ),
     "trainers/sft/test_sft_qwen3_5_dense.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
@@ -1332,12 +1324,9 @@ ALL_MARKERS = (
 
 
 def script_path(rel: str) -> Path:
-    """Absolute path to a manifest script."""
-    return _GPU_DIR / rel
+    """Absolute path to a script under ``tests/gpu/``, given relative to it."""
+    return GPU_DIR / rel
 
-
-# Pytest-native modules collected directly, not torchrun scripts.
-_NOT_MANIFEST_SCRIPTS = {"test_suite.py", "test_launcher_contract.py"}
 
 # Measurement entry points driven by hand from a docs recipe or a `tests/gpu/profiling/run_*.sh`
 # runner, never by the pytest launcher. Listing them here is what marks an unlisted `bench*.py` as an
@@ -1368,19 +1357,21 @@ def unregistered_scripts() -> list[str]:
     """Executable scripts under ``tests/gpu/`` that no launch spec accounts for.
 
     The conftest fails collection if this is non-empty, so a new test cannot be added
-    without a launch spec. The launcher entrypoint (``test_suite.py``) is excluded, since
-    pytest collects it directly rather than launching it. ``bench*.py`` files are globbed
+    without a launch spec. The :data:`LAUNCHER_ENTRYPOINTS` are excluded, since pytest
+    collects them directly rather than launching them. ``bench*.py`` files are globbed
     too, against :data:`_UNMANIFESTED_BENCHMARKS`.
     """
     on_disk = {
-        str(p.relative_to(_GPU_DIR))
+        str(p.relative_to(GPU_DIR))
         for pattern in ("test_*.py", "bench*.py")
-        for p in _GPU_DIR.rglob(pattern)
-        if "__pycache__" not in p.parts and p.name not in _NOT_MANIFEST_SCRIPTS
+        for p in GPU_DIR.rglob(pattern)
+        if "__pycache__" not in p.parts
     }
-    return sorted(on_disk - set(MANIFEST) - _UNMANIFESTED_BENCHMARKS)
+    return sorted(on_disk - set(MANIFEST) - LAUNCHER_ENTRYPOINTS - _UNMANIFESTED_BENCHMARKS)
 
 
 def stale_entries() -> list[str]:
-    """Registered scripts, manifest entries and benchmarks alike, that no longer exist on disk."""
-    return sorted(rel for rel in (*MANIFEST, *_UNMANIFESTED_BENCHMARKS) if not script_path(rel).exists())
+    """Listed scripts that no longer exist on disk: manifest entries, launcher entry points and
+    benchmarks alike."""
+    listed = (*MANIFEST, *LAUNCHER_ENTRYPOINTS, *_UNMANIFESTED_BENCHMARKS)
+    return sorted(rel for rel in listed if not script_path(rel).exists())

@@ -30,16 +30,16 @@ from src.data.pipeline.processing import (
     get_function_identifier,
 )
 from tests.common.harness import gpu_test_main, record_check
+from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
 
 # Configuration
 
 # Use two distinct tokenizers to test cache isolation
-TOKENIZER_A_NAME = "Qwen/Qwen3-0.6B"
+TOKENIZER_A_NAME = QWEN3_0_6B
 TOKENIZER_B_NAME = "openai-community/gpt2"
 
 NUM_SAMPLES = 20
-SEED = 42
 
 
 # Utilities

@@ -19,6 +19,7 @@ from unittest import mock
 
 import pytest
 from datasets import Dataset, DatasetDict
+from trl import SFTConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.mixins import RLRRConfig, SDPGArguments
@@ -36,6 +37,7 @@ from src.training.parallelism_args import parallelism_config_from_args
 from src.training.script_runner import (
     distributed_trainer_kwargs,
     reject_non_default_args,
+    reject_trl_dataset_prep_args,
     reject_unsupported_args,
 )
 from tests.common.utils import load_script_module
@@ -254,6 +256,46 @@ def test_reject_unsupported_args_names_every_set_field():
     assert "images_field" not in message  # unset fields are not a request
 
 
+# reject_trl_dataset_prep_args: the knobs only TRL's own dataset prep and collator read
+
+
+def _sft_config(**overrides) -> SFTConfig:
+    return SFTConfig(output_dir="unused", bf16=False, use_cpu=True, **overrides)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "knob"),
+    [
+        # Tri-state: an explicit False is as unhonorable a request as True.
+        ({"completion_only_loss": False}, "completion_only_loss"),
+        ({"assistant_only_loss": True}, "assistant_only_loss"),
+        ({"dataset_text_field": "messages"}, "dataset_text_field"),
+        ({"dataset_kwargs": {"add_special_tokens": False}}, "dataset_kwargs"),
+        ({"eval_packing": True}, "eval_packing"),
+    ],
+)
+def test_trl_dataset_prep_knobs_are_refused(overrides, knob):
+    config = _sft_config(**overrides)
+    with pytest.raises(ValueError, match=rf"does not support these config fields.*{knob}"):
+        reject_trl_dataset_prep_args("Some script", config, "eval_packing")
+
+
+def test_trl_dataset_prep_defaults_pass():
+    reject_trl_dataset_prep_args("Some script", _sft_config(), "eval_packing")
+
+
+def test_each_trl_dataset_prep_refusal_names_its_own_way_out():
+    """A mask knob's refusal points at the script's own masking; a rendering knob's at the caller's
+    rendering remedy. Neither message carries the other's advice."""
+    with pytest.raises(ValueError) as masked:
+        reject_trl_dataset_prep_args("Some script", _sft_config(assistant_only_loss=True), render_remedy="REMEDY")
+    assert "train_on_completions_only" in str(masked.value) and "REMEDY" not in str(masked.value)
+
+    with pytest.raises(ValueError) as rendered:
+        reject_trl_dataset_prep_args("Some script", _sft_config(dataset_text_field="messages"), render_remedy="REMEDY")
+    assert "REMEDY" in str(rendered.value) and "train_on_completions_only" not in str(rendered.value)
+
+
 # reject_non_default_args: the same gate for knobs whose own default is truthy
 
 
@@ -318,10 +360,6 @@ def _rejected_knobs(script_path: str) -> set[str]:
     return rejected
 
 
-# Consumed only by TRL's own dataset prep + default collator, which these scripts replace.
-_TRL_SFT_MASK_KNOBS = {"assistant_only_loss", "completion_only_loss"}
-
-
 @pytest.mark.parametrize(
     ("script", "fields"),
     [
@@ -332,8 +370,6 @@ _TRL_SFT_MASK_KNOBS = {"assistant_only_loss", "completion_only_loss"}
         ("scripts/training/classification.py", {"text_only_model"}),
         ("scripts/training/environmental_grpo.py", {"tools_field", "text_only_model"}),
         ("scripts/training/online_grpo/rlvr.py", {"text_only_model"}),
-        ("scripts/training/distillation/self_distill.py", _TRL_SFT_MASK_KNOBS),
-        ("scripts/training/sft.py", _TRL_SFT_MASK_KNOBS),
         (
             "scripts/training/embedding.py",
             {

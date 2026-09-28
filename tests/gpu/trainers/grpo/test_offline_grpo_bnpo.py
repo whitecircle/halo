@@ -41,7 +41,7 @@ from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.utils import cleanup_memory, log, training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 20
@@ -93,8 +93,8 @@ def run_training(
     eval_dataset: Dataset,
     generate_dataset: Dataset,
     output_dir: str,
-) -> tuple[dict[str, bool], dict]:
-    """Run a single training pass (FSDP or TP). Returns (checks, metrics)."""
+) -> tuple[dict[str, bool], float]:
+    """Run a single training pass (FSDP or TP). Returns (checks, training loss)."""
     is_tp = mode == "tp"
     mode_label = "TP=2" if is_tp else "FSDP"
 
@@ -192,39 +192,22 @@ def run_training(
 
     train_result = trainer.train()
 
-    training_loss = train_result.training_loss
-    losses = step_losses(trainer)
-    eval_losses = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
-
-    metrics = {
-        "training_loss": training_loss,
-        "step_losses": losses,
-        "eval_losses": eval_losses,
-    }
-
     log(f"\n  --- {mode_label} Results ---")
-    log(f"  Training loss: {training_loss:.6f}")
-    log(f"  Step losses: {[f'{l:.4f}' for l in losses]}")
-    if eval_losses:
-        log(f"  Eval losses: {[f'{l:.4f}' for l in eval_losses]}")
-
-    checks = {}
-    checks["loss_finite"] = math.isfinite(training_loss)
-    checks["all_steps_finite"] = all(math.isfinite(l) for l in losses)
-    checks["steps_completed"] = trainer.state.global_step == MAX_STEPS
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
     if not is_tp:
+        eval_losses = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
         checks["has_eval"] = len(eval_losses) > 0
-        checks["eval_finite"] = all(math.isfinite(l) for l in eval_losses) if eval_losses else False
-
-    log("\n  --- Assertions ---")
-    for name, passed in checks.items():
-        log(f"  {name}: {'PASS' if passed else 'FAIL'}")
+        checks["eval_finite"] = bool(eval_losses) and all(math.isfinite(l) for l in eval_losses)
+        log(
+            f"  Eval losses logged and finite: {'PASS' if checks['eval_finite'] else 'FAIL'} "
+            f"({[f'{l:.4f}' for l in eval_losses]})"
+        )
 
     del trainer, model
     cleanup_memory()
     barrier()
 
-    return checks, metrics
+    return checks, train_result.training_loss
 
 
 def run(ctx) -> dict:
@@ -269,7 +252,7 @@ def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     for mode in modes:
-        mode_checks, mode_metrics = run_training(
+        mode_checks, training_loss = run_training(
             mode,
             tokenizer,
             train_dataset,
@@ -278,7 +261,7 @@ def run(ctx) -> dict:
             output_dir,
         )
         merge_checks(checks, mode_checks)
-        metrics[f"{mode}_training_loss"] = mode_metrics["training_loss"]
+        metrics[f"{mode}_training_loss"] = training_loss
 
     log(f"\n{'#' * 70}")
     for mode, loss in metrics.items():

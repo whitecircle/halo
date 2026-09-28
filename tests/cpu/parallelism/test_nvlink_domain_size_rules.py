@@ -25,8 +25,8 @@ from unittest.mock import patch
 
 import pytest
 
+import src.distributed.parallelism_config as parallelism_config_module
 from tests.common.parallelism import create_config
-from tests.cpu.parallelism.test_parallelism_config import _MOD
 
 # ── A rack-wide domain on a MULTI-NODE sub-job must raise, never clamp ──────────
 
@@ -79,12 +79,12 @@ def test_worlds_that_divide_into_whole_domains_are_accepted(domain, world):
 
 def test_the_clamp_line_is_info_and_only_on_the_global_main_process():
     """A per-rank clamp line is noise at world scale; the gate is what keeps it to one."""
-    with patch(f"{_MOD}.logger") as main_logger:
+    with patch.object(parallelism_config_module, "logger") as main_logger:
         create_config(nvlink_domain_size=72, world_size=8, gpus_per_node=8, rank=0)
     info_lines = [str(call.args[0]) for call in main_logger.info.call_args_list]
     assert any("clamping" in line for line in info_lines), f"the clamp must be INFO: {info_lines}"
 
-    with patch(f"{_MOD}.logger") as worker_logger:
+    with patch.object(parallelism_config_module, "logger") as worker_logger:
         cfg = create_config(nvlink_domain_size=72, world_size=8, gpus_per_node=8, rank=3)
     worker_lines = [
         str(call.args[0]) for call in worker_logger.info.call_args_list + worker_logger.warning.call_args_list

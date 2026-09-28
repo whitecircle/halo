@@ -51,8 +51,10 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import (
+    cleanup_dirs,
     ensure_model_downloaded,
     init_distributed,
+    setup_cache_dirs,
     teardown_distributed,
 )
 from tests.common.models import DEFAULT_MODEL, MODEL_CONFIGS
@@ -188,6 +190,7 @@ def run_benchmark_mode(
     dataset: Dataset,
     rank: int,
     local_rank: int,
+    output_dir: str,
 ) -> dict | None:
     """Run a single benchmark mode.
 
@@ -201,6 +204,7 @@ def run_benchmark_mode(
         dataset: Training dataset.
         rank: Global rank.
         local_rank: Local rank.
+        output_dir: The trainer's output directory, allocated and reclaimed by the caller.
 
     Returns:
         Dict with benchmark metrics, or None on failure.
@@ -233,8 +237,6 @@ def run_benchmark_mode(
         print(f"  Model loaded: {trainable / 1e9:.2f}B params, {mem_gb:.1f} GB")
 
     # --- SFT Config ---
-    output_dir = f"/tmp/bench_compile_{mode}_{args.ep}_{args.seq}"
-
     sft_config = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=BATCH_SIZE,
@@ -453,51 +455,55 @@ def main():
         dist.destroy_process_group()
         return 1
 
-    # --- Ensure model is cached ---
-    if rank == 0:
-        print("\nEnsuring model is downloaded...")
-    ensure_model_downloaded(model_name, rank)
+    output_dir, cache_dir = setup_cache_dirs("bench_compile", rank)
+    try:
+        # --- Ensure model is cached ---
+        if rank == 0:
+            print("\nEnsuring model is downloaded...")
+        ensure_model_downloaded(model_name, rank)
 
-    # --- Load tokenizer ---
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        # --- Load tokenizer ---
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    # --- Create dataset (shared across all modes) ---
-    dataset = create_synthetic_sft_dataset(tokenizer, args.seq)
-    if rank == 0:
-        print(f"Dataset created: {len(dataset)} samples, target seq_len={args.seq}")
-        sample_tokens = len(tokenizer.encode(dataset[0]["text"]))
-        print(f"Sample token count: {sample_tokens}")
+        # --- Create dataset (shared across all modes) ---
+        dataset = create_synthetic_sft_dataset(tokenizer, args.seq)
+        if rank == 0:
+            print(f"Dataset created: {len(dataset)} samples, target seq_len={args.seq}")
+            sample_tokens = len(tokenizer.encode(dataset[0]["text"]))
+            print(f"Sample token count: {sample_tokens}")
 
-    # --- Determine modes to run ---
-    modes = [args.mode] if args.mode else ALL_MODES
+        # --- Determine modes to run ---
+        modes = [args.mode] if args.mode else ALL_MODES
 
-    if rank == 0:
-        print(f"\nModes to benchmark: {modes}")
+        if rank == 0:
+            print(f"\nModes to benchmark: {modes}")
 
-    # --- Run benchmarks ---
-    all_results = []
-    failed = False
-    for mode in modes:
-        try:
-            result = run_benchmark_mode(mode, args, tokenizer, dataset, rank, local_rank)
-            if result is not None:
-                all_results.append(result)
-        except Exception as e:
-            failed = True
-            if rank == 0:
-                print(f"\n  ERROR in mode '{mode}': {e}")
-                traceback.print_exc()
-            # Clean up and continue to next mode
-            gc.collect()
-            torch.cuda.empty_cache()
-            barrier()
-            continue
+        # --- Run benchmarks ---
+        all_results = []
+        failed = False
+        for mode in modes:
+            try:
+                result = run_benchmark_mode(mode, args, tokenizer, dataset, rank, local_rank, output_dir)
+                if result is not None:
+                    all_results.append(result)
+            except Exception as e:
+                failed = True
+                if rank == 0:
+                    print(f"\n  ERROR in mode '{mode}': {e}")
+                    traceback.print_exc()
+                # Clean up and continue to next mode
+                gc.collect()
+                torch.cuda.empty_cache()
+                barrier()
+                continue
 
-    # --- Print summary ---
-    if rank == 0 and len(all_results) > 0:
-        print_summary(all_results, args)
+        # --- Print summary ---
+        if rank == 0 and len(all_results) > 0:
+            print_summary(all_results, args)
+    finally:
+        cleanup_dirs(output_dir, cache_dir)
 
     # On rank 0 a run with no successful modes is a failure; other ranks only
     # collect results on rank 0, so they gate on whether any mode raised.

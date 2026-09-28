@@ -25,6 +25,10 @@ class _Tolerances:
     # all-reduce hands every rank one sum); 1e-3 is headroom over that reorder, and a real mis-dispatch
     # or mis-shard moves one rank's loss well past it.
     ep_identical_batch_rank_spread_abs: float = 1e-3
+    # Identical batch through an all-reduce with no EP combine in the path (pure TP, pure ETP): the
+    # all-reduce hands every rank one sum, so ranks agree far tighter than across the combine, and a loss
+    # or grad norm read off a shard misses by orders of magnitude more.
+    all_reduced_rank_spread_abs: float = 1e-4
 
     # ── Parallel mode vs single-GPU / FSDP reference ────────────────────────
     # Step-0 loss, before optimizer drift: routing/all-to-all is not bitwise-dense.
@@ -55,6 +59,10 @@ class _Tolerances:
 
     # Loss across a resume boundary (same data, same step).
     resume_loss_abs: float = 0.05
+    # Fixed-batch forward loss before a save and after the resume, on a forward with no
+    # nondeterministic reduction (FSDP, TP, CP; not DeepEP's combine): bf16 round-trip noise. An
+    # unrestored or mis-gathered weight set moves it by more than 1.
+    resume_fixed_batch_loss_abs: float = 1e-2
 
     # ── Gradients through a sharded axis ────────────────────────────────────
     # Two independent bug classes a collapsed relative-L2 bound cannot separate. Scale: a missing
@@ -63,6 +71,14 @@ class _Tolerances:
     # corruption reorients the gradient at unchanged norm, which no norm ratio can see.
     grad_norm_ratio_max: float = 1.25
     grad_direction_cosine_min: float = 0.90
+
+    # ── CP gradients vs the full-sequence reference ─────────────────────────
+    # The CP-rank-averaged gradient against the single-rank full-sequence one. Ulysses re-partitions
+    # attention exactly, so only bf16 all-to-all and accumulation order separate them: each parameter's
+    # direction holds to 0.99 and the total norm to 10%. A wrong sequence split or RoPE offset reorients
+    # the attention grads, and a CP reduction that sums instead of averaging scales the norm by cp_size.
+    cp_grad_cosine_min: float = 0.99
+    cp_grad_norm_rtol: float = 0.10
 
     # ── EP gradients vs a replicated reference, tiny random-init MoE ─────────
     # bf16 grads on a ~128-token model carry real rounding noise, the paths accumulate in different

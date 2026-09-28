@@ -27,7 +27,12 @@ from transformers import AutoTokenizer
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_WEIGHTS_FILE, sweep_after_full_save
+from src.checkpoint.format import (
+    DEFAULT_MAX_SHARD_SIZE,
+    SAFETENSORS_METADATA,
+    SAFETENSORS_WEIGHTS_FILE,
+    sweep_after_full_save,
+)
 from src.checkpoint.model_card import tag_exported_model_card
 from src.checkpoint.tool_io import (
     STAGING_SUFFIX,
@@ -155,7 +160,7 @@ def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: 
     # which a kill mid-write would otherwise destroy.
     logger.info(f"Saving updated checkpoint to {output_safetensors}...")
     tmp_path = output_safetensors.with_suffix(".safetensors.tmp")
-    save_file(state_dict, str(tmp_path))
+    save_file(state_dict, str(tmp_path), metadata=SAFETENSORS_METADATA)
 
     # Verify the staged file before the rename: under --in_place the rename replaces the only copy,
     # so a write that kept live sinks must not get that far.
@@ -349,7 +354,7 @@ def reset_sinks(
         if not dry_run:
             raise ValueError(
                 "--output_dir is required: this tool replaces a checkpoint's sink tensors, and defaulting "
-                "to the input meant a mistyped command rewrote the only copy with no undo. Pass "
+                "to the input would let a mistyped command rewrite the only copy with no undo. Pass "
                 "--output_dir <new dir>, or --in_place to rewrite the --model_id directory deliberately."
             )
         output_dir = checkpoint_dir

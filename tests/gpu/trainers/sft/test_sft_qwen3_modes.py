@@ -33,9 +33,11 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.env import is_accelerate_fsdp_launch
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.peft_helpers import adapter_save_checks
 from tests.common.utils import LM_TRAINING_LOSS_BAND, cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 # Configuration
@@ -68,46 +70,6 @@ PEFT_ARGS = SimpleNamespace(
 
 
 # Helpers
-
-
-def _verify_checkpoint(save_dir: str, mode: str, rank: int) -> dict[str, bool]:
-    """Verify saved model files exist. Only rank 0 checks."""
-    if rank != 0:
-        return {}
-
-    checks = {}
-    dir_exists = os.path.isdir(save_dir)
-    checks["save_dir_exists"] = dir_exists
-    log(f"  Save dir exists: {'PASS' if dir_exists else 'FAIL'} ({save_dir})")
-
-    if not dir_exists:
-        return checks
-
-    contents = os.listdir(save_dir)
-    log(f"  Save contents: {sorted(contents)}")
-
-    if mode == "full":
-        has_model = any(f.startswith("model") and f.endswith(".safetensors") for f in contents) or any(
-            f.startswith("pytorch_model") and f.endswith(".bin") for f in contents
-        )
-        checks["has_model_weights"] = has_model
-        log(f"  Has model weights: {'PASS' if has_model else 'FAIL'}")
-    else:
-        has_adapter = "adapter_config.json" in contents or any("adapter" in f for f in contents)
-        checks["has_adapter"] = has_adapter
-        log(f"  Has adapter files: {'PASS' if has_adapter else 'FAIL'}")
-
-    if mode == "full":
-        has_config = "config.json" in contents
-        checks["has_config"] = has_config
-        log(f"  Has config.json: {'PASS' if has_config else 'FAIL'}")
-    else:
-        # PEFT saves adapter_config.json, not config.json
-        has_adapter_config = "adapter_config.json" in contents
-        checks["has_adapter_config"] = has_adapter_config
-        log(f"  Has adapter_config.json: {'PASS' if has_adapter_config else 'FAIL'}")
-
-    return checks
 
 
 # Mode runner — mirrors sft.py: load_distributed_model → setup_peft_model
@@ -190,8 +152,7 @@ def run_mode(
         log(f"\n  --- Validation ({mode_name}) ---")
         checks = training_run_checks(train_result, trainer, MAX_STEPS, loss_band=LM_TRAINING_LOSS_BAND)
 
-        ckpt_checks = _verify_checkpoint(save_dir, mode_name, rank)
-        checks.update(ckpt_checks)
+        checks |= model_save_checks(save_dir, rank) if mode_name == "full" else adapter_save_checks(save_dir, rank)
 
         all_passed = all(checks.values())
         detail = f"loss={train_result.training_loss:.6f}"

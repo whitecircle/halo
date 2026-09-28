@@ -19,7 +19,7 @@ Dockerfile does not provide.
 The `Makefile` wraps the `docker run` incantation once:
 
 ```bash
-make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8 EXTRA="--expert_parallel_size=8"
+make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml NPROC=8 EXTRA="--expert_parallel_size=8"
 ```
 
 The Makefile's `DOCKER_RUN` is not identical to a hand-rolled launch. It runs in the foreground and adds

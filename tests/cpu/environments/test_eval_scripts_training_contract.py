@@ -171,7 +171,7 @@ def test_the_coding_eval_takes_the_level_the_training_env_was_built_with(tmp_pat
 def test_the_meta_line_records_the_whole_generation_contract(contract, tmp_path):
     rollout = rollout_config_from_args(_args(), contract, default_temperature=0.2, default_max_tokens=99)
     traj_path = tmp_path / "trajectories.jsonl"
-    args = _args(output=None, dataset="d", config=None, split="test", training_config=contract.path)
+    args = _args(output=None, dataset="d", config=None, training_config=contract.path)
     env = SimpleNamespace(max_turns=7, system_prompt="sp", get_tools_schema=lambda: None)
 
     write_eval_outputs(
@@ -180,12 +180,14 @@ def test_the_meta_line_records_the_whole_generation_contract(contract, tmp_path)
         env=env,
         traj_path=str(traj_path),
         env_type="code_contests",
+        split="train",
         max_turns=None,
         rollout=rollout,
         num_samples=1,
     )
 
     meta = json.loads(traj_path.read_text().splitlines()[0])
+    assert meta["split"] == "train"
     assert meta["training_config"] == contract.path
     assert meta["rollout"]["chat_template_kwargs"] == {"preserve_thinking": True}
     assert meta["rollout"]["stop_token_ids"] == [_CALL_TOKEN_ID]

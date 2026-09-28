@@ -41,7 +41,7 @@ envs:
 
 file_mounts:
   /workspace: {source: ., mode: COPY}
-  /data: {source: s3://${HALO_BUCKET}/halo, mode: MOUNT}
+  /data: {source: "s3://${HALO_BUCKET}/halo", mode: MOUNT}
 
 setup: |
   set -e

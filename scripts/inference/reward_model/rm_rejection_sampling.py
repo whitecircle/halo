@@ -29,20 +29,14 @@ Output formats:
 
 import asyncio
 import json
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
 from tqdm import tqdm
 
-from scripts.inference._common import (
-    add_output_format_arg,
-    degenerate_hypotheses_reason,
-    offline_grpo_record,
-    preference_record,
-    reject_empty_results,
-    run_async_cli,
-)
+from scripts.inference._common import reject_empty_results, run_async_cli
 from scripts.inference.reward_model._common import (
     OverlongConversationError,
     TruncatedGenerationError,
@@ -62,7 +56,13 @@ from src.inference.response import ENGINE_CUT_FINISH_REASONS
 def parse_args():
     parser = build_generation_parser("Async generation with RM rejection sampling", temperature_default=0.8)
     parser.add_argument("--n_hypos", type=int, default=5, help="Hypotheses per prompt (default: 5, at least 2)")
-    add_output_format_arg(parser)
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="preference",
+        choices=["preference", "offline_grpo"],
+        help="Output format: preference (DPO/SMPO) or offline_grpo (default: preference)",
+    )
     parser.add_argument("--rm_max_batch_size", type=int, default=8)
     args = parser.parse_args()
     if args.n_hypos < 2:
@@ -122,6 +122,28 @@ async def generate_hypotheses(
             print(f"Generation error for {row.get(args.id_field, '?')}: {e}")
 
 
+def degenerate_hypotheses_reason(scores: Sequence[float], output_format: str) -> str | None:
+    """Why a scored row cannot produce a useful record, or ``None`` if it can.
+
+    Fewer than 2 hypotheses cannot separate a best from a worst, and all-equal scores make argmax ==
+    argmin, giving a chosen == rejected pair. ``offline_grpo`` keeps an all-equal reward vector, which
+    the trainer's degenerate-group handling covers.
+    """
+    if len(scores) < 2:
+        return f"insufficient hypotheses ({len(scores)} < 2)"
+    if output_format != "offline_grpo" and len({float(score) for score in scores}) < 2:
+        return f"all {len(scores)} hypotheses scored equally ({float(scores[0])})"
+    return None
+
+
+def best_worst_indices(scores: Sequence[float]) -> tuple[int, int]:
+    """``(argmax, argmin)`` over ``scores``, first index winning a tie, reading a Python list and a
+    numpy score vector the same way. :func:`degenerate_hypotheses_reason` has already refused the
+    all-equal row where the two would name the same completion."""
+    ranked = range(len(scores))
+    return max(ranked, key=scores.__getitem__), min(ranked, key=scores.__getitem__)
+
+
 def build_preference_result(
     row,
     base_prompt,
@@ -130,21 +152,31 @@ def build_preference_result(
     args,
     correct_answer,
 ) -> dict:
-    """This sampler's DPO/SMPO record, in the dispatch signature ``build_fn`` calls.
+    """The DPO/SMPO preference record: the best- and worst-scored hypothesis of one prompt.
 
-    The record itself is :func:`preference_record`, the shared writer for the trainers' contract,
-    since both rejection samplers feed the same readers. Each hypothesis is the last turn of one
-    scored conversation, and the reward model that graded it is this sampler's provenance column.
+    The preference trainers read one contract (``agent-docs/data/dataset-formats.md``):
+    ``chosen``/``rejected`` are message lists and every score a plain float (a ``numpy.float64`` does
+    not survive ``json.dumps``). Each hypothesis is the last turn of one scored conversation, and the
+    whole scored set rides along so a re-pairing needs no re-generation. The row id rides along only
+    when the source row carries it, ``target_answer`` only where the run has a ground truth, and the
+    reward model that graded the set is the record's provenance.
     """
-    record = preference_record(
-        base_prompt,
-        [conversation[-1] for conversation in conversations],
-        scores,
-        row=row,
-        id_field=args.id_field,
-        gen_model=args.model,
-        correct_answer=correct_answer,
-    )
+    completions = [conversation[-1] for conversation in conversations]
+    best, worst = best_worst_indices(scores)
+    record = {
+        "prompt": base_prompt,
+        "chosen": [completions[best]],
+        "chosen_score": float(scores[best]),
+        "rejected": [completions[worst]],
+        "rejected_score": float(scores[worst]),
+        "all_generations": completions,
+        "all_scores": [float(score) for score in scores],
+        "gen_model": args.model,
+    }
+    if args.id_field in row:
+        record[args.id_field] = row[args.id_field]
+    if correct_answer is not None:
+        record["target_answer"] = correct_answer
     record["rm_model"] = args.rm_model_path
     return record
 
@@ -157,20 +189,24 @@ def build_offline_grpo_result(
     args,
     correct_answer,
 ) -> dict:
-    """This sampler's offline-GRPO record, in the dispatch signature ``build_fn`` calls.
+    """The offline-GRPO training record: ``{"prompt", "completions", "rewards"}`` (+ optional keys).
 
-    The record itself is :func:`offline_grpo_record`, the shared writer for the trainer's contract,
-    since both rejection samplers feed the same reader. Each completion is the last turn of one
-    scored conversation: the hypothesis the reward model graded.
+    The trainer reads one contract (``agent-docs/data/dataset-formats.md``): ``completions`` is a list
+    of message lists, ``rewards`` a parallel list of plain floats. Each completion is the last turn of
+    one scored conversation: the hypothesis the reward model graded. The row id rides along only when
+    the source row carries it, so a dataset without the column does not gain a null one, and
+    ``target_answer`` only where the run has a ground truth.
     """
-    return offline_grpo_record(
-        base_prompt,
-        [[conv[-1]] for conv in conversations],
-        scores,
-        row=row,
-        id_field=args.id_field,
-        correct_answer=correct_answer,
-    )
+    record = {
+        "prompt": base_prompt,
+        "completions": [[conversation[-1]] for conversation in conversations],
+        "rewards": [float(score) for score in scores],
+    }
+    if args.id_field in row:
+        record[args.id_field] = row[args.id_field]
+    if correct_answer is not None:
+        record["target_answer"] = correct_answer
+    return record
 
 
 async def score_and_select(

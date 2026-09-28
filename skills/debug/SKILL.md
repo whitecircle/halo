@@ -39,7 +39,7 @@ the others never reach.
 2. Suspect a shape/value divergence upstream of the stuck collective →
    `HALO_TP_CONSISTENCY_CHECK=1` + `assert_tensor_shape_consistent(t, group=..., label=...)`.
 3. An EP job that stops at startup with `ValueError: parallelism config failed on … First (rank 0):
-   ep_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` is a
+   expert_parallel_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` is a
    rejected topology, not a hang — see the **DeepEP fault** branch.
 
 ### OOM (CUDA out of memory)
@@ -66,8 +66,8 @@ the others never reach.
 ### DeepEP fault (EP crash, combine-barrier deadlock)
 - **Multiple >2-rank dispatch groups in one NVLink domain are rejected at config time**
   (`ep_size > 2` with `nvlink_domain_size > ep_group_size`, e.g. ep4 on an 8-GPU domain): startup
-  raises `ValueError: parallelism config failed on … First (rank 0): ep_size=N on a single M-GPU
-  NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` before any model load
+  raises `ValueError: parallelism config failed on … First (rank 0): expert_parallel_size=N on a
+  single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` before any model load
   (`_validate_single_domain_multigroup_ep`, `parallelism_config.py`);
   `EpIntrospectionMixin._setup_ep_gradient_checkpointing` re-checks a hand-built config. Run anyway,
   their combine barriers race FSDP2's DP-wide NCCL (`elastic` faults, `legacy` deadlocks). **Fix: use

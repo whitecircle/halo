@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """CPU test for ``scripts/before_training/patch_vocab.py`` :func:`add_tokens_to_model`.
 
-The invariant (patch_vocab.py ~211-224): never shrink — only grow when ``new_vocab_size`` exceeds the
-model's existing (padded) embedding size; added tokens reuse the existing padding rows. Resizing the
+The invariant (the resize in :func:`add_tokens_to_model`): never shrink — only grow when
+``new_vocab_size`` exceeds the model's existing (padded) embedding size; added tokens reuse the existing padding rows. Resizing the
 embedding DOWN to ``len(tokenizer)`` drops the padding rows that hold high special tokens (harmony
 EOS / <|return|> / <|call|> …), and the served model then cannot emit its stop tokens and generates
 degenerate garbage.

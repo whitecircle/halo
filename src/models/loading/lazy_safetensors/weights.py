@@ -350,7 +350,7 @@ def verify_loaded_shape(
     raise RuntimeError(
         f"Lazy load: tensor from {source} has shape {tuple(tensor.shape)} but model tensor "
         f"{model_key!r} expects {tuple(expected)}{sliced}. The checkpoint does not match the "
-        f"config.json the model was built from (e.g. a patch_vocab-shrunk checkpoint paired with "
+        f"config.json the model was built from (e.g. a patch_vocab-grown checkpoint paired with "
         f"the base config, or a changed intermediate_size / expert count)."
     )
 

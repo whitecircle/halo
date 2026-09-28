@@ -84,8 +84,8 @@ def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool |
     for n_heads in _declared_head_counts(text_config, "num_attention_heads"):
         if n_heads % tp_size != 0:
             raise ValueError(
-                f"Tensor parallelism requires num_attention_heads ({n_heads}) divisible by tp_size "
-                f"({tp_size}); an uneven query/output split silently corrupts attention."
+                f"Tensor parallelism requires num_attention_heads ({n_heads}) divisible by "
+                f"tensor_parallel_size ({tp_size}); an uneven query/output split silently corrupts attention."
             )
     if uses_mla is None:
         uses_mla = any(getattr(text_config, field, None) for field in _MLA_CONFIG_FIELDS)
@@ -94,9 +94,10 @@ def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool |
     for n_kv in _declared_head_counts(text_config, "num_key_value_heads"):
         if n_kv % tp_size != 0:
             raise ValueError(
-                f"Tensor parallelism requires num_key_value_heads ({n_kv}) divisible by tp_size "
-                f"({tp_size}); GQA with fewer KV heads than TP ranks would split individual KV heads "
-                f"(numerically wrong). Reduce tp_size or use EP for this model."
+                f"Tensor parallelism requires num_key_value_heads ({n_kv}) divisible by "
+                f"tensor_parallel_size ({tp_size}); GQA with fewer KV heads than TP ranks would "
+                f"split individual KV heads (numerically wrong). Reduce tensor_parallel_size or use "
+                f"EP for this model."
             )
 
 
@@ -127,8 +128,8 @@ def shard_sinks_param(
 
     if total_heads % tp_size:
         raise ValueError(
-            f"Cannot shard {total_heads} attention sinks across tp_size={tp_size}: an indivisible "
-            f"count would silently drop the tail heads."
+            f"Cannot shard {total_heads} attention sinks across tensor_parallel_size={tp_size}: an "
+            f"indivisible count would silently drop the tail heads."
         )
 
     with torch.no_grad():
@@ -218,8 +219,8 @@ def register_mla_rope_grad_reduction(attn: nn.Module, tp_mesh: DeviceMesh, confi
         raise ValueError(
             f"{type(attn).__name__} exposes kv_a_proj_with_mqa (MLA) but its config declares no "
             f"qk_rope_head_dim, so the rope half of that projection cannot be located. Without it "
-            f"the rope rows would be AVG-reduced over the TP group and train on 1/tp_size of their "
-            f"gradient. Add qk_rope_head_dim to the model config, or drop this family from "
+            f"the rope rows would be AVG-reduced over the TP group and train on 1/tensor_parallel_size "
+            f"of their gradient. Add qk_rope_head_dim to the model config, or drop this family from "
             f"TP_SHARDABLE_ATTENTION_CLASSES."
         )
 
@@ -367,8 +368,8 @@ def apply_tp_to_attention_only(
         model_type = getattr(cfg, "model_type", "unknown")
         attn_classes = sorted({type(a).__name__ for a in (_find_attention(layer)[0] for layer in layers) if a})
         raise ValueError(
-            f"Tensor parallelism (tp_size={tp_size}) sharded ZERO attention layers on this model "
-            f"(model_type={model_type!r}, attention classes {attn_classes}): none are in "
+            f"Tensor parallelism (tensor_parallel_size={tp_size}) sharded ZERO attention layers on "
+            f"this model (model_type={model_type!r}, attention classes {attn_classes}): none are in "
             f"TP_SHARDABLE_ATTENTION_CLASSES, so every weight would stay replicated while the TP mesh "
             f"assumes sharding. This model family does not support TP — use EP (and/or ETP for "
             f"experts) instead, or add validated entries to "
@@ -382,10 +383,11 @@ def apply_tp_to_attention_only(
     if tp_size > 1 and unsharded:
         detail = ", ".join(f"{name} x{count}" for name, count in sorted(unsharded.items()))
         logger.warning(
-            f"Selective TP sharded {patched} of {len(layers)} decoder layers (tp_size={tp_size}). "
-            f"Left REPLICATED on every TP rank: {detail}. Their gradients are AVG-reduced over the TP "
-            f"group, so training is numerically correct — but their weights, gradients and optimizer "
-            f"state are NOT divided by tp_size, so budget memory for full copies of those layers."
+            f"Selective TP sharded {patched} of {len(layers)} decoder layers "
+            f"(tensor_parallel_size={tp_size}). Left REPLICATED on every TP rank: {detail}. Their "
+            f"gradients are AVG-reduced over the TP group, so training is numerically correct — but "
+            f"their weights, gradients and optimizer state are NOT divided by tensor_parallel_size, "
+            f"so budget memory for full copies of those layers."
         )
 
     _register_per_head_norm_params(model, per_head_norms)

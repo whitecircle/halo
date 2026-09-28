@@ -26,7 +26,7 @@ from src.env import env_str
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", QWEN3_0_6B)
 NUM_TRAIN_SAMPLES = 16
@@ -108,7 +108,7 @@ def run(ctx) -> dict:
 
     trainer.train()
 
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
+    losses = step_losses(trainer)
     opd = [e["opd_loss"] for e in trainer.state.log_history if "opd_loss" in e]
     if opd:
         log(f"OPD loss recorded: {opd[0]:.4f}")

@@ -14,8 +14,8 @@ Those helpers are the shared flag surfaces:
 
 | Helper | Flags |
 |---|---|
-| `scripts/_common.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/`, and `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`, `--model`), taken by every generation, eval and playground CLI under `inference/` and `environments/` |
-| `scripts/inference/_common.py` | The generation, resume and Gradio blocks |
+| `scripts/_common.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, each taken by the `before_training/` and `after_training/` tools that need it (`quantize_to_lowp.py` and `s3_datasets.py` take none, `prepare_dataset.py` only `--trust_remote_code`); `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers `rm_scoring.py` and `rm_rejection_sampling.py` (their device flag is their own `--rm_device`); `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every CLI that drives a served model — `openai_batched_generation.py`, the two reward-model scorers, `run_env.py`, `run_code_contests.py` and the two Gradio playgrounds — with a required `--model` on all but the playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
+| `scripts/inference/_common.py` | The generation block (`--n_parallel`, `--temperature`, `--max_gen_tokens`) and the prompt-row fields (`--id_field`, `--prompt_field`, `--local_system_prompt_field`, `--global_system_prompt`), shared by the S3 generation CLI and the reward-model scorers; the S3 dataset block (`--input_path`, `--output_path`, `--subfolder`) and `--checkpoint_interval` of the S3 generation CLI; the Gradio server block (`--host`, `--port`, `--share`) of the two playgrounds |
 | `scripts/inference/reward_model/_common.py` | The reward-model scoring block, on top of the previous two |
 | `scripts/environments/_common.py` | The env-eval dataset/endpoint/trajectory flags, `--training_config`, and the output writer |
 
@@ -307,7 +307,7 @@ python scripts/before_training/patch_vocab.py \
 # remote-code family (Bailing/Ling, Laguna): add --trust_remote_code — a Hub source is opt-in here
 ```
 
-`patch_vocab.py` only **grows** the embedding (added tokens reuse existing padding rows), never shrinks it: models like GPT-OSS ship a vocab padded past `len(tokenizer)`, and shrinking would drop the high special tokens (harmony `<|return|>`/EOS, …) and break generation. A vocab-patched checkpoint is a **training base** — serve the original full-vocab model, not the patched one.
+`patch_vocab.py` only **grows** the embedding (added tokens reuse existing padding rows), never shrinks it: models like GPT-OSS ship a vocab padded past `len(tokenizer)`, and shrinking would drop the high special tokens (harmony `<|return|>`/EOS, …) and break generation. A patched checkpoint therefore serves like its base, except a GPT-OSS patched with `--reset_sinks`: served sinks-off, the pretrained model degenerates ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)). The added tokens start at the mean embedding and mean nothing until trained.
 
 ## Profiling & benchmarks
 

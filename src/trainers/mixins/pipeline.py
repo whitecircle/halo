@@ -56,6 +56,7 @@ from src.trainers.mixins.pp_gates import (
     reject_pp_compute_metrics,
     reject_pp_peft,
 )
+from src.trainers.mixins.validation import evaluation_runs
 
 logger = get_logger(__name__, log_level="info")
 
@@ -261,8 +262,10 @@ class PipelineTrainerMixin:
                 "from inside the schedule's backward. Drop the kwarg (the default use_reentrant="
                 "False path is supported and validated)."
             )
-        evaluating = training_args.eval_strategy not in ("no", None)
-        if evaluating and training_args.per_device_eval_batch_size != training_args.per_device_train_batch_size:
+        if (
+            evaluation_runs(training_args)
+            and training_args.per_device_eval_batch_size != training_args.per_device_train_batch_size
+        ):
             raise ValueError(
                 f"per_device_eval_batch_size ({training_args.per_device_eval_batch_size}) must "
                 f"equal per_device_train_batch_size ({training_args.per_device_train_batch_size}) "
@@ -302,7 +305,8 @@ class PipelineTrainerMixin:
         n_microbatches = config.pp_microbatches or training_args.gradient_accumulation_steps
         if config.pp_schedule == "1f1b" and n_microbatches < config.pp_size:
             logger.warning(
-                "pipeline_microbatches=%d is below pp_size=%d (Schedule1F1B needs a full pipeline); raising to %d.",
+                "pipeline_microbatches=%d is below pipeline_parallel_size=%d (Schedule1F1B needs a full "
+                "pipeline); raising to %d.",
                 n_microbatches,
                 config.pp_size,
                 config.pp_size,
@@ -310,9 +314,9 @@ class PipelineTrainerMixin:
             n_microbatches = config.pp_size
         if n_microbatches < _BUBBLE_WARN_FACTOR * config.pp_size:
             logger.warning(
-                "pipeline_microbatches=%d gives a large pipeline bubble at pp_size=%d (idle fraction "
-                "(pp-1)/(m+pp-1): ~22%% of the step measured at m=2*pp on 2 stages). For a 10%% bubble "
-                "use at least %d microbatches (rule: %d*(pp_size-1)).",
+                "pipeline_microbatches=%d gives a large pipeline bubble at pipeline_parallel_size=%d (idle "
+                "fraction (pp-1)/(m+pp-1): ~22%% of the step measured at m=2*pp on 2 stages). For a 10%% "
+                "bubble use at least %d microbatches (rule: %d*(pipeline_parallel_size-1)).",
                 n_microbatches,
                 config.pp_size,
                 _BUBBLE_TARGET_FACTOR * (config.pp_size - 1),

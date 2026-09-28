@@ -12,7 +12,7 @@ CP is not supported — the trainer pools over the complete sequence, which no C
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/classification.py \\
-        examples/classification/qwen3_5/clf-qwen3.5-9b-mage.yaml --expert_parallel_size=8
+        examples/classification/gptoss/clf-gptoss-20b-mage-ep.yaml
 """
 
 import torch.distributed as dist
@@ -28,10 +28,12 @@ from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_jso
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rendered import tokenize_rendered
 from src.data.sources.loading import reject_image_columns
+from src.data.sources.paths import EVAL_SPLIT_NAMES
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import require_multimodal_sequence_classification_head
 from src.distributed.runtime import barrier, get_global_world_size, is_global_main_process
 from src.models.loading.model_preparation import log_model_info
+from src.trainers.mixins.validation import evaluation_runs
 from src.trainers.reward.classification import ClassificationTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser
@@ -56,7 +58,7 @@ NO_LABEL_SENTINEL = "-1"
 
 # Every split whose labels join the class list: an eval split may hold a class train lacks, and a
 # split the run never reads still counts, so the head does not change shape with the eval setting.
-LABEL_SPLITS = ("train", "validation", "test")
+LABEL_SPLITS = ("train", *EVAL_SPLIT_NAMES)
 
 
 def tokenize_classification_row(
@@ -130,8 +132,7 @@ def require_prompt_or_text_column(train_columns: list[str], text_field: str | No
 
 def run_splits(training_config) -> tuple[str, ...]:
     """The splits the run reads: train, and the ``test`` eval split when the run evaluates."""
-    evaluates = training_config.eval_strategy not in ("no", None) or training_config.eval_on_start
-    return ("train", "test") if evaluates else ("train",)
+    return ("train", "test") if evaluation_runs(training_config) else ("train",)
 
 
 def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
@@ -164,7 +165,9 @@ def refuse_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_mul
         if NO_LABEL_SENTINEL not in split_labels.get(split, ()):
             continue
         if split == "train":
-            remedy = "Filter those rows out, e.g. dataset.filter(lambda row: str(row['label']) != '-1')."
+            remedy = (
+                f"Filter those rows out, e.g. dataset.filter(lambda row: str(row['label']) != {NO_LABEL_SENTINEL!r})."
+            )
         else:
             remedy = (
                 "Evaluate on labeled rows instead: point dataset at the train split alone (e.g. "

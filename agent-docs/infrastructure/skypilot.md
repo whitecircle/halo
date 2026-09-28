@@ -113,7 +113,7 @@ Every shipped task declares two mounts:
 ```yaml
 file_mounts:
   /workspace: {source: ., mode: COPY}                  # the repo
-  /data:      {source: s3://${HALO_BUCKET}/halo, mode: MOUNT}   # bucket from envs; --env HALO_BUCKET=... retargets
+  /data:      {source: "s3://${HALO_BUCKET}/halo", mode: MOUNT}   # bucket from envs; --env HALO_BUCKET=... retargets
 ```
 
 `HALO_BUCKET` is the placeholder you must set (`--env HALO_BUCKET=<your-bucket>`); `HF_HOME`,

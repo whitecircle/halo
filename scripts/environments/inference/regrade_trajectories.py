@@ -46,10 +46,10 @@ from src.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
 from src.environments.registry import resolve_environment
 from src.environments.tools.definitions import NativeTool
 
-# Meta keys a re-grade needs: env_type/adapter/dataset select the environment and rebuild the hidden
-# tests, model/language name the row of the report. Only run_code_contests.py stamps the full set —
-# run_env.py writes the generic eval meta, without adapter/language.
-_REQUIRED_META_KEYS = ("env_type", "adapter", "dataset", "model", "language")
+# Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
+# hidden tests, model/language name the row of the report. Only run_code_contests.py stamps the full
+# set — run_env.py writes the generic eval meta, without adapter/language.
+_REQUIRED_META_KEYS = ("env_type", "adapter", "dataset", "split", "model", "language")
 # The env options the meta line records at its top level, as the env resolved them, and the re-grade
 # reads from there alone; ``env_kwargs`` supplies every other option.
 _TOP_LEVEL_ENV_KEYS = ("language", "reasoning_effort", "eval_protocol")
@@ -109,7 +109,7 @@ def build_payloads(meta: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         meta["adapter"],
         meta["dataset"],
         meta.get("config"),
-        meta.get("split", "test"),
+        meta["split"],
         ContestSelection.from_meta(meta.get("selection")),
     )
 

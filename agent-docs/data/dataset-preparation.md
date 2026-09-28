@@ -158,6 +158,19 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 
 ## Output structure
 
+`--num-shards 1` (the default) writes a `DatasetDict.save_to_disk` directory with no shard index;
+every rank loads it whole and the DataLoader splits the rows by data-parallel rank:
+
+```text
+s3://bucket/preprocessed/dataset/
+├── metadata.json              # Preprocessing config and stats
+├── dataset_dict.json
+├── train/                     # Arrow files + dataset_info.json + state.json
+└── test/                      # only when the input has a test/validation split or --test-size is set
+```
+
+`--num-shards > 1` writes per-split shards and a shard index:
+
 ```text
 s3://bucket/preprocessed/dataset/
 ├── metadata.json              # Preprocessing config and stats

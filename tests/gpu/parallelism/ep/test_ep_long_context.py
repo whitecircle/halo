@@ -14,7 +14,7 @@ length — no guard, no CUDA fault. With an int32 offset seq=65536 illegal-acces
 grouped activation overflows). The int64 offset's *backward* equivalence is covered by
 `tests/gpu/kernels/test_fused_glu.py` (the >2³¹-numel case).
 
-Forward-only: the fault is a forward-dispatch fault, so a no_grad forward proves the lift
+Forward-only: the fault is a forward-dispatch fault, so a no_grad forward covers it
 without the memory (and DeepEP-barrier sensitivity) of a 65536-token backward.
 
 Run with 8 GPUs (single node):
@@ -72,12 +72,15 @@ def run(ctx):
     checks = {f"finite_loss_seq{s}": math.isfinite(losses[s]) for s in SWEEP}
 
     if ctx.rank == 0:
+        hidden = model.config.hidden_size
+        arena_bound = 2**30 // (EP_SIZE * hidden)
         log(
-            f"\n{'=' * 70}\nEP LONG-CONTEXT (ep{EP_SIZE}, gpt-oss hidden 2880; old ceiling ≈ 46.6k tok/rank)\n{'=' * 70}"
+            f"\n{'=' * 70}\nEP LONG-CONTEXT (ep{EP_SIZE}, hidden {hidden}; 2³⁰ arena bound at {arena_bound:,} tok/rank)"
+            f"\n{'=' * 70}"
         )
         log(f"  {'seq/rank':>10} {'extent=seq×ep×hidden':>22} {'vs 2³⁰':>10} {'loss':>12}")
         for s in SWEEP:
-            extent = s * EP_SIZE * 2880
+            extent = s * EP_SIZE * hidden
             log(f"  {s:>10} {extent:>21,} {'≥' if extent >= 2**30 else '<':>10} {losses[s]:>12.5f}")
     return {"checks": checks}
 

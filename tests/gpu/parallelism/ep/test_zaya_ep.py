@@ -22,8 +22,6 @@ Run (2 GPUs, EP=2):
             tests/gpu/parallelism/ep/test_zaya_ep.py
 """
 
-import math
-
 import torch
 from trl import SFTConfig
 
@@ -35,7 +33,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, step_losses, training_run_checks
 
 MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_EP_STEPS", 4)
@@ -146,14 +144,9 @@ def run(ctx):
     # ── Train ──────────────────────────────────────────────────────
     log(f"\n[4/4] Training {MAX_STEPS} steps...")
     result = trainer.train()
-    losses = step_losses(trainer)
-    log(f"  Final loss: {result.training_loss:.4f}")
-    log(f"  Per-step losses: {[f'{loss:.4f}' for loss in losses]}")
     log(f"  HBM peak: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
-
-    checks["training_loss_finite"] = math.isfinite(result.training_loss)
-    checks["step_losses_finite"] = all(math.isfinite(loss) for loss in losses)
-    checks["logged_every_step"] = len(losses) == MAX_STEPS
+    checks |= training_run_checks(result, trainer, MAX_STEPS)
+    checks["logged_every_step"] = len(step_losses(trainer)) == MAX_STEPS
     return {"checks": checks, "metrics": ctx.metrics(trainer)}
 
 

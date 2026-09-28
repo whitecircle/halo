@@ -31,9 +31,10 @@ from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.datasets import digit_image
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_5_2B
 from tests.common.utils import cleanup_memory, log
 
-MODEL_NAME = "Qwen/Qwen3.5-2B"
+MODEL_NAME = QWEN3_5_2B
 NUM_TRAIN_SAMPLES = 16
 NUM_TRAIN_STEPS = 4
 _VISION_TOWER_SUFFIXES = ("visual", "vision_tower", "vision_model")

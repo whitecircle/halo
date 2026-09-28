@@ -15,7 +15,7 @@ This drives that order through the real SFT trainer on FSDP2 data parallelism: a
 no-grad forward inside the trainer's ``disable_adapter()`` after every optimizer step, as TRL's GRPO
 scoring does. Checks:
 
-  1. every step completes, with a reference pass after each;
+  1. every step completes with a finite loss, with a reference pass after each;
   2. every training forward (the gradient-checkpoint recomputes included) sees a trainable adapter;
   3. after the last reference pass every sharded adapter is trainable.
 
@@ -35,7 +35,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import adapter_param_items, load_peft_model
-from tests.common.utils import log
+from tests.common.utils import log, training_run_checks
 
 MAX_STEPS = 3
 # Two micro-steps per window: the second unshards afresh after the first one's post-backward reshard.
@@ -76,6 +76,7 @@ def run(ctx) -> dict:
         logging_steps=1,
         save_strategy="no",
         report_to="none",
+        logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
@@ -99,7 +100,7 @@ def run(ctx) -> dict:
     adapter.register_forward_pre_hook(
         lambda module, args: forward_trainable.append(module.weight.requires_grad) if torch.is_grad_enabled() else None
     )
-    trainer.train()
+    train_result = trainer.train()
 
     # Register the sharded params: they carry the flag every unshard copies, and the optimizer's state.
     reshard_fsdp2_modules(trainer.model)
@@ -110,7 +111,8 @@ def run(ctx) -> dict:
         f"with a trainable adapter {sum(forward_trainable)}/{len(forward_trainable)}, sharded trainable "
         f"{sum(sharded_trainable)}/{len(sharded_trainable)}"
     )
-    checks = {
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
+    checks |= {
         "every_step_and_reference_pass_ran": trainer.state.global_step == callback.passes == MAX_STEPS,
         "training_forwards_see_trainable_adapters": len(forward_trainable) >= MAX_STEPS * GRADIENT_ACCUMULATION_STEPS
         and all(forward_trainable),

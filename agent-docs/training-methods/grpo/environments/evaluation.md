@@ -120,7 +120,7 @@ episode recorded with a `generation_error` leaves `n` and is counted in `generat
 `--workers` at or below the core count.
 
 Only `run_code_contests.py` stamps the meta a re-grade needs (`env_type`, `adapter`, `dataset`,
-`model`, `language`); a `run_env.py` dump is refused.
+`split`, `model`, `language`); a `run_env.py` dump is refused.
 
 ## Smoke-testing a config
 

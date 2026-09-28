@@ -105,19 +105,20 @@ SUPPORTED_AXIS_SETS: frozenset[frozenset[str]] = frozenset(
 AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
     frozenset({"tp", "cp"}): (
         "TP and CP would partition the same ranks twice: both groups are contiguous rank blocks, so "
-        "at tp_size == cp_size a rank's TP partners ARE its CP partners, required to hold the same "
-        "tokens (TP) and different sequence chunks (CP) at once. Ulysses also redistributes attention "
-        "over HEADS, of which TP has already left this rank only num_attention_heads / tp_size, while "
-        "validate_model_for_ulysses checks divisibility against the config's full head count; and "
-        "data_parallel_size takes max(tp_size, cp_size), which counts one of the two axes only. "
-        "Use EP+TP or EP+CP."
+        "at tensor_parallel_size == context_parallel_size a rank's TP partners ARE its CP partners, "
+        "required to hold the same tokens (TP) and different sequence chunks (CP) at once. Ulysses "
+        "also redistributes attention over HEADS, of which TP has already left this rank only "
+        "num_attention_heads / tensor_parallel_size, while validate_model_for_ulysses checks "
+        "divisibility against the config's full head count; and data_parallel_size takes "
+        "max(tensor_parallel_size, context_parallel_size), which counts one of the two axes only. Use "
+        "EP+TP or EP+CP."
     ),
     frozenset({"etp", "cp"}): (
         "expert-TP partners hold shards of one expert and must see the SAME tokens — ReduceFromExpertTP "
         "sums their outputs element-wise in token space — but CP hands each rank a different sequence "
         "chunk, so that sum would add unrelated tokens. get_data_parallel_rank keys on the expert-TP "
-        "layout alone, so it also stops agreeing with data_parallel_size once cp_size exceeds "
-        "expert_tp_size. Drop one of the two."
+        "layout alone, so it also stops agreeing with data_parallel_size once context_parallel_size "
+        "exceeds expert_tensor_parallel_size. Drop one of the two."
     ),
     frozenset({"tp", "etp"}): (
         "attention TP and expert TP would shard the same ranks along two different axes. Use EP+TP "
@@ -132,17 +133,18 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
         "hook re-reduces accumulated history. Use PP+EP, or TP inside a single stage-less job."
     ),
     frozenset({"pp", "cp"}): (
-        "the pipeline loss normalizer is already stage-wide and carries no cancelling x cp_size "
-        "factor, so every gradient would come out cp_size x too small with no error raised. "
-        "Use PP without CP, or CP without PP."
+        "the pipeline loss normalizer is already stage-wide and carries no cancelling x "
+        "context_parallel_size factor, so every gradient would come out context_parallel_size x too "
+        "small with no error raised. Use PP without CP, or CP without PP."
     ),
     frozenset({"pp", "ep", "etp"}): (
         "ReduceFromExpertTP.backward is model math, not gradient sync, so it CANNOT be deferred the "
         "way the DP sweep defers its all-reduce: it runs inside every microbatch backward. At "
-        "ep_size > 1 that strided expert-TP all-reduce interleaves with the DeepEP combine the same "
-        "backward is inside, and the two orderings are not guaranteed to agree across ranks. At "
-        "ep_size == 1 (PP+ETP) the dispatch group is width 1, so there is no combine to interleave "
-        "with and the composition is safe. Use PP+EP or PP+ETP, not all three."
+        "expert_parallel_size > 1 that strided expert-TP all-reduce interleaves with the DeepEP "
+        "combine the same backward is inside, and the two orderings are not guaranteed to agree "
+        "across ranks. At expert_parallel_size == 1 (PP+ETP) the dispatch group is width 1, so "
+        "there is no combine to interleave with and the composition is safe. Use PP+EP or PP+ETP, "
+        "not all three."
     ),
     frozenset({"pp", "ep", "tp"}): (
         "the deferred cross-replica expert sweep needs FSDP to shard non-expert params over the EP "
@@ -153,8 +155,9 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
     frozenset({"pp", "ep", "cp"}): (
         "under PP the expert gradients are synced by the deferred post-backward sweep, whose divisor "
         "counts every rank of the stage as a distinct DP replica. CP ranks are not — they hold "
-        "sequence shards of the SAME batch — and the pipeline loss carries no cancelling x cp_size "
-        "factor, so every expert gradient would come out cp_size x too small. Use PP+EP without CP."
+        "sequence shards of the SAME batch — and the pipeline loss carries no cancelling x "
+        "context_parallel_size factor, so every expert gradient would come out context_parallel_size "
+        "x too small. Use PP+EP without CP."
     ),
     frozenset({"ep", "tp", "etp"}): (
         "attention TP and expert TP cannot both shard the EP group. Use EP+TP or EP+ETP."
@@ -347,18 +350,18 @@ class ParallelismConfig:
             self.gpus_per_node = min(self.gpus_per_node, self.world_size)
 
         for _name, _val in (
-            ("ep_size", self.ep_size),
-            ("tp_size", self.tp_size),
-            ("cp_size", self.cp_size),
-            ("expert_tp_size", self.expert_tp_size),
-            ("pp_size", self.pp_size),
+            ("expert_parallel_size", self.ep_size),
+            ("tensor_parallel_size", self.tp_size),
+            ("context_parallel_size", self.cp_size),
+            ("expert_tensor_parallel_size", self.expert_tp_size),
+            ("pipeline_parallel_size", self.pp_size),
         ):
             if _val < 1:
                 raise ValueError(f"{_name} must be >= 1 (1 = disabled), got {_val}")
         if self.pp_schedule not in PP_SCHEDULES:
-            raise ValueError(f"pp_schedule must be one of {PP_SCHEDULES}, got {self.pp_schedule!r}")
+            raise ValueError(f"pipeline_schedule must be one of {PP_SCHEDULES}, got {self.pp_schedule!r}")
         if self.pp_microbatches < 0:
-            raise ValueError(f"pp_microbatches must be >= 0 (0 = auto), got {self.pp_microbatches}")
+            raise ValueError(f"pipeline_microbatches must be >= 0 (0 = auto), got {self.pp_microbatches}")
         if self.ep_scope not in EP_SCOPES:
             raise ValueError(f"ep_scope must be one of {EP_SCOPES}, got {self.ep_scope!r}")
         # The dispatcher's own check runs after the whole model has loaded and returns early at
@@ -432,7 +435,7 @@ class ParallelismConfig:
         # PP carves the world first: every other mode's group math uses stage_world_size, not world_size.
         if self.world_size % self.pp_size != 0:
             raise ValueError(
-                f"world_size ({self.world_size}) must be divisible by pp_size ({self.pp_size}): "
+                f"world_size ({self.world_size}) must be divisible by pipeline_parallel_size ({self.pp_size}): "
                 f"pipeline stages are equal contiguous rank blocks."
             )
         self.stage_world_size = self.world_size // self.pp_size
@@ -555,14 +558,14 @@ class ParallelismConfig:
         if self.pp_size == 1:
             # Nothing reads the PP-only knobs at pp_size == 1, so a set value would have no effect.
             for name, value, default in (
-                ("pp_split", self.pp_split, None),
-                ("pp_microbatches", self.pp_microbatches, 0),
-                ("pp_schedule", self.pp_schedule, PP_DEFAULT_SCHEDULE),
+                ("pipeline_split", self.pp_split, None),
+                ("pipeline_microbatches", self.pp_microbatches, 0),
+                ("pipeline_schedule", self.pp_schedule, PP_DEFAULT_SCHEDULE),
             ):
                 if value != default:
                     raise ValueError(
-                        f"{name}={value!r} is only meaningful with pipeline_parallel_size > 1; "
-                        f"at pp_size=1 nothing reads it. Remove it or set pipeline_parallel_size."
+                        f"{name}={value!r} is only meaningful with pipeline_parallel_size > 1; at 1 nothing reads it. "
+                        f"Remove it or set pipeline_parallel_size."
                     )
             return
 
@@ -577,55 +580,58 @@ class ParallelismConfig:
         if self.pp_split is not None:
             if len(self.pp_split) != self.pp_size:
                 raise ValueError(
-                    f"pp_split has {len(self.pp_split)} entries but pipeline_parallel_size={self.pp_size}: "
+                    f"pipeline_split has {len(self.pp_split)} entries but pipeline_parallel_size={self.pp_size}: "
                     f"one decoder-layer count per stage is required."
                 )
             if min(self.pp_split) < 1:
-                raise ValueError(f"pp_split entries must be >= 1 decoder layer, got {self.pp_split}.")
+                raise ValueError(f"pipeline_split entries must be >= 1 decoder layer, got {self.pp_split}.")
 
         if self.stage_world_size % self.nvlink_domain_size != 0:
             raise ValueError(
                 f"Each pipeline stage owns {self.stage_world_size} ranks (world_size "
-                f"{self.world_size} / pp_size {self.pp_size}), which is not a multiple of the NVLink "
-                f"domain ({self.nvlink_domain_size}). Stage boundaries must fall on NVLink-domain "
-                f"boundaries so EP/TP/ETP/CP groups stay inside one stage and only PP's "
-                f"point-to-point activations cross RDMA. Choose pp_size dividing "
-                f"{self.world_size // self.nvlink_domain_size} (the domain count), or set "
-                f"NVLINK_DOMAIN_SIZE to the real NVLink partition size."
+                f"{self.world_size} / pipeline_parallel_size {self.pp_size}), which is not a "
+                f"multiple of the NVLink domain ({self.nvlink_domain_size}). Stage boundaries "
+                f"must fall on NVLink-domain boundaries so EP/TP/ETP/CP groups stay inside one "
+                f"stage and only PP's point-to-point activations cross RDMA. Choose a "
+                f"pipeline_parallel_size dividing {self.world_size // self.nvlink_domain_size} "
+                f"(the domain count), or set NVLINK_DOMAIN_SIZE to the real NVLink partition size."
             )
 
         if self.stage_world_size == 1:
             # setup_fsdp2_for_dp skips wrapping at dp <= 1, so the runtime FSDP contract assert would
             # report a missing wrap instead of the stage width that caused it.
             raise ValueError(
-                f"pp_size={self.pp_size} leaves each pipeline stage with a single rank "
-                f"(world_size={self.world_size}): unsharded one-rank stages are not supported yet "
-                f"(the stage FSDP wrap and its grad-reduction contract assume dp >= 2 per stage). "
-                f"Use a smaller pp_size, or add data-parallel width per stage."
+                f"pipeline_parallel_size={self.pp_size} leaves each pipeline stage with a single "
+                f"rank (world_size={self.world_size}): unsharded one-rank stages are not "
+                f"supported yet (the stage FSDP wrap and its grad-reduction contract assume dp >= "
+                f"2 per stage). Use a smaller pipeline_parallel_size, or add data-parallel width "
+                f"per stage."
             )
 
         if self.needs_ep_wrappers and self.ep_group_size == 1 and not self.experts_fsdp_managed:
             raise ValueError(
-                f"PP with fsdp_shard_ep1_experts=False (pp_size={self.pp_size}, ep_size=1) is not "
-                f"supported: a MoE stage would then hold plain replicated expert tensors while a "
-                f"fully-dense stage of the same pipeline runs the plain FSDP clip — the two stages "
-                f"would issue different collective programs and deadlock at the gradient norm. Keep "
-                f"fsdp_shard_ep1_experts=True (the default) so experts are stage-mesh DTensors."
+                f"PP with fsdp_shard_ep1_experts=False (pipeline_parallel_size={self.pp_size}, "
+                f"expert_parallel_size=1) is not supported: a MoE stage would then hold plain "
+                f"replicated expert tensors while a fully-dense stage of the same pipeline runs the "
+                f"plain FSDP clip — the two stages would issue different collective programs and "
+                f"deadlock at the gradient norm. Keep fsdp_shard_ep1_experts=True (the default) so "
+                f"experts are stage-mesh DTensors."
             )
 
         if self.use_hsdp:
             # The shape is coherent whenever a stage holds >1 domain (its domains hold the same
             # layers, so replicating across them is ordinary HSDP); the mesh is what is missing.
             raise ValueError(
-                f"PP + HSDP is not supported (pp_size={self.pp_size}, stage_world_size="
-                f"{self.stage_world_size}, {self.num_nvlink_domains} NVLink domain(s) per stage). "
-                f"HSDP's 2-D (dp_replicate, dp_shard) mesh is built by init_device_mesh over the whole "
-                f"world, and cannot be restricted to a stage's rank block (create_dp_mesh takes a "
-                f"process group on the 1-D path only) — a stage-sized 2-D mesh would silently be made "
-                f"of the FIRST stage's ranks on every rank. Enabling it needs the pipeline as an outer "
-                f"mesh dimension: init_device_mesh((pp, dp_replicate, dp_shard))[dp_replicate, "
-                f"dp_shard]. At one domain per stage HSDP is a no-op anyway (dp_replicate_size counts "
-                f"a stage's domains). Use plain FSDP inside each stage (use_hsdp=False)."
+                f"PP + HSDP is not supported (pipeline_parallel_size={self.pp_size}, "
+                f"stage_world_size={self.stage_world_size}, {self.num_nvlink_domains} NVLink domain(s) "
+                f"per stage). HSDP's 2-D (dp_replicate, dp_shard) mesh is built by init_device_mesh "
+                f"over the whole world, and cannot be restricted to a stage's rank block "
+                f"(create_dp_mesh takes a process group on the 1-D path only) — a stage-sized 2-D mesh "
+                f"would silently be made of the FIRST stage's ranks on every rank. Enabling it needs "
+                f"the pipeline as an outer mesh dimension: init_device_mesh((pp, dp_replicate, "
+                f"dp_shard))[dp_replicate, dp_shard]. At one domain per stage HSDP is a no-op anyway "
+                f"(dp_replicate_size counts a stage's domains). Use plain FSDP inside each stage "
+                f"(use_hsdp=False)."
             )
 
         if (self.fp32_grad_reduce or self.fp32_non_ep_params) and is_global_main_process():
@@ -647,24 +653,26 @@ class ParallelismConfig:
             # (clip / checkpoint / EP) and pays an all-gather the schedule does not need.
             raise ValueError(
                 f"PP + fsdp_reshard_after_forward=True (FULL_SHARD / ZeRO-3) is not enabled "
-                f"(pp_size={self.pp_size}): torch's pipeline schedule already pins each stage "
-                f"unsharded across the backward (set_reshard_after_backward(False)) and drives FSDP's "
-                f"post-backward itself, so resharding after every FORWARD only re-fetches parameters "
-                f"the next microbatch immediately needs — and no equivalence gate covers the "
-                f"composition through the trainer. Use fsdp_reshard_after_forward=False "
-                f"(SHARD_GRAD_OP / ZeRO-2), with activation checkpointing for the memory."
+                f"(pipeline_parallel_size={self.pp_size}): torch's pipeline schedule already pins "
+                f"each stage unsharded across the backward (set_reshard_after_backward(False)) and "
+                f"drives FSDP's post-backward itself, so resharding after every FORWARD only "
+                f"re-fetches parameters the next microbatch immediately needs — and no equivalence "
+                f"gate covers the composition through the trainer. Use "
+                f"fsdp_reshard_after_forward=False (SHARD_GRAD_OP / ZeRO-2), with activation "
+                f"checkpointing for the memory."
             )
 
         if self.lowp_precision != "bf16":
             raise ValueError(
-                f"PP + lowp_precision={self.lowp_precision!r} is not supported (pp_size={self.pp_size}). "
-                f"No equivalence gate has ever compared PP low-precision gradients against an unsplit "
-                f"reference, and the composition has a known silent failure: "
-                f"apply_mixed_precision_compute derives each block's index from its MODULE NAME and "
-                f"keeps lowp_keep_first_blocks / lowp_keep_last_blocks at the ends of that numbering, "
-                f"but a stage's layers are re-based to 0 — so every stage would keep its OWN first and "
-                f"last blocks in bf16 while the network's true ends get low precision, with nothing "
-                f"raised. bf16 is the production default; train the low-precision recipe without PP."
+                f"PP + lowp_precision={self.lowp_precision!r} is not supported "
+                f"(pipeline_parallel_size={self.pp_size}). No equivalence gate has ever compared PP "
+                f"low-precision gradients against an unsplit reference, and the composition has a "
+                f"known silent failure: apply_mixed_precision_compute derives each block's index from "
+                f"its MODULE NAME and keeps lowp_keep_first_blocks / lowp_keep_last_blocks at the ends "
+                f"of that numbering, but a stage's layers are re-based to 0 — so every stage would "
+                f"keep its OWN first and last blocks in bf16 while the network's true ends get low "
+                f"precision, with nothing raised. bf16 is the production default; train the "
+                f"low-precision recipe without PP."
             )
 
     def _validate_ep_group(self):
@@ -683,7 +691,11 @@ class ParallelismConfig:
                 # "global" EP spans one pipeline stage, so the bound is stage_world_size (equal to
                 # world_size at pp_size == 1). The message names the unit, or an ep16+pp2 job reads
                 # "cannot exceed world size (8)" on 16 GPUs.
-                scope_desc = "world size" if self.pp_size == 1 else f"stage world size (world / pp{self.pp_size})"
+                scope_desc = (
+                    "world size"
+                    if self.pp_size == 1
+                    else f"stage world size (world size / pipeline_parallel_size {self.pp_size})"
+                )
                 reject_cross_node_ep_group(
                     self.ep_group_size,
                     self.stage_world_size,
@@ -700,40 +712,46 @@ class ParallelismConfig:
         if self.cp_size > 1:
             if self.cp_size > self.nvlink_domain_size:
                 raise ValueError(
-                    f"CP size ({self.cp_size}) cannot exceed the NVLink domain ({self.nvlink_domain_size}). "
-                    f"CP must stay on NVLink for efficient Ulysses attention."
+                    f"context_parallel_size ({self.cp_size}) cannot exceed the NVLink domain "
+                    f"({self.nvlink_domain_size}). CP must stay on NVLink for efficient Ulysses attention."
                 )
             if self.nvlink_domain_size % self.cp_size != 0:
-                raise ValueError(f"CP size ({self.cp_size}) must divide the NVLink domain ({self.nvlink_domain_size})")
+                raise ValueError(
+                    f"context_parallel_size ({self.cp_size}) must divide the NVLink domain ({self.nvlink_domain_size})"
+                )
 
     def _validate_tp(self):
         """TP must divide world; under EP+TP, ep_size must be a multiple of tp_size so each EP group
         spans whole TP groups (else double-counted grads and misrouted tokens)."""
         if self.tp_size > 1:
             if self.tp_size > self.stage_world_size:
-                raise ValueError(f"TP size ({self.tp_size}) cannot exceed world size ({self.stage_world_size})")
+                raise ValueError(
+                    f"tensor_parallel_size ({self.tp_size}) cannot exceed world size ({self.stage_world_size})"
+                )
             if self.stage_world_size % self.tp_size != 0:
-                raise ValueError(f"TP size ({self.tp_size}) must divide world size ({self.stage_world_size})")
+                raise ValueError(
+                    f"tensor_parallel_size ({self.tp_size}) must divide world size ({self.stage_world_size})"
+                )
             if self.ep_size > 1 and self.ep_size % self.tp_size != 0:
                 raise ValueError(
-                    f"EP+TP requires ep_size ({self.ep_size}) to be a multiple of tp_size "
-                    f"({self.tp_size}) so each EP group spans whole TP groups."
+                    f"EP+TP requires expert_parallel_size ({self.ep_size}) to be a multiple of "
+                    f"tensor_parallel_size ({self.tp_size}) so each EP group spans whole TP groups."
                 )
             # TP groups are contiguous rank blocks and must stay inside one NVLink domain.
             if self.nvlink_domain_size % self.tp_size != 0:
                 raise ValueError(
-                    f"tp_size ({self.tp_size}) must divide the NVLink domain "
+                    f"tensor_parallel_size ({self.tp_size}) must divide the NVLink domain "
                     f"({self.nvlink_domain_size}): TP groups are contiguous rank blocks, so a "
-                    f"non-dividing tp_size makes some TP groups straddle a domain boundary and "
-                    f"every attention all-reduce crosses RDMA. Use tp_size that divides "
-                    f"{self.nvlink_domain_size}, with DP across domains."
+                    f"non-dividing tensor_parallel_size makes some TP groups straddle a domain boundary "
+                    f"and every attention all-reduce crosses RDMA. Use a tensor_parallel_size that "
+                    f"divides {self.nvlink_domain_size}, with DP across domains."
                 )
             # Multi-domain multi-group EP+TP: the deferred-DP sweep assumes FSDP shards over the EP
             # group, but EP+TP shards over the (dp, tp) mesh — the average would mix dp shards.
             if self._is_multi_domain_multi_group_ep:
                 raise ValueError(
-                    f"Multi-domain multi-group EP+TP is not supported: ep_size={self.ep_size} with "
-                    f"tp_size={self.tp_size} on {self.stage_world_size} ranks forms "
+                    f"Multi-domain multi-group EP+TP is not supported: expert_parallel_size={self.ep_size} "
+                    f"with tensor_parallel_size={self.tp_size} on {self.stage_world_size} ranks forms "
                     f"{self.stage_world_size // self.ep_group_size} EP groups across "
                     f"{self.num_nvlink_domains} NVLink domains, and the cross-replica gradient "
                     "average is incompatible with the EP+TP (dp, tp) FSDP mesh. Use a SINGLE EP "
@@ -751,8 +769,9 @@ class ParallelismConfig:
                 reject_expert_lora_with_expert_tp()
             if self.nvlink_domain_size % self.expert_tp_size != 0:
                 raise ValueError(
-                    f"expert_tp_size ({self.expert_tp_size}) must divide the NVLink domain ({self.nvlink_domain_size}). "
-                    f"Expert TP groups must stay on NVLink for efficient all-reduce."
+                    f"expert_tensor_parallel_size ({self.expert_tp_size}) must divide the NVLink domain "
+                    f"({self.nvlink_domain_size}). Expert TP groups must stay on NVLink for efficient "
+                    f"all-reduce."
                 )
             # Multi-domain multi-group EP+ETP: expert-TP keeps is_deferred_dp off, so the non-expert
             # FSDP2 reduce-scatter stays DP-wide while the combine spans one narrower dispatch group.
@@ -790,15 +809,15 @@ class ParallelismConfig:
             if self.ep_scope == "global":
                 raise ValueError(
                     f"EP+CP requires node-local EP (ep_scope='node' with ep_group_size == nvlink_domain_size); "
-                    f"cross-NVLink-domain EP (ep_scope='global') is incompatible with CP. "
-                    f"Got ep_group_size={self.ep_group_size}, nvlink_domain_size={self.nvlink_domain_size}, "
-                    f"cp_size={self.cp_size}."
+                    f"cross-NVLink-domain EP (ep_scope='global') is incompatible with CP. Got "
+                    f"ep_group_size={self.ep_group_size}, nvlink_domain_size={self.nvlink_domain_size}, "
+                    f"context_parallel_size={self.cp_size}."
                 )
             if self.ep_scope == "node" and self.ep_group_size != self.nvlink_domain_size:
                 raise ValueError(
                     f"Node-local EP+CP requires ep_group_size=nvlink_domain_size.\n"
-                    f"Got ep_group_size={self.ep_group_size} (ep_size={self.ep_size} * expert_tp_size={self.expert_tp_size}), "
-                    f"nvlink_domain_size={self.nvlink_domain_size}"
+                    f"Got ep_group_size={self.ep_group_size} (expert_parallel_size={self.ep_size} * "
+                    f"expert_tensor_parallel_size={self.expert_tp_size}), nvlink_domain_size={self.nvlink_domain_size}"
                 )
 
     @property
@@ -825,8 +844,8 @@ class ParallelismConfig:
     def racy_ep_topology_message(self) -> str:
         """Rejection message for the racy-EP topology, shared by the config gate and trainer guard."""
         return (
-            f"ep_size={self.ep_size} on a single {self.nvlink_domain_size}-GPU NVLink domain forms "
-            f"{self.nvlink_domain_size // self.ep_size} concurrent >2-rank DeepEP dispatch "
+            f"expert_parallel_size={self.ep_size} on a single {self.nvlink_domain_size}-GPU NVLink "
+            f"domain forms {self.nvlink_domain_size // self.ep_size} concurrent >2-rank DeepEP dispatch "
             f"groups (ep_group_size={self.ep_group_size}), whose combine barriers race FSDP2's "
             f"DP-wide collectives. Measured on an 8-GPU node: the legacy buffer deadlocks, the elastic "
             f"default faults with 'Invalid access of peer GPU memory over nvlink' — both with and "
@@ -873,16 +892,17 @@ class ParallelismConfig:
             return
         if self.tp_size > 1 or self.expert_tp_size > 1:
             raise ValueError(
-                f"use_hsdp=True is not supported with TP (tp_size={self.tp_size}) or Expert-TP "
-                f"(expert_tp_size={self.expert_tp_size}); those modes build their own (dp, tp) device "
-                f"mesh. Use HSDP on the standard DP path (pure DP or CP)."
+                f"use_hsdp=True is not supported with TP (tensor_parallel_size={self.tp_size}) or Expert-TP "
+                f"(expert_tensor_parallel_size={self.expert_tp_size}); those modes build their own (dp, tp) "
+                f"device mesh. Use HSDP on the standard DP path (pure DP or CP)."
             )
         if self.ep_size > 1:
             # EP already shards over the EP group; HSDP would be a no-op or race the combine.
             raise ValueError(
-                f"use_hsdp=True is not supported with EP (ep_size={self.ep_size}). Multi-group EP "
-                f"already shards over the EP group (deferred cross-replica sync); single-group EP "
-                f"must use 1D FSDP so backward collectives share the combine's membership."
+                f"use_hsdp=True is not supported with EP (expert_parallel_size={self.ep_size}). "
+                f"Multi-group EP already shards over the EP group (deferred cross-replica sync); "
+                f"single-group EP must use 1D FSDP so backward collectives share the combine's "
+                f"membership."
             )
         if self.num_nvlink_domains <= 1 and is_global_main_process():
             logger.warning(
@@ -923,31 +943,31 @@ class ParallelismConfig:
             raise ValueError(
                 f"fsdp_shard_ep1_experts=False is not honored under TP or CP "
                 f"(tensor_parallel_size={self.tp_size}, context_parallel_size={self.cp_size}): those paths "
-                f"FSDP-shard the "
-                f"replicated experts unconditionally. Remove the flag (sharded experts are "
-                f"grad-equivalent; gpt-oss-20b on 8 GPUs at batch 1 trades -10.6% throughput for -59% "
-                f"peak memory), or use pure DP for the full replicated expert copy."
+                f"FSDP-shard the replicated experts unconditionally. Remove the flag (sharded experts are "
+                f"grad-equivalent; the memory/throughput trade is in "
+                f"agent-docs/parallelism/data-parallelism.md#ep1-expert-sharding), or use pure DP for "
+                f"the full replicated expert copy."
             )
         if not self.fsdp_reshard_after_forward:
             return
         if self.is_ep_mode:
             raise ValueError(
                 f"fsdp_reshard_after_forward=True (FULL_SHARD / ZeRO-3) is not supported where an "
-                f"expert-distribution group exists (ep_size={self.ep_size}, "
-                f"expert_tp_size={self.expert_tp_size}, ep_group_size={self.ep_group_size}): its "
-                f"backward-pass all-gather can race the DeepEP combine, and pure ETP shares that "
-                f"path. Full-shard is supported where ep_group_size==1 (pure DP, CP, and ep_size==1 "
-                f"MoE without expert TP). Otherwise reduce peak memory with activation "
-                f"checkpointing instead, or set fsdp_reshard_after_forward=False "
+                f"expert-distribution group exists (expert_parallel_size={self.ep_size}, "
+                f"expert_tensor_parallel_size={self.expert_tp_size}, ep_group_size={self.ep_group_size}): "
+                f"its backward-pass all-gather can race the DeepEP combine, and pure ETP shares that "
+                f"path. Full-shard is supported where ep_group_size==1 (pure DP, CP, and "
+                f"expert_parallel_size=1 MoE without expert TP). Otherwise reduce peak memory with "
+                f"activation checkpointing instead, or set fsdp_reshard_after_forward=False "
                 f"(SHARD_GRAD_OP / ZeRO-2)."
             )
         if self.is_tp_mode and self.data_parallel_size > 1:
             raise ValueError(
                 f"fsdp_reshard_after_forward=True (FULL_SHARD / ZeRO-3) is not supported with Tensor "
-                f"Parallelism + data parallelism (tp_size={self.tp_size}, data_parallel_size="
-                f"{self.data_parallel_size}): FSDP2's backward re-gather issues a plain c10d all-gather on "
-                f"the TP-sharded DTensor params, which has no registered DTensor sharding strategy "
-                f"(NotImplementedError mid-step). Use fsdp_reshard_after_forward=False (SHARD_GRAD_OP / "
+                f"Parallelism + data parallelism (tensor_parallel_size={self.tp_size}, "
+                f"data_parallel_size={self.data_parallel_size}): FSDP2's backward re-gather issues a plain "
+                f"c10d all-gather on the TP-sharded DTensor params, which has no registered DTensor sharding "
+                f"strategy (NotImplementedError mid-step). Use fsdp_reshard_after_forward=False (SHARD_GRAD_OP / "
                 f"ZeRO-2), which keeps params gathered between forward and backward, or use_hsdp for replica "
                 f"memory savings."
             )
@@ -995,10 +1015,10 @@ class ParallelismConfig:
             num_experts = get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
             if num_experts and num_experts % self.ep_size != 0:
                 raise ValueError(
-                    f"expert_parallel_size={self.ep_size} does not divide this model's "
-                    f"{num_experts} routed experts: DeepEP dispatch maps tokens to ranks by a uniform "
-                    f"expert-to-rank division, so an uneven assignment would route tokens to the wrong "
-                    f"experts or drop them. ep_sizes dividing {num_experts} that fit this job: "
+                    f"expert_parallel_size={self.ep_size} does not divide this model's {num_experts} "
+                    f"routed experts: DeepEP dispatch maps tokens to ranks by a uniform expert-to-rank "
+                    f"division, so an uneven assignment would route tokens to the wrong experts or "
+                    f"drop them. expert_parallel_size values dividing {num_experts} that fit this job: "
                     f"{', '.join(str(e) for e in _divisors_up_to(num_experts, self.stage_world_size))} "
                     f"(the topology gates narrow this further — a single-domain job takes 2 or the "
                     f"domain width)."
@@ -1009,7 +1029,7 @@ class ParallelismConfig:
                 raise ValueError(
                     f"expert_tensor_parallel_size={self.expert_tp_size} does not divide this model's "
                     f"expert FFN width ({width}): expert-TP shards that dimension, so the shards would "
-                    f"be ragged. Use an expert_tp_size dividing {width}."
+                    f"be ragged. Use an expert_tensor_parallel_size dividing {width}."
                 )
         if (
             self.fp32_non_ep_params
@@ -1026,9 +1046,9 @@ class ParallelismConfig:
             )
             raise ValueError(
                 f"fp32_non_ep_params=True cannot combine with fsdp_shard_ep1_experts=True at "
-                f"ep_size=1 on a MoE model: dense params go fp32 while the FSDP-managed experts "
-                f"stay bf16 in the same shard group, and FSDP2 asserts 'uniform original parameter "
-                f"dtype' at the first forward. Remedy: {remedy}."
+                f"expert_parallel_size=1 on a MoE model: dense params go fp32 while the "
+                f"FSDP-managed experts stay bf16 in the same shard group, and FSDP2 asserts "
+                f"'uniform original parameter dtype' at the first forward. Remedy: {remedy}."
             )
         # Dense TP goes through HF's tp_plan="auto", which checks no head count of its own, so
         # without this it fails on the first forward's reshape, after the full load.
@@ -1077,7 +1097,7 @@ class ParallelismConfig:
                 is_inter_node=self.requires_rdma,
             )
         except ValueError as exc:
-            cp_note = f" ({budget} / cp_size={self.cp_size})" if self.cp_size > 1 else ""
+            cp_note = f" ({budget} / context_parallel_size={self.cp_size})" if self.cp_size > 1 else ""
             length_note = "" if self.ep_declared_max_length else " (no length cap → the model's context window)"
             raise ValueError(
                 f"Lower per_device_train_batch_size or the row-length cap (max_length, or "
@@ -1424,13 +1444,13 @@ def accelerate_launch_rejection(pc: ParallelismConfig) -> str | None:
         "For EP/CP/TP/PP training, use 'torchrun' instead:\n"
         "\n"
         "  # Single node\n"
-        "  torchrun --nproc_per_node=8 scripts/training/sft.py \\\n"
+        "  torchrun --nproc_per_node=8 scripts/training/sft.py <config> \\\n"
         "      --expert_parallel_size=8\n"
         "\n"
         "  # Multi-node\n"
         "  torchrun --nnodes=2 --node_rank=0 --nproc_per_node=8 \\\n"
         "      --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \\\n"
-        "      scripts/training/sft.py \\\n"
+        "      scripts/training/sft.py <config> \\\n"
         "      --expert_parallel_size=8\n"
         "\n"
         "For standard data parallelism (no EP/CP/TP/PP), use 'torchrun' too:\n"

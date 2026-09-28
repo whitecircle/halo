@@ -41,10 +41,11 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 5
@@ -68,35 +69,6 @@ def detect_launch_mode() -> str:
         return "accelerate_ddp"
     else:
         return "torchrun_fsdp_no_shard"
-
-
-def verify_checkpoint(save_dir: str, rank: int) -> dict:
-    """Verify checkpoint files on rank 0."""
-    if rank != 0:
-        return {}
-
-    checks = {}
-    dir_exists = os.path.isdir(save_dir)
-    checks["save_dir_exists"] = dir_exists
-    log(f"  Save dir exists: {'PASS' if dir_exists else 'FAIL'} ({save_dir})")
-
-    if not dir_exists:
-        return checks
-
-    contents = os.listdir(save_dir)
-    log(f"  Contents: {sorted(contents)}")
-
-    has_config = "config.json" in contents
-    checks["has_config"] = has_config
-    log(f"  config.json: {'PASS' if has_config else 'FAIL'}")
-
-    has_model = any(f.startswith("model") and f.endswith(".safetensors") for f in contents) or any(
-        f.startswith("pytorch_model") and f.endswith(".bin") for f in contents
-    )
-    checks["has_model_weights"] = has_model
-    log(f"  Model weights: {'PASS' if has_model else 'FAIL'}")
-
-    return checks
 
 
 @gpu_test_main(min_world_size=1, prefix="test_sft_accel")
@@ -141,6 +113,9 @@ def run(ctx):
         output_dir=ctx.output_dir,
         max_steps=MAX_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
+        # With drop_last, a per-device eval batch past NUM_EVAL_SAMPLES / world size yields no batch,
+        # and the eval leg then logs no loss at all.
+        per_device_eval_batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
@@ -174,49 +149,15 @@ def run(ctx):
 
     log("\n[4/5] Training...")
     train_result = trainer.train()
-
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    losses = step_losses(trainer)
-    eval_entries = [e for e in log_history if "eval_loss" in e]
-
-    log(f"\n  Training loss: {training_loss:.6f}")
-    log(f"  Step losses: {[f'{l:.4f}' for l in losses]}")
-    for e in eval_entries:
-        log(f"  Eval loss (step {e.get('step', '?')}): {e['eval_loss']:.6f}")
+    checks = training_run_checks(train_result, trainer, MAX_STEPS, loss_decreased=True)
+    eval_losses = [entry["eval_loss"] for entry in trainer.state.log_history if "eval_loss" in entry]
+    checks["eval_finite"] = bool(eval_losses) and all(math.isfinite(loss) for loss in eval_losses)
+    log(f"  Eval losses: {[f'{loss:.6f}' for loss in eval_losses]}")
 
     log("\n[5/5] Saving model...")
     trainer.save_model(save_dir)
     ctx.barrier()
-
-    log("\n  --- Assertions ---")
-    checks = {}
-
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss finite: {'PASS' if loss_finite else 'FAIL'} ({training_loss:.6f})")
-
-    all_finite = all(math.isfinite(l) for l in losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All steps finite: {'PASS' if all_finite else 'FAIL'}")
-
-    if len(losses) >= 2:
-        decreased = losses[-1] < losses[0]
-        checks["loss_decreased"] = decreased
-        log(f"  Loss decreased: {'PASS' if decreased else 'FAIL'} ({losses[0]:.4f} -> {losses[-1]:.4f})")
-
-    if eval_entries:
-        eval_finite = all(math.isfinite(e["eval_loss"]) for e in eval_entries)
-        checks["eval_finite"] = eval_finite
-        log(f"  Eval finite: {'PASS' if eval_finite else 'FAIL'}")
-
-    steps_ok = train_result.global_step == MAX_STEPS
-    checks["steps_completed"] = steps_ok
-    log(f"  Steps completed: {'PASS' if steps_ok else 'FAIL'} ({train_result.global_step}/{MAX_STEPS})")
-
-    ckpt_checks = verify_checkpoint(save_dir, ctx.rank)
-    checks.update(ckpt_checks)
-
+    checks |= model_save_checks(save_dir, ctx.rank)
     return {"checks": checks}
 
 

@@ -4,9 +4,9 @@ SFT training test with default mode (FSDP2, no EP/CP/TP) on GptOss-20B.
 
 Smoke test: DistributedSFTTrainer trains a MoE model with FSDP2 (fully_shard) data parallelism,
 per-layer wrapping with SHARD_GRAD_OP behavior and no expert parallelism (all experts on every GPU),
-then saves it. Checks that no EP/CP/TP mode engages, that every logged loss and grad norm is finite,
-that the last-step loss is below the first, and that the save wrote weight files. No loss is compared
-against a reference and the saved weights are not reloaded.
+then saves it. Checks that every logged loss and grad norm is finite, that the last-step loss is below
+the first, and that the save wrote ``config.json`` and the weights. No loss is compared against a
+reference and the saved weights are not reloaded.
 
 Model: unsloth/gpt-oss-20b-BF16 (MoE, 32 experts)
 
@@ -20,7 +20,6 @@ Usage:
         tests/gpu/trainers/sft/test_sft_oss20b_default.py
 """
 
-import math
 import os
 
 import torch
@@ -31,11 +30,12 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 NUM_TRAIN_SAMPLES = 32
@@ -110,63 +110,14 @@ def run(ctx) -> dict:
         parallelism_config=parallelism_config,
     )
 
-    assert not trainer.is_ep_mode, "Should NOT be in EP mode"
-    assert not trainer.is_cp_mode, "Should NOT be in CP mode"
-    assert not trainer.is_tp_mode, "Should NOT be in TP mode"
-    log("Confirmed: default mode (no EP/CP/TP)")
-
     log(f"\n--- Training ({NUM_TRAIN_STEPS} steps) ---")
     train_result = trainer.train()
+    checks = training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True, loss_decreased=True)
 
     log(f"\n--- Saving model to {save_dir} ---")
     trainer.save_model(save_dir)
     barrier()
-
-    training_loss = train_result.training_loss
-    log_history = trainer.state.log_history
-    losses = step_losses(trainer)
-    grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
-
-    log("\n--- Metrics ---")
-    log(f"Final loss: {training_loss:.6f}")
-    log(f"Step losses: {[f'{l:.4f}' for l in losses]}")
-    if grad_norms:
-        log(f"Grad norms: {[f'{g:.2f}' for g in grad_norms]}")
-
-    log("\n--- Checks ---")
-    checks = {}
-
-    loss_finite = math.isfinite(training_loss) and all(math.isfinite(l) for l in losses)
-    checks["loss_finite"] = loss_finite
-    log(f"Loss finite: {'PASS' if loss_finite else 'FAIL'}")
-
-    if len(losses) >= 2:
-        first_loss, last_loss = losses[0], losses[-1]
-        loss_decreased = last_loss < first_loss
-        checks["loss_decreased"] = loss_decreased
-        log(f"Loss decreased: {'PASS' if loss_decreased else 'FAIL'} ({first_loss:.4f} -> {last_loss:.4f})")
-    else:
-        checks["loss_decreased"] = False
-        log("Loss decreased: FAIL (not enough steps logged)")
-
-    if grad_norms:
-        grad_ok = all(math.isfinite(g) for g in grad_norms)
-        checks["grad_finite"] = grad_ok
-        log(f"Grad norms finite: {'PASS' if grad_ok else 'FAIL'}")
-
-    if ctx.rank == 0:
-        dir_exists = os.path.isdir(save_dir)
-        checks["save_dir_exists"] = dir_exists
-        log(f"Save dir exists: {'PASS' if dir_exists else 'FAIL'}")
-        if dir_exists:
-            contents = os.listdir(save_dir)
-            log(f"Save contents: {sorted(contents)}")
-            has_model = any(f.startswith("model") and f.endswith(".safetensors") for f in contents) or any(
-                f.startswith("pytorch_model") and f.endswith(".bin") for f in contents
-            )
-            checks["has_model_weights"] = has_model
-            log(f"Has model weights: {'PASS' if has_model else 'FAIL'}")
-
+    checks |= model_save_checks(save_dir, ctx.rank)
     return {"checks": checks}
 
 

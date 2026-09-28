@@ -43,7 +43,7 @@ from tests.common.distributed import ensure_model_downloaded, snapshot_full_weig
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.tolerances import TOL
-from tests.common.utils import log
+from tests.common.utils import log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 NUM_TRAIN_SAMPLES = 64
@@ -223,7 +223,7 @@ def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int):
 
     trainer.compute_loss = spying_compute_loss
     trainer.train()
-    return trainer, captured, weights, [e["loss"] for e in trainer.state.log_history if "loss" in e]
+    return trainer, captured, weights, step_losses(trainer)
 
 
 @gpu_test_main(min_world_size=2, prefix="classification")

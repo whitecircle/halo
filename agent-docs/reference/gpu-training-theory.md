@@ -478,7 +478,7 @@ That is why low precision pays there: quantizing weights halves (fp8) or quarter
 | Low precision | mostly a *memory* lever; bf16 compute at these MoE shapes | a real *speed* lever |
 | Optimize | bigger M, fusion, GC trade-off, comm overlap | weight quant, KV compression, batching |
 
-Hence `scripts/after_training/quantize_to_lowp.py`, which converts a trained bf16 checkpoint to mxfp8/nvfp4: fp8/fp4 is an inference and memory capability here, and training stays bf16.
+Hence `scripts/after_training/quantize_to_lowp.py`, which converts a trained bf16 checkpoint to mxfp8/mxfp4/nvfp4: fp8/fp4 is an inference and memory capability here, and training stays bf16.
 
 ### RL is both at once
 

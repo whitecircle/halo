@@ -38,7 +38,7 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import cleanup_memory, log
+from tests.common.utils import cleanup_memory, log, step_losses
 
 MODEL_NAME = PARAPHRASE_MINILM
 NUM_TRAIN_STEPS = 10
@@ -165,7 +165,7 @@ def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Da
     ctx.barrier()
     result = trainer.train()
 
-    losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
+    losses = step_losses(trainer)
     log(f"  Steps: {result.global_step}  Loss: {losses[0]:.6f} -> {losses[-1]:.6f}")
     assert len(losses) == NUM_TRAIN_STEPS, f"expected {NUM_TRAIN_STEPS} logged steps, got {len(losses)}"
     assert torch.isfinite(torch.tensor(losses)).all(), f"non-finite loss in {losses}"

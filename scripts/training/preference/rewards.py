@@ -22,7 +22,7 @@ image-feeding run is refused by the pipeline gate.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/rewards.py \\
-        examples/reward/qwen3_5/rm-qwen3.5-9b-skywork-pref80k.yaml --expert_parallel_size=8
+        examples/reward/gptoss/rm-gptoss-20b-skywork-pref80k-ep.yaml
 """
 
 from transformers import AutoModelForSequenceClassification

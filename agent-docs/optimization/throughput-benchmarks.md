@@ -126,7 +126,7 @@ EP distributes experts; DP = world_size = 8. Small-batch pure EP is **communicat
 
 Rows are the grouped-GEMM path (default); the ep1 rows here hold experts replicated per rank (`fsdp_shard_ep1_experts: false`) — the fixed config the b1 golden baselines in `tests/baselines/` measure. Nothing reads those files automatically: `tokens_per_second` and `peak_allocated_gb` are diffed by hand ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
 
-`fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group, cutting ep1 b1 to **8,414 tok/s/GPU · 60.3 GB** (−59% memory for −10.6% throughput at b1; the all-gather overlaps better at larger batch — −3.5% at b4) — the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
+`fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group, cutting ep1 b1 to **8,414 tok/s/GPU · 60.3 GB** (−59% memory for −10.5% throughput at b1; the all-gather overlaps better at larger batch — −3.5% at b4) — the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
 
 Grouped beats the per-expert loop (`use_grouped_gemm: false`) at low EP and at high EP up to moderate batch; the loop edges ahead only at high EP with large batches. The crossover is set by local experts per rank, modulated by batch — the authoritative A/B is in [grouped-gemm](grouped-gemm.md#when-the-loop-path-wins).
 

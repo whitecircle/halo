@@ -273,8 +273,8 @@ Enabled by default where supported:
 
 - **Precision and optimizers** — `AdamWBF16` with stochastic rounding keeps weights and optimizer
   state in 6 bytes/parameter instead of 12 with FP32 master weights. Muon and FlashAdamW are also
-  supported. FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with mxfp8/nvfp4
-  export.
+  supported. FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with
+  mxfp8/mxfp4/nvfp4 export.
 
 - **Memory and PEFT** — padding-free, boundary-aware packing with `cu_seq_lens`, plus LoRA and QLoRA.
   QLoRA fits a 24 GB consumer GPU: the [Qwen3-4B QLoRA example](examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml)

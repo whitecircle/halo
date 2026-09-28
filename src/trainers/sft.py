@@ -80,10 +80,10 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
                     pad_token_id = resolve_tokenizer(self.processing_class).pad_token_id
                     if pad_token_id is None:
                         raise ValueError(
-                            "Context parallelism pads every sequence to a multiple of cp_size and "
-                            "needs the tokenizer's pad_token_id; the processing_class passed to the "
-                            "trainer has none. Set one (commonly the EOS token) rather than padding "
-                            "with vocabulary token 0."
+                            "Context parallelism pads every sequence to a multiple of "
+                            "context_parallel_size and needs the tokenizer's pad_token_id; the "
+                            "processing_class passed to the trainer has none. Set one (commonly the "
+                            "EOS token) rather than padding with vocabulary token 0."
                         )
                     for key in ("input_ids", "labels", "attention_mask", "position_ids"):
                         if key not in inputs:

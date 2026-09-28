@@ -124,9 +124,9 @@ def _validate_fp32_non_ep_params(pc: ParallelismConfig, model_config) -> None:
         if not layer_cls._supports_fp32_non_ep_params:
             family = "/".join(layer_cls.HF_MODEL_TYPES)
             raise ValueError(
-                f"fp32_non_ep_params=True is not supported for {family} under "
-                f"Expert Parallelism (ep_size={pc.ep_size}): the combination is unvalidated for this "
-                f"family and documented to fail at the first dispatch (see its model page). Train it "
+                f"fp32_non_ep_params=True is not supported for {family} under Expert Parallelism "
+                f"(expert_parallel_size={pc.ep_size}): the combination is unvalidated for this family "
+                f"and documented to fail at the first dispatch (see its model page). Train it "
                 f"experts-distributed in plain bf16 — AdamWBF16's stochastic rounding is the supported "
                 f"precision floor there."
             )
@@ -252,12 +252,12 @@ def load_distributed_model(
     # ep_size rather than is_ep_mode: pure ETP folds into is_ep_mode but never reaches the transport.
     if dtype == torch.float32 and parallelism_config.ep_size > 1:
         raise ValueError(
-            f"fp32 training is not supported under Expert Parallelism (ep_size="
-            f"{parallelism_config.ep_size}): DeepEP's dispatch buffer is sized for 2-byte tokens and "
-            f"asserts on 4-byte ones. Train in bf16 (the toolkit default) — for fp32 master weights "
-            f"without fp32 compute use fp32_non_ep_params / fp32_experts, which keep the "
-            f"dispatched activations bf16 (except Gemma 4, whose norms re-emit fp32 activations "
-            f"into the dispatch — it is refused separately)."
+            f"fp32 training is not supported under Expert Parallelism "
+            f"(expert_parallel_size={parallelism_config.ep_size}): DeepEP's dispatch buffer is sized "
+            f"for 2-byte tokens and asserts on 4-byte ones. Train in bf16 (the toolkit default) — "
+            f"for fp32 master weights without fp32 compute use fp32_non_ep_params / fp32_experts, "
+            f"which keep the dispatched activations bf16 (except Gemma 4, whose norms re-emit fp32 "
+            f"activations into the dispatch — it is refused separately)."
         )
 
     # Full fp32 matmul precision before any forward: the image's TF32 default degrades long-context RoPE.
@@ -608,11 +608,12 @@ def _load_pp_stage_model(
         raise ValueError(
             f"Pipeline parallelism needs a safetensors checkpoint the stage-aware loader can read, "
             f"but {model_name_or_path!r} has none. Falling back to a whole-model load would make "
-            f"every rank hold all pp_size={pc.pp_size} stages — the ceiling PP exists to remove. "
-            f"Either the checkpoint is not safetensors (convert it), or this family's EP layer "
-            f"declares _supports_lazy_loading=False / nests its expert index under an extra module "
-            f"(pre-5.14 Zaya checkpoints), in which case the model cannot use PP at all (see "
-            f"src/distributed/expert_parallel/layers/ and agent-docs/parallelism/pipeline-parallelism.md)."
+            f"every rank hold all pipeline_parallel_size={pc.pp_size} stages — the ceiling PP "
+            f"exists to remove. Either the checkpoint is not safetensors (convert it), or this "
+            f"family's EP layer declares _supports_lazy_loading=False / nests its expert index "
+            f"under an extra module (pre-5.14 Zaya checkpoints), in which case the model cannot "
+            f"use PP at all (see src/distributed/expert_parallel/layers/ and "
+            f"agent-docs/parallelism/pipeline-parallelism.md)."
         )
     if local_dir is None:
         raise RuntimeError(

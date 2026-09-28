@@ -170,16 +170,16 @@ def test_p4_ep_group_partition_is_exact():
 
 
 def test_p5_rejects_pp_not_dividing_world():
-    with pytest.raises(ValueError, match="divisible by pp_size"):
+    with pytest.raises(ValueError, match="divisible by pipeline_parallel_size"):
         _two_node_stage(0, pp_size=3)
 
 
 def test_p5_rejects_bad_pp_size_and_schedule():
-    with pytest.raises(ValueError, match="pp_size must be >= 1"):
+    with pytest.raises(ValueError, match="pipeline_parallel_size must be >= 1"):
         _two_node_stage(0, pp_size=0)
-    with pytest.raises(ValueError, match="pp_schedule must be"):
+    with pytest.raises(ValueError, match="pipeline_schedule must be"):
         _two_node_stage(0, pp_size=2, pp_schedule="dualpipe")
-    with pytest.raises(ValueError, match="pp_microbatches must be"):
+    with pytest.raises(ValueError, match="pipeline_microbatches must be"):
         _two_node_stage(0, pp_size=2, pp_microbatches=-1)
 
 

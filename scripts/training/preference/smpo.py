@@ -16,7 +16,7 @@ PP is declared but not yet available in this release.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \\
-        examples/preference/qwen3_5/smpo-qwen3.5-9b-tulu3-prefmix.yaml --expert_parallel_size=8
+        examples/preference/gptoss/smpo-gptoss-20b-tulu3-prefmix-ep.yaml
 
 Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the same plus an
 ``images``/``image`` column (single image or list), which is what declares the VLM run.
@@ -27,7 +27,6 @@ from trl import ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.smpo_args import SMPOScriptArguments
 from src.configs.smpo_config import SmoothMarginPOConfig
-from src.data.vlm import is_vlm_run
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier
@@ -46,8 +45,8 @@ from src.training.script_runner import (
     load_script_datasets,
     padded_workload_attn_implementation,
     prepare_script_preference_data,
-    reject_images_under_text_only_model,
     reject_unsupported_args,
+    resolve_vlm_run,
     run_trainer,
 )
 
@@ -62,22 +61,12 @@ def main():
     parallelism_config = runtime.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the verdict below, which reads the checkpoint's config: under text_only_model that
-    # config still says multimodal while the loaded class has no vision path.
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
 
     # The run's data path, not the checkpoint's modality: a multimodal checkpoint carrying text-only
     # pairs is a text run, and CP / padding_free stay legal for it. Decided here so the VLM
     # guards (the trainer enforces the same ones) raise before the model load, which also requires
-    # the checkpoint's processor for a VLM run, and pinned to the same revision as that load, since
-    # hub `main` can name a different modality than the commit this run trains.
-    is_vlm = is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        ds,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    # the checkpoint's processor for a VLM run.
+    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
     if dist_args.context_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Context Parallelism — drop --context_parallel_size.")
     if is_vlm:

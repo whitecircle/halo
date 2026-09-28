@@ -13,24 +13,32 @@ uninterrupted run).
 A save→reload or save→resume test proves the weights survived by value: the same fixed batch's forward
 loss before the save and after the reload (:func:`fixed_batch_loss`). A resume test also reads the
 optimizer and scheduler state the checkpoint restored, snapshotted before the first resumed step
-(:class:`ResumeCapture`).
+(:class:`ResumeCapture`) and graded by :func:`resume_continuity_checks`. The file probes (:func:`model_save_checks`, :func:`resume_checkpoint_checks`)
+name what a save must have left on disk before any of that is read.
 """
 
+import math
 import os
 
 import torch
 from transformers import TrainerCallback
+from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
+from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE, load_full_state_dict
+from src.checkpoint.format import SAFETENSORS_INDEX_FILE, has_whole_model_weight_file, load_full_state_dict
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.optimizers.adamw_bf16 import reset_sr_stream
 from tests.common.peft_helpers import snapshot_adapters, unwrap
-from tests.common.utils import local_optimizer_state
+from tests.common.utils import local_optimizer_state, log, optimizer_state_matches
 
 # The key lists ``from_pretrained``'s loading info reports; a clean load leaves every one empty.
 LOADING_INFO_KINDS = ("missing_keys", "unexpected_keys", "mismatched_keys")
 # Truncation bound for a :func:`fixed_text_batch` sequence; the short probe texts stay under it.
 FIXED_TEXT_BATCH_MAX_TOKENS = 64
+# The per-rank optimizer shards and the fingerprint meta a sharded save writes, spelled independently of
+# the writer so a rename fails here instead of agreeing with itself.
+OPTIMIZER_SHARD_FILE = "optimizer_shard_{rank:05d}.pt"
+OPTIMIZER_META_FILE = "optimizer_meta.pt"
 # The fixed-batch probe of the TP resume suites, scored before the save and after the resume.
 TP_RESUME_PROBE_TEXT = (
     "User: What is 17 plus 25?\nAssistant: The answer is 42. "
@@ -66,6 +74,53 @@ def weight_files(output_dir: str, *, include_index: bool = False) -> list[str]:
         if os.path.isfile(index):
             names.append(SAFETENSORS_INDEX_FILE)
     return names
+
+
+def model_save_checks(save_dir: str, rank: int) -> dict[str, bool]:
+    """Named checks that a ``save_model`` directory holds a loadable whole model: ``config.json`` and the
+    weights.
+
+    The full-model counterpart of :func:`tests.common.peft_helpers.adapter_save_checks`. Only rank 0
+    reads the disk; the other ranks return no checks.
+    """
+    if rank != 0:
+        return {}
+    exists = os.path.isdir(save_dir)
+    checks = {
+        "save_dir_exists": exists,
+        "has_config": exists and os.path.isfile(os.path.join(save_dir, CONFIG_NAME)),
+        "has_model_weights": exists and has_whole_model_weight_file(save_dir),
+    }
+    log(f"  Save at {save_dir}: {sorted(os.listdir(save_dir)) if exists else 'missing'}")
+    for name, ok in checks.items():
+        log(f"  {name}: {'PASS' if ok else 'FAIL'}")
+    return checks
+
+
+def resume_checkpoint_checks(checkpoint_dir: str, world_size: int) -> dict[str, bool]:
+    """Named checks that a mid-training checkpoint holds every file a full resume reads back.
+
+    Every run writes the trainer state, the LR scheduler and whole-model weights. A sharded run
+    (``world_size > 1``) adds one optimizer shard and one RNG state per rank plus the fingerprint meta,
+    whose ``num_ranks`` must be the world that wrote it; a single process writes HF's ``optimizer.pt``
+    and one ``rng_state.pth``. Reads the disk only, so rank 0 calls it and shares the verdict
+    (``ctx.broadcast_checks``).
+    """
+    files = set(os.listdir(checkpoint_dir)) if os.path.isdir(checkpoint_dir) else set()
+    if world_size > 1:
+        per_run = [OPTIMIZER_META_FILE]
+        per_run += [OPTIMIZER_SHARD_FILE.format(rank=rank) for rank in range(world_size)]
+        per_run += [f"rng_state_{rank}.pth" for rank in range(world_size)]
+    else:
+        per_run = [OPTIMIZER_NAME, "rng_state.pth"]
+    checks = {name: name in files for name in (TRAINER_STATE_NAME, SCHEDULER_NAME, *per_run)}
+    checks["model_weights"] = has_whole_model_weight_file(checkpoint_dir)
+    if checks.get(OPTIMIZER_META_FILE):
+        meta = torch.load(os.path.join(checkpoint_dir, OPTIMIZER_META_FILE), map_location="cpu", weights_only=False)
+        checks["optimizer_meta_num_ranks"] = meta.get("num_ranks") == world_size
+    missing = [name for name, ok in checks.items() if not ok]
+    log(f"  Checkpoint {checkpoint_dir}: {sorted(files)}" + (f"; FAILED: {missing}" if missing else ""))
+    return checks
 
 
 def fixed_text_batch(tokenizer, device, text: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -224,3 +279,44 @@ class ResumeCapture(TrainerCallback):
         if self.optimizer_state:
             self.capture["optimizer_state"] = local_optimizer_state(trainer.model, trainer.optimizer)
         return control
+
+
+def resume_continuity_checks(
+    capture: dict | None,
+    l_pre: float,
+    *,
+    save_step: int,
+    loss_tol: float,
+    optimizer_state: dict | None = None,
+) -> dict[str, bool]:
+    """Named checks on what a :class:`ResumeCapture` read at the first resumed step.
+
+    ``resume_capture_fired``; ``resume_weights_restored`` (the fixed-batch loss within ``loss_tol`` of
+    ``l_pre``, the same batch's loss before the save); ``resume_optimizer_moments_restored`` (Adam's
+    second moments present, not all zero, finite); ``resume_scheduler_restored`` (the LR scheduler at
+    ``save_step``, not back at warmup); and, given the pre-save ``optimizer_state`` (the capture must
+    have been built with ``optimizer_state=True``), ``resume_optimizer_state_bit_exact``.
+    """
+    checks = {"resume_capture_fired": capture is not None}
+    if capture is None:
+        log("  ERROR: the resume capture never fired (on_train_begin missed)")
+        return checks
+    l_post = capture["l_post"]
+    delta = abs(l_post - l_pre)
+    checks["resume_weights_restored"] = math.isfinite(l_post) and delta < loss_tol
+    checks["resume_optimizer_moments_restored"] = (
+        capture["moments_materialized"] and capture["moments_nonzero"] and capture["moments_finite"]
+    )
+    checks["resume_scheduler_restored"] = capture["sched_last_epoch"] == save_step
+    log(f"  L_pre={l_pre:.6f}  L_post={l_post:.6f}  |delta|={delta:.6f} (tol {loss_tol})")
+    log(
+        f"  exp_avg_sq materialized={capture['moments_materialized']} nonzero={capture['moments_nonzero']} "
+        f"finite={capture['moments_finite']}; scheduler last_epoch={capture['sched_last_epoch']} "
+        f"(expected {save_step})"
+    )
+    if optimizer_state is not None:
+        bit_exact, why = optimizer_state_matches(optimizer_state, capture["optimizer_state"])
+        checks["resume_optimizer_state_bit_exact"] = bit_exact
+        if not bit_exact:
+            log(f"  ERROR: optimizer state not bit-exact after resume: {why}")
+    return checks

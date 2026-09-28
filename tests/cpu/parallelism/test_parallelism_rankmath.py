@@ -95,7 +95,7 @@ def _assert_config_rejects_multigroup_ep(*, ep_size, world, gpus_per_node):
         # ep_size, the NVLink-domain size, AND the derived per-domain group count — so a guard that
         # fired for the WRONG reason (or with wrong arithmetic) would not satisfy this.
         n_groups = gpus_per_node // ep_size
-        assert f"ep_size={ep_size}" in msg, msg
+        assert f"expert_parallel_size={ep_size}" in msg, msg
         assert f"{gpus_per_node}-GPU NVLink domain" in msg, msg
         assert f"{n_groups} " in msg and "dispatch groups" in msg, msg
         return

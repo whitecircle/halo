@@ -443,11 +443,11 @@ def compute_layer_partition(
         )
     if pp_split is not None:
         if len(pp_split) != pp_size:
-            raise ValueError(f"pp_split has {len(pp_split)} entries but pipeline_parallel_size={pp_size}.")
+            raise ValueError(f"pipeline_split has {len(pp_split)} entries but pipeline_parallel_size={pp_size}.")
         if min(pp_split) < 1:
-            raise ValueError(f"pp_split entries must be >= 1 decoder layer, got {pp_split}.")
+            raise ValueError(f"pipeline_split entries must be >= 1 decoder layer, got {pp_split}.")
         if sum(pp_split) != num_layers:
-            raise ValueError(f"pp_split sums to {sum(pp_split)} but the model has {num_layers} decoder layers.")
+            raise ValueError(f"pipeline_split sums to {sum(pp_split)} but the model has {num_layers} decoder layers.")
         sizes = list(pp_split)
     else:
         sizes = _balanced_sizes(num_layers, pp_size, head_layer_equivalents, max(1, boundary_period))

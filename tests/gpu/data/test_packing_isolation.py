@@ -25,9 +25,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.data.collators.packing import DataCollatorWithPacking
 from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
 
-MODEL = "Qwen/Qwen3-0.6B"
+MODEL = QWEN3_0_6B
 # The isolated path recomputes doc B over exactly the same keys/values, so bf16 accumulation is
 # reproduced bit-for-bit; the control moves the logits by O(1).
 LEAK_THRESHOLD = 1e-2

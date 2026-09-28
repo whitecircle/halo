@@ -39,7 +39,7 @@ def test_rank_shifts_tile_the_unsplit_shift(cp_size):
 def test_a_sequence_the_ranks_cannot_split_evenly_is_refused():
     logits = torch.zeros(BATCH, SEQ // 2, VOCAB)
     labels = torch.zeros(BATCH, SEQ + 1, dtype=torch.long)
-    with pytest.raises(ValueError, match="divisible by cp_size 2"):
+    with pytest.raises(ValueError, match="divisible by context_parallel_size 2"):
         cp_shift_against_full_labels(logits, labels, 0, 2)
 
 

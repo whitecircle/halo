@@ -8,8 +8,8 @@
   ``tests.common.harness.record_check(checks, name, fn)`` is not that — the banned mechanism is the
   printed summary, not recording a verdict the harness then returns.
 * A collection of the CPU tier from the repo root never imports a GPU script: everything under
-  ``tests/gpu/`` except the two launcher entry points is a torchrun script, and one that acts at
-  import takes the whole session down.
+  ``tests/gpu/`` except the launcher entry points is a torchrun script, and one that acts at import
+  takes the whole session down.
 * No CPU test file re-declares the ``cpu`` marker: ``tests/conftest.py`` applies it by path to
   everything under ``tests/cpu/``, so a per-file ``pytestmark`` is a second mechanism for the same
   selection that only rots when the collector's rule changes.
@@ -32,6 +32,7 @@ import textwrap
 import pytest
 
 from tests.common.utils import REPO_ROOT, probe_findings
+from tests.gpu.manifest import LAUNCHER_ENTRYPOINTS
 
 CPU_MAIN_ENTRY = 'if __name__ == "__main__":\n    raise SystemExit(pytest.main([__file__, "-v"]))'
 BANNED_RUNNER = "Test" + "Runner"
@@ -46,8 +47,9 @@ BOOTSTRAP_EXEMPT = {"tests/conftest.py", "tests/cpu/checkpoint/test_parallel_con
 SUMMARY_EXEMPT = {"tests/gpu/profiling/benchmark_collators.py", "tests/gpu/profiling/benchmark_torch_compile.py"}
 
 
-# Modules a CPU-tier collection may load from tests/gpu/: the launcher side, never a torchrun script.
-GPU_LAUNCHER_MODULES = {"__init__.py", "conftest.py", "manifest.py", "test_suite.py", "test_launcher_contract.py"}
+# Modules a CPU-tier collection may load from tests/gpu/, relative to it: the launcher side, never a
+# torchrun script.
+GPU_LAUNCHER_MODULES = {"__init__.py", "conftest.py", "manifest.py", *LAUNCHER_ENTRYPOINTS}
 COLLECTION_MARKER = "GPU_SCRIPTS_IMPORTED:"
 
 
@@ -216,8 +218,9 @@ def test_a_cpu_tier_collection_never_imports_a_gpu_script():
         found = [] if code == pytest.ExitCode.NO_TESTS_COLLECTED else [f"exit {{int(code)}}"]
         for module in list(sys.modules.values()):
             path = pathlib.Path(getattr(module, "__file__", None) or "/").resolve()
-            if path.is_relative_to(gpu) and path.name not in {sorted(GPU_LAUNCHER_MODULES)!r}:
-                found.append(str(path.relative_to(gpu)))
+            rel = path.relative_to(gpu).as_posix() if path.is_relative_to(gpu) else None
+            if rel is not None and rel not in {sorted(GPU_LAUNCHER_MODULES)!r}:
+                found.append(rel)
         print({COLLECTION_MARKER!r} + "|".join(sorted(found)))
         """
     )

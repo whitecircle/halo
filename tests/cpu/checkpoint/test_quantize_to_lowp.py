@@ -1,4 +1,4 @@
-"""CPU test for scripts/after_training/quantize_to_lowp.py — the bf16/fp32 → block-scaled mxfp8/nvfp4
+"""CPU test for scripts/after_training/quantize_to_lowp.py — the bf16/fp32 → block-scaled mxfp8/mxfp4/nvfp4
 checkpoint conversion that pairs with quantization-aware training.
 
 Verifies: (1) only the targeted MLP/expert weights are quantized (attention/norm/embed/bias copied

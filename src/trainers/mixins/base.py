@@ -780,11 +780,11 @@ class DistributedTrainerMixin(
         if self._device_mesh is not None:
             return
         raise RuntimeError(
-            f"Tensor parallelism is active (tp_size={self.parallelism_config.tp_size}) but no device "
-            "mesh reached the trainer: FSDP did not build one (pure TP) and the model carries no "
-            "`_device_mesh` from the loader. Without it the TP group is unknown, so replicated "
-            "gradients are never averaged and the TP gradient-norm bucket is never reduced. Load the "
-            "model through load_distributed_model, which attaches the mesh."
+            f"Tensor parallelism is active (tensor_parallel_size={self.parallelism_config.tp_size}) "
+            "but no device mesh reached the trainer: FSDP did not build one (pure TP) and the model "
+            "carries no `_device_mesh` from the loader. Without it the TP group is unknown, so "
+            "replicated gradients are never averaged and the TP gradient-norm bucket is never "
+            "reduced. Load the model through load_distributed_model, which attaches the mesh."
         )
 
     def _reject_unsynced_trainable_params(self, model: nn.Module, candidates: Iterable[nn.Parameter]) -> None:
@@ -1541,14 +1541,14 @@ class DistributedTrainerMixin(
             return
         raise ValueError(
             f"optim={optim!r} cannot mix the plain-tensor expert FFN params (EP rank-local experts, "
-            f"or the grouped-GEMM gate_proj_gmm/up_proj_gmm split at ep_size=1) with the FSDP2 "
-            f"DTensor non-expert params: aten._fused_adamw_ raises 'mixed torch.Tensor and DTensor' "
+            f"or the grouped-GEMM gate_proj_gmm/up_proj_gmm split at expert_parallel_size=1) with the "
+            f"FSDP2 DTensor non-expert params: aten._fused_adamw_ raises 'mixed torch.Tensor and DTensor' "
             f"at the first step. Use AdamWBF16 (bf16=true, the production default, or "
             f"bf16_optimizer=true — its per-parameter path is DTensor-aware), or "
             f"fp32_non_ep_params=true for fp32 masters on the non-expert params only (experts stay "
             f"bf16). The stock AdamW runs where the parameters are uniform (dense models, and "
-            f"ep_size==1 MoE at the default fsdp_shard_ep1_experts), over the parameters at the run's "
-            f"dtype: bf16 masters under bf16=true, not fp32."
+            f"expert_parallel_size=1 MoE without expert TP at the default fsdp_shard_ep1_experts), over "
+            f"the parameters at the run's dtype: bf16 masters under bf16=true, not fp32."
         )
 
     def evaluation_loop(self, *args, **kwargs):

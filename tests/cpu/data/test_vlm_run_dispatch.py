@@ -51,7 +51,7 @@ from src.data.vlm import (
     is_vlm_run,
     process_vlm_conversation,
 )
-from src.training.script_runner import enforce_text_path_padding_side
+from src.training.script_runner import enforce_text_path_padding_side, resolve_vlm_run
 from tests.common.utils import load_script_module
 
 # Real configs, not stand-ins: the verdict must follow what transformers says about the architecture.
@@ -157,6 +157,28 @@ def test_args_without_the_modality_knobs_still_resolve():
     bare = SimpleNamespace()
     assert not is_vlm_run(bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
     assert is_vlm_run(bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS], {"image": [None]}), config=VLM_CONFIG)
+
+
+def test_the_script_seam_probes_the_checkpoint_the_run_loads(monkeypatch):
+    """A training script's probe must read the pinned commit under the run's own trust: hub ``main``
+    can name a different modality, and a forced trust would execute code the run never trusted."""
+    seen = []
+    monkeypatch.setattr(vlm_module, "is_vlm_model", lambda name, **kwargs: seen.append((name, kwargs)) or True)
+    model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision="abc123", trust_remote_code=True)
+
+    assert resolve_vlm_run(_args(images_field="images"), model_config, None, text_only_model=False)
+    assert seen == [("org/ckpt", {"config": None, "revision": "abc123", "trust_remote_code": True})]
+
+
+@pytest.mark.parametrize("vlm_checkpoint", [True, False])
+def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm_checkpoint):
+    monkeypatch.setattr(vlm_module, "is_vlm_model", lambda *a, **k: pytest.fail("the checkpoint was probed again"))
+    model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
+
+    verdict = resolve_vlm_run(
+        _args(images_field="images"), model_config, None, text_only_model=False, vlm_checkpoint=vlm_checkpoint
+    )
+    assert verdict is vlm_checkpoint
 
 
 # --- the dataset-side declaration ----------------------------------------------------------------

@@ -11,12 +11,9 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import preprocess_dataset
 from src.data.shard_index import SHARD_INDEX_FILE
 from src.data.sources.loading import load_preprocessed_dataset
-from tests.common.models import QWEN3_0_6B
-from tests.common.tokenizers import load_cached_tokenizer
+from tests.common.datasets import write_prepared_text_dataset
 
 _DOCS = [f"Document number {i} of the raw corpus." for i in range(12)]
 
@@ -26,10 +23,7 @@ PartialState()  # the loaders log through accelerate's rank-aware logger
 def _prepare(output_dir, *, num_shards: int, with_test: bool) -> None:
     train = Dataset.from_dict({"text": _DOCS})
     data = DatasetDict({"train": train, "test": train.select(range(4))}) if with_test else train
-    config = PreprocessingConfig(
-        model_name_or_path=QWEN3_0_6B, mode="text", max_length=64, num_shards=num_shards, num_proc=1
-    )
-    preprocess_dataset(data, load_cached_tokenizer(QWEN3_0_6B), config, output_dir=str(output_dir))
+    write_prepared_text_dataset(output_dir, data, num_shards=num_shards)
 
 
 def test_the_default_single_shard_output_trains_at_dp_2(tmp_path):

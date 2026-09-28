@@ -2,9 +2,8 @@
 """An adapter run refuses ``unfreeze_layers_patterns`` / ``freeze_layers_patterns`` instead of dropping them.
 
 The patterns are applied only on a full or partial fine-tune. An adapter run freezes every base
-parameter and trains the adapters alone, so a pattern there would select nothing; an expert-only
-LoRA run used to return before looking at them, and an attention-PEFT run only warned. Both must
-raise at setup, and the no-adapter path must still apply them.
+parameter and trains the adapters alone, so a pattern there would select nothing. Expert-only LoRA
+and attention PEFT both raise at setup, and the no-adapter path still applies them.
 
 Run: pytest tests/cpu/peft/test_peft_layer_patterns_refused.py
 """

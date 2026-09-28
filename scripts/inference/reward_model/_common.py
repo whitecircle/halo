@@ -18,8 +18,8 @@ import pandas as pd
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from scripts._common import add_openai_endpoint_args, add_trust_remote_code_arg
-from scripts.inference._common import add_generation_args
+from scripts._common import add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
+from scripts.inference._common import add_generation_args, add_prompt_field_args
 from src.checkpoint.tool_io import reject_sharded_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
@@ -142,19 +142,9 @@ def build_generation_parser(description: str, *, temperature_default: float) -> 
     # Data configuration
     parser.add_argument("--prompts_source", type=str, required=True, help="Path to JSONL file with prompts")
     parser.add_argument("--output_folder", type=str, default="data")
-    parser.add_argument("--id_field", type=str, default="id")
-    parser.add_argument(
-        "--prompt_field", type=str, default="prompt", help="Field containing the prompt as list of message dicts"
-    )
+    add_prompt_field_args(parser)
     parser.add_argument("--follow_up_prompt_field", type=str, default="follow_up_prompt")
     parser.add_argument("--correct_answer_field", type=str, default="correct_answer")
-    parser.add_argument("--local_system_prompt_field", type=str, default="system_prompt")
-    parser.add_argument(
-        "--global_system_prompt",
-        type=str,
-        default=None,
-        help="System prompt applied to all rows (overridden by local)",
-    )
 
     # Generation configuration
     add_generation_args(parser, temperature_default=temperature_default)
@@ -171,12 +161,10 @@ def build_generation_parser(description: str, *, temperature_default: float) -> 
         "never truncated (default: %(default)s)",
     )
     parser.add_argument("--rm_device", type=str, default="cuda:0")
-    parser.add_argument(
-        "--rm_dtype",
-        type=str,
-        default="bfloat16",
-        choices=list(DTYPE_BY_NAME),
-        help="Reward-model compute dtype (default: bfloat16, the toolkit-wide default — float16's "
+    add_dtype_arg(
+        parser,
+        flag="--rm_dtype",
+        help="Reward-model compute dtype (default: %(default)s, the toolkit-wide default — float16's "
         "narrow range overflows on out-of-distribution reward logits)",
     )
 

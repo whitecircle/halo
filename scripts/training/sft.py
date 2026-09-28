@@ -13,7 +13,7 @@ padding-free, and CP is text-only: the CP wrapper raises on a batch carrying ``p
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/sft.py \\
-        examples/sft/gptoss/gptoss-20b-multinode-ep.yaml --expert_parallel_size=8
+        examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
 """
 
 from accelerate.logging import get_logger
@@ -34,7 +34,6 @@ from src.data.pipeline.row_processors import create_llm_processor, text_render_k
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset, vlm_map_features
 from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.sources.loading import load_datasets_auto
-from src.data.vlm import is_vlm_run
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier, init_distributed, is_global_main_process
@@ -54,9 +53,9 @@ from src.training.script_runner import (
     install_resolved_tokenizer,
     load_script_datasets,
     log_script_dataset_examples,
-    reject_images_under_text_only_model,
     reject_non_default_args,
-    reject_unsupported_args,
+    reject_trl_dataset_prep_args,
+    resolve_vlm_run,
     run_trainer,
 )
 
@@ -227,21 +226,11 @@ def main():
             "eval_packing=True packs nothing without packing=True: it can only turn packing off for the "
             "eval split. Set packing: true to pack both splits, or remove eval_packing."
         )
-    # TRL applies these inside its own dataset prep + default collator, both replaced here, so they would
-    # parse and mask nothing. Completion masking is train_on_completions_only + assistant_message_template.
-    reject_unsupported_args(
+    reject_trl_dataset_prep_args(
         "Halo SFT",
-        # Tri-state: an explicit False ("train on the full sequence") is ignored the same as True.
-        completion_only_loss=sft_config.completion_only_loss is not None,
-        assistant_only_loss=sft_config.assistant_only_loss,
-    )
-    # Read by that same prep alone, and disable_trl_dataset_prep overwrites dataset_kwargs.
-    reject_non_default_args(
-        "Halo SFT (it renders conversation_field itself; tokenize a raw-text column offline with "
-        "scripts/before_training/prepare_dataset.py --mode text)",
         sft_config,
-        "dataset_text_field",
-        "dataset_kwargs",
+        render_remedy="it renders conversation_field itself; tokenize a raw-text column offline with "
+        "scripts/before_training/prepare_dataset.py --mode text",
     )
 
     # The checkpoint's modality names the run, which init_training_script needs before the dataset
@@ -283,13 +272,8 @@ def main():
     # checkpoint's processor is required: a multimodal checkpoint carrying text-only rows is a text
     # run, and packing / padding_free / train_on_last_assistant_only stay legal for it. The model
     # class is unaffected; it follows the checkpoint.
-    reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
-    is_vlm = is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        ds,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
+    is_vlm = resolve_vlm_run(
+        args, model_config, ds, text_only_model=dist_args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
     )
 
     model, processing_class, tokenizer, _ = load_model_for_training(

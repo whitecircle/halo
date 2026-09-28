@@ -186,10 +186,11 @@ class ParallelismValidationMixin:
         config = self.parallelism_config
         if ref_model is not None and (config.is_ep_mode or config.is_tp_mode):
             raise ValueError(
-                f"An explicit ref_model is not supported under EP/TP (ep_size={config.ep_size}, "
-                f"tp_size={config.tp_size}): the reference is not parallelized, so it would run the "
-                f"unpatched dense path and its log-probs would not match the policy's. Use PEFT/LoRA "
-                f"(ref_model=None) or precompute_ref_log_probs=True."
+                f"An explicit ref_model is not supported under EP/TP "
+                f"(expert_parallel_size={config.ep_size}, tensor_parallel_size={config.tp_size}): "
+                f"the reference is not parallelized, so it would run the unpatched dense path and "
+                f"its log-probs would not match the policy's. Use PEFT/LoRA (ref_model=None) or "
+                f"precompute_ref_log_probs=True."
             )
 
     def _validate_implicit_reference_model(self) -> None:
@@ -326,7 +327,7 @@ class ParallelismValidationMixin:
                 f"lora_dropout={configured} is configured but every LoRA dropout in the live model is 0: "
                 f"this trainer disables dropout after the adapter wrap (disable_dropout=True), which "
                 f"zeroes PEFT's lora_dropout along with the model's own. Set disable_dropout=False to keep "
-                f"it, or drop lora_dropout to stop expecting regularization that is not applied."
+                f"it, or set lora_dropout: 0.0 to stop expecting regularization that is not applied."
             )
 
     def _validate_expert_lora_realized(self):
@@ -450,7 +451,7 @@ class ParallelismValidationMixin:
         model = self._top_level_model()
         if has_ep_lora(model):
             raise ValueError(
-                "Native EP expert LoRA is not supported with Tensor Parallelism (tp_size > 1).\n"
+                "Native EP expert LoRA is not supported with Tensor Parallelism (tensor_parallel_size > 1).\n"
                 "The expert adapters live on the EP-distributed expert weights, so every TP gate "
                 "skips them by param identity: neither the attention-adapter check nor the TP "
                 "replicated-grad sync sees them, and no gradient-equivalence or save/merge test "
@@ -463,7 +464,7 @@ class ParallelismValidationMixin:
         if not isinstance(model, PeftModel) and not tuner_adapter_param_ids(model):
             return
         raise ValueError(
-            "LoRA/PEFT adapters are not supported with Tensor Parallelism (tp_size > 1).\n"
+            "LoRA/PEFT adapters are not supported with Tensor Parallelism (tensor_parallel_size > 1).\n"
             "TP shards the attention/MLP base layers as DTensors, but PEFT adapters are added as "
             "plain tensors outside the TP graph: the replicated adapter matrix diverges across "
             "ranks (per-rank init, never broadcast) and the sharded one is corrupted by the TP "

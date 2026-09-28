@@ -24,8 +24,6 @@ Run with 2 GPUs:
         tests/gpu/trainers/preference/test_smpo_padding_free.py
 """
 
-import math
-
 import torch
 
 from src.configs.smpo_config import SmoothMarginPOConfig
@@ -35,7 +33,7 @@ from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.utils import log, training_run_checks
 
 # Configuration
 
@@ -131,33 +129,12 @@ def run(ctx):
     log("\n[4/4] Training...")
     train_result = trainer.train()
 
-    # -- Collect metrics --
-    training_loss = train_result.training_loss
-    losses = step_losses(trainer)
-
-    log("\n  --- Training Results ---")
-    log(f"  Final training loss: {training_loss:.6f}")
-    log(f"  Per-step losses: {[f'{l:.4f}' for l in losses]}")
-
     # -- Assertions --
     log("\n  --- Assertions ---")
-    checks = {}
-
-    # Check 1: Training completed (loss is finite)
-    loss_finite = math.isfinite(training_loss)
-    checks["loss_finite"] = loss_finite
-    log(f"  Loss is finite: {'PASS' if loss_finite else 'FAIL'} (loss={training_loss:.6f})")
-
-    # Check 2: All step losses are finite (no NaN/Inf)
-    all_finite = all(math.isfinite(l) for l in losses)
-    checks["all_steps_finite"] = all_finite
-    log(f"  All step losses finite: {'PASS' if all_finite else 'FAIL'}")
-
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
     checks["padding_free_active"] = trainer.padding_free is True
-    checks["steps_completed"] = trainer.state.global_step == MAX_STEPS
-    log(f"  Steps completed: {trainer.state.global_step}/{MAX_STEPS}")
 
-    return {"checks": checks, "metrics": {"final_train_loss": training_loss}}
+    return {"checks": checks, "metrics": {"final_train_loss": train_result.training_loss}}
 
 
 main = gpu_test_main(min_world_size=1, prefix="smpo_padding_free")(run)
