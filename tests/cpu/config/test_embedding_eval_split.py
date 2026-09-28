@@ -48,7 +48,7 @@ def _eval_dataset_handed_to_the_trainer(tmp_path, dataset: DatasetDict):
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "build_sentence_transformer", return_value=model),
-        mock.patch.object(module, "build_peft_config", return_value=None),
+        mock.patch.object(module, "inject_lora"),
         mock.patch.object(module, "apply_distributed_trainer_config"),
         mock.patch.object(module, "barrier"),
         mock.patch.object(module, "build_training_callbacks", return_value=[]),
