@@ -282,6 +282,18 @@ def test_trl_dataset_prep_defaults_pass():
     reject_trl_dataset_prep_args("Some script", _sft_config(), "eval_packing")
 
 
+def test_each_trl_dataset_prep_refusal_names_its_own_way_out():
+    """A mask knob's refusal points at the script's own masking; a rendering knob's at the caller's
+    rendering remedy. Neither message carries the other's advice."""
+    with pytest.raises(ValueError) as masked:
+        reject_trl_dataset_prep_args("Some script", _sft_config(assistant_only_loss=True), render_remedy="REMEDY")
+    assert "train_on_completions_only" in str(masked.value) and "REMEDY" not in str(masked.value)
+
+    with pytest.raises(ValueError) as rendered:
+        reject_trl_dataset_prep_args("Some script", _sft_config(dataset_text_field="messages"), render_remedy="REMEDY")
+    assert "REMEDY" in str(rendered.value) and "train_on_completions_only" not in str(rendered.value)
+
+
 # reject_non_default_args: the same gate for knobs whose own default is truthy
 
 

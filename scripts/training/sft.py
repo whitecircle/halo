@@ -227,9 +227,10 @@ def main():
             "eval split. Set packing: true to pack both splits, or remove eval_packing."
         )
     reject_trl_dataset_prep_args(
-        "Halo SFT (it renders conversation_field itself; tokenize a raw-text column offline with "
-        "scripts/before_training/prepare_dataset.py --mode text)",
+        "Halo SFT",
         sft_config,
+        render_remedy="it renders conversation_field itself; tokenize a raw-text column offline with "
+        "scripts/before_training/prepare_dataset.py --mode text",
     )
 
     # The checkpoint's modality names the run, which init_training_script needs before the dataset
