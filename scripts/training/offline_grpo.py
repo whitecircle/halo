@@ -7,7 +7,7 @@ CP is not supported (the trainer uses the ``logits_to_keep`` optimization); use 
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \\
-        examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml --expert_parallel_size=8
+        examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml
 """
 
 from functools import partial

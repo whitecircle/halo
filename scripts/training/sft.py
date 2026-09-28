@@ -13,7 +13,7 @@ padding-free, and CP is text-only: the CP wrapper raises on a batch carrying ``p
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/sft.py \\
-        examples/sft/gptoss/gptoss-20b-multinode-ep.yaml --expert_parallel_size=8
+        examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
 """
 
 from accelerate.logging import get_logger
