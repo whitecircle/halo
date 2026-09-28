@@ -923,10 +923,10 @@ class ParallelismConfig:
             raise ValueError(
                 f"fsdp_shard_ep1_experts=False is not honored under TP or CP "
                 f"(tensor_parallel_size={self.tp_size}, context_parallel_size={self.cp_size}): those paths "
-                f"FSDP-shard the "
-                f"replicated experts unconditionally. Remove the flag (sharded experts are "
-                f"grad-equivalent; gpt-oss-20b on 8 GPUs at batch 1 trades -10.6% throughput for -59% "
-                f"peak memory), or use pure DP for the full replicated expert copy."
+                f"FSDP-shard the replicated experts unconditionally. Remove the flag (sharded experts are "
+                f"grad-equivalent; the memory/throughput trade is in "
+                f"agent-docs/parallelism/data-parallelism.md#ep1-expert-sharding), or use pure DP for "
+                f"the full replicated expert copy."
             )
         if not self.fsdp_reshard_after_forward:
             return
