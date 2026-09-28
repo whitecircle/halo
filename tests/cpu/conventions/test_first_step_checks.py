@@ -82,10 +82,14 @@ def test_a_reoriented_gradient_fails_only_the_direction_check():
     assert _failed(_step(grads=grads)) == ["step1_grad_direction_matches_reference"]
 
 
-def test_a_parameter_left_out_of_the_step_fails_the_coverage_check():
+def test_a_parameter_left_out_of_the_step_fails_every_gradient_check():
     grads = _grads()
     del grads["norm.weight"]
-    assert "step1_grads_cover_the_reference_params" in _failed(_step(grads=grads))
+    assert _failed(_step(grads=grads)) == [
+        "step1_grads_cover_the_reference_params",
+        "step1_grad_direction_matches_reference",
+        "step1_grad_norm_matches_reference",
+    ]
 
 
 def test_a_backward_through_the_c10d_fallback_fails_its_check():

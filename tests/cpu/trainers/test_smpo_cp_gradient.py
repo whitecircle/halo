@@ -29,6 +29,7 @@ import torch.nn as nn
 from src.distributed.context_parallel.config import split_sequence_for_cp
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from tests.common.first_step import AUTOGRAD_FALLBACK_WARNING
 from tests.common.gloo import run_gloo_ranks
 
 CP_WORLD_SIZE = 2
@@ -37,7 +38,6 @@ PAD_TOKEN_ID = 0
 # The trainer sums log-probs and NLL in fp32 whatever the input dtype, so a chunked sum differs from
 # the unsplit one by fp32 summation order (~1 ulp); a cp_size-fold gradient error is 0.5 or more.
 REL_TOL = 1e-6
-AUTOGRAD_FALLBACK_WARNING = "autograd kernel was not registered"
 PER_SEQUENCE_KEYS = ("chosen_logps", "rejected_logps", "chosen_sft_loss", "rejected_sft_loss")
 
 

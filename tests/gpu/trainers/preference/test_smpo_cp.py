@@ -15,7 +15,8 @@ loss. Both train to finite losses, so the run is pinned by value: step 1's micro
      (clipping off, so it is the backward's own gradient);
   3. no backward reached the c10d autograd fallback;
 
-besides the smoke checks: CP mode active, every step run, the training loss finite.
+besides the smoke checks: the Ulysses layers span the CP group, every step runs, and the losses and
+logged gradient norms are finite.
 tests/cpu/trainers/test_smpo_cp_gradient.py pins the same objective exactly, in float64 on gloo.
 
 Run with 2 GPUs:
@@ -26,8 +27,6 @@ Requirements:
     - 2x GPUs
     - Model: Qwen/Qwen3-0.6B (auto-downloaded)
 """
-
-import math
 
 import torch
 import torch.distributed as dist
@@ -47,7 +46,8 @@ from tests.common.first_step import (
 )
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
 
 # Configuration
 
@@ -124,18 +124,12 @@ def _train_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep, s
         processing_class=tokenizer,
         parallelism_config=parallelism_config,
     )
-    checks = {"cp_mode_active": bool(trainer.is_cp_mode)}
-    log(f"trainer.is_cp_mode: {trainer.is_cp_mode}")
+    checks = parallel_shape_checks(trainer.model, parallelism_config)
 
     log(f"\nStarting training for {NUM_TRAIN_STEPS} steps...")
     train_result, first_step = train_recording_first_step(trainer)
     log("Training complete!")
-
-    final_loss = train_result.metrics["train_loss"]
-    log(f"Final training loss: {final_loss}")
-    checks["train_loss_finite"] = math.isfinite(final_loss)
-    checks["steps_completed"] = trainer.state.global_step == NUM_TRAIN_STEPS
-    log(f"Steps completed: {trainer.state.global_step}")
+    checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
 
     del trainer, model
     cleanup_memory()
@@ -182,6 +176,8 @@ def run(ctx) -> dict:
     log(f"\nScoring step 1 with a CP=1 trainer (GPU memory after freeing the CP run: {gpu_mem_gb():.1f}GB)")
     reference = _score_reference(output_dir, tokenizer, first_step, attn_implementation)
     loss_checks, metrics = first_step_checks(first_step, reference, miscount_factor=CP_SIZE, loss_rtol=LOSS_RTOL)
+    # TOL's CP gradient bounds: measured over four seeds at 2 to 16 microbatches, the gradient's cosine to
+    # the reference is at least 0.9985 and its norm within 2.8%.
     grad_checks, grad_metrics = first_step_gradient_checks(first_step, reference)
     return {"checks": checks | loss_checks | grad_checks, "metrics": metrics | grad_metrics}
 

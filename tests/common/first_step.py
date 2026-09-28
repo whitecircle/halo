@@ -9,9 +9,9 @@ reached PyTorch's c10d autograd fallback. :func:`score_first_step` runs those mi
 reference trainer on the initial weights as the training step would; :func:`first_step_checks` and
 :func:`first_step_gradient_checks` compare the two.
 
-Gradients are compared on the FSDP2-sharded (DTensor) parameters: the backward's reduce-scatter
-finalizes them, so the reference's backward outside the loop yields the same quantity. EP experts and
-routers are FSDP-ignored and finalized by the trainer's EP sync at the clip, so they are left out.
+Gradients are compared on the FSDP2-sharded (DTensor) parameters, which FSDP2 and the trainer's clip
+seam finalize the same way on both sides. EP experts and routers are FSDP-ignored and live in a
+layout-specific form, so they are left out.
 """
 
 import contextlib
@@ -74,9 +74,12 @@ class _FirstStepRecorder(TrainerCallback):
         compute_loss = trainer.compute_loss
 
         def recording_compute_loss(model, inputs, *args, **kwargs):
-            loss = compute_loss(model, inputs, *args, **kwargs)
-            if len(record.batches) < microbatches:
+            # Training microbatches only: an evaluation pass reaches compute_loss with the model in eval mode.
+            recording = model.training and len(record.batches) < microbatches
+            if recording:
                 record.batches.append({key: _host_copy(value) for key, value in inputs.items()})
+            loss = compute_loss(model, inputs, *args, **kwargs)
+            if recording:
                 record.losses.append(float(loss))
             return loss
 
@@ -121,20 +124,30 @@ def train_recording_first_step(trainer, *, gradients: bool = True):
 def score_first_step(trainer, record: FirstStep) -> FirstStep:
     """``trainer``'s own first step on ``record``'s microbatches. Collective.
 
-    Mirrors the training step outside the loop: ``compute_loss`` under the trainer's loss context,
-    each loss divided by the microbatch count and backpropagated through the accelerator. The result
-    carries the losses, the step loss HF would log and, when ``record`` carries gradients, the
-    gradient the step accumulated.
+    Mirrors the training step outside the loop: ``compute_loss`` under the trainer's loss context and,
+    when ``record`` carries gradients, each loss divided by the microbatch count, backpropagated through
+    the accelerator and finalized by the clip seam HF runs before the optimizer step. The result carries
+    the losses, the step loss HF would log and those gradients. Only a trainer whose loss is its own
+    mean is mirrored: HF skips the division when it normalizes by the batch's item count instead.
     """
+    if trainer.model_accepts_loss_kwargs:
+        raise ValueError(
+            f"{type(trainer).__name__} normalizes its loss by the batch's item count, a step score_first_step "
+            f"does not mirror"
+        )
     trainer.model.train()
     scored = FirstStep()
     for batch in record.batches:
         inputs = trainer._prepare_inputs(batch)
-        with trainer.compute_loss_context_manager():
+        with torch.set_grad_enabled(bool(record.grads)), trainer.compute_loss_context_manager():
             loss = trainer.compute_loss(trainer.model, inputs)
-        trainer.accelerator.backward(loss / len(record.batches))
+        if record.grads:
+            trainer.accelerator.backward(loss / len(record.batches))
         scored.losses.append(float(loss))
     if record.grads:
+        # HF's clip, or its norm-only pass when clipping is off: where the EP, TP and QLoRA syncs run.
+        grad_norm = trainer._clip_grad_norm(trainer.model) if trainer.args.max_grad_norm > 0 else None
+        trainer._get_grad_norm(trainer.model, grad_norm=grad_norm)
         scored.grads = _sharded_grads(trainer.model)
     # HF logs the world mean of the per-rank step losses.
     scored.logged_loss = world_mean(sum(scored.losses) / len(scored.losses), trainer.accelerator.device)

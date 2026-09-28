@@ -59,9 +59,9 @@ BATCH_SIZE = 1
 GRADIENT_ACCUMULATION = 2
 LEARNING_RATE = 5e-6
 SEED = 42
-# Step 1 against the EP-only trainer, relative. With the sinks neutralized the model is sensitive to each
-# layout's bf16 numerics: measured over two seeds, a microbatch loss moves by up to 16% and the logged
-# step loss by up to 8%. A loss counted once per CP rank is 100% off.
+# Step 1 against the EP-only trainer, relative. With the sinks neutralized the two layouts' losses drift
+# apart: measured over two seeds, a microbatch loss by up to 16% and the logged step loss by up to 8%. A
+# loss counted once per CP rank is 100% off.
 LOSS_RTOL = 0.4
 
 
