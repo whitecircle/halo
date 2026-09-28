@@ -198,15 +198,15 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 | Flag | Scope | Effect |
 |---|---|---|
 | `fp32_router` | Router/gate weights | FP32 master. The routing matmul runs in FP32 while the EP layer syncs the router (`ep_group_size > 1`, or `fsdp_shard_ep1_experts: false`); at `ep_group_size == 1` under `fsdp_shard_ep1_experts` the router takes its own FSDP2 shard group and computes in BF16 under FSDP2's `param_dtype` |
-| `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — use `fp32_non_ep_params` there |
+| `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — set `fsdp_shard_ep1_experts: false` for fp32 expert masters there |
 | `fp32_non_ep_params` | Attention, embed, norm | FP32 master, BF16 compute |
 
 Training checkpoints keep these masters in fp32 and exports write them bf16
 ([What gets saved](../reference/checkpoints.md#what-gets-saved)).
 
-`fp32_non_ep_params: true` unconditionally implies `fp32_router: true` — every family except Gemma 4
-keeps its router inside the EP wrapper, where leaving it BF16 next to FP32 dense params would trip
-FSDP2's uniform-dtype check.
+`fp32_non_ep_params: true` unconditionally implies `fp32_router: true`: every family except Gemma 4
+keeps its router inside the EP wrapper, which that upcast skips, so the implication keeps every
+non-expert weight an FP32 master.
 
 **Gemma 4: `fp32_non_ep_params` under EP is refused at load**, off the family's
 `_supports_fp32_non_ep_params = False` and before the model is built. Its router (`Gemma4TextRouter`)

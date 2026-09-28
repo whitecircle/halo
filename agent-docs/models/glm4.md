@@ -63,7 +63,7 @@ GLM-4 MoE Lite's router is DeepSeek-V3 aux-loss-free (sigmoid + a static `e_scor
 
 [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) sign-updates the gate's own `e_score_correction_bias` — the native slot the family's selection arithmetic already consults, adopted whole rather than stacked with a side buffer — so the final bias exports with every checkpoint and a served copy routes as training did. To freeze the router instead, use `freeze_layers_patterns: ["*.mlp.gate.weight"]`.
 
-Router precision comes from `fp32_router`, and `fp32_non_ep_params` (dense attention/embeddings/lm_head) turns it on regardless: that upcast skips the EP-owned router, and a bf16 router beside fp32 dense params would trip FSDP2's uniform-dtype check. The example config sets both.
+Router precision comes from `fp32_router`, and `fp32_non_ep_params` (dense attention/embeddings/lm_head) turns it on regardless, since that upcast skips the EP-owned router. The example config sets both.
 
 ## Chat templates
 
