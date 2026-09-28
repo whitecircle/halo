@@ -178,7 +178,7 @@ def destroy_all_dispatchers() -> None:
 
     The leading barrier is load-bearing: ``buffer.destroy()`` spins on the device-side NVLink barrier
     for ``HALO_DEEPEP_GPU_TIMEOUT_SECONDS``, and teardown is reached after rank-asymmetric work (a
-    gathered save streaming tens of GB on the writer rank, an adapter unmerge, an eval). NCCL's
+    gathered save streaming tens of GB on the writer rank, an eval). NCCL's
     barrier blocks the host, so aligning here puts that wait under the process-group timeout rather
     than the device one; without it the first rank in spends the whole budget and the job fails with
     ``DeepEP NVLink barrier timeout`` followed by ``cudaErrorLaunchFailure``. It only aligns ranks

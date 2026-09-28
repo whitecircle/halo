@@ -292,10 +292,10 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         if not config.is_ep_mode or not self._has_injected_lora():
             return
         raise ValueError(
-            "LoRA for embedding training is not supported with Expert Parallelism: the EP save path "
-            "gathers the expert layout directly and has no adapter-merge step, so the checkpoint "
-            "would carry adapter keys that reload as random base weights. Drop "
-            "--expert_parallel_size, or full fine-tune this model."
+            "LoRA for embedding training is not supported with Expert Parallelism (EP or expert-TP): the "
+            "save folds the adapters over the backbone's own parameters, which there hold this rank's "
+            "expert shards under their local names, so the checkpoint would load nowhere. Drop "
+            "--expert_parallel_size / --expert_tensor_parallel_size, or full fine-tune this model."
         )
 
     def _validate_modules_outside_backbone(self) -> None:
