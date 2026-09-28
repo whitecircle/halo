@@ -198,6 +198,7 @@ def _pp_args(**overrides):
         "gradient_checkpointing": False,
         "gradient_checkpointing_kwargs": None,
         "eval_strategy": "no",
+        "eval_on_start": False,
         "per_device_eval_batch_size": 2,
         "per_device_train_batch_size": 2,
         "gradient_accumulation_steps": 2,
@@ -298,6 +299,7 @@ def test_sharded_ep_save_is_rejected_under_pp():
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs=None,
         eval_strategy="no",
+        eval_on_start=False,
         per_device_eval_batch_size=1,
         per_device_train_batch_size=1,
         torch_compile=False,
@@ -314,6 +316,28 @@ def test_sharded_ep_save_is_rejected_under_pp():
         PipelineTrainerMixin._maybe_prepare_pipeline_model(gathered, {"model": model}, args)
     except Exception as exc:  # noqa: BLE001 — any later failure is fine; the sharded-save one is not
         assert "save_sharded_ep" not in str(exc), f"the gathered save tripped the PP sharded-save gate: {exc}"
+
+
+@pytest.mark.parametrize(
+    ("eval_strategy", "eval_on_start"),
+    [pytest.param("steps", False, id="eval_strategy"), pytest.param("no", True, id="eval_on_start_only")],
+)
+def test_eval_batch_mismatch_is_rejected_whenever_an_evaluation_runs(eval_strategy, eval_on_start):
+    """The P2P buffers freeze to the training microbatch, so an eval batch of another size cannot be
+    split into matching chunks. ``eval_on_start`` evaluates under ``eval_strategy: no`` too, so the
+    gate must key on whether any evaluation runs, not on the strategy alone."""
+    stub = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=False)
+    args = _pp_args(eval_strategy=eval_strategy, eval_on_start=eval_on_start, per_device_eval_batch_size=4)
+    with pytest.raises(ValueError, match=r"per_device_eval_batch_size \(4\) must equal per_device_train_batch_size"):
+        PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, args)
+
+
+def test_eval_batch_mismatch_passes_when_no_evaluation_runs():
+    """The converse: with no evaluation scheduled the eval batch size is never used, so the run gets
+    past the gate to the next one (the missing ``model``)."""
+    stub = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=False)
+    with pytest.raises(ValueError, match="requires the model to be passed"):
+        PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, _pp_args(per_device_eval_batch_size=4))
 
 
 if __name__ == "__main__":

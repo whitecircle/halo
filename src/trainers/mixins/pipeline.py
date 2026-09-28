@@ -56,6 +56,7 @@ from src.trainers.mixins.pp_gates import (
     reject_pp_compute_metrics,
     reject_pp_peft,
 )
+from src.trainers.mixins.validation import evaluation_runs
 
 logger = get_logger(__name__, log_level="info")
 
@@ -261,8 +262,10 @@ class PipelineTrainerMixin:
                 "from inside the schedule's backward. Drop the kwarg (the default use_reentrant="
                 "False path is supported and validated)."
             )
-        evaluating = training_args.eval_strategy not in ("no", None)
-        if evaluating and training_args.per_device_eval_batch_size != training_args.per_device_train_batch_size:
+        if (
+            evaluation_runs(training_args)
+            and training_args.per_device_eval_batch_size != training_args.per_device_train_batch_size
+        ):
             raise ValueError(
                 f"per_device_eval_batch_size ({training_args.per_device_eval_batch_size}) must "
                 f"equal per_device_train_batch_size ({training_args.per_device_train_batch_size}) "
