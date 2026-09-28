@@ -218,6 +218,14 @@ def parse_args() -> argparse.Namespace:
         f"{DEFAULT_ENV_TYPE}).",
     )
     add_endpoint_args(p)
+    # Defaults to None so resolve_split can tell an explicit split, which a single-split source refuses,
+    # from an omitted one.
+    p.add_argument(
+        "--split",
+        default=None,
+        help=f"Dataset split (default: {DEFAULT_SPLIT}). A source that ships a single split of its own reads "
+        "that split and refuses another.",
+    )
     p.add_argument(
         "--adapter",
         default="codeforces",
@@ -359,7 +367,7 @@ def main() -> None:
     try:
         args.split = adapter.resolve_split(args.split, DEFAULT_SPLIT)
     except ValueError as exc:
-        raise SystemExit(f"--adapter {args.adapter}: {exc}") from exc
+        raise SystemExit(f"--split on --adapter {args.adapter}: {exc}") from exc
     selection = resolve_selection(args, adapter)
     env_kwargs = json.loads(args.env_kwargs)
     refuse_flag_owned_env_kwargs(env_kwargs)
@@ -418,6 +426,7 @@ def main() -> None:
         env=env,
         traj_path=traj_path,
         env_type=env_type,
+        split=args.split,
         max_turns=max_turns,
         rollout=rollout,
         num_samples=args.num_samples,

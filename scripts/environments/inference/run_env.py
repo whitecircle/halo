@@ -82,8 +82,7 @@ def parse_args() -> argparse.Namespace:
         "--training_config names one (environment_type).",
     )
     add_endpoint_args(p)
-    # A generic dataset ships no split of its own to refuse a different one against.
-    p.set_defaults(split=DEFAULT_SPLIT)
+    p.add_argument("--split", default=DEFAULT_SPLIT, help="Dataset split (default: %(default)s).")
     p.add_argument("--prompt_field", default="prompt", help="Row field holding the prompt.")
     p.add_argument(
         "--answer_field",
@@ -219,6 +218,7 @@ def main() -> None:
         env=env,
         traj_path=traj_path,
         env_type=env_type,
+        split=args.split,
         max_turns=args.max_turns,
         rollout=rollout,
         num_samples=args.num_samples,

@@ -27,6 +27,7 @@ _FULL_META = {
     "env_type": "code_contests",
     "adapter": "code_contests",
     "dataset": "deepmind/code_contests",
+    "split": "test",
     "model": "org/model",
     "language": "python",
 }
@@ -52,6 +53,13 @@ def test_validate_meta_reports_every_missing_key_and_its_producer():
     message = str(excinfo.value)
     assert "adapter" in message and "language" in message
     assert "run_code_contests.py" in message, "the error must name the producer that stamps the missing keys"
+
+
+def test_a_meta_without_its_split_is_refused():
+    """The split picks the rows whose tests the re-grade rebuilds; guessing one would grade every
+    episode of a train-split run (HLCE) against another split's problems."""
+    with pytest.raises(ValueError, match="split"):
+        regrade_trajectories.validate_meta("f.jsonl", {k: v for k, v in _FULL_META.items() if k != "split"})
 
 
 def test_a_null_report_key_is_missing_too():

@@ -44,18 +44,12 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
     Task-specific flags (env type, adapter, language, sampling budgets, concurrency) stay on the
     script's own parser; only flags whose meaning and defaults are identical across the eval scripts
     live here. The sampling flags default to ``None`` so :func:`rollout_config_from_args` can tell an
-    explicit value from an omitted one: explicit CLI > ``--training_config`` > default. ``--split``
-    does too, so a runner can refuse an explicit split its dataset does not ship; each runner resolves
-    it before the split is read or recorded.
+    explicit value from an omitted one: explicit CLI > ``--training_config`` > default. ``--split`` is
+    the runner's own: its default and help depend on whether the runner's datasets can ship a single
+    split of their own.
     """
     parser.add_argument("--dataset", required=True, help="HF Hub id or local save_to_disk dir.")
     parser.add_argument("--config", default=None, help="Dataset config (e.g. 'all', 'verifiable', 'taco').")
-    parser.add_argument(
-        "--split",
-        default=None,
-        help=f"Dataset split (default: {DEFAULT_SPLIT}). A source that ships a single split of its own reads "
-        "that split and refuses another.",
-    )
     add_openai_endpoint_args(parser, model_help="Served/model name.")
     parser.add_argument(
         "--training_config",
@@ -233,6 +227,7 @@ def write_eval_outputs(
     env: BaseEnvironment,
     traj_path: str | None,
     env_type: str,
+    split: str,
     max_turns: int | None,
     rollout: RolloutConfig,
     num_samples: int,
@@ -266,7 +261,7 @@ def write_eval_outputs(
         "env_type": env_type,
         "dataset": args.dataset,
         "config": args.config,
-        "split": args.split,
+        "split": split,
         # The effective cap rather than the flag: an omitted --max_turns leaves the env's own value,
         # and a null here would leave a trajectory with no record of the budget it ran under.
         "max_turns": max_turns if max_turns is not None else env.max_turns,
