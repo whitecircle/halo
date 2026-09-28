@@ -189,19 +189,19 @@ def lora_scaling_mismatch(adapter_dir: str, attention: Mapping | None, expert: M
         saved = json.load(fh)
     halves = [("", saved, attention, LORA_SCALING_FIELDS)]
     halves.append(("expert ", saved.get(EXPERT_LORA_CONFIG_KEY, saved), expert, EXPERT_LORA_SCALING_FIELDS))
-    changed = [
-        f"{half}{field}: saved {recorded.get(field)!r}, live {live.get(field)!r}"
+    changed = {
+        f"{half}{field}: saved {recorded.get(field)!r}, live {live.get(field)!r}": field
         for half, recorded, live, fields in halves
         if live is not None
         for field in fields
         if recorded.get(field) != live.get(field)
-    ]
+    }
     if not changed:
         return None
     return (
         f"the adapter at {adapter_dir} was trained at another LoRA scaling than this run ({'; '.join(changed)}): "
         f"its tensors would restore by name and shape and every delta would be rescaled. Resume with the "
-        f"lora_alpha / use_rslora / use_dora / alpha_pattern it was saved with."
+        f"{' / '.join(dict.fromkeys(changed.values()))} it was saved with."
     )
 
 

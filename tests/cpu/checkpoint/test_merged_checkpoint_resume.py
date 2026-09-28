@@ -361,7 +361,7 @@ def test_the_adapter_restore_refuses_another_attention_lora_scaling(tmp_path):
     adapter_dir = str(tmp_path / "adapter")
     _tiny_peft_model(seed=1, lora_alpha=8).save_pretrained(adapter_dir)
 
-    with pytest.raises(ValueError, match="lora_alpha: saved 8, live 16"):
+    with pytest.raises(ValueError, match=r"lora_alpha: saved 8, live 16\).* Resume with the lora_alpha it was"):
         restore_adapters(adapter_dir, _tiny_peft_model(seed=2, lora_alpha=16), is_cp_mode=False)
     assert restore_adapters(adapter_dir, _tiny_peft_model(seed=2, lora_alpha=8), is_cp_mode=False) is not None
     os.remove(os.path.join(adapter_dir, ADAPTER_CONFIG_FILE))
@@ -387,7 +387,7 @@ def test_the_adapter_restore_refuses_another_expert_lora_scaling(tmp_path, monke
     adapter_dir = resume_adapter_dir(checkpoint)
     rescaled = ExpertLoraSpec(r=SPEC.r, alpha=2 * SPEC.alpha, projections=SPEC.projections)
 
-    with pytest.raises(ValueError, match="expert lora_alpha"):
+    with pytest.raises(ValueError, match=r"expert lora_alpha: .* Resume with the lora_alpha it was"):
         restore_adapters(adapter_dir, _ExpertLoraModel(rescaled), is_cp_mode=False)
     assert not applied.calls, "the expert adapters were restored before the refusal"
     assert restore_adapters(adapter_dir, _ExpertLoraModel(SPEC), is_cp_mode=False) is not None

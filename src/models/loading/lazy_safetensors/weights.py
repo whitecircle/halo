@@ -237,8 +237,8 @@ class SafetensorsWeightLoader:
                     shard_dim=plan.shard_dim if sharded else None,
                     shard_len=plan.shard_end - plan.shard_start if sharded else None,
                 )
-                # Every float parameter, overriding the class's _keep_in_fp32_modules[_strict]:
-                # FSDP2 rejects mixed dtypes in one shard group, and the eager loaders cast to match.
+                # Every float parameter takes the run dtype, as the eager loaders cast (FSDP2 rejects
+                # mixed dtypes in one shard group); keep_fp32 holds the fp32-masters exceptions.
                 # Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases).
                 if tensor.is_floating_point() and isinstance(_target_tensor(model, plan.model_key), nn.Parameter):
                     reject_fp8_tensor(plan.model_key, tensor, dtype)
