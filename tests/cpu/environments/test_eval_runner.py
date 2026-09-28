@@ -501,7 +501,7 @@ def test_load_hf_split_picks_the_named_split_of_a_dataset_dict(tmp_path):
     ).save_to_disk(path)
     assert load_hf_split(path, None, "test")[0]["prompt"] == "test-row"
     # A mistyped split must not quietly evaluate another one (possibly train).
-    with pytest.raises(ValueError, match=r"'validation' is not in .*\['train', 'test'\]"):
+    with pytest.raises(ValueError, match=r"--split 'validation' is not in .*\['train', 'test'\]"):
         load_hf_split(path, None, "validation")
 
 
