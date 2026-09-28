@@ -291,6 +291,7 @@ def is_vlm_run(
     config=None,
     revision: str | None = None,
     trust_remote_code: bool = False,
+    vlm_checkpoint: bool | None = None,
 ) -> bool:
     """Whether this run takes the VLM data path: a multimodal checkpoint plus image data to feed it.
 
@@ -302,15 +303,32 @@ def is_vlm_run(
 
     Agreed across ranks once for the whole verdict rather than per term. ``config`` / ``revision`` /
     ``trust_remote_code`` reach the modality probe as in :func:`~src.models.modality.is_vlm_model`;
-    pass the already-loaded ``model.config`` where there is one.
+    pass the already-loaded ``model.config`` where there is one, or the probe's own verdict as
+    ``vlm_checkpoint`` where the caller already took it, so the checkpoint config is not read twice.
     """
-    local = is_vlm_model(
-        model_name_or_path, config=config, revision=revision, trust_remote_code=trust_remote_code
-    ) and bool(
+    if vlm_checkpoint is None:
+        vlm_checkpoint = is_vlm_model(
+            model_name_or_path, config=config, revision=revision, trust_remote_code=trust_remote_code
+        )
+    local = vlm_checkpoint and bool(
         getattr(args, "images_field", None)
         or _declares_images_locally(dataset, getattr(args, "conversation_field", None))
     )
     return agree_probe_across_ranks(local, model_name_or_path, "is_vlm_run")
+
+
+def is_vlm_script_run(args, model_config, dataset, *, vlm_checkpoint: bool | None = None) -> bool:
+    """:func:`is_vlm_run` for a training script, off its ``ModelConfig``: the probe reads the
+    checkpoint at the run's ``model_revision`` under its ``trust_remote_code``, as the model load does,
+    since hub ``main`` can name a different modality than the pinned commit."""
+    return is_vlm_run(
+        args,
+        model_config.model_name_or_path,
+        dataset,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+        vlm_checkpoint=vlm_checkpoint,
+    )
 
 
 def process_vlm_conversation(

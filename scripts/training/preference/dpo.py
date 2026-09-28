@@ -25,7 +25,7 @@ from trl import DPOConfig, ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.dpo_args import DPOScriptArguments
 from src.data.sources.loading import alias_images_column
-from src.data.vlm import is_vlm_run
+from src.data.vlm import is_vlm_script_run
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
@@ -79,13 +79,7 @@ def main():
     # vision path. There the rows pass through untouched: TRL tokenizes them, auto-selects
     # DataCollatorForVisionPreference and applies no hub-shape normalization of its own. Decided
     # before the model load, which requires the checkpoint's processor for a vision run.
-    is_vlm_data = is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        ds,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    is_vlm_data = is_vlm_script_run(args, model_config, ds)
     if is_vlm_data:
         # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
         # tools column would survive the signature filter and render toolless.

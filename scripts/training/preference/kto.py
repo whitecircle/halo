@@ -26,7 +26,7 @@ from src.args.distributed_args import DistributedArguments
 from src.args.kto_args import KTOScriptArguments
 from src.data.pipeline.processing import require_render_column
 from src.data.sources.loading import alias_images_column
-from src.data.vlm import dataset_declares_images, is_vlm_run
+from src.data.vlm import dataset_declares_images, is_vlm_script_run
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
@@ -135,13 +135,7 @@ def main():
     # Vision routing keys on the dataset, not the checkpoint: a natively-multimodal model trains
     # text-only unpaired data through TRL's text path. Decided before the model load, which requires
     # the checkpoint's processor for a vision run.
-    is_vlm_data = is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        ds,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    is_vlm_data = is_vlm_script_run(args, model_config, ds)
 
     # --- Model (text or VLM, auto-detected); padded preference takes the shared padded-workload
     # backend (SDPA, dropped under live sinks). The reference load uses the same binding: a logratio

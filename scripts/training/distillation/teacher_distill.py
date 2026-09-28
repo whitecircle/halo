@@ -29,7 +29,7 @@ from src.data.pipeline.processing import coordinated_map, filter_by_length, reso
 from src.data.pipeline.rendered import tokenize_rendered
 from src.data.pipeline.row_processors import apply_chat_template_to_conversations, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.data.vlm import is_vlm_run
+from src.data.vlm import is_vlm_script_run
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.peft_setup import prepare_peft_model, setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
@@ -187,13 +187,7 @@ def main():
     # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
     # which requires the checkpoint's processor for an image run.
     reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
-    is_vlm = is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        ds,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    is_vlm = is_vlm_script_run(args, model_config, ds)
 
     # Same padded-workload request the teacher load makes: the two forwards are compared token by
     # token, so a backend split between them biases the distillation targets.

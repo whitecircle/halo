@@ -34,7 +34,7 @@ from src.data.pipeline.row_processors import create_llm_processor, text_render_k
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset, vlm_map_features
 from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.sources.loading import load_datasets_auto
-from src.data.vlm import is_vlm_run
+from src.data.vlm import is_vlm_script_run
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier, init_distributed, is_global_main_process
@@ -284,13 +284,7 @@ def main():
     # run, and packing / padding_free / train_on_last_assistant_only stay legal for it. The model
     # class is unaffected; it follows the checkpoint.
     reject_images_under_text_only_model(args, ds, text_only_model=dist_args.text_only_model)
-    is_vlm = is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        ds,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    is_vlm = is_vlm_script_run(args, model_config, ds, vlm_checkpoint=is_vlm_checkpoint)
 
     model, processing_class, tokenizer, _ = load_model_for_training(
         model_config,

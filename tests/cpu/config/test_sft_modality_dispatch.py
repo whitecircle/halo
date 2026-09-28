@@ -24,6 +24,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from src.models import modality
 from tests.common.utils import load_script_module
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -271,6 +272,18 @@ def test_text_only_model_refuses_embedded_images_before_the_model_load(tmp_path)
     assert not loads
 
 
+def test_the_checkpoint_config_is_read_once(tmp_path):
+    """The run prefix and the data dispatch both need the checkpoint's modality; the dispatch takes
+    the verdict the prefix already probed rather than reading the checkpoint config a second time."""
+    probes = []
+    with (
+        mock.patch.object(modality, "_probe_checkpoint_config", side_effect=lambda *args: probes.append(args)),
+        pytest.raises(_TextPathReached),
+    ):
+        _run_sft(tmp_path, "", _dataset(), stub_vlm_prep=False)
+    assert len(probes) == 1, probes
+
+
 def test_the_run_verdict_reaches_the_model_load(tmp_path):
     """Only an image run requires the checkpoint's processor, and a multimodal checkpoint may ship
     none (Step-3.7 Flash): the load has to be handed the verdict the dataset decides."""
@@ -322,14 +335,14 @@ def test_every_dispatching_script_settles_the_text_path_padding_side(script):
 
 @pytest.mark.parametrize("script", _DISPATCHING_SCRIPTS)
 def test_data_dispatch_goes_through_the_shared_seam(script):
-    """Each script that branches its data path on modality must ask ``is_vlm_run``. A local
+    """Each script that branches its data path on modality must ask ``is_vlm_script_run``. A local
     ``is_vlm_model`` / column check here is the copy that drifts: it is exactly what made the SFT
     text recipes unrunnable while DPO's own dataset-keyed copy kept working."""
     tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
     called = {
         node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "is_vlm_run" in called, f"{script} decides its data path without the shared is_vlm_run seam"
+    assert "is_vlm_script_run" in called, f"{script} decides its data path without the shared is_vlm_script_run seam"
 
 
 # Every script that loads a possibly-multimodal checkpoint through the modality-aware loader.
@@ -346,7 +359,7 @@ def test_the_loading_script_roster_is_not_vacuous():
 
 @pytest.mark.parametrize("script", _LOADING_SCRIPTS)
 def test_every_model_load_takes_the_run_verdict(script):
-    """``vlm_run`` must be the script's own ``is_vlm_run`` result: a constant, or the checkpoint's
+    """``vlm_run`` must be the script's own ``is_vlm_script_run`` result: a constant, or the checkpoint's
     verdict, either refuses the text recipes on a checkpoint shipping no processor or hands an image
     run a bare tokenizer."""
     tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
@@ -355,7 +368,7 @@ def test_every_model_load_takes_the_run_verdict(script):
         for node in ast.walk(tree)
         if isinstance(node, ast.Assign)
         and isinstance(node.value, ast.Call)
-        and getattr(node.value.func, "id", None) == "is_vlm_run"
+        and getattr(node.value.func, "id", None) == "is_vlm_script_run"
         for target in node.targets
         if isinstance(target, ast.Name)
     }
@@ -368,7 +381,7 @@ def test_every_model_load_takes_the_run_verdict(script):
     for call in loads:
         passed = [kw.value for kw in call.keywords if kw.arg == "vlm_run"]
         assert len(passed) == 1 and isinstance(passed[0], ast.Name) and passed[0].id in verdicts, (
-            f"{script}: load_model_for_training is not handed the is_vlm_run verdict as vlm_run"
+            f"{script}: load_model_for_training is not handed the is_vlm_script_run verdict as vlm_run"
         )
 
 
