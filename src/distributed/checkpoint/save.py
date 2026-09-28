@@ -204,10 +204,10 @@ def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
     :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR` through the writer the non-merged save uses
     (:class:`PeftAdapterSaver` when a PeftModel carries an attention half,
     :func:`save_ep_lora_adapters` for expert-only), at their live dtype as any training checkpoint
-    writes them, so the adapter restore reads them unchanged. Each
-    save rank then writes the marker the resume classifies on, after its own copy is complete. With
-    any older marker removed before the save began (:func:`remove_stale_resume_marker`), a failed
-    adapter write leaves no marker. Collective: every rank enters the adapter gathers.
+    writes them, so the adapter restore reads them unchanged. Each save rank then writes the marker
+    the resume classifies on, after its own copy is complete. With any older marker removed before
+    the save began (:func:`remove_stale_resume_marker`), a failed adapter write leaves no marker.
+    Collective: every rank enters the adapter gathers.
     """
     # Rank-uniform, and a no-op when sharded: a forward's transient unsharded params predate the
     # last optimizer step, like every writer's.

@@ -152,7 +152,7 @@ def test_a_tp_hand_sliced_param_is_written_once_at_its_gathered_width(tmp_path, 
     model._tp_sharded_non_dtensor = [("self_attn.sinks", 0)]
     key = "model.layers.0.self_attn.sinks"
 
-    def _gathered(_model, state_dict, retain=True):
+    def _gathered(_model, state_dict, retain=True, keep_live_dtype=False):
         """The mesh all-gather, stubbed to its RESULT: the full-width tensor on the save rank."""
         if retain:
             state_dict[key] = torch.ones(4)

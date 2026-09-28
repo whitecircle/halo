@@ -157,6 +157,7 @@ class _SaveRoutingTrainer(_StubTrainer):
     save_sharded_ep = False
     processing_class = None
     _pp_wrapper_state = None
+    _writing_training_checkpoint = False
 
     def __init__(self, model, merge_expert_lora_on_save, output_dir):
         super().__init__(model, merge_expert_lora_on_save)

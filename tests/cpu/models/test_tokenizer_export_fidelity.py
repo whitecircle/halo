@@ -126,6 +126,7 @@ class _Fsdp2SaveTrainer:
     _fsdp_wrapped = True
     _accelerate_manages_fsdp = False
     _pp_wrapper_state = None
+    _writing_training_checkpoint = False
     save_sharded_ep = False
 
     def __init__(self, tokenizer, output_dir: str):
