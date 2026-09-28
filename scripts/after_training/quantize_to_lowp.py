@@ -459,7 +459,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Quantize a bf16/fp32 checkpoint to block-scaled mxfp8/mxfp4/nvfp4.")
     p.add_argument("--input_dir", required=True, help="Source checkpoint directory (safetensors).")
     p.add_argument("--output_dir", required=True, help="Output directory for the quantized checkpoint.")
-    p.add_argument("--format", choices=["mxfp8", "mxfp4", "nvfp4"], required=True, help="Block-scaled target format.")
+    p.add_argument("--format", choices=list(_QUANTIZERS), required=True, help="Block-scaled target format.")
     p.add_argument(
         "--contraction_axis",
         type=int,

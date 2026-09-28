@@ -17,8 +17,7 @@ Run: ``python tests/cpu/checkpoint/test_convert_to_bf16_loaders.py`` (or ``pytes
 
 from __future__ import annotations
 
-import ast
-import pathlib
+import argparse
 import types
 
 import pytest
@@ -36,30 +35,27 @@ def finalized(monkeypatch) -> list:
     return seen
 
 
-def _model_type_choices() -> set[str]:
-    """The ``--model_type`` choices the CLI advertises, read off its own ``add_argument`` call.
-
-    Read statically rather than by running ``parse_args()``, which would need a full argv and
-    exit on a missing required flag.
-    """
-    source = ast.parse(pathlib.Path(convert_module.__file__).read_text(encoding="utf-8"))
-    for node in ast.walk(source):
-        if (
-            isinstance(node, ast.Call)
-            and getattr(node.func, "attr", None) == "add_argument"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and node.args[0].value == "--model_type"
-        ):
-            choices = {kw.arg: kw.value for kw in node.keywords}["choices"]
-            return {elt.value for elt in choices.elts}
-    raise AssertionError("convert_to_bf16.py no longer declares a --model_type argument")
+class _ParserBuilt(Exception):
+    """Carries the tool's parser out of ``parse_args`` before it reads ``sys.argv``."""
 
 
-def test_table_covers_exactly_the_cli_choices():
-    """Derived from the parser, not transcribed: a choice added without a loader entry (or a loader
+def _model_type_choices(monkeypatch) -> set[str]:
+    """The ``--model_type`` choices the CLI advertises, read off the parser ``parse_args`` builds."""
+
+    def capture(self, *args, **kwargs):
+        raise _ParserBuilt(self)
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", capture)
+    with pytest.raises(_ParserBuilt) as built:
+        convert_module.parse_args()
+    parser = built.value.args[0]
+    return set(next(action.choices for action in parser._actions if "--model_type" in action.option_strings))
+
+
+def test_table_covers_exactly_the_cli_choices(monkeypatch):
+    """Read off the parser, not transcribed: a choice added without a loader entry (or a loader
     added without a choice) must fail here rather than silently fall through to a bare AutoModel."""
-    assert set(_MODEL_CLASSES) == _model_type_choices()
+    assert set(_MODEL_CLASSES) == _model_type_choices(monkeypatch)
 
 
 def test_unknown_model_type_raises_instead_of_falling_back():

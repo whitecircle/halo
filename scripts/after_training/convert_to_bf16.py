@@ -459,7 +459,7 @@ def parse_args():
         "--model_type",
         type=str,
         default="causal_lm",
-        choices=["causal_lm", "classifier", "base"],
+        choices=list(_MODEL_CLASSES),
         help="Type of the model: causal_lm (for LLMs), classifier, or base",
     )
     parser.add_argument("--peft", action="store_true", help="Whether the model is a PEFT adapter model")

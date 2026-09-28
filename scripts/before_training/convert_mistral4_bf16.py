@@ -22,6 +22,7 @@ import math
 import torch
 
 from scripts._common import add_hub_source_args, add_max_shard_size_arg
+from src.checkpoint.format import cast_to_save_dtype
 from src.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
 from src.checkpoint.tool_io import SAFETENSORS_FLOAT_DTYPES, header_numel
 from src.log import configure_cli_logging
@@ -65,11 +66,7 @@ def dequantize(weight: torch.Tensor, scale: torch.Tensor, name: str) -> torch.Te
 
 
 def convert(name: str, tensor: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
-    if scale is not None:
-        return dequantize(tensor, scale, name)
-    if tensor.is_floating_point() and tensor.dtype != torch.bfloat16:
-        return tensor.to(torch.bfloat16)
-    return tensor
+    return cast_to_save_dtype(tensor) if scale is None else dequantize(tensor, scale, name)
 
 
 def static_fp8_rules(_source: str) -> DequantRules:

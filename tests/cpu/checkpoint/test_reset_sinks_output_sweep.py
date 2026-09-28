@@ -27,6 +27,7 @@ import time
 import pytest
 import torch
 from accelerate import PartialState
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import GptOssConfig, GptOssForCausalLM
 
@@ -35,6 +36,7 @@ PartialState()  # the script's model loading logs through accelerate's logger
 import scripts.after_training.reset_sinks as reset_sinks_mod
 from scripts.after_training.reset_sinks import reset_sinks
 from src.checkpoint import tool_io
+from src.checkpoint.format import SAFETENSORS_METADATA
 from src.checkpoint.tool_io import STAGING_SUFFIX, checkpoint_shard_files
 from src.models.patches import gpt_oss_sinks
 from tests.common.checkpoint_io import weight_files
@@ -158,6 +160,18 @@ def test_the_single_file_branch_sweeps_the_previous_runs_leftovers(tmp_path):
 
     assert _weight_files(out) == {SINGLE}, "the previous sharded run outlived the reset"
     _assert_sinks_reset(out, sinks)
+
+
+def test_the_single_file_branch_stamps_the_safetensors_format(tmp_path):
+    """The rewrite stamps the ``format`` metadata ``save_pretrained`` and the toolkit's full-checkpoint
+    writers stamp, so the reset file reads as the same kind of checkpoint it replaced."""
+    source, out = tmp_path / "src", tmp_path / "out"
+    _build_source(source, sharded=False)
+
+    reset_sinks(str(source), str(out))
+
+    with safe_open(os.path.join(out, SINGLE), framework="pt") as handle:
+        assert handle.metadata() == SAFETENSORS_METADATA
 
 
 def test_the_sharded_branch_sweeps_the_previous_runs_index(tmp_path):
