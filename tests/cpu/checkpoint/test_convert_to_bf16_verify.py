@@ -24,15 +24,19 @@ import os
 
 import pytest
 import torch
+from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
+PartialState()  # the tool's loads log through accelerate's logger
+
 import scripts.after_training.convert_to_bf16 as convert_module
 from scripts.after_training.convert_to_bf16 import (
     _BF16_VERIFY_MIN_FRACTION,
     convert_to_bf16,
+    verify_adapter_save,
     verify_model_conversion,
 )
 
@@ -164,6 +168,18 @@ def test_verify_accepts_an_unmerged_peft_save(tmp_path):
     assert stored == {"F32"}, f"fixture no longer reproduces PEFT's fp32 restore: {stored}"
 
 
+def test_an_unmerged_peft_save_verifies_its_adapter_not_a_stale_model(tmp_path):
+    """An unmerged --peft save removes nothing, so an --output_dir that held an earlier fp32 full save
+    still carries its model.safetensors. Verifying that stale file failed the adapter the run just
+    wrote (and a stale bf16 one would have passed it unchecked)."""
+    adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
+    out = _fp32_checkpoint(tmp_path / "out")
+    convert_to_bf16(adapter, out, "causal_lm", is_peft=True, verify=True)  # raises if verification fails
+
+    assert os.path.isfile(os.path.join(out, "adapter_model.safetensors"))
+    assert set(_stored_dtype_counts(out)[0]) == {"F32"}, "premise: the stale fp32 model is still there"
+
+
 def test_verify_still_applies_to_a_merged_peft_save(tmp_path, monkeypatch):
     """Anti-over-exemption: --merge_adapter writes a real model, so the tool's own ``verify`` GATE
     must still judge it. Asserted by forcing the checker to fail and requiring the gate to raise —
@@ -181,7 +197,7 @@ def test_verify_rejects_an_empty_adapter(tmp_path):
     os.makedirs(adapter_dir)
     save_file({}, os.path.join(adapter_dir, "adapter_model.safetensors"), metadata={"format": "pt"})
     with pytest.raises(RuntimeError, match="nothing in it"):
-        verify_model_conversion(str(adapter_dir))
+        verify_adapter_save(os.path.join(adapter_dir, "adapter_model.safetensors"))
 
 
 def test_verify_threshold_is_strict_at_the_boundary(tmp_path):
