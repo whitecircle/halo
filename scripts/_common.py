@@ -1,12 +1,14 @@
 """Argparse flags shared across the ``scripts/`` subtrees.
 
 The shard cap, the Hub-capable source block, the dtype and device-map pair and the remote-code
-switch are defined once so the tools chained over a single artifact (``after_training/``,
-``before_training/``) accept the same spelling and defaults; the reward-model scorers
-(``inference/reward_model/``) take the remote-code switch as is and the dtype flag under their
-``--rm_dtype`` name. The OpenAI-compatible endpoint block is defined once for the same reason across
-the generation, eval and playground CLIs (``inference/``, ``environments/``), which all drive one
-served model. Flags only; the drivers they feed live in ``src/``.
+switch are defined once so the checkpoint tools chained over a single artifact (``after_training/``,
+``before_training/``) accept the same spelling and defaults. The reward-model scorers
+(``inference/reward_model/``) take the remote-code switch and the dtype flag, the latter as
+``--rm_dtype`` (their device is their own ``--rm_device``), and ``dataset_deduplication.py`` the
+remote-code switch. The OpenAI-compatible endpoint block (``--base_url``, ``--api_key``) is defined
+once for the same reason across the generation, eval and playground CLIs (``inference/``,
+``environments/``), which all drive one served model; it adds a required ``--model`` for every CLI
+but the two playgrounds. Flags only; the drivers they feed live in ``src/``.
 """
 
 import argparse

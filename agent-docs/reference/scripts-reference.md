@@ -14,8 +14,8 @@ Those helpers are the shared flag surfaces:
 
 | Helper | Flags |
 |---|---|
-| `scripts/_common.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, taken by the checkpoint tools across `after_training/`, `before_training/` and `inference/reward_model/`, and `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`, `--model`), taken by every generation, eval and playground CLI under `inference/` and `environments/` |
-| `scripts/inference/_common.py` | The generation, resume and Gradio blocks |
+| `scripts/_common.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, taken by the checkpoint tools across `after_training/` and `before_training/`; `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers under `inference/reward_model/` (their device flag is their own `--rm_device`); `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every generation, eval and playground CLI under `inference/` and `environments/`, with a required `--model` on all but the two Gradio playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
+| `scripts/inference/_common.py` | The generation, resume and Gradio blocks, and the prompt-row fields (`--id_field`, `--prompt_field`, `--local_system_prompt_field`, `--global_system_prompt`) the S3 generation CLI and the reward-model scorers share |
 | `scripts/inference/reward_model/_common.py` | The reward-model scoring block, on top of the previous two |
 | `scripts/environments/_common.py` | The env-eval dataset/endpoint/trajectory flags, `--training_config`, and the output writer |
 
