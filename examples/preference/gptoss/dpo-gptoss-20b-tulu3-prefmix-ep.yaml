@@ -63,7 +63,6 @@ remove_unused_columns: true
 use_peft: true
 lora_r: 64
 lora_alpha: 128
-lora_dropout: 0.05
 lora_task_type: CAUSAL_LM
 lora_target_modules:               # attention only; expert projections need EP grouped adapters (split_expert_lora_targets)
 - q_proj

@@ -20,7 +20,7 @@ assistant_message_template: "<|im_start|>assistant\n"
 # --- Parallelism ---
 expert_parallel_size: 2
 
-# --- Training (few steps, padded batches — padding_free/packing are rejected for V4) ---
+# --- Training (few steps, padded batches — padding_free is rejected for V4, packing is left off) ---
 max_steps: 10
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 2

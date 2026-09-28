@@ -45,7 +45,7 @@ per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
 gradient_checkpointing: true
-# padding_free / packing are rejected for V4 (eager attention has no varlen path) — padded batches.
+# padding_free is rejected for V4 (eager attention has no varlen path); packing is left off here — padded batches.
 packing: false
 max_length: 8192
 
