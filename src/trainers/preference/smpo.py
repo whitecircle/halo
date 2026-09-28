@@ -868,7 +868,8 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         token_counts = torch.zeros(num_seqs, device=device, dtype=torch.float32)
         logp_sums.scatter_add_(0, shift_seq_idx, (flat_logps * flat_mask).float())
         token_counts.scatter_add_(0, shift_seq_idx, flat_mask.float())
-        seq_logps = logp_sums / token_counts.clamp(min=1)
+        # padding_free is refused under CP, so these means are rank-local.
+        seq_logps = self._cp_global_mean(logp_sums, token_counts, None)
 
         chosen_logps = seq_logps[:num_chosen]
         rejected_logps = seq_logps[num_chosen:]
@@ -880,8 +881,12 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         mean_chosen_logits = self._masked_logit_mean(shift_logits_flat, chosen_valid)
         mean_rejected_logits = self._masked_logit_mean(shift_logits_flat, rejected_valid)
 
-        chosen_sft_loss = (flat_nll * chosen_valid).sum(dtype=torch.float32) / chosen_valid.sum().clamp(min=1)
-        rejected_sft_loss = (flat_nll * rejected_valid).sum(dtype=torch.float32) / rejected_valid.sum().clamp(min=1)
+        chosen_sft_loss = self._cp_global_mean(
+            (flat_nll * chosen_valid).sum(dtype=torch.float32), chosen_valid.sum(), None
+        )
+        rejected_sft_loss = self._cp_global_mean(
+            (flat_nll * rejected_valid).sum(dtype=torch.float32), rejected_valid.sum(), None
+        )
 
         return {
             "chosen_logps": chosen_logps,
