@@ -6,9 +6,11 @@ Transformers ships `transformers.models.laguna` natively, and the released check
 
 | | EP | CP | TP | ETP | PP | EP+CP | EP+TP | LoRA |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Laguna S / XS 2.1 | Yes | **No** | **No** | untested | — ¹ | **No** | **No** | Yes |
+| Laguna S / XS 2.1 | Yes | **No** | **No** | partial ² | — ¹ | **No** | **No** | Yes |
 
 ¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+
+² Its only GPU test is a tiny-model LoRA row: `tests/gpu/trainers/lora/test_lora_weight_sync_exact_families.py --family laguna --mode etp2 --adapters peft` (pure ETP, attention PEFT).
 
 ## EP wrapper
 

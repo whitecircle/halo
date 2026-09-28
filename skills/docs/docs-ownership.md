@@ -76,6 +76,7 @@ changes.
 | `src/distributed/loading/model_loading.py`, `src/distributed/loading/warmup.py`, `src/models/loading/model_preparation.py`, `src/models/patches/remote_code_compat.py`, `src/models/patches/remote_code_hooks.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page |
 | `src/models/seq_cls_heads.py` (Gemma 4 + MoE Qwen3.5/3.6 seq-cls heads, registered by an import in `src/models/loading/model_preparation.py`) | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
 | `src/models/loading/checkpoint_coverage.py` (random-init load gate) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md` |
+| `src/models/loading/dtype.py` (run dtype, the loaded-parameter cast: fp32 pins → run dtype, fp8 refused; fp32-matmul precision) | `agent-docs/models/README.md` (Load precision), `agent-docs/reference/configuration-reference.md` (`HALO_FP32_MATMUL_PRECISION`) |
 | `src/models/loading/config_levels.py` (composite-config field access, run-scoped writes, `config_export_ready`) | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
 | `src/models/modality.py` (multimodal checkpoint detection) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `src/models/attention_geometry.py` (head-dim and KV-head resolution across composite/per-layer configs) | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md` |

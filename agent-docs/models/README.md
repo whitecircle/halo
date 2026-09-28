@@ -16,15 +16,15 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 | [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | Yes | **No** ¹ | Yes | Yes | **No** | Yes | Yes | `examples/sft/qwen3_5/*` |
 | [GPT-OSS](gpt-oss.md) | Yes | Yes | Yes | Yes | Yes ⁶ | Yes | Yes | `examples/sft/gptoss/*` |
 | [GLM-4 MoE Lite](glm4.md) | Yes | Yes | Yes ² | Yes | Yes ⁶ | Yes | Yes | `examples/sft/glm4/*` |
-| [Laguna S / XS 2.1](laguna.md) | Yes | **No** | **No** | untested | **No** | **No** | Yes | `examples/sft/laguna/*` |
-| [Inkling-Small](inkling.md) | Yes | **No** | **No** | Yes | **No** | **No** | untested | `examples/sft/inkling/*` |
+| [Laguna S / XS 2.1](laguna.md) | Yes | **No** | **No** | partial ¹³ | **No** | **No** | Yes | `examples/sft/laguna/*` |
+| [Inkling-Small](inkling.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes ¹² | `examples/sft/inkling/*` |
 | [Gemma 4 MoE](gemma4.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes | `examples/sft/gemma4/*` |
-| [Bailing MoE / Ling](bailing.md) | Yes | Yes ³ | **No** ³ | Yes | untested ⁶ | **No** | Yes | `examples/sft/ling_mini_2/*` |
+| [Bailing MoE / Ling](bailing.md) | Yes | Yes ³ | **No** ³ | Yes | partial ⁶ ¹³ | **No** | Yes | `examples/sft/ling_mini_2/*` |
 | [LFM-2 MoE](lfm2.md) | Yes | **No** | Yes | Yes | **No** | Yes | Yes | `examples/sft/lfm2/*` |
-| [Mistral4 MoE](mistral4.md) | Yes | Yes | Yes | Yes | untested ⁶ | Yes | Yes | `examples/sft/mistral4/*` |
+| [Mistral4 MoE](mistral4.md) | Yes | Yes | Yes | Yes | partial ⁶ ¹³ | Yes | Yes | `examples/sft/mistral4/*` |
 | [DeepSeek-V4](deepseek-v4.md) | Yes | **No** ⁸ | **No** ⁸ | untested | **No** | **No** | Yes | `examples/sft/deepseek_v4/*` |
 | [Zaya (Zyphra/ZAYA1)](zaya.md) | Yes ⁴ | **No** ⁴ | **No** ⁴ | Yes | **No** | **No** | Yes | `examples/sft/zaya/*` |
-| [Cohere2 MoE (Command A+)](cohere2-moe.md) | Yes | Yes ⁹ | Yes ⁹ | Yes ⁹ | Yes ⁶ ⁹ | Yes ⁹ | untested | `examples/sft/cohere2_moe/*` |
+| [Cohere2 MoE (Command A+)](cohere2-moe.md) | Yes | Yes ⁹ | Yes ⁹ | Yes ⁹ | Yes ⁶ ⁹ | Yes ⁹ | Yes ¹² | `examples/sft/cohere2_moe/*` |
 | [GLM-5 Next (GLM-5.3-Flash)](glm5-next.md) | Yes | **No** ¹⁰ | **No** ¹⁰ | Yes | **No** | **No** | Yes | `examples/sft/glm5_next/*` |
 | [Step-3.7 Flash](step3p7.md) | Yes | **No** ¹¹ | **No** ¹¹ | Yes | **No** | **No** | Yes | `examples/sft/step3p7/*` |
 | Any other HF model with `tp_plan` (Llama, Mistral, Phi, …) | — | — | Yes | — | — | — | Yes | — |
@@ -55,6 +55,10 @@ Trainer × parallelism support is tracked in [Trainer Compatibility](../referenc
 
 ¹¹ Step-3.7 Flash's per-layer head counts (64 full / 96 sliding) fit no uniform q/k/v shard plan, so `Step3p7Attention` is outside the selective-TP accept-list and TP shards zero layers (raise); no Ulysses CP wrapper is registered either — nothing architectural, the head counts divide cp 2/4/8. See [step3p7.md](step3p7.md#limitations).
 
+¹² Tiny-model LoRA verified: `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` trains expert and mixed adapters at ep2, ep1 and ep2+cp2 (Inkling's CP row checks the refusal) through a merged save and an exact resume. No full-scale LoRA run.
+
+¹³ A tiny-model LoRA row is the only GPU test of the shape: Laguna pure ETP in `tests/gpu/trainers/lora/test_lora_weight_sync_exact_families.py` (`--mode etp2 --adapters peft`), Ling 2.0 and Mistral4 EP+CP in `test_lora_merged_save_resume_families.py` (`--cp-size 2`, ep2+cp2). Validate a short run first.
+
 ## MoE knobs
 
 Every MoE family shares three settings:
@@ -77,7 +81,7 @@ Families spell the count and the width differently (`num_experts`, `num_local_ex
 
 ## Load precision
 
-The training and scoring loaders cast each floating parameter to the run dtype right after `from_pretrained` and before any EP/TP/CP wrapper (`cast_parameters_to_run_dtype` in `src/models/loading/dtype.py`; the EP lazy loader casts per tensor to the same effect). That overrides transformers' `_keep_in_fp32_modules[_strict]` — DeepSeek-V4's norms and hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so a family trains in one precision under every parallelism mode; FSDP2 refuses mixed dtypes among a shard group's trainable parameters. Buffers keep their dtype (Zaya's balancing biases, a buffer-held `e_score_correction_bias`). Under `fp32_non_ep_params` the fp32 parameters outside the MoE blocks keep their stored values as the fp32 masters start; the experts stay at the run dtype. A quantized base keeps its storage (bnb `Params4bit`, whatever its `bnb_4bit_quant_storage`). An fp8 weight is refused on every training loader, the EP lazy one included: dequantize the checkpoint to bf16 once (`scripts/before_training/convert_*_bf16.py`, for the families that ship a converter). Three loads skip the cast: the checkpoint conversion tools, which keep the pins; the deduplication embeddings tool (`scripts/inference/generation/dataset_deduplication.py`), which loads at the checkpoint's dtype, so a pinned-family model embeds with its pins and a DeepSeek-V4 one fails on the fp32-norm output; and the dense TP loader, which loads straight into DTensors the cast cannot re-dtype (no dense family pins a parameter). The reward-scoring tool casts the whole model, buffers included, to its `--dtype`.
+The training and scoring loaders cast each floating parameter to the run dtype right after `from_pretrained` and before any EP/TP/CP wrapper (`cast_parameters_to_run_dtype` in `src/models/loading/dtype.py`; the EP lazy loader casts per tensor to the same effect). That overrides transformers' `_keep_in_fp32_modules[_strict]` — DeepSeek-V4's norms and hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so a family trains in one precision under every parallelism mode; FSDP2 refuses mixed dtypes among a shard group's trainable parameters. Buffers keep their dtype (Zaya's balancing biases, a buffer-held `e_score_correction_bias`). Under `fp32_non_ep_params` the fp32 parameters outside the MoE blocks keep their stored values as the fp32 masters start; the experts stay at the run dtype. A quantized base keeps its storage (bnb `Params4bit`, whatever its `bnb_4bit_quant_storage`). An fp8 weight is refused on every training loader, the EP lazy one included: dequantize the checkpoint to bf16 once (`scripts/before_training/convert_*_bf16.py`, for the families that ship a converter). Three loads skip the cast: the checkpoint conversion tools, which keep the pins; the deduplication embeddings tool (`scripts/inference/generation/dataset_deduplication.py`), which loads at the checkpoint's dtype, so a pinned-family model embeds with its pins and a DeepSeek-V4 one fails on the fp32-norm output; and the dense TP loader, which loads straight into DTensors the cast cannot re-dtype (no dense family pins a parameter). The reward-scoring tool casts the whole model, buffers included, to its `--rm_dtype`.
 
 ## Per-family pages
 
@@ -108,7 +112,7 @@ The matrix carries each family's supported modes; the per-family page covers mod
 | Dense Qwen3, long context | > 32K | [CP](../parallelism/context-parallelism.md) |
 | Dense, doesn't fit per GPU | any | [TP](../parallelism/tensor-parallelism.md) via native `tp_plan` |
 | MoE with full coverage (Qwen3 MoE, GPT-OSS, GLM-4, Mistral4, Cohere2 MoE) | ≤ 32K | [EP](../parallelism/expert-parallelism.md), or EP+TP at very large scale |
-| Same MoEs, long context | > 32K | EP+CP (untested on Mistral4) |
+| Same MoEs, long context | > 32K | EP+CP (on Mistral4 only a tiny-model LoRA row runs it) |
 | MoE without CP (Qwen3.5/3.6, LFM-2, Gemma 4, DeepSeek-V4, Laguna, Inkling, Ling 3.0, GLM-5 Next, Step-3.7 Flash) | any | EP; add EP+TP for Qwen3.5/3.6 and LFM-2, or pure ETP (`ep_size=1`) when expert memory is the bottleneck |
 | Ling 2.0, long context | > 32K | EP, plus CP once the sequence exceeds one GPU |
 | Zaya | any | EP without GC (optionally + ETP), or plain FSDP2 without GC |

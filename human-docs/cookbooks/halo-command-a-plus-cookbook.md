@@ -8,13 +8,14 @@ Command A+ has 128 routed experts. The router selects eight experts and also run
 
 Validation status: only EP8 has a full-scale run, on the 200B+ checkpoint on an 8-GPU B300
 node. CP, TP, ETP, EP+CP and EP+TP pass the tiny-model 8-GPU parallelism matrix (cp8, tp8,
-etp8, ep2+etp4, ep8+cp2, ep8+tp2); LoRA has no GPU test for this family.
+etp8, ep2+etp4, ep8+cp2, ep8+tp2). LoRA is verified on the tiny model only: expert and mixed
+adapters at EP2, EP1 and EP2+CP2, through a merged save and an exact resume.
 
 ## Halo support
 
 | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | untested |
+| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 
 Halo wraps the Cohere2 MoE blocks inside the vision model. It keeps the native Hugging Face checkpoint format.
 
@@ -207,7 +208,7 @@ output_dir: /data/checkpoints/command-a-plus-ultrachat-lora
 ```
 
 Keep EP enabled if the base model needs expert sharding. Keep TP disabled for LoRA.
-LoRA is untested on this family; validate before a long run.
+LoRA is verified on the tiny model only; validate a short run on the full checkpoint first.
 
 ## Continue with GRPO
 

@@ -8,9 +8,11 @@ Transformers ships `transformers.models.inkling` natively (the image pins 5.16.1
 
 | | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Inkling-Small | Yes | **No** ¹ | **No** ¹ | Yes | **No** ¹ | **No** ¹ | untested |
+| Inkling-Small | Yes | **No** ¹ | **No** ¹ | Yes | **No** ¹ | **No** ¹ | Yes ² |
 
 ¹ Architectural, not a missing registration — see [Why CP and TP are out](#why-cp-and-tp-are-out). Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+
+² Tiny-model LoRA verified (`test_lora_merged_save_resume_families.py`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume); no full-scale LoRA run.
 
 ## EP wrapper
 
@@ -84,4 +86,4 @@ Inkling loads as a `ConditionalGeneration` class, but the data path follows the 
 
 The shipped config sets `packing: false`: full rows attend 8192 tokens/rank/step against the ~2.3k the measurement above ran at, on a peak of 246 of 288 GB, and the depthwise convs cross packed documents either way.
 
-CPU coverage: `tests/cpu/models/test_inkling_support.py` (registration and router parity, joint normalization included). GPU gates: `tests/gpu/parallelism/ep/test_ep_vs_reference_inkling.py`, `tests/gpu/parallelism/combined/test_ep_etp_inkling.py`, `tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`.
+CPU coverage: `tests/cpu/models/test_inkling_support.py` (registration and router parity, joint normalization included). GPU gates: `tests/gpu/parallelism/ep/test_ep_vs_reference_inkling.py`, `tests/gpu/parallelism/combined/test_ep_etp_inkling.py`, `tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` (`--family inkling_text`).

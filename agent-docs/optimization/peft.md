@@ -8,13 +8,15 @@ under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibil
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
 Most trainers take it. The embedding trainer
-accepts LoRA and DoRA, not QLoRA ([below](#embedding-models)).
+accepts LoRA and DoRA, not QLoRA ([Embedding — PEFT / LoRA](../training-methods/embedding.md#peft--lora)).
 
 ## Supported methods
 
 Uses the [PEFT library](https://github.com/huggingface/peft) (v0.18+). LoRA is the only method with tested
 parallelism support; other PEFT methods (AdaLoRA, Prompt Tuning, (IA)3) reach the trainer through a custom
-`peft_config` but are untested with it.
+`peft_config` but are untested with it. An AdaLoRA or (IA)3 layer is refused at construction wherever an
+out-of-place fold runs (the weight-sync trainers, embedding LoRA, `merge_expert_lora_on_save`): the fold
+covers plain LoRA and DoRA only ([Online RL](#online-rl--rollout-server-weight-sync)).
 
 | Method | Enable | Notes |
 |---|---|---|
@@ -242,9 +244,11 @@ sharded one from a replica (the TP replicated-grad sync averages and corrupts it
 rank-inconsistent and will not reload onto a non-TP model. Use FSDP/DP, CP, or pure ETP instead.
 
 The gate is `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`) and it refuses both
-adapter kinds: a `PeftModel` or any adapter outside the EP layers, and — checked first, via `has_ep_lora` —
-the native grouped expert adapters, which every other TP gate skips by param identity. `expert_tp_size > 1`
-rejects expert LoRA earlier still, at config time in `ParallelismConfig`, before the checkpoint downloads.
+adapter kinds: a `PeftModel` or any PEFT tuner layer injected in place (read off the tuner layers, so a
+backbone's own `lora_*` weights stay base weights), and — checked first, via `has_ep_lora` — the native
+grouped expert adapters, which are no tuner layer and which the TP replicated-grad sweep skips by param
+identity. `expert_tp_size > 1` rejects expert LoRA earlier still, at config time in `ParallelismConfig`,
+before the checkpoint downloads.
 
 ## Measured cost
 
@@ -349,15 +353,7 @@ which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all
 
 ## Embedding models
 
-The embedding trainer is SentenceTransformer-based. `use_peft: true` injects LoRA into the transformer
-backbone only (`model[0].auto_model`) via `peft.inject_adapter_in_model` (not
-`SentenceTransformer.add_adapter`) and freezes every non-adapter param. 4-bit QLoRA is rejected on the ST
-loader, and a layer the out-of-place fold does not cover ([above](#online-rl--rollout-server-weight-sync))
-at trainer construction. In-place injection never reads `lora_task_type`.
-
-Runs under standard / FSDP2 data parallelism only; EP and TP are rejected at trainer construction (the EP
-save path has no adapter-merge step, so the checkpoint would carry adapter keys that reload as random base
-weights). Saving and resume: [Embedding — Saving](../training-methods/embedding.md#saving).
+The embedding trainer injects LoRA into its backbone in place, on data parallelism only: [Embedding — PEFT / LoRA](../training-methods/embedding.md#peft--lora).
 
 ## Quantized training (QLoRA)
 

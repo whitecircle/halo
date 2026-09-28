@@ -54,8 +54,11 @@ A `pooling_mode` differing from the checkpoint's is applied and logged — set i
 ## Launch
 
 ```bash
-# single GPU or FSDP2 data parallel
+# single GPU
 python scripts/training/embedding.py examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml
+
+# FSDP2 data parallel (8 GPUs)
+torchrun --nproc_per_node=8 scripts/training/embedding.py examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml
 
 # EP (MoE, 8 GPUs)
 torchrun --nproc_per_node=8 scripts/training/embedding.py \
@@ -75,7 +78,7 @@ Under EP or TP the backbone loads through `PreloadedTransformer` (`src/trainers/
 
 ## PEFT / LoRA
 
-`use_peft: true` injects LoRA in place (`inject_adapter_in_model`) into the transformer backbone only (`model[0].auto_model`), on the plain data-parallel / FSDP2 path only — EP, ETP and TP are rejected at construction ([PEFT](../optimization/peft.md#embedding-models)). Targets may include the input embedding (`embed_tokens`, BERT's `word_embeddings`), and `use_dora` applies. Quantization, `lora_modules_to_save` and `train_sinks: true` raise at startup; a PEFT tuner layer outside the backbone, or an adapter the save cannot fold (an `nn.MultiheadAttention` LoRA, trainable tokens), raises at trainer construction.
+`use_peft: true` injects LoRA in place (`inject_adapter_in_model`) into the transformer backbone only (`model[0].auto_model`) and freezes every other parameter; `lora_task_type` is never read. It runs on one GPU, DDP or FSDP2 data parallelism. EP, pure ETP included, is refused at trainer construction: the save folds the adapters over the backbone's own parameter walk, which under EP holds each rank's expert shards under their local names, so the checkpoint would load nowhere. TP is refused by the trainer mixin's LoRA gate ([PEFT — Parallelism compatibility](../optimization/peft.md#parallelism-compatibility)). Targets may include the input embedding (`embed_tokens`, BERT's `word_embeddings`), and `use_dora` applies. Quantization, `lora_modules_to_save` and `train_sinks: true` raise at startup; a PEFT tuner layer outside the backbone, or an adapter the save cannot fold (an `nn.MultiheadAttention` LoRA, trainable tokens), raises at trainer construction.
 
 Injected LoRA is recognized by its PEFT tuner layers, not by parameter name, and the fold drops only the adapter tensors those layers own. A remote-code backbone whose own parameters are named `lora_*` (jina-embeddings-v3's LoRA parametrizations) is therefore not taken for injected LoRA, and its saves keep those parameters.
 
@@ -113,4 +116,4 @@ The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save
 ## Related pages
 
 - [Expert Parallelism](../parallelism/expert-parallelism.md) · [Tensor Parallelism](../parallelism/tensor-parallelism.md)
-- [Dataset Formats](../data/dataset-formats.md) · [PEFT](../optimization/peft.md#embedding-models) · [Scripts Reference](../reference/scripts-reference.md)
+- [Dataset Formats](../data/dataset-formats.md) · [PEFT](../optimization/peft.md) · [Scripts Reference](../reference/scripts-reference.md)

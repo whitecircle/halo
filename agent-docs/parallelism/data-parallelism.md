@@ -41,8 +41,9 @@ over. What gets sharded varies:
 The plain-DP, CP, EP and EP+TP wraps also leave out the frozen parameters whose dtype no trainable
 parameter shares (a base under differently typed adapters), one parameter at a time, so a trainable child
 of their module stays in its shard group (`_fsdp_exclusions` in `src/trainers/mixins/base.py`). A
-trainable parameter left out of every group has no reduce-scatter; unless an EP layer's hooks or the
-deferred sweep average it, the wrap raises on every rank rather than let it drift across DP ranks.
+trainable parameter left out of every group has no reduce-scatter, and only an EP layer can leave one out;
+unless its hooks or the deferred sweep average it, trainer construction raises on every rank rather than
+let it drift across DP ranks (`_reject_unsynced_trainable_params`).
 
 FSDP2 shards params, gradients, and optimizer states across the DP ranks, so per-rank optimizer-state
 memory is ~`dp_size` smaller than DDP's full per-rank replication. Setup lives in

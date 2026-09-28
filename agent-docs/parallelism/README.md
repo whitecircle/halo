@@ -167,17 +167,17 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 
 ¹ Qwen3.5/3.6 — CP blocked by interleaved linear-attention layers; see [qwen3_5.md](../models/qwen3_5.md).
 
-² CP covers Ling 2.0 only. `Ring-mini-linear-2.0` is rejected by name (its file reuses Ling 2.0's full-attention class names over a Lightning-Attention-2 stack) and Ling 3.0 pairs a KDA linear recurrence with unwrapped MLA. EP+CP itself is untested on this family. See [bailing.md](../models/bailing.md#cp-wrapper).
+² CP covers Ling 2.0 only. `Ring-mini-linear-2.0` is rejected by name (its file reuses Ling 2.0's full-attention class names over a Lightning-Attention-2 stack) and Ling 3.0 pairs a KDA linear recurrence with unwrapped MLA. EP+CP's only GPU test on this family is a tiny-model LoRA row (`test_lora_merged_save_resume_families.py`, ep2+cp2). See [bailing.md](../models/bailing.md#cp-wrapper).
 
 ³ Gemma 4 — TP and CP blocked by KV-shared layers + `attention_k_eq_v`; see [gemma4.md](../models/gemma4.md).
 
 ⁴ Zaya — CCA rules out CP/TP, GC unsupported; see [Zaya — Limitations](../models/zaya.md#limitations).
 
-⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). EP+CP is a valid shape, unvalidated on this model. See [mistral4.md](../models/mistral4.md).
+⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). EP+CP is a valid shape whose only GPU test on this model is a tiny-model LoRA row (`test_lora_merged_save_resume_families.py`, ep2+cp2). See [mistral4.md](../models/mistral4.md).
 
 ⁶ LFM-2 — CP blocked by the sequence-axis short-conv layers in the hybrid stack (no Ulysses wrapper); see [lfm2.md](../models/lfm2.md).
 
-⁷ Laguna — `LagunaAttention` is in neither the Ulysses nor the TP registry, so CP and TP both raise; ETP is mechanically reachable but unvalidated. See [laguna.md](../models/laguna.md).
+⁷ Laguna — `LagunaAttention` is in neither the Ulysses nor the TP registry, so CP and TP both raise; ETP is mechanically reachable, and its only GPU test is a tiny-model LoRA row (`test_lora_weight_sync_exact_families.py`, etp2). See [laguna.md](../models/laguna.md).
 
 ⁸ Inkling — CP blocked by the sequence-axis short convolutions, TP by the RoPE-free relative-logits attention. See [inkling.md](../models/inkling.md).
 

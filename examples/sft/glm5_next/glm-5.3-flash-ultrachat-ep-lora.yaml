@@ -22,9 +22,9 @@ test_size: 0.01
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8               # 288 routed experts -> 36/rank; one dispatch group on 8 GPUs
 save_sharded_ep: false                # consolidate expert shards into a single checkpoint
-# Required, not a preference: the checkpoint keeps A_log / dt_bias / hc_* fp32 and FSDP2 asserts one
-# original dtype per shard group — upcasting the non-expert params to fp32 masters makes the wrap
-# legal. Under LoRA the attention adapters follow it; the expert adapters are EP-owned bf16.
+# Optional fp32 masters for the non-expert params: they keep the checkpoint's stored fp32 A_log /
+# dt_bias / conv1d pins, which the loader otherwise casts to bf16. Under LoRA the attention adapters
+# follow it; the expert adapters are EP-owned bf16.
 fp32_non_ep_params: true
 fp32_grad_reduce: true                # tighter gradient reduction; LoRA-cheap (adapter grads only)
 

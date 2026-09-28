@@ -133,7 +133,8 @@ src/
 │                        #     remote_code_hooks = the one wrap of transformers' remote-class funnel, buffer_fixes),
 │                        #   loading/(model_preparation = Auto* class + family patches + the shared post-load
 │                        #     finalize_run_model, config_levels = composite-config field access, tokenizer_setup =
-│                        #     processing class + length budget, dtype = dtype + fp32-matmul precision,
+│                        #     processing class + length budget, dtype = run dtype, the loaded-parameter cast
+│                        #     (fp32 pins → run dtype, fp8 refused) + fp32-matmul precision,
 │                        #     checkpoint_coverage = random-init gate; lazy_safetensors/ = generic safetensors
 │                        #     lazy-load core — index, key alignment, plans, conversion ops, meta shell —
 │                        #     shared by the EP + PP loaders)

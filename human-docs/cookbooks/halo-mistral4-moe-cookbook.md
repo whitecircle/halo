@@ -8,7 +8,7 @@ The model has 128 routed experts and selects four experts for each token. It als
 
 | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | untested | Yes | Yes |
+| Yes | Yes | Yes | Yes | Yes | partial | Yes | Yes |
 
 Halo uses DeepEP for token dispatch and grouped GEMM for the expert projections, and it preserves Mistral 4's group-top-k router and shared expert. CP and selective TP support the MLA attention layers.
 
@@ -109,8 +109,9 @@ Keep `flash_attention_2` — it is what the shipped config pins and what this re
 
 ## Add CP, TP, or ETP
 
-Use CP2 with EP8 for longer sequences; EP+CP is a valid shape but untested on this family,
-so validate it with a short run first. Disable packing when CP splits the sequence.
+Use CP2 with EP8 for longer sequences. EP+CP is a valid shape, but on this family its only
+GPU test is a tiny-model LoRA row at EP2+CP2, so validate it with a short run first. Disable
+packing when CP splits the sequence.
 
 ```yaml
 expert_parallel_size: 8
