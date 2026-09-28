@@ -3,8 +3,9 @@
 Handles causal-LM, sequence-classification and bare-base checkpoints, optionally merging a LoRA
 adapter into its base model first. ``--verify`` reads the saved safetensors headers and asserts the
 stored parameters are primarily bfloat16, raising on failure; ``--check_inference`` runs a short
-generation / classification pass and reports its output. ``--output_dir`` is written fresh: every
-``model*.safetensors`` or index the completed save did not produce is removed afterwards.
+generation / classification pass and reports its output. A full-model save writes ``--output_dir``
+fresh: every ``model*.safetensors`` or index the completed save did not produce is removed afterwards.
+An unmerged ``--peft`` save writes adapter files only and removes nothing.
 
 Usage:
     python scripts/after_training/convert_to_bf16.py --input_dir <src> --output_dir <dst> \
@@ -451,8 +452,8 @@ def parse_args():
         type=str,
         required=True,
         help=(
-            "Output directory for the BF16 model "
-            "(every model*.safetensors/index the completed save did not produce is removed afterwards)"
+            "Output directory for the BF16 model. A full-model save removes every model*.safetensors/index "
+            "the completed save did not produce; an unmerged --peft save writes adapter files only"
         ),
     )
     parser.add_argument(

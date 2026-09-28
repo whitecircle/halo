@@ -9,8 +9,8 @@ storage), so this script routes the checkpoint through transformers' dequantizin
 (``FineGrainedFP8Config(dequantize=True)`` attaches ``Fp8Dequantize`` to the V4 weight-conversion
 chain, verified exact against a manual e2m1 LUT dequant) and re-saves it sharded in BF16.
 
-Disk budget: ~750 GB total, ~330 GB for the FP8/FP4 download cache (HF_HOME) plus ~420 GB for the
-BF16 output. RAM: the model is materialized on CPU (~420 GB), so use a high-memory host.
+Disk budget: ~910 GB total, ~330 GB for the FP8/FP4 download cache (HF_HOME) plus ~580 GB for the
+BF16 output. RAM: the model is materialized on CPU (~580 GB), so use a high-memory host.
 
 The saved checkpoint is uniform BF16: transformers' ``_keep_in_fp32_modules_strict`` would keep the
 HC/norm modules fp32, whose fp32 outputs fail the eager-only bf16 forward on a dtype mismatch, and
@@ -58,7 +58,7 @@ _PARALLEL_PLAN_ATTRS = ("base_model_ep_plan", "base_model_tp_plan")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_hub_source_args(parser, source="The FP8 release to dequantize", default="deepseek-ai/DeepSeek-V4-Flash")
-    parser.add_argument("--output_dir", required=True, help="Destination for the BF16 checkpoint (needs ~420 GB)")
+    parser.add_argument("--output_dir", required=True, help="Destination for the BF16 checkpoint (needs ~580 GB)")
     # This tool loads through from_pretrained, so it exposes the same flag as every sibling that
     # executes a checkpoint's own code. Opt-in, since --model_id defaults to a Hub repo and the hub
     # V4 checkpoints are transformers-native.
