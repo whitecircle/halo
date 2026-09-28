@@ -656,15 +656,20 @@ def load_datasets(
 
     if len(ds["train"]) == 0:
         raise ValueError("No training data after schema normalization. Please check your dataset.")
-    else:
-        logger.info(f"Training data after schema normalization: {len(ds['train'])}")
-        logger.info(f"Columns in training dataset: {ds['train'].column_names}")
+    logger.info(f"Training data after schema normalization: {len(ds['train'])}")
+    logger.info(f"Columns in training dataset: {ds['train'].column_names}")
 
-    if len(ds["test"]) == 0:
+    test_empty = len(ds["test"]) == 0
+    if sharded:
+        # An eval split with fewer shards than ranks leaves some ranks none, which the trainer's
+        # pre-sharded eval equalization refuses world-uniformly once evaluation runs. Only a split
+        # empty on every rank is refused here: a rank raising alone would leave its peers blocked in
+        # their next collective.
+        test_empty, _ = rank_consensus(test_empty)
+    if test_empty:
         raise ValueError("No test data after schema normalization. Please check your dataset.")
-    else:
-        logger.info(f"Test data after schema normalization: {len(ds['test'])}")
-        logger.info(f"Columns in test dataset: {ds['test'].column_names}")
+    logger.info(f"Test data after schema normalization: {len(ds['test'])}")
+    logger.info(f"Columns in test dataset: {ds['test'].column_names}")
 
     # HF's own fingerprints diverge between writer and loader ranks, breaking downstream cache keys.
     # Unguarded: a failure here would leave the ranks disagreeing on every downstream cache key, and
