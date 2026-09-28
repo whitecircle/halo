@@ -591,10 +591,19 @@ def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool =
     return any(os.path.isfile(os.path.join(checkpoint_dir, name)) for name in names)
 
 
+def adapter_weight_paths(adapter_dir: str) -> tuple[str, ...]:
+    """The adapter weight files a directory may carry, in PEFT's own load-preference order.
+
+    Taken from the :data:`ADAPTER_WEIGHT_NAMES` tuple that declares it: a reader that misses the
+    ``.bin`` fallback reads a saved adapter as absent.
+    """
+    return tuple(os.path.join(adapter_dir, name) for name in ADAPTER_WEIGHT_NAMES)
+
+
 def has_adapter_weight_file(directory: str) -> bool:
-    """Whether a directory holds a PEFT adapter weight file, either spelling in
-    :data:`ADAPTER_WEIGHT_NAMES`; stat-only, like :func:`has_whole_model_weight_file`."""
-    return any(os.path.isfile(os.path.join(directory, name)) for name in ADAPTER_WEIGHT_NAMES)
+    """Whether a directory holds a PEFT adapter weight file (:func:`adapter_weight_paths`); stat-only,
+    like :func:`has_whole_model_weight_file`."""
+    return any(os.path.isfile(path) for path in adapter_weight_paths(directory))
 
 
 def write_resume_adapter_marker(checkpoint_dir: str) -> None:
@@ -621,6 +630,37 @@ def resume_adapter_dir(checkpoint_dir: str) -> str | None:
     if not os.path.isfile(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE)):
         return None
     return os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
+
+
+def missing_resume_adapter_reason(checkpoint_dir: str) -> str:
+    """The refusal for a marked checkpoint whose :data:`RESUME_ADAPTER_DIR` holds no adapter file."""
+    return (
+        f"{checkpoint_dir} is marked to resume from its adapter ({RESUME_ADAPTER_MARKER_FILE}), but "
+        f"{os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)} holds no adapter file, so the adapters would "
+        f"resume from initialization. Resume from a complete checkpoint."
+    )
+
+
+def resume_adapter_on_own_weights_reason(checkpoint_dir: str) -> str:
+    """The refusal for resuming a marked checkpoint onto a model built from its own merged weights."""
+    return (
+        f"{checkpoint_dir} holds merged weights, which already carry the adapter delta, and resume "
+        f"restores the unmerged adapters from {os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)} onto the "
+        f"base model. This model was loaded from the checkpoint itself, so the delta would apply twice. "
+        f"Load the model from the base the run started from (the training scripts keep "
+        f"model_name_or_path there for this checkpoint)."
+    )
+
+
+def unmarked_merged_checkpoint_reason(checkpoint_dir: str) -> str:
+    """The refusal for an adapter run resuming merged weights that carry no resume adapter."""
+    return (
+        f"{checkpoint_dir} holds merged weights without its resume adapter (no {RESUME_ADAPTER_MARKER_FILE}: "
+        f"a torn save, or one written without it), and this run trains adapters. Resuming would restart "
+        f"them from initialization on weights that already hold their trained delta. Resume from a "
+        f"checkpoint that carries its resume adapter, or start a new run from its merged weights "
+        f"(model_name_or_path: {checkpoint_dir}, without resume_from_checkpoint)."
+    )
 
 
 def load_full_state_dict(checkpoint_dir: str, device: str = "cpu") -> dict[str, torch.Tensor] | None:

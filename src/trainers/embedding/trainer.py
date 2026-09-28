@@ -44,19 +44,22 @@ from transformers.trainer_callback import TrainerCallback
 from trl.trainer.utils import disable_dropout_in_model
 
 import src.trainers.embedding.sentence_transformers_compat  # noqa: F401  installs ST's gradient-checkpointing signatures
-from src.checkpoint.adapters import adapter_weight_paths, lora_scaling_mismatch, read_adapter_file
+from src.checkpoint.adapters import lora_scaling_mismatch, read_adapter_file
 from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
+    adapter_weight_paths,
+    missing_resume_adapter_reason,
     resume_adapter_dir,
+    resume_adapter_on_own_weights_reason,
+    unmarked_merged_checkpoint_reason,
     write_gathered_checkpoint,
 )
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
-from src.distributed.checkpoint.peft import copy_full_tensor
 from src.distributed.checkpoint.save import mark_resume_adapter_complete, save_checkpoint
 from src.distributed.checkpoint.write import gather_saveable_tensors, resolve_retained
 from src.distributed.fsdp import reshard_fsdp2_modules
@@ -64,6 +67,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import (
     barrier_on_exit,
     broadcast_from_rank0,
+    copy_full_tensor,
     fs_aware_makedirs,
     fs_aware_save_rank,
     is_global_main_process,
@@ -649,14 +653,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             super()._load_from_checkpoint(resume_from_checkpoint, model, for_best_model=for_best_model)
             return
         if not marked:
-            raise ValueError(
-                f"{resume_from_checkpoint} holds folded weights without a resume adapter (no "
-                f"{RESUME_ADAPTER_MARKER_FILE}: a torn save, or one written without it), and this run "
-                f"trains injected LoRA. Resuming would restart the adapters from initialization while "
-                f"restoring their optimizer state. Resume from a checkpoint that carries its resume "
-                f"adapter, or start a new run from the folded weights (model_name_or_path: "
-                f"{resume_from_checkpoint}, without resume_from_checkpoint)."
-            )
+            raise ValueError(unmarked_merged_checkpoint_reason(resume_from_checkpoint))
         self._restore_injected_lora(resume_from_checkpoint)
         self._restore_router_balancing_biases(resume_from_checkpoint)
 
@@ -674,21 +671,12 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         adapter_dir = os.path.join(checkpoint, RESUME_ADAPTER_DIR)
         # realpath resolves node-locally, so rank 0's verdict is the world's.
         if broadcast_from_rank0(built_from_checkpoint(weights_read_from(self._get_unwrapped_model()), checkpoint)):
-            raise ValueError(
-                f"{checkpoint} holds folded weights, which already carry the adapter delta, and resume "
-                f"restores the unfolded adapters from {adapter_dir} onto the BASE model. This model was "
-                f"loaded from the checkpoint itself, so the delta would apply twice. Point "
-                f"model_name_or_path at the base model the run started from."
-            )
+            raise ValueError(resume_adapter_on_own_weights_reason(checkpoint))
         saved, path = consensus_read(
             adapter_weight_paths(adapter_dir), read_adapter_file, what="Resume adapter", checkpoint=checkpoint
         )
         if path is None:
-            raise RuntimeError(
-                f"{checkpoint} is marked to resume from its adapter ({RESUME_ADAPTER_MARKER_FILE}), but "
-                f"{adapter_dir} holds no adapter file on any rank, so the adapters would resume from "
-                f"initialization. Resume from a complete checkpoint."
-            )
+            raise RuntimeError(missing_resume_adapter_reason(checkpoint))
         reject_across_ranks(
             lora_scaling_mismatch(adapter_dir, self._injected_lora_config().to_dict()),
             "Injected-LoRA resume",

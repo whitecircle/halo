@@ -25,10 +25,10 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 
 import src.distributed.checkpoint.coordination as coordination
-import src.distributed.checkpoint.peft as peft_mod
-from src.checkpoint.format import ADAPTER_WEIGHT_NAMES
+import src.distributed.runtime as runtime_mod
+from src.checkpoint.format import ADAPTER_WEIGHT_NAMES, adapter_weight_paths
 from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.checkpoint.peft import _load_peft_adapter_state, adapter_weight_paths
+from src.distributed.checkpoint.peft import _load_peft_adapter_state
 
 # Deliberately NOT sorted: a dict preserves insertion order, which is the adapter file's order.
 UNSORTED_KEYS = (
@@ -79,9 +79,9 @@ def test_dtensor_adapter_tensors_are_distributed_in_sorted_key_order(single_rank
     state = {key: torch.full((2, 2), float(order[key])) for key in UNSORTED_KEYS}
 
     issued: list[float] = []
-    real_distribute = peft_mod.distribute_tensor
+    real_distribute = runtime_mod.distribute_tensor
     monkeypatch.setattr(
-        peft_mod,
+        runtime_mod,
         "distribute_tensor",
         lambda tensor, device_mesh, placements: (
             issued.append(tensor.flatten()[0].item()),

@@ -285,9 +285,7 @@ def _save_ep_gathered(
     # unfuse/re-interleave, so the fold is layout-correct for every family.
     expert_keys = 0
     for layer_name, module in ep_layers:
-        gathered = gather_ep_layer_weights(
-            layer_name, module, merge_lora=merge_lora, retain=is_save_rank, lora_folds=lora_folds
-        )
+        gathered = gather_ep_layer_weights(layer_name, module, merge_lora=merge_lora, retain=is_save_rank)
         if gathered:  # non-savers gather onto the device and keep nothing
             guard.run(partial(stage_expert_layer, gathered))
         expert_keys += len(gathered)

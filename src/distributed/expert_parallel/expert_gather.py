@@ -18,9 +18,8 @@ from functools import partial
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor, distribute_tensor
 
-from src.distributed.runtime import materialize_dtensor
+from src.distributed.runtime import copy_full_tensor, materialize_dtensor
 
 
 class EPExpertGatherMixin:
@@ -377,16 +376,12 @@ class EPExpertGatherMixin:
                 "Likely a use_grouped_gemm / expert_tp_size / GPU-arch change between checkpoint and "
                 "resume — resume with the same expert configuration."
             )
-        # sorted(): the DTensor branch below is a collective, and frozenset order varies per process
+        # sorted(): the DTensor copy below is a collective, and frozenset order varies per process
         # (unpinned PYTHONHASHSEED), so an unsorted loop lets ranks scatter in different orders.
         for attr in sorted(self._expert_lora_attrs):
             for which in ("A", "B"):
                 key = f"experts.{attr}.lora_{which}"
                 shard = layer_state[key][self.expert_start : self.expert_end]  # this rank's experts (dim 0)
-                target = getattr(self, f"{attr}_lora_{which}")
-                value = shard.to(dtype=target.dtype, device=target.device)
-                # ep1 + fsdp_shard_ep1_experts makes these DTensors, where a plain copy_ raises; re-shard
-                # onto the param's mesh first. No-op at ep_size>1 (plain, FSDP-ignored).
-                if isinstance(target.data, DTensor):
-                    value = distribute_tensor(value, target.data.device_mesh, target.data.placements)
-                target.data.copy_(value)
+                # ep1 + fsdp_shard_ep1_experts makes these DTensors, re-sharded onto the param's mesh;
+                # plain (FSDP-ignored) at ep_size>1.
+                copy_full_tensor(getattr(self, f"{attr}_lora_{which}"), shard)

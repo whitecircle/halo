@@ -15,7 +15,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from torch.distributed import distributed_c10d as c10d
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from src.env import env_flag, resolve_nccl_timeout_minutes, resolve_store_timeout_hours
 from src.log import warn_once
@@ -676,6 +676,22 @@ def materialize_dtensor(data: torch.Tensor | None) -> torch.Tensor | None:
     if isinstance(data, DTensor):
         return data.full_tensor()
     return data
+
+
+def copy_full_tensor(target: torch.Tensor, value: torch.Tensor) -> None:
+    """Copy the whole tensor ``value`` into the live parameter or buffer ``target``, at its dtype.
+
+    A DTensor target is written through ``distribute_tensor`` at the default ``src_data_rank``: mesh
+    rank 0's copy is broadcast, so every replica holds one node's bytes, and the call is a mesh
+    collective that callers issue in the same key order on every rank. ``CheckpointLoader._load_tp``
+    slices per rank instead, since its ranks each need the full tensor and it joins the key set
+    explicitly. A plain target takes ``value`` as is.
+    """
+    data = target.data if isinstance(target, torch.nn.Parameter) else target
+    value = value.to(data.dtype)
+    if isinstance(data, DTensor):
+        value = distribute_tensor(value, data.device_mesh, data.placements)
+    data.copy_(value)
 
 
 def to_local(tensor: torch.Tensor) -> torch.Tensor:

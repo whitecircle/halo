@@ -22,10 +22,10 @@ from transformers.trainer import TRAINER_STATE_NAME
 from transformers.trainer_utils import get_last_checkpoint
 
 from src.checkpoint.format import (
-    RESUME_ADAPTER_MARKER_FILE,
     has_adapter_weight_file,
     has_whole_model_weight_file,
     is_sharded_checkpoint,
+    missing_resume_adapter_reason,
     resume_adapter_dir,
 )
 from src.data.pipeline.processing import ensure_cache_dir
@@ -320,11 +320,7 @@ def resolve_resume_weights_source(checkpoint: str | None, model_config, parallel
         )
     if decision == "merged_adapter_missing":
         # Before the policy load, which would build the whole base only for the loader to refuse.
-        raise ValueError(
-            f"Cannot resume from '{checkpoint}': its {RESUME_ADAPTER_MARKER_FILE} says it resumes from "
-            f"its adapter, but {resume_adapter_dir(checkpoint)} holds no adapter file, so the adapters "
-            f"would resume from initialization. Resume from a complete checkpoint."
-        )
+        raise ValueError(missing_resume_adapter_reason(checkpoint))
     if decision == "full":
         if is_global_main_process():
             logger.info(

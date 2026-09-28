@@ -3,8 +3,8 @@
 :class:`PeftAdapterSaver` is invoked by ``save_model`` before the mode ladder: DTensor-LoRA gather,
 CP key normalization, or the standard ``save_pretrained`` path. :func:`restore_adapters` is the
 resume counterpart, needed because EP/CP rebuild the model with zero-init adapters; both directions
-share the CP key remap defined here. :func:`copy_full_tensor` is the DTensor-aware write the restores
-share, the PP stage load and the embedding trainer's resume adapter included.
+share the CP key remap defined here. Restores write through
+:func:`~src.distributed.runtime.copy_full_tensor`, the DTensor-aware whole-tensor write.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import torch
 from peft import PeftModel
 from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
 from safetensors.torch import save_file as safetensors_save_file
-from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import DTensor
 
 from src.checkpoint.adapters import (
     EXPERT_LORA_CONFIG_KEY,
@@ -49,6 +49,7 @@ from src.distributed.expert_parallel.expert_weights import (
 )
 from src.distributed.runtime import (
     barrier_on_exit,
+    copy_full_tensor,
     fs_aware_makedirs,
     is_global_main_process,
     reject_across_ranks,
@@ -370,22 +371,6 @@ class PeftAdapterSaver:
             config = config or copy.deepcopy(peft_config)
             setattr(config, field, plain)
         return config or peft_config
-
-
-def copy_full_tensor(target: torch.Tensor, value: torch.Tensor) -> None:
-    """Copy the whole tensor ``value`` into the live parameter or buffer ``target``, at its dtype.
-
-    A DTensor target is written through ``distribute_tensor`` at the default ``src_data_rank``: mesh
-    rank 0's copy is broadcast, so every replica holds one node's bytes, and the call is a mesh
-    collective that callers issue in the same key order on every rank. ``CheckpointLoader._load_tp``
-    slices per rank instead, since its ranks each need the full tensor and it joins the key set
-    explicitly. A plain target takes ``value`` as is.
-    """
-    data = target.data if isinstance(target, torch.nn.Parameter) else target
-    value = value.to(data.dtype)
-    if isinstance(data, DTensor):
-        value = distribute_tensor(value, data.device_mesh, data.placements)
-    data.copy_(value)
 
 
 def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:

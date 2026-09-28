@@ -21,8 +21,8 @@ from transformers import PreTrainedModel
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
-    ADAPTER_WEIGHT_NAMES,
     DEFAULT_MAX_SHARD_SIZE,
+    adapter_weight_paths,
     cast_to_save_dtype,
 )
 from src.checkpoint.tool_io import (
@@ -80,15 +80,6 @@ def is_expert_lora_key(key: str) -> bool:
     matching those here would route real PEFT adapters into the EP loader.
     """
     return ".experts." in key and key.endswith((".lora_A", ".lora_B"))
-
-
-def adapter_weight_paths(adapter_dir: str) -> tuple[str, ...]:
-    """The adapter weight files a directory may carry, in PEFT's own load-preference order.
-
-    Taken from the :data:`~src.checkpoint.format.ADAPTER_WEIGHT_NAMES` tuple that declares it: a
-    reader that misses the ``.bin`` fallback reads a saved adapter as absent.
-    """
-    return tuple(os.path.join(adapter_dir, name) for name in ADAPTER_WEIGHT_NAMES)
 
 
 def _adapter_tensor_keys(adapter_dir: str) -> list[str]:

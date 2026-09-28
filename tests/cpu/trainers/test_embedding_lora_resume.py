@@ -441,7 +441,7 @@ def test_an_unmarked_folded_checkpoint_refuses_an_injected_lora_run(run, tmp_pat
     )
     trainer = _trainer(_lora_model(source if built_from == "resolver" else run.base, seed=2), tmp_path / "out")
 
-    with pytest.raises(ValueError, match="without a resume adapter"):
+    with pytest.raises(ValueError, match="without its resume adapter"):
         trainer._load_from_checkpoint(checkpoint)
 
 
